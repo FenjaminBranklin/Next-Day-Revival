@@ -1,0 +1,17 @@
+# Windows-Skripte brauchen CRLF. Eine .bat mit LF-Zeilenenden bricht bei
+# manchen Windows-Fassungen mitten im Befehl ab - deshalb hier festgenagelt
+# und nicht der Autoerkennung ueberlassen.
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.ini  text eol=crlf
+*.txt  text eol=crlf
+
+*.md   text eol=lf
+*.py   text eol=lf
+*.cs   text eol=lf
+
+# Alles Binaere unangetastet lassen - Meshes und PNGs vertragen keine
+# Zeilenendenumwandlung.
+*.dll     binary
+*.png     binary
+*.ndmesh  binary
