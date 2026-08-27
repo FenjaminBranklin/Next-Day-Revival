@@ -1,0 +1,110 @@
+NEXT DAY: SURVIVAL - MITSPIELEN
+Paket @VERSION@
+
+Next Day: Survival hat keinen offiziellen Server mehr - der Betreiber hat ihn
+abgeschaltet, deshalb kommt man ueber "Spielen" nicht mehr ins Spiel. Dieses
+Paket richtet dein Spiel auf einen privaten Ersatzserver ein. Danach
+funktioniert alles wieder wie frueher, nur dass die Anmeldung ueber diesen
+Server laeuft.
+
+
+SO GEHT ES
+----------
+1. Steam starten und Next Day: Survival EINMAL installiert haben.
+   Das Spiel muss NICHT laufen - im Gegenteil, es muss geschlossen sein.
+
+2. Diesen Ordner an eine echte Stelle auf der Platte ziehen, zum Beispiel
+   nach Downloads. NICHT direkt im Zip-Fenster arbeiten: Windows tut dort nur
+   so, als waere es ein Ordner, und die Skripte finden sich gegenseitig nicht.
+
+3. 1_EINRICHTEN.bat doppelt anklicken.
+   Es sucht dein Spiel selbst, richtet alles ein und sagt am Ende, ob der
+   Server antwortet. Dauert ein paar Sekunden.
+
+4. 2_SPIELEN.bat doppelt anklicken.
+   Damit startet das Spiel. Steam muss dabei laufen.
+
+5. Im Hauptmenue auf Spielen, dann den Server aus der Liste waehlen.
+
+Fertig. Ab jetzt reicht Schritt 4.
+
+
+WICHTIG: NICHT UEBER STEAM STARTEN
+----------------------------------
+Der gruene Play-Knopf in Steam startet einen Anti-Cheat-Launcher, und der
+bricht ab, sobald die Mod installiert ist ("Untrusted system file"). Das ist
+kein Fehler in deiner Installation - benutze einfach 2_SPIELEN.bat.
+
+
+WENN WINDOWS MECKERT
+--------------------
+"Der Computer wurde durch Windows geschuetzt"
+    Auf "Weitere Informationen" und dann "Trotzdem ausfuehren". Windows sagt
+    das bei jeder Datei aus dem Internet, die es nicht kennt.
+
+"Die Datei ist blockiert" / es passiert gar nichts
+    Rechtsklick auf die .bat, Eigenschaften, unten "Zulassen" ankreuzen, OK.
+
+"Spielordner wurde nicht gefunden"
+    Dein Spiel liegt woanders, zum Beispiel auf einer zweiten Platte. Oeffne
+    in Steam Rechtsklick auf das Spiel, Verwalten, Lokale Dateien anzeigen,
+    kopiere den Pfad aus der Adresszeile und starte stattdessen so:
+        powershell -ExecutionPolicy Bypass -File client_patch.ps1 -Game "DEIN\PFAD"
+
+"Server nicht erreichbar"
+    Dann laeuft der Server gerade nicht. Melde dich bei dem, der dir das
+    Paket gegeben hat. Am Spiel liegt es nicht.
+
+
+WAS DAS PAKET AN DEINEM SPIEL AENDERT
+-------------------------------------
+Ehrlich und vollstaendig, damit du weisst, was du anklickst:
+
+1. ClientConfig.ini bekommt die Adresse des Ersatzservers.
+   Deine alte Fassung wird vorher gesichert.
+
+2. Assembly-CSharp.dll wird an EINER Stelle geaendert: eine Abfrage, die den
+   Anti-Cheat einschaltet, liefert jetzt fest "aus". Ohne das laedt die Mod
+   nicht. Die Originaldatei wird vorher gesichert. Die Dateigroesse bleibt
+   gleich, es werden 8 Bytes ueberschrieben, sonst nichts.
+
+3. BepInEx kommt in den Spielordner. Das ist das Standardwerkzeug, mit dem
+   Unity-Spiele Mods laden - frei verfuegbar, siehe DRITTANBIETER.txt.
+
+4. Die Mod selbst kommt nach BepInEx\plugins.
+
+Alles davon liegt in deinem Spielordner, nichts in Windows, nichts in der
+Registry, keine Administratorrechte.
+
+
+RUECKGAENGIG MACHEN
+-------------------
+    powershell -ExecutionPolicy Bypass -File client_patch.ps1 -Restore
+
+Das setzt die Serveradresse zurueck. Willst du auch die Mod loswerden:
+BepInEx\plugins\NextDayRevivalToolkit.dll und den Ordner assets daneben
+loeschen. Und wenn du das Spiel ganz im Auslieferungszustand willst, in Steam
+"Dateien auf Fehler ueberpruefen" laufen lassen - das holt sich die
+unveraenderte Assembly-CSharp.dll zurueck.
+
+
+NUR NACHSEHEN, NICHTS AENDERN
+-----------------------------
+    powershell -ExecutionPolicy Bypass -File client_patch.ps1 -Check
+
+Sagt dir, was eingerichtet ist und was nicht, ohne eine Datei anzufassen.
+
+
+WAS AUSSERDEM DRIN IST
+----------------------
+Die Mod bringt vier eigene Gegenstaende mit: ein MG42, eine TAC-50 mit
+eigenem Zielfernrohr und die passende Munition. Dazu ein Fix, damit der
+Mauszeiger im Fenstermodus nicht mehr aus dem Spiel rutscht.
+
+
+DEIN SPIELSTAND
+---------------
+Er liegt auf dem Server, nicht bei dir. Der erste Charakter wird beim ersten
+Anmelden angelegt. Bis dein Spiel das erste Mal etwas zurueckmeldet, heisst
+er "Bean Battles World Champion" - das ist die Vorlage, aus der neue
+Charaktere entstehen, und verschwindet von selbst.

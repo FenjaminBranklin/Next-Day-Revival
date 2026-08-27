@@ -1,0 +1,9 @@
+# Bauergebnisse und geschnuerte Pakete - make_package.ps1 baut sie neu.
+build/
+dist/
+
+# Sicherungen, die client_patch.ps1 auf dem jeweiligen PC anlegt.
+backup_game/
+
+__pycache__/
+*.pyc

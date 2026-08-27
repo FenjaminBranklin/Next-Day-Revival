@@ -1,0 +1,32 @@
+FREMDE BESTANDTEILE IN DIESEM PAKET
+
+
+BepInEx 5.4.23.5
+----------------
+Ordner bepinex\ (winhttp.dll, doorstop_config.ini, BepInEx\core\)
+
+BepInEx ist ein Werkzeug, mit dem Unity-Spiele Mods laden. Es stammt nicht
+aus diesem Projekt und gehoert dem BepInEx-Projekt.
+
+    Lizenz    LGPL-2.1
+    Quelle    https://github.com/BepInEx/BepInEx
+
+Es liegt hier nur bei, damit das Einrichten ein einziger Klick ist. Die
+Dateien sind unveraendert. Wer sie lieber selbst holt: die offizielle
+Fassung fuer "Unity Mono x64" tut dasselbe, dann den Ordner bepinex\
+loeschen und BepInEx von Hand in den Spielordner entpacken.
+
+Enthalten sind ausserdem die Bibliotheken, die BepInEx selbst mitbringt -
+HarmonyX, MonoMod und Mono.Cecil. Auch die gehoeren ihren jeweiligen
+Projekten und stehen unter deren Lizenzen.
+
+
+NICHT ENTHALTEN
+---------------
+Kein Bestandteil des Spiels. Keine Assembly-CSharp.dll, nichts aus dem
+Ordner Managed, keine Texturen, keine Modelle und keine Spielstaende. Die
+Aenderung am Spielcode wird auf deiner eigenen Installation gerechnet, nicht
+als fertige Datei mitgeliefert.
+
+Next Day: Survival gehoert SOFF Games. Dieses Paket ist ein privates
+Fanprojekt, steht in keiner Verbindung zum Studio und wird nicht verkauft.
