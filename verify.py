@@ -28,7 +28,13 @@ except ImportError:
     ildasm = None
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Nach einem Bau liegt die DLL in build\, im ausgelieferten Repository
+# dagegen im Wurzelverzeichnis. Der frischere Stand gewinnt.
 DLL = os.path.join(ROOT, "build", "NextDayRevivalToolkit.dll")
+_fertig = os.path.join(ROOT, "NextDayRevivalToolkit.dll")
+if os.path.exists(_fertig) and (not os.path.exists(DLL)
+                                or os.path.getmtime(_fertig) > os.path.getmtime(DLL)):
+    DLL = _fertig
 SRC = os.path.join(ROOT, "RevivalPlugin.cs")
 ASSETS = os.path.join(ROOT, "assets")
 
@@ -327,8 +333,9 @@ def check_eac():
     print("[8] EAC-Patch im Spielcode")
     try:
         import eacpatch
-    except Exception as ex:
-        warn("eacpatch.py nicht ladbar (%s) - EAC nicht geprueft" % ex)
+    except Exception:
+        warn("eacpatch.py nicht vorhanden - EAC hier nicht geprueft. "
+             "Nachsehen mit: powershell -File client_patch.ps1 -Check")
         return
     state = eacpatch.describe(eacpatch.DLL)[0]
     if state.startswith("GEPATCHT"):
