@@ -87,7 +87,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.4.0";
+        public const string VERSION = "0.4.1";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -137,6 +137,8 @@ namespace NextDayRevival
         internal static ConfigEntry<string> CfgSpawnCarKey;
         internal static ConfigEntry<string> CfgSpawnCarName;
         internal static ConfigEntry<float> CfgSpawnCarDistance;
+        internal static ConfigEntry<bool> CfgAdmin;
+        internal static ConfigEntry<string> CfgAdminKey;
         internal static ConfigEntry<bool> CfgArena;
         internal static ConfigEntry<string> CfgArenaKey;
         internal static ConfigEntry<float> CfgArenaSize;
@@ -344,6 +346,11 @@ namespace NextDayRevival
             // Eine ebene Testflaeche zur Laufzeit. Keine Region im Sinne des
             // Spiels - eine Region ist ein GameRegionData mit Buildindizes,
             // und neue Buildszenen gibt es ohne Neubau des Spiels nicht.
+            CfgAdmin = Config.Bind("Admin", "Enabled", true,
+                "Menue im Spiel: Items geben, Werkzeuge schalten.");
+            CfgAdminKey = Config.Bind("Admin", "Key", "F8",
+                "Taste, die das Adminmenue auf- und zumacht.");
+
             CfgArena = Config.Bind("Research", "Arena", false,
                 "Auf Tastendruck eine ebene Testflaeche vor dem Spieler bauen, "
                 + "aus dem Material des Bodens darunter. Nochmal druecken raeumt "
@@ -666,7 +673,12 @@ namespace NextDayRevival
 
         void Update()
         {
-            CursorGuard.Tick();
+            Admin.Tick();
+            // Solange das Menue offen ist, gehoert der Zeiger dem Menue -
+            // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
+            // man kann keinen Knopf treffen.
+            if (Admin.IsOpen) CursorGuard.Release();
+            else CursorGuard.Tick();
             Research.Tick();
             Turret.Tick();
             Arena.Tick();
@@ -681,6 +693,7 @@ namespace NextDayRevival
         void OnGUI()
         {
             Turret.DrawScope();
+            Admin.Draw();
         }
 
         void OnApplicationFocus(bool hasFocus)
@@ -4481,6 +4494,215 @@ namespace NextDayRevival
                 _key = KeyCode.F10;
                 RevivalPlugin.L.LogWarning("Testflaeche: ArenaKey "
                     + RevivalPlugin.CfgArenaKey.Value + " unbekannt, benutze F10.");
+            }
+            return _key;
+        }
+    }
+
+    /// <summary>
+    /// Kleines Menue im Spiel: Items geben, Werkzeuge an- und ausschalten.
+    ///
+    /// Der Grund ist nicht Bequemlichkeit, sondern Zeit. Bisher fuellte
+    /// `invtool.py` das Inventar - und das geht nur bei geschlossenem Spiel,
+    /// kostet also je Versuch einen Neustart. Wer eine Waffe dreimal
+    /// hintereinander in der Hand sehen will, startet dreimal.
+    ///
+    /// Gegeben wird ueber `PlayerInventoryManager::AddBackpackItemFromValues` -
+    /// dieselbe Methode, die das Spiel beim Laden des Profils benutzt. Ihre
+    /// Argumentliste ist am 2026-08-28 aus dem eigenen Diagnoseprotokoll
+    /// abgelesen worden:
+    ///
+    ///     AddBackpackItemFromValues(2051, 0, 0, 0, 0, 0, 5, 0, False)
+    ///     AddBackpackItemFromValues(2050, 0, 0, 0, 0, 0, 200, 0, False)
+    ///
+    /// Argument 0 ist die Item-Id, Argument 6 die Menge - belegt daran, dass
+    /// dort genau die Bullets-Werte der Item-Tabelle stehen. Die uebrigen
+    /// Argumente sind in allen beobachteten Aufrufen 0 beziehungsweise False;
+    /// was sie bedeuten, ist **Hypothese** und wird hier nicht geraten,
+    /// sondern auf den beobachteten Wert gesetzt.
+    /// </summary>
+    public static class Admin
+    {
+        const int FensterId = 0x4E445241;
+
+        static bool _offen;
+        static KeyCode _key = KeyCode.None;
+        static bool _keyParsed;
+        static Rect _fenster = new Rect(40f, 40f, 430f, 0f);
+        static Vector2 _rollen;
+        static string _menge = "";
+        static string _status = "Bereit.";
+
+        public static bool IsOpen { get { return _offen; } }
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgAdmin.Value) return;
+            try
+            {
+                if (!Input.GetKeyDown(Key())) return;
+                _offen = !_offen;
+                RevivalPlugin.L.LogInfo("Adminmenue " + (_offen ? "auf" : "zu") + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Adminmenue: " + ex);
+            }
+        }
+
+        public static void Draw()
+        {
+            if (!_offen || !RevivalPlugin.CfgAdmin.Value) return;
+            // Der Cursor gehoert waehrenddessen dem Menue. CursorGuard wird in
+            // RevivalPlugin.Update ausgesetzt, solange offen ist.
+            Cursor.visible = true;
+            Cursor.lockState = CursorLockMode.None;
+            _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
+                                        "Revival - Admin");
+        }
+
+        static void Inhalt(int id)
+        {
+            GUILayout.Label("Items in den Rucksack legen");
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Menge (leer = Standard):", GUILayout.Width(170f));
+            _menge = GUILayout.TextField(_menge, 6, GUILayout.Width(60f));
+            GUILayout.EndHorizontal();
+
+            _rollen = GUILayout.BeginScrollView(_rollen, GUILayout.Height(190f));
+            List<ItemDef> items = RevivalPlugin.Items;
+            for (int i = 0; i < items.Count; i++)
+            {
+                ItemDef d = items[i];
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(d.Id + "  " + d.Name, GUILayout.Width(250f));
+                if (GUILayout.Button("geben", GUILayout.Width(90f)))
+                    Geben(d);
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.EndScrollView();
+
+            GUILayout.Space(6f);
+            GUILayout.Label("Werkzeuge");
+            RevivalPlugin.CfgTurret.Value =
+                GUILayout.Toggle(RevivalPlugin.CfgTurret.Value,
+                                 "Geschuetz (Taste " + RevivalPlugin.CfgTurretKey.Value + ")");
+            RevivalPlugin.CfgArena.Value =
+                GUILayout.Toggle(RevivalPlugin.CfgArena.Value,
+                                 "Testflaeche (Taste " + RevivalPlugin.CfgArenaKey.Value + ")");
+            RevivalPlugin.CfgSpawnCar.Value =
+                GUILayout.Toggle(RevivalPlugin.CfgSpawnCar.Value,
+                                 "Fahrzeugspawn (Taste " + RevivalPlugin.CfgSpawnCarKey.Value + ")");
+            RevivalPlugin.CfgSceneJump.Value =
+                GUILayout.Toggle(RevivalPlugin.CfgSceneJump.Value,
+                                 "Szenensprung (Taste " + RevivalPlugin.CfgJumpKey.Value + ")");
+
+            GUILayout.Space(6f);
+            GUILayout.Label(_status);
+            GUILayout.Label("Alles hier landet auch im BepInEx-Log. "
+                            + "Auswerten mit: python playlog.py");
+
+            if (GUILayout.Button("schliessen")) _offen = false;
+            GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+        }
+
+        static void Geben(ItemDef d)
+        {
+            try
+            {
+                int menge = d.Bullets > 0 ? d.Bullets : 1;
+                if (_menge.Length > 0)
+                {
+                    int gewuenscht;
+                    if (int.TryParse(_menge, out gewuenscht) && gewuenscht > 0)
+                        menge = gewuenscht;
+                }
+
+                object pim = InventarManager();
+                if (pim == null)
+                {
+                    Melde("PlayerInventoryManager nicht gefunden - im Hauptmenue "
+                          + "gibt es keinen. Erst ins Spiel gehen.");
+                    return;
+                }
+
+                MethodInfo m = null;
+                MethodInfo[] alle = pim.GetType().GetMethods();
+                for (int i = 0; i < alle.Length; i++)
+                    if (alle[i].Name == "AddBackpackItemFromValues") { m = alle[i]; break; }
+                if (m == null)
+                {
+                    Melde("AddBackpackItemFromValues fehlt - Spielversion anders?");
+                    return;
+                }
+
+                ParameterInfo[] ps = m.GetParameters();
+                object[] args = new object[ps.Length];
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    Type pt = ps[i].ParameterType;
+                    if (pt == typeof(bool)) args[i] = false;
+                    else if (pt.IsValueType) args[i] = Activator.CreateInstance(pt);
+                    else args[i] = null;
+                }
+                args[0] = d.Id;
+                // Argument 6 ist in allen beobachteten Aufrufen die Menge. Hat
+                // die Methode weniger Argumente, wird NICHT geraten.
+                if (ps.Length > 6 && ps[6].ParameterType == typeof(int))
+                    args[6] = menge;
+                else
+                    Melde("Argument 6 ist kein int - Menge nicht gesetzt.");
+
+                m.Invoke(pim, args);
+                Melde("gegeben: " + d.Id + " " + d.Name + " x" + menge);
+            }
+            catch (Exception ex)
+            {
+                Melde("fehlgeschlagen: " + ex.Message);
+                RevivalPlugin.L.LogError("Adminmenue geben: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Der Manager ist eine Komponente in der Szene. Erst die ueblichen
+        /// Singleton-Namen probieren, dann in der Szene suchen - FindObjectOfType
+        /// ist teuer, aber das hier passiert nur auf Knopfdruck.
+        /// </summary>
+        static object InventarManager()
+        {
+            Type t = AccessTools.TypeByName("PlayerInventoryManager");
+            if (t == null) return null;
+            string[] namen = new string[] { "current", "Instance", "instance" };
+            for (int i = 0; i < namen.Length; i++)
+            {
+                MethodInfo g = AccessTools.PropertyGetter(t, namen[i]);
+                if (g == null || !g.IsStatic) continue;
+                object o = g.Invoke(null, null);
+                if (o != null) return o;
+            }
+            return UnityEngine.Object.FindObjectOfType(t);
+        }
+
+        static void Melde(string s)
+        {
+            _status = s;
+            RevivalPlugin.L.LogInfo("Adminmenue: " + s);
+        }
+
+        static KeyCode Key()
+        {
+            if (_keyParsed) return _key;
+            _keyParsed = true;
+            try
+            {
+                _key = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                           RevivalPlugin.CfgAdminKey.Value, true);
+            }
+            catch
+            {
+                _key = KeyCode.F8;
+                RevivalPlugin.L.LogWarning("Adminmenue: Taste "
+                    + RevivalPlugin.CfgAdminKey.Value + " unbekannt, benutze F8.");
             }
             return _key;
         }
