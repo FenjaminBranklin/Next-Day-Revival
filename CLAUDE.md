@@ -13,6 +13,61 @@ The source comments are in German. That is not going to change - translating
 92 KB of comments would be a huge diff over code that works. Read them, or ask
 and translate them in place for the person you are helping.
 
+## First run on a new machine
+
+If the person you are helping has just cloned this and nothing is set up yet,
+work through this list in order and report what you find. Do not skip ahead -
+step 3 fails in a confusing way if step 2 has not happened.
+
+**1. Look before touching anything.** This is read-only and safe:
+
+    powershell -ExecutionPolicy Bypass -File client_patch.ps1 -Check
+
+It prints seven checks: game folder, server address, `ClientConfig.ini`, the
+EAC patch, BepInEx, the plugin, and whether the server answers. Show the output
+and say which lines are not OK. If the game folder is not found, Next Day:
+Survival is not installed through Steam and nothing else will work.
+
+**2. Patch the installation.** Ask the person what character name they want
+first - it goes into `ClientConfig.ini` and it must not be left as the default,
+because two players with the same name on the server is confusing for everyone.
+**The game must be closed.**
+
+    powershell -ExecutionPolicy Bypass -File client_patch.ps1 -Name "<their name>"
+
+This writes the server address, patches EAC out of the game code, installs
+BepInEx from `bepinex\`, and copies the plugin and assets. It is safe to run
+again at any time, and `-Restore` puts `ClientConfig.ini` back.
+
+**3. Check the toolchain.** Only needed if they will actually change code.
+
+    powershell -File build.ps1 -NoInstall
+
+Needs `csc.exe` from .NET Framework 3.5 at
+`C:\Windows\Microsoft.NET\Framework64\v3.5\csc.exe`. If it is missing, turn on
+"**.NET Framework 3.5**" in Windows Features (`OptionalFeatures.exe`) and try
+again. This step compiles against the DLLs inside the game folder, which is why
+it comes after step 2.
+
+    python verify.py
+
+Needs Python 3. If it complains about `numpy` or `PIL`, run
+`pip install numpy pillow` - those are only needed for the asset generators.
+Expect **0 errors**. Two or three hints are normal on a fresh clone:
+`ildasm.py` and `eacpatch.py` are deliberately not in this repository, and the
+installed DLL may be older than the built one until step 4.
+
+**4. Install the freshly built plugin.** Game closed:
+
+    powershell -File build.ps1
+
+**5. Play.** Steam must be running; never use its Play button.
+
+    powershell -File start_game.ps1
+
+Then report: what worked, what did not, and what the person still has to do
+themselves (installing Python, turning on .NET 3.5, buying the game).
+
 ## Read this first, then stop
 
 Everything else is in `KNOWLEDGE.md`. It starts with an index. **Read the

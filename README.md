@@ -5,8 +5,22 @@ it down, so pressing *Play* no longer gets anyone into the game. This project
 brings it back: a private replacement master server, plus a one-click patcher
 that points your game at it.
 
-It also adds four new items, because once the server was running there was no
+It also adds six new items, because once the server was running there was no
 reason to stop.
+
+---
+
+## Working on it with Claude Code?
+
+Open this folder and say:
+
+> Set this project up on my machine. Follow the "First run on a new machine"
+> section in CLAUDE.md and tell me what is missing.
+
+`CLAUDE.md` is loaded automatically and covers setup, the build commands and
+the traps that cost hours. `KNOWLEDGE.md` beside it is the reference: a map of
+the plugin by class and line, what is known about the game, and what has
+already been tried and failed.
 
 ---
 
