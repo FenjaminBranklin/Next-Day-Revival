@@ -20,7 +20,6 @@ $ErrorActionPreference = "Stop"
 
 # Spielordner nicht fest verdrahten - auf einem anderen PC liegt Steam
 # woanders. Gleiche Suche wie in client_patch.ps1.
-$suche = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "client_patch.ps1"
 $game = ""
 try {
     $r = Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction SilentlyContinue
@@ -97,6 +96,9 @@ $assets = @(
     "sniper50_icon.png", "sniper50_weapon_icon.png",
     "mgbelt.ndmesh", "mgbelt_diffuse.png", "mgbelt_normal.png", "mgbelt_icon.png",
     "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png",
+    "law.ndmesh", "law_diffuse.png", "law_normal.png",
+    "law_icon.png", "law_weapon_icon.png",
+    "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "scope50.png"
 )
 

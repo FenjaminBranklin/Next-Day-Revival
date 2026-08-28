@@ -20,8 +20,13 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# ildasm.py liest die IL des gebauten Plugins und gehoert nicht zu diesem
-# Repository. Fehlt es, entfaellt Pruefung [1] - alles andere laeuft.
+# ildasm.py liest die IL des gebauten Plugins. Es liegt beim Masterserver und
+# nicht in diesem Repository - der Ordner wird daneben gesucht, keine feste
+# Adresse. Fehlt er, entfaellt Pruefung [1] und alles andere laeuft weiter.
+_tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "NextDaySurvival_Stage64_PhotonOwnAppId", "tools")
+if os.path.isdir(_tools):
+    sys.path.insert(0, _tools)
 try:
     import ildasm
 except ImportError:
@@ -75,16 +80,22 @@ ASSET_FILES = [
     "sniper50_icon.png", "sniper50_weapon_icon.png",
     "mgbelt.ndmesh", "mgbelt_diffuse.png", "mgbelt_normal.png", "mgbelt_icon.png",
     "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png",
+    "law.ndmesh", "law_diffuse.png", "law_normal.png",
+    "law_icon.png", "law_weapon_icon.png",
+    "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "scope50.png",
 ]
 
-MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh"]
+MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh",
+          "law.ndmesh", "rocket.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
     "mg42_icon.png": (300, 300), "sniper50_icon.png": (300, 300),
     "mgbelt_icon.png": (300, 300), "ammo50_icon.png": (300, 300),
+    "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
+    "law_weapon_icon.png": (317, 183),
     "scope50.png": (1920, 1920),
 }
 
@@ -115,14 +126,15 @@ def check_dll():
         return None
     if ildasm is None:
         warn("ildasm.py fehlt - IL des Plugins nicht geprueft")
-        return
+        return None
     a = ildasm.Asm(DLL)
     types = set()
     for td in a.md.TypeDef.rows:
         types.add(a._s(td.TypeName))
     want_types = ["RevivalPlugin", "ItemDef", "ItemFactory", "ResourceHook",
                   "LocalizationHook", "CursorTracker", "CursorGuard", "Assets",
-                  "Registry", "WeaponData", "Diag", "Research"]
+                   "Registry", "WeaponData", "Diag", "Research", "RocketHook",
+                   "Turret", "Arena"]
     for t in want_types:
         if t in types:
             ok("Typ " + t)
@@ -244,7 +256,7 @@ def check_grip_alignment():
     Hand ins Leere.
     """
     print("[5] Griff an der RPD-Handposition (y 0.555 .. 0.692, z unter 0.05)")
-    for f in ("mg42.ndmesh", "sniper50.ndmesh"):
+    for f in ("mg42.ndmesh", "sniper50.ndmesh", "law.ndmesh"):
         p = os.path.join(ASSETS, f)
         if not os.path.exists(p):
             continue
@@ -300,9 +312,6 @@ def check_images():
 
 def check_installed():
     print("[7] Installierter Stand im Spielordner")
-    if not GAME_PLUGINS:
-        warn("Spielinstallation nicht gefunden - nichts zu vergleichen")
-        return
     dll = os.path.join(GAME_PLUGINS, "NextDayRevivalToolkit.dll")
     if not os.path.exists(dll):
         warn("noch nichts installiert")
@@ -333,9 +342,10 @@ def check_eac():
     print("[8] EAC-Patch im Spielcode")
     try:
         import eacpatch
-    except Exception:
-        warn("eacpatch.py nicht vorhanden - EAC hier nicht geprueft. "
-             "Nachsehen mit: powershell -File client_patch.ps1 -Check")
+    except Exception as ex:
+        warn("eacpatch.py nicht vorhanden - EAC nicht geprueft. Das Werkzeug "
+             "gehoert nicht zu diesem Repository; wenn das Plugin nicht laedt, "
+             "client_patch.ps1 nochmal laufen lassen. (%s)" % ex)
         return
     state = eacpatch.describe(eacpatch.DLL)[0]
     if state.startswith("GEPATCHT"):
@@ -345,6 +355,66 @@ def check_eac():
             "Beheben mit: python eacpatch.py patch")
     else:
         warn("EAC-Zustand unklar (%s) - python eacpatch.py status" % state)
+
+
+def check_winding():
+    """Zeigt die Vorderseite jedes Dreiecks nach aussen?
+
+    Unitys Konvention ist am Spiel selbst gemessen (2026-08-28): `BoxAmmo01`
+    und `Battery` aus `resources.assets` als OBJ exportiert - der UnityPy-
+    Exporter spiegelt x und dreht die Eckenreihenfolge, zwei Umkehrungen, die
+    sich aufheben - und dort zeigt die Rechte-Hand-Normale der Wicklung bei
+    2659 von 2664 Dreiecken in dieselbe Richtung wie die gespeicherte Normale.
+
+    Daraus zwei Bedingungen, die beide gelten muessen:
+
+      1. Je Dreieck: gespeicherte Normale und Wicklung zeigen dieselbe Seite.
+         Sonst wird die Flaeche weggecullt, waehrend sie beleuchtet wird - die
+         Waffe sieht aus, als koenne man hineinsehen.
+      2. Je geschlossenem Koerper: vorzeichenbehaftetes Volumen positiv.
+
+    Bis 2026-08-28 war beides im ganzen Baukasten verkehrt herum.
+    """
+    print("[9] Vorderseiten und Umlaufsinn")
+    for f in MESHES:
+        p = os.path.join(ASSETS, f)
+        if not os.path.exists(p):
+            continue
+        try:
+            n, V, N, T, m, I = read_mesh(p)
+        except Exception:
+            continue
+
+        vol = 0.0
+        gegen = 0
+        for t in range(0, m, 3):
+            a, b, c = I[t], I[t + 1], I[t + 2]
+            pa = (V[3 * a], V[3 * a + 1], V[3 * a + 2])
+            pb = (V[3 * b], V[3 * b + 1], V[3 * b + 2])
+            pc = (V[3 * c], V[3 * c + 1], V[3 * c + 2])
+            vol += (pa[0] * (pb[1] * pc[2] - pb[2] * pc[1])
+                    - pa[1] * (pb[0] * pc[2] - pb[2] * pc[0])
+                    + pa[2] * (pb[0] * pc[1] - pb[1] * pc[0])) / 6.0
+            u = (pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2])
+            v = (pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2])
+            fn = (u[1] * v[2] - u[2] * v[1],
+                  u[2] * v[0] - u[0] * v[2],
+                  u[0] * v[1] - u[1] * v[0])
+            nv = (N[3 * a], N[3 * a + 1], N[3 * a + 2])
+            if fn[0] * nv[0] + fn[1] * nv[1] + fn[2] * nv[2] < 0:
+                gegen += 1
+
+        line = "%-16s %5d Tri  Volumen %+8.5f" % (f, m // 3, vol)
+        if gegen:
+            bad(line + "  -> %d Dreiecke zeigen die Rueckseite nach aussen "
+                       "(im Spiel unsichtbar)" % gegen)
+        elif vol < -1e-9:
+            bad(line + "  -> Koerper ist nach innen gewickelt")
+        elif abs(vol) <= 1e-9:
+            ok(line + "  Vorderseiten stimmen (Volumen 0: doppelt gebaute "
+                      "Flaechen, beidseitig sichtbar)")
+        else:
+            ok(line + "  Vorderseiten stimmen")
 
 
 if __name__ == "__main__":
@@ -360,6 +430,7 @@ if __name__ == "__main__":
     check_images()
     check_installed()
     check_eac()
+    check_winding()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))
     for f in fails:

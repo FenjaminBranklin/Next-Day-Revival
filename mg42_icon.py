@@ -25,7 +25,7 @@ ICON = os.path.join(ASSETS, "mg42_icon.png")
 WICON = os.path.join(ASSETS, "mg42_weapon_icon.png")
 
 if __name__ == "__main__":
-    iconlib.item_icon(MESH, TEX, ICON, size=300, tilt=33.0)
+    iconlib.item_icon(MESH, TEX, ICON, size=300)
     iconlib.weapon_icon(MESH, TEX, WICON)
     print("MG42-Icons")
     iconlib.report(ICON)

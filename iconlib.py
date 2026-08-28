@@ -40,6 +40,18 @@ FILL = FILL / np.linalg.norm(FILL)
 SS = 4                      # Supersampling-Faktor
 SPEC = 0.62                 # Staerke des Glanzlichts
 
+# Beleuchtungsanteile. Nicht gewaehlt, sondern am Kontrastumfang der
+# Spielvorlagen gemessen: RPD_Item liegt bei Mittel 37 und 95. Perzentil 86,
+# svd_Item bei 39 und 109 - also Faktor 2.3 bis 2.8. Der alte Satz
+# (0.14 / 0.70 / 0.20 / 0.16) kam auf Faktor 4.1: dieselbe Grundhelligkeit,
+# aber viel zu harte Lichter, sichtbar als helles Rautenmuster auf dem
+# MG42-Laufmantel. Mehr Umgebungslicht und weniger gerichtetes Licht bei
+# gleicher Summe druecken die Spitze, ohne die Flaeche flau zu machen.
+AMB = 0.30
+KEYW = 0.50
+FILLW = 0.18
+RIMW = 0.10
+
 
 def rot(yaw, pitch):
     cy, sy = math.cos(yaw), math.sin(yaw)
@@ -61,7 +73,7 @@ def load_texture(path):
     return np.asarray(Image.open(path).convert("RGB"), np.float32) / 255.0
 
 
-def render(v, nm, idx, uv, tex, w, h, yaw=0.34, pitch=0.20, fill=0.94, gain=730.0):
+def render(v, nm, idx, uv, tex, w, h, yaw=0.34, pitch=0.20, fill=0.94, gain=580.0):
     """Orthografischer Render mit Z-Buffer. Muendung zeigt nach rechts.
 
     Das Mesh laeuft entlang -Y zur Muendung. Die Bildachse ist deshalb -Y, damit
@@ -85,7 +97,7 @@ def render(v, nm, idx, uv, tex, w, h, yaw=0.34, pitch=0.20, fill=0.94, gain=730.
     key = np.clip(n @ KEY, 0, 1)
     fillamt = np.clip(n @ FILL, 0, 1)
     rim = 1.0 - np.clip(np.abs(n[:, 0]), 0, 1)          # Blickrichtung ist X
-    shade = 0.14 + 0.70 * key + 0.20 * fillamt + 0.16 * rim ** 3
+    shade = AMB + KEYW * key + FILLW * fillamt + RIMW * rim ** 3
 
     # Glanzlicht. Ohne das bleibt jede Flaeche flach eingefaerbt, und genau so
     # sahen die eigenen Icons neben denen des Spiels aus: gleichmaessig graue
@@ -166,28 +178,44 @@ def fit(img, w, h, margin=0.94):
     return out
 
 
-def item_icon(mesh_path, tex_path, out_path, size=300, tilt=33.0,
-              yaw=0.42, pitch=0.0, gain=730.0):
-    """300x300, Waffe diagonal - wie RPD_Item, svd_Item, PSG-1_Item."""
+def item_icon(mesh_path, tex_path, out_path, size=300, tilt=49.0,
+              yaw=0.42, pitch=0.0, gain=580.0, margin=0.82):
+    """300x300, Waffe diagonal - wie RPD_Item, svd_Item, PSG-1_Item.
+
+    tilt und margin sind an den Vorlagen gemessen, nicht gewaehlt. Der Kasten
+    der nicht durchsichtigen Pixel liegt beim RPD bei 75.0 x 85.7 Prozent der
+    Bildkante, bei der SVD bei 80.0 x 83.3. Eine lange duenne Waffe ergibt bei
+    Neigung theta einen Kasten im Verhaeltnis tan(theta) - aus 86/75 folgt
+    rund 49 Grad. Mit tilt 33 wurden daraus 97 x 70: zu flach, und links und
+    rechts am Bildrand abgeschnitten. Die margin von 0.86 statt 0.94 laesst
+    denselben Rand wie die Vorlagen.
+    """
     v, nm, idx, uv = load(mesh_path)
     tex = load_texture(tex_path)
     big = render(v, nm, idx, uv, tex, size * SS * 3, size * SS, yaw, pitch,
                  fill=0.98, gain=gain)
     big = big.rotate(tilt, resample=Image.BICUBIC, expand=True)
-    img = fit(big, size, size, margin=0.94)
+    img = fit(big, size, size, margin=margin)
     img = drop_shadow(img, offset=(4, 6), blur=6, strength=0.5)
     img.save(out_path)
     return img
 
 
 def weapon_icon(mesh_path, tex_path, out_path, w=317, h=183,
-                yaw=0.42, pitch=0.0, gain=730.0):
-    """317x183, Waffe waagerecht - wie RPD_Weapon, svd_Weapon, PSG-1_Weapon."""
+                yaw=0.42, pitch=0.0, gain=580.0, margin=0.88):
+    """317x183, Waffe waagerecht - wie RPD_Weapon, svd_Weapon, PSG-1_Weapon.
+
+    Hier ist der yaw der wirksame Regler, nicht die Groesse. Das RPD-Icon des
+    Spiels zeigt eine Silhouette von rund 3.3 zu 1; die eigenen Waffen kamen
+    auf 5.4 zu 1, weil sie fast von der Seite gerendert wurden. Mehr yaw
+    dreht die Waffe zur Kamera, verkuerzt sie perspektivisch und macht die
+    Silhouette gedrungener - genau der Dreiviertelblick der Vorlagen.
+    """
     v, nm, idx, uv = load(mesh_path)
     tex = load_texture(tex_path)
     big = render(v, nm, idx, uv, tex, w * SS, h * SS, yaw, pitch,
                  fill=0.98, gain=gain)
-    img = fit(big, w, h, margin=0.96)
+    img = fit(big, w, h, margin=margin)
     img = drop_shadow(img, offset=(3, 4), blur=5, strength=0.5)
     img.save(out_path)
     return img

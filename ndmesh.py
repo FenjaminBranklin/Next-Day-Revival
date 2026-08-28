@@ -153,34 +153,59 @@ class Mesh(object):
         if fn is None:
             self.dropped += 1
             return
+        out = (-fn[0], -fn[1], -fn[2])
         if normals is None:
-            normals = (fn, fn, fn)
+            normals = (out, out, out)
         pts = (p0, p1, p2)
         uvs = self._uv(pts, region, fn)
         base = len(self.V)
         for p, n, t in zip(pts, normals, uvs):
-            nn = norm(n) or fn
+            nn = norm(n) or out
             self.V.append(p)
             self.N.append(nn)
             self.T.append(t)
-        self.IDX.extend([base, base + 1, base + 2])
+        # UMLAUFSINN, siehe Kommentar bei quad().
+        self.IDX.extend([base, base + 2, base + 1])
 
     def quad(self, p0, p1, p2, p3, region, normals=None):
+        """Viereck. Der Umlaufsinn wird hier einmal zentral auf Unity gedreht.
+
+        Belegt am Spiel selbst (2026-08-28): `BoxAmmo01` und `Battery` aus
+        `resources.assets` ueber UnityPy als OBJ exportiert. Der Exporter
+        spiegelt x **und** dreht die Eckenreihenfolge um - zwei Umkehrungen,
+        die sich aufheben. Im OBJ zeigt die Rechte-Hand-Normale der Wicklung
+        bei 2659 von 2664 Dreiecken in dieselbe Richtung wie die gespeicherte
+        Normale. In Unity gilt damit dasselbe: **die Rechte-Hand-Normale der
+        Wicklung zeigt nach aussen**, das vorzeichenbehaftete Volumen eines
+        geschlossenen Koerpers ist positiv.
+
+        Der Baukasten zieht seine Profile andersherum. Bis 2026-08-28 landete
+        das ungedreht im Mesh - alle Waffen waren von aussen unsichtbar und
+        zeigten stattdessen ihre Innenseite. Sichtbar blieb nur, was doppelt
+        gebaut ist: die M72 LAW hat jede Flaeche zweimal und sah deshalb als
+        einzige richtig aus.
+
+        Gedreht wird beides zusammen, sonst passt die Beleuchtung nicht zur
+        Sichtbarkeit: die Indexreihenfolge und die aus ihr abgeleitete Normale.
+        Ausdruecklich uebergebene Normalen (Rundungen, Deckel) sind bereits
+        Aussennormalen und bleiben unangetastet.
+        """
         fn = face_normal(p0, p1, p2) or face_normal(p0, p2, p3)
         if fn is None:
             self.dropped += 1
             return
+        out = (-fn[0], -fn[1], -fn[2])
         if normals is None:
-            normals = (fn, fn, fn, fn)
+            normals = (out, out, out, out)
         pts = (p0, p1, p2, p3)
         uvs = self._uv(pts, region, fn)
         base = len(self.V)
         for p, n, t in zip(pts, normals, uvs):
-            nn = norm(n) or fn
+            nn = norm(n) or out
             self.V.append(p)
             self.N.append(nn)
             self.T.append(t)
-        self.IDX.extend([base, base + 1, base + 2, base, base + 2, base + 3])
+        self.IDX.extend([base, base + 2, base + 1, base, base + 3, base + 2])
 
     def fan(self, pts, region, plane_normal):
         """Deckflaeche als Dreiecksfaecher mit vorgegebener Ebenennormale.
@@ -294,15 +319,23 @@ class Mesh(object):
             ends.append([(x_c + px, cy + pz * ca, cz + pz * sa) for (px, pz) in prof])
         a0, b0 = ends
         k = len(prof)
-        # Die Abbildung px->x und pz->(y,z) dreht die Haendigkeit des
-        # Querschnitts gegenueber prism(). Ohne Umkehr zeigen alle Normalen nach
-        # innen und das Bauteil verschwindet im Backface-Culling.
+        # Wicklung wie in prism(): a-Ende, dann b-Ende, im selben Umlaufsinn.
+        #
+        # Hier stand bis 2026-08-28 die umgekehrte Reihenfolge, mit der
+        # Begruendung, die Abbildung px->x und pz->(y,z) drehe die Haendigkeit.
+        # Sie tut es nicht. Gemessen am fertigen Mesh: alle prism-Bauteile
+        # haben ein negatives vorzeichenbehaftetes Volumen, die angled_box-
+        # Bauteile als einzige ein positives - Griff und Zweibein waren damit
+        # nach innen gewickelt und im Spiel von aussen unsichtbar. Genau das
+        # war die "durchsichtige Seite" am MG42.
         for i in range(k):
             j = (i + 1) % k
-            self.quad(b0[i], b0[j], a0[j], a0[i], region)
+            self.quad(a0[i], a0[j], b0[j], b0[i], region)
         axis = norm((0.0, sa, -ca)) or (0.0, 1.0, 0.0)
-        self.fan(a0, region, (-axis[0], -axis[1], -axis[2]))
-        self.fan(list(reversed(b0)), region, axis)
+        # Die Deckel behalten ihre echten Aussennormalen; nur der Umlaufsinn
+        # dreht sich mit. b0 liegt bei +axis, a0 bei -axis.
+        self.fan(list(reversed(a0)), region, (-axis[0], -axis[1], -axis[2]))
+        self.fan(b0, region, axis)
 
 
     # ------------------------------------------------------- Zusammensetzen

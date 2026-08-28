@@ -24,6 +24,8 @@ GROUPS = [
     ("mg42", ["mg42_mesh.py", "mg42_texture.py", "mg42_icon.py"]),
     ("sniper50", ["sniper50_mesh.py", "sniper50_texture.py", "sniper50_icon.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
+    ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
+    ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),
     ("scope", ["scope50.py"]),
     ("preview", ["mesh_preview.py"]),
 ]

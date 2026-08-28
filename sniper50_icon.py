@@ -21,7 +21,7 @@ ICON = os.path.join(ASSETS, "sniper50_icon.png")
 WICON = os.path.join(ASSETS, "sniper50_weapon_icon.png")
 
 if __name__ == "__main__":
-    iconlib.item_icon(MESH, TEX, ICON, size=300, tilt=33.0)
+    iconlib.item_icon(MESH, TEX, ICON, size=300)
     iconlib.weapon_icon(MESH, TEX, WICON)
     print("Sniper50-Icons")
     iconlib.report(ICON)

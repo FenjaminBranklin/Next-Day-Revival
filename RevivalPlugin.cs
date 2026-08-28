@@ -96,11 +96,47 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgMetallic;
         internal static ConfigEntry<float> CfgGlossiness;
         internal static ConfigEntry<int> CfgRenderQueue;
+        internal static ConfigEntry<bool> CfgNoCold;
         internal static ConfigEntry<bool> CfgVerbose;
         internal static ConfigEntry<string> CfgExtraScenes;
         internal static ConfigEntry<bool> CfgSceneJump;
         internal static ConfigEntry<int> CfgJumpScene;
         internal static ConfigEntry<string> CfgJumpKey;
+        internal static ConfigEntry<bool> CfgTurret;
+        internal static ConfigEntry<string> CfgTurretKey;
+        internal static ConfigEntry<float> CfgTurretDamage;
+        internal static ConfigEntry<float> CfgTurretRange;
+        internal static ConfigEntry<float> CfgTurretDelay;
+        internal static ConfigEntry<float> CfgTurretTurnSpeed;
+        internal static ConfigEntry<float> CfgTurretPitchMin;
+        internal static ConfigEntry<float> CfgTurretPitchMax;
+        internal static ConfigEntry<bool> CfgTurretAmmo;
+        internal static ConfigEntry<int> CfgTurretAmmoId;
+        internal static ConfigEntry<bool> CfgTurretAmmoBackpack;
+        internal static ConfigEntry<float> CfgTurretSensitivity;
+        internal static ConfigEntry<float> CfgTurretRecoil;
+        internal static ConfigEntry<float> CfgTurretEyeForward;
+        internal static ConfigEntry<float> CfgTurretEyeUp;
+        internal static ConfigEntry<float> CfgTurretEyeSide;
+        internal static ConfigEntry<bool> CfgTurretCrosshair;
+        internal static ConfigEntry<bool> CfgTurretTakeCamera;
+        internal static ConfigEntry<float> CfgTurretFov;
+        internal static ConfigEntry<bool> CfgTurretExplosion;
+        internal static ConfigEntry<float> CfgTurretExplosionDamage;
+        internal static ConfigEntry<float> CfgTurretExplosionRadius;
+        internal static ConfigEntry<bool> CfgTurretInvertX;
+        internal static ConfigEntry<bool> CfgTurretScopeOverlay;
+        internal static ConfigEntry<float> CfgTurretSeatX;
+        internal static ConfigEntry<float> CfgTurretSeatY;
+        internal static ConfigEntry<float> CfgTurretSeatZ;
+        internal static ConfigEntry<bool> CfgSpawnCar;
+        internal static ConfigEntry<string> CfgSpawnCarKey;
+        internal static ConfigEntry<string> CfgSpawnCarName;
+        internal static ConfigEntry<float> CfgSpawnCarDistance;
+        internal static ConfigEntry<bool> CfgArena;
+        internal static ConfigEntry<string> CfgArenaKey;
+        internal static ConfigEntry<float> CfgArenaSize;
+        internal static ConfigEntry<float> CfgArenaDistance;
 
         internal static List<ItemDef> Items = new List<ItemDef>();
         internal const string ScopePath = "WeaponElements/Scopes/NDR_Scope50";
@@ -127,6 +163,10 @@ namespace NextDayRevival
             PatchLocalization();
             PatchBackpackDiagnostics();
             PatchReloadDiagnostics();
+            PatchRocketImpact();
+            PatchLawDrop();
+            Turret.Install(_harmony);
+            ColdHook.Install(_harmony);
 
             StartCoroutine(LateSetup());
         }
@@ -158,6 +198,17 @@ namespace NextDayRevival
             CfgRenderQueue = Config.Bind("CustomItems", "RenderQueueOffset", 60,
                 "Verschiebt die Zeichenreihenfolge nach hinten. 0 = wie die "
                 + "Spielmaterialien (Geometry, 2000).");
+            // Die Erkaeltung entsteht zur Laufzeit, nicht im Profil:
+            // PlayerLifeDataManager::PlayerColdController zaehlt _playerLifeData.Cold
+            // im Takt von Cold_Delay hoch, sobald die Stunde am TOD_Sky ueber 22
+            // oder unter 7 liegt. Ein geheiltes Profil ist deshalb nach der
+            // naechsten Nacht wieder krank - das Feld im Profil zu setzen reicht
+            // nicht, der Zaehler muss aus.
+            CfgNoCold = Config.Bind("Fixes", "NoCold", true,
+                "Die naechtliche Erkaeltung abschalten: haelt Cold UND Temp auf 0. "
+                + "Temp ist der Fieberzaehler, nicht die Koerpertemperatur - "
+                + "gesund ist 0, jeder Wert darueber hustet, macht Schaden und "
+                + "waechst von selbst weiter.");
             CfgVerbose = Config.Bind("Debug", "Verbose", false,
                 "Ausfuehrliche Feld- und Ladeprotokolle. Fuer die Fehlersuche.");
 
@@ -180,6 +231,145 @@ namespace NextDayRevival
                 + "18 Underground_Lab.");
             CfgJumpKey = Config.Bind("Research", "JumpKey", "F9",
                 "Taste fuer den Szenenwechsel, Name aus UnityEngine.KeyCode.");
+
+            // Das Turmgeschuetz des BTR-80A. Der Sitz entsteht im Prefix auf
+            // InitCar, weil das Spiel dort
+            //     Passengers = new GameObject[SeatPoints.childCount]
+            // setzt - ein zusaetzliches Kind an SeatPoints genuegt also, und
+            // das Array bekommt von selbst die richtige Laenge.
+            CfgTurret = Config.Bind("Turret", "Enabled", true,
+                "Dem BTR-80A einen siebten Sitz im Turm geben und das Geschuetz "
+                + "bedienbar machen. Im Spiel noch UNGEPRUEFT, Stand 2026-08-28.");
+            CfgTurretKey = Config.Bind("Turret", "TurretKey", "G",
+                "Taste zum Aufsitzen und Verlassen des Geschuetzes, waehrend man "
+                + "im Fahrzeug sitzt. Name aus UnityEngine.KeyCode.");
+            CfgTurretDamage = Config.Bind("Turret", "Damage", 750f,
+                "Schaden je Schuss. Zum Vergleich: die Granate des M72 macht 900 "
+                + "im Radius 12.");
+            CfgTurretRange = Config.Bind("Turret", "Range", 900f,
+                "Reichweite des Schusses in Welteinheiten.");
+            CfgTurretDelay = Config.Bind("Turret", "FireDelay", 0.9f,
+                "Sekunden zwischen zwei Schuessen.");
+            CfgTurretTurnSpeed = Config.Bind("Turret", "TurnSpeed", 140f,
+                "Grad je Sekunde, mit denen das Rohr der Blickrichtung nachdreht. "
+                + "Der BLICK folgt der Maus sofort - nur das Rohr hat Traegheit. "
+                + "Bis 2026-08-28 hing die Kamera am Rohr und damit an diesen "
+                + "55 Grad je Sekunde; das war der Grund, warum sich das Zielen "
+                + "zaeh anfuehlte.");
+            CfgTurretPitchMin = Config.Bind("Turret", "PitchMin", -20f,
+                "Tiefster Rohrwinkel in Grad. Weiter als das echte Vorbild "
+                + "(-5 Grad): seit die Kamera an der Zielrichtung haengt, ist "
+                + "der Rohrwinkel zugleich der Blickwinkel, und ein Blick, der "
+                + "nicht nach unten kann, macht das Zielen unbrauchbar.");
+            CfgTurretPitchMax = Config.Bind("Turret", "PitchMax", 60f,
+                "Hoechster Rohrwinkel in Grad.");
+            CfgTurretAmmo = Config.Bind("Turret", "RequireAmmo", true,
+                "Je Schuss eine Patrone aus dem Kofferraum nehmen. Der Kofferraum "
+                + "ist InteractColliders/BagaggeContainer, ein ItemsContainer.");
+            CfgTurretAmmoId = Config.Bind("Turret", "AmmoItemId", 2051,
+                "Item-ID der Munition. 2051 ist die .50-BMG-Kiste des Toolkits.");
+            CfgTurretAmmoBackpack = Config.Bind("Turret", "AmmoFromBackpack", true,
+                "Ist der Kofferraum leer, auch aus dem Rucksack des Spielers "
+                + "nehmen. Der Kofferraum gehoert dem Fahrzeug und ist nach dem "
+                + "naechsten Spielstart mitsamt Inhalt weg.");
+            // Gezielt wird mit der Maus, nicht mit dem Kopf: die Kamera sitzt
+            // waehrend des Schiessens im Rohr und koennte den Turm sonst nicht
+            // mehr steuern - sie zeigt ja immer schon dorthin, wo er steht.
+            CfgTurretSensitivity = Config.Bind("Turret", "Sensitivity", 2.2f,
+                "Grad Turmschwenk je Einheit Mausbewegung. Die Traegheit aus "
+                + "TurnSpeed bleibt davon unberuehrt.");
+            CfgTurretRecoil = Config.Bind("Turret", "Recoil", 0.30f,
+                "Grad, die das Rohr je Schuss hochschlaegt. Bewusst klein - "
+                + "ein Turmgeschuetz sitzt auf zwoelf Tonnen Fahrzeug.");
+            // Die Kamera sass bis 2026-08-28 auf der Rohrachse, kurz vor der
+            // Muendung - und damit MITTEN IM BUG. Nachgemessen am Prefab
+            // BTR-80A_Spawn: das Turmmesh reicht in Rohrrichtung bis z 8.9,
+            // die Wanne (hull, Halbmasse 11.47 um z 0) aber bis z 11.47. Ein
+            // Auge knapp vor dem Rohr steckt also im Bugblech. Deshalb sitzt
+            // es jetzt UEBER dem Turm: Ankerpunkt ist die Turmachse, nicht die
+            // Muendung, und EyeUp hebt es ueber das Turmdach (lokal z bis
+            // 2.878 ueber dem Drehpunkt).
+            CfgTurretEyeForward = Config.Bind("Turret", "CamForward", 2.0f,
+                "Wie weit vor dem Turmdrehpunkt die Kamera sitzt, laengs des "
+                + "Rohres. Heisst nicht mehr EyeForward, weil sich der Bezugs"
+                + "punkt geaendert hat - EyeForward und EyeUp in dieser Datei "
+                + "sind Reste und ohne Wirkung.");
+            CfgTurretEyeUp = Config.Bind("Turret", "CamUp", 3.6f,
+                "Wie hoch die Kamera ueber dem Turmdrehpunkt sitzt. Das Turmdach "
+                + "liegt 2.9 Einheiten darueber - weniger, und der Turm steht "
+                + "im Bild.");
+            CfgTurretEyeSide = Config.Bind("Turret", "CamSide", 0.0f,
+                "Seitenversatz der Kamera. 0 heisst mittig ueber dem Rohr.");
+            CfgTurretInvertX = Config.Bind("Turret", "InvertX", false,
+                "Seitenrichtung der Maus umkehren.");
+            CfgTurretCrosshair = Config.Bind("Turret", "Crosshair", true,
+                "Fadenkreuz in der Bildmitte. Der Schuss laeuft seit 2026-08-28 "
+                + "auf der BLICKACHSE der Kamera, nicht mehr auf der Rohrachse - "
+                + "die Mitte ist damit immer der Treffpunkt, egal wo die Kamera "
+                + "sitzt. Der alte Schluessel CrosshairRange ist wirkungslos.");
+            CfgTurretTakeCamera = Config.Bind("Turret", "TakeCamera", true,
+                "Die Kamera des Spiels waehrend des Zielens stilllegen. Ohne das "
+                + "zieht MouseOrbitController sie jeden Frame wieder um das "
+                + "Fahrzeug herum - der Blick zeigt dann auf den eigenen BTR "
+                + "statt durch das Rohr. Auf false, falls die Kamera nach dem "
+                + "Aussteigen haengt.");
+            CfgTurretFov = Config.Bind("Turret", "FOV", 26f,
+                "Bildwinkel im Geschuetz, in Grad. Klein heisst nah heran wie im "
+                + "Zielfernrohr; das Spiel selbst benutzt 60. 0 laesst den "
+                + "Bildwinkel unveraendert.");
+            CfgTurretExplosion = Config.Bind("Turret", "Explosion", true,
+                "Am Einschlag eine Sprenggranate zuenden. Ohne das ist ein "
+                + "Schuss nicht zu sehen und nicht zu hoeren - die 30 mm des "
+                + "BTR-80A sind Sprengmunition, kein Gewehrschuss.");
+            CfgTurretExplosionDamage = Config.Bind("Turret", "ExplosionDamage", 350f,
+                "Schaden der Sprenggranate im Umkreis.");
+            CfgTurretExplosionRadius = Config.Bind("Turret", "ExplosionRadius", 5f,
+                "Wirkungsradius der Sprenggranate in Welteinheiten.");
+            CfgTurretScopeOverlay = Config.Bind("Turret", "ScopeOverlay", false,
+                "Zusaetzlich das Zielfernrohrbild ueberblenden. Aus, seit die "
+                + "Kamera im Rohr sitzt - das Bild verdeckte nur die Sicht.");
+            CfgTurretSeatX = Config.Bind("Turret", "SeatX", 0.0f,
+                "Lage des Geschuetzsitzes, relativ zu SeatPoints. Die vorhandenen "
+                + "Sitze liegen bei x plus/minus 1.35, y 0.15, z -4.62 bis 5.77.");
+            CfgTurretSeatY = Config.Bind("Turret", "SeatY", 0.95f,
+                "Hoehe des Geschuetzsitzes. Hoeher als die Bank, weil der Kopf in "
+                + "den Turm gehoert. UNGEPRUEFT - hier wird im Spiel nachgemessen.");
+            CfgTurretSeatZ = Config.Bind("Turret", "SeatZ", 2.6f,
+                "Laengslage des Geschuetzsitzes. Der Turm sitzt vor der Mitte.");
+
+            // Eine ebene Testflaeche zur Laufzeit. Keine Region im Sinne des
+            // Spiels - eine Region ist ein GameRegionData mit Buildindizes,
+            // und neue Buildszenen gibt es ohne Neubau des Spiels nicht.
+            CfgArena = Config.Bind("Research", "Arena", false,
+                "Auf Tastendruck eine ebene Testflaeche vor dem Spieler bauen, "
+                + "aus dem Material des Bodens darunter. Nochmal druecken raeumt "
+                + "sie weg. Erkundungswerkzeug, deshalb standardmaessig aus.");
+            CfgArenaKey = Config.Bind("Research", "ArenaKey", "F10",
+                "Taste fuer die Testflaeche, Name aus UnityEngine.KeyCode.");
+            CfgArenaSize = Config.Bind("Research", "ArenaSize", 60f,
+                "Kantenlaenge der Testflaeche in Welteinheiten.");
+            CfgArenaDistance = Config.Bind("Research", "ArenaDistance", 45f,
+                "Wie weit vor dem Spieler die Flaeche entsteht.");
+
+            // Fahrzeuge entstehen sonst nur an den VehicleSpawnPoints der Szene.
+            // VehicleSpawnPoint::InstantiateCar macht nichts weiter als
+            //     PhotonNetwork.InstantiateSceneObject("VehicleSpawn\\" + name, ...)
+            // und setzt danach Kraftstoff, Zustand und die drei Teile. Genau das
+            // steht hier nochmal, damit ein BTR dort steht, wo geprueft wird.
+            CfgSpawnCar = Config.Bind("Research", "SpawnCar", false,
+                "Auf Tastendruck ein Fahrzeug vor dem Spieler erzeugen. "
+                + "Erkundungswerkzeug, deshalb standardmaessig aus. Braucht den "
+                + "Masterclient - im eigenen Raum ist man das.");
+            CfgSpawnCarKey = Config.Bind("Research", "SpawnCarKey", "F7",
+                "Taste fuer den Fahrzeugspawn, Name aus UnityEngine.KeyCode.");
+            CfgSpawnCarName = Config.Bind("Research", "SpawnCarName", "btr-80a_spawn",
+                "Prefabname unter Resources/VehicleSpawn. Moeglich sind "
+                + "btr-80a_spawn, paz-672_spawn, uaz-3151_military_spawn, "
+                + "uaz-3151_police_spawn, ural-375(mod)_spawn, vaz_1111_spawn, "
+                + "zaz-968_spawn.");
+            CfgSpawnCarDistance = Config.Bind("Research", "SpawnCarDistance", 12f,
+                "Wie weit vor dem Spieler das Fahrzeug entsteht. Weniger als "
+                + "die halbe Fahrzeuglaenge setzt es in den Spieler.");
         }
 
         // Die Tabelle. Spende-IDs sind bewusst artverwandt gewaehlt: das RPD ist
@@ -227,6 +417,26 @@ namespace NextDayRevival
                 "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
                 "ammo50_icon.png", null,
                 10, 0, 3.2f));
+
+            Items.Add(new ItemDef(
+                1162, 1010, true,
+                "M72 LAW",
+                "Leichter 66-mm-Einweg-Raketenwerfer mit fest geladener "
+                + "Hohlladungsrakete. Nach dem einzigen Schuss bleibt ein leeres, "
+                + "nicht nachladbares Rohr zurueck. Der Gefahrenbereich hinter dem "
+                + "Rohr ist kein Ort fuer Freunde.",
+                "law.ndmesh", "law_diffuse.png", "law_normal.png",
+                "law_icon.png", "law_weapon_icon.png",
+                1, 0, 2.5f));
+
+            Items.Add(new ItemDef(
+                2052, 2030, false,
+                "M72 Rakete (1)",
+                "Ausstellungsstueck einer 66-mm-Hohlladungsrakete. Die M72 wird "
+                + "ab Werk geladen und kann im Feld nicht nachgeladen werden.",
+                "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png",
+                "rocket_icon.png", null,
+                1, 0, 6.0f));
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -326,6 +536,50 @@ namespace NextDayRevival
             catch (Exception ex) { L.LogError("Reload-Patch fehlgeschlagen: " + ex.Message); }
         }
 
+        void PatchRocketImpact()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("PlayerFirearmWeaponController");
+                if (t == null)
+                {
+                    L.LogWarning("PlayerFirearmWeaponController fuer LAW nicht gefunden.");
+                    return;
+                }
+                MethodInfo m = AccessTools.Method(t, "FireOneShot", null, null);
+                if (m == null) { L.LogWarning("FireOneShot fuer LAW nicht gefunden."); return; }
+                _harmony.Patch(m, null,
+                    new HarmonyMethod(typeof(RocketHook).GetMethod("Postfix")), null, null, null);
+                L.LogInfo("M72-LAW-Einschlagexplosion aktiv.");
+            }
+            catch (Exception ex) { L.LogError("LAW-Patch fehlgeschlagen: " + ex); }
+        }
+
+        void PatchLawDrop()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("PlayerInventoryManager");
+                if (t == null) { L.LogWarning("PlayerInventoryManager fuer LAW-Drop fehlt."); return; }
+                MethodInfo m = AccessTools.Method(t, "DropWeaponFromHand",
+                    new Type[] { typeof(int), typeof(int), typeof(int), typeof(Vector3),
+                                 typeof(Quaternion), typeof(Vector3) }, null);
+                if (m == null) { L.LogWarning("DropWeaponFromHand fuer LAW fehlt."); return; }
+                _harmony.Patch(m,
+                    new HarmonyMethod(typeof(LawDropHook).GetMethod("Prefix")),
+                    null, null, null, null);
+
+                MethodInfo inventory = AccessTools.Method(t, "DropInventoryItem",
+                    new Type[] { typeof(int), typeof(int), typeof(string), typeof(bool) }, null);
+                if (inventory == null) { L.LogWarning("DropInventoryItem fuer LAW fehlt."); return; }
+                _harmony.Patch(inventory,
+                    new HarmonyMethod(typeof(LawDropHook).GetMethod("InventoryPrefix")),
+                    null, null, null, null);
+                L.LogInfo("M72-LAW-Weltablage, Slotfreigabe und Todes-Drop aktiv.");
+            }
+            catch (Exception ex) { L.LogError("LAW-Drop-Patch fehlgeschlagen: " + ex); }
+        }
+
         void PatchBackpackDiagnostics()
         {
             try
@@ -410,6 +664,19 @@ namespace NextDayRevival
         {
             CursorGuard.Tick();
             Research.Tick();
+            Turret.Tick();
+            Arena.Tick();
+            CarSpawn.Tick();
+        }
+
+        void LateUpdate()
+        {
+            Turret.LateTick();
+        }
+
+        void OnGUI()
+        {
+            Turret.DrawScope();
         }
 
         void OnApplicationFocus(bool hasFocus)
@@ -617,6 +884,430 @@ namespace NextDayRevival
                 if (__0 == "$" + d.Id + "_Name") { __result = d.Name; return; }
                 if (__0 == "$" + d.Id + "_Descr") { __result = d.Descr; return; }
             }
+        }
+    }
+
+    /// <summary>
+    /// Haengt die vorhandene Granatenexplosion an den Hitscan-Treffer der LAW.
+    /// Alle Spieltypen bleiben absichtlich ueber Reflection angebunden.
+    /// </summary>
+    public static class RocketHook
+    {
+        const int LAW_ID = 1162;
+        const string EXPLOSION_PREFAB = "PlayerDataPrefabs/Throw/1403_Throw";
+        static bool _loggedId;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+                object weaponData = GetField(__instance, "_weaponFirearmData");
+                if (weaponData == null) return;
+
+                int itemId = ObscuredInt(GetField(weaponData, "ItemID"));
+                if (itemId != LAW_ID) return;
+                if (!_loggedId)
+                {
+                    _loggedId = true;
+                    RevivalPlugin.L.LogInfo("M72 LAW erkannt: ItemID " + itemId);
+                }
+
+                Transform cameraTransform = GetField(__instance, "MainCamera") as Transform;
+                if (cameraTransform == null)
+                    throw new InvalidOperationException("MainCamera ist null oder kein Transform.");
+
+                float maximumRange = ObscuredFloat(GetField(weaponData, "MaximumRange"));
+                Vector3 hitPoint, hitNormal;
+                List<Vector3> trajectory;
+                Vector3 launchPoint = cameraTransform.position
+                    + cameraTransform.forward * 0.85f - cameraTransform.up * 0.34f;
+                bool didHit = TraceTrajectory(launchPoint, cameraTransform.forward,
+                                              maximumRange, out hitPoint, out hitNormal,
+                                              out trajectory);
+                SpawnTracer(trajectory);
+                if (!didHit) return;
+
+                Detonate(hitPoint + hitNormal * 0.15f, 900f, 12f, 3f);
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("M72-LAW-Einschlagexplosion fehlgeschlagen: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Zuendet eine Sprenggranate an einem Punkt. Herausgeloest, weil das
+        /// Geschuetz des BTR dieselben sechs Schritte braucht - Prefab ueber
+        /// PhotonNetwork erzeugen, Physik ruhigstellen, Collider auf
+        /// IgnoreLocalPlayer, dann SetExplosionData und StartExplosion.
+        ///
+        /// `ExplosionObject::Explode` prueft `photonView.isMine`; ein blosses
+        /// Object.Instantiate reicht deshalb nicht.
+        /// </summary>
+        internal static void Detonate(Vector3 point, float damage, float radius, float lifeTime)
+        {
+            GameObject spawned = PhotonInstantiate(EXPLOSION_PREFAB, point,
+                                                   Quaternion.identity, (byte)0);
+            if (spawned == null)
+                throw new InvalidOperationException("PhotonNetwork.Instantiate lieferte null.");
+
+            Type bodyType = AccessTools.TypeByName("UnityEngine.Rigidbody");
+            Component body = bodyType == null ? null : spawned.GetComponent(bodyType);
+            if (body == null && bodyType != null)
+                body = spawned.GetComponentInChildren(bodyType);
+            if (body != null)
+            {
+                SetProperty(body, "velocity", Vector3.zero);
+                SetProperty(body, "angularVelocity", Vector3.zero);
+                SetProperty(body, "useGravity", false);
+                SetProperty(body, "isKinematic", true);
+            }
+
+            int ignoreLayer = LayerMask.NameToLayer("IgnoreLocalPlayer");
+            Type colliderType = AccessTools.TypeByName("UnityEngine.Collider");
+            Component[] colliders = colliderType == null
+                ? new Component[0] : spawned.GetComponentsInChildren(colliderType, true);
+            for (int i = 0; i < colliders.Length; i++)
+                colliders[i].gameObject.layer = ignoreLayer;
+
+            Type explosionType = AccessTools.TypeByName("ExplosionObject");
+            if (explosionType == null)
+                throw new MissingMemberException("ExplosionObject nicht gefunden.");
+            Component explosion = spawned.GetComponent(explosionType);
+            if (explosion == null)
+                throw new MissingMemberException("ExplosionObject fehlt am Granaten-Prefab.");
+
+            MethodInfo setData = AccessTools.Method(explosionType, "SetExplosionData",
+                new Type[] { typeof(float), typeof(float), typeof(float), typeof(float) }, null);
+            MethodInfo start = AccessTools.Method(explosionType, "StartExplosion",
+                new Type[] { typeof(float) }, null);
+            if (setData == null || start == null)
+                throw new MissingMethodException("ExplosionObject-Methoden nicht gefunden.");
+
+            setData.Invoke(explosion, new object[] { damage, radius, lifeTime, 0f });
+            IEnumerator routine = start.Invoke(explosion, new object[] { 0.02f }) as IEnumerator;
+            MonoBehaviour behaviour = explosion as MonoBehaviour;
+            if (routine == null || behaviour == null)
+                throw new InvalidOperationException("StartExplosion lieferte keine Coroutine.");
+            behaviour.StartCoroutine(routine);
+        }
+
+        static bool TraceTrajectory(Vector3 origin, Vector3 direction, float range,
+                                    out Vector3 point, out Vector3 normal,
+                                    out List<Vector3> path)
+        {
+            const float speed = 95.0f;
+            const float gravity = 14.0f;
+            const float stepTime = 0.08f;
+
+            direction.Normalize();
+            point = Vector3.zero;
+            normal = Vector3.zero;
+            path = new List<Vector3>();
+            path.Add(origin);
+
+            Vector3 previous = origin;
+            int steps = Math.Max(1, (int)Math.Ceiling(range / (speed * stepTime)));
+            for (int i = 1; i <= steps; i++)
+            {
+                float time = i * stepTime;
+                Vector3 next = origin + direction * (speed * time)
+                    + Vector3.down * (0.5f * gravity * time * time);
+                Vector3 segment = next - previous;
+                float length = segment.magnitude;
+                if (length > 0.0001f
+                    && Raycast(previous, segment / length, length, out point, out normal))
+                {
+                    path.Add(point);
+                    return true;
+                }
+                path.Add(next);
+                previous = next;
+            }
+            point = previous;
+            return false;
+        }
+
+        internal static void SpawnTracer(List<Vector3> points)
+        {
+            if (points == null || points.Count < 2) return;
+            GameObject tracer = new GameObject("NDR Leuchtspur");
+            LineRenderer line = tracer.AddComponent(typeof(LineRenderer)) as LineRenderer;
+            if (line == null)
+            {
+                UnityEngine.Object.Destroy(tracer);
+                throw new MissingMemberException("LineRenderer konnte nicht erzeugt werden.");
+            }
+
+            Shader shader = Shader.Find("Particles/Additive");
+            if (shader == null) shader = Shader.Find("Unlit/Color");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null)
+            {
+                UnityEngine.Object.Destroy(tracer);
+                throw new MissingMemberException("Shader fuer LAW-Leuchtspur nicht gefunden.");
+            }
+
+            Material material = new Material(shader);
+            Color bright = new Color(1.0f, 0.88f, 0.42f, 1.0f);
+            if (material.HasProperty("_Color")) material.SetColor("_Color", bright);
+            if (material.HasProperty("_TintColor")) material.SetColor("_TintColor", bright);
+
+            line.material = material;
+            line.useWorldSpace = true;
+            line.positionCount = points.Count;
+            line.startWidth = 0.035f;
+            line.endWidth = 0.012f;
+            line.startColor = Color.white;
+            line.endColor = bright;
+            for (int i = 0; i < points.Count; i++) line.SetPosition(i, points[i]);
+            UnityEngine.Object.Destroy(tracer, 0.22f);
+        }
+
+        static object GetField(object instance, string name)
+        {
+            if (instance == null) return null;
+            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            if (f == null) throw new MissingFieldException(instance.GetType().FullName, name);
+            return f.GetValue(instance);
+        }
+
+        static int ObscuredInt(object value)
+        {
+            object result = InvokeImplicit(value, typeof(int));
+            return (int)result;
+        }
+
+        static float ObscuredFloat(object value)
+        {
+            object result = InvokeImplicit(value, typeof(float));
+            return (float)result;
+        }
+
+        static object InvokeImplicit(object value, Type returnType)
+        {
+            if (value == null) throw new ArgumentNullException("value");
+            Type valueType = value.GetType();
+            MethodInfo[] methods = valueType.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo m = methods[i];
+                if (m.Name != "op_Implicit" || m.ReturnType != returnType) continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == valueType)
+                    return m.Invoke(null, new object[] { value });
+            }
+            throw new MissingMethodException(valueType.FullName,
+                                             "op_Implicit -> " + returnType.FullName);
+        }
+
+        static bool Raycast(Vector3 origin, Vector3 direction, float range,
+                            out Vector3 point, out Vector3 normal)
+        {
+            point = Vector3.zero;
+            normal = Vector3.zero;
+            Type physicsType = AccessTools.TypeByName("UnityEngine.Physics");
+            Type hitType = AccessTools.TypeByName("UnityEngine.RaycastHit");
+            if (physicsType == null || hitType == null)
+                throw new MissingMemberException("UnityEngine.Physics oder RaycastHit nicht gefunden.");
+
+            MethodInfo chosen = null;
+            MethodInfo[] methods = physicsType.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo m = methods[i];
+                if (m.Name != "Raycast" || m.ReturnType != typeof(bool)) continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 4 && ps[0].ParameterType == typeof(Vector3)
+                    && ps[1].ParameterType == typeof(Vector3)
+                    && ps[2].ParameterType.IsByRef
+                    && ps[2].ParameterType.GetElementType() == hitType
+                    && ps[3].ParameterType == typeof(float))
+                {
+                    chosen = m;
+                    break;
+                }
+            }
+            if (chosen == null)
+                throw new MissingMethodException("Physics.Raycast(Vector3,Vector3,out RaycastHit,float)");
+
+            object boxedHit = Activator.CreateInstance(hitType);
+            object[] args = new object[] { origin, direction, boxedHit, range };
+            bool didHit = (bool)chosen.Invoke(null, args);
+            if (!didHit) return false;
+            boxedHit = args[2];
+
+            PropertyInfo pointProperty = hitType.GetProperty("point", BindingFlags.Public | BindingFlags.Instance);
+            PropertyInfo normalProperty = hitType.GetProperty("normal", BindingFlags.Public | BindingFlags.Instance);
+            if (pointProperty == null || normalProperty == null)
+                throw new MissingMemberException("RaycastHit.point oder normal nicht gefunden.");
+            point = (Vector3)pointProperty.GetValue(boxedHit, null);
+            normal = (Vector3)normalProperty.GetValue(boxedHit, null);
+            return true;
+        }
+
+        static void SetProperty(object instance, string name, object value)
+        {
+            MethodInfo setter = AccessTools.PropertySetter(instance.GetType(), name);
+            if (setter == null)
+                throw new MissingMethodException(instance.GetType().FullName, "set_" + name);
+            setter.Invoke(instance, new object[] { value });
+        }
+
+        static GameObject PhotonInstantiate(string path, Vector3 position,
+                                            Quaternion rotation, byte group)
+        {
+            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
+            MethodInfo chosen = null;
+            MethodInfo[] methods = photon.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo m = methods[i];
+                if (m.Name != "Instantiate") continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 4 && ps[0].ParameterType == typeof(string)
+                    && ps[1].ParameterType == typeof(Vector3)
+                    && ps[2].ParameterType == typeof(Quaternion)
+                    && ps[3].ParameterType == typeof(byte))
+                {
+                    chosen = m;
+                    break;
+                }
+            }
+            if (chosen == null)
+                throw new MissingMethodException("PhotonNetwork.Instantiate(string,Vector3,Quaternion,byte)");
+            return chosen.Invoke(null, new object[] { path, position, rotation, group }) as GameObject;
+        }
+    }
+
+    /// <summary>
+    /// Das Spiel kennt fuer die neue ID kein Photon-Drop-Prefab. Ohne diesen
+    /// Ersatz wirft DropWeaponFromHand eine NullReferenceException; beim Tod
+    /// bricht dadurch auch PlayerDeath vor dem Respawn-Bildschirm ab.
+    /// </summary>
+    public static class LawDropHook
+    {
+        const int LAW_ID = 1162;
+
+        public static bool InventoryPrefix(object __instance, int __0, int __1,
+                                           string __2, bool __3)
+        {
+            if (__1 != LAW_ID) return true;
+            if (__2 != "WeaponSlot" && __2 != "BackpackSlot") return true;
+            try
+            {
+                FieldInfo spawnerField = AccessTools.Field(__instance.GetType(), "ObjectSpawner");
+                Transform spawner = spawnerField == null
+                    ? null : spawnerField.GetValue(__instance) as Transform;
+                Vector3 position = spawner == null
+                    ? Vector3.zero : spawner.position;
+                Prefix(LAW_ID, 0, 0, position, Quaternion.identity, Vector3.zero);
+
+                if (__2 == "WeaponSlot")
+                {
+                    MethodInfo clear = AccessTools.Method(__instance.GetType(), "ClearWeaponSlot",
+                        new Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool) }, null);
+                    if (clear == null) throw new MissingMethodException("ClearWeaponSlot fehlt.");
+                    clear.Invoke(__instance, new object[] { __0, LAW_ID, true, false });
+                }
+                else
+                {
+                    MethodInfo clear = AccessTools.Method(__instance.GetType(), "ClearBackpackSlot",
+                        new Type[] { typeof(int), typeof(int), typeof(bool) }, null);
+                    if (clear == null) throw new MissingMethodException("ClearBackpackSlot fehlt.");
+                    clear.Invoke(__instance, new object[] { __0, LAW_ID, true });
+                }
+
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogInfo("M72 LAW aus " + __2 + " " + __0
+                                            + " entfernt und lokal abgelegt.");
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("M72-LAW-Slotfreigabe fehlgeschlagen: " + ex);
+            }
+            return false;
+        }
+
+        public static bool Prefix(int __0, int __1, int __2, Vector3 __3,
+                                  Quaternion __4, Vector3 __5)
+        {
+            if (__0 != LAW_ID) return true;
+            try
+            {
+                ItemDef law = null;
+                for (int i = 0; i < RevivalPlugin.Items.Count; i++)
+                    if (RevivalPlugin.Items[i].Id == LAW_ID)
+                    {
+                        law = RevivalPlugin.Items[i];
+                        break;
+                    }
+                if (law == null) throw new MissingMemberException("LAW-ItemDef fehlt.");
+
+                GameObject model = law.Factory.GetModelPrefab();
+                if (model == null) throw new MissingMemberException("LAW-Modell-Prefab fehlt.");
+                MeshFilter sourceFilter = model.GetComponentInChildren<MeshFilter>(true);
+                MeshRenderer sourceRenderer = model.GetComponentInChildren<MeshRenderer>(true);
+                if (sourceFilter == null || sourceFilter.sharedMesh == null
+                    || sourceRenderer == null)
+                    throw new MissingMemberException("LAW-Modellgeometrie fehlt.");
+
+                // Kein Spawn-Prefab klonen: Es enthaelt viele MeshFilter und
+                // ItemSpawned/Photon-Komponenten. Das erzeugte mehrere Rohre
+                // und einen Pickup-Prompt, der niemals erfolgreich sein konnte.
+                GameObject drop = new GameObject("M72 LAW verbrauchtes Rohr");
+                MeshFilter filter = drop.AddComponent<MeshFilter>();
+                filter.sharedMesh = sourceFilter.sharedMesh;
+                MeshRenderer renderer = drop.AddComponent<MeshRenderer>();
+                renderer.sharedMaterials = sourceRenderer.sharedMaterials;
+                drop.transform.position = __3 + Vector3.up * 0.35f;
+                drop.transform.rotation = Quaternion.Euler(0f, 0f, 90f);
+
+                Type colliderType = AccessTools.TypeByName("UnityEngine.BoxCollider");
+                Component collider = colliderType == null ? null : drop.AddComponent(colliderType);
+                if (collider == null)
+                    throw new MissingMemberException("BoxCollider fuer LAW-Drop fehlt.");
+                SetProperty(collider, "center", sourceFilter.sharedMesh.bounds.center);
+                SetProperty(collider, "size", sourceFilter.sharedMesh.bounds.size);
+
+                Type bodyType = AccessTools.TypeByName("UnityEngine.Rigidbody");
+                Component body = bodyType == null ? null : drop.GetComponent(bodyType);
+                if (body == null && bodyType != null) body = drop.AddComponent(bodyType);
+                if (body != null)
+                {
+                    SetProperty(body, "useGravity", true);
+                    SetProperty(body, "isKinematic", false);
+                    Vector3 velocity = __5;
+                    if (velocity.magnitude > 15f) velocity = velocity.normalized * 15f;
+                    SetProperty(body, "velocity", velocity);
+                    SetProperty(body, "angularVelocity", new Vector3(0f, 0.8f, 0f));
+                }
+
+                UnityEngine.Object.Destroy(drop, 300f);
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogInfo("M72 LAW lokal abgelegt (Bullets=" + __1 + ").");
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("M72-LAW-Ablage fehlgeschlagen: " + ex);
+            }
+
+            // Das Original wuerde fuer ID 1162 immer ein null-Drop-Prefab
+            // dereferenzieren. Der aufrufende Inventarcode entfernt den Slot.
+            return false;
+        }
+
+        static void SetProperty(object instance, string name, object value)
+        {
+            MethodInfo setter = AccessTools.PropertySetter(instance.GetType(), name);
+            if (setter == null)
+                throw new MissingMethodException(instance.GetType().FullName, "set_" + name);
+            setter.Invoke(instance, new object[] { value });
         }
     }
 
@@ -2035,6 +2726,1977 @@ namespace NextDayRevival
                 }
             }
             return data;
+        }
+    }
+
+    // ------------------------------------------------------- BTR-Geschuetz
+
+    /// <summary>
+    /// Macht das Turmgeschuetz des BTR-80A bemannbar.
+    ///
+    /// BELEGT (IL von Assembly-CSharp.dll, gelesen am 2026-08-28):
+    ///
+    ///   VehicleGameSystem::InitCar setzt
+    ///       Passengers = new GameObject[SeatPoints.childCount]
+    ///   Ein siebter Sitz ist deshalb KEIN Arraypatch, sondern ein
+    ///   zusaetzliches Kind an SeatPoints. Das Spiel dimensioniert selbst,
+    ///   solange das Kind vor InitCar existiert.
+    ///
+    ///   VehicleGameSystem::SitToPassengerPlace(playerGO, placeId, isLocal, ...)
+    ///       Passengers[placeId] = playerGO
+    ///       playerGO.transform.SetParent(_passengersRootTr)
+    ///       Position und Rotation von SeatPoints.GetChild(placeId)
+    ///
+    ///   PlayerVehicleManager::SomePlayerWantToSit(viewId)
+    ///       _passengerPlaceId = vgs.GetFreePassengerPlaceId()
+    ///       -1 heisst voll, dann passiert nichts.
+    ///   Deshalb haelt FreeSeatPostfix den Geschuetzplatz aus der
+    ///   automatischen Vergabe heraus: wer einsteigt, landet auf einem
+    ///   normalen Sitz, nicht ueberraschend am Geschuetz.
+    ///
+    ///   PlayerVehicleManager::ChangeToPassengerPlace(int newPlaceId)
+    ///       prueft selbst Passengers[newPlaceId] == null und schickt
+    ///       ChangeToPassengerPlaceRPC ueber Photon. Genau ein int-Argument.
+    ///
+    ///   Am BTR-Prefab traegt InteractColliders/BagaggeContainer die
+    ///   Komponenten PhotonView und ItemsContainer.
+    ///   ItemsContainer._containerData ist eine ContainerData mit den
+    ///   Parallelarrays SlotID, ItemID (ObscuredInt[]) und ItemBullets
+    ///   (ObscuredInt[]). Daraus kommt die Munition.
+    ///
+    ///   Schaden verteilt das Spiel in PlayerFirearmWeaponController::FireOneShot
+    ///   ueber PhotonView.RPC: ApplyDamage an NPC_AI2, PlayerApplyDamage an
+    ///   Spieler, NetworkApplyDamage an Animal_AI.
+    ///
+    /// UNGEPRUEFT: alles, was Augen braucht - Sitzhoehe im Turm, Blickrichtung,
+    /// Drehsinn, Muendungspunkt, ob der Schaden ankommt. Steht in TASKS.md
+    /// unter "Abnahme im Spiel".
+    /// </summary>
+    public static class Turret
+    {
+        public const string SeatName = "NDR_GunnerSeat";
+        const string BtrPrefix = "BTR-80A";
+
+        static object _vgs;                  // VehicleGameSystem des eigenen Fahrzeugs
+        static Transform _vehicleRoot;
+        static Transform[] _turrets = new Transform[0];
+        static Renderer _turretRenderer;
+        static int _gunnerIndex = -1;
+        static float _nextScan;
+        static float _nextShot;
+        static bool _manning;
+        static KeyCode _manKey = KeyCode.None;
+        static bool _keyParsed;
+        static Texture2D _scope;
+        static bool _scopeTried;
+        static bool _warnedNoSeat;
+        static float _yaw;                   // Sollrichtung des Rohrs, Grad
+        static float _pitch;
+        static bool _aimInit;
+        static Texture2D _dot;               // 1x1 weiss, fuer das Fadenkreuz
+        static bool _camLogged;
+        static string _ammoFrom;             // zuletzt benutzte Munitionsquelle
+        static Camera _cam;                  // die uebernommene Kamera
+        static float _fovBack = -1f;         // Bildwinkel vor der Uebernahme
+        static readonly List<Behaviour> _paused = new List<Behaviour>();
+
+        /// <summary>
+        /// Skripte, die die Kamera bewegen und deshalb waehrend des Zielens
+        /// stillstehen muessen.
+        ///
+        /// Der wichtige davon ist `MouseOrbitController`: eine Umlaufkamera mit
+        /// `Target`, die im LateUpdate jeden Frame neu um ihr Ziel herum
+        /// gerechnet wird. Genau das war der Grund, warum drei Anlaeufe mit
+        /// Postfix und LateUpdate nichts genutzt haben - egal wohin das Plugin
+        /// die Kamera setzte, sie stand einen Wimpernschlag spaeter wieder
+        /// hinter dem BTR und blickte darauf. Gegen ein Skript, das jeden Frame
+        /// schreibt, hilft kein zweites Skript, das auch jeden Frame schreibt,
+        /// sondern nur Abschalten.
+        ///
+        /// Bildeffekte (`CrosshairCameraEffect`, `ScopeCameraEffect`, ...)
+        /// stehen absichtlich NICHT auf der Liste: sie bewegen nichts, und ohne
+        /// sie saehe das Bild anders aus als im Rest des Spiels.
+        /// </summary>
+        static readonly string[] CamDrivers = {
+            "MouseOrbitController", "CameraController", "CameraControllerFPS",
+            "CameraFPSController", "CameraTPSController", "CameraAimingSystem",
+            "CameraFollow", "CameraWork", "CameraAnimationController",
+            "CameraSpectratorController", "CameraSwitch", "CameraPathAnimator",
+            "CameraRotateAroundTrailer", "CameraRotateWhenLoaded",
+        };
+
+        public static bool Manning { get { return _manning; } }
+
+        /// <summary>
+        /// Der EINZIGE Weg, `_manning` zu aendern. Vorher stand das an sechs
+        /// Stellen verstreut, und jede haette die Kamera zurueckgeben muessen.
+        /// </summary>
+        static void SetManning(bool on)
+        {
+            if (_manning == on) return;
+            _manning = on;
+            if (on) TakeCamera(); else ReleaseCamera();
+        }
+
+        /// <summary>
+        /// Legt die Kameraskripte des Spiels still und merkt sich, welche das
+        /// waren. Erst danach bleibt die Kamera dort stehen, wohin `LateTick`
+        /// sie setzt.
+        /// </summary>
+        static void TakeCamera()
+        {
+            _cam = ViewCamera();
+            if (_cam == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: keine Kamera gefunden.");
+                return;
+            }
+            if (!RevivalPlugin.CfgTurretTakeCamera.Value) return;
+            try
+            {
+                _paused.Clear();
+                _fovBack = _cam.fieldOfView;
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+
+                // Vom Kameraobjekt aus nach OBEN durch alle Elternteile: die
+                // Umlaufkamera sitzt am Rig, nicht an der Kamera selbst.
+                Transform t = _cam.transform;
+                while (t != null)
+                {
+                    Component[] comps = t.gameObject.GetComponents(typeof(Behaviour));
+                    for (int i = 0; i < comps.Length; i++)
+                    {
+                        Behaviour b = comps[i] as Behaviour;
+                        if (b == null || !b.enabled) continue;
+                        string n = b.GetType().Name;
+                        bool drives = false;
+                        for (int k = 0; k < CamDrivers.Length; k++)
+                            if (CamDrivers[k] == n) { drives = true; break; }
+                        if (!drives) continue;
+                        b.enabled = false;
+                        _paused.Add(b);
+                        if (sb.Length > 0) sb.Append(", ");
+                        sb.Append(n).Append(" an \"").Append(t.name).Append("\"");
+                    }
+                    t = t.parent;
+                }
+                RevivalPlugin.L.LogInfo("Geschuetzkamera uebernommen: \"" + _cam.name
+                    + "\", stillgelegt: " + (sb.Length == 0 ? "nichts" : sb.ToString())
+                    + ". Aktive Kameras: " + Kameraliste() + ".");
+                if (_paused.Count == 0)
+                    RevivalPlugin.L.LogWarning("Geschuetzkamera: kein einziges "
+                        + "Kameraskript gefunden - dann bewegt etwas anderes die "
+                        + "Kamera, und der Blick wird wieder wandern.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzkamera uebernehmen: " + ex);
+            }
+        }
+
+        /// <summary>Gibt die Kamera dem Spiel zurueck. Muss immer laufen.</summary>
+        static void ReleaseCamera()
+        {
+            try
+            {
+                for (int i = 0; i < _paused.Count; i++)
+                    if (_paused[i] != null) _paused[i].enabled = true;
+                if (_paused.Count > 0)
+                    RevivalPlugin.L.LogInfo("Geschuetzkamera zurueckgegeben ("
+                        + _paused.Count + " Skripte wieder an).");
+                _paused.Clear();
+                if (_cam != null && _fovBack > 0f) _cam.fieldOfView = _fovBack;
+                _fovBack = -1f;
+                _cam = null;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzkamera zurueckgeben: " + ex);
+            }
+        }
+
+        // --------------------------------------------------------- Einhaengen
+
+        public static void Install(Harmony harmony)
+        {
+            if (!RevivalPlugin.CfgTurret.Value) return;
+            try
+            {
+                Type vgs = AccessTools.TypeByName("VehicleGameSystem");
+                if (vgs == null)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetz: VehicleGameSystem nicht gefunden.");
+                    return;
+                }
+
+                MethodInfo initCar = AccessTools.Method(vgs, "InitCar", null, null);
+                if (initCar == null)
+                    throw new MissingMethodException("VehicleGameSystem.InitCar");
+                harmony.Patch(initCar,
+                    new HarmonyMethod(typeof(Turret).GetMethod("InitCarPrefix")),
+                    null, null, null, null);
+
+                MethodInfo freeSeat = AccessTools.Method(vgs, "GetFreePassengerPlaceId", null, null);
+                if (freeSeat == null)
+                    throw new MissingMethodException("VehicleGameSystem.GetFreePassengerPlaceId");
+                harmony.Patch(freeSeat, null,
+                    new HarmonyMethod(typeof(Turret).GetMethod("FreeSeatPostfix")),
+                    null, null, null);
+
+                RevivalPlugin.L.LogInfo("Geschuetz: InitCar und GetFreePassengerPlaceId gepatcht.");
+                CameraHook.Install(harmony);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetz konnte nicht eingehaengt werden: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Haengt den Geschuetzsitz an SeatPoints, BEVOR das Original
+        /// Passengers dimensioniert. Nur am BTR-80A, nur einmal je Fahrzeug.
+        /// </summary>
+        public static void InitCarPrefix(object __instance)
+        {
+            try
+            {
+                MonoBehaviour mb = __instance as MonoBehaviour;
+                if (mb == null) return;
+                if (!IsBtr(mb.transform)) return;
+
+                Transform seatPoints = Field(__instance, "SeatPoints") as Transform;
+                if (seatPoints == null)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetz: SeatPoints fehlt an " + mb.name + ".");
+                    return;
+                }
+                if (seatPoints.Find(SeatName) != null) return;
+
+                GameObject seat = new GameObject(SeatName);
+                seat.transform.SetParent(seatPoints, false);
+                seat.transform.localPosition = new Vector3(
+                    RevivalPlugin.CfgTurretSeatX.Value,
+                    RevivalPlugin.CfgTurretSeatY.Value,
+                    RevivalPlugin.CfgTurretSeatZ.Value);
+                seat.transform.localRotation = Quaternion.identity;
+
+                RevivalPlugin.L.LogInfo("Geschuetzsitz an " + mb.name
+                    + " angehaengt, Index " + (seatPoints.childCount - 1)
+                    + " von " + seatPoints.childCount + " Sitzen.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzsitz anhaengen fehlgeschlagen: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Der Geschuetzplatz wird nicht automatisch vergeben. Sonst landet
+        /// irgendein Mitfahrer ohne Vorwarnung im Turm.
+        /// </summary>
+        public static void FreeSeatPostfix(object __instance, ref int __result)
+        {
+            try
+            {
+                if (__result < 0) return;
+                MonoBehaviour mb = __instance as MonoBehaviour;
+                if (mb == null || !IsBtr(mb.transform)) return;
+                Transform seatPoints = Field(__instance, "SeatPoints") as Transform;
+                if (seatPoints == null) return;
+                int gunner = GunnerIndexOf(seatPoints);
+                if (gunner >= 0 && __result == gunner) __result = -1;
+            }
+            catch { }
+        }
+
+        // -------------------------------------------------------------- Frame
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgTurret.Value) return;
+            try
+            {
+                if (Time.time >= _nextScan)
+                {
+                    _nextScan = Time.time + 0.4f;
+                    Rescan();
+                }
+                if (_vgs == null) { SetManning(false); return; }
+
+                if (Input.GetKeyDown(ManKey())) ToggleManning();
+                if (!_manning) return;
+
+                Aim();
+                if (Input.GetMouseButton(0) && Time.time >= _nextShot)
+                {
+                    _nextShot = Time.time + RevivalPlugin.CfgTurretDelay.Value;
+                    Fire();
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetz-Tick: " + ex);
+                SetManning(false);
+            }
+        }
+
+        /// <summary>Sucht das Fahrzeug, in dem der lokale Spieler sitzt.</summary>
+        static void Rescan()
+        {
+            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            if (vgsType == null) { _vgs = null; return; }
+
+            if (_vgs != null)
+            {
+                MonoBehaviour cur = _vgs as MonoBehaviour;
+                if (cur != null && IntField(_vgs, "_localPlayerPassengerId") >= 0) return;
+                Clear();
+            }
+
+            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(vgsType);
+            for (int i = 0; i < all.Length; i++)
+            {
+                MonoBehaviour mb = all[i] as MonoBehaviour;
+                if (mb == null) continue;
+                if (IntField(all[i], "_localPlayerPassengerId") < 0) continue;
+                if (!IsBtr(mb.transform)) continue;
+
+                _vgs = all[i];
+                _vehicleRoot = mb.transform;
+                Transform seatPoints = Field(_vgs, "SeatPoints") as Transform;
+                _gunnerIndex = seatPoints == null ? -1 : GunnerIndexOf(seatPoints);
+                CollectTurrets(mb.transform);
+                if (_gunnerIndex < 0 && !_warnedNoSeat)
+                {
+                    _warnedNoSeat = true;
+                    RevivalPlugin.L.LogWarning("Geschuetz: kein " + SeatName
+                        + " an diesem BTR. InitCar lief vermutlich vor dem Plugin.");
+                }
+                return;
+            }
+            Clear();
+        }
+
+        static void Clear()
+        {
+            _vgs = null;
+            _vehicleRoot = null;
+            _gunnerIndex = -1;
+            _turrets = new Transform[0];
+            _turretRenderer = null;
+            SetManning(false);
+        }
+
+        /// <summary>Alle vier LOD-Tuerme einsammeln - die LODGroup blendet um.</summary>
+        static void CollectTurrets(Transform root)
+        {
+            List<Transform> found = new List<Transform>();
+            Transform[] all = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < all.Length; i++)
+                if (all[i].name == "turret") found.Add(all[i]);
+            _turrets = found.ToArray();
+            _turretRenderer = null;
+            for (int i = 0; i < _turrets.Length; i++)
+            {
+                Renderer r = _turrets[i].GetComponent<Renderer>();
+                if (r != null) { _turretRenderer = r; break; }
+            }
+            RevivalPlugin.L.LogInfo("Geschuetz: " + _turrets.Length
+                + " Turmobjekte gefunden, Sitzindex " + _gunnerIndex + ".");
+        }
+
+        // ------------------------------------------------------- Platzwechsel
+
+        static void ToggleManning()
+        {
+            if (_gunnerIndex < 0)
+            {
+                RevivalPlugin.L.LogInfo("Geschuetz: dieses Fahrzeug hat keinen Geschuetzplatz.");
+                return;
+            }
+            int here = IntField(_vgs, "_localPlayerPassengerId");
+
+            if (_manning)
+            {
+                SetManning(false);
+                // Koerperlich zurueck auf einen normalen Platz. Ohne das bleibt
+                // man im Turm sitzen, und beim naechsten Druck gaebe es nichts
+                // mehr zu schalten.
+                int back = FirstNormalSeat();
+                if (back >= 0) ChangeSeat(back);
+                RevivalPlugin.L.LogInfo("Geschuetz verlassen"
+                    + (back >= 0 ? ", zurueck auf Platz " + back + "." : "."));
+                return;
+            }
+
+            // Wer schon auf dem Geschuetzplatz sitzt, will es bedienen.
+            //
+            // Bis 2026-08-28 stand hier das Gegenteil: derselbe Zweig, der das
+            // Verlassen meldet, fing auch den Fall "sitzt bereits auf Platz 6"
+            // ab - und bewegte dabei niemanden. Wer vom Spiel auf den Turmplatz
+            // gesetzt wurde, bekam auf jeden Tastendruck "Geschuetz verlassen"
+            // und kam nie hinein. Genau so sah es im Log vom 2026-08-28 aus.
+            if (here == _gunnerIndex)
+            {
+                SetManning(true);
+                _aimInit = false;
+                _camLogged = false;
+                RevivalPlugin.L.LogInfo("Geschuetz besetzt (Sitz " + here
+                    + ", der Spieler sass schon dort).");
+                return;
+            }
+
+            if (!ChangeSeat(_gunnerIndex)) return;   // ChangeSeat begruendet selbst
+            SetManning(true);
+            _aimInit = false;
+            _camLogged = false;
+            RevivalPlugin.L.LogInfo("Geschuetz besetzt (Sitz " + _gunnerIndex
+                + ", vorher " + here + ").");
+        }
+
+        /// <summary>Erster freier Platz, der nicht der Geschuetzplatz ist.</summary>
+        static int FirstNormalSeat()
+        {
+            Array passengers = Field(_vgs, "Passengers") as Array;
+            if (passengers == null) return -1;
+            for (int i = 0; i < passengers.Length; i++)
+            {
+                if (i == _gunnerIndex) continue;
+                GameObject go = passengers.GetValue(i) as GameObject;
+                if (go == null) return i;
+            }
+            return -1;
+        }
+
+        /// <summary>PlayerVehicleManager.ChangeToPassengerPlace(int) - ein Argument.</summary>
+        static bool ChangeSeat(int index)
+        {
+            object pvm = Field(_vgs, "_playerVehicleManager");
+            if (pvm == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: _playerVehicleManager ist null - "
+                    + "der lokale Spieler ist an diesem Fahrzeug nicht eingetragen.");
+                return false;
+            }
+            MethodInfo m = AccessTools.Method(pvm.GetType(), "ChangeToPassengerPlace",
+                                              new Type[] { typeof(int) }, null);
+            if (m == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: ChangeToPassengerPlace(int) fehlt.");
+                return false;
+            }
+            Array passengers = Field(_vgs, "Passengers") as Array;
+            if (passengers == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: Passengers ist null.");
+                return false;
+            }
+            if (index >= passengers.Length)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: Passengers hat nur "
+                    + passengers.Length + " Plaetze, der Turm waere Nummer " + index
+                    + ". InitCar lief vor dem Plugin.");
+                return false;
+            }
+            // Ueber GameObject vergleichen, nicht ueber object: Unity haelt eine
+            // zerstoerte Instanz als Verweis fest, meldet sie aber ueber den
+            // eigenen ==-Operator als null. Ein roher object-Vergleich haelt so
+            // einen Platz fuer belegt, den das Spiel selbst als frei ansieht -
+            // VehicleGameSystem prueft mit Object::op_Inequality.
+            GameObject sitting = passengers.GetValue(index) as GameObject;
+            if (sitting != null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: Platz " + index
+                    + " ist belegt von \"" + sitting.name + "\".");
+                return false;
+            }
+            m.Invoke(pvm, new object[] { index });
+            return true;
+        }
+
+        // ------------------------------------------------------------- Zielen
+
+        /// <summary>
+        /// Der Turm haengt unter Meshes, und Meshes ist um -90 Grad um X
+        /// gedreht. Im Turmraum gilt damit: lokales +Z zeigt in der Welt nach
+        /// oben, lokales -Y ist die Rohrrichtung.
+        ///
+        /// Quaternion.LookRotation baut dagegen eine Drehung, deren +Z nach
+        /// vorn und deren +Y nach oben zeigt. Die Differenz ist eine feste
+        /// Korrekturdrehung - damit stimmt der Drehsinn, ohne Vorzeichen zu
+        /// raten.
+        /// </summary>
+        static void Aim()
+        {
+            if (_turrets.Length == 0) return;
+            Transform parent = _turrets[0].parent;
+            if (parent == null) return;
+
+            if (!_aimInit) InitAim();
+
+            // Seitenrichtung: HERGELEITET, nicht geraten. Bei Seitenwinkel a
+            // ist die Rohrrichtung im Turmraum (-sin a, -cos a, sin e); der
+            // Turmraum liegt unter Meshes, dessen -90 Grad um X das lokale X
+            // unveraendert auf das Welt-X des Fahrzeugs abbilden, und +X ist
+            // am BTR-Prefab rechts (Rad FR bei x +3.57). Ein groesseres a
+            // schiebt das Rohr also nach -X, das heisst nach LINKS. Bis
+            // 2026-08-28 stand hier "+=": Maus nach rechts drehte den Turm
+            // nach links.
+            float sens = RevivalPlugin.CfgTurretSensitivity.Value;
+            float mx = Input.GetAxis("Mouse X") * sens;
+            if (RevivalPlugin.CfgTurretInvertX.Value) mx = -mx;
+            _yaw -= mx;
+            _pitch += Input.GetAxis("Mouse Y") * sens;
+            _pitch = Mathf.Clamp(_pitch,
+                                 RevivalPlugin.CfgTurretPitchMin.Value,
+                                 RevivalPlugin.CfgTurretPitchMax.Value);
+            if (_yaw > 180f) _yaw -= 360f;
+            if (_yaw < -180f) _yaw += 360f;
+
+            Quaternion want = LocalRotationFor(_yaw, _pitch);
+            float step = RevivalPlugin.CfgTurretTurnSpeed.Value * Time.deltaTime;
+            for (int i = 0; i < _turrets.Length; i++)
+                _turrets[i].localRotation =
+                    Quaternion.RotateTowards(_turrets[i].localRotation, want, step);
+        }
+
+        /// <summary>
+        /// Uebersetzt Seiten- und Hoehenwinkel in die lokale Drehung des Turms.
+        ///
+        /// Der Turm haengt unter Meshes, und Meshes ist um -90 Grad um X
+        /// gedreht. Im Turmraum gilt damit: lokales +Z zeigt in der Welt nach
+        /// oben, lokales -Y ist die Rohrrichtung. Bei Seitenwinkel 0 ist die
+        /// Rohrrichtung also (0, -1, 0), rechts davon liegt (-1, 0, 0).
+        ///
+        /// Quaternion.LookRotation baut dagegen eine Drehung, deren +Z nach
+        /// vorn und deren +Y nach oben zeigt. Die Differenz ist eine feste
+        /// Korrekturdrehung - damit stimmt der Drehsinn, ohne Vorzeichen zu
+        /// raten.
+        /// </summary>
+        static Quaternion LocalRotationFor(float yaw, float pitch)
+        {
+            float a = yaw * Mathf.Deg2Rad;
+            float e = pitch * Mathf.Deg2Rad;
+            float ce = Mathf.Cos(e);
+            Vector3 dirLocal = new Vector3(-Mathf.Sin(a) * ce,
+                                           -Mathf.Cos(a) * ce,
+                                           Mathf.Sin(e));
+            Quaternion correction = Quaternion.Inverse(
+                Quaternion.LookRotation(new Vector3(0f, -1f, 0f), new Vector3(0f, 0f, 1f)));
+            return Quaternion.LookRotation(dirLocal, new Vector3(0f, 0f, 1f)) * correction;
+        }
+
+        /// <summary>
+        /// Sollwinkel aus der aktuellen Stellung uebernehmen, damit der Turm
+        /// beim Aufsitzen nicht springt.
+        /// </summary>
+        static void InitAim()
+        {
+            _aimInit = true;
+            _yaw = 0f;
+            _pitch = 0f;
+            if (_turrets.Length == 0) return;
+            Vector3 d = _turrets[0].localRotation * new Vector3(0f, -1f, 0f);
+            if (d.sqrMagnitude < 0.000001f) return;
+            d.Normalize();
+            _pitch = Mathf.Asin(Mathf.Clamp(d.z, -1f, 1f)) * Mathf.Rad2Deg;
+            _yaw = Mathf.Atan2(-d.x, -d.y) * Mathf.Rad2Deg;
+        }
+
+        /// <summary>
+        /// Setzt die Kamera in die Rohrachse. Gehoert in LateUpdate: das Spiel
+        /// zieht seine Fahrzeugkamera im selben Frame nach, und wer zuerst
+        /// schreibt, verliert.
+        /// </summary>
+        public static void LateTick()
+        {
+            if (!RevivalPlugin.CfgTurret.Value || !_manning) return;
+            try
+            {
+                if (_turrets.Length == 0) return;
+                Camera cam = ViewCamera();
+                if (cam == null) return;
+
+                // Der Blick folgt der SOLLRICHTUNG, nicht der Rohrstellung.
+                // Das Rohr dreht mit TurnSpeed nach - haengt die Kamera daran,
+                // kriecht das ganze Bild der Maus hinterher, und zielen fuehlt
+                // sich an wie durch Sirup. Das Rohr holt binnen Sekundenbruchteil
+                // auf, und von innen sieht man es ohnehin nicht.
+                Vector3 dir, up;
+                AimAxes(out dir, out up);
+                Vector3 side = Vector3.Cross(up, dir).normalized;
+
+                // Ankerpunkt ist der TURMDREHPUNKT, nicht die Muendung. Ein
+                // Auge kurz vor der Muendung liegt beim BTR im Bugblech: das
+                // Turmmesh reicht laengs bis 8.9, die Wanne bis 11.47.
+                Vector3 eye = _turrets[0].position
+                    + dir * RevivalPlugin.CfgTurretEyeForward.Value
+                    + up * RevivalPlugin.CfgTurretEyeUp.Value
+                    + side * RevivalPlugin.CfgTurretEyeSide.Value;
+
+                cam.transform.position = eye;
+                cam.transform.rotation = Quaternion.LookRotation(dir, up);
+
+                // Bildwinkel jeden Frame nachziehen, nicht einmal beim
+                // Aufsitzen: Zielfernrohr- und Sprinteffekte des Spiels
+                // schreiben ihn sonst wieder um.
+                if (RevivalPlugin.CfgTurretFov.Value > 1f)
+                    cam.fieldOfView = RevivalPlugin.CfgTurretFov.Value;
+
+                if (!_camLogged)
+                {
+                    _camLogged = true;
+                    RevivalPlugin.L.LogInfo("Geschuetzkamera: \"" + cam.name
+                        + "\" (Elternteil \""
+                        + (cam.transform.parent == null ? "-" : cam.transform.parent.name)
+                        + "\"), Auge " + eye + ", Turmmitte "
+                        + (_turretRenderer == null ? Vector3.zero : _turretRenderer.bounds.center)
+                        + ", Muendung " + Muzzle() + ", Rohrrichtung " + dir + ".");
+                    // Gezielt wird ueber genau diese Kamera. Steht hier mehr
+                    // als eine, ist im Nachhinein zu klaeren, ob wirklich die
+                    // oben genannte das Bild macht.
+                    RevivalPlugin.L.LogInfo("Geschuetzkamera: aktive Kameras "
+                        + Kameraliste() + ".");
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzkamera: " + ex);
+                SetManning(false);
+            }
+        }
+
+        /// <summary>
+        /// Alle eingeschalteten Kameras mit Tiefe und Bildausschnitt, einmal
+        /// fuer das Log. Ohne das ist im Nachhinein nicht zu unterscheiden, ob
+        /// die Kamera falsch stand oder ob eine ganz andere gerendert hat.
+        /// </summary>
+        static string Kameraliste()
+        {
+            Camera[] all = Camera.allCameras;
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i] == null) continue;
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(all[i].name).Append(" (Tiefe ").Append(all[i].depth)
+                  .Append(", FOV ").Append(all[i].fieldOfView)
+                  .Append(all[i].targetTexture == null ? "" : ", in Textur")
+                  .Append(")");
+            }
+            return sb.Length == 0 ? "keine" : sb.ToString();
+        }
+
+        /// <summary>
+        /// Die Kamera, die wirklich rendert. Camera.main ist der Normalfall;
+        /// findet sich keine mit dem Tag MainCamera, wird die aktivste
+        /// genommen. Der Name landet einmal im Log - sonst ist im Nachhinein
+        /// nicht zu unterscheiden, ob die Lage falsch war oder die Kamera.
+        /// </summary>
+        static Camera ViewCamera()
+        {
+            // Waehrend des Zielens immer dieselbe wie beim Aufsitzen. Sonst
+            // koennten Kameralage, Fadenkreuz und Schuss auf drei
+            // verschiedene Kameras zeigen.
+            if (_cam != null) return _cam;
+            Camera cam = Camera.main;
+            if (cam != null) return cam;
+            Camera[] all = Camera.allCameras;
+            Camera best = null;
+            for (int i = 0; i < all.Length; i++)
+                if (all[i] != null && all[i].enabled
+                    && (best == null || all[i].depth > best.depth))
+                    best = all[i];
+            return best;
+        }
+
+        /// <summary>
+        /// Soll-Blickachse aus Seiten- und Hoehenwinkel: wohin der Turm ZEIGEN
+        /// SOLL, unabhaengig davon, wie weit er schon geschwenkt ist. Ohne
+        /// Turm faellt es auf die tatsaechliche Rohrrichtung zurueck.
+        /// </summary>
+        static void AimAxes(out Vector3 dir, out Vector3 up)
+        {
+            dir = BarrelDirection();
+            up = Vector3.up;
+            if (_turrets.Length == 0) return;
+            Transform parent = _turrets[0].parent;
+            if (parent == null) return;
+
+            Quaternion want = LocalRotationFor(_yaw, _pitch);
+            Vector3 d = parent.TransformDirection(want * new Vector3(0f, -1f, 0f));
+            Vector3 u = parent.TransformDirection(want * new Vector3(0f, 0f, 1f));
+            if (d.sqrMagnitude < 0.000001f || u.sqrMagnitude < 0.000001f) return;
+            dir = d.normalized;
+            up = u.normalized;
+        }
+
+        /// <summary>Weltrichtung, in die das Rohr gerade zeigt.</summary>
+        static Vector3 BarrelDirection()
+        {
+            if (_turrets.Length == 0) return Vector3.forward;
+            return _turrets[0].TransformDirection(new Vector3(0f, -1f, 0f)).normalized;
+        }
+
+        /// <summary>
+        /// Muendung aus den WELT-Bounds des Turmrenderers, nicht aus
+        /// Modellzahlen. Die Einheiten des BTR-Modells sind nicht Meter
+        /// (Radstand plus/minus 3.47 bei 2.9 m Spurweite in echt), ein hart
+        /// eingetragener Versatz waere also geraten.
+        /// </summary>
+        static Vector3 Muzzle()
+        {
+            Vector3 dir = BarrelDirection();
+            if (_turretRenderer == null)
+                return (_turrets.Length > 0 ? _turrets[0].position : Vector3.zero) + dir;
+            Bounds b = _turretRenderer.bounds;
+            float reach = Vector3.Dot(b.extents, new Vector3(
+                Mathf.Abs(dir.x), Mathf.Abs(dir.y), Mathf.Abs(dir.z)));
+            return b.center + dir * (reach + 0.5f);
+        }
+
+        // ----------------------------------------------------------- Schiessen
+
+        static void Fire()
+        {
+            if (RevivalPlugin.CfgTurretAmmo.Value && !TakeRound())
+            {
+                RevivalPlugin.L.LogInfo("Geschuetz: keine Munition (Item "
+                    + RevivalPlugin.CfgTurretAmmoId.Value
+                    + ") im Kofferraum und im Rucksack.");
+                return;
+            }
+
+            // Rueckstoss: das Rohr schlaegt hoch, der Sollwinkel wandert mit.
+            // Bewusst klein - der Turm sitzt auf zwoelf Tonnen Fahrzeug, und
+            // ein Geschuetz, das nach jedem Schuss neu gesucht werden muss,
+            // ist auf diese Entfernung unbrauchbar.
+            _pitch = Mathf.Clamp(_pitch + RevivalPlugin.CfgTurretRecoil.Value,
+                                 RevivalPlugin.CfgTurretPitchMin.Value,
+                                 RevivalPlugin.CfgTurretPitchMax.Value);
+
+            Vector3 origin, dir;
+            AimRay(out origin, out dir);
+            Vector3 impact;
+            GameObject struck = RaycastPastVehicle(origin, dir,
+                                                   RevivalPlugin.CfgTurretRange.Value, out impact);
+
+            // Leuchtspur IMMER, auch wenn nichts getroffen wurde. Bis heute war
+            // ein Schuss weder zu sehen noch zu hoeren - im Spiel sah das aus,
+            // als ginge das Geschuetz gar nicht los.
+            Vector3 ende = struck == null
+                ? origin + dir * RevivalPlugin.CfgTurretRange.Value : impact;
+            Tracer(origin + dir * 3f, ende);
+            if (struck == null) return;
+
+            // Sprenggranate am Einschlag. Das BTR-80A schiesst 30 mm
+            // Sprengmunition, keine Gewehrkugeln: der Einschlag gehoert
+            // gesehen, und Flaechenwirkung gehoert dazu.
+            if (RevivalPlugin.CfgTurretExplosion.Value)
+            {
+                try
+                {
+                    RocketHook.Detonate(impact - dir * 0.15f,
+                        RevivalPlugin.CfgTurretExplosionDamage.Value,
+                        RevivalPlugin.CfgTurretExplosionRadius.Value, 3f);
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogError("Geschuetz: Einschlag ohne Explosion - " + ex.Message);
+                }
+            }
+
+            float damage = RevivalPlugin.CfgTurretDamage.Value;
+
+            // Reihenfolge und Methodennamen wie in FireOneShot.
+            if (TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return;
+            if (TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return;
+            TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage);
+        }
+
+        /// <summary>Leuchtspur von der Muendung zum Einschlag.</summary>
+        static void Tracer(Vector3 von, Vector3 bis)
+        {
+            try
+            {
+                List<Vector3> bahn = new List<Vector3>();
+                bahn.Add(von);
+                bahn.Add(bis);
+                RocketHook.SpawnTracer(bahn);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetz: Leuchtspur - " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Die Achse, auf der der Schuss laeuft: Standort und Blickrichtung der
+        /// KAMERA, nicht Muendung und Rohrrichtung.
+        ///
+        /// Begruendung (2026-08-28, dritter Anlauf): solange gezielt wurde,
+        /// indem das Fadenkreuz auf die Rohrachse projiziert wurde, hing das
+        /// Fadenkreuz irgendwo im Bild und wanderte beim Schwenken sogar an den
+        /// Rand - zielen war damit Glueckssache. Umgekehrt ist es eindeutig:
+        /// getroffen wird, worauf die Bildmitte zeigt. Das gilt auch dann noch,
+        /// wenn das Spiel die Kamera doch woanders hinsetzt als LateTick sie
+        /// gestellt hat; das Fadenkreuz kann dann gar nicht mehr luegen.
+        ///
+        /// Der Rueckstoss wirkt weiter ueber den Turm: die Kamera haengt an der
+        /// Rohrachse, also wandert mit dem Rohr auch der Blick.
+        /// </summary>
+        static void AimRay(out Vector3 origin, out Vector3 direction)
+        {
+            Camera cam = ViewCamera();
+            if (cam == null)
+            {
+                origin = Muzzle();
+                direction = BarrelDirection();
+                return;
+            }
+            origin = cam.transform.position;
+            direction = cam.transform.forward;
+        }
+
+        /// <summary>
+        /// Wie RaycastObject, ueberspringt aber Treffer am eigenen Fahrzeug.
+        ///
+        /// Noetig, weil der Schuss auf der Rohrachse beginnt und die Muendung
+        /// beim BTR NOCH IN DER WANNE steckt: das Turmmesh reicht laengs bis
+        /// z 8.9, die Wanne bis z 11.47 (gemessen am Prefab BTR-80A_Spawn).
+        /// Ohne das schoesse das Geschuetz in das Auto, in dem man sitzt.
+        /// </summary>
+        static GameObject RaycastPastVehicle(Vector3 origin, Vector3 direction,
+                                             float range, out Vector3 point)
+        {
+            point = Vector3.zero;
+            Vector3 from = origin;
+            float rest = range;
+            for (int versuch = 0; versuch < 4 && rest > 0f; versuch++)
+            {
+                Vector3 hit;
+                GameObject go = RaycastObject(from, direction, rest, out hit);
+                if (go == null) return null;
+                if (!IsOwnVehicle(go)) { point = hit; return go; }
+                rest -= Vector3.Distance(from, hit) + 0.25f;
+                from = hit + direction * 0.25f;
+            }
+            return null;
+        }
+
+        /// <summary>Gehoert das Objekt zu dem Fahrzeug, in dem wir sitzen?</summary>
+        static bool IsOwnVehicle(GameObject go)
+        {
+            if (go == null || _vehicleRoot == null) return false;
+            Transform t = go.transform;
+            while (t != null)
+            {
+                if (t == _vehicleRoot) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Raycast ueber Reflexion. build.ps1 referenziert bewusst nur
+        /// UnityEngine.dll, CoreModule, ImageConversionModule und IMGUIModule -
+        /// UnityEngine.PhysicsModule ist nicht dabei, also sind Physics,
+        /// RaycastHit und Collider als Typen nicht uebersetzbar. Derselbe Weg
+        /// wie in RocketHook.Raycast.
+        /// </summary>
+        internal static GameObject RaycastObject(Vector3 origin, Vector3 direction,
+                                                 float range, out Vector3 point)
+        {
+            point = Vector3.zero;
+            Type physicsType = AccessTools.TypeByName("UnityEngine.Physics");
+            Type hitType = AccessTools.TypeByName("UnityEngine.RaycastHit");
+            if (physicsType == null || hitType == null) return null;
+
+            MethodInfo chosen = null;
+            MethodInfo[] methods = physicsType.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo m = methods[i];
+                if (m.Name != "Raycast" || m.ReturnType != typeof(bool)) continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 4 && ps[0].ParameterType == typeof(Vector3)
+                    && ps[1].ParameterType == typeof(Vector3)
+                    && ps[2].ParameterType.IsByRef
+                    && ps[2].ParameterType.GetElementType() == hitType
+                    && ps[3].ParameterType == typeof(float))
+                {
+                    chosen = m;
+                    break;
+                }
+            }
+            if (chosen == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: Physics.Raycast nicht gefunden.");
+                return null;
+            }
+
+            object[] args = new object[] {
+                origin, direction, Activator.CreateInstance(hitType), range };
+            if (!(bool)chosen.Invoke(null, args)) return null;
+
+            PropertyInfo pointProperty = hitType.GetProperty("point",
+                BindingFlags.Public | BindingFlags.Instance);
+            if (pointProperty != null) point = (Vector3)pointProperty.GetValue(args[2], null);
+
+            PropertyInfo colliderProperty = hitType.GetProperty("collider",
+                BindingFlags.Public | BindingFlags.Instance);
+            if (colliderProperty == null) return null;
+            Component hitCollider = colliderProperty.GetValue(args[2], null) as Component;
+            return hitCollider == null ? null : hitCollider.gameObject;
+        }
+
+        /// <summary>
+        /// Sucht am getroffenen Objekt die genannte Komponente und ruft ihre
+        /// Schadensmethode. Die Argumentliste ist nicht belegt, deshalb wird
+        /// sie aus der Methode selbst gelesen: der erste float bekommt den
+        /// Schaden, alles andere den Vorgabewert seines Typs. Passt keine
+        /// Signatur, wird das protokolliert statt geraten.
+        /// </summary>
+        static bool TryDamage(GameObject struck, string typeName, string rpc, float damage)
+        {
+            Type t = AccessTools.TypeByName(typeName);
+            if (t == null) return false;
+            Component target = struck.GetComponentInParent(t);
+            if (target == null) return false;
+
+            MethodInfo m = AccessTools.Method(t, rpc, null, null);
+            if (m == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: " + typeName + "." + rpc + " fehlt.");
+                return false;
+            }
+            ParameterInfo[] ps = m.GetParameters();
+            object[] args = new object[ps.Length];
+            bool damagePlaced = false;
+            for (int i = 0; i < ps.Length; i++)
+            {
+                Type pt = ps[i].ParameterType;
+                if (!damagePlaced && pt == typeof(float))
+                {
+                    args[i] = damage;
+                    damagePlaced = true;
+                }
+                else if (pt == typeof(string)) args[i] = string.Empty;
+                else if (pt.IsValueType) args[i] = Activator.CreateInstance(pt);
+                else args[i] = null;
+            }
+            if (!damagePlaced)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: " + typeName + "." + rpc
+                    + " hat keinen float-Parameter - Schaden nicht zuzuordnen.");
+                return false;
+            }
+            m.Invoke(target, args);
+            RevivalPlugin.L.LogInfo("Geschuetztreffer: " + typeName + ", "
+                + damage + " Schaden.");
+            return true;
+        }
+
+        // ----------------------------------------------------------- Munition
+
+        /// <summary>
+        /// Nimmt eine Patrone aus dem Kofferraum. Der Kofferraum ist der
+        /// ItemsContainer an InteractColliders/BagaggeContainer; die Menge
+        /// steht in ContainerData.ItemBullets an derselben Stelle, an der
+        /// ItemID die Munitions-ID traegt.
+        /// </summary>
+        static bool TakeRound()
+        {
+            object trunk = TrunkContainer();
+            if (trunk != null && TakeFrom(trunk, Field(trunk, "_containerData"), "Kofferraum"))
+                return true;
+
+            if (!RevivalPlugin.CfgTurretAmmoBackpack.Value) return false;
+
+            // Alle eigenen Inventare, Rucksack UND Weste. Die Weste bleibt als
+            // Quelle drin, obwohl dort nach dem 2026-08-28 keine Munition mehr
+            // liegt: Westenplatz 7 gab es nie, und ein Eintrag darauf hat das
+            // Laden des ganzen Profils abgebrochen (Beleg im Kopf von
+            // invtool.py). Ein einziger,
+            // ueber PlayerInventory() geratener Kandidat reicht also nicht: das
+            // Spiel legt fuer Fahrzeuge Spielerkopien an
+            // (VehicleGameSystem::CheckAndRemovePlayerCopys), und die erste
+            // gefundene Instanz muss nicht die mit dem gefuellten Rucksack sein.
+            List<object> invs = PlayerInventories();
+            for (int i = 0; i < invs.Count; i++)
+            {
+                if (TakeFrom(invs[i], Field(invs[i], "_backpackData"), "Rucksack")) return true;
+                if (TakeFrom(invs[i], Field(invs[i], "_gearsData"), "Weste")) return true;
+            }
+            BerichteLeer(trunk, invs);
+            return false;
+        }
+
+        static bool _leerBerichtet;
+
+        /// <summary>
+        /// Schreibt EINMAL auf, was in den durchsuchten Behaeltern wirklich
+        /// steht. Ohne das ist "keine Munition" nicht zu unterscheiden von
+        /// "Behaelter nicht gefunden" oder "IDs nicht lesbar" - genau daran ist
+        /// der erste Anlauf haengengeblieben.
+        /// </summary>
+        static void BerichteLeer(object trunk, List<object> invs)
+        {
+            if (_leerBerichtet) return;
+            _leerBerichtet = true;
+            RevivalPlugin.L.LogInfo("Geschuetz: keine Munition (Item "
+                + RevivalPlugin.CfgTurretAmmoId.Value + ") gefunden.");
+            RevivalPlugin.L.LogInfo("  Kofferraum: "
+                + (trunk == null ? "nicht gefunden" : Inhalt(Field(trunk, "_containerData"))));
+            RevivalPlugin.L.LogInfo("  eigene Inventare: " + invs.Count);
+            for (int i = 0; i < invs.Count; i++)
+            {
+                RevivalPlugin.L.LogInfo("  #" + i + " Rucksack: "
+                    + Inhalt(Field(invs[i], "_backpackData")));
+                RevivalPlugin.L.LogInfo("  #" + i + " Weste:    "
+                    + Inhalt(Field(invs[i], "_gearsData")));
+            }
+        }
+
+        /// <summary>ItemID mal ItemBullets eines Datenblocks als Text.</summary>
+        static string Inhalt(object data)
+        {
+            if (data == null) return "kein Datenblock";
+            Array ids = Field(data, "ItemID") as Array;
+            Array bullets = Field(data, "ItemBullets") as Array;
+            if (ids == null) return "kein ItemID-Feld";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                object box = ids.GetValue(i);
+                int id = box == null ? -1 : Obscured(box);
+                if (id <= 0) continue;
+                int b = 0;
+                if (bullets != null && i < bullets.Length && bullets.GetValue(i) != null)
+                    b = Obscured(bullets.GetValue(i));
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(id).Append("x").Append(b);
+            }
+            return sb.Length == 0 ? "leer (" + ids.Length + " Plaetze)" : sb.ToString();
+        }
+
+        /// <summary>
+        /// Nimmt eine Patrone aus einem ContainerData. Kofferraum und Rucksack
+        /// haben denselben Aufbau - Parallelarrays SlotID, ItemID, ItemBullets,
+        /// alle drei mit ObscuredInt-Elementen.
+        ///
+        /// Der Rucksack ist bewusst als zweite Quelle dabei: der Kofferraum
+        /// gehoert dem Fahrzeug, und ein Fahrzeug ist nach dem naechsten
+        /// Spielstart weg - mitsamt der Munition, die darin lag.
+        /// </summary>
+        static bool TakeFrom(object owner, object data, string woher)
+        {
+            if (owner == null || data == null) return false;
+
+            Array ids = Field(data, "ItemID") as Array;
+            Array bullets = Field(data, "ItemBullets") as Array;
+            Array slots = Field(data, "SlotID") as Array;
+            if (ids == null || bullets == null) return false;
+
+            int wanted = RevivalPlugin.CfgTurretAmmoId.Value;
+            for (int i = 0; i < ids.Length && i < bullets.Length; i++)
+            {
+                object idBox = ids.GetValue(i);
+                if (idBox == null) continue;
+                if (Obscured(idBox) != wanted) continue;
+
+                object countBox = bullets.GetValue(i);
+                int count = countBox == null ? 0 : Obscured(countBox);
+                if (count <= 0) continue;
+
+                count--;
+                bullets.SetValue(MakeObscured(bullets.GetType().GetElementType(), count), i);
+                if (count > 0)
+                {
+                    if (_ammoFrom != woher)
+                    {
+                        _ammoFrom = woher;
+                        RevivalPlugin.L.LogInfo("Geschuetz: Munition aus dem " + woher + ".");
+                    }
+                    return true;
+                }
+
+                int slot = i;
+                if (slots != null && i < slots.Length && slots.GetValue(i) != null)
+                    slot = Obscured(slots.GetValue(i));
+                MethodInfo clear = AccessTools.Method(owner.GetType(),
+                    "NetworkClearContainerSlot", new Type[] { typeof(int) }, null);
+                if (clear == null)
+                    clear = AccessTools.Method(owner.GetType(),
+                        "ClearBackpackSlot", new Type[] { typeof(int) }, null);
+                if (clear != null) clear.Invoke(owner, new object[] { slot });
+                _ammoFrom = woher;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Alle PlayerInventoryManager, die dem lokalen Spieler gehoeren.
+        ///
+        /// Bewusst eine Liste statt eines einzelnen Treffers: fremde Inventare
+        /// bleiben ueber photonView.isMine draussen, aber unter den eigenen
+        /// wird nicht mehr geraten, welches das richtige ist.
+        /// </summary>
+        static List<object> PlayerInventories()
+        {
+            List<object> found = new List<object>();
+            Type t = AccessTools.TypeByName("PlayerInventoryManager");
+            if (t == null) return found;
+            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+            for (int i = 0; i < all.Length; i++)
+            {
+                MonoBehaviour mb = all[i] as MonoBehaviour;
+                if (mb == null) continue;
+                MethodInfo get = AccessTools.Method(mb.GetType(), "get_photonView", null, null);
+                object view = null;
+                try { if (get != null) view = get.Invoke(mb, null); }
+                catch { view = null; }
+                if (view != null)
+                {
+                    MethodInfo isMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
+                    try
+                    {
+                        if (isMine != null && !(bool)isMine.Invoke(view, null)) continue;
+                    }
+                    catch { }
+                }
+                found.Add(all[i]);
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Der Kofferraum. Ueber die KOMPONENTE gesucht, nicht ueber den Pfad:
+        /// "InteractColliders/BagaggeContainer" haengt am BTR nicht an der
+        /// Wurzel, sondern unter Chassis (gemessen am Prefab BTR-80A_Spawn) -
+        /// Transform.Find lieferte deshalb immer null, und der Kofferraum wurde
+        /// nie durchsucht.
+        /// </summary>
+        static object TrunkContainer()
+        {
+            if (_vehicleRoot == null) return null;
+            Type ic = AccessTools.TypeByName("ItemsContainer");
+            if (ic == null) return null;
+            Component[] all = _vehicleRoot.GetComponentsInChildren(ic, true);
+            return all.Length == 0 ? null : all[0];
+        }
+
+        // ------------------------------------------------------ Zielfernrohr
+
+        public static void DrawScope()
+        {
+            if (!_manning) return;
+            try
+            {
+                if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
+                if (RevivalPlugin.CfgTurretCrosshair.Value) DrawCrosshair();
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzanzeige: " + ex);
+            }
+        }
+
+        static void DrawOverlay()
+        {
+            if (!_scopeTried)
+            {
+                _scopeTried = true;
+                _scope = Assets.Texture("scope50.png", false, true);
+            }
+            if (_scope == null) return;
+
+            float side = Mathf.Max(Screen.width, Screen.height);
+            Rect r = new Rect((Screen.width - side) * 0.5f,
+                              (Screen.height - side) * 0.5f, side, side);
+            GUI.DrawTexture(r, _scope, ScaleMode.StretchToFill, true);
+        }
+
+        /// <summary>
+        /// Fadenkreuz in der BILDMITTE.
+        ///
+        /// Bis 2026-08-28 wurde der Punkt, den das Rohr auf CrosshairRange
+        /// erreicht, in den Bildschirm projiziert. Das war im Spiel unbrauchbar:
+        /// das Fadenkreuz wanderte beim Schwenken aus der Mitte und stand
+        /// zeitweise am Bildrand, weil Kamera und Rohrachse eben doch nicht
+        /// dieselbe Achse sind. Jetzt umgekehrt herum gedacht - der Schuss
+        /// laeuft auf der BLICKACHSE (siehe AimRay), damit ist die Bildmitte
+        /// per Konstruktion der Treffpunkt und das Fadenkreuz steht still.
+        ///
+        /// Gezeichnet aus einer 1x1-Textur: das Spiel bringt kein Fadenkreuz
+        /// mit, das zum Geschuetz passt, und eine eigene Textur waere fuer vier
+        /// Striche zu viel Aufwand.
+        /// </summary>
+        static void DrawCrosshair()
+        {
+            if (_dot == null)
+            {
+                _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                _dot.SetPixel(0, 0, Color.white);
+                _dot.Apply();
+                _dot.hideFlags = HideFlags.HideAndDontSave;
+            }
+
+            float cx = Screen.width * 0.5f;
+            float cy = Screen.height * 0.5f;
+            float gap = Mathf.Max(6f, Screen.height * 0.012f);
+            float arm = Mathf.Max(14f, Screen.height * 0.030f);
+            float th = 2f;
+
+            Color old = GUI.color;
+
+            // Erst ein dunkler Schatten, einen Pixel versetzt: sonst
+            // verschwindet ein weisses Fadenkreuz vor hellem Himmel.
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            Bars(cx + 1f, cy + 1f, gap, arm, th);
+            GUI.color = new Color(0.85f, 1f, 0.85f, 0.95f);
+            Bars(cx, cy, gap, arm, th);
+
+            // Mittelpunkt: der eigentliche Treffpunkt.
+            GUI.color = new Color(1f, 0.35f, 0.2f, 0.95f);
+            GUI.DrawTexture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), _dot);
+
+            // Entfernungsstriche unter der Mitte, alle 25 Bildpunkte einer.
+            GUI.color = new Color(0.85f, 1f, 0.85f, 0.55f);
+            for (int i = 1; i <= 3; i++)
+            {
+                float y = cy + arm + gap + i * Mathf.Max(10f, Screen.height * 0.022f);
+                float w = 10f - i * 2f;
+                GUI.DrawTexture(new Rect(cx - w, y, w * 2f, 1.5f), _dot);
+            }
+
+            GUI.color = old;
+        }
+
+        static void Bars(float cx, float cy, float gap, float arm, float th)
+        {
+            GUI.DrawTexture(new Rect(cx - gap - arm, cy - th * 0.5f, arm, th), _dot);
+            GUI.DrawTexture(new Rect(cx + gap, cy - th * 0.5f, arm, th), _dot);
+            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy - gap - arm, th, arm), _dot);
+            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy + gap, th, arm), _dot);
+        }
+
+        // ------------------------------------------------------------- Helfer
+
+        static bool IsBtr(Transform root)
+        {
+            if (root == null) return false;
+            return root.name.StartsWith(BtrPrefix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        static int GunnerIndexOf(Transform seatPoints)
+        {
+            for (int i = 0; i < seatPoints.childCount; i++)
+                if (seatPoints.GetChild(i).name == SeatName) return i;
+            return -1;
+        }
+
+        static KeyCode ManKey()
+        {
+            if (_keyParsed) return _manKey;
+            _keyParsed = true;
+            try
+            {
+                _manKey = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                              RevivalPlugin.CfgTurretKey.Value, true);
+            }
+            catch
+            {
+                _manKey = KeyCode.G;
+                RevivalPlugin.L.LogWarning("Geschuetz: TurretKey "
+                    + RevivalPlugin.CfgTurretKey.Value + " unbekannt, benutze G.");
+            }
+            return _manKey;
+        }
+
+        static object Field(object instance, string name)
+        {
+            if (instance == null) return null;
+            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            return f == null ? null : f.GetValue(instance);
+        }
+
+        static int IntField(object instance, string name)
+        {
+            object v = Field(instance, name);
+            return v is int ? (int)v : -1;
+        }
+
+        /// <summary>ObscuredInt zu int ueber den impliziten Operator.</summary>
+        static int Obscured(object value)
+        {
+            if (value is int) return (int)value;
+            Type t = value.GetType();
+            MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(int)) continue;
+                ParameterInfo[] ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == t)
+                    return (int)ms[i].Invoke(null, new object[] { value });
+            }
+            return -1;
+        }
+
+        static object MakeObscured(Type t, int value)
+        {
+            if (t == typeof(int)) return value;
+            MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != t) continue;
+                ParameterInfo[] ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(int))
+                    return ms[i].Invoke(null, new object[] { value });
+            }
+            return value;
+        }
+    }
+
+    // ----------------------------------------------------------- Testflaeche
+
+    /// <summary>
+    /// Legt zur Laufzeit eine kleine ebene Testflaeche vor den Spieler und
+    /// setzt ihn darauf. Gedacht als Ort, an dem sich etwas ausprobieren
+    /// laesst, ohne die Welt anzufassen.
+    ///
+    /// WARUM DAS KEINE ECHTE REGION IST - und keine sein kann
+    /// ------------------------------------------------------
+    /// Eine Region des Spiels ist ein GameRegionData mit den Feldern region,
+    /// startScene und scenes; die Szenen sind Buildindizes. Eine neue Region
+    /// braucht also entweder
+    ///
+    ///   a) eine neue Szene im Build - die laesst sich ohne Neubau des Spiels
+    ///      nicht anlegen, oder
+    ///   b) ein zurueckgeschriebenes resources.assets - das ist in
+    ///      docs/ai/TASKS.md unter NEXT als offene Voraussetzung vermerkt und
+    ///      bis heute UNKNOWN.
+    ///
+    /// Was ohne beides geht, ist genau das hier: Geometrie zur Laufzeit, in
+    /// der bereits geladenen Szene. Der Szenensprung in die zehn ungenutzten
+    /// Buildszenen (Research.Jump, Bunker_A65, GW_Scene_2, Underground_Lab)
+    /// ist der andere Weg zu "neuem" Gelaende und schon vorhanden.
+    ///
+    /// WARUM HIER KEINE GEGNER STEHEN
+    /// ------------------------------
+    /// Belegt aus NPC_Settlement::InitSpawnNpc: das Spiel erzeugt einen NPC
+    /// mit PhotonNetwork.InstantiateSceneObject unter dem Pfad
+    /// "NPCSpawn\Marauder_NPC_01" und ruft danach der Reihe nach
+    /// SetCustomization, SetMaxHealth, ResetHealth, SetBehaviorPattern,
+    /// CalculateMaxEnemiesCount, SetGodMode, SetIsSafeSettlement,
+    /// SetMainWeaponId, NPC_SpawnPoint::Init, NPC_AI2::InitSpawnPoint und
+    /// SetSpawnData. Die Daten dafuer kommen aus einer Customization-Datenbank
+    /// und einer Waffentabelle.
+    ///
+    /// Diese Kette halb nachzubauen ergibt Gegner ohne Waffe, ohne Leben und
+    /// ohne Verhalten - und InstantiateSceneObject setzt ausserdem voraus,
+    /// dass man Masterclient ist. Dazu kommt: NPC_AI2 haelt einen
+    /// NavMeshAgent, und ein Navigationsnetz laesst sich zur Laufzeit nicht
+    /// backen. Deshalb liegt die Flaeche bewusst nur wenige Zentimeter ueber
+    /// dem Boden - dann traegt das vorhandene Navigationsnetz darunter noch.
+    ///
+    /// Der vollstaendige Bauplan steht in
+    /// docs/ai/tasks/testregion-arena.md. Ausprobiert wird er in einem Zug,
+    /// wenn das Spiel ohnehin laeuft.
+    /// </summary>
+    public static class Arena
+    {
+        const string RootName = "NDR_TestArena";
+        static KeyCode _key = KeyCode.None;
+        static bool _keyParsed;
+        static GameObject _arena;
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgArena.Value) return;
+            try
+            {
+                if (!Input.GetKeyDown(Key())) return;
+                if (_arena != null)
+                {
+                    UnityEngine.Object.Destroy(_arena);
+                    _arena = null;
+                    RevivalPlugin.L.LogInfo("Testflaeche entfernt.");
+                    return;
+                }
+                Build();
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Testflaeche: " + ex);
+            }
+        }
+
+        static void Build()
+        {
+            Camera cam = Camera.main;
+            if (cam == null)
+            {
+                RevivalPlugin.L.LogWarning("Testflaeche: keine Kamera gefunden.");
+                return;
+            }
+
+            Vector3 eye = cam.transform.position;
+            Vector3 ahead = cam.transform.forward;
+            ahead.y = 0f;
+            if (ahead.sqrMagnitude < 0.000001f) ahead = Vector3.forward;
+            ahead.Normalize();
+
+            float distance = RevivalPlugin.CfgArenaDistance.Value;
+            Vector3 above = eye + ahead * distance + Vector3.up * 60f;
+
+            Vector3 ground;
+            GameObject under = Turret.RaycastObject(above, Vector3.down, 400f, out ground);
+            if (under == null)
+            {
+                RevivalPlugin.L.LogWarning("Testflaeche: unter " + above
+                    + " ist kein Boden - naeher an festen Grund stellen.");
+                return;
+            }
+
+            Material material = GroundMaterial(under);
+            float size = Mathf.Max(8f, RevivalPlugin.CfgArenaSize.Value);
+
+            _arena = new GameObject(RootName);
+            _arena.transform.position = ground + Vector3.up * 0.06f;
+
+            GameObject floor = new GameObject("Flaeche");
+            floor.transform.SetParent(_arena.transform, false);
+            MeshFilter mf = floor.AddComponent<MeshFilter>();
+            mf.sharedMesh = Grid(size, 16);
+            MeshRenderer mr = floor.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = material;
+
+            Posts(size);
+
+            RevivalPlugin.L.LogInfo("Testflaeche gebaut: " + size + " x " + size
+                + " Einheiten bei " + _arena.transform.position
+                + ", Material \"" + (material == null ? "keins" : material.name)
+                + "\" vom Boden unter dem Spieler.");
+            RevivalPlugin.L.LogInfo("Testflaeche: Gegner stehen hier absichtlich "
+                + "keine - Begruendung in docs/ai/tasks/testregion-arena.md.");
+        }
+
+        /// <summary>
+        /// Nimmt das Material des Bodens, auf dem gebaut wird - das sind die
+        /// vorhandenen Overworld-Texturen, ohne dass eine einzige neue Datei
+        /// dazukommt. Kopiert wird es, damit die Welt unangetastet bleibt.
+        /// </summary>
+        static Material GroundMaterial(GameObject under)
+        {
+            Renderer r = under.GetComponent<Renderer>();
+            if (r == null) r = under.GetComponentInParent<Renderer>();
+            if (r == null || r.sharedMaterial == null)
+            {
+                RevivalPlugin.L.LogWarning("Testflaeche: der Boden hat kein "
+                    + "auslesbares Material (Terrain hat keinen Renderer). "
+                    + "Die Flaeche bleibt einfarbig.");
+                return null;
+            }
+            Material copy = new Material(r.sharedMaterial);
+            copy.name = "NDR_ArenaGround";
+            return copy;
+        }
+
+        /// <summary>Ebenes Gitter, damit die Beleuchtung nicht auf zwei Dreiecke faellt.</summary>
+        static Mesh Grid(float size, int cells)
+        {
+            int line = cells + 1;
+            Vector3[] verts = new Vector3[line * line];
+            Vector2[] uvs = new Vector2[line * line];
+            Vector3[] normals = new Vector3[line * line];
+            float half = size * 0.5f;
+            float step = size / cells;
+
+            for (int z = 0; z < line; z++)
+            {
+                for (int x = 0; x < line; x++)
+                {
+                    int i = z * line + x;
+                    verts[i] = new Vector3(-half + x * step, 0f, -half + z * step);
+                    // Eine Kachel je zwei Meter, damit die Bodentextur nicht
+                    // ueber die ganze Flaeche gezogen wird.
+                    uvs[i] = new Vector2(verts[i].x * 0.5f, verts[i].z * 0.5f);
+                    normals[i] = Vector3.up;
+                }
+            }
+
+            int[] tris = new int[cells * cells * 6];
+            int t = 0;
+            for (int z = 0; z < cells; z++)
+            {
+                for (int x = 0; x < cells; x++)
+                {
+                    int i = z * line + x;
+                    tris[t++] = i;
+                    tris[t++] = i + line;
+                    tris[t++] = i + line + 1;
+                    tris[t++] = i;
+                    tris[t++] = i + line + 1;
+                    tris[t++] = i + 1;
+                }
+            }
+
+            Mesh mesh = new Mesh();
+            mesh.name = "NDR_ArenaFloor";
+            mesh.vertices = verts;
+            mesh.uv = uvs;
+            mesh.normals = normals;
+            mesh.triangles = tris;
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        /// <summary>
+        /// Vier Ecken markieren, sonst findet man die Flaeche im Gelaende
+        /// nicht wieder. Bewusst Wuerfel aus demselben Mesh statt
+        /// GameObject.CreatePrimitive - das haengt einen Collider an, und der
+        /// wuerde dem Navigationsnetz darunter im Weg stehen.
+        /// </summary>
+        static void Posts(float size)
+        {
+            float half = size * 0.5f;
+            Mesh post = Grid(1.2f, 1);
+            for (int i = 0; i < 4; i++)
+            {
+                float sx = (i == 0 || i == 3) ? -1f : 1f;
+                float sz = (i < 2) ? -1f : 1f;
+                GameObject marker = new GameObject("Ecke" + i);
+                marker.transform.SetParent(_arena.transform, false);
+                marker.transform.localPosition =
+                    new Vector3(sx * half, 1.4f, sz * half);
+                MeshFilter mf = marker.AddComponent<MeshFilter>();
+                mf.sharedMesh = post;
+                marker.AddComponent<MeshRenderer>();
+            }
+        }
+
+        static KeyCode Key()
+        {
+            if (_keyParsed) return _key;
+            _keyParsed = true;
+            try
+            {
+                _key = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                           RevivalPlugin.CfgArenaKey.Value, true);
+            }
+            catch
+            {
+                _key = KeyCode.F10;
+                RevivalPlugin.L.LogWarning("Testflaeche: ArenaKey "
+                    + RevivalPlugin.CfgArenaKey.Value + " unbekannt, benutze F10.");
+            }
+            return _key;
+        }
+    }
+
+    /// <summary>
+    /// Setzt die Kamera NACH der Kamera des Spiels.
+    ///
+    /// Der erste Anlauf am 2026-08-28 schrieb die Kameralage im LateUpdate des
+    /// Plugins. Das reicht nicht: `CameraFPSController::LateUpdate` setzt sie
+    /// im selben Frame ebenfalls, und welche der beiden Komponenten zuerst
+    /// laeuft, entscheidet Unity nach Skriptreihenfolge - im Spiel gewann die
+    /// des Spiels, der Blick blieb hinter dem Turm. Ein Postfix auf genau diese
+    /// Methode laeuft dagegen garantiert danach.
+    /// </summary>
+    [HarmonyPatch]
+    public static class CameraHook
+    {
+        public static void Postfix()
+        {
+            Turret.LateTick();
+        }
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("CameraFPSController");
+                if (t == null)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetzkamera: CameraFPSController "
+                        + "nicht gefunden - der Blick bleibt beim Spiel.");
+                    return;
+                }
+                MethodInfo m = AccessTools.Method(t, "LateUpdate", null, null);
+                if (m == null)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetzkamera: CameraFPSController.LateUpdate "
+                        + "nicht gefunden.");
+                    return;
+                }
+                harmony.Patch(m, null,
+                              new HarmonyMethod(typeof(CameraHook).GetMethod("Postfix")),
+                              null, null, null);
+                RevivalPlugin.L.LogInfo("Geschuetzkamera: CameraFPSController.LateUpdate gepatcht.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetzkamera nicht eingehaengt: " + ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Haelt die Erkaeltung auf null.
+    ///
+    /// `PlayerLifeDataManager::PlayerColdController` laeuft im Takt von
+    /// `Cold_Delay` und zaehlt `_playerLifeData.Cold` hoch, sobald die Stunde
+    /// am `TOD_Sky` ueber 22 oder unter 7 liegt. Steigt Cold auf 100 und ist
+    /// Temp 0, startet `ApplyPlayerSick("Temp", 50)`.
+    ///
+    /// Deshalb genuegt es NICHT, `cold` im gespeicherten Profil auf 0 zu
+    /// setzen - nach der naechsten Nacht steht es wieder da. Der Prefix setzt
+    /// den Wert und laesst das Original aus.
+    /// </summary>
+    [HarmonyPatch]
+    public static class ColdHook
+    {
+        static FieldInfo _lifeData;
+        static FieldInfo _cold;
+        static FieldInfo _temp;
+        static bool _looked;
+        static bool _warned;
+
+        public static bool Prefix(object __instance)
+        {
+            return Null(__instance, "Cold", ref _cold);
+        }
+
+        /// <summary>
+        /// Das Fieber ist ein ZWEITER, eigener Zaehler - und der Grund, warum
+        /// die Erkaeltung nach dem Heilen wiederkam.
+        ///
+        /// GEMESSEN (IL, 2026-08-28):
+        /// ApplyPlayerLifeParamsConsequences ruft PlayerTempController auf,
+        /// sobald _playerLifeData.Temp GROESSER NULL ist. PlayerTempController
+        /// macht dann je Takt 1 Schaden, spielt den Hustenzustand und zaehlt
+        /// Temp um 1 HOCH. Temp ist also kein Grad Celsius, sondern ein
+        /// Fieberzaehler - gesund heisst Temp == 0.
+        ///
+        /// Beleg aus dem Profil: invtool.py hat Temp auf 36.6 gesetzt
+        /// ("normale Koerpertemperatur"), nach der Sitzung stand 39.6 darin -
+        /// genau drei Takte a plus eins. Die Heilung hat die Krankheit selbst
+        /// am Leben gehalten.
+        ///
+        /// Der zweite Weg hinein bleibt trotzdem zu: PlayerColdController setzt
+        /// bei Cold >= 100 ueber ApplyPlayerSick("Temp", 50) neues Fieber an -
+        /// deshalb bleibt auch der Prefix auf Cold.
+        /// </summary>
+        public static bool TempPrefix(object __instance)
+        {
+            return Null(__instance, "Temp", ref _temp);
+        }
+
+        static bool Null(object __instance, string feld, ref FieldInfo cache)
+        {
+            if (!RevivalPlugin.CfgNoCold.Value) return true;
+            try
+            {
+                if (!_looked)
+                {
+                    _looked = true;
+                    _lifeData = AccessTools.Field(__instance.GetType(), "_playerLifeData");
+                }
+                if (_lifeData == null) return true;
+                object data = _lifeData.GetValue(__instance);
+                if (data == null) return true;
+
+                if (cache == null) cache = AccessTools.Field(data.GetType(), feld);
+                if (cache == null) return true;
+
+                cache.SetValue(data, ZeroLike(cache.FieldType));
+                return false;                       // Original ueberspringen
+            }
+            catch (Exception ex)
+            {
+                if (!_warned)
+                {
+                    _warned = true;
+                    RevivalPlugin.L.LogWarning("Erkaeltung: " + ex.Message
+                        + " - der Zaehler laeuft weiter.");
+                }
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Cold ist ein ObscuredFloat. Der Wert 0 muss deshalb ueber die
+        /// implizite Umwandlung des Typs entstehen, nicht als blanke Null.
+        /// </summary>
+        static object ZeroLike(Type t)
+        {
+            if (t == typeof(float)) return 0f;
+            MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != t) continue;
+                ParameterInfo[] ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(float))
+                    return ms[i].Invoke(null, new object[] { 0f });
+            }
+            return Activator.CreateInstance(t);
+        }
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("PlayerLifeDataManager");
+                if (t == null)
+                {
+                    RevivalPlugin.L.LogWarning("Erkaeltung: PlayerLifeDataManager nicht gefunden.");
+                    return;
+                }
+                MethodInfo m = AccessTools.Method(t, "PlayerColdController", null, null);
+                if (m == null)
+                {
+                    RevivalPlugin.L.LogWarning("Erkaeltung: PlayerColdController nicht gefunden.");
+                    return;
+                }
+                harmony.Patch(m, new HarmonyMethod(typeof(ColdHook).GetMethod("Prefix")),
+                              null, null, null, null);
+
+                MethodInfo mt = AccessTools.Method(t, "PlayerTempController", null, null);
+                if (mt == null)
+                    RevivalPlugin.L.LogWarning("Fieber: PlayerTempController nicht gefunden - "
+                        + "eine bestehende Erkaeltung heilt dann nicht von selbst aus.");
+                else
+                    harmony.Patch(mt, new HarmonyMethod(typeof(ColdHook).GetMethod("TempPrefix")),
+                                  null, null, null, null);
+
+                RevivalPlugin.L.LogInfo("Erkaeltung: PlayerColdController"
+                    + (mt == null ? "" : " und PlayerTempController")
+                    + " gepatcht (NoCold=" + RevivalPlugin.CfgNoCold.Value
+                    + "), Cold und Temp werden auf 0 gehalten.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Erkaeltung konnte nicht abgeschaltet werden: " + ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Erzeugt ein Fahrzeug vor dem Spieler. Ohne das steht ein BTR nur dort,
+    /// wo die Szene einen VehicleSpawnPoint hat - zum Pruefen des Turmgeschuetzes
+    /// zu wenig.
+    ///
+    /// Nachgebaut aus VehicleSpawnPoint::InstantiateCar (IL, 2026-08-28):
+    ///
+    ///     PhotonNetwork.InstantiateSceneObject("VehicleSpawn\" + name, pos, rot, 0, data)
+    ///     VehicleGameSystem.Fuel, .Durability
+    ///     VehicleInventoryManager.SetPartSpawn(10002, 10003, 10004)
+    ///
+    /// Zwei bewusste Abweichungen:
+    ///
+    /// 1. Der Datenblock bleibt null. Sein erster Eintrag ist die PointId, und
+    ///    VehicleGameSystem::FindMySpawnPointAndSet setzt das Fahrzeug damit auf
+    ///    die Position des zugehoerigen Spawnpunkts zurueck - es stuende dann
+    ///    nicht mehr dort, wo es geprueft werden soll. Bei null kehrt die
+    ///    Methode gleich am Anfang zurueck (IL_000C..IL_0044).
+    /// 2. Die drei Teile setzt LocalSetVehicleComponent direkt statt ueber
+    ///    SetPartSpawn - das wuerfelt bei Modus 3 mit 50 Prozent, und ein
+    ///    Fahrzeug ohne Zuendkerze faehrt nicht.
+    /// </summary>
+    public static class CarSpawn
+    {
+        // Aus VehicleSpawnPoint::InstantiateCar: Batterie, Schluessel, Kerze.
+        static readonly int[] Parts = new int[] { 10002, 10003, 10004 };
+
+        static KeyCode _key = KeyCode.None;
+        static bool _keyParsed;
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgSpawnCar.Value) return;
+            try
+            {
+                if (!Input.GetKeyDown(Key())) return;
+                Spawn();
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Fahrzeugspawn: " + ex);
+            }
+        }
+
+        static void Spawn()
+        {
+            Camera cam = Camera.main;
+            if (cam == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: keine Kamera gefunden.");
+                return;
+            }
+
+            Vector3 ahead = cam.transform.forward;
+            ahead.y = 0f;
+            if (ahead.sqrMagnitude < 0.000001f) ahead = Vector3.forward;
+            ahead.Normalize();
+
+            float distance = Mathf.Max(4f, RevivalPlugin.CfgSpawnCarDistance.Value);
+            Vector3 above = cam.transform.position + ahead * distance + Vector3.up * 30f;
+
+            Vector3 ground;
+            GameObject under = Turret.RaycastObject(above, Vector3.down, 200f, out ground);
+            if (under == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: unter " + above
+                    + " ist kein Boden - naeher an festen Grund stellen.");
+                return;
+            }
+
+            if (!IsMasterClient())
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: dieser Client ist nicht "
+                    + "Masterclient. InstantiateSceneObject wird von Photon abgewiesen.");
+                return;
+            }
+
+            string name = RevivalPlugin.CfgSpawnCarName.Value;
+            string path = "VehicleSpawn\\" + name;
+            Vector3 pos = ground + Vector3.up * 1.6f;
+            Quaternion rot = Quaternion.LookRotation(ahead, Vector3.up);
+
+            GameObject car = InstantiateSceneObject(path, pos, rot);
+            if (car == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: Photon lieferte null fuer \""
+                    + path + "\". Ist der Prefabname richtig?");
+                return;
+            }
+
+            Prepare(car);
+
+            RevivalPlugin.L.LogInfo("Fahrzeug \"" + name + "\" erzeugt bei " + pos
+                + ", Boden \"" + under.name + "\".");
+        }
+
+        /// <summary>
+        /// Tank, Zustand und die drei Teile, sonst springt der Motor nicht an.
+        /// </summary>
+        static void Prepare(GameObject car)
+        {
+            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            if (vgsType == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: VehicleGameSystem nicht gefunden.");
+                return;
+            }
+
+            Component vgs = car.GetComponent(vgsType);
+            if (vgs == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: kein VehicleGameSystem am Fahrzeug.");
+                return;
+            }
+
+            SetFloatField(vgs, "Fuel", 4000f);
+            SetFloatField(vgs, "Durability", 2000f);
+
+            MethodInfo set = AccessTools.Method(vgsType, "LocalSetVehicleComponent", null, null);
+            if (set == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: LocalSetVehicleComponent fehlt - "
+                    + "das Fahrzeug steht ohne Batterie, Kerze und Schluessel da.");
+                return;
+            }
+
+            ParameterInfo[] ps = set.GetParameters();
+            bool secondIsBool = ps.Length > 1 && ps[1].ParameterType == typeof(bool);
+            for (int i = 0; i < Parts.Length; i++)
+            {
+                object second = secondIsBool ? (object)true : (object)1;
+                try { set.Invoke(vgs, new object[] { Parts[i], second }); }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Fahrzeugspawn: Teil " + Parts[i]
+                        + " liess sich nicht setzen: " + ex.Message);
+                }
+            }
+        }
+
+        static void SetFloatField(object instance, string name, float value)
+        {
+            try
+            {
+                FieldInfo fi = AccessTools.Field(instance.GetType(), name);
+                if (fi == null) return;
+                if (fi.FieldType == typeof(float)) fi.SetValue(instance, value);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: Feld " + name
+                    + " nicht gesetzt: " + ex.Message);
+            }
+        }
+
+        static bool IsMasterClient()
+        {
+            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            if (photon == null) return false;
+            MethodInfo getter = AccessTools.PropertyGetter(photon, "isMasterClient");
+            if (getter == null) getter = AccessTools.PropertyGetter(photon, "IsMasterClient");
+            // Findet sich die Eigenschaft nicht, wird nicht geraten: dann laesst
+            // Photon den Aufruf entweder zu oder meldet es selbst.
+            if (getter == null) return true;
+            return (bool)getter.Invoke(null, null);
+        }
+
+        static GameObject InstantiateSceneObject(string path, Vector3 position,
+                                                 Quaternion rotation)
+        {
+            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
+
+            MethodInfo chosen = null;
+            MethodInfo[] methods = photon.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo m = methods[i];
+                if (m.Name != "InstantiateSceneObject") continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 5 && ps[0].ParameterType == typeof(string)
+                    && ps[1].ParameterType == typeof(Vector3)
+                    && ps[2].ParameterType == typeof(Quaternion)
+                    && ps[3].ParameterType == typeof(byte))
+                {
+                    chosen = m;
+                    break;
+                }
+            }
+            if (chosen == null)
+                throw new MissingMethodException(
+                    "PhotonNetwork.InstantiateSceneObject(string,Vector3,Quaternion,byte,object[])");
+
+            return chosen.Invoke(null, new object[] {
+                path, position, rotation, (byte)0, null }) as GameObject;
+        }
+
+        static KeyCode Key()
+        {
+            if (_keyParsed) return _key;
+            _keyParsed = true;
+            try
+            {
+                _key = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                           RevivalPlugin.CfgSpawnCarKey.Value, true);
+            }
+            catch
+            {
+                _key = KeyCode.F7;
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: SpawnCarKey "
+                    + RevivalPlugin.CfgSpawnCarKey.Value + " unbekannt, benutze F7.");
+            }
+            return _key;
         }
     }
 }
