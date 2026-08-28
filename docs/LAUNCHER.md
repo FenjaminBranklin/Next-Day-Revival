@@ -46,16 +46,22 @@ Kevin adds this; the endpoint does not exist yet. Schema:
     GET http://187.124.117.145:12080/revival.json
 
     {
-      "contentVersion":   "0.4.0",
-      "modItems":         [1160, 1161, 1162, 2050, 2051, 2052],
-      "minClientVersion": "0.3.1",
+      "contentVersion":   "0.4.3",
+      "modWeapons":       [{"id": 1160, "clip": 2050},
+                           {"id": 1161, "clip": 2051}],
+      "minClientVersion": "0.4.0",
       "downloadUrl":      "https://github.com/FenjaminBranklin/Next-Day-Revival/releases/download/v0.4.0/NextDayRevival_Client_0.4.0.zip",
       "message":          ""
     }
 
-`modItems` is the list of ids from the reserved ranges (1160-1199 weapons,
-2050-2099 ammo) that the server's own database actually contains. The server
-computes it on deploy; nobody maintains it by hand.
+`modWeapons` is every weapon from the reserved range 1160-1199 that the
+server's own `weapons_db.xml` actually contains, with the magazine it expects.
+The server computes it; nobody maintains it by hand.
+
+Weapons, not items: ammunition ids have no entry of their own in that file,
+they only appear as a weapon's `ClipItemID`. `serversync.py` in the repository
+root already implements the comparison - call it rather than re-deriving the
+rule, and note the `--url` switch, which is how you point it at a mock.
 
 **Do not wait for it.** Write a `revival.sample.json` next to the launcher and
 read that when the server does not answer. You can build and finish the whole
