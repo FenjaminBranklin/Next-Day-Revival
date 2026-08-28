@@ -83,7 +83,11 @@ namespace NextDayRevival
     {
         public const string GUID = "nextday.revival.toolkit";
         public const string NAME = "Next Day Revival Toolkit";
-        public const string VERSION = "0.3.0";
+        // Muss mit der Datei VERSION im Wurzelverzeichnis uebereinstimmen -
+        // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
+        // machen jeden Versionsabgleich wertlos, und genau das war zwischen
+        // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
+        public const string VERSION = "0.4.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;

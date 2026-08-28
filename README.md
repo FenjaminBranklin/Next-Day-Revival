@@ -22,6 +22,10 @@ the traps that cost hours. `KNOWLEDGE.md` beside it is the reference: a map of
 the plugin by class and line, what is known about the game, and what has
 already been tried and failed.
 
+Looking for something to build? **[docs/LAUNCHER.md](docs/LAUNCHER.md)** is a
+project brief for a launcher that keeps client and server versions in step -
+self-contained, PowerShell, and it cannot break anyone else's game.
+
 ---
 
 ## Just want to play?

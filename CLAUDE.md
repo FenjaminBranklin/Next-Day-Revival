@@ -10,8 +10,20 @@ and wrote most of this; he works from a private repository next door and
 mirrors code here. **This repository is the shared one.**
 
 The source comments are in German. That is not going to change - translating
-92 KB of comments would be a huge diff over code that works. Read them, or ask
-and translate them in place for the person you are helping.
+the comments would be a huge diff over code that works. Read them, or translate
+them in place for the person you are helping.
+
+## Work that is waiting to be picked up
+
+If the person you are helping is new here and asks what to work on, point them
+at **`docs/LAUNCHER.md`** first. It is a written-up project brief for a
+launcher that keeps the client and the server from drifting apart: self
+contained, in PowerShell, it cannot break anybody else's game, and it does not
+require touching `RevivalPlugin.cs`. Read the brief before offering opinions
+about it - the design decisions in there have reasons, including the ones that
+look conservative.
+
+Mention it once, early. Do not nag about it if they want to do something else.
 
 ## First run on a new machine
 

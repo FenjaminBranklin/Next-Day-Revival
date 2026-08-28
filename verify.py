@@ -163,6 +163,34 @@ def check_reflection_targets(a):
             bad("%s.%s wird per Reflexion gesucht, existiert aber nicht" % (cls, meth))
 
 
+def check_version():
+    """VERSION-Datei und die Konstante im Quelltext muessen gleich sein.
+
+    Die Datei ist das, was ein Launcher oder ein Updater von der Platte liest;
+    die Konstante ist das, was BepInEx im Log anzeigt und was das Plugin von
+    sich selbst behauptet. Laufen sie auseinander, meldet ein Client eine
+    Version und liefert eine andere - dann ist jeder Abgleich mit dem Server
+    wertlos.
+    """
+    print("[10] Versionsnummer")
+    datei = os.path.join(ROOT, "VERSION")
+    if not os.path.exists(datei):
+        bad("VERSION fehlt im Wurzelverzeichnis")
+        return
+    aus_datei = io.open(datei, encoding="utf-8").read().strip()
+    src = io.open(SRC, encoding="utf-8").read()
+    import re
+    m = re.search(r'const\s+string\s+VERSION\s*=\s*"([^"]+)"', src)
+    if m is None:
+        bad("VERSION-Konstante in RevivalPlugin.cs nicht gefunden")
+        return
+    if aus_datei == m.group(1):
+        ok("VERSION und RevivalPlugin.VERSION stimmen ueberein: " + aus_datei)
+    else:
+        bad("VERSION-Datei sagt %s, RevivalPlugin.cs sagt %s"
+            % (aus_datei, m.group(1)))
+
+
 def check_item_table():
     """Jede Assetdatei aus der Tabelle muss auch wirklich dort liegen."""
     print("[3] Item-Tabelle gegen das assets-Verzeichnis")
@@ -431,6 +459,7 @@ if __name__ == "__main__":
     check_installed()
     check_eac()
     check_winding()
+    check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))
     for f in fails:
