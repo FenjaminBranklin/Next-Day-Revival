@@ -15,3 +15,8 @@
 *.dll     binary
 *.png     binary
 *.ndmesh  binary
+
+# Der Action-Runner ist Linux. CRLF in einem run:-Block bricht die Shell.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+VERSION text eol=lf
