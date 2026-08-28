@@ -65,6 +65,9 @@ thing against the mock, and the day the endpoint appears you change one URL.
 
 `VERSION` in the repository root - one line, currently `0.4.0`. It is shipped
 next to the plugin and it is the single number the launcher reads from disk.
+**Trim it.** The repository normalises line endings, so what you read may carry
+a trailing `\r`, and `"0.4.0" -ne "0.4.0\r"` will have you comparing versions
+that look identical on screen.
 `RevivalPlugin.VERSION` in the source must match it, and `verify.py` check [10]
 fails if they drift.
 
