@@ -451,16 +451,20 @@ try {
         # aus ClientConfig.ini. Stimmen sie nicht ueberein, laeuft die Anmeldung
         # woanders hin als erwartet.
         Warn ("Serverliste nennt " + $mHost.Groups[1].Value + ", gepatcht wurde auf " + $Server + ".")
-        Info "advertiseHost in deploy\server.json auf dem VPS pruefen."
+        Info "Der Serverbetreiber muss das richtigstellen - sag ihm Bescheid."
     }
     if ($mApp.Success -and $mApp.Groups[1].Value.Length -lt 8) {
         Warn "photonAppId sieht leer aus - ohne sie kommt kein Spieler in einen Raum."
     }
 } catch {
+    # Diese Hinweise liest ein SPIELER. Hier standen bis 0.4.5 Handgriffe fuer
+    # den Serverbetreiber - ein ssh-Aufruf mit Hostnamen und Dienstnamen, dazu
+    # eine E-Nummer aus der internen Doku. Das half niemandem, der es zu sehen
+    # bekam, und trug Betriebsinterna in jedes ausgelieferte Paket.
     Bad ("nicht erreichbar: " + $listUrl)
     Info ($_.Exception.Message)
-    Info "Laeuft der Dienst?   ssh ndmaster 'systemctl status ndmaster'"
-    Info "Abnahme ist PROFILE SAVED im Log, nicht is-active (E-016)."
+    Info "Der Server ist gerade nicht erreichbar. Das liegt nicht an deinem"
+    Info "Spiel - sag dem Bescheid, von dem du dieses Paket hast."
 }
 
 
@@ -480,7 +484,8 @@ if ($Check) {
     Write-Host "Client steht. Jetzt starten mit:" -ForegroundColor Green
     Write-Host "    powershell -File start_game.ps1"
     Write-Host ""
-    Write-Host "Nicht ueber den Steam-Play-Knopf - der startet den EAC-Launcher (E-014)."
+    Write-Host "Nicht ueber den Steam-Play-Knopf - der startet den EAC-Launcher,"
+    Write-Host "und der bricht seit einem Update im August 2026 ab."
 }
 if ($hinweise.Count -gt 0) {
     Write-Host ""
