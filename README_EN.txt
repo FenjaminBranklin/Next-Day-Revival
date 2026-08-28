@@ -95,9 +95,12 @@ Tells you what is set up and what is not, without touching a single file.
 
 WHAT ELSE IS IN HERE
 --------------------
-The mod adds four items of its own: an MG42, a TAC-50 with its own scope, and
-the matching ammunition. Plus a fix that keeps the mouse cursor from sliding
-out of the game in windowed mode.
+The mod adds six items of its own: an MG42, a TAC-50 with its own scope, an
+M72 LAW that explodes where it hits, and the matching ammunition for all
+three. Plus a fix that keeps the mouse cursor from sliding out of the game in
+windowed mode.
+
+There is also a gunner seat on the BTR-80A: get in and press G.
 
 
 YOUR SAVE GAME

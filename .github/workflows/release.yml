@@ -50,6 +50,12 @@ jobs:
           # Working material of the generators - useless in the game.
           find "stage/$NAME/assets" -name "*_preview.png" -delete
           find "stage/$NAME/assets" -name "icon_vergleich.png" -delete
+          # The texts carry a @VERSION@ placeholder that make_package.ps1 fills
+          # in when it builds a package. Copying them raw shipped a readme
+          # whose first line literally read "Paket @VERSION@" in v0.4.0 and
+          # v0.4.1. Substitute here, and refuse to ship if one survives.
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/@VERSION@/$VER/g" "stage/$NAME"/*.txt
           echo "NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Guard - nothing in here may belong to the game
@@ -63,6 +69,16 @@ jobs:
           fi
           test -f "stage/$NAME/NextDayRevivalToolkit.dll" || {
             echo "::error::the plugin DLL is missing from the package"; exit 1; }
+          if grep -rl "@VERSION@" "stage/$NAME" >/dev/null 2>&1; then
+            echo "::error::an unsubstituted @VERSION@ placeholder is still in:"
+            grep -rl "@VERSION@" "stage/$NAME"
+            exit 1
+          fi
+          # The readme is the first thing a player opens. If it does not name
+          # this version, something in the staging step silently did nothing.
+          grep -q "${GITHUB_REF_NAME#v}" "stage/$NAME/LIESMICH.txt" || {
+            echo "::error::LIESMICH.txt does not mention ${GITHUB_REF_NAME#v}"
+            exit 1; }
 
       - name: Zip
         run: cd stage && zip -qr "../$NAME.zip" "$NAME"

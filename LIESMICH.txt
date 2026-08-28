@@ -97,9 +97,12 @@ Sagt dir, was eingerichtet ist und was nicht, ohne eine Datei anzufassen.
 
 WAS AUSSERDEM DRIN IST
 ----------------------
-Die Mod bringt vier eigene Gegenstaende mit: ein MG42, eine TAC-50 mit
-eigenem Zielfernrohr und die passende Munition. Dazu ein Fix, damit der
-Mauszeiger im Fenstermodus nicht mehr aus dem Spiel rutscht.
+Die Mod bringt sechs eigene Gegenstaende mit: ein MG42, eine TAC-50 mit
+eigenem Zielfernrohr, eine M72 LAW, die am Einschlag detoniert, und die
+passende Munition zu allen dreien. Dazu ein Fix, damit der Mauszeiger im
+Fenstermodus nicht mehr aus dem Spiel rutscht.
+
+Ausserdem hat der BTR-80A einen Platz am Geschuetz: einsteigen, G druecken.
 
 
 DEIN SPIELSTAND
