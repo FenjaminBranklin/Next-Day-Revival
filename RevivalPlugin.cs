@@ -4160,7 +4160,19 @@ namespace NextDayRevival
                 return;
             }
 
-            Material material = GroundMaterial(under);
+            string quelle;
+            Material material = GroundMaterial(under, out quelle);
+            if (material == null)
+            {
+                // Lieber nichts bauen als etwas Magentafarbenes hinstellen: ein
+                // Renderer ohne Material sieht im Spiel nach kaputtem Modell aus
+                // und schickt die Fehlersuche in die falsche Richtung.
+                RevivalPlugin.L.LogError("Testflaeche: kein brauchbares Material "
+                    + "gefunden, die Flaeche wird nicht gebaut. Ohne Material "
+                    + "zeichnet Unity sie magenta.");
+                return;
+            }
+
             float size = Mathf.Max(8f, RevivalPlugin.CfgArenaSize.Value);
 
             _arena = new GameObject(RootName);
@@ -4173,35 +4185,126 @@ namespace NextDayRevival
             MeshRenderer mr = floor.AddComponent<MeshRenderer>();
             mr.sharedMaterial = material;
 
-            Posts(size);
+            Posts(size, material);
 
             RevivalPlugin.L.LogInfo("Testflaeche gebaut: " + size + " x " + size
                 + " Einheiten bei " + _arena.transform.position
-                + ", Material \"" + (material == null ? "keins" : material.name)
-                + "\" vom Boden unter dem Spieler.");
+                + ", Material \"" + material.name + "\" aus Quelle: " + quelle + ".");
             RevivalPlugin.L.LogInfo("Testflaeche: Gegner stehen hier absichtlich "
                 + "keine - Begruendung in docs/ai/tasks/testregion-arena.md.");
         }
 
         /// <summary>
-        /// Nimmt das Material des Bodens, auf dem gebaut wird - das sind die
-        /// vorhandenen Overworld-Texturen, ohne dass eine einzige neue Datei
-        /// dazukommt. Kopiert wird es, damit die Welt unangetastet bleibt.
+        /// Besorgt ein Material, das garantiert zeichnet.
+        ///
+        /// Der erste Anlauf am 2026-08-28 nahm nur den Renderer des getroffenen
+        /// Bodens. In der Overworld steht der Spieler aber auf Unity-Terrain,
+        /// und Terrain zeichnet ueber die Komponente `Terrain`, nicht ueber
+        /// einen `MeshRenderer` - der Griff ging ins Leere, das Material blieb
+        /// null, und Unity malt einen Renderer ohne Material magenta. Genau die
+        /// pinke Flaeche, die im Spiel zu sehen war.
+        ///
+        /// Deshalb jetzt vier Quellen der Reihe nach. Die letzte traegt immer,
+        /// solange das Spiel ueberhaupt etwas zeichnet.
         /// </summary>
-        static Material GroundMaterial(GameObject under)
+        static Material GroundMaterial(GameObject under, out string quelle)
         {
-            Renderer r = under.GetComponent<Renderer>();
-            if (r == null) r = under.GetComponentInParent<Renderer>();
-            if (r == null || r.sharedMaterial == null)
+            quelle = "keine";
+
+            Material vorlage = TerrainMaterial();
+            if (vorlage != null) quelle = "Terrain";
+
+            if (vorlage == null)
             {
-                RevivalPlugin.L.LogWarning("Testflaeche: der Boden hat kein "
-                    + "auslesbares Material (Terrain hat keinen Renderer). "
-                    + "Die Flaeche bleibt einfarbig.");
+                Renderer r = under.GetComponent<Renderer>();
+                if (r == null) r = under.GetComponentInParent<Renderer>();
+                if (r != null && r.sharedMaterial != null)
+                {
+                    vorlage = r.sharedMaterial;
+                    quelle = "Boden unter dem Spieler";
+                }
+            }
+
+            if (vorlage == null)
+            {
+                Renderer r = NearbyRenderer(under.transform.position);
+                if (r != null)
+                {
+                    vorlage = r.sharedMaterial;
+                    quelle = "naechster Renderer: " + r.gameObject.name;
+                }
+            }
+
+            if (vorlage != null)
+            {
+                Material copy = new Material(vorlage);
+                copy.name = "NDR_ArenaGround";
+                return copy;
+            }
+
+            // Letzter Ausweg: eigenes Material auf einem Shader, den das Spiel
+            // selbst benutzt. Dieselbe Kette wie in ItemFactory.MakeMaterial.
+            Shader shader = Shader.Find("Standard");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null) shader = Shader.Find("Diffuse");
+            if (shader == null) return null;
+
+            Material eigen = new Material(shader);
+            eigen.name = "NDR_ArenaGround";
+            if (eigen.HasProperty("_Color"))
+                eigen.color = new Color(0.42f, 0.40f, 0.36f);
+            quelle = "eigener Shader " + shader.name;
+            return eigen;
+        }
+
+        /// <summary>
+        /// Terrain.activeTerrain.materialTemplate ueber Reflexion.
+        ///
+        /// `Terrain` liegt in UnityEngine.TerrainModule, und build.ps1
+        /// referenziert die Assembly nicht. Ueber AccessTools zu gehen ist
+        /// derselbe Weg, den das Plugin fuer alle Spieltypen nimmt, und spart
+        /// einen Verweis, der auf einem anderen Rechner fehlen koennte.
+        ///
+        /// Liefert null, wenn das Terrain den eingebauten Standard benutzt -
+        /// materialTemplate ist dann leer. Dafuer gibt es die naechste Quelle.
+        /// </summary>
+        static Material TerrainMaterial()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("UnityEngine.Terrain");
+                if (t == null) return null;
+                MethodInfo aktiv = AccessTools.PropertyGetter(t, "activeTerrain");
+                if (aktiv == null) return null;
+                object terrain = aktiv.Invoke(null, null);
+                if (terrain == null) return null;
+                MethodInfo mat = AccessTools.PropertyGetter(t, "materialTemplate");
+                if (mat == null) return null;
+                return mat.Invoke(terrain, null) as Material;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Testflaeche: Terrain-Material nicht "
+                    + "lesbar (" + ex.Message + ")");
                 return null;
             }
-            Material copy = new Material(r.sharedMaterial);
-            copy.name = "NDR_ArenaGround";
-            return copy;
+        }
+
+        /// <summary>Naechstgelegener Renderer mit brauchbarem Material.</summary>
+        static Renderer NearbyRenderer(Vector3 nahe)
+        {
+            MeshRenderer[] alle = UnityEngine.Object.FindObjectsOfType<MeshRenderer>();
+            Renderer beste = null;
+            float abstand = float.MaxValue;
+            for (int i = 0; i < alle.Length; i++)
+            {
+                MeshRenderer r = alle[i];
+                if (r == null || !r.enabled) continue;
+                if (r.sharedMaterial == null || r.sharedMaterial.shader == null) continue;
+                float d = (r.transform.position - nahe).sqrMagnitude;
+                if (d < abstand) { abstand = d; beste = r; }
+            }
+            return beste;
         }
 
         /// <summary>Ebenes Gitter, damit die Beleuchtung nicht auf zwei Dreiecke faellt.</summary>
@@ -4259,10 +4362,19 @@ namespace NextDayRevival
         /// GameObject.CreatePrimitive - das haengt einen Collider an, und der
         /// wuerde dem Navigationsnetz darunter im Weg stehen.
         /// </summary>
-        static void Posts(float size)
+        static void Posts(float size, Material boden)
         {
             float half = size * 0.5f;
             Mesh post = Grid(1.2f, 1);
+
+            // Eigenes Material, sonst faerbt das Abdunkeln auch die Flaeche -
+            // und vor allem: ein MeshRenderer ohne Material ist magenta. Der
+            // erste Anlauf hatte hier gar keins gesetzt.
+            Material mark = new Material(boden);
+            mark.name = "NDR_ArenaMarker";
+            if (mark.HasProperty("_Color"))
+                mark.color = mark.color * 0.45f;
+
             for (int i = 0; i < 4; i++)
             {
                 float sx = (i == 0 || i == 3) ? -1f : 1f;
@@ -4273,7 +4385,8 @@ namespace NextDayRevival
                     new Vector3(sx * half, 1.4f, sz * half);
                 MeshFilter mf = marker.AddComponent<MeshFilter>();
                 mf.sharedMesh = post;
-                marker.AddComponent<MeshRenderer>();
+                MeshRenderer mr = marker.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = mark;
             }
         }
 
