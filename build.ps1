@@ -59,7 +59,10 @@ $refs = @(
     (Join-Path $managed "UnityEngine.dll"),
     (Join-Path $managed "UnityEngine.CoreModule.dll"),
     (Join-Path $managed "UnityEngine.ImageConversionModule.dll"),
-    (Join-Path $managed "UnityEngine.IMGUIModule.dll")
+    (Join-Path $managed "UnityEngine.IMGUIModule.dll"),
+    # AudioModule: die Drohne rechnet ihr Surren zur Laufzeit aus (AudioClip.Create)
+    # und haengt es an eine AudioSource. Ohne das hoert man sie nicht kommen.
+    (Join-Path $managed "UnityEngine.AudioModule.dll")
 ) | Where-Object { Test-Path $_ }
 
 $cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2", "/out:$staged")
@@ -99,6 +102,11 @@ $assets = @(
     "law.ndmesh", "law_diffuse.png", "law_normal.png",
     "law_icon.png", "law_weapon_icon.png",
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
+    "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
+    "t72_hull.ndmesh", "t72_turret.ndmesh", "t72_diffuse.png", "t72_normal.png",
+    "t72_scope.png",
+    "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
+    "shell125_icon.png",
     "scope50.png"
 )
 

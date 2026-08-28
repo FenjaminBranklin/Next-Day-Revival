@@ -26,16 +26,22 @@ GROUPS = [
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),
+    ("drone", ["drone_mesh.py", "drone_texture.py", "drone_icon.py"]),
+    ("t72", ["t72_mesh.py", "t72_texture.py", "t72_scope.py",
+             "shell125_mesh.py", "shell125_texture.py", "shell125_icon.py",
+             "mesh_preview.py t72"]),
     ("scope", ["scope50.py"]),
     ("preview", ["mesh_preview.py"]),
 ]
 
 
 def run(script):
+    """Ein Eintrag ist "skript.py" oder "skript.py argument"."""
     print("-" * 74)
     print(">>> " + script)
     print("-" * 74)
-    r = subprocess.run([sys.executable, os.path.join(ROOT, script)],
+    teile = script.split()
+    r = subprocess.run([sys.executable, os.path.join(ROOT, teile[0])] + teile[1:],
                        cwd=ROOT, capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     if r.stdout:

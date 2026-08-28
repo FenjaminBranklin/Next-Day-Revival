@@ -87,7 +87,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.4.5";
+        public const string VERSION = "0.5.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -130,15 +130,62 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgTurretExplosionRadius;
         internal static ConfigEntry<bool> CfgTurretInvertX;
         internal static ConfigEntry<bool> CfgTurretScopeOverlay;
+        internal static ConfigEntry<float> CfgTurretAimLead;
         internal static ConfigEntry<float> CfgTurretSeatX;
         internal static ConfigEntry<float> CfgTurretSeatY;
         internal static ConfigEntry<float> CfgTurretSeatZ;
+        internal static ConfigEntry<bool> CfgTank;
+        internal static ConfigEntry<string> CfgTankKey;
+        internal static ConfigEntry<bool> CfgTankSwapMesh;
+        internal static ConfigEntry<int> CfgTankSeats;
+        internal static ConfigEntry<float> CfgTankDamage;
+        internal static ConfigEntry<float> CfgTankExplosionDamage;
+        internal static ConfigEntry<float> CfgTankExplosionRadius;
+        internal static ConfigEntry<float> CfgTankDelay;
+        internal static ConfigEntry<float> CfgTankRange;
+        internal static ConfigEntry<float> CfgTankTurnSpeed;
+        internal static ConfigEntry<float> CfgTankFov;
+        internal static ConfigEntry<int> CfgTankAmmoId;
+        internal static ConfigEntry<int> CfgTankSpawnAmmo;
+        internal static ConfigEntry<bool> CfgTankScope;
         internal static ConfigEntry<bool> CfgSpawnCar;
         internal static ConfigEntry<string> CfgSpawnCarKey;
         internal static ConfigEntry<string> CfgSpawnCarName;
         internal static ConfigEntry<float> CfgSpawnCarDistance;
         internal static ConfigEntry<bool> CfgAdmin;
         internal static ConfigEntry<string> CfgAdminKey;
+        internal static ConfigEntry<string> CfgAdminIds;
+        internal static ConfigEntry<bool> CfgDrone;
+        internal static ConfigEntry<string> CfgDroneKey;
+        internal static ConfigEntry<float> CfgDroneThrust;
+        internal static ConfigEntry<float> CfgDroneSideThrust;
+        internal static ConfigEntry<float> CfgDroneLift;
+        internal static ConfigEntry<float> CfgDroneGravity;
+        internal static ConfigEntry<float> CfgDroneDrag;
+        internal static ConfigEntry<float> CfgDroneMaxSpeed;
+        internal static ConfigEntry<float> CfgDroneSensitivity;
+        internal static ConfigEntry<bool> CfgDroneInvertX;
+        internal static ConfigEntry<bool> CfgDroneInvertY;
+        internal static ConfigEntry<float> CfgDroneFov;
+        internal static ConfigEntry<float> CfgDroneDamage;
+        internal static ConfigEntry<float> CfgDroneRadius;
+        internal static ConfigEntry<float> CfgDroneLaunchForward;
+        internal static ConfigEntry<float> CfgDroneLaunchUp;
+        internal static ConfigEntry<float> CfgDroneLaunchSpeed;
+        internal static ConfigEntry<float> CfgDroneArmDelay;
+        internal static ConfigEntry<float> CfgDroneSafeRadius;
+        internal static ConfigEntry<int> CfgDroneEventCode;
+        internal static ConfigEntry<float> CfgDroneNetHz;
+        internal static ConfigEntry<float> CfgDroneModelScale;
+        internal static ConfigEntry<bool> CfgDroneSound;
+        internal static ConfigEntry<float> CfgDroneSoundVolume;
+        internal static ConfigEntry<float> CfgDroneSoundRange;
+        internal static ConfigEntry<float> CfgDroneFlightTime;
+        internal static ConfigEntry<float> CfgDroneRange;
+        internal static ConfigEntry<float> CfgDroneNoiseFrom;
+        internal static ConfigEntry<bool> CfgDroneOverlay;
+        internal static ConfigEntry<bool> CfgDroneRequireItem;
+        internal static ConfigEntry<int> CfgDroneItemId;
         internal static ConfigEntry<bool> CfgArena;
         internal static ConfigEntry<string> CfgArenaKey;
         internal static ConfigEntry<float> CfgArenaSize;
@@ -173,6 +220,7 @@ namespace NextDayRevival
             PatchLawDrop();
             Turret.Install(_harmony);
             ColdHook.Install(_harmony);
+            DroneInputHook.Install(_harmony);
 
             StartCoroutine(LateSetup());
         }
@@ -334,6 +382,13 @@ namespace NextDayRevival
             CfgTurretScopeOverlay = Config.Bind("Turret", "ScopeOverlay", false,
                 "Zusaetzlich das Zielfernrohrbild ueberblenden. Aus, seit die "
                 + "Kamera im Rohr sitzt - das Bild verdeckte nur die Sicht.");
+            CfgTurretAimLead = Config.Bind("Turret", "AimLead", 5f,
+                "Wie weit die Zielrichtung der Rohrstellung vorauslaufen darf, "
+                + "in Grad. Der Blick haengt seit 0.4.9 am ROHR, nicht mehr an "
+                + "der Maus: das Bild schwenkt genau so schnell wie der Turm. "
+                + "Ohne diese Grenze liefe die Maus beliebig weit voraus und der "
+                + "Turm drehte nach dem Loslassen noch sekundenlang weiter. "
+                + "0 klebt die Maus starr ans Rohr.");
             CfgTurretSeatX = Config.Bind("Turret", "SeatX", 0.0f,
                 "Lage des Geschuetzsitzes, relativ zu SeatPoints. Die vorhandenen "
                 + "Sitze liegen bei x plus/minus 1.35, y 0.15, z -4.62 bis 5.77.");
@@ -350,6 +405,162 @@ namespace NextDayRevival
                 "Menue im Spiel: Items geben, Werkzeuge schalten.");
             CfgAdminKey = Config.Bind("Admin", "Key", "F8",
                 "Taste, die das Adminmenue auf- und zumacht.");
+            // Steam-Ids, die das Menue oeffnen duerfen, mit Komma getrennt.
+            // Leer laesst es fuer jeden auf - so bleibt ein Rechner ohne
+            // laufendes Steam pruefbar. Die Vorgabe sind die beiden Konten,
+            // die bisher am Masterserver waren.
+            CfgAdminIds = Config.Bind("Admin", "AllowedSteamIds",
+                "76561198376412662,76561198035776744",
+                "Steam-Ids mit Zugang zum Menue, mit Komma getrennt. Leer = alle.");
+
+            // ------------------------------------------------------- Drohne
+            //
+            // Die Werte stehen im Verhaeltnis zu dem, was es schon gibt:
+            // die LAW detoniert mit 900 auf 12 m, das BTR-Geschuetz mit 350
+            // auf 5 m. Die Drohne ist eine Wegwerfwaffe, keine Artillerie -
+            // ihr Reiz ist die Zustellung, nicht die Wucht.
+            CfgDrone = Config.Bind("Drone", "Enabled", true,
+                "FPV-Drohne: auf Tastendruck starten, durch ihre Kamera fliegen, "
+                + "beim ersten Treffer detoniert sie. Der Koerper bleibt stehen "
+                + "und ist waehrenddessen angreifbar. Notausgang bei Problemen: "
+                + "hier false eintragen.");
+            CfgDroneKey = Config.Bind("Drone", "Key", "V",
+                "Taste zum Starten und Abbrechen, Name aus UnityEngine.KeyCode.");
+            CfgDroneThrust = Config.Bind("Drone", "Thrust", 16f,
+                "Schub vor und zurueck (W/S) in Metern je Sekundenquadrat.");
+            CfgDroneSideThrust = Config.Bind("Drone", "SideThrust", 11f,
+                "Schub seitwaerts (A/D).");
+            CfgDroneLift = Config.Bind("Drone", "Lift", 14f,
+                "Schub nach oben (Leertaste) und unten (Strg oder C).");
+            CfgDroneGravity = Config.Bind("Drone", "Gravity", -5.5f,
+                "Schwerkraft auf die Drohne. Absichtlich schwaecher als die "
+                + "echten -9.81: eine Drohne haengt in der Luft, sie faellt nicht.");
+            CfgDroneDrag = Config.Bind("Drone", "Drag", 1.4f,
+                "Luftwiderstand je Sekunde, geschwindigkeitsproportional. Groesser "
+                + "heisst traeger und stabiler, kleiner heisst schwebender. Zusammen "
+                + "mit Thrust bestimmt das die Endgeschwindigkeit (Thrust/Drag).");
+            CfgDroneMaxSpeed = Config.Bind("Drone", "MaxSpeed", 32f,
+                "Harte Obergrenze der Geschwindigkeit in m/s.");
+            CfgDroneSensitivity = Config.Bind("Drone", "Sensitivity", 2.4f,
+                "Mausempfindlichkeit fuer Nick und Gier.");
+            CfgDroneInvertX = Config.Bind("Drone", "InvertX", false,
+                "Seitenrichtung der Maus umkehren.");
+            CfgDroneInvertY = Config.Bind("Drone", "InvertY", false,
+                "Hoehenrichtung der Maus umkehren.");
+            CfgDroneFov = Config.Bind("Drone", "FOV", 92f,
+                "Bildwinkel der Drohnenkamera. FPV-Kameras sind extrem weitwinklig; "
+                + "0 laesst den Bildwinkel des Spiels stehen.");
+            CfgDroneDamage = Config.Bind("Drone", "Damage", 550f,
+                "Sprengschaden beim Einschlag. LAW 900, BTR-Geschuetz 350.");
+            CfgDroneRadius = Config.Bind("Drone", "Radius", 7f,
+                "Wirkungsradius der Detonation in Metern. LAW 12, BTR 5.");
+            CfgDroneLaunchForward = Config.Bind("Drone", "LaunchForward", 2.2f,
+                "Wie weit vor der Kamera die Drohne entsteht. Zu klein, und sie "
+                + "startet im eigenen Koerper.");
+            CfgDroneLaunchUp = Config.Bind("Drone", "LaunchUp", 0.5f,
+                "Wie weit ueber der Kamera die Drohne entsteht.");
+            CfgDroneLaunchSpeed = Config.Bind("Drone", "LaunchSpeed", 5f,
+                "Anfangsgeschwindigkeit in Blickrichtung.");
+            CfgDroneArmDelay = Config.Bind("Drone", "ArmDelay", 0.35f,
+                "Sekunden nach dem Start, in denen keine Kollision zaehlt. Faengt "
+                + "alles ab, was im ersten Moment im Weg steht - Rucksack, Waffe, "
+                + "Fahrzeug.");
+            CfgDroneSafeRadius = Config.Bind("Drone", "SafeRadius", 2.5f,
+                "Treffer naeher als das am Startpunkt gelten als eigener Koerper.");
+            CfgDroneEventCode = Config.Bind("Drone", "EventCode", 176,
+                "Erster von drei Photon-Ereigniscodes (Start, Lauf, Ende). Photon "
+                + "verwirft alles ab 200; das Spiel selbst benutzt nur 1 und 2.");
+            CfgDroneNetHz = Config.Bind("Drone", "NetHz", 15f,
+                "Wie oft je Sekunde Lage und Blickrichtung an die anderen gehen. "
+                + "Dazwischen wird bei ihnen interpoliert.");
+            CfgDroneModelScale = Config.Bind("Drone", "ModelScale", 1f,
+                "Groesse des Modells, das die anderen sehen.");
+            CfgDroneSound = Config.Bind("Drone", "Sound", true,
+                "Surren. NICHT nur Verzierung: wer von einer Drohne getroffen wird, "
+                + "muss vorher die Gelegenheit gehabt haben, sie zu hoeren.");
+            CfgDroneSoundVolume = Config.Bind("Drone", "SoundVolume", 0.8f,
+                "Lautstaerke des Surrens, 0 bis 1.");
+            CfgDroneSoundRange = Config.Bind("Drone", "SoundRange", 140f,
+                "Ab dieser Entfernung in Metern ist die Drohne nicht mehr zu hoeren.");
+            CfgDroneFlightTime = Config.Bind("Drone", "FlightTime", 90f,
+                "Flugzeit in Sekunden. Danach gehen die Motoren aus: sie faellt, "
+                + "und beim Aufschlag detoniert sie NICHT.");
+            CfgDroneRange = Config.Bind("Drone", "Range", 300f,
+                "Funkreichweite in Metern. Darueber reisst die Verbindung ab, der "
+                + "Blick faellt zum Koerper zurueck und die Drohne ist weg. Der "
+                + "Wert ist GERATEN und gehoert nachgemessen - er ist zugleich die "
+                + "billigste Absicherung dagegen, dass die Drohne aus dem geladenen "
+                + "Teil der Welt fliegt und durch den Boden faellt.");
+            CfgDroneNoiseFrom = Config.Bind("Drone", "NoiseFrom", 250f,
+                "Ab dieser Entfernung rauscht das Bild. Das ist die Vorwarnung vor "
+                + "dem Abriss.");
+            CfgDroneOverlay = Config.Bind("Drone", "Overlay", true,
+                "Videoeinblendung: Akku, Entfernung, Hoehe, Fadenkreuz, Rauschen.");
+            CfgDroneRequireItem = Config.Bind("Drone", "RequireItem", true,
+                "Der Start verbraucht eine Drohne aus dem Rucksack. Auf false "
+                + "startet sie aus dem Nichts - zum Ausprobieren, nicht zum Spielen.");
+            CfgDroneItemId = Config.Bind("Drone", "ItemId", 1163,
+                "Item, das ein Start verbraucht.");
+
+            // -------------------------------------------------- Kampfpanzer
+            //
+            // Der Panzer ist ein umgebautes BTR-80A und benutzt dasselbe
+            // Geschuetz - nur mit diesen Werten statt der Turret-Werte. Sie
+            // stehen bewusst im Verhaeltnis zu dem, was es schon gibt:
+            //
+            //   BTR-Geschuetz   750 direkt,  350 auf  5 m, alle 0,9 s
+            //   M72 LAW                      900 auf 12 m, Einwegwaffe
+            //   T-72           1500 direkt, 1600 auf 16 m, alle 12 s
+            //
+            // Das eigentliche Gegengewicht zur Feuerkraft ist nicht die
+            // Ladezeit, sondern die Turmdrehung: 22 Grad je Sekunde gegen 140
+            // beim BTR. Wer von der Seite kommt, ist vorbei, bevor das Rohr
+            // steht. Alle Werte sind Vorschlaege und gehoeren im Spiel
+            // gedreht, bis es sich richtig anfuehlt.
+            CfgTank = Config.Bind("Tank", "Enabled", true,
+                "Kampfpanzer T-72: auf Tastendruck einen umgebauten BTR-80A "
+                + "hinstellen - anderes Mesh, vier Sitze, schweres Geschuetz. "
+                + "Notausgang bei Problemen: hier false eintragen.");
+            CfgTankKey = Config.Bind("Tank", "Key", "F9",
+                "Taste, die den Panzer hinstellt, Name aus UnityEngine.KeyCode. "
+                + "F7 stellt weiter den unveraenderten BTR hin.");
+            CfgTankSwapMesh = Config.Bind("Tank", "SwapMesh", true,
+                "Das sichtbare Mesh gegen das Panzermodell tauschen. Auf false "
+                + "bleibt ein BTR stehen, der sich wie ein Panzer verhaelt - "
+                + "zum Trennen der Fehlersuche.");
+            CfgTankSeats = Config.Bind("Tank", "Seats", 3,
+                "Mitfahrplaetze ohne den Geschuetzsitz. 3 ergibt zusammen mit "
+                + "dem Geschuetz die geforderten vier Sitze.");
+            CfgTankDamage = Config.Bind("Tank", "Damage", 1500f,
+                "Direkter Trefferschaden. Doppelt so hart wie das BTR-Geschuetz.");
+            CfgTankExplosionDamage = Config.Bind("Tank", "ExplosionDamage", 1600f,
+                "Sprengschaden am Einschlag. Knapp doppelt so viel wie die LAW - "
+                + "die ist eine Handwaffe, das hier ist Artillerie.");
+            CfgTankExplosionRadius = Config.Bind("Tank", "ExplosionRadius", 16f,
+                "Wirkungsradius der Sprengwirkung in Metern.");
+            CfgTankDelay = Config.Bind("Tank", "FireDelay", 12f,
+                "Ladezeit in Sekunden. Ein echter T-72 laedt mit Lademaschine in "
+                + "sieben bis acht Sekunden, von Hand in ueber zwanzig. Waehrend "
+                + "der Ladezeit steht ein Balken unter dem Fadenkreuz.");
+            CfgTankRange = Config.Bind("Tank", "Range", 1600f,
+                "Reichweite des Schusses in Metern.");
+            CfgTankTurnSpeed = Config.Bind("Tank", "TurnSpeed", 22f,
+                "Grad je Sekunde, mit denen das Rohr der Blickrichtung nachdreht. "
+                + "Ein Turm dieser Groesse dreht langsam, und genau das ist das "
+                + "Gegengewicht zur Feuerkraft.");
+            CfgTankFov = Config.Bind("Tank", "FOV", 20f,
+                "Bildwinkel im Geschuetz. Enger als beim BTR (26).");
+            CfgTankAmmoId = Config.Bind("Tank", "AmmoItemId", 2053,
+                "Item, das ein Schuss verbraucht. 2053 ist die 125-mm-Granate.");
+            CfgTankSpawnAmmo = Config.Bind("Tank", "SpawnAmmo", 5,
+                "So viele 125-mm-Granaten wandern beim Hinstellen des Panzers in "
+                + "den Rucksack. Ohne das steht ein Panzer da, der nicht "
+                + "schiesst - und im Log stand nur eine Zeile darueber, im Spiel "
+                + "gar nichts. 0 schaltet die Beigabe ab.");
+            CfgTankScope = Config.Bind("Tank", "Scope", true,
+                "Panzerzielfernrohr statt freier Sicht: schwarze Fassung, runde "
+                + "Linse, Winkelmarke mit Entfernungsskala (t72_scope.png). "
+                + "Ersetzt im Panzer das einfache Fadenkreuz.");
 
             CfgArena = Config.Bind("Research", "Arena", false,
                 "Auf Tastendruck eine ebene Testflaeche vor dem Spieler bauen, "
@@ -448,6 +659,28 @@ namespace NextDayRevival
                 "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png",
                 "rocket_icon.png", null,
                 1, 0, 6.0f));
+
+            Items.Add(new ItemDef(
+                2053, 2030, false,
+                "125-mm-Granate (1)",
+                "Eine Granate fuer die 2A46 des T-72. Getrennt geladen: Geschoss "
+                + "mit Aufschlagzuender, dahinter die Treibladung. Ein Einschlag "
+                + "reisst mehr weg als die LAW - dafuer dauert das Nachladen im "
+                + "Turm zwoelf Sekunden.",
+                "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
+                "shell125_icon.png", null,
+                1, 0, 9.0f));
+
+            Items.Add(new ItemDef(
+                1163, 2030, false,
+                "FPV-Drohne",
+                "Kleiner Quadrokopter mit Kamera und fest verbautem Sprengkopf. "
+                + "Wird auf Tastendruck gestartet und aus der Ferne geflogen; "
+                + "waehrenddessen steht man selbst unbeweglich in der Gegend "
+                + "herum. Kommt nicht zurueck.",
+                "drone.ndmesh", "drone_diffuse.png", "drone_normal.png",
+                "drone_icon.png", null,
+                1, 0, 1.4f));
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -681,18 +914,20 @@ namespace NextDayRevival
             else CursorGuard.Tick();
             Research.Tick();
             Turret.Tick();
+            Drone.Tick();
             Arena.Tick();
             CarSpawn.Tick();
         }
 
         void LateUpdate()
         {
-            Turret.LateTick();
+            CameraOwner.LateTick();
         }
 
         void OnGUI()
         {
             Turret.DrawScope();
+            Drone.Draw();
             Admin.Draw();
         }
 
@@ -2746,6 +2981,238 @@ namespace NextDayRevival
         }
     }
 
+    // -------------------------------------------------- Kameraschiedsrichter
+
+    /// <summary>
+    /// Haelt fest, WER gerade durch die Kamera des Spiels sieht.
+    ///
+    /// Bis 0.4.5 gab es genau einen Bewerber - das Geschuetz - und deshalb
+    /// stand die Uebernahme mitten in `Turret`: `TakeCamera` legte die
+    /// Kameraskripte still, und `CameraHook.Postfix` rief fest
+    /// `Turret.LateTick()` auf. Mit der Drohne gibt es zwei Bewerber um
+    /// dieselbe Transform, und zwei Skripte, die im selben Frame dieselbe
+    /// Transform schreiben, ergeben genau das zuckende Bild, gegen das
+    /// `TakeCamera` ueberhaupt gebaut wurde.
+    ///
+    /// Deshalb haelt jetzt diese Klasse den Blick: wer sehen will, meldet sich
+    /// mit `Request` an und bekommt den Zuschlag oder eine Absage. Nur der
+    /// eingetragene Halter wird von `LateTick` aufgerufen. Der Zweite bekommt
+    /// nichts - bewusst kein Verdraengen, denn dann muesste geklaert werden,
+    /// was mit dem Ersten passiert, und ein Geschuetz ohne Bild ist schlimmer
+    /// als eine Drohne, die nicht startet.
+    ///
+    /// Uebernommen aus `Turret` und dort geloescht. Verhalten unveraendert:
+    /// dieselbe Liste `CamDrivers`, dieselbe Suche vom Kameraobjekt nach OBEN
+    /// durch alle Elternteile, dieselbe Wiederherstellung des Bildwinkels.
+    /// </summary>
+    public static class CameraOwner
+    {
+        public const int None = 0;
+        public const int Turm = 1;
+        public const int Drohne = 2;
+
+        /// <summary>
+        /// Skripte, die die Kamera bewegen und deshalb waehrend einer
+        /// Uebernahme stillstehen muessen.
+        ///
+        /// Der wichtige davon ist `MouseOrbitController`: eine Umlaufkamera mit
+        /// `Target`, die im LateUpdate jeden Frame neu um ihr Ziel herum
+        /// gerechnet wird. Genau das war der Grund, warum drei Anlaeufe mit
+        /// Postfix und LateUpdate nichts genutzt haben - egal wohin das Plugin
+        /// die Kamera setzte, sie stand einen Wimpernschlag spaeter wieder
+        /// hinter dem BTR und blickte darauf. Gegen ein Skript, das jeden Frame
+        /// schreibt, hilft kein zweites Skript, das auch jeden Frame schreibt,
+        /// sondern nur Abschalten.
+        ///
+        /// Bildeffekte (`CrosshairCameraEffect`, `ScopeCameraEffect`, ...)
+        /// stehen absichtlich NICHT auf der Liste: sie bewegen nichts, und ohne
+        /// sie saehe das Bild anders aus als im Rest des Spiels.
+        /// </summary>
+        static readonly string[] CamDrivers = {
+            "MouseOrbitController", "CameraController", "CameraControllerFPS",
+            "CameraFPSController", "CameraTPSController", "CameraAimingSystem",
+            "CameraFollow", "CameraWork", "CameraAnimationController",
+            "CameraSpectratorController", "CameraSwitch", "CameraPathAnimator",
+            "CameraRotateAroundTrailer", "CameraRotateWhenLoaded",
+        };
+
+        static int _owner;
+        static string _label = "";
+        static Camera _cam;                  // die uebernommene Kamera
+        static float _fovBack = -1f;         // Bildwinkel vor der Uebernahme
+        static readonly List<Behaviour> _paused = new List<Behaviour>();
+
+        public static int Owner { get { return _owner; } }
+        public static bool Has(int who) { return _owner == who; }
+        public static bool Free { get { return _owner == None; } }
+
+        /// <summary>
+        /// Die Kamera, die wirklich rendert. Camera.main ist der Normalfall;
+        /// findet sich keine mit dem Tag MainCamera, wird die aktivste
+        /// genommen.
+        ///
+        /// Waehrend einer Uebernahme immer dieselbe wie beim Anmelden. Sonst
+        /// koennten Kameralage, Fadenkreuz und Schuss auf drei verschiedene
+        /// Kameras zeigen.
+        /// </summary>
+        public static Camera ViewCamera()
+        {
+            if (_cam != null) return _cam;
+            Camera cam = Camera.main;
+            if (cam != null) return cam;
+            Camera[] all = Camera.allCameras;
+            Camera best = null;
+            for (int i = 0; i < all.Length; i++)
+                if (all[i] != null && all[i].enabled
+                    && (best == null || all[i].depth > best.depth))
+                    best = all[i];
+            return best;
+        }
+
+        /// <summary>
+        /// Meldet einen Halter an. Liefert false, wenn schon jemand sieht oder
+        /// keine Kamera zu finden ist - der Aufrufer darf dann NICHT so tun,
+        /// als haette er den Blick.
+        ///
+        /// `pauseDrivers` bildet den alten Schalter `Turret/TakeCamera` ab:
+        /// Halter wird man auch ohne Stilllegen, dann bewegt das Spiel die
+        /// Kamera aber weiter mit.
+        /// </summary>
+        public static bool Request(int who, bool pauseDrivers, string label)
+        {
+            if (who == None) return false;
+            if (_owner == who) return true;
+            if (_owner != None)
+            {
+                RevivalPlugin.L.LogInfo(label + ": die Kamera haelt gerade \""
+                    + _label + "\" - Anfrage abgelehnt.");
+                return false;
+            }
+
+            Camera cam = ViewCamera();
+            if (cam == null)
+            {
+                RevivalPlugin.L.LogWarning(label + ": keine Kamera gefunden.");
+                return false;
+            }
+
+            _owner = who;
+            _label = label;
+            _cam = cam;
+            if (!pauseDrivers)
+            {
+                RevivalPlugin.L.LogInfo(label + ": Kamera uebernommen, ohne die "
+                    + "Kameraskripte stillzulegen - das Bild wird wandern.");
+                return true;
+            }
+
+            try
+            {
+                _paused.Clear();
+                _fovBack = _cam.fieldOfView;
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+
+                // Vom Kameraobjekt aus nach OBEN durch alle Elternteile: die
+                // Umlaufkamera sitzt am Rig, nicht an der Kamera selbst.
+                Transform t = _cam.transform;
+                while (t != null)
+                {
+                    Component[] comps = t.gameObject.GetComponents(typeof(Behaviour));
+                    for (int i = 0; i < comps.Length; i++)
+                    {
+                        Behaviour b = comps[i] as Behaviour;
+                        if (b == null || !b.enabled) continue;
+                        string n = b.GetType().Name;
+                        bool drives = false;
+                        for (int k = 0; k < CamDrivers.Length; k++)
+                            if (CamDrivers[k] == n) { drives = true; break; }
+                        if (!drives) continue;
+                        b.enabled = false;
+                        _paused.Add(b);
+                        if (sb.Length > 0) sb.Append(", ");
+                        sb.Append(n).Append(" an \"").Append(t.name).Append("\"");
+                    }
+                    t = t.parent;
+                }
+                RevivalPlugin.L.LogInfo(label + ": Kamera uebernommen: \"" + _cam.name
+                    + "\", stillgelegt: " + (sb.Length == 0 ? "nichts" : sb.ToString())
+                    + ". Aktive Kameras: " + Kameraliste() + ".");
+                if (_paused.Count == 0)
+                    RevivalPlugin.L.LogWarning(label + ": kein einziges "
+                        + "Kameraskript gefunden - dann bewegt etwas anderes die "
+                        + "Kamera, und der Blick wird wieder wandern.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError(label + ": Kamera uebernehmen: " + ex);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Gibt die Kamera dem Spiel zurueck. Muss immer laufen, auch bei
+        /// Ausnahme. Ein fremder Halter wird nicht angetastet - wer nicht
+        /// angemeldet ist, kann auch nicht abmelden.
+        /// </summary>
+        public static void Release(int who)
+        {
+            if (_owner != who || who == None) return;
+            try
+            {
+                for (int i = 0; i < _paused.Count; i++)
+                    if (_paused[i] != null) _paused[i].enabled = true;
+                if (_paused.Count > 0)
+                    RevivalPlugin.L.LogInfo(_label + ": Kamera zurueckgegeben ("
+                        + _paused.Count + " Skripte wieder an).");
+                _paused.Clear();
+                if (_cam != null && _fovBack > 0f) _cam.fieldOfView = _fovBack;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError(_label + ": Kamera zurueckgeben: " + ex);
+            }
+            finally
+            {
+                _fovBack = -1f;
+                _cam = null;
+                _owner = None;
+                _label = "";
+            }
+        }
+
+        /// <summary>
+        /// Setzt die Kamera fuer den aktuellen Halter. Gehoert in LateUpdate:
+        /// das Spiel zieht seine eigene Kamera im selben Frame nach, und wer
+        /// zuerst schreibt, verliert.
+        /// </summary>
+        public static void LateTick()
+        {
+            if (_owner == Turm) Turret.LateTick();
+            else if (_owner == Drohne) Drone.LateTick();
+        }
+
+        /// <summary>
+        /// Alle eingeschalteten Kameras mit Tiefe und Bildausschnitt, einmal
+        /// fuer das Log. Ohne das ist im Nachhinein nicht zu unterscheiden, ob
+        /// die Kamera falsch stand oder ob eine ganz andere gerendert hat.
+        /// </summary>
+        public static string Kameraliste()
+        {
+            Camera[] all = Camera.allCameras;
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i] == null) continue;
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(all[i].name).Append(" (Tiefe ").Append(all[i].depth)
+                  .Append(", FOV ").Append(all[i].fieldOfView)
+                  .Append(all[i].targetTexture == null ? "" : ", in Textur")
+                  .Append(")");
+            }
+            return sb.Length == 0 ? "keine" : sb.ToString();
+        }
+    }
+
     // ------------------------------------------------------- BTR-Geschuetz
 
     /// <summary>
@@ -2812,124 +3279,78 @@ namespace NextDayRevival
         static bool _aimInit;
         static Texture2D _dot;               // 1x1 weiss, fuer das Fadenkreuz
         static bool _camLogged;
+        // Kamera, Bildwinkel und die stillgelegten Skripte liegen seit 0.4.6
+        // in CameraOwner - der Turm ist nur noch einer von zwei Bewerbern.
         static string _ammoFrom;             // zuletzt benutzte Munitionsquelle
-        static Camera _cam;                  // die uebernommene Kamera
-        static float _fovBack = -1f;         // Bildwinkel vor der Uebernahme
-        static readonly List<Behaviour> _paused = new List<Behaviour>();
-
-        /// <summary>
-        /// Skripte, die die Kamera bewegen und deshalb waehrend des Zielens
-        /// stillstehen muessen.
-        ///
-        /// Der wichtige davon ist `MouseOrbitController`: eine Umlaufkamera mit
-        /// `Target`, die im LateUpdate jeden Frame neu um ihr Ziel herum
-        /// gerechnet wird. Genau das war der Grund, warum drei Anlaeufe mit
-        /// Postfix und LateUpdate nichts genutzt haben - egal wohin das Plugin
-        /// die Kamera setzte, sie stand einen Wimpernschlag spaeter wieder
-        /// hinter dem BTR und blickte darauf. Gegen ein Skript, das jeden Frame
-        /// schreibt, hilft kein zweites Skript, das auch jeden Frame schreibt,
-        /// sondern nur Abschalten.
-        ///
-        /// Bildeffekte (`CrosshairCameraEffect`, `ScopeCameraEffect`, ...)
-        /// stehen absichtlich NICHT auf der Liste: sie bewegen nichts, und ohne
-        /// sie saehe das Bild anders aus als im Rest des Spiels.
-        /// </summary>
-        static readonly string[] CamDrivers = {
-            "MouseOrbitController", "CameraController", "CameraControllerFPS",
-            "CameraFPSController", "CameraTPSController", "CameraAimingSystem",
-            "CameraFollow", "CameraWork", "CameraAnimationController",
-            "CameraSpectratorController", "CameraSwitch", "CameraPathAnimator",
-            "CameraRotateAroundTrailer", "CameraRotateWhenLoaded",
-        };
+        static float _nextTry;               // Wiederholsperre nach Fehlschuss
+        static string _hinweis;              // Einblendung ueber dem Fadenkreuz
+        static float _hinweisBis;
+        static float _leerGemeldet;          // Log-Bremse fuer "keine Munition"
+        static Texture2D _tankScope;         // Panzerzielfernrohr
+        static bool _tankScopeTried;
 
         public static bool Manning { get { return _manning; } }
+
+        // --------------------------------------------------- Zwei Werteprofile
+        //
+        // Das Geschuetz des Panzers ist DASSELBE Geschuetz - nur langsamer,
+        // seltener und haerter. Deshalb steht hier kein zweiter Bauplan,
+        // sondern nur eine zweite Wertetabelle. Alles andere - Sitz, Kamera,
+        // Zielen, Munition aus dem Rucksack, Leuchtspur, Explosion - bleibt
+        // Zeile fuer Zeile dieselbe.
+        //
+        // `_tank` gilt fuer das Fahrzeug, in dem der Spieler gerade sitzt, und
+        // wird ausschliesslich in Rescan gesetzt und in Clear zurueckgenommen.
+        static bool _tank;
+
+        static float Damage()
+        { return _tank ? RevivalPlugin.CfgTankDamage.Value : RevivalPlugin.CfgTurretDamage.Value; }
+
+        static float Reichweite()
+        { return _tank ? RevivalPlugin.CfgTankRange.Value : RevivalPlugin.CfgTurretRange.Value; }
+
+        static float Ladezeit()
+        { return _tank ? RevivalPlugin.CfgTankDelay.Value : RevivalPlugin.CfgTurretDelay.Value; }
+
+        static float Drehgeschwindigkeit()
+        { return _tank ? RevivalPlugin.CfgTankTurnSpeed.Value : RevivalPlugin.CfgTurretTurnSpeed.Value; }
+
+        static float Bildwinkel()
+        { return _tank ? RevivalPlugin.CfgTankFov.Value : RevivalPlugin.CfgTurretFov.Value; }
+
+        static float Sprengschaden()
+        { return _tank ? RevivalPlugin.CfgTankExplosionDamage.Value : RevivalPlugin.CfgTurretExplosionDamage.Value; }
+
+        static float Sprengradius()
+        { return _tank ? RevivalPlugin.CfgTankExplosionRadius.Value : RevivalPlugin.CfgTurretExplosionRadius.Value; }
+
+        static int MunitionsId()
+        { return _tank ? RevivalPlugin.CfgTankAmmoId.Value : RevivalPlugin.CfgTurretAmmoId.Value; }
 
         /// <summary>
         /// Der EINZIGE Weg, `_manning` zu aendern. Vorher stand das an sechs
         /// Stellen verstreut, und jede haette die Kamera zurueckgeben muessen.
+        ///
+        /// Liefert seit 0.4.6 zurueck, ob es geklappt hat: haelt jemand anders
+        /// den Blick - die Drohne fliegt -, wird das Geschuetz NICHT besetzt.
+        /// Ohne diese Rueckmeldung saesse der Spieler im Turm und saehe durch
+        /// die Drohne.
         /// </summary>
-        static void SetManning(bool on)
+        static bool SetManning(bool on)
         {
-            if (_manning == on) return;
-            _manning = on;
-            if (on) TakeCamera(); else ReleaseCamera();
-        }
-
-        /// <summary>
-        /// Legt die Kameraskripte des Spiels still und merkt sich, welche das
-        /// waren. Erst danach bleibt die Kamera dort stehen, wohin `LateTick`
-        /// sie setzt.
-        /// </summary>
-        static void TakeCamera()
-        {
-            _cam = ViewCamera();
-            if (_cam == null)
+            if (_manning == on) return true;
+            if (on)
             {
-                RevivalPlugin.L.LogWarning("Geschuetz: keine Kamera gefunden.");
-                return;
+                if (!CameraOwner.Request(CameraOwner.Turm,
+                                         RevivalPlugin.CfgTurretTakeCamera.Value,
+                                         "Geschuetz"))
+                    return false;
+                _manning = true;
+                return true;
             }
-            if (!RevivalPlugin.CfgTurretTakeCamera.Value) return;
-            try
-            {
-                _paused.Clear();
-                _fovBack = _cam.fieldOfView;
-                System.Text.StringBuilder sb = new System.Text.StringBuilder();
-
-                // Vom Kameraobjekt aus nach OBEN durch alle Elternteile: die
-                // Umlaufkamera sitzt am Rig, nicht an der Kamera selbst.
-                Transform t = _cam.transform;
-                while (t != null)
-                {
-                    Component[] comps = t.gameObject.GetComponents(typeof(Behaviour));
-                    for (int i = 0; i < comps.Length; i++)
-                    {
-                        Behaviour b = comps[i] as Behaviour;
-                        if (b == null || !b.enabled) continue;
-                        string n = b.GetType().Name;
-                        bool drives = false;
-                        for (int k = 0; k < CamDrivers.Length; k++)
-                            if (CamDrivers[k] == n) { drives = true; break; }
-                        if (!drives) continue;
-                        b.enabled = false;
-                        _paused.Add(b);
-                        if (sb.Length > 0) sb.Append(", ");
-                        sb.Append(n).Append(" an \"").Append(t.name).Append("\"");
-                    }
-                    t = t.parent;
-                }
-                RevivalPlugin.L.LogInfo("Geschuetzkamera uebernommen: \"" + _cam.name
-                    + "\", stillgelegt: " + (sb.Length == 0 ? "nichts" : sb.ToString())
-                    + ". Aktive Kameras: " + Kameraliste() + ".");
-                if (_paused.Count == 0)
-                    RevivalPlugin.L.LogWarning("Geschuetzkamera: kein einziges "
-                        + "Kameraskript gefunden - dann bewegt etwas anderes die "
-                        + "Kamera, und der Blick wird wieder wandern.");
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogError("Geschuetzkamera uebernehmen: " + ex);
-            }
-        }
-
-        /// <summary>Gibt die Kamera dem Spiel zurueck. Muss immer laufen.</summary>
-        static void ReleaseCamera()
-        {
-            try
-            {
-                for (int i = 0; i < _paused.Count; i++)
-                    if (_paused[i] != null) _paused[i].enabled = true;
-                if (_paused.Count > 0)
-                    RevivalPlugin.L.LogInfo("Geschuetzkamera zurueckgegeben ("
-                        + _paused.Count + " Skripte wieder an).");
-                _paused.Clear();
-                if (_cam != null && _fovBack > 0f) _cam.fieldOfView = _fovBack;
-                _fovBack = -1f;
-                _cam = null;
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogError("Geschuetzkamera zurueckgeben: " + ex);
-            }
+            _manning = false;
+            CameraOwner.Release(CameraOwner.Turm);
+            return true;
         }
 
         // --------------------------------------------------------- Einhaengen
@@ -3044,10 +3465,16 @@ namespace NextDayRevival
                 if (!_manning) return;
 
                 Aim();
-                if (Input.GetMouseButton(0) && Time.time >= _nextShot)
+                // Die Ladezeit laeuft erst, wenn wirklich eine Granate im Rohr
+                // war. Bis 0.4.8 stand sie eine Zeile zu frueh: wer keine
+                // Munition hatte, bekam zwoelf Sekunden Ladebalken und nie
+                // einen Schuss - im Spiel sah das aus wie ein kaputtes
+                // Geschuetz, im Log stand die Begruendung.
+                if (Input.GetMouseButton(0) && Time.time >= _nextShot
+                    && Time.time >= _nextTry)
                 {
-                    _nextShot = Time.time + RevivalPlugin.CfgTurretDelay.Value;
-                    Fire();
+                    if (Fire()) _nextShot = Time.time + Ladezeit();
+                    else _nextTry = Time.time + 1f;
                 }
             }
             catch (Exception ex)
@@ -3080,6 +3507,7 @@ namespace NextDayRevival
 
                 _vgs = all[i];
                 _vehicleRoot = mb.transform;
+                _tank = Tank.IstPanzer(mb.transform);
                 Transform seatPoints = Field(_vgs, "SeatPoints") as Transform;
                 _gunnerIndex = seatPoints == null ? -1 : GunnerIndexOf(seatPoints);
                 CollectTurrets(mb.transform);
@@ -3098,6 +3526,7 @@ namespace NextDayRevival
         {
             _vgs = null;
             _vehicleRoot = null;
+            _tank = false;
             _gunnerIndex = -1;
             _turrets = new Transform[0];
             _turretRenderer = null;
@@ -3119,7 +3548,8 @@ namespace NextDayRevival
                 if (r != null) { _turretRenderer = r; break; }
             }
             RevivalPlugin.L.LogInfo("Geschuetz: " + _turrets.Length
-                + " Turmobjekte gefunden, Sitzindex " + _gunnerIndex + ".");
+                + " Turmobjekte gefunden, Sitzindex " + _gunnerIndex
+                + ", Werteprofil " + (_tank ? "T-72" : "BTR-80A") + ".");
         }
 
         // ------------------------------------------------------- Platzwechsel
@@ -3155,7 +3585,7 @@ namespace NextDayRevival
             // und kam nie hinein. Genau so sah es im Log vom 2026-08-28 aus.
             if (here == _gunnerIndex)
             {
-                SetManning(true);
+                if (!SetManning(true)) return;   // CameraOwner begruendet selbst
                 _aimInit = false;
                 _camLogged = false;
                 RevivalPlugin.L.LogInfo("Geschuetz besetzt (Sitz " + here
@@ -3164,7 +3594,7 @@ namespace NextDayRevival
             }
 
             if (!ChangeSeat(_gunnerIndex)) return;   // ChangeSeat begruendet selbst
-            SetManning(true);
+            if (!SetManning(true)) return;           // CameraOwner begruendet selbst
             _aimInit = false;
             _camLogged = false;
             RevivalPlugin.L.LogInfo("Geschuetz besetzt (Sitz " + _gunnerIndex
@@ -3270,8 +3700,29 @@ namespace NextDayRevival
             if (_yaw > 180f) _yaw -= 360f;
             if (_yaw < -180f) _yaw += 360f;
 
+            // Vorlauf begrenzen. Seit 0.4.9 haengt der BLICK am Rohr, nicht an
+            // der Maus - das Bild schwenkt also nur so schnell wie der Turm.
+            // Ohne diese Grenze liefe die Sollrichtung beliebig weit voraus:
+            // eine schnelle Mausbewegung, und der Turm dreht danach noch
+            // Sekunden weiter, ohne dass der Spieler es aufhalten kann.
+            float lead = RevivalPlugin.CfgTurretAimLead.Value;
+            if (lead >= 0f)
+            {
+                float iy, ip;
+                if (IstStellung(out iy, out ip))
+                {
+                    _yaw = iy + Mathf.Clamp(Mathf.DeltaAngle(iy, _yaw), -lead, lead);
+                    _pitch = ip + Mathf.Clamp(_pitch - ip, -lead, lead);
+                    _pitch = Mathf.Clamp(_pitch,
+                                         RevivalPlugin.CfgTurretPitchMin.Value,
+                                         RevivalPlugin.CfgTurretPitchMax.Value);
+                    if (_yaw > 180f) _yaw -= 360f;
+                    if (_yaw < -180f) _yaw += 360f;
+                }
+            }
+
             Quaternion want = LocalRotationFor(_yaw, _pitch);
-            float step = RevivalPlugin.CfgTurretTurnSpeed.Value * Time.deltaTime;
+            float step = Drehgeschwindigkeit() * Time.deltaTime;
             for (int i = 0; i < _turrets.Length; i++)
                 _turrets[i].localRotation =
                     Quaternion.RotateTowards(_turrets[i].localRotation, want, step);
@@ -3304,6 +3755,25 @@ namespace NextDayRevival
         }
 
         /// <summary>
+        /// Seiten- und Hoehenwinkel, die das Rohr WIRKLICH hat - die Umkehrung
+        /// von LocalRotationFor. Zwei Aufgaben haengen daran: der Sollwinkel
+        /// beim Aufsitzen (damit der Turm nicht springt) und die Vorlaufgrenze
+        /// beim Zielen.
+        /// </summary>
+        static bool IstStellung(out float yaw, out float pitch)
+        {
+            yaw = 0f;
+            pitch = 0f;
+            if (_turrets.Length == 0) return false;
+            Vector3 d = _turrets[0].localRotation * new Vector3(0f, -1f, 0f);
+            if (d.sqrMagnitude < 0.000001f) return false;
+            d.Normalize();
+            pitch = Mathf.Asin(Mathf.Clamp(d.z, -1f, 1f)) * Mathf.Rad2Deg;
+            yaw = Mathf.Atan2(-d.x, -d.y) * Mathf.Rad2Deg;
+            return true;
+        }
+
+        /// <summary>
         /// Sollwinkel aus der aktuellen Stellung uebernehmen, damit der Turm
         /// beim Aufsitzen nicht springt.
         /// </summary>
@@ -3312,12 +3782,7 @@ namespace NextDayRevival
             _aimInit = true;
             _yaw = 0f;
             _pitch = 0f;
-            if (_turrets.Length == 0) return;
-            Vector3 d = _turrets[0].localRotation * new Vector3(0f, -1f, 0f);
-            if (d.sqrMagnitude < 0.000001f) return;
-            d.Normalize();
-            _pitch = Mathf.Asin(Mathf.Clamp(d.z, -1f, 1f)) * Mathf.Rad2Deg;
-            _yaw = Mathf.Atan2(-d.x, -d.y) * Mathf.Rad2Deg;
+            IstStellung(out _yaw, out _pitch);
         }
 
         /// <summary>
@@ -3334,11 +3799,20 @@ namespace NextDayRevival
                 Camera cam = ViewCamera();
                 if (cam == null) return;
 
-                // Der Blick folgt der SOLLRICHTUNG, nicht der Rohrstellung.
-                // Das Rohr dreht mit TurnSpeed nach - haengt die Kamera daran,
-                // kriecht das ganze Bild der Maus hinterher, und zielen fuehlt
-                // sich an wie durch Sirup. Das Rohr holt binnen Sekundenbruchteil
-                // auf, und von innen sieht man es ohnehin nicht.
+                // Der Blick folgt der ROHRSTELLUNG, nicht der Sollrichtung.
+                //
+                // Bis 0.4.8 war es umgekehrt, mit der Begruendung, ein Bild,
+                // das der Maus hinterherkriecht, fuehle sich an wie Sirup. Beim
+                // BTR mit 140 Grad je Sekunde stimmt das auch. Beim Panzer mit
+                // 22 Grad je Sekunde war es dagegen ein Balanceloch: das
+                // Fadenkreuz - und damit der Schuss, siehe AimRay - sprang
+                // sofort ueberall hin, waehrend das Rohr noch schwenkte. Die
+                // langsame Turmdrehung, das erklaerte Gegengewicht zur
+                // Feuerkraft, kostete nichts.
+                //
+                // Jetzt schwenkt das Bild genau so schnell wie der Turm. Damit
+                // das nicht zaeh wird, begrenzt Aim() den Vorlauf der Maus auf
+                // AimLead Grad.
                 Vector3 dir, up;
                 AimAxes(out dir, out up);
                 Vector3 side = Vector3.Cross(up, dir).normalized;
@@ -3357,8 +3831,8 @@ namespace NextDayRevival
                 // Bildwinkel jeden Frame nachziehen, nicht einmal beim
                 // Aufsitzen: Zielfernrohr- und Sprinteffekte des Spiels
                 // schreiben ihn sonst wieder um.
-                if (RevivalPlugin.CfgTurretFov.Value > 1f)
-                    cam.fieldOfView = RevivalPlugin.CfgTurretFov.Value;
+                if (Bildwinkel() > 1f)
+                    cam.fieldOfView = Bildwinkel();
 
                 if (!_camLogged)
                 {
@@ -3373,7 +3847,7 @@ namespace NextDayRevival
                     // als eine, ist im Nachhinein zu klaeren, ob wirklich die
                     // oben genannte das Bild macht.
                     RevivalPlugin.L.LogInfo("Geschuetzkamera: aktive Kameras "
-                        + Kameraliste() + ".");
+                        + CameraOwner.Kameraliste() + ".");
                 }
             }
             catch (Exception ex)
@@ -3384,67 +3858,26 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Alle eingeschalteten Kameras mit Tiefe und Bildausschnitt, einmal
-        /// fuer das Log. Ohne das ist im Nachhinein nicht zu unterscheiden, ob
-        /// die Kamera falsch stand oder ob eine ganz andere gerendert hat.
-        /// </summary>
-        static string Kameraliste()
-        {
-            Camera[] all = Camera.allCameras;
-            System.Text.StringBuilder sb = new System.Text.StringBuilder();
-            for (int i = 0; i < all.Length; i++)
-            {
-                if (all[i] == null) continue;
-                if (sb.Length > 0) sb.Append(", ");
-                sb.Append(all[i].name).Append(" (Tiefe ").Append(all[i].depth)
-                  .Append(", FOV ").Append(all[i].fieldOfView)
-                  .Append(all[i].targetTexture == null ? "" : ", in Textur")
-                  .Append(")");
-            }
-            return sb.Length == 0 ? "keine" : sb.ToString();
-        }
-
-        /// <summary>
-        /// Die Kamera, die wirklich rendert. Camera.main ist der Normalfall;
-        /// findet sich keine mit dem Tag MainCamera, wird die aktivste
-        /// genommen. Der Name landet einmal im Log - sonst ist im Nachhinein
-        /// nicht zu unterscheiden, ob die Lage falsch war oder die Kamera.
+        /// Die Kamera, die wirklich rendert - jetzt aus einer Hand, damit
+        /// Turm und Drohne nicht auf verschiedene Kameras zeigen koennen.
         /// </summary>
         static Camera ViewCamera()
         {
-            // Waehrend des Zielens immer dieselbe wie beim Aufsitzen. Sonst
-            // koennten Kameralage, Fadenkreuz und Schuss auf drei
-            // verschiedene Kameras zeigen.
-            if (_cam != null) return _cam;
-            Camera cam = Camera.main;
-            if (cam != null) return cam;
-            Camera[] all = Camera.allCameras;
-            Camera best = null;
-            for (int i = 0; i < all.Length; i++)
-                if (all[i] != null && all[i].enabled
-                    && (best == null || all[i].depth > best.depth))
-                    best = all[i];
-            return best;
+            return CameraOwner.ViewCamera();
         }
 
         /// <summary>
-        /// Soll-Blickachse aus Seiten- und Hoehenwinkel: wohin der Turm ZEIGEN
-        /// SOLL, unabhaengig davon, wie weit er schon geschwenkt ist. Ohne
-        /// Turm faellt es auf die tatsaechliche Rohrrichtung zurueck.
+        /// Blickachse des Geschuetzes: die tatsaechliche Rohrachse mitsamt
+        /// ihrer Oben-Richtung. Im Turmraum ist -Y die Rohrrichtung und +Z
+        /// oben (siehe LocalRotationFor).
         /// </summary>
         static void AimAxes(out Vector3 dir, out Vector3 up)
         {
             dir = BarrelDirection();
             up = Vector3.up;
             if (_turrets.Length == 0) return;
-            Transform parent = _turrets[0].parent;
-            if (parent == null) return;
-
-            Quaternion want = LocalRotationFor(_yaw, _pitch);
-            Vector3 d = parent.TransformDirection(want * new Vector3(0f, -1f, 0f));
-            Vector3 u = parent.TransformDirection(want * new Vector3(0f, 0f, 1f));
-            if (d.sqrMagnitude < 0.000001f || u.sqrMagnitude < 0.000001f) return;
-            dir = d.normalized;
+            Vector3 u = _turrets[0].TransformDirection(new Vector3(0f, 0f, 1f));
+            if (u.sqrMagnitude < 0.000001f) return;
             up = u.normalized;
         }
 
@@ -3474,14 +3907,26 @@ namespace NextDayRevival
 
         // ----------------------------------------------------------- Schiessen
 
-        static void Fire()
+        /// <summary>
+        /// Ein Schuss. Liefert false, wenn KEINER gefallen ist - dann darf auch
+        /// die Ladezeit nicht anlaufen.
+        /// </summary>
+        static bool Fire()
         {
             if (RevivalPlugin.CfgTurretAmmo.Value && !TakeRound())
             {
-                RevivalPlugin.L.LogInfo("Geschuetz: keine Munition (Item "
-                    + RevivalPlugin.CfgTurretAmmoId.Value
-                    + ") im Kofferraum und im Rucksack.");
-                return;
+                Hinweis("Keine Munition - Item " + MunitionsId()
+                        + " fehlt in Kofferraum, Rucksack und Weste", 2.5f);
+                // Der Mausknopf bleibt gedrueckt; ohne Bremse stuende diese
+                // Zeile jede Sekunde im Log.
+                if (Time.time >= _leerGemeldet)
+                {
+                    _leerGemeldet = Time.time + 10f;
+                    RevivalPlugin.L.LogInfo("Geschuetz: keine Munition (Item "
+                        + MunitionsId()
+                        + ") im Kofferraum und im Rucksack.");
+                }
+                return false;
             }
 
             // Rueckstoss: das Rohr schlaegt hoch, der Sollwinkel wandert mit.
@@ -3496,15 +3941,15 @@ namespace NextDayRevival
             AimRay(out origin, out dir);
             Vector3 impact;
             GameObject struck = RaycastPastVehicle(origin, dir,
-                                                   RevivalPlugin.CfgTurretRange.Value, out impact);
+                                                   Reichweite(), out impact);
 
             // Leuchtspur IMMER, auch wenn nichts getroffen wurde. Bis heute war
             // ein Schuss weder zu sehen noch zu hoeren - im Spiel sah das aus,
             // als ginge das Geschuetz gar nicht los.
             Vector3 ende = struck == null
-                ? origin + dir * RevivalPlugin.CfgTurretRange.Value : impact;
+                ? origin + dir * Reichweite() : impact;
             Tracer(origin + dir * 3f, ende);
-            if (struck == null) return;
+            if (struck == null) return true;
 
             // Sprenggranate am Einschlag. Das BTR-80A schiesst 30 mm
             // Sprengmunition, keine Gewehrkugeln: der Einschlag gehoert
@@ -3514,8 +3959,7 @@ namespace NextDayRevival
                 try
                 {
                     RocketHook.Detonate(impact - dir * 0.15f,
-                        RevivalPlugin.CfgTurretExplosionDamage.Value,
-                        RevivalPlugin.CfgTurretExplosionRadius.Value, 3f);
+                        Sprengschaden(), Sprengradius(), 3f);
                 }
                 catch (Exception ex)
                 {
@@ -3523,12 +3967,20 @@ namespace NextDayRevival
                 }
             }
 
-            float damage = RevivalPlugin.CfgTurretDamage.Value;
+            float damage = Damage();
 
             // Reihenfolge und Methodennamen wie in FireOneShot.
-            if (TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return;
-            if (TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return;
+            if (TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return true;
+            if (TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return true;
             TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage);
+            return true;
+        }
+
+        /// <summary>Kurze Einblendung ueber dem Fadenkreuz.</summary>
+        internal static void Hinweis(string text, float sekunden)
+        {
+            _hinweis = text;
+            _hinweisBis = Time.time + sekunden;
         }
 
         /// <summary>Leuchtspur von der Muendung zum Einschlag.</summary>
@@ -3749,6 +4201,97 @@ namespace NextDayRevival
             return false;
         }
 
+        /// <summary>
+        /// Removes ONE whole item `wanted` from the player's own inventory -
+        /// backpack, vest or weapon slots. Used by the drone.
+        ///
+        /// WHY NOT TakeFrom: TakeFrom decrements ItemBullets, which is the
+        /// number of rounds INSIDE one item (a belt of 200, a box of 10) - the
+        /// right thing for turret ammunition, the wrong thing for an item that
+        /// is consumed as a whole. A drone with Bullets 1 ended up at
+        /// "Bullets 0" and stayed in the slot, because the slot was never
+        /// cleared: TakeFrom looked for NetworkClearContainerSlot(int) or
+        /// ClearBackpackSlot(int) on the PlayerInventoryManager, and neither
+        /// exists there (CONFIRMED, IL: the manager has
+        /// ClearBackpackSlot(int SlotID, int ItemID, bool onChangeInventory)).
+        /// The reflection lookup returned null and nothing happened.
+        ///
+        /// The game's own RemoveItem(int ItemID, int Count) does all of it:
+        /// it counts the item across backpack, vest and weapon slots, refuses
+        /// if there are fewer than Count, and clears whole slots through
+        /// ClearBackpackSlot / ClearGearSlot / ClearWeaponSlot with
+        /// onChangeInventory set - so UI and server data are updated too.
+        /// It returns void, hence the count before and after.
+        /// </summary>
+        internal static bool TakeItem(int wanted, string wer)
+        {
+            List<object> invs = PlayerInventories();
+            for (int i = 0; i < invs.Count; i++)
+            {
+                object inv = invs[i];
+                int vorher = CountItem(inv, wanted);
+                if (vorher <= 0) continue;
+
+                MethodInfo remove = AccessTools.Method(inv.GetType(), "RemoveItem",
+                    new Type[] { typeof(int), typeof(int) }, null);
+                if (remove == null)
+                {
+                    RevivalPlugin.L.LogWarning(wer + ": PlayerInventoryManager."
+                        + "RemoveItem(int,int) fehlt - Item " + wanted
+                        + " kann nicht verbraucht werden.");
+                    return false;
+                }
+
+                try { remove.Invoke(inv, new object[] { wanted, 1 }); }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogError(wer + ": RemoveItem(" + wanted
+                        + ", 1) fehlgeschlagen: " + ex);
+                    return false;
+                }
+
+                int nachher = CountItem(inv, wanted);
+                if (nachher >= vorher)
+                {
+                    RevivalPlugin.L.LogWarning(wer + ": Item " + wanted
+                        + " liegt noch " + nachher + " mal im Inventar - "
+                        + "RemoveItem hat nichts weggenommen.");
+                    return false;
+                }
+                RevivalPlugin.L.LogInfo(wer + ": Item " + wanted
+                    + " verbraucht, " + nachher + " uebrig.");
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// How often item `wanted` lies in one PlayerInventoryManager -
+        /// backpack, vest and weapon slots, the same three containers
+        /// RemoveItem walks. Slot counts come from the arrays themselves, not
+        /// from the fixed 7 and 3 the game hardcodes.
+        /// </summary>
+        static int CountItem(object inv, int wanted)
+        {
+            return CountIn(Field(inv, "_backpackData"), wanted)
+                 + CountIn(Field(inv, "_gearsData"), wanted)
+                 + CountIn(Field(inv, "_weaponsData"), wanted);
+        }
+
+        static int CountIn(object data, int wanted)
+        {
+            if (data == null) return 0;
+            Array ids = Field(data, "ItemID") as Array;
+            if (ids == null) return 0;
+            int n = 0;
+            for (int i = 0; i < ids.Length; i++)
+            {
+                object box = ids.GetValue(i);
+                if (box != null && Obscured(box) == wanted) n++;
+            }
+            return n;
+        }
+
         static bool _leerBerichtet;
 
         /// <summary>
@@ -3762,7 +4305,7 @@ namespace NextDayRevival
             if (_leerBerichtet) return;
             _leerBerichtet = true;
             RevivalPlugin.L.LogInfo("Geschuetz: keine Munition (Item "
-                + RevivalPlugin.CfgTurretAmmoId.Value + ") gefunden.");
+                + MunitionsId() + ") gefunden.");
             RevivalPlugin.L.LogInfo("  Kofferraum: "
                 + (trunk == null ? "nicht gefunden" : Inhalt(Field(trunk, "_containerData"))));
             RevivalPlugin.L.LogInfo("  eigene Inventare: " + invs.Count);
@@ -3808,6 +4351,20 @@ namespace NextDayRevival
         /// </summary>
         static bool TakeFrom(object owner, object data, string woher)
         {
+            return TakeFrom(owner, data, woher, MunitionsId(), "Geschuetz");
+        }
+
+        /// <summary>
+        /// Takes ONE ROUND out of a container: ItemBullets minus one, and the
+        /// slot is cleared once it hits zero. Only the turret calls this - the
+        /// drone used to, and that was the bug: an item that is consumed whole
+        /// is not a stack of rounds. It now goes through TakeItem above.
+        /// The wanted-id and caller parameters stay, they cost nothing and
+        /// keep the log readable.
+        /// </summary>
+        internal static bool TakeFrom(object owner, object data, string woher,
+                                      int wanted, string wer)
+        {
             if (owner == null || data == null) return false;
 
             Array ids = Field(data, "ItemID") as Array;
@@ -3815,7 +4372,6 @@ namespace NextDayRevival
             Array slots = Field(data, "SlotID") as Array;
             if (ids == null || bullets == null) return false;
 
-            int wanted = RevivalPlugin.CfgTurretAmmoId.Value;
             for (int i = 0; i < ids.Length && i < bullets.Length; i++)
             {
                 object idBox = ids.GetValue(i);
@@ -3833,7 +4389,7 @@ namespace NextDayRevival
                     if (_ammoFrom != woher)
                     {
                         _ammoFrom = woher;
-                        RevivalPlugin.L.LogInfo("Geschuetz: Munition aus dem " + woher + ".");
+                        RevivalPlugin.L.LogInfo(wer + ": Nachschub aus dem " + woher + ".");
                     }
                     return true;
                 }
@@ -3841,16 +4397,68 @@ namespace NextDayRevival
                 int slot = i;
                 if (slots != null && i < slots.Length && slots.GetValue(i) != null)
                     slot = Obscured(slots.GetValue(i));
-                MethodInfo clear = AccessTools.Method(owner.GetType(),
-                    "NetworkClearContainerSlot", new Type[] { typeof(int) }, null);
-                if (clear == null)
-                    clear = AccessTools.Method(owner.GetType(),
-                        "ClearBackpackSlot", new Type[] { typeof(int) }, null);
-                if (clear != null) clear.Invoke(owner, new object[] { slot });
+                ClearSlot(owner, woher, slot, wanted, wer);
                 _ammoFrom = woher;
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Empties one slot after its last round was used. Three containers,
+        /// three different methods - and NONE of them is the one-int
+        /// NetworkClearContainerSlot that this code called for all of them
+        /// until 0.4.9. On a PlayerInventoryManager that lookup returned null,
+        /// so an empty ammunition item kept sitting in the backpack with
+        /// "0 rounds" (CONFIRMED, IL, signatures below).
+        ///
+        /// The onChangeInventory flag is set on purpose: it makes the game
+        /// call OnChangedInventoryData(true), which refreshes the UI and the
+        /// server-side copy. Without it the slot would only look empty until
+        /// the next reload.
+        /// </summary>
+        static void ClearSlot(object owner, string woher, int slot, int wanted, string wer)
+        {
+            MethodInfo m;
+            object[] args;
+
+            if (woher == "Weste")
+            {
+                // ClearGearSlot(int SlotID, int ItemID, bool animate,
+                //               bool onChangeInventory, bool onlyValuesClear)
+                m = AccessTools.Method(owner.GetType(), "ClearGearSlot",
+                    new Type[] { typeof(int), typeof(int), typeof(bool),
+                                 typeof(bool), typeof(bool) }, null);
+                args = new object[] { slot, wanted, false, true, false };
+            }
+            else if (woher == "Rucksack")
+            {
+                // ClearBackpackSlot(int SlotID, int ItemID, bool onChangeInventory)
+                m = AccessTools.Method(owner.GetType(), "ClearBackpackSlot",
+                    new Type[] { typeof(int), typeof(int), typeof(bool) }, null);
+                args = new object[] { slot, wanted, true };
+            }
+            else
+            {
+                // The trunk is an ItemsContainer and has this one.
+                m = AccessTools.Method(owner.GetType(), "NetworkClearContainerSlot",
+                    new Type[] { typeof(int) }, null);
+                args = new object[] { slot };
+            }
+
+            if (m == null)
+            {
+                RevivalPlugin.L.LogWarning(wer + ": Platz " + slot + " im " + woher
+                    + " laesst sich nicht leeren - passende Methode an "
+                    + owner.GetType().Name + " nicht gefunden.");
+                return;
+            }
+            try { m.Invoke(owner, args); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError(wer + ": " + m.Name + " auf Platz " + slot
+                    + " (" + woher + ") fehlgeschlagen: " + ex);
+            }
         }
 
         /// <summary>
@@ -3908,11 +4516,24 @@ namespace NextDayRevival
 
         public static void DrawScope()
         {
+            // Der Hinweis gilt auch ausserhalb des Geschuetzes: die
+            // Munitionsbeigabe beim Panzerspawn meldet sich, waehrend der
+            // Spieler noch daneben steht.
+            try { DrawHinweis(); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Hinweis: " + ex); }
             if (!_manning) return;
             try
             {
-                if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
-                if (RevivalPlugin.CfgTurretCrosshair.Value) DrawCrosshair();
+                // Im Panzer sieht man durch ein Zielfernrohr, nicht ueber vier
+                // Striche im freien Bild: schwarze Fassung, runde Linse,
+                // Winkelmarke mit Entfernungsskala. Das Bild bringt sein
+                // Fadenkreuz selbst mit - deshalb bleibt daneben keines stehen.
+                bool panzerglas = _tank && RevivalPlugin.CfgTankScope.Value
+                                  && PanzerScope() != null;
+                if (panzerglas) Vollbild(PanzerScope());
+                else if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
+                if (RevivalPlugin.CfgTurretCrosshair.Value && !panzerglas) DrawCrosshair();
+                DrawLadeanzeige();
             }
             catch (Exception ex)
             {
@@ -3928,11 +4549,49 @@ namespace NextDayRevival
                 _scope = Assets.Texture("scope50.png", false, true);
             }
             if (_scope == null) return;
+            Vollbild(_scope);
+        }
 
+        static Texture2D PanzerScope()
+        {
+            if (!_tankScopeTried)
+            {
+                _tankScopeTried = true;
+                _tankScope = Assets.Texture("t72_scope.png", false, true);
+                if (_tankScope == null)
+                    RevivalPlugin.L.LogWarning("Panzer: t72_scope.png fehlt neben "
+                        + "der DLL - es bleibt beim einfachen Fadenkreuz.");
+            }
+            return _tankScope;
+        }
+
+        /// <summary>
+        /// Quadratische Blende ueber das ganze Bild, wie ScaleMode.ScaleAndCrop:
+        /// die Breite passt, oben und unten wird abgeschnitten. StretchToFill
+        /// auf ein Rechteck wuerde den Linsenkreis zum Ei ziehen.
+        /// </summary>
+        static void Vollbild(Texture2D tex)
+        {
             float side = Mathf.Max(Screen.width, Screen.height);
             Rect r = new Rect((Screen.width - side) * 0.5f,
                               (Screen.height - side) * 0.5f, side, side);
-            GUI.DrawTexture(r, _scope, ScaleMode.StretchToFill, true);
+            GUI.DrawTexture(r, tex, ScaleMode.StretchToFill, true);
+        }
+
+        /// <summary>Einblendung ueber dem Fadenkreuz - "keine Munition" und aehnliches.</summary>
+        static void DrawHinweis()
+        {
+            if (_hinweis == null || Time.time > _hinweisBis) return;
+            float w = Mathf.Max(280f, Screen.width * 0.36f);
+            float x = (Screen.width - w) * 0.5f;
+            float y = Screen.height * 0.5f - Mathf.Max(60f, Screen.height * 0.10f);
+
+            Color old = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(new Rect(x, y, w, 24f), Punkt());
+            GUI.color = new Color(1f, 0.72f, 0.35f, 0.95f);
+            GUI.Label(new Rect(x + 8f, y + 3f, w - 16f, 22f), _hinweis);
+            GUI.color = old;
         }
 
         /// <summary>
@@ -3952,13 +4611,7 @@ namespace NextDayRevival
         /// </summary>
         static void DrawCrosshair()
         {
-            if (_dot == null)
-            {
-                _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
-                _dot.SetPixel(0, 0, Color.white);
-                _dot.Apply();
-                _dot.hideFlags = HideFlags.HideAndDontSave;
-            }
+            Punkt();
 
             float cx = Screen.width * 0.5f;
             float cy = Screen.height * 0.5f;
@@ -3988,6 +4641,54 @@ namespace NextDayRevival
                 GUI.DrawTexture(new Rect(cx - w, y, w * 2f, 1.5f), _dot);
             }
 
+            GUI.color = old;
+        }
+
+        /// <summary>Die 1x1-Textur, aus der alle Anzeigen gezeichnet werden.</summary>
+        static Texture2D Punkt()
+        {
+            if (_dot == null)
+            {
+                _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                _dot.SetPixel(0, 0, Color.white);
+                _dot.Apply();
+                _dot.hideFlags = HideFlags.HideAndDontSave;
+            }
+            return _dot;
+        }
+
+        /// <summary>
+        /// Ladebalken unter dem Fadenkreuz, solange nachgeladen wird.
+        ///
+        /// Er erscheint erst ab zwei Sekunden Ladezeit: beim BTR mit 0,9 s
+        /// waere er ein Flackern und im Weg. Beim Panzer ist er dagegen kein
+        /// Schmuck, sondern notwendig - zwoelf Sekunden lang passiert auf
+        /// Mausklick nichts, und ohne Rueckmeldung haelt der Spieler das
+        /// Geschuetz fuer kaputt.
+        /// </summary>
+        static void DrawLadeanzeige()
+        {
+            float ladezeit = Ladezeit();
+            if (ladezeit < 2f) return;
+            float rest = _nextShot - Time.time;
+            if (rest <= 0f || rest > ladezeit) return;
+
+            float w = Mathf.Max(160f, Screen.width * 0.16f);
+            float h = Mathf.Max(5f, Screen.height * 0.007f);
+            float x = (Screen.width - w) * 0.5f;
+            float y = Screen.height * 0.5f + Mathf.Max(44f, Screen.height * 0.08f);
+            float voll = 1f - Mathf.Clamp01(rest / ladezeit);
+
+            Color old = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(new Rect(x - 1f, y - 1f, w + 2f, h + 2f), Punkt());
+            GUI.color = new Color(0.10f, 0.10f, 0.09f, 0.80f);
+            GUI.DrawTexture(new Rect(x, y, w, h), Punkt());
+            GUI.color = new Color(0.85f, 0.55f, 0.15f, 0.95f);
+            GUI.DrawTexture(new Rect(x, y, w * voll, h), Punkt());
+            GUI.color = new Color(0.88f, 1f, 0.88f, 0.90f);
+            GUI.Label(new Rect(x, y + h + 3f, w, 22f),
+                      "Laedt " + rest.ToString("0.0") + " s");
             GUI.color = old;
         }
 
@@ -4526,6 +5227,7 @@ namespace NextDayRevival
         const int FensterId = 0x4E445241;
 
         static bool _offen;
+        static bool _fokusLoesen;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
         static Rect _fenster = new Rect(40f, 40f, 430f, 0f);
@@ -4535,13 +5237,90 @@ namespace NextDayRevival
 
         public static bool IsOpen { get { return _offen; } }
 
+        // -1 noch nicht geprueft, 0 nein, 1 ja. Einmal entschieden bleibt es
+        // so: die Steam-Id aendert sich waehrend einer Sitzung nicht.
+        static int _zutritt = -1;
+
+        // Wer das Menue oeffnen darf. Es setzt Panzer, Drohne und Items in die
+        // Welt - das gehoert nicht in jede Hand, die das Paket herunterlaedt.
+        //
+        // Das ist KEIN Schutz im Sinne von Sicherheit. Die Liste steht in einer
+        // Konfigurationsdatei auf dem Rechner des Spielers, und wer sie aendert,
+        // aendert sie. Es haelt das Menue von Haenden fern, die es nicht suchen.
+        // Was wirklich zaehlt, prueft ohnehin der Server gegen weapons_db.xml.
+        static bool Zutritt()
+        {
+            if (_zutritt >= 0) return _zutritt == 1;
+            _zutritt = 0;
+            try
+            {
+                string liste = RevivalPlugin.CfgAdminIds.Value;
+                if (liste == null) liste = "";
+                liste = liste.Trim();
+                if (liste.Length == 0) { _zutritt = 1; return true; }
+
+                string ich = SteamId();
+                if (ich == null)
+                {
+                    RevivalPlugin.L.LogInfo(
+                        "Adminmenue: eigene Steam-Id nicht lesbar, Menue bleibt zu.");
+                    return false;
+                }
+                string[] teile = liste.Split(',');
+                for (int i = 0; i < teile.Length; i++)
+                {
+                    if (teile[i].Trim() == ich) { _zutritt = 1; break; }
+                }
+                RevivalPlugin.L.LogInfo("Adminmenue: Steam-Id " + ich +
+                    (_zutritt == 1 ? " steht auf der Liste." : " steht nicht auf der Liste."));
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Adminmenue Zutritt: " + ex.Message);
+            }
+            return _zutritt == 1;
+        }
+
+        // SteamInterface::GetSteamID ist der Umweg des Spiels ueber
+        // Steamworks.SteamUser (liegt in Assembly-CSharp-firstpass, nicht in
+        // Assembly-CSharp). Zurueck kommt ein CSteamID; die Zahl steht in
+        // dessen Feld m_SteamID - belegt mit ildasm gegen beide Assemblies.
+        static string SteamId()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("SteamInterface");
+                if (t == null) return null;
+                MethodInfo m = AccessTools.Method(t, "GetSteamID", null, null);
+                if (m == null) return null;
+                object id = m.Invoke(null, null);
+                if (id == null) return null;
+                FieldInfo f = AccessTools.Field(id.GetType(), "m_SteamID");
+                if (f == null) return null;
+                object roh = f.GetValue(id);
+                if (roh == null) return null;
+                string s = roh.ToString();
+                return s == "0" ? null : s;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Steam-Id nicht lesbar: " + ex.Message);
+                return null;
+            }
+        }
+
         public static void Tick()
         {
-            if (!RevivalPlugin.CfgAdmin.Value) return;
+            if (!RevivalPlugin.CfgAdmin.Value || !Zutritt()) return;
             try
             {
                 if (!Input.GetKeyDown(Key())) return;
                 _offen = !_offen;
+                if (!_offen)
+                {
+                    _fokusLoesen = true;
+                    CursorZurueck();
+                }
                 RevivalPlugin.L.LogInfo("Adminmenue " + (_offen ? "auf" : "zu") + ".");
             }
             catch (Exception ex)
@@ -4550,13 +5329,42 @@ namespace NextDayRevival
             }
         }
 
+        static void CursorZurueck()
+        {
+            if (!CursorTracker.SawCall) return;
+            CursorTracker.Restoring = true;
+            try
+            {
+                Cursor.lockState = CursorTracker.DesiredLock;
+                Cursor.visible = CursorTracker.DesiredVisible;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Adminmenue Cursor zurueck: " + ex.Message);
+            }
+            finally { CursorTracker.Restoring = false; }
+        }
+
         public static void Draw()
         {
-            if (!_offen || !RevivalPlugin.CfgAdmin.Value) return;
+            // Vermutung: Das Mengenfeld haelt sonst den IMGUI-Tastaturfokus.
+            if (_fokusLoesen)
+            {
+                _fokusLoesen = false;
+                GUIUtility.keyboardControl = 0;
+                GUIUtility.hotControl = 0;
+            }
+            if (!_offen || !RevivalPlugin.CfgAdmin.Value || !Zutritt()) return;
             // Der Cursor gehoert waehrenddessen dem Menue. CursorGuard wird in
-            // RevivalPlugin.Update ausgesetzt, solange offen ist.
-            Cursor.visible = true;
-            Cursor.lockState = CursorLockMode.None;
+            // RevivalPlugin.Update ausgesetzt, solange offen ist. Restoring
+            // verhindert, dass diese Zugriffe als Spielwunsch gespeichert werden.
+            CursorTracker.Restoring = true;
+            try
+            {
+                Cursor.visible = true;
+                Cursor.lockState = CursorLockMode.None;
+            }
+            finally { CursorTracker.Restoring = false; }
             _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
                                         "Revival - Admin");
         }
@@ -4593,6 +5401,9 @@ namespace NextDayRevival
             RevivalPlugin.CfgSpawnCar.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgSpawnCar.Value,
                                  "Fahrzeugspawn (Taste " + RevivalPlugin.CfgSpawnCarKey.Value + ")");
+            RevivalPlugin.CfgTank.Value =
+                GUILayout.Toggle(RevivalPlugin.CfgTank.Value,
+                                 "Panzer T-72 (Taste " + RevivalPlugin.CfgTankKey.Value + ")");
             RevivalPlugin.CfgSceneJump.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgSceneJump.Value,
                                  "Szenensprung (Taste " + RevivalPlugin.CfgJumpKey.Value + ")");
@@ -4608,22 +5419,33 @@ namespace NextDayRevival
 
         static void Geben(ItemDef d)
         {
+            int menge = d.Bullets > 0 ? d.Bullets : 1;
+            if (_menge.Length > 0)
+            {
+                int gewuenscht;
+                if (int.TryParse(_menge, out gewuenscht) && gewuenscht > 0)
+                    menge = gewuenscht;
+            }
+            string meldung;
+            GibItem(d.Id, menge, out meldung);
+            Melde(meldung);
+        }
+
+        /// <summary>
+        /// Ein Item in den Rucksack legen. Seit 0.4.9 nicht mehr nur fuer das
+        /// Menue: der Panzerspawn legt hierueber seine Granaten dazu, damit
+        /// nicht wieder jemand vor einem Panzer steht, der nicht schiesst.
+        /// </summary>
+        internal static bool GibItem(int id, int menge, out string meldung)
+        {
             try
             {
-                int menge = d.Bullets > 0 ? d.Bullets : 1;
-                if (_menge.Length > 0)
-                {
-                    int gewuenscht;
-                    if (int.TryParse(_menge, out gewuenscht) && gewuenscht > 0)
-                        menge = gewuenscht;
-                }
-
                 object pim = InventarManager();
                 if (pim == null)
                 {
-                    Melde("PlayerInventoryManager nicht gefunden - im Hauptmenue "
-                          + "gibt es keinen. Erst ins Spiel gehen.");
-                    return;
+                    meldung = "PlayerInventoryManager nicht gefunden - im Hauptmenue "
+                              + "gibt es keinen. Erst ins Spiel gehen.";
+                    return false;
                 }
 
                 MethodInfo m = null;
@@ -4632,8 +5454,8 @@ namespace NextDayRevival
                     if (alle[i].Name == "AddBackpackItemFromValues") { m = alle[i]; break; }
                 if (m == null)
                 {
-                    Melde("AddBackpackItemFromValues fehlt - Spielversion anders?");
-                    return;
+                    meldung = "AddBackpackItemFromValues fehlt - Spielversion anders?";
+                    return false;
                 }
 
                 ParameterInfo[] ps = m.GetParameters();
@@ -4645,21 +5467,23 @@ namespace NextDayRevival
                     else if (pt.IsValueType) args[i] = Activator.CreateInstance(pt);
                     else args[i] = null;
                 }
-                args[0] = d.Id;
+                args[0] = id;
                 // Argument 6 ist in allen beobachteten Aufrufen die Menge. Hat
                 // die Methode weniger Argumente, wird NICHT geraten.
-                if (ps.Length > 6 && ps[6].ParameterType == typeof(int))
-                    args[6] = menge;
-                else
-                    Melde("Argument 6 ist kein int - Menge nicht gesetzt.");
+                bool mengeGesetzt = ps.Length > 6 && ps[6].ParameterType == typeof(int);
+                if (mengeGesetzt) args[6] = menge;
 
                 m.Invoke(pim, args);
-                Melde("gegeben: " + d.Id + " " + d.Name + " x" + menge);
+                meldung = "gegeben: " + id + " x" + menge
+                          + (mengeGesetzt ? "" : " (Argument 6 ist kein int - "
+                                                 + "Menge nicht gesetzt)");
+                return true;
             }
             catch (Exception ex)
             {
-                Melde("fehlgeschlagen: " + ex.Message);
-                RevivalPlugin.L.LogError("Adminmenue geben: " + ex);
+                meldung = "fehlgeschlagen: " + ex.Message;
+                RevivalPlugin.L.LogError("Item geben: " + ex);
+                return false;
             }
         }
 
@@ -4723,7 +5547,10 @@ namespace NextDayRevival
     {
         public static void Postfix()
         {
-            Turret.LateTick();
+            // Nicht mehr fest der Turm: wer den Blick haelt, entscheidet
+            // CameraOwner. Sonst schrieben Turm und Drohne im selben Frame
+            // dieselbe Transform.
+            CameraOwner.LateTick();
         }
 
         public static void Install(Harmony harmony)
@@ -4918,6 +5745,291 @@ namespace NextDayRevival
     ///    SetPartSpawn - das wuerfelt bei Modus 3 mit 50 Prozent, und ein
     ///    Fahrzeug ohne Zuendkerze faehrt nicht.
     /// </summary>
+    // ------------------------------------------------------------ Kampfpanzer
+
+    /// <summary>
+    /// Macht aus einem frisch gespawnten BTR-80A einen T-72.
+    ///
+    /// Der Panzer ist kein eigenes Fahrzeug, sondern ein umgebautes. Dasselbe
+    /// Prefab, dieselben Kollider, dieselbe Fahrphysik, dasselbe PhotonView.
+    /// Ausgetauscht werden drei Dinge, und nur diese drei:
+    ///
+    ///     das sichtbare Mesh   hull -> t72_hull, turret -> t72_turret
+    ///     die Zahl der Sitze   6 + Geschuetz  ->  3 + Geschuetz
+    ///     das Werteprofil      Turret rechnet mit den Tank-Werten
+    ///
+    /// Der Panzer faehrt sich damit wie ein BTR. Das ist kein Versehen,
+    /// sondern der Preis, zu dem es ueberhaupt geht: ein Fahrzeug ist nicht
+    /// ein Modell, sondern Modell plus Radkollider, Fahrphysik, Netzabgleich,
+    /// Sitzpunkte, Schadensmodell, Treibstoff, Bauteile und Spawnsystem.
+    ///
+    /// BELEGT (REVERSE_ENGINEERING.md 18, am 2026-08-29 ohne Spielstart):
+    ///
+    ///   Das Prefab hat sieben BoxCollider und acht Radkollider, aber KEINEN
+    ///   MeshCollider. Ein Meshtausch kann die Fahrphysik nicht treffen - das
+    ///   war die riskanteste Annahme des ganzen Vorhabens.
+    ///
+    ///   VehicleGameSystem::InitCar setzt
+    ///       Passengers = new GameObject[SeatPoints.childCount]
+    ///   Die Sitzzahl steht also NUR an SeatPoints. InitCar ist gelaufen, wenn
+    ///   dieser Umbau greift - deshalb wird das Array hier neu gesetzt. Zu
+    ///   diesem Zeitpunkt sitzt noch niemand darin.
+    ///
+    ///   Der Knoten `Meshes` dreht -90 Grad um X. Im Meshraum ist damit +Z
+    ///   oben und -Y vorn, der Massstab betraegt 3 Einheiten je Meter.
+    ///   `t72_mesh.py` baut genau so - deshalb wird hier nichts skaliert und
+    ///   nichts gedreht.
+    ///
+    /// WAS ANDERE SPIELER SEHEN: einen BTR. Uebertragen wird der Resources-
+    /// Pfad, nicht das Ergebnis; jeder Client baut sein eigenes Exemplar aus
+    /// demselben Prefab, und dieser Umbau ist rein oertlich. Der Weg dahin
+    /// stuende im fuenften Parameter von InstantiateSceneObject (object[]
+    /// data, heute null) - gebaut ist er nicht.
+    ///
+    /// UNGEPRUEFT: alles, was Augen braucht. Steht in TASKS.md unter
+    /// "Abnahme im Spiel".
+    /// </summary>
+    public static class Tank
+    {
+        /// <summary>
+        /// Kennzeichnung im Namen der Instanz. Sie MUSS weiter mit "BTR-80A"
+        /// beginnen: `Turret.IsBtr` prueft diesen Praefix, und der Panzer soll
+        /// vom vorhandenen Geschuetzcode ohne jede Aenderung erkannt werden.
+        /// </summary>
+        public const string Marke = "_T72";
+        const string InstanzName = "BTR-80A_Spawn" + Marke;
+
+        /// <summary>
+        /// Turmring des T-72 in der Wanne, in Spieleinheiten. Aus t72_mesh.py
+        /// (RING_Y und RING_Z mal U). Der BTR hat den Turm hoeher und weiter
+        /// vorn; bliebe die Transform stehen, schwebte der Panzerturm.
+        /// </summary>
+        static readonly Vector3 Turmring = new Vector3(0f, -1.2f, 4.5f);
+
+        /// <summary>
+        /// Wo die Mitfahrer im Panzer sitzen, in Fahrzeugeinheiten relativ zu
+        /// SeatPoints. Fahrer vorn links, dahinter zwei Plaetze im Kampfraum -
+        /// alle drei tief genug, dass kein Kopf durch das Dach stoesst.
+        /// </summary>
+        static readonly Vector3[] Mitfahrerplaetze = new Vector3[] {
+            new Vector3(-1.10f, -1.0f, 3.60f),
+            new Vector3( 1.35f, -1.0f, 0.20f),
+            new Vector3(-1.35f, -1.0f, -2.60f),
+        };
+
+        static Material _mat;
+
+        public static bool IstPanzer(Transform root)
+        {
+            if (root == null) return false;
+            return root.name.IndexOf(Marke, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>Der ganze Umbau. Aufgerufen direkt nach dem Spawn.</summary>
+        public static void Umbauen(GameObject car)
+        {
+            if (car == null) return;
+            car.name = InstanzName;
+            try { Sitze(car); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Panzer, Sitze: " + ex); }
+            if (!RevivalPlugin.CfgTankSwapMesh.Value)
+            {
+                RevivalPlugin.L.LogInfo("Panzer: Meshtausch ist abgeschaltet, "
+                    + "es bleibt ein BTR mit Panzerwerten stehen.");
+                return;
+            }
+            try { Meshes(car); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Panzer, Mesh: " + ex); }
+        }
+
+        // ------------------------------------------------------------- Sitze
+
+        static void Sitze(GameObject car)
+        {
+            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            if (vgsType == null) return;
+            Component vgs = car.GetComponent(vgsType);
+            if (vgs == null) return;
+
+            FieldInfo fSeats = AccessTools.Field(vgsType, "SeatPoints");
+            Transform seats = fSeats == null ? null : fSeats.GetValue(vgs) as Transform;
+            if (seats == null)
+            {
+                RevivalPlugin.L.LogWarning("Panzer: SeatPoints fehlt, Sitzzahl bleibt.");
+                return;
+            }
+
+            // Der Geschuetzsitz haengt schon dran (Turret.InitCarPrefix lief
+            // beim Erzeugen) und bleibt in jedem Fall. Weggenommen werden nur
+            // Mitfahrerplaetze, und zwar von hinten.
+            int behalten = Mathf.Max(1, RevivalPlugin.CfgTankSeats.Value);
+            List<Transform> mitfahrer = new List<Transform>();
+            for (int i = 0; i < seats.childCount; i++)
+            {
+                Transform c = seats.GetChild(i);
+                if (c.name == Turret.SeatName) continue;
+                mitfahrer.Add(c);
+            }
+            for (int i = mitfahrer.Count - 1; i >= behalten; i--)
+            {
+                // SetParent wirkt sofort, Destroy erst am Frameende - und bis
+                // dahin zaehlte childCount den Sitz noch mit.
+                mitfahrer[i].SetParent(null, false);
+                UnityEngine.Object.Destroy(mitfahrer[i].gameObject);
+            }
+
+            // Die verbliebenen Plaetze IN die Wanne legen.
+            //
+            // Die Sitzpunkte des BTR stehen fuer eine Wanne, die hoeher ist als
+            // die des Panzers: Driver bei z 5.47 und Passenger1 bei z 5.77
+            // liegen unter der abfallenden Bugplatte, und dort ragten am
+            // 2026-08-29 im Spiel zwei Koepfe aus dem Panzerdach heraus.
+            //
+            // VehicleGameSystem::SitToPassengerPlace setzt Position und Drehung
+            // des Mitfahrers EINMAL aus SeatPoints.GetChild(i) (im IL gelesen,
+            // 2026-08-29) - wer die Punkte vor dem Aufsitzen verschiebt,
+            // verschiebt damit den Mitfahrer, und sonst nichts. Der
+            // Geschuetzsitz bleibt, wo Turret.InitCarPrefix ihn hingesetzt hat.
+            //
+            // Hoehe -1.0 statt 0.15: das Wannendach liegt bei 4.5 Einheiten,
+            // ein sitzender Koerper ist rund 3.9 hoch. Damit bleibt gut eine
+            // Einheit Luft, und der Platz liegt trotzdem nicht so tief, dass
+            // die Kamera durch den Boden faellt.
+            for (int i = 0; i < mitfahrer.Count && i < Mitfahrerplaetze.Length; i++)
+            {
+                if (mitfahrer[i] == null) continue;
+                mitfahrer[i].localPosition = Mitfahrerplaetze[i];
+            }
+
+            FieldInfo fPass = AccessTools.Field(vgsType, "Passengers");
+            if (fPass != null) fPass.SetValue(vgs, new GameObject[seats.childCount]);
+
+            RevivalPlugin.L.LogInfo("Panzer: " + seats.childCount + " Sitze ("
+                + behalten + " Mitfahrer plus Geschuetz), Passengers neu gesetzt, "
+                + "Mitfahrer in die Wanne gesetzt.");
+        }
+
+        // ------------------------------------------------------------- Modell
+
+        static void Meshes(GameObject car)
+        {
+            Mesh wanne = Assets.Load("t72_hull.ndmesh");
+            Mesh turm = Assets.Load("t72_turret.ndmesh");
+            if (wanne == null || turm == null)
+            {
+                RevivalPlugin.L.LogWarning("Panzer: t72_hull.ndmesh oder "
+                    + "t72_turret.ndmesh fehlt neben der DLL - es bleibt ein BTR.");
+                return;
+            }
+
+            int wannen = 0, tuerme = 0, glas = 0;
+            Transform[] all = car.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                Transform t = all[i];
+                // Vier LOD-Stufen tragen dieselben Namen. Alle vier werden
+                // umgehaengt: die LODGroup blendet beim Wegfahren um, und ein
+                // Panzer, der ab dreissig Metern zum BTR wird, ist schlimmer
+                // als gar keiner.
+                if (t.name == "hull") { if (Setzen(t, wanne)) wannen++; }
+                else if (t.name == "turret")
+                {
+                    if (Setzen(t, turm)) { t.localPosition = Turmring; tuerme++; }
+                }
+                else if (t.name == "glass")
+                {
+                    Renderer r = t.GetComponent<Renderer>();
+                    if (r != null) { r.enabled = false; glas++; }
+                }
+            }
+
+            // Die acht Raeder des BTR liegen innerhalb der Ketten und waeren
+            // von aussen kaum zu sehen - aber sie drehen sich beim Fahren, und
+            // ein drehendes LKW-Rad in einer Panzerkette faellt dann doch auf.
+            // Nur die Anzeige geht aus; die Radkollider bleiben, sonst faehrt
+            // nichts mehr.
+            int raeder = 0;
+            Transform naben = car.transform.Find("Wheel Transforms");
+            if (naben != null)
+            {
+                Renderer[] rs = naben.GetComponentsInChildren<Renderer>(true);
+                for (int i = 0; i < rs.Length; i++) { rs[i].enabled = false; raeder++; }
+            }
+
+            RevivalPlugin.L.LogInfo("Panzer: " + wannen + " Wannen, " + tuerme
+                + " Tuerme getauscht, " + glas + " Scheiben und " + raeder
+                + " Raeder ausgeblendet.");
+        }
+
+        static bool Setzen(Transform t, Mesh mesh)
+        {
+            MeshFilter mf = t.GetComponent<MeshFilter>();
+            if (mf == null) return false;
+            // .mesh und nicht .sharedMesh: sonst traegt jedes BTR im Spiel ab
+            // sofort das Panzermodell.
+            mf.mesh = mesh;
+            Renderer r = t.GetComponent<Renderer>();
+            if (r != null) r.material = Panzermaterial(r.sharedMaterial);
+            return true;
+        }
+
+        /// <summary>
+        /// Material aus dem Shader des Fahrzeugs und den eigenen Texturen.
+        ///
+        /// Dieselbe Kette wie `ItemFactory.MakeMaterial` - dort steht
+        /// ausfuehrlich, warum jede einzelne Zeile noetig ist. Kurz: Shader vom
+        /// Original uebernehmen, Metallic-Map abraeumen, Blend-Modus hart auf
+        /// Opaque, und die Normal Map ohne das Keyword `_NORMALMAP` wird zwar
+        /// gesetzt, aber nicht ausgewertet.
+        ///
+        /// Einmal gebaut und gemerkt: alle Panzer teilen sich ein Material.
+        /// </summary>
+        static Material Panzermaterial(Material vorlage)
+        {
+            if (_mat != null) return _mat;
+
+            Shader shader = vorlage == null ? null : vorlage.shader;
+            if (shader == null) shader = Shader.Find("Standard");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null) throw new Exception("kein brauchbarer Shader gefunden");
+
+            Texture2D diffuse = Assets.Texture("t72_diffuse.png", false, true);
+            Material m = new Material(shader);
+            m.name = "T72_Material";
+            m.mainTexture = diffuse;
+            if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", diffuse);
+            if (m.HasProperty("_Color")) m.SetColor("_Color", Color.white);
+            // Panzerlack ist matt und nicht metallisch. Die Werte der Waffen
+            // waeren hier zu glaenzend.
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.10f);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.04f);
+            if (m.HasProperty("_MetallicGlossMap")) m.SetTexture("_MetallicGlossMap", null);
+            m.DisableKeyword("_METALLICGLOSSMAP");
+            if (m.HasProperty("_Mode")) m.SetFloat("_Mode", 0f);
+            if (m.HasProperty("_SrcBlend")) m.SetFloat("_SrcBlend", 1f);
+            if (m.HasProperty("_DstBlend")) m.SetFloat("_DstBlend", 0f);
+            if (m.HasProperty("_ZWrite")) m.SetFloat("_ZWrite", 1f);
+            m.DisableKeyword("_ALPHATEST_ON");
+            m.DisableKeyword("_ALPHABLEND_ON");
+            m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            if (m.HasProperty("_EmissionColor")) m.SetColor("_EmissionColor", Color.black);
+            m.DisableKeyword("_EMISSION");
+
+            Texture2D nrm = Assets.Texture("t72_normal.png", true, true);
+            if (nrm != null && m.HasProperty("_BumpMap"))
+            {
+                m.SetTexture("_BumpMap", nrm);
+                if (m.HasProperty("_BumpScale")) m.SetFloat("_BumpScale", 1.0f);
+                m.EnableKeyword("_NORMALMAP");
+            }
+
+            RevivalPlugin.L.LogInfo("Panzer: Material auf Shader " + shader.name
+                + ", Normal Map " + (nrm != null) + ".");
+            _mat = m;
+            return m;
+        }
+    }
+
     public static class CarSpawn
     {
         // Aus VehicleSpawnPoint::InstantiateCar: Batterie, Schluessel, Kerze.
@@ -4925,14 +6037,24 @@ namespace NextDayRevival
 
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
+        static KeyCode _tankKey = KeyCode.None;
+        static bool _tankKeyParsed;
 
         public static void Tick()
         {
-            if (!RevivalPlugin.CfgSpawnCar.Value) return;
             try
             {
+                // Der Panzer haengt NICHT an Research/SpawnCar: der Fahrzeug-
+                // spawn ist ein Werkzeug und standardmaessig aus, der Panzer
+                // ist Spielinhalt und standardmaessig an.
+                if (RevivalPlugin.CfgTank.Value && Input.GetKeyDown(TankKey()))
+                {
+                    Spawn(true);
+                    return;
+                }
+                if (!RevivalPlugin.CfgSpawnCar.Value) return;
                 if (!Input.GetKeyDown(Key())) return;
-                Spawn();
+                Spawn(false);
             }
             catch (Exception ex)
             {
@@ -4940,7 +6062,7 @@ namespace NextDayRevival
             }
         }
 
-        static void Spawn()
+        static void Spawn(bool panzer)
         {
             Camera cam = Camera.main;
             if (cam == null)
@@ -4987,9 +6109,36 @@ namespace NextDayRevival
             }
 
             Prepare(car);
+            if (panzer)
+            {
+                Tank.Umbauen(car);
+                Munitionsbeigabe();
+            }
 
-            RevivalPlugin.L.LogInfo("Fahrzeug \"" + name + "\" erzeugt bei " + pos
+            RevivalPlugin.L.LogInfo((panzer ? "Panzer aus \"" : "Fahrzeug \"")
+                + name + "\" erzeugt bei " + pos
                 + ", Boden \"" + under.name + "\".");
+        }
+
+        /// <summary>
+        /// Granaten zum Panzer dazulegen.
+        ///
+        /// Am 2026-08-29 stand im Spiel ein fertiger Panzer, dessen Geschuetz
+        /// auf jeden Mausklick schwieg - im Rucksack lag keine einzige 2053.
+        /// Die Begruendung stand nur im Log. Wer den Panzer per Taste
+        /// hinstellt, bekommt seine erste Ladung jetzt mit dazu; alles Weitere
+        /// kommt aus Loot oder dem Adminmenue.
+        /// </summary>
+        static void Munitionsbeigabe()
+        {
+            int menge = RevivalPlugin.CfgTankSpawnAmmo.Value;
+            if (menge <= 0) return;
+            int id = RevivalPlugin.CfgTankAmmoId.Value;
+            string meldung;
+            bool ok = Admin.GibItem(id, menge, out meldung);
+            RevivalPlugin.L.LogInfo("Panzer: Munitionsbeigabe " + menge + "x "
+                + id + " - " + meldung);
+            if (ok) Turret.Hinweis(menge + " Granaten im Rucksack", 4f);
         }
 
         /// <summary>
@@ -5093,6 +6242,24 @@ namespace NextDayRevival
                 path, position, rotation, (byte)0, null }) as GameObject;
         }
 
+        static KeyCode TankKey()
+        {
+            if (_tankKeyParsed) return _tankKey;
+            _tankKeyParsed = true;
+            try
+            {
+                _tankKey = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                               RevivalPlugin.CfgTankKey.Value, true);
+            }
+            catch
+            {
+                _tankKey = KeyCode.F9;
+                RevivalPlugin.L.LogWarning("Panzer: Key "
+                    + RevivalPlugin.CfgTankKey.Value + " unbekannt, benutze F9.");
+            }
+            return _tankKey;
+        }
+
         static KeyCode Key()
         {
             if (_keyParsed) return _key;
@@ -5109,6 +6276,1105 @@ namespace NextDayRevival
                     + RevivalPlugin.CfgSpawnCarKey.Value + " unbekannt, benutze F7.");
             }
             return _key;
+        }
+    }
+
+    // ------------------------------------------------------------ FPV-Drohne
+
+    /// <summary>
+    /// Eine Wegwerfdrohne: Taste druecken, durch ihre Kamera fliegen, beim
+    /// ersten Treffer detoniert sie. Der Koerper des Piloten bleibt stehen,
+    /// wo er steht, und ist waehrenddessen angreifbar.
+    ///
+    /// Technisch ist sie **eine Turmkamera, die sich bewegen darf**. Die zwei
+    /// schwierigen Teile waren vorher da: `CameraOwner` haelt den Blick, und
+    /// `RocketHook.Detonate` zuendet eine Granatenexplosion, die alle sehen
+    /// und spueren (belegt an der M72 LAW). Neu ist nur der Integrator hier
+    /// und eine Kollisionsabfrage per Strahl.
+    ///
+    /// KEIN Rigidbody und keine Unity-Physik. Ein Rigidbody wuerde mit Photon
+    /// und den Collidern der Welt Dinge tun, die wir nicht kontrollieren, und
+    /// wir brauchen keine Aerodynamik - wir brauchen ein Flugbild, das sich
+    /// wie eine Drohne anfuehlt, und das entsteht aus Traegheit und Daempfung.
+    ///
+    /// BELEGT (IL von Assembly-CSharp.dll, gelesen am 2026-08-28):
+    ///
+    ///   Das Spiel hat eine ganze Familie von Sperr-Praedikaten, alle mit
+    ///   Rueckgabe bool und der Bedeutung "jetzt gerade nicht":
+    ///       PlayerMovementController::PlayerCantMovement / PlayerCantRotate /
+    ///       PlayerCantRotateAxisX / PlayerCantJump / PlayerCantRun
+    ///       PlayerFirearmWeaponController::CantShoot
+    ///       PlayerMeleeWeaponController::MeleeCantAttack
+    ///       PlayerGrenadeWeaponController::CantThrowGrenade
+    ///       PlayerInteractingManager::CantInteractWithItem
+    ///       MouseOrbitController::PlayerCantOrbitRotate
+    ///   `PlayerCantMovement` liefert unter anderem dann true, wenn
+    ///   `_uiController.CantPlayerControlWhenOpenedUI()` true ist oder der
+    ///   Spieler auf einem Sitz sitzt. Genau dieselbe Tuer benutzt die
+    ///   Drohne (DroneInputHook): ein Postfix, der waehrend des Fluges true
+    ///   erzwingt. Das ist der Weg des Spiels, nicht ein Abschalten von
+    ///   Skripten - laeuft die Drohne aus, ist der Spieler ohne Aufraeumen
+    ///   sofort wieder normal steuerbar.
+    ///
+    ///   PhotonNetwork::RaiseEvent(byte code, object inhalt, bool zuverlaessig,
+    ///   RaiseEventOptions) verwirft alles ab Code 200 - 0..199 sind frei.
+    ///   Im ganzen Spiel ruft das genau EINE Stelle auf (PunTurnManager::
+    ///   SendMove, mit den Codes 1 und 2), unsere 176-178 sind also frei.
+    ///   NetworkingPeer::OnEvent ruft fuer Code &lt; 200 das statische FELD
+    ///   PhotonNetwork.OnEventCall mit (Code, EventData[245], senderId) auf.
+    ///   Ein Feld, kein C#-Event: es laesst sich lesen, per Delegate.Combine
+    ///   erweitern und zurueckschreiben - ohne die Photon-DLL zu
+    ///   referenzieren und ohne einen eigenen RPC anzumelden.
+    ///
+    /// UNGEPRUEFT: alles, was Augen braucht. Steht in TASKS.md unter
+    /// "Abnahme im Spiel".
+    /// </summary>
+    public static class Drone
+    {
+        static bool _flying;
+        static Vector3 _pos;
+        static Vector3 _vel;
+        static float _yaw;                   // Grad, 0 = Welt-Z
+        static float _pitch;                 // Grad, positiv = Nase hoch
+        static float _armed;                 // ab wann eine Kollision zaehlt
+        static float _start;                 // Time.time beim Start
+        static Vector3 _home;                // wo der Pilot steht
+        static Transform _pilotRoot;
+        static float _nextNet;
+        static float _nextHeight;
+        static float _height = -1f;
+        static Texture2D _dot;               // 1x1 weiss, fuer die Einblendung
+        static AudioSource _ownHum;
+        static KeyCode _key = KeyCode.None;
+        static bool _keyParsed;
+
+        public static bool Flying { get { return _flying; } }
+        public static Vector3 Position { get { return _pos; } }
+        public static Vector3 Home { get { return _home; } }
+        public static float FlightTime { get { return Time.time - _start; } }
+
+        static float ArmDelay() { return RevivalPlugin.CfgDroneArmDelay.Value; }
+
+        // ------------------------------------------------------------- Takt
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgDrone.Value) return;
+            try
+            {
+                Net.EnsureHooked();
+                Net.TickRemotes();
+
+                if (Input.GetKeyDown(Key()))
+                {
+                    if (_flying) Land(Grund.Abbruch);
+                    else Launch();
+                }
+                if (!_flying) return;
+
+                Steer();
+                Move();
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Drohne: " + ex);
+                Land(Grund.Abbruch);
+            }
+        }
+
+        /// <summary>
+        /// Setzt die Kamera in die Drohne. Wird von CameraOwner.LateTick
+        /// gerufen, und nur dann, wenn die Drohne den Blick haelt.
+        /// </summary>
+        public static void LateTick()
+        {
+            if (!_flying) return;
+            try
+            {
+                Camera cam = CameraOwner.ViewCamera();
+                if (cam == null) return;
+                cam.transform.position = _pos;
+                cam.transform.rotation = Quaternion.LookRotation(Forward(), Vector3.up);
+                // Bildwinkel jeden Frame nachziehen, nicht einmal beim Start:
+                // Zielfernrohr- und Sprinteffekte des Spiels schreiben ihn
+                // sonst wieder um. Derselbe Grund wie beim Geschuetz.
+                if (RevivalPlugin.CfgDroneFov.Value > 1f)
+                    cam.fieldOfView = RevivalPlugin.CfgDroneFov.Value;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Drohnenkamera: " + ex);
+                Land(Grund.Abbruch);
+            }
+        }
+
+        // ------------------------------------------------------ Start, Ende
+
+        /// <summary>Warum der Flug endet. Geht als Zahl ueber das Netz.</summary>
+        public static class Grund
+        {
+            public const int Detonation = 1;
+            public const int Absturz = 2;
+            public const int Abriss = 3;
+            public const int Abbruch = 4;
+        }
+
+        static void Launch()
+        {
+            Camera cam = CameraOwner.ViewCamera();
+            if (cam == null)
+            {
+                RevivalPlugin.L.LogWarning("Drohne: keine Kamera gefunden.");
+                return;
+            }
+            if (!CameraOwner.Free)
+            {
+                RevivalPlugin.L.LogInfo("Drohne: der Blick ist gerade vergeben - "
+                    + "erst das Geschuetz verlassen.");
+                return;
+            }
+
+            Vector3 f = cam.transform.forward;
+            _home = cam.transform.position;
+            _pos = _home + f * RevivalPlugin.CfgDroneLaunchForward.Value
+                 + Vector3.up * RevivalPlugin.CfgDroneLaunchUp.Value;
+            _vel = f * RevivalPlugin.CfgDroneLaunchSpeed.Value;
+            _yaw = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;
+            _pitch = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg;
+            _pilotRoot = LocalPlayerRoot();
+
+            // Erst die Drohne aus dem Rucksack nehmen, DANN die Kamera holen.
+            // Andersherum haette ein leerer Rucksack den Blick uebernommen und
+            // sofort wieder zurueckgegeben - ein Zucken im Bild fuer nichts.
+            if (RevivalPlugin.CfgDroneRequireItem.Value
+                && !Turret.TakeItem(RevivalPlugin.CfgDroneItemId.Value, "Drohne"))
+            {
+                RevivalPlugin.L.LogInfo("Drohne: keine im Rucksack (Item "
+                    + RevivalPlugin.CfgDroneItemId.Value + ").");
+                return;
+            }
+
+            if (!CameraOwner.Request(CameraOwner.Drohne, true, "Drohne")) return;
+
+            _flying = true;
+            _start = Time.time;
+            _armed = Time.time + ArmDelay();
+            _nextNet = 0f;
+            Net.Send(Net.Start, _pos, Forward(), 0f, true);
+            StartOwnHum();
+
+            RevivalPlugin.L.LogInfo("Drohne gestartet bei " + _pos
+                + ", Blickrichtung " + Forward()
+                + ", Pilot \"" + (_pilotRoot == null ? "unbekannt" : _pilotRoot.name)
+                + "\". Scharf ab " + ArmDelay() + " s.");
+        }
+
+        /// <summary>
+        /// Beendet den Flug. Muss IMMER laufen - sonst behaelt die Drohne den
+        /// Blick, und der Spieler sieht bis zum Neustart durch eine Kamera,
+        /// die niemand mehr bewegt.
+        /// </summary>
+        static void Land(int grund)
+        {
+            if (!_flying) return;
+            _flying = false;
+            try
+            {
+                if (grund != Grund.Detonation)
+                    Net.Send(Net.Ende, _pos, Forward(), (float)grund, true);
+                StopOwnHum();
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Drohne beenden: " + ex); }
+            finally
+            {
+                CameraOwner.Release(CameraOwner.Drohne);
+            }
+            RevivalPlugin.L.LogInfo("Drohne beendet (" + GrundText(grund)
+                + "), Blick zurueck beim Koerper.");
+        }
+
+        static string GrundText(int grund)
+        {
+            if (grund == Grund.Detonation) return "Detonation";
+            if (grund == Grund.Absturz) return "Absturz";
+            if (grund == Grund.Abriss) return "Signalabriss";
+            return "abgebrochen";
+        }
+
+        /// <summary>
+        /// Einschlag: erst allen sagen, WO es knallt, dann zuenden, dann den
+        /// Blick zurueckgeben. Die Explosion selbst laeuft ueber
+        /// PhotonNetwork.Instantiate und ist damit ohnehin fuer alle da - das
+        /// Ereignis daneben braucht es nur, damit die anderen ihr Modell und
+        /// ihren Ton loswerden.
+        /// </summary>
+        static void Impact(Vector3 point)
+        {
+            Vector3 p = point - Forward() * 0.25f;
+            Net.Send(Net.Ende, p, Forward(), (float)Grund.Detonation, true);
+            try
+            {
+                RocketHook.Detonate(p, RevivalPlugin.CfgDroneDamage.Value,
+                                    RevivalPlugin.CfgDroneRadius.Value, 3f);
+                RevivalPlugin.L.LogInfo("Drohne detoniert bei " + p + ", "
+                    + RevivalPlugin.CfgDroneDamage.Value + " Schaden auf "
+                    + RevivalPlugin.CfgDroneRadius.Value + " m.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Drohnendetonation fehlgeschlagen: " + ex);
+            }
+            Land(Grund.Detonation);
+        }
+
+        // -------------------------------------------------------- Steuerung
+
+        static void Steer()
+        {
+            float sens = RevivalPlugin.CfgDroneSensitivity.Value;
+            float mx = Input.GetAxis("Mouse X") * sens;
+            if (RevivalPlugin.CfgDroneInvertX.Value) mx = -mx;
+            _yaw += mx;
+            float my = Input.GetAxis("Mouse Y") * sens;
+            if (RevivalPlugin.CfgDroneInvertY.Value) my = -my;
+            _pitch = Mathf.Clamp(_pitch + my, -85f, 85f);
+            if (_yaw > 180f) _yaw -= 360f;
+            if (_yaw < -180f) _yaw += 360f;
+        }
+
+        /// <summary>
+        /// Der ganze Flug, drei Zeilen Mathematik plus ein Strahl.
+        ///
+        /// Der Strahl geht von der ALTEN zur NEUEN Lage, nicht einfach nach
+        /// vorn: bei 30 m/s und 60 Bildern liegt zwischen zwei Frames ein
+        /// halber Meter, und eine Wand, die duenner ist als dieser Schritt,
+        /// wuerde sonst durchflogen.
+        /// </summary>
+        static void Move()
+        {
+            float dt = Time.deltaTime;
+            if (dt <= 0f) return;
+
+            Vector3 fwd = Forward();
+            Vector3 right = Vector3.Cross(Vector3.up, fwd);
+            if (right.sqrMagnitude < 0.000001f) right = Vector3.right;
+            else right.Normalize();
+
+            // Leerer Akku heisst nicht Detonation, sondern Motoren aus. Sie
+            // faellt dann wie ein Stein mit Fluegeln: volle Schwerkraft, kein
+            // Schub, und beim Aufschlag knallt sie NICHT.
+            bool motorlos = Motorlos();
+
+            float thrust = RevivalPlugin.CfgDroneThrust.Value;
+            float side = RevivalPlugin.CfgDroneSideThrust.Value;
+            float lift = RevivalPlugin.CfgDroneLift.Value;
+
+            Vector3 accel = Vector3.up * (motorlos ? -9.81f
+                                                   : RevivalPlugin.CfgDroneGravity.Value);
+            if (!motorlos)
+            {
+                if (Input.GetKey(KeyCode.W)) accel += fwd * thrust;
+                if (Input.GetKey(KeyCode.S)) accel -= fwd * thrust;
+                if (Input.GetKey(KeyCode.D)) accel += right * side;
+                if (Input.GetKey(KeyCode.A)) accel -= right * side;
+                if (Input.GetKey(KeyCode.Space)) accel += Vector3.up * lift;
+                if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.C))
+                    accel -= Vector3.up * lift;
+            }
+
+            _vel += accel * dt;
+
+            // Luftwiderstand. Bewusst geschwindigkeitsproportional und ueber
+            // dt gerechnet - ein fester Faktor je Frame haengt sonst an der
+            // Bildrate, und die Drohne floege auf einem schnellen Rechner
+            // anders als auf einem langsamen.
+            _vel -= _vel * Mathf.Min(1f, RevivalPlugin.CfgDroneDrag.Value * dt);
+
+            float max = RevivalPlugin.CfgDroneMaxSpeed.Value;
+            if (_vel.magnitude > max) _vel = _vel.normalized * max;
+
+            Vector3 step = _vel * dt;
+            float len = step.magnitude;
+            if (len > 0.0001f && Time.time >= _armed)
+            {
+                Vector3 hit;
+                GameObject go = Turret.RaycastObject(_pos, step / len, len + 0.20f, out hit);
+                if (go != null && !IsPilot(go))
+                {
+                    if (motorlos) Land(Grund.Absturz);
+                    else Impact(hit);
+                    return;
+                }
+            }
+            _pos += step;
+
+            // Ab hier ist die Funkstrecke die Grenze, nicht der Akku. Die
+            // Drohne verschwindet dabei - kein Wrack: es gibt kein Objekt in
+            // der Welt, das liegenbleiben koennte, die anderen sehen nur ein
+            // lokal gebautes Modell, und ein Wrack muesste als eigenes Ding
+            // erfunden und wieder aufgeraeumt werden.
+            if (Entfernung() >= RevivalPlugin.CfgDroneRange.Value)
+            {
+                Land(Grund.Abriss);
+                return;
+            }
+
+            if (Time.time >= _nextNet)
+            {
+                float hz = Mathf.Max(2f, RevivalPlugin.CfgDroneNetHz.Value);
+                _nextNet = Time.time + 1f / hz;
+                Net.Send(Net.Lauf, _pos, fwd, 0f, false);
+            }
+        }
+
+        static Vector3 Forward()
+        {
+            return Quaternion.Euler(-_pitch, _yaw, 0f) * Vector3.forward;
+        }
+
+        // -------------------------------------- Akku, Reichweite, Bildstoerung
+
+        /// <summary>Entfernung zum Piloten - die Funkstrecke.</summary>
+        public static float Entfernung()
+        {
+            return Vector3.Distance(_pos, _home);
+        }
+
+        /// <summary>Akkustand von 1 (voll) bis 0 (leer).</summary>
+        public static float Akku()
+        {
+            float ganz = Mathf.Max(1f, RevivalPlugin.CfgDroneFlightTime.Value);
+            return Mathf.Clamp01(1f - FlightTime / ganz);
+        }
+
+        static bool Motorlos()
+        {
+            return FlightTime >= RevivalPlugin.CfgDroneFlightTime.Value;
+        }
+
+        /// <summary>
+        /// Signalguete von 1 (sauber) bis 0 (Abriss). Bis `NoiseFrom` ist das
+        /// Bild ruhig, danach faellt es linear ab. Das ist die Vorwarnung: wer
+        /// das Rauschen sieht, weiss, dass er umkehren muss.
+        /// </summary>
+        public static float Signal()
+        {
+            float weit = RevivalPlugin.CfgDroneRange.Value;
+            float ruhig = Mathf.Min(RevivalPlugin.CfgDroneNoiseFrom.Value, weit - 1f);
+            float d = Entfernung();
+            if (d <= ruhig) return 1f;
+            return Mathf.Clamp01(1f - (d - ruhig) / Mathf.Max(1f, weit - ruhig));
+        }
+
+        /// <summary>
+        /// Hoehe ueber Grund, per Strahl nach unten. Nur fuenfmal je Sekunde -
+        /// jeden Frame waere es ein Raycast mehr fuer eine Zahl, die sich in
+        /// einer Fuenftelsekunde kaum aendert.
+        /// </summary>
+        static float Hoehe()
+        {
+            if (Time.time >= _nextHeight)
+            {
+                _nextHeight = Time.time + 0.2f;
+                Vector3 boden;
+                GameObject go = Turret.RaycastObject(_pos, Vector3.down, 400f, out boden);
+                _height = go == null ? -1f : _pos.y - boden.y;
+            }
+            return _height;
+        }
+
+        /// <summary>
+        /// Gehoert das Getroffene zum eigenen Koerper? Ohne das detoniert die
+        /// Drohne im ersten Frame am Piloten. Muster ist Turret.IsOwnVehicle.
+        /// Die Scharfzeit (`ArmDelay`) faengt zusaetzlich alles ab, was in den
+        /// ersten Zehntelsekunden im Weg steht - Ruecksack, Waffe, Fahrzeug.
+        /// </summary>
+        static bool IsPilot(GameObject go)
+        {
+            if (go == null) return false;
+            if (_pilotRoot != null)
+            {
+                Transform t = go.transform;
+                while (t != null)
+                {
+                    if (t == _pilotRoot) return true;
+                    t = t.parent;
+                }
+            }
+            return Vector3.Distance(go.transform.position, _home)
+                   < RevivalPlugin.CfgDroneSafeRadius.Value;
+        }
+
+        /// <summary>
+        /// Die Wurzel des eigenen Spielerobjekts. Fremde bleiben ueber
+        /// photonView.isMine draussen - dasselbe Muster wie in
+        /// Turret.PlayerInventories.
+        /// </summary>
+        static Transform LocalPlayerRoot()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("PlayerMovementController");
+                if (t == null) return null;
+                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    MonoBehaviour mb = all[i] as MonoBehaviour;
+                    if (mb == null) continue;
+                    if (!IsMine(mb)) continue;
+                    return mb.transform.root;
+                }
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Drohne: Pilot nicht gefunden: " + ex.Message); }
+            return null;
+        }
+
+        static bool IsMine(MonoBehaviour mb)
+        {
+            MethodInfo get = AccessTools.Method(mb.GetType(), "get_photonView", null, null);
+            object view = null;
+            try { if (get != null) view = get.Invoke(mb, null); }
+            catch { view = null; }
+            if (view == null) return true;          // ohne PhotonView: Einzelspieler
+            MethodInfo isMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
+            try { return isMine == null || (bool)isMine.Invoke(view, null); }
+            catch { return true; }
+        }
+
+        static KeyCode Key()
+        {
+            if (_keyParsed) return _key;
+            _keyParsed = true;
+            try
+            {
+                _key = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                           RevivalPlugin.CfgDroneKey.Value, true);
+            }
+            catch
+            {
+                _key = KeyCode.V;
+                RevivalPlugin.L.LogWarning("Drohne: Taste \""
+                    + RevivalPlugin.CfgDroneKey.Value + "\" unbekannt, benutze V.");
+            }
+            return _key;
+        }
+
+        // -------------------------------------------------------------- Ton
+
+        /// <summary>
+        /// Der Pilot hoert seine eigene Drohne nicht raeumlich - er sitzt in
+        /// ihr. Ein leiser Motorton ohne Raumanteil, damit Schub und Stille
+        /// unterscheidbar sind.
+        /// </summary>
+        static void StartOwnHum()
+        {
+            if (!RevivalPlugin.CfgDroneSound.Value) return;
+            try
+            {
+                if (_ownHum == null)
+                {
+                    GameObject go = new GameObject("NDR_DroneOwnHum");
+                    UnityEngine.Object.DontDestroyOnLoad(go);
+                    _ownHum = go.AddComponent<AudioSource>();
+                    _ownHum.clip = Sound.Hum();
+                    _ownHum.loop = true;
+                    _ownHum.spatialBlend = 0f;
+                    _ownHum.playOnAwake = false;
+                }
+                _ownHum.volume = RevivalPlugin.CfgDroneSoundVolume.Value * 0.35f;
+                _ownHum.Play();
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Drohnenton: " + ex.Message); }
+        }
+
+        static void StopOwnHum()
+        {
+            if (_ownHum != null) _ownHum.Stop();
+        }
+
+        // ------------------------------------------------------------- Netz
+
+        /// <summary>
+        /// Sichtbarkeit fuer die anderen - Weg B aus `tasks/fpv-drohne.md`:
+        /// uebertragen werden nur Zahlen, das Modell baut jeder Client selbst.
+        /// Kein registriertes Prefab, keine Abhaengigkeit vom Masterclient.
+        ///
+        /// Warum ein Photon-EREIGNIS und kein eigener RPC: ein RPC muesste als
+        /// Methode an einer Komponente eines vom Spiel registrierten
+        /// PhotonView haengen und traegt in PUN das Attribut `[PunRPC]` - ein
+        /// Attribut steht in den Metadaten und liesse sich nur mit einer
+        /// Referenz auf die Photon-DLL setzen. `RaiseEvent` braucht davon
+        /// nichts: Code, Zahlenfeld, fertig.
+        ///
+        /// Warum drei Ereigniscodes statt einem mit Typfeld: dann ist der
+        /// Inhalt immer ein schlichtes float[], und ueber die Serialisierung
+        /// von object[] oder Hashtable muss nichts vermutet werden.
+        /// </summary>
+        public static class Net
+        {
+            public const int Start = 0;
+            public const int Lauf = 1;
+            public const int Ende = 2;
+
+            static bool _hooked;
+            static bool _failed;
+            static MethodInfo _raise;
+            static Type _optType;
+            static FieldInfo _onEventCall;
+            static readonly Dictionary<int, Fremd> _fremde = new Dictionary<int, Fremd>();
+            static readonly List<int> _weg = new List<int>();
+
+            /// <summary>Eine fremde Drohne, wie dieser Client sie sieht.</summary>
+            class Fremd
+            {
+                public GameObject Go;
+                public AudioSource Src;
+                public Vector3 Von;
+                public Vector3 Nach;
+                public Vector3 Blick;
+                public float T;              // 0..1 zwischen Von und Nach
+                public float Dauer;          // Sekunden zwischen zwei Meldungen
+                public float Zuletzt;        // Time.time der letzten Meldung
+            }
+
+            public static void EnsureHooked()
+            {
+                if (_hooked || _failed) return;
+                try
+                {
+                    Type photon = AccessTools.TypeByName("PhotonNetwork");
+                    if (photon == null)
+                    {
+                        _failed = true;
+                        RevivalPlugin.L.LogWarning("Drohnennetz: PhotonNetwork nicht "
+                            + "gefunden - die Drohne fliegt, aber niemand sonst sieht sie.");
+                        return;
+                    }
+                    _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
+                    _onEventCall = AccessTools.Field(photon, "OnEventCall");
+                    _optType = AccessTools.TypeByName("RaiseEventOptions");
+                    if (_raise == null || _onEventCall == null)
+                    {
+                        _failed = true;
+                        RevivalPlugin.L.LogWarning("Drohnennetz: RaiseEvent oder "
+                            + "OnEventCall fehlt - die Drohne bleibt fuer andere unsichtbar.");
+                        return;
+                    }
+
+                    MethodInfo mine = typeof(Net).GetMethod("OnPhotonEvent",
+                        BindingFlags.Public | BindingFlags.Static);
+                    Delegate handler = Delegate.CreateDelegate(_onEventCall.FieldType, mine);
+                    Delegate current = _onEventCall.GetValue(null) as Delegate;
+                    _onEventCall.SetValue(null, Delegate.Combine(current, handler));
+
+                    _hooked = true;
+                    RevivalPlugin.L.LogInfo("Drohnennetz eingehaengt: Ereigniscodes "
+                        + Code(Start) + "-" + Code(Ende) + ", Empfang ueber "
+                        + "PhotonNetwork.OnEventCall.");
+                }
+                catch (Exception ex)
+                {
+                    _failed = true;
+                    RevivalPlugin.L.LogError("Drohnennetz nicht eingehaengt: " + ex);
+                }
+            }
+
+            static int Code(int art) { return RevivalPlugin.CfgDroneEventCode.Value + art; }
+
+            public static void Send(int art, Vector3 pos, Vector3 blick, float zusatz,
+                                    bool zuverlaessig)
+            {
+                if (!_hooked) return;
+                try
+                {
+                    float[] daten = new float[] {
+                        pos.x, pos.y, pos.z, blick.x, blick.y, blick.z, zusatz };
+                    object opts = _optType == null ? null : Activator.CreateInstance(_optType);
+                    _raise.Invoke(null, new object[] {
+                        (byte)Code(art), daten, zuverlaessig, opts });
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Drohnennetz senden: " + ex.Message);
+                }
+            }
+
+            /// <summary>
+            /// Empfaenger. Signatur MUSS zu PhotonNetwork.EventCallback passen
+            /// (byte, object, int) - Delegate.CreateDelegate prueft das, und ein
+            /// Fehler hier faellt beim Einhaengen auf, nicht erst im Flug.
+            /// </summary>
+            public static void OnPhotonEvent(byte code, object inhalt, int absender)
+            {
+                try
+                {
+                    int art = code - RevivalPlugin.CfgDroneEventCode.Value;
+                    if (art < Start || art > Ende) return;
+                    float[] d = inhalt as float[];
+                    if (d == null || d.Length < 7) return;
+
+                    Vector3 pos = new Vector3(d[0], d[1], d[2]);
+                    Vector3 blick = new Vector3(d[3], d[4], d[5]);
+
+                    if (art == Ende) { Entferne(absender, (int)d[6]); return; }
+
+                    Fremd f;
+                    if (!_fremde.TryGetValue(absender, out f))
+                    {
+                        f = new Fremd();
+                        f.Go = Modell.Bauen();
+                        f.Src = Sound.Anhaengen(f.Go);
+                        f.Von = pos;
+                        _fremde[absender] = f;
+                        RevivalPlugin.L.LogInfo("Fremde Drohne von Spieler "
+                            + absender + " bei " + pos + ".");
+                    }
+                    else
+                    {
+                        f.Von = f.Go == null ? pos : f.Go.transform.position;
+                    }
+                    f.Nach = pos;
+                    f.Blick = blick.sqrMagnitude < 0.000001f ? Vector3.forward : blick;
+                    f.Dauer = Mathf.Max(0.02f, Time.time - f.Zuletzt);
+                    f.Zuletzt = Time.time;
+                    f.T = 0f;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Drohnennetz empfangen: " + ex.Message);
+                }
+            }
+
+            /// <summary>
+            /// Zwischen zwei Meldungen wird lokal weitergeschoben. Ohne das
+            /// ruckelt die fremde Drohne im Takt der Meldungen - bei 15 Hz
+            /// waere das gut sichtbar.
+            /// </summary>
+            public static void TickRemotes()
+            {
+                if (_fremde.Count == 0) return;
+                _weg.Clear();
+                foreach (KeyValuePair<int, Fremd> kv in _fremde)
+                {
+                    Fremd f = kv.Value;
+                    if (f.Go == null || Time.time - f.Zuletzt > 4f) { _weg.Add(kv.Key); continue; }
+                    f.T = Mathf.Min(1f, f.T + Time.deltaTime / Mathf.Max(0.02f, f.Dauer));
+                    f.Go.transform.position = Vector3.Lerp(f.Von, f.Nach, f.T);
+                    f.Go.transform.rotation = Quaternion.LookRotation(f.Blick, Vector3.up);
+                }
+                for (int i = 0; i < _weg.Count; i++) Entferne(_weg[i], Grund.Abriss);
+            }
+
+            static void Entferne(int absender, int grund)
+            {
+                Fremd f;
+                if (!_fremde.TryGetValue(absender, out f)) return;
+                _fremde.Remove(absender);
+                if (f.Src != null) f.Src.Stop();
+                if (f.Go != null) UnityEngine.Object.Destroy(f.Go);
+                RevivalPlugin.L.LogInfo("Fremde Drohne von Spieler " + absender
+                    + " ist weg (" + GrundText(grund) + ").");
+            }
+        }
+
+        // ----------------------------------------------------------- Modell
+
+        /// <summary>
+        /// Das Modell, das die anderen sehen. Wird lokal gebaut, nicht ueber
+        /// das Netz erzeugt - deshalb braucht es kein registriertes Prefab.
+        /// </summary>
+        public static class Modell
+        {
+            static Material _mat;
+            static Mesh _notnagel;
+
+            /// <summary>
+            /// Baut das Modell. Seit 0.4.8 aus drone.ndmesh und
+            /// drone_diffuse.png; fehlt eine der beiden Dateien, faellt es auf
+            /// den eingebauten Notnagel zurueck, statt still gar nichts
+            /// anzuzeigen - eine unsichtbare Drohne waere schlimmer als eine
+            /// haessliche.
+            /// </summary>
+            public static GameObject Bauen()
+            {
+                GameObject go = new GameObject("NDR_Drone");
+                MeshFilter mf = go.AddComponent<MeshFilter>();
+                MeshRenderer mr = go.AddComponent<MeshRenderer>();
+                Mesh mesh = Assets.Load("drone.ndmesh");
+                mf.sharedMesh = mesh != null ? mesh : Notnagel();
+                mr.sharedMaterial = Werkstoff();
+                float s = RevivalPlugin.CfgDroneModelScale.Value;
+                go.transform.localScale = new Vector3(s, s, s);
+                return go;
+            }
+
+            /// <summary>
+            /// Rueckfall, wenn drone.ndmesh fehlt - fuenf Quader: Rumpf und
+            /// vier Rotorscheiben. Sieht nach nichts aus, ist aber sichtbar,
+            /// und Sichtbarkeit ist bei dieser Waffe kein Schmuck: wer von ihr
+            /// getroffen wird, muss die Gelegenheit gehabt haben, sie zu sehen.
+            /// </summary>
+            static Mesh Notnagel()
+            {
+                if (_notnagel != null) return _notnagel;
+                List<Vector3> v = new List<Vector3>();
+                List<int> t = new List<int>();
+                Quader(v, t, new Vector3(0f, 0f, 0.02f), new Vector3(0.16f, 0.05f, 0.22f));
+                float a = 0.15f;
+                Quader(v, t, new Vector3(a, 0.03f, a), new Vector3(0.14f, 0.012f, 0.14f));
+                Quader(v, t, new Vector3(-a, 0.03f, a), new Vector3(0.14f, 0.012f, 0.14f));
+                Quader(v, t, new Vector3(a, 0.03f, -a), new Vector3(0.14f, 0.012f, 0.14f));
+                Quader(v, t, new Vector3(-a, 0.03f, -a), new Vector3(0.14f, 0.012f, 0.14f));
+                Mesh m = new Mesh();
+                m.name = "NDR_DroneFallback";
+                m.vertices = v.ToArray();
+                m.triangles = t.ToArray();
+                m.RecalculateNormals();
+                m.RecalculateBounds();
+                _notnagel = m;
+                return m;
+            }
+
+            static void Quader(List<Vector3> v, List<int> t, Vector3 c, Vector3 size)
+            {
+                float x = size.x * 0.5f, y = size.y * 0.5f, z = size.z * 0.5f;
+                int b = v.Count;
+                v.Add(c + new Vector3(-x, -y, -z)); v.Add(c + new Vector3(x, -y, -z));
+                v.Add(c + new Vector3(x, y, -z)); v.Add(c + new Vector3(-x, y, -z));
+                v.Add(c + new Vector3(-x, -y, z)); v.Add(c + new Vector3(x, -y, z));
+                v.Add(c + new Vector3(x, y, z)); v.Add(c + new Vector3(-x, y, z));
+                int[] f = new int[] {
+                    0,2,1, 0,3,2,   5,6,4, 4,6,7,
+                    4,7,0, 0,7,3,   1,2,5, 5,2,6,
+                    3,7,2, 2,7,6,   0,1,4, 4,1,5 };
+                for (int i = 0; i < f.Length; i++) t.Add(b + f[i]);
+            }
+
+            /// <summary>
+            /// Ein Material, das garantiert zeichnet. Shader.Find findet in
+            /// einem gebauten Spiel nur, was auch eingebaut ist; deshalb der
+            /// Rueckfall auf ein vorhandenes Material aus der Szene. Ein
+            /// Renderer ohne Material malt Unity magenta - genau der Fehler,
+            /// der bei der Testflaeche schon einmal Zeit gekostet hat.
+            /// </summary>
+            static Material Werkstoff()
+            {
+                if (_mat != null) return _mat;
+                Shader sh = Shader.Find("Standard");
+                if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
+                if (sh == null)
+                {
+                    UnityEngine.Object[] all =
+                        UnityEngine.Object.FindObjectsOfType(typeof(Renderer));
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        Renderer r = all[i] as Renderer;
+                        if (r == null || r.sharedMaterial == null) continue;
+                        if (r.sharedMaterial.shader == null) continue;
+                        sh = r.sharedMaterial.shader;
+                        break;
+                    }
+                }
+                if (sh == null)
+                {
+                    RevivalPlugin.L.LogWarning("Drohnenmodell: kein Shader gefunden - "
+                        + "die anderen sehen sie nicht.");
+                    return null;
+                }
+                _mat = new Material(sh);
+                _mat.name = "NDR_Drone_Material";
+                Texture2D tex = Assets.Texture("drone_diffuse.png", false, true);
+                if (tex != null) _mat.mainTexture = tex;
+                else _mat.color = new Color(0.16f, 0.17f, 0.19f, 1f);
+                return _mat;
+            }
+        }
+
+        // ------------------------------------------------- Videoeinblendung
+
+        /// <summary>
+        /// Das Bild eines Videosenders: Akku, Entfernung, Hoehe, Fadenkreuz,
+        /// und bei schlechtem Signal Rauschen. Das ist der Teil, der aus einer
+        /// fliegenden Kiste eine FPV-Drohne macht, und er kostet am wenigsten.
+        ///
+        /// Gehoert in OnGUI, nicht in Update: IMGUI zeichnet nur dort.
+        /// </summary>
+        public static void Draw()
+        {
+            if (!_flying || !RevivalPlugin.CfgDroneOverlay.Value) return;
+            try
+            {
+                if (_dot == null)
+                {
+                    _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                    _dot.SetPixel(0, 0, Color.white);
+                    _dot.Apply();
+                    _dot.hideFlags = HideFlags.HideAndDontSave;
+                }
+
+                float w = Screen.width, h = Screen.height;
+                float sig = Signal();
+                Color alt = GUI.color;
+
+                if (sig < 1f) Rauschen(w, h, sig);
+                Rahmen(w, h, sig);
+                Fadenkreuz(w, h);
+                Zahlen(w, h, sig);
+
+                GUI.color = alt;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Drohnenanzeige: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// Waagerechte Streifen mit wechselnder Deckkraft - das Bild eines
+        /// Analogsenders am Rand der Reichweite. Bewusst grob und billig:
+        /// gezeichnet wird jeden Frame, und eine echte Stoerung ueber eine
+        /// Textur waere Aufwand fuer denselben Eindruck.
+        /// </summary>
+        static void Rauschen(float w, float h, float sig)
+        {
+            float staerke = 1f - sig;
+            int streifen = (int)(staerke * 26f);
+            int seed = (int)(Time.time * 37f) * 40503 + 12345;
+            for (int i = 0; i < streifen; i++)
+            {
+                seed = seed * 1103515245 + 12345;
+                float y = (((seed >> 16) & 0x7fff) / 32767f) * h;
+                seed = seed * 1103515245 + 12345;
+                float hh = 1f + (((seed >> 16) & 0x7fff) / 32767f) * 9f;
+                GUI.color = new Color(0.75f, 0.85f, 0.8f, 0.05f + staerke * 0.16f);
+                GUI.DrawTexture(new Rect(0f, y, w, hh), _dot);
+            }
+        }
+
+        /// <summary>
+        /// Vier Eckwinkel wie im Sucher einer Kamera. Faerbt sich mit
+        /// schlechtem Signal rot - man soll die Warnung sehen, ohne die Zahlen
+        /// zu lesen.
+        /// </summary>
+        static void Rahmen(float w, float h, float sig)
+        {
+            float m = Mathf.Max(18f, h * 0.045f);
+            float l = Mathf.Max(24f, h * 0.055f);
+            float t = 2f;
+            GUI.color = sig > 0.35f
+                ? new Color(0.6f, 1f, 0.7f, 0.55f)
+                : new Color(1f, 0.35f, 0.25f, 0.75f);
+            float[] xs = new float[] { m, w - m - l };
+            float[] ys = new float[] { m, h - m - t };
+            for (int i = 0; i < 2; i++)
+                for (int k = 0; k < 2; k++)
+                {
+                    GUI.DrawTexture(new Rect(xs[i], ys[k], l, t), _dot);
+                    float yv = k == 0 ? m : h - m - l;
+                    float xv = i == 0 ? m : w - m - t;
+                    GUI.DrawTexture(new Rect(xv, yv, t, l), _dot);
+                }
+        }
+
+        static void Fadenkreuz(float w, float h)
+        {
+            float cx = w * 0.5f, cy = h * 0.5f;
+            float gap = Mathf.Max(5f, h * 0.010f);
+            float arm = Mathf.Max(10f, h * 0.022f);
+            GUI.color = new Color(0f, 0f, 0f, 0.5f);
+            Kreuz(cx + 1f, cy + 1f, gap, arm);
+            GUI.color = new Color(0.7f, 1f, 0.75f, 0.9f);
+            Kreuz(cx, cy, gap, arm);
+            GUI.color = new Color(1f, 0.4f, 0.25f, 0.9f);
+            GUI.DrawTexture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), _dot);
+        }
+
+        static void Kreuz(float cx, float cy, float gap, float arm)
+        {
+            GUI.DrawTexture(new Rect(cx - gap - arm, cy - 1f, arm, 2f), _dot);
+            GUI.DrawTexture(new Rect(cx + gap, cy - 1f, arm, 2f), _dot);
+            GUI.DrawTexture(new Rect(cx - 1f, cy - gap - arm, 2f, arm), _dot);
+            GUI.DrawTexture(new Rect(cx - 1f, cy + gap, 2f, arm), _dot);
+        }
+
+        static void Zahlen(float w, float h, float sig)
+        {
+            float m = Mathf.Max(18f, h * 0.045f);
+            float akku = Akku();
+            float bw = Mathf.Max(90f, w * 0.10f);
+            float bh = Mathf.Max(9f, h * 0.014f);
+            float bx = m + 4f, by = h - m - bh - 24f;
+
+            // Akkubalken. Unter einem Fuenftel rot - ab da ist der Rueckweg
+            // ohnehin keine Frage mehr, die Drohne kommt nicht zurueck.
+            GUI.color = new Color(0f, 0f, 0f, 0.45f);
+            GUI.DrawTexture(new Rect(bx - 1f, by - 1f, bw + 2f, bh + 2f), _dot);
+            GUI.color = akku > 0.2f
+                ? new Color(0.55f, 1f, 0.6f, 0.85f)
+                : new Color(1f, 0.35f, 0.25f, 0.9f);
+            GUI.DrawTexture(new Rect(bx, by, bw * akku, bh), _dot);
+
+            float hoehe = Hoehe();
+            string zeile = "AKKU " + Mathf.RoundToInt(akku * 100f) + "%"
+                + "   ENTF " + Mathf.RoundToInt(Entfernung()) + " m"
+                + "   HOEHE " + (hoehe < 0f ? "--" : Mathf.RoundToInt(hoehe).ToString()) + " m"
+                + "   SIG " + Mathf.RoundToInt(sig * 100f) + "%";
+            if (Motorlos()) zeile = "AKKU LEER - SIE FAELLT   " + zeile;
+            else if (sig < 0.35f) zeile = "SIGNAL SCHWACH   " + zeile;
+
+            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.Label(new Rect(bx + 1f, by + bh + 5f, w, 22f), zeile);
+            GUI.color = sig > 0.35f && !Motorlos()
+                ? new Color(0.75f, 1f, 0.8f, 0.95f)
+                : new Color(1f, 0.45f, 0.3f, 0.95f);
+            GUI.Label(new Rect(bx, by + bh + 4f, w, 22f), zeile);
+        }
+
+        // -------------------------------------------------------------- Ton
+
+        /// <summary>
+        /// Der Klang wird gerechnet, nicht geladen.
+        ///
+        /// Begruendung: ob und wie sich eigene Klaenge ueber Resources.Load ins
+        /// Spiel bringen lassen, ist offen (REVERSE_ENGINEERING.md). Vier
+        /// Sinusroehren mit Oberwelle und etwas Rauschen klingen nach
+        /// Quadrokopter, kosten nichts und haengen von nichts ab. Alle
+        /// Frequenzen sind ganze Vielfache von 1 Hz, damit die Sekunde
+        /// nahtlos in sich selbst uebergeht - sonst knackt die Schleife.
+        /// </summary>
+        public static class Sound
+        {
+            static AudioClip _hum;
+
+            public static AudioClip Hum()
+            {
+                if (_hum != null) return _hum;
+                const int rate = 22050;
+                float[] d = new float[rate];
+                int[] rotor = new int[] { 187, 193, 199, 211 };
+                int seed = 1163;
+                for (int i = 0; i < d.Length; i++)
+                {
+                    float t = (float)i / rate;
+                    float s = 0f;
+                    for (int k = 0; k < rotor.Length; k++)
+                    {
+                        float w = 2f * Mathf.PI * rotor[k] * t;
+                        s += Mathf.Sin(w) * 0.22f + Mathf.Sin(w * 2f) * 0.07f;
+                    }
+                    // Billiges, deterministisches Rauschen - kein System.Random,
+                    // damit jeder Client denselben Klang bekommt.
+                    seed = seed * 1103515245 + 12345;
+                    float r = (((seed >> 16) & 0x7fff) / 16383.5f) - 1f;
+                    s += r * 0.05f;
+                    d[i] = Mathf.Clamp(s * 0.5f, -1f, 1f);
+                }
+                _hum = AudioClip.Create("NDR_DroneHum", d.Length, 1, rate, false);
+                _hum.SetData(d, 0);
+                return _hum;
+            }
+
+            public static AudioSource Anhaengen(GameObject go)
+            {
+                if (!RevivalPlugin.CfgDroneSound.Value || go == null) return null;
+                try
+                {
+                    AudioSource src = go.AddComponent<AudioSource>();
+                    src.clip = Hum();
+                    src.loop = true;
+                    src.playOnAwake = false;
+                    src.spatialBlend = 1f;              // voll raeumlich
+                    src.rolloffMode = AudioRolloffMode.Logarithmic;
+                    src.minDistance = 5f;
+                    src.maxDistance = RevivalPlugin.CfgDroneSoundRange.Value;
+                    src.volume = RevivalPlugin.CfgDroneSoundVolume.Value;
+                    src.Play();
+                    return src;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Drohnenton: " + ex.Message);
+                    return null;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waehrend die Drohne fliegt, steht der Koerper still.
+    ///
+    /// Nicht durch Abschalten von Skripten, sondern durch die eigenen
+    /// Sperren des Spiels: eine Reihe von `Cant...`-Praedikaten entscheidet
+    /// ohnehin schon jeden Frame, ob der Spieler laufen, drehen, springen,
+    /// schiessen oder etwas aufheben darf. Ein Postfix, der waehrend des
+    /// Fluges true erzwingt, ist deshalb weder ein Eingriff noch etwas, das
+    /// aufgeraeumt werden muesste: hoert die Drohne auf zu fliegen, gilt
+    /// wieder das Urteil des Spiels.
+    ///
+    /// ANGREIFBAR BLEIBT ER. Das ist Absicht und der Kern des Spielgefuehls -
+    /// wer eine Drohne startet, sucht sich vorher Deckung.
+    /// </summary>
+    [HarmonyPatch]
+    public static class DroneInputHook
+    {
+        /// <summary>Typ::Methode. Alle liefern bool und heissen "geht nicht".</summary>
+        static readonly string[] Sperren = {
+            "PlayerMovementController::PlayerCantMovement",
+            "PlayerMovementController::PlayerCantRotate",
+            "PlayerMovementController::PlayerCantRotateAxisX",
+            "PlayerMovementController::PlayerCantJump",
+            "PlayerMovementController::PlayerCantRun",
+            "PlayerFirearmWeaponController::CantShoot",
+            "PlayerMeleeWeaponController::MeleeCantAttack",
+            "PlayerGrenadeWeaponController::CantThrowGrenade",
+            "PlayerInteractingManager::CantInteractWithItem",
+            "MouseOrbitController::PlayerCantOrbitRotate",
+        };
+
+        public static void Postfix(ref bool __result)
+        {
+            if (Drone.Flying) __result = true;
+        }
+
+        public static void Install(Harmony harmony)
+        {
+            if (!RevivalPlugin.CfgDrone.Value) return;
+            int gepatcht = 0;
+            System.Text.StringBuilder fehlt = new System.Text.StringBuilder();
+            HarmonyMethod post = new HarmonyMethod(
+                typeof(DroneInputHook).GetMethod("Postfix"));
+
+            for (int i = 0; i < Sperren.Length; i++)
+            {
+                string[] teile = Sperren[i].Split(new string[] { "::" },
+                                                  StringSplitOptions.None);
+                try
+                {
+                    Type t = AccessTools.TypeByName(teile[0]);
+                    MethodInfo m = t == null ? null
+                                 : AccessTools.Method(t, teile[1], null, null);
+                    if (m == null || m.ReturnType != typeof(bool))
+                    {
+                        if (fehlt.Length > 0) fehlt.Append(", ");
+                        fehlt.Append(Sperren[i]);
+                        continue;
+                    }
+                    harmony.Patch(m, null, post, null, null, null);
+                    gepatcht++;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Drohnensperre " + Sperren[i]
+                        + " nicht gepatcht: " + ex.Message);
+                }
+            }
+
+            RevivalPlugin.L.LogInfo("Drohnensperren: " + gepatcht + " von "
+                + Sperren.Length + " gepatcht"
+                + (fehlt.Length == 0 ? "." : (", nicht gefunden: " + fehlt + ".")));
+            if (gepatcht == 0)
+                RevivalPlugin.L.LogWarning("Drohne: KEINE Sperre gepatcht - der "
+                    + "Koerper laeuft mit, waehrend geflogen wird.");
         }
     }
 }

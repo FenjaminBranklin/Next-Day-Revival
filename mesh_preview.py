@@ -114,8 +114,46 @@ def render(v, nm, idx, yaw, pitch, label):
     return out, label
 
 
+def zusammen(namen):
+    """Mehrere Meshes in EIN Bild - fuer Baugruppen, die im Spiel
+    zusammengehoeren, aber als getrennte Dateien vorliegen (Wanne und Turm).
+    Die Verschiebung ist dieselbe, die das Plugin spaeter der Transform gibt.
+    """
+    vs, ns, ids = [], [], []
+    off = 0
+    for pfad, versatz in namen:
+        v, nm, idx = load(pfad)
+        vs.append(v + np.asarray(versatz, np.float32))
+        ns.append(nm)
+        ids.append(idx + off)
+        off += len(v)
+    return np.concatenate(vs), np.concatenate(ns), np.concatenate(ids)
+
+
+# Baugruppen, die als mehrere Dateien vorliegen. Werte in Spieleinheiten,
+# gleiche Zahlen wie im Generator (t72_mesh.py, RING_Y/RING_Z mal U).
+GRUPPEN = {
+    "t72": [("t72_hull.ndmesh", (0.0, 0.0, 0.0)),
+            ("t72_turret.ndmesh", (0.0, -1.2, 4.5))],
+}
+
+
 if __name__ == "__main__":
-    v, nm, idx = load(SRC)
+    name = sys.argv[1] if len(sys.argv) > 1 else "mg42"
+    name = name[:-7] if name.endswith(".ndmesh") else name
+    if name in GRUPPEN:
+        teile = [(os.path.join(HIER, "assets", f), o) for f, o in GRUPPEN[name]]
+        for pfad, _ in teile:
+            if not os.path.exists(pfad):
+                raise SystemExit("fehlt: " + pfad)
+        v, nm, idx = zusammen(teile)
+    else:
+        src = os.path.join(HIER, "assets", name + ".ndmesh")
+        if not os.path.exists(src):
+            raise SystemExit("fehlt: " + src)
+        v, nm, idx = load(src)
+    out = os.path.join(HIER, "assets", name + "_preview.png")
+
     print("geladen: %d Vertices, %d Dreiecke" % (len(v), len(idx)))
     views = [
         (0.0, 0.0, "Seite"),
@@ -126,5 +164,5 @@ if __name__ == "__main__":
     sheet = Image.new("RGB", (W, H * len(tiles)), (16, 16, 16))
     for i, t in enumerate(tiles):
         sheet.paste(t, (0, i * H))
-    sheet.save(OUT)
-    print("Vorschau: %s   (%s)" % (OUT, ", ".join(v[2] for v in views)))
+    sheet.save(out)
+    print("Vorschau: %s   (%s)" % (out, ", ".join(v[2] for v in views)))

@@ -83,20 +83,29 @@ ASSET_FILES = [
     "law.ndmesh", "law_diffuse.png", "law_normal.png",
     "law_icon.png", "law_weapon_icon.png",
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
+    "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
+    "t72_hull.ndmesh", "t72_turret.ndmesh",
+    "t72_diffuse.png", "t72_normal.png", "t72_scope.png",
+    "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
+    "shell125_icon.png",
     "scope50.png",
 ]
 
 MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh",
-          "law.ndmesh", "rocket.ndmesh"]
+          "law.ndmesh", "rocket.ndmesh", "drone.ndmesh",
+          "t72_hull.ndmesh", "t72_turret.ndmesh", "shell125.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
     "mg42_icon.png": (300, 300), "sniper50_icon.png": (300, 300),
     "mgbelt_icon.png": (300, 300), "ammo50_icon.png": (300, 300),
     "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
+    "drone_icon.png": (300, 300),
+    "shell125_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
     "scope50.png": (1920, 1920),
+    "t72_scope.png": (1920, 1920),
 }
 
 fails = []
@@ -323,15 +332,19 @@ def check_images():
         a = np.asarray(im.convert("RGBA"))
         alpha = a[..., 3]
         filled = 100.0 * (alpha > 8).mean()
-        if f == "scope50.png":
+        if f in ("scope50.png", "t72_scope.png"):
+            # Beide sind Zielfernrohrblenden: aussen deckend, in der Mitte ein
+            # Loch. Das Panzerglas hat zusaetzlich eine Vignette zum Rand hin,
+            # deshalb ist "voellig frei" dort kleiner - 8 Prozent reichen als
+            # Nachweis, dass ueberhaupt noch durchgesehen werden kann.
             opaque = 100.0 * (alpha > 247).mean()
             clear = 100.0 * (alpha < 8).mean()
-            if opaque < 50 or clear < 10:
-                bad("scope50.png: %.1f %% deckend, %.1f %% frei - Linse stimmt nicht"
-                    % (opaque, clear))
+            if opaque < 50 or clear < 8:
+                bad("%s: %.1f %% deckend, %.1f %% frei - Linse stimmt nicht"
+                    % (f, opaque, clear))
             else:
-                ok("scope50.png %dx%d  %.1f %% deckend, %.1f %% freie Linse"
-                   % (im.width, im.height, opaque, clear))
+                ok("%s %dx%d  %.1f %% deckend, %.1f %% freie Linse"
+                   % (f, im.width, im.height, opaque, clear))
         elif filled < 3.0:
             bad("%s ist praktisch leer (%.1f %% Alpha)" % (f, filled))
         else:
