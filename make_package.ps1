@@ -60,10 +60,16 @@ foreach ($p in @("*_preview.png", "icon_vergleich.png")) {
 }
 
 # Version in die Texte einsetzen.
+#
+# -Encoding UTF8 ist hier NICHT optional: README_EN.txt traegt seit 0.4.3 eine
+# russische Fassung, und Get-Content ohne Angabe liest in PowerShell 5.1 eine
+# Datei ohne BOM als ANSI - aus Kyrillisch wuerden Fragezeichen, ohne dass
+# irgendetwas fehlschlaegt. Geschrieben wird MIT BOM, damit auch ein zweiter
+# Lauf und aeltere Windows-Editoren es richtig lesen.
 foreach ($f in @("LIESMICH.txt", "README_EN.txt")) {
     $p = Join-Path $stage $f
-    $t = (Get-Content $p -Raw).Replace("@VERSION@", $Version)
-    [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))
+    $t = (Get-Content $p -Raw -Encoding UTF8).Replace("@VERSION@", $Version)
+    [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($true)))
 }
 
 # Gegenprobe. Faellt lieber hier auf als nach dem Hochladen.

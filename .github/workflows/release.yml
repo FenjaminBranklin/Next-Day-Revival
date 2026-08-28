@@ -56,6 +56,10 @@ jobs:
           # v0.4.1. Substitute here, and refuse to ship if one survives.
           VER="${GITHUB_REF_NAME#v}"
           sed -i "s/@VERSION@/$VER/g" "stage/$NAME"/*.txt
+          # README_EN.txt is UTF-8 with a BOM because it carries a Russian
+          # version. sed works on bytes and leaves the BOM alone; do not
+          # "clean it up" - without it, Windows PowerShell and older editors
+          # read the file as ANSI and Cyrillic turns into question marks.
           echo "NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Guard - nothing in here may belong to the game

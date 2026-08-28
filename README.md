@@ -37,8 +37,8 @@ self-contained, PowerShell, and it cannot break anyone else's game.
 4. In the main menu: *Play*, then pick the server from the list.
 
 That is all. No Python, no administrator rights, no BepInEx download - it is
-in the package. Full details in `README_EN.txt` (English) or `LIESMICH.txt`
-(German).
+in the package. Full details in `README_EN.txt` — English first, **русская
+версия ниже в том же файле** — or `LIESMICH.txt` (German).
 
 > **Do not use Steam's Play button.** It starts the EasyAntiCheat launcher,
 > which refuses to run once the mod is installed. Use `2_SPIELEN.bat` - Steam
