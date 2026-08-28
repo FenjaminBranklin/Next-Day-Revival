@@ -38,6 +38,16 @@ jobs:
             exit 1
           fi
 
+      - name: The release must match the live master server
+        # A release goes to people who will simply play. If the server does not
+        # know an item id this build registers, that item silently turns into
+        # its donor weapon in their inventory - and it looks like a broken mod,
+        # not like a version problem.
+        #
+        # Deliberately fail-closed: an unreachable server is a failure, not a
+        # shrug. No release may go out unverified.
+        run: python3 serversync.py
+
       - name: Stage the package
         run: |
           NAME="NextDayRevival_Client_${GITHUB_REF_NAME#v}"
