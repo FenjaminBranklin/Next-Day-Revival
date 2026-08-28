@@ -4215,8 +4215,9 @@ namespace NextDayRevival
         {
             quelle = "keine";
 
-            Material vorlage = TerrainMaterial();
-            if (vorlage != null) quelle = "Terrain";
+            string terrainQuelle;
+            Material vorlage = TerrainMaterial(out terrainQuelle);
+            if (vorlage != null) quelle = terrainQuelle;
 
             if (vorlage == null)
             {
@@ -4269,11 +4270,19 @@ namespace NextDayRevival
         /// derselbe Weg, den das Plugin fuer alle Spieltypen nimmt, und spart
         /// einen Verweis, der auf einem anderen Rechner fehlen koennte.
         ///
-        /// Liefert null, wenn das Terrain den eingebauten Standard benutzt -
-        /// materialTemplate ist dann leer. Dafuer gibt es die naechste Quelle.
+        /// `materialTemplate` ist im Spiel LEER - gemessen am 2026-08-28: das
+        /// Gelaende benutzt das eingebaute Standardmaterial, und das gibt Unity
+        /// nur bei materialType == Custom heraus. Deshalb zweiter Griff auf die
+        /// **Splat-Textur** des Gelaendes: das ist die Textur, die man beim
+        /// Spielen tatsaechlich unter den Fuessen sieht.
+        ///
+        /// Ohne diesen zweiten Griff fiel die Flaeche auf "naechster Renderer"
+        /// zurueck und trug die Rinde von "dead_trunk_01_LOD0" - nicht mehr
+        /// magenta, aber Boden aus Baumstamm.
         /// </summary>
-        static Material TerrainMaterial()
+        static Material TerrainMaterial(out string quelle)
         {
+            quelle = null;
             try
             {
                 Type t = AccessTools.TypeByName("UnityEngine.Terrain");
@@ -4282,9 +4291,25 @@ namespace NextDayRevival
                 if (aktiv == null) return null;
                 object terrain = aktiv.Invoke(null, null);
                 if (terrain == null) return null;
+
                 MethodInfo mat = AccessTools.PropertyGetter(t, "materialTemplate");
-                if (mat == null) return null;
-                return mat.Invoke(terrain, null) as Material;
+                if (mat != null)
+                {
+                    Material vorlage = mat.Invoke(terrain, null) as Material;
+                    if (vorlage != null)
+                    {
+                        quelle = "Terrain.materialTemplate";
+                        return vorlage;
+                    }
+                }
+
+                Material ausSplat = SplatMaterial(t, terrain);
+                if (ausSplat != null)
+                {
+                    quelle = "Terrain-Splattextur";
+                    return ausSplat;
+                }
+                return null;
             }
             catch (Exception ex)
             {
@@ -4292,6 +4317,54 @@ namespace NextDayRevival
                     + "lesbar (" + ex.Message + ")");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Erste Splat-Textur des Gelaendes auf einem Standard-Shader.
+        ///
+        /// Unity 2018.1 fuehrt sie als `TerrainData.splatPrototypes`, ein Feld
+        /// von `SplatPrototype` mit `texture` und `tileSize`. Ab 2018.3 heisst
+        /// dasselbe `terrainLayers`/`diffuseTexture` - beide Namen werden
+        /// probiert, damit ein Spielupdate das hier nicht stumm ausknipst.
+        /// </summary>
+        static Material SplatMaterial(Type terrainTyp, object terrain)
+        {
+            MethodInfo daten = AccessTools.PropertyGetter(terrainTyp, "terrainData");
+            if (daten == null) return null;
+            object td = daten.Invoke(terrain, null);
+            if (td == null) return null;
+
+            object[] schichten = null;
+            string[] namen = new string[] { "splatPrototypes", "terrainLayers" };
+            for (int i = 0; i < namen.Length && schichten == null; i++)
+            {
+                MethodInfo g = AccessTools.PropertyGetter(td.GetType(), namen[i]);
+                if (g == null) continue;
+                schichten = g.Invoke(td, null) as object[];
+            }
+            if (schichten == null || schichten.Length == 0) return null;
+
+            Texture textur = null;
+            for (int i = 0; i < schichten.Length && textur == null; i++)
+            {
+                if (schichten[i] == null) continue;
+                string[] felder = new string[] { "texture", "diffuseTexture" };
+                for (int k = 0; k < felder.Length && textur == null; k++)
+                {
+                    MethodInfo g = AccessTools.PropertyGetter(schichten[i].GetType(), felder[k]);
+                    if (g == null) continue;
+                    textur = g.Invoke(schichten[i], null) as Texture;
+                }
+            }
+            if (textur == null) return null;
+
+            Shader shader = Shader.Find("Standard");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null) return null;
+
+            Material m = new Material(shader);
+            m.mainTexture = textur;
+            return m;
         }
 
         /// <summary>Naechstgelegener Renderer mit brauchbarem Material.</summary>

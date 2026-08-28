@@ -203,9 +203,25 @@ Logs, in the order you usually want them:
 
     <game>\BepInEx\LogOutput.log        our plugin. Every line the mod writes
                                         is here, prefixed with the plugin name.
-    %USERPROFILE%\AppData\LocalLow\SOFF Games\Next Day Survival\Player.log
+    %USERPROFILE%\AppData\LocalLow\SOFF Games\Next Day Survival\output_log.txt
                                         the game's own log - Unity exceptions,
-                                        connection failures, missing resources
+                                        connection failures, missing resources.
+                                        Unity 2018 calls it output_log.txt,
+                                        NOT Player.log - that name came in
+                                        with a later Unity version and will
+                                        send you looking for a file that does
+                                        not exist.
+
+Do not read either one by hand first. Run:
+
+    python playlog.py            verdicts from the last session, plus errors
+    python playlog.py --roh      every line the plugin wrote, verbatim
+    python playlog.py --unity    also the exceptions from output_log.txt
+
+It answers what can be answered without eyes: which camera was taken over,
+where the test surface got its material, whether the turret drew ammunition,
+whether a hit did damage. What it cannot answer - does it look right, does it
+point the right way - still needs a person watching.
 
 If the plugin does not appear in `LogOutput.log` at all, BepInEx did not load
 it: check that the DLL is in `BepInEx\plugins\`, then check the EAC patch.

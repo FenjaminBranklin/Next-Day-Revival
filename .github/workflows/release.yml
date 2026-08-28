@@ -1,0 +1,76 @@
+# Publishes a player-ready zip whenever a version tag is pushed.
+#
+#     git tag v0.4.0
+#     git push origin v0.4.0
+#
+# That is the whole release process. No GitHub CLI on your machine, no token,
+# no manual upload - the runner does it with the built-in GITHUB_TOKEN.
+#
+# The zip contains only our own files. It must never contain game code:
+# client_patch.ps1 computes the EAC patch on the player's own installation,
+# and shipping Assembly-CSharp.dll would be distributing someone else's work.
+# The "guard" step below fails the build rather than let that happen.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version must match the tag
+        run: |
+          FILE=$(tr -d ' \t\r\n' < VERSION)
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "VERSION file: $FILE   tag: $TAG"
+          if [ "$FILE" != "$TAG" ]; then
+            echo "::error::VERSION says '$FILE' but the tag says '$TAG'."
+            echo "::error::Bump VERSION and RevivalPlugin.cs first, then re-tag."
+            exit 1
+          fi
+
+      - name: Stage the package
+        run: |
+          NAME="NextDayRevival_Client_${GITHUB_REF_NAME#v}"
+          mkdir -p "stage/$NAME"
+          cp -r assets bepinex "stage/$NAME/"
+          cp NextDayRevivalToolkit.dll VERSION "stage/$NAME/"
+          cp client_patch.ps1 start_game.ps1 "stage/$NAME/"
+          cp 1_EINRICHTEN.bat 2_SPIELEN.bat "stage/$NAME/"
+          cp LIESMICH.txt README_EN.txt DRITTANBIETER.txt LICENSE "stage/$NAME/"
+          # Working material of the generators - useless in the game.
+          find "stage/$NAME/assets" -name "*_preview.png" -delete
+          find "stage/$NAME/assets" -name "icon_vergleich.png" -delete
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Guard - nothing in here may belong to the game
+        run: |
+          BAD=$(find stage \( -name "Assembly-CSharp.dll" -o -name "*.nd" \
+                              -o -name "players.json" -o -name "*.orig*" \) -print)
+          if [ -n "$BAD" ]; then
+            echo "::error::These do not belong in a release:"
+            echo "$BAD"
+            exit 1
+          fi
+          test -f "stage/$NAME/NextDayRevivalToolkit.dll" || {
+            echo "::error::the plugin DLL is missing from the package"; exit 1; }
+
+      - name: Zip
+        run: cd stage && zip -qr "../$NAME.zip" "$NAME"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$NAME.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
