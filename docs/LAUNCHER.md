@@ -39,6 +39,24 @@ This is the actual design. Not "update yes/no":
 4. **Server unreachable** - offer Play anyway, with a note. **The launcher must
    never be the reason somebody cannot play.** Two second timeout, then move on.
 
+### Decide states 1 and 3 on the item ids, never on the version strings
+
+This is the trap in this design, and it will bite you on day one if you miss
+it. `contentVersion` describes the **server's content**, and it only changes
+when somebody deploys a new `weapons_db.xml`. The client version changes with
+every release, including releases that add nothing the server cares about.
+
+Right now the live server reports `contentVersion` 0.4.3 while the newest
+client is 0.4.5, and **that is correct and in sync** - the weapons match. A
+launcher that compares the two strings would shout at every single player about
+a problem that does not exist, and once it has cried wolf twice nobody reads
+its warnings again.
+
+So: compare `modWeapons` against the ids the plugin registers. Show
+`contentVersion` as information, never as a verdict. `serversync.py` in the
+repository root already does exactly this comparison - read it, or just call it
+and use its exit code (0 in sync, 1 mismatch, 2 unreachable).
+
 ## What the server will provide
 
 Kevin adds this; the endpoint does not exist yet. Schema:
