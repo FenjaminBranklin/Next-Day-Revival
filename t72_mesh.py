@@ -1,4 +1,17 @@
-"""Erzeugt Wanne und Turm des T-72 als zwei getrennte .ndmesh.
+"""ABGELOEST SEIT 0.5.3 - dieses Skript laeuft nicht mehr mit.
+
+`make_assets.py` ruft stattdessen `t72_import.py` auf. Der Panzer kommt seit
+0.5.3 als Modell UND Textur aus dem Spiel selbst: `t-72_wrecked` in level10
+ist ein vollstaendiger, handmodellierter T-72 mit eigenen UV-Texturen. Drei
+Anlaeufe mit diesem Generator (0.4.7, 0.4.9, 0.5.2) haben die Silhouette
+getroffen und danach an der Oberflaeche verloren - ein Skript mit vierzig
+Konstanten ersetzt keine Handarbeit.
+
+Die Datei bleibt liegen, weil sie das Einzige ist, was ohne Spielinstallation
+einen Panzer erzeugt, und weil ihre Kommentare die Messungen am BTR und die
+Falle mit `ndmesh._uv` festhalten.
+
+Erzeugt Wanne und Turm des T-72 als zwei getrennte .ndmesh.
 
 WARUM ZWEI DATEIEN UND NICHT EINE
 ---------------------------------
@@ -75,6 +88,8 @@ LEITRAD = (-2.92, 0.58, 0.30)          # vorn
 TRIEBRAD = (2.97, 0.64, 0.30)          # hinten
 STUETZROLLEN = ((-1.60, 0.80, 0.12), (0.25, 0.80, 0.12), (2.05, 0.80, 0.12))
 
+SEITE_EINZUG = 0.06                     # Einzug der oberen Seitenwand, siehe profil()
+
 KETTE_D = 0.09                          # Dicke des Kettenbandes
 KETTE_MITTE = 1.44                      # Abstand der Kettenmitte von der Achse
 KETTE_B = 0.58                          # Breite des Kettenbandes
@@ -86,31 +101,53 @@ RAD_B = 0.42                            # Breite der Laufrollen
 #   y, Bodenhoehe, Deckhoehe, Halbbreite unten, Halbbreite oben
 # Die vier vorderen Deckhoehen liegen auf einer Geraden - so wird die Glacis
 # eine ebene Platte und keine Treppe.
+#
+# Die obere Halbbreite verjuengt sich seit 0.5.2 nach vorn (1.40 in der Mitte,
+# 1.12 an der Bugspitze) und leicht nach hinten. Vorher stand sie ueber die
+# ganze Laenge auf 1.40, und genau das ist der Grund, warum die Wanne von
+# schraeg oben ein Ziegel war: in der Draufsicht ein Rechteck, in dem sich
+# kein einziger Fluchtpunkt findet. Die Deckhoehen bleiben unveraendert - die
+# vier vorderen liegen weiter exakt auf einer Geraden.
 STATIONEN = (
-    (-3.30, 0.52, 0.611, 1.00, 1.24),
-    (-2.90, 0.49, 0.836, 1.06, 1.33),
-    (-2.30, 0.47, 1.174, 1.09, 1.38),
-    (-1.72, 0.47, 1.500, 1.09, 1.40),
+    (-3.30, 0.52, 0.611, 1.00, 1.12),
+    (-2.90, 0.49, 0.836, 1.06, 1.23),
+    (-2.30, 0.47, 1.174, 1.09, 1.33),
+    (-1.72, 0.47, 1.500, 1.09, 1.39),
     ( 1.55, 0.47, 1.500, 1.09, 1.40),
     ( 2.05, 0.47, 1.455, 1.09, 1.40),
-    ( 3.15, 0.48, 1.440, 1.09, 1.40),
-    ( 3.45, 0.62, 1.220, 1.00, 1.30),
+    ( 3.15, 0.48, 1.440, 1.09, 1.37),
+    ( 3.45, 0.62, 1.220, 1.00, 1.24),
 )
 
 # --------------------------------------------------------------------- Turm
-TURM_H = 0.78                           # Ring bis Dach
-TURM_B = 1.34                           # Halbbreite am Ring
-TURM_V = 1.36                           # nach vorn
-TURM_R = 1.18                           # nach hinten
+#
+# WARUM DER TURM 0.5.2 KLEINER, LAENGER UND KANTIGER WIRD
+# Der erste Blick im Spiel (2026-08-29) nannte ihn "zu gross und kreisfoermig".
+# Beides ist an den Zahlen nachweisbar: er war mit 2.68 m BREITER als lang
+# (2.54 m), und ein Koerper, der breiter als lang ist, liest sich von oben und
+# von schraeg vorn zwangslaeufig als Scheibe. Beim Vorbild ist es umgekehrt -
+# rund 2.3 m breit, mit Gepaeckkorb ueber 3 m lang. Dazu kam ein Umriss aus
+# reinem Sinus und Kosinus, also eine Ellipse ohne jede Wange.
+#
+# Deshalb hier drei Aenderungen an denselben vier Zahlen: schmaler, deutlich
+# laenger, flacher - und ein Umriss, der keine Ellipse mehr ist (TURM_KANTE).
+TURM_H = 0.68                           # Ring bis Dach (vorher 0.78)
+TURM_B = 1.18                           # Halbbreite am Ring (vorher 1.34)
+TURM_V = 1.62                           # nach vorn (vorher 1.36)
+TURM_R = 1.30                           # nach hinten (vorher 1.18)
 TURM_SEG = 56                           # Stuetzpunkte im Umriss (vorher 32)
-# Hoehe ueber dem Ring, Skalierung des Umrisses. Zwoelf Lagen statt acht, und
-# der Umriss faellt zum Dach hin nur noch auf 0.70 statt auf 0.60: der T-72
-# traegt einen flachen Gussturm mit einem breiten Dach, keine Halbkugel. Die
-# Halbkugel war der Grund, warum der Turm im Spiel wie eine Suppenschuessel
-# aussah.
-TURM_LAGEN = ((-0.14, 0.885), (0.00, 1.000), (0.11, 1.020), (0.22, 1.018),
-              (0.33, 1.000), (0.43, 0.970), (0.52, 0.932), (0.60, 0.888),
-              (0.67, 0.840), (0.72, 0.792), (0.76, 0.744), (0.78, 0.700))
+# Exponent des Umrisses. 1.0 ergibt exakt eine Ellipse; kleiner als 1 zieht die
+# Kontur zu den Ecken hin und macht aus dem Kreis eine Flaeche mit Wangen und
+# gerundeten Kanten. Unter etwa 0.7 wird daraus ein Kasten mit abgerundeten
+# Ecken - das ist zu viel fuer einen Gussturm.
+TURM_KANTE = 0.78
+# Hoehe ueber dem Ring, Skalierung des Umrisses. Der Umriss faellt jetzt von
+# der ersten Lage an ab. Vorher stand er bis auf ein Drittel der Hoehe auf
+# 1.00 und mehr - eine senkrechte Wand mit Bauch, also eine Trommel. Ein
+# T-72-Turm zieht sich ab dem Ring durchgehend ein.
+TURM_LAGEN = ((-0.12, 0.930), (0.00, 1.000), (0.09, 0.992), (0.18, 0.968),
+              (0.27, 0.932), (0.36, 0.888), (0.45, 0.838), (0.53, 0.786),
+              (0.60, 0.730), (0.65, 0.672), (0.68, 0.606))
 
 ROHR_Z = 0.28                           # Rohrachse ueber dem Turmring
 ROHR_SPITZE = -5.36
@@ -370,14 +407,27 @@ def profil(floor, top, lhw, uhw):
     Unten die schmale Wanne zwischen den Ketten, darueber der ueberhaengende
     Kasten, oben eine Fase zum Dach. Fase und Absatzhoehe wachsen mit der
     Bauhoehe mit, sonst kippt der Umriss am flachen Bug in sich zusammen.
+
+    ZWEI ZAHLEN GEGEN DEN ZIEGEL (0.5.2)
+    Bis 0.5.1 stand die Seitenwand zwischen Absatz und Fase exakt senkrecht,
+    und die Fase war mit hoechstens 0.10 kaum zu sehen. Im Spiel war das eine
+    glatte, hohe Wand mit einer scharfen Oberkante - der Grund fuer "klobig".
+
+      SEITE_EINZUG   zieht die Wand nach oben um 6 cm ein. Sie faengt damit
+                     Licht von schraeg oben und trennt sich sichtbar vom Dach.
+      Fase           bis 0.17 statt bis 0.10, und sie waechst schneller mit
+                     der Bauhoehe (0.30 statt 0.25).
     """
-    ch = min(0.10, 0.25 * (top - floor))
+    ch = min(0.17, 0.30 * (top - floor))
     spz = min(1.04, floor + 0.55 * (top - floor))
     spz = min(spz, top - ch - 0.02)
+    # Halbbreite direkt unter der Fase. Nie schmaler als die Wanne unten,
+    # sonst haengt der Kasten am flachen Bug innerhalb des Unterbaus.
+    uw = max(lhw, uhw - SEITE_EINZUG)
     return [
         (-lhw, floor), (lhw, floor),
-        (lhw, spz), (uhw, spz), (uhw, top - ch), (uhw - ch, top),
-        (-(uhw - ch), top), (-uhw, top - ch), (-uhw, spz), (-lhw, spz),
+        (lhw, spz), (uhw, spz), (uw, top - ch), (uw - ch, top),
+        (-(uw - ch), top), (-uw, top - ch), (-uhw, spz), (-lhw, spz),
     ]
 
 
@@ -466,18 +516,34 @@ def turm_umriss(s):
     Mitte, laeuft nach vorn deutlich schmaler zu und hat hinten eine fast
     senkrechte Wand. Genau diese Abweichung vom Kreis ist der Unterschied
     zwischen "Panzerturm" und "Schuessel".
+
+    Seit 0.5.2 kommt die Abweichung aus zwei Quellen statt einer:
+
+      TURM_KANTE   hebt Kosinus und Sinus auf einen Exponenten unter 1. Das
+                   schiebt Stuetzpunkte aus den vier Scheiteln in die Ecken -
+                   aus der Ellipse wird eine Flaeche mit geraden Wangen und
+                   gerundeten Kanten. Genau daran erkennt das Auge einen
+                   Gussturm und keine Schuessel.
+      schmal       zieht die vordere Haelfte zusaetzlich zusammen, jetzt auf
+                   0.34 statt 0.20. Zusammen mit TURM_V 1.62 wird die Front
+                   ein Keil und keine Rundung mehr.
     """
     pts = []
     n = TURM_SEG
+    e = TURM_KANTE
     for i in range(n):
         a = 2.0 * math.pi * i / n
         ca, sa = math.cos(a), math.sin(a)
+        # Superellipse. copysign, weil ein negativer Wert keine gebrochene
+        # Potenz hat - Betrag potenzieren, Vorzeichen zurueckgeben.
+        cx = math.copysign(abs(ca) ** e, ca)
+        cz = math.copysign(abs(sa) ** e, sa)
         # Vorn (sa > 0) zieht sich der Umriss zusammen, hinten bleibt er voll.
-        schmal = 1.0 - 0.20 * max(0.0, sa) ** 1.6
-        x = s * TURM_B * ca * schmal
-        z = s * (TURM_V if sa > 0 else TURM_R) * sa
+        schmal = 1.0 - 0.34 * max(0.0, sa) ** 1.4
+        x = s * TURM_B * cx * schmal
+        z = s * (TURM_V if sa > 0 else TURM_R) * cz
         # Hinten abgeflacht: der T-72 hat dort eine fast senkrechte Wand.
-        z = max(z, -s * TURM_R * 0.86)
+        z = max(z, -s * TURM_R * 0.88)
         pts.append((x, z))
     return pts
 
@@ -493,12 +559,16 @@ def build_turret():
     # und Rohrwurzel - ohne sie steht das Rohr in einem Loch.
     # Die Blende ist bewusst klein und stark gefast: als grosser scharfer
     # Kasten sah sie in der Vorschau wie eine aufgeklebte Platte aus.
-    m.cbox(0.0, -1.24, ROHR_Z, 0.86, 0.50, 0.52, "receiver", c=0.14)
-    m.tube(0.0, ROHR_Z, -2.30, -1.40, 0.155, "receiver", seg=ROHR_SEG)
+    # Alle drei Marken 0.26 weiter vorn als bis 0.5.1: der Turm reicht mit
+    # TURM_V 1.62 weiter nach vorn, die Blende muss die Naht weiter vorn
+    # zudecken. Auf Rohrhoehe (0.28 ueber dem Ring) steht der Umriss auf rund
+    # 0.93 der vollen Laenge, die Turmnase also bei -1.51.
+    m.cbox(0.0, -1.46, ROHR_Z, 0.82, 0.50, 0.50, "receiver", c=0.14)
+    m.tube(0.0, ROHR_Z, -2.52, -1.60, 0.155, "receiver", seg=ROHR_SEG)
     # Waermeschutzhuelle ueber fast der ganzen Rohrlaenge. Ohne sie wirkt das
     # Rohr wie ein Besenstiel; sie ist das, was ein modernes Panzerrohr dick
     # aussehen laesst.
-    m.tube(0.0, ROHR_Z, -4.95, -2.30, 0.135, "receiver", seg=ROHR_SEG)
+    m.tube(0.0, ROHR_Z, -4.95, -2.52, 0.135, "receiver", seg=ROHR_SEG)
     # Rauchabsauger - das Merkmal, an dem man ein sowjetisches Panzerrohr auf
     # hundert Meter erkennt.
     m.tube(0.0, ROHR_Z, -4.05, -3.40, 0.185, "receiver", seg=ROHR_SEG)
@@ -512,10 +582,13 @@ def build_turret():
     # Kommandantenkuppel rechts, Richtschuetzenvisier links. Mehr kommt nicht
     # aufs Dach: der Auftrag will keine Luken und keine Griffe, aber ein
     # voellig kahles Dach sieht aus wie ein unfertiges Modell.
+    # Beide sitzen naeher an der Mitte als bis 0.5.1: das Dach ist mit dem
+    # neuen Umriss schmaler (Halbbreite rund 0.72 statt 0.94), an der alten
+    # Stelle stuenden sie ueber der Kante in der Luft.
     haube = Mesh("Kuppel")
-    haube.tube(0.0, 0.0, 0.0, 0.14, 0.31, "receiver", seg=20)
-    m.merge(haube, rot_deg=(90.0, 0.0, 0.0), offset=(0.45, 0.16, TURM_H - 0.01))
-    m.cbox(-0.44, -0.52, TURM_H + 0.06, 0.30, 0.34, 0.18, "receiver", c=0.02)
+    haube.tube(0.0, 0.0, 0.0, 0.13, 0.28, "receiver", seg=20)
+    m.merge(haube, rot_deg=(90.0, 0.0, 0.0), offset=(0.36, 0.14, TURM_H - 0.01))
+    m.cbox(-0.36, -0.44, TURM_H + 0.05, 0.28, 0.32, 0.16, "receiver", c=0.02)
 
     # Nebelwurfbecher auf beiden Wangen und der Gepaeckkorb hinten. Beides
     # kostet zusammen keine 400 Dreiecke und ist genau das, was einen Turm von
@@ -526,10 +599,10 @@ def build_turret():
             becher = Mesh("Nebelbecher")
             becher.tube(0.0, 0.0, 0.0, 0.30, 0.058, "detail", seg=10)
             m.merge(becher, rot_deg=(64.0, 0.0, s * 14.0),
-                    offset=(s * (0.62 + k * 0.135), -0.86 + k * 0.055,
-                            TURM_H - 0.30))
-    m.cbox(0.0, 1.02, TURM_H - 0.30, 1.70, 0.34, 0.26, "stock", c=0.03)
-    m.cbox(0.0, 0.86, TURM_H - 0.05, 1.10, 0.22, 0.14, "stock", c=0.02)
+                    offset=(s * (0.54 + k * 0.122), -0.70 + k * 0.050,
+                            TURM_H - 0.26))
+    m.cbox(0.0, 1.12, TURM_H - 0.26, 1.62, 0.34, 0.24, "stock", c=0.03)
+    m.cbox(0.0, 0.94, TURM_H - 0.04, 1.06, 0.22, 0.13, "stock", c=0.02)
 
     m.V = [(p[0] * U, p[1] * U, p[2] * U) for p in m.V]
     return m

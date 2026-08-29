@@ -133,8 +133,9 @@ def zusammen(namen):
 # Baugruppen, die als mehrere Dateien vorliegen. Werte in Spieleinheiten,
 # gleiche Zahlen wie im Generator (t72_mesh.py, RING_Y/RING_Z mal U).
 GRUPPEN = {
+    # Turmring aus t72_import.py - der Turm dreht sich um diesen Punkt.
     "t72": [("t72_hull.ndmesh", (0.0, 0.0, 0.0)),
-            ("t72_turret.ndmesh", (0.0, -1.2, 4.5))],
+            ("t72_turret.ndmesh", (0.0, -0.922, 4.144))],
 }
 
 

@@ -87,7 +87,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.0";
+        public const string VERSION = "0.5.3";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -125,10 +125,8 @@ namespace NextDayRevival
         internal static ConfigEntry<bool> CfgTurretCrosshair;
         internal static ConfigEntry<bool> CfgTurretTakeCamera;
         internal static ConfigEntry<float> CfgTurretFov;
-        internal static ConfigEntry<bool> CfgTurretExplosion;
-        internal static ConfigEntry<float> CfgTurretExplosionDamage;
-        internal static ConfigEntry<float> CfgTurretExplosionRadius;
         internal static ConfigEntry<bool> CfgTurretInvertX;
+        internal static ConfigEntry<bool> CfgTurretScope;
         internal static ConfigEntry<bool> CfgTurretScopeOverlay;
         internal static ConfigEntry<float> CfgTurretAimLead;
         internal static ConfigEntry<float> CfgTurretSeatX;
@@ -148,6 +146,7 @@ namespace NextDayRevival
         internal static ConfigEntry<int> CfgTankAmmoId;
         internal static ConfigEntry<int> CfgTankSpawnAmmo;
         internal static ConfigEntry<bool> CfgTankScope;
+        internal static ConfigEntry<bool> CfgTankExplosion;
         internal static ConfigEntry<bool> CfgSpawnCar;
         internal static ConfigEntry<string> CfgSpawnCarKey;
         internal static ConfigEntry<string> CfgSpawnCarName;
@@ -186,12 +185,32 @@ namespace NextDayRevival
         internal static ConfigEntry<bool> CfgDroneOverlay;
         internal static ConfigEntry<bool> CfgDroneRequireItem;
         internal static ConfigEntry<int> CfgDroneItemId;
+        internal static ConfigEntry<bool> CfgWatchTemplates;
+        internal static ConfigEntry<bool> CfgJammer;
+        internal static ConfigEntry<int> CfgJammerItemId;
+        internal static ConfigEntry<float> CfgJammerRadius;
+        internal static ConfigEntry<float> CfgJammerWarnRadius;
+        internal static ConfigEntry<bool> CfgJammerDetonate;
+        internal static ConfigEntry<float> CfgJammerDelay;
+        internal static ConfigEntry<bool> CfgJammerAffectsOwn;
+        internal static ConfigEntry<bool> CfgDroneSelfDestruct;
+        internal static ConfigEntry<bool> CfgFire;
+        internal static ConfigEntry<float> CfgFireScale;
+        internal static ConfigEntry<bool> CfgNetDrop;
         internal static ConfigEntry<bool> CfgArena;
         internal static ConfigEntry<string> CfgArenaKey;
         internal static ConfigEntry<float> CfgArenaSize;
         internal static ConfigEntry<float> CfgArenaDistance;
 
         internal static List<ItemDef> Items = new List<ItemDef>();
+
+        /// <summary>The ItemDef for an id, or null if the id is the game's own.</summary>
+        internal static ItemDef FindItem(int id)
+        {
+            for (int i = 0; i < Items.Count; i++)
+                if (Items[i].Id == id) return Items[i];
+            return null;
+        }
         internal const string ScopePath = "WeaponElements/Scopes/NDR_Scope50";
         internal static bool SetupDone;
 
@@ -215,9 +234,13 @@ namespace NextDayRevival
             PatchResourcesLoad();
             PatchLocalization();
             PatchBackpackDiagnostics();
+            PatchWeaponSpine();
+            PatchSpawnLookup();
+            PatchDestroyWatch();
             PatchReloadDiagnostics();
             PatchRocketImpact();
-            PatchLawDrop();
+            PatchCustomDrop();
+            PatchFire();
             Turret.Install(_harmony);
             ColdHook.Install(_harmony);
             DroneInputHook.Install(_harmony);
@@ -297,13 +320,23 @@ namespace NextDayRevival
             CfgTurretKey = Config.Bind("Turret", "TurretKey", "G",
                 "Taste zum Aufsitzen und Verlassen des Geschuetzes, waehrend man "
                 + "im Fahrzeug sitzt. Name aus UnityEngine.KeyCode.");
-            CfgTurretDamage = Config.Bind("Turret", "Damage", 750f,
-                "Schaden je Schuss. Zum Vergleich: die Granate des M72 macht 900 "
-                + "im Radius 12.");
+            CfgTurretDamage = Config.Bind("Turret", "Damage", 120f,
+                "Schaden je Schuss, und der EINZIGE Schaden - es gibt keine "
+                + "Flaechenwirkung mehr, getroffen wird nur, worauf die Bildmitte "
+                + "steht. Bis 0.5.1 waren es 750 je Schuss plus Sprengwirkung; "
+                + "das war ein Panzer im Kleinen. Jetzt ist es eine Waffe mit "
+                + "grossem Kaliber: ein einzelner Treffer tut weh, toetet aber "
+                + "nicht von selbst - das macht erst die Garbe. Zum Vergleich: "
+                + "die Granate des M72 macht 900 im Radius 12, der Panzer 1500.");
             CfgTurretRange = Config.Bind("Turret", "Range", 900f,
                 "Reichweite des Schusses in Welteinheiten.");
-            CfgTurretDelay = Config.Bind("Turret", "FireDelay", 0.9f,
-                "Sekunden zwischen zwei Schuessen.");
+            CfgTurretDelay = Config.Bind("Turret", "FireDelay", 0.12f,
+                "Sekunden zwischen zwei Schuessen - rund acht je Sekunde, also "
+                + "eine Maschinenkanone. Das Geschuetz lebt von der Kadenz, nicht "
+                + "von der Wucht des einzelnen Treffers. ACHTUNG: jeder Schuss "
+                + "nimmt eine Patrone. Deshalb ist die Vorgabe fuer AmmoItemId "
+                + "seit 0.5.2 der Gurt mit 200 Schuss und nicht mehr die Kiste "
+                + "mit 10 - die waere in gut einer Sekunde durch.");
             CfgTurretTurnSpeed = Config.Bind("Turret", "TurnSpeed", 140f,
                 "Grad je Sekunde, mit denen das Rohr der Blickrichtung nachdreht. "
                 + "Der BLICK folgt der Maus sofort - nur das Rohr hat Traegheit. "
@@ -320,8 +353,14 @@ namespace NextDayRevival
             CfgTurretAmmo = Config.Bind("Turret", "RequireAmmo", true,
                 "Je Schuss eine Patrone aus dem Kofferraum nehmen. Der Kofferraum "
                 + "ist InteractColliders/BagaggeContainer, ein ItemsContainer.");
-            CfgTurretAmmoId = Config.Bind("Turret", "AmmoItemId", 2051,
-                "Item-ID der Munition. 2051 ist die .50-BMG-Kiste des Toolkits.");
+            CfgTurretAmmoId = Config.Bind("Turret", "AmmoItemId", 2050,
+                "Item-ID der Munition. 2050 ist der Gurtkasten mit 200 Schuss, "
+                + "2051 die .50-BMG-Kiste mit 10. Bei acht Schuss je Sekunde ist "
+                + "die Kiste in gut einer Sekunde leer, deshalb der Gurt. Dass "
+                + "eine Maschinenkanone an einem 7,62er Gurt haengt, ist ein "
+                + "Zugestaendnis an den vorhandenen Itembestand - ein eigener "
+                + "30-mm-Gurt waere ein eigenes Item mit eigener Id, eigenem "
+                + "Modell und einem Eintrag am Server.");
             CfgTurretAmmoBackpack = Config.Bind("Turret", "AmmoFromBackpack", true,
                 "Ist der Kofferraum leer, auch aus dem Rucksack des Spielers "
                 + "nehmen. Der Kofferraum gehoert dem Fahrzeug und ist nach dem "
@@ -332,9 +371,13 @@ namespace NextDayRevival
             CfgTurretSensitivity = Config.Bind("Turret", "Sensitivity", 2.2f,
                 "Grad Turmschwenk je Einheit Mausbewegung. Die Traegheit aus "
                 + "TurnSpeed bleibt davon unberuehrt.");
-            CfgTurretRecoil = Config.Bind("Turret", "Recoil", 0.30f,
-                "Grad, die das Rohr je Schuss hochschlaegt. Bewusst klein - "
-                + "ein Turmgeschuetz sitzt auf zwoelf Tonnen Fahrzeug.");
+            CfgTurretRecoil = Config.Bind("Turret", "Recoil", 0.05f,
+                "Grad, die das Rohr je Schuss hochschlaegt. Bewusst klein - ein "
+                + "Turmgeschuetz sitzt auf zwoelf Tonnen Fahrzeug. Der Wert haengt "
+                + "an der Kadenz, nicht am Kaliber: bei acht Schuss je Sekunde "
+                + "sind auch 0,05 Grad noch 0,4 Grad Wanderung in der Sekunde. "
+                + "Die alten 0,30 Grad haetten das Rohr in einer Garbe in den "
+                + "Himmel geschoben.");
             // Die Kamera sass bis 2026-08-28 auf der Rohrachse, kurz vor der
             // Muendung - und damit MITTEN IM BUG. Nachgemessen am Prefab
             // BTR-80A_Spawn: das Turmmesh reicht in Rohrrichtung bis z 8.9,
@@ -360,25 +403,35 @@ namespace NextDayRevival
                 "Fadenkreuz in der Bildmitte. Der Schuss laeuft seit 2026-08-28 "
                 + "auf der BLICKACHSE der Kamera, nicht mehr auf der Rohrachse - "
                 + "die Mitte ist damit immer der Treffpunkt, egal wo die Kamera "
-                + "sitzt. Der alte Schluessel CrosshairRange ist wirkungslos.");
+                + "sitzt. Der alte Schluessel CrosshairRange ist wirkungslos. "
+                + "Zu sehen nur, wenn keine Optik im Bild ist - Turret/Scope "
+                + "und Tank/Scope bringen ihr eigenes Kreuz mit.");
             CfgTurretTakeCamera = Config.Bind("Turret", "TakeCamera", true,
                 "Die Kamera des Spiels waehrend des Zielens stilllegen. Ohne das "
                 + "zieht MouseOrbitController sie jeden Frame wieder um das "
                 + "Fahrzeug herum - der Blick zeigt dann auf den eigenen BTR "
                 + "statt durch das Rohr. Auf false, falls die Kamera nach dem "
                 + "Aussteigen haengt.");
-            CfgTurretFov = Config.Bind("Turret", "FOV", 26f,
+            CfgTurretFov = Config.Bind("Turret", "FOV", 32f,
                 "Bildwinkel im Geschuetz, in Grad. Klein heisst nah heran wie im "
                 + "Zielfernrohr; das Spiel selbst benutzt 60. 0 laesst den "
-                + "Bildwinkel unveraendert.");
-            CfgTurretExplosion = Config.Bind("Turret", "Explosion", true,
-                "Am Einschlag eine Sprenggranate zuenden. Ohne das ist ein "
-                + "Schuss nicht zu sehen und nicht zu hoeren - die 30 mm des "
-                + "BTR-80A sind Sprengmunition, kein Gewehrschuss.");
-            CfgTurretExplosionDamage = Config.Bind("Turret", "ExplosionDamage", 350f,
-                "Schaden der Sprenggranate im Umkreis.");
-            CfgTurretExplosionRadius = Config.Bind("Turret", "ExplosionRadius", 5f,
-                "Wirkungsradius der Sprenggranate in Welteinheiten.");
+                + "Bildwinkel unveraendert. Weiter als im Panzer (20): das BTR "
+                + "schiesst schnell auf bewegliche Ziele, und wer nur durch ein "
+                + "Rohr sieht, findet sie nicht wieder.");
+            CfgTurretScope = Config.Bind("Turret", "Scope", true,
+                "Richtoptik statt vier Striche im freien Bild: schwarze Fassung, "
+                + "runde Linse, offenes Kreuz mit Vorhaltemarken (apc_scope.png). "
+                + "Die Linse ist weiter als die des Panzers und die Abschattung "
+                + "zum Rand schwaecher. Auf false bleibt es beim einfachen "
+                + "Fadenkreuz.");
+            // KEIN Explosionsschalter mehr fuer das BTR, und das ist Absicht.
+            // Ein Schalter mit der Vorgabe false haette nichts geholfen: eine
+            // vorhandene nextday.revival.toolkit.cfg gewinnt gegen jede neue
+            // Vorgabe, und genau so schoss das Geschuetz nach 0.5.1 weiter mit
+            // Sprenggranaten. Was ganz weg ist, kann keine alte Datei wieder
+            // anschalten. Die Sprengwerte des Panzers stehen unter [Tank].
+            // Die drei alten Zeilen Explosion/ExplosionDamage/ExplosionRadius
+            // bleiben in vorhandenen Dateien stehen und sind wirkungslos.
             CfgTurretScopeOverlay = Config.Bind("Turret", "ScopeOverlay", false,
                 "Zusaetzlich das Zielfernrohrbild ueberblenden. Aus, seit die "
                 + "Kamera im Rohr sitzt - das Bild verdeckte nur die Sicht.");
@@ -502,6 +555,79 @@ namespace NextDayRevival
             CfgDroneItemId = Config.Bind("Drone", "ItemId", 1163,
                 "Item, das ein Start verbraucht.");
 
+            // -------------------------------------------------- Stoersender
+            //
+            // The counter to the drone, and the reason it is a CARRIED item:
+            // a drone is a weapon that costs its owner nothing but a backpack
+            // slot, so the answer has to cost a backpack - 26 kg of it.
+            //
+            // Who decides that a drone dies is the whole design. A drone only
+            // exists on the client flying it; only there can the camera be
+            // given back and the warhead be fired. The jammer therefore kills
+            // nothing itself. It says "jammer here, radius R" and every pilot
+            // checks their own drone against that. A modified client could
+            // ignore it - among friends that is fine, as a security measure it
+            // is worthless, and it is written down so nobody mistakes it for
+            // one.
+            //
+            // Traffic stays at zero until it matters: the event goes out only
+            // while a foreign drone is actually close, and then five times a
+            // second, unreliable.
+            CfgWatchTemplates = Config.Bind("Fixes", "WatchSpawnTemplates", true,
+                "Schreibt ins Log, WER eine Inventarvorlage eines eigenen Items "
+                + "zerstoert - mitsamt Aufrufer. Kostet einen Vergleich je "
+                + "Object.Destroy und beantwortet die Frage, warum ein Item "
+                + "mitten in der Sitzung aufhoert zu existieren (E-029).");
+            CfgJammer = Config.Bind("Jammer", "Enabled", true,
+                "Stoersender: wer einen traegt, laesst jede Drohne hochgehen, "
+                + "die ihm zu nahe kommt.");
+            CfgJammerItemId = Config.Bind("Jammer", "ItemId", 2054,
+                "Item, das den Stoersender ausmacht. Es muss nur im Rucksack "
+                + "oder in der Weste liegen - verbraucht wird nichts. Zum "
+                + "Ausprobieren laesst sich hier auch eine vorhandene Spiel-Id "
+                + "eintragen.");
+            CfgJammerRadius = Config.Bind("Jammer", "Radius", 50f,
+                "Ab dieser Entfernung in Metern ist die Drohne verloren.");
+            CfgJammerWarnRadius = Config.Bind("Jammer", "WarnRadius", 85f,
+                "Ab hier rauscht das Bild - die Vorwarnung. Wer sie sieht, "
+                + "kann noch abdrehen. Ein Wert kleiner als Radius schaltet "
+                + "die Vorwarnung ab.");
+            CfgJammerDetonate = Config.Bind("Jammer", "Detonate", true,
+                "true: die Drohne zuendet dort, wo sie fliegt. false: die "
+                + "Motoren stehen, sie faellt und geht am Boden hoch.");
+            CfgJammerDelay = Config.Bind("Jammer", "Delay", 0.4f,
+                "Sekunden zwischen dem Betreten des Radius und dem Knall. "
+                + "Nicht null, damit es nach Wirkung aussieht und nicht nach "
+                + "einem Fehler. Entkommen kann die Drohne in dieser Zeit "
+                + "nicht - wer drin war, ist erledigt.");
+            CfgJammerAffectsOwn = Config.Bind("Jammer", "AffectsOwn", false,
+                "Stoert der eigene Sender die eigene Drohne? Vorgabe false, "
+                + "sonst kann niemand beides tragen. Auf true ist der "
+                + "Stoersender allein zu pruefen: starten, wegfliegen, "
+                + "umdrehen - beim Radius muss es knallen.");
+            CfgDroneSelfDestruct = Config.Bind("Drone", "SelfDestruct", true,
+                "Pressing the drone key during a flight blows the drone up where it "
+                + "is, instead of quietly ending the flight. Nearer to the pilot "
+                + "than SafeRadius it still only lands - a mis-press must not be "
+                + "able to kill you.");
+
+            // ------------------------------------------------------- Effects
+            CfgFire = Config.Bind("Effects", "Fire", true,
+                "Fire on top of every explosion: fireball, tongues, sparks, smoke "
+                + "and a short flash of light. The game's own explosion stays as it "
+                + "is underneath - this is added, nothing is replaced.");
+            CfgFireScale = Config.Bind("Effects", "FireScale", 1.0f,
+                "Size of that fire, relative to the blast radius of the explosion "
+                + "it belongs to. 0 is not allowed, use Fire = false.");
+
+            CfgNetDrop = Config.Bind("CustomItems", "NetworkedDrop", true,
+                "Drop our own ids through the game's own path, so what lands on "
+                + "the ground is a scene object with a PhotonView and an "
+                + "ItemSpawned: others see it, and it can be picked up. Needs the "
+                + "Resources.Load(string, Type) patch (0.5.3). On false the plugin "
+                + "falls back to the local piece of scenery of 0.5.1 - visible to "
+                + "nobody else and not pickable.");
+
             // -------------------------------------------------- Kampfpanzer
             //
             // Der Panzer ist ein umgebautes BTR-80A und benutzt dasselbe
@@ -561,6 +687,14 @@ namespace NextDayRevival
                 "Panzerzielfernrohr statt freier Sicht: schwarze Fassung, runde "
                 + "Linse, Winkelmarke mit Entfernungsskala (t72_scope.png). "
                 + "Ersetzt im Panzer das einfache Fadenkreuz.");
+            // Eigener Schalter, seit das BTR keine Sprenggranaten mehr schiesst:
+            // vorher hing beides an Turret/Explosion, und ein Panzer ohne
+            // Flaechenwirkung waere ein sehr langsames Gewehr.
+            CfgTankExplosion = Config.Bind("Tank", "Explosion", true,
+                "Am Einschlag eine Sprenggranate zuenden. Beim Panzer der Sinn "
+                + "der Sache - 125 mm sind Artillerie. Das BTR hat dafuer seinen "
+                + "eigenen Schalter unter Turret/Explosion, der seit 0.5.1 aus "
+                + "ist.");
 
             CfgArena = Config.Bind("Research", "Arena", false,
                 "Auf Tastendruck eine ebene Testflaeche vor dem Spieler bauen, "
@@ -682,6 +816,19 @@ namespace NextDayRevival
                 "drone_icon.png", null,
                 1, 0, 1.4f));
 
+            Items.Add(new ItemDef(
+                2054, 2030, false,
+                "Stoersender R-330 (tragbar)",
+                "Breitbandstoerer im Traggestell: Batteriekasten, Verstaerker, "
+                + "vier Peitschenantennen. Wer ihn traegt, nimmt jeder Drohne "
+                + "im Umkreis von 50 m die Funkstrecke - und weil der Zuender "
+                + "davon nichts weiss, geht sie dort hoch, wo sie gerade "
+                + "fliegt. Der Preis steht auf der Waage: 26 kg, die sonst "
+                + "Munition waeren.",
+                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
+                "jammer_icon.png", null,
+                1, 0, 26.0f));
+
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
             {
@@ -719,21 +866,43 @@ namespace NextDayRevival
                 // AccessTools.Method wirft hier AmbiguousMatchException, weil
                 // Resources.Load(string) und Resources.Load<T>(string) dieselbe
                 // Parameterliste haben. Also von Hand auswaehlen.
-                MethodInfo target = null;
+                //
+                // BEIDE Ueberladungen, seit 0.5.3. Das Spiel selbst ruft
+                // Resources.Load(string); Photon aber ruft in
+                // NetworkingPeer::DoInstantiate und in
+                // PhotonNetwork::InstantiateSceneObject die Form
+                // Resources.Load(string, Type) auf. Genau daran ist der Drop
+                // eigener Ids bisher gescheitert (E-025): der Hook beantwortete
+                // die erste Ladung, Photons zweite lief daran vorbei, kam mit
+                // null zurueck, und das Spiel schrieb "DropItem null!".
+                MethodInfo byPath = null;
+                MethodInfo byPathAndType = null;
                 foreach (MethodInfo m in typeof(Resources).GetMethods(
                              BindingFlags.Public | BindingFlags.Static))
                 {
                     if (m.Name != "Load") continue;
                     if (m.IsGenericMethod || m.IsGenericMethodDefinition) continue;
                     ParameterInfo[] ps = m.GetParameters();
-                    if (ps.Length == 1 && ps[0].ParameterType == typeof(string)) target = m;
+                    if (ps.Length == 1 && ps[0].ParameterType == typeof(string))
+                        byPath = m;
+                    else if (ps.Length == 2 && ps[0].ParameterType == typeof(string)
+                             && ps[1].ParameterType == typeof(Type))
+                        byPathAndType = m;
                 }
-                if (target == null) { L.LogError("Resources.Load(string) nicht gefunden."); return; }
+                if (byPath == null) { L.LogError("Resources.Load(string) nicht gefunden."); return; }
 
-                _harmony.Patch(target,
+                _harmony.Patch(byPath,
                     new HarmonyMethod(typeof(ResourceHook).GetMethod("Prefix")),
                     null, null, null, null);
-                L.LogInfo("Resources.Load(string) gepatcht.");
+                if (byPathAndType != null)
+                    _harmony.Patch(byPathAndType,
+                        new HarmonyMethod(typeof(ResourceHook).GetMethod("Prefix")),
+                        null, null, null, null);
+                else
+                    L.LogWarning("Resources.Load(string, Type) nicht gefunden - "
+                                 + "der Drop eigener Ids bleibt oertlich.");
+                L.LogInfo("Resources.Load gepatcht (string"
+                          + (byPathAndType != null ? " und string,Type" : "") + ").");
             }
             catch (Exception ex) { L.LogError("Resources.Load-Patch fehlgeschlagen: " + ex); }
         }
@@ -799,7 +968,7 @@ namespace NextDayRevival
             catch (Exception ex) { L.LogError("LAW-Patch fehlgeschlagen: " + ex); }
         }
 
-        void PatchLawDrop()
+        void PatchCustomDrop()
         {
             try
             {
@@ -810,18 +979,127 @@ namespace NextDayRevival
                                  typeof(Quaternion), typeof(Vector3) }, null);
                 if (m == null) { L.LogWarning("DropWeaponFromHand fuer LAW fehlt."); return; }
                 _harmony.Patch(m,
-                    new HarmonyMethod(typeof(LawDropHook).GetMethod("Prefix")),
+                    new HarmonyMethod(typeof(DropHook).GetMethod("Prefix")),
                     null, null, null, null);
 
                 MethodInfo inventory = AccessTools.Method(t, "DropInventoryItem",
                     new Type[] { typeof(int), typeof(int), typeof(string), typeof(bool) }, null);
                 if (inventory == null) { L.LogWarning("DropInventoryItem fuer LAW fehlt."); return; }
                 _harmony.Patch(inventory,
-                    new HarmonyMethod(typeof(LawDropHook).GetMethod("InventoryPrefix")),
+                    new HarmonyMethod(typeof(DropHook).GetMethod("InventoryPrefix")),
                     null, null, null, null);
                 L.LogInfo("M72-LAW-Weltablage, Slotfreigabe und Todes-Drop aktiv.");
             }
             catch (Exception ex) { L.LogError("LAW-Drop-Patch fehlgeschlagen: " + ex); }
+        }
+
+        /// <summary>
+        /// Fire for every explosion. The hook sits on
+        /// `ExplosionObject::NetworkVisualizeExplode` on purpose: that method is
+        /// the RPC the game sends to everyone in range, so it runs once on the
+        /// client that blew something up AND once on every other client. One
+        /// postfix, and the fire is there for all of them - our own explosions
+        /// (drone, LAW, both guns) as well as the game's grenades.
+        ///
+        /// A postfix, never a prefix: whatever the game does with its own dust
+        /// stays untouched, the fire is put on top of it.
+        /// </summary>
+        void PatchFire()
+        {
+            try
+            {
+                if (!CfgFire.Value) { L.LogInfo("Fire effect switched off."); return; }
+                Type t = AccessTools.TypeByName("ExplosionObject");
+                if (t == null) { L.LogWarning("ExplosionObject fehlt - kein Feuer."); return; }
+                MethodInfo m = null;
+                foreach (MethodInfo cand in t.GetMethods(BindingFlags.Instance
+                             | BindingFlags.Public | BindingFlags.NonPublic))
+                    if (cand.Name == "NetworkVisualizeExplode") { m = cand; break; }
+                if (m == null)
+                {
+                    L.LogWarning("NetworkVisualizeExplode fehlt - kein Feuer.");
+                    return;
+                }
+                _harmony.Patch(m, null,
+                    new HarmonyMethod(typeof(FireHook).GetMethod("Postfix")),
+                    null, null, null);
+                L.LogInfo("Feuer auf jeder Explosion aktiv ("
+                          + m.GetParameters().Length + " Parameter).");
+            }
+            catch (Exception ex) { L.LogError("Feuer-Patch fehlgeschlagen: " + ex); }
+        }
+
+        /// <summary>
+        /// Haengt den Finalizer an das Rueckenmodell. Begruendung bei
+        /// <see cref="SpineGuard"/>.
+        /// </summary>
+        void PatchWeaponSpine()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("PlayerMenuCustomizationManager");
+                if (t == null)
+                {
+                    L.LogWarning("PlayerMenuCustomizationManager nicht gefunden.");
+                    return;
+                }
+                MethodInfo m = AccessTools.Method(t, "WeaponSpineInstanceManager", null, null);
+                if (m == null)
+                {
+                    L.LogWarning("WeaponSpineInstanceManager nicht gefunden.");
+                    return;
+                }
+                _harmony.Patch(m, null, null, null,
+                    new HarmonyMethod(typeof(SpineGuard).GetMethod("Finalizer")), null);
+                L.LogInfo("Rueckenmodell abgesichert (WeaponSpineInstanceManager).");
+            }
+            catch (Exception ex) { L.LogError("Spine-Patch fehlgeschlagen: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Haengt die Vorlagenpruefung vor jede Item-Abfrage des Spiels.
+        /// Begruendung bei <see cref="Registry.RepairIfDead"/>.
+        /// </summary>
+        void PatchSpawnLookup()
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("ItemSpawnCategoriesDB");
+                if (t == null) { L.LogWarning("ItemSpawnCategoriesDB nicht gefunden."); return; }
+                MethodInfo m = AccessTools.Method(t, "GetItemSpawnedScriptByID", null, null);
+                if (m == null) { L.LogWarning("GetItemSpawnedScriptByID nicht gefunden."); return; }
+                _harmony.Patch(m,
+                    new HarmonyMethod(typeof(Registry).GetMethod("LookupPrefix")),
+                    null, null, null, null);
+                L.LogInfo("Vorlagenpruefung aktiv (GetItemSpawnedScriptByID).");
+            }
+            catch (Exception ex) { L.LogError("Vorlagen-Patch fehlgeschlagen: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Haengt den Wachhund an Object.Destroy. Begruendung bei
+        /// <see cref="SpawnWatch"/>.
+        /// </summary>
+        void PatchDestroyWatch()
+        {
+            if (!CfgWatchTemplates.Value) return;
+            try
+            {
+                int n = 0;
+                foreach (MethodInfo m in typeof(UnityEngine.Object).GetMethods(
+                             BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (m.Name != "Destroy" && m.Name != "DestroyImmediate") continue;
+                    ParameterInfo[] ps = m.GetParameters();
+                    if (ps.Length < 1 || ps[0].ParameterType != typeof(UnityEngine.Object)) continue;
+                    _harmony.Patch(m,
+                        new HarmonyMethod(typeof(SpawnWatch).GetMethod("DestroyPrefix")),
+                        null, null, null, null);
+                    n++;
+                }
+                L.LogInfo("Vorlagenwache aktiv (" + n + " Destroy-Ueberladungen).");
+            }
+            catch (Exception ex) { L.LogError("Destroy-Patch fehlgeschlagen: " + ex.Message); }
         }
 
         void PatchBackpackDiagnostics()
@@ -1282,7 +1560,63 @@ namespace NextDayRevival
             return false;
         }
 
+        // EIN Material fuer alle Leuchtspuren, nicht eines je Schuss.
+        //
+        // Bis 0.5.1 legte jeder Schuss ein eigenes `new Material(shader)` an.
+        // Bei der LAW war das gleichgueltig - eine Rakete alle paar Sekunden.
+        // Das BTR-Geschuetz schiesst seit 0.5.2 acht mal je Sekunde, und ein
+        // zur Laufzeit erzeugtes Material wird von `Destroy(tracer)` NICHT
+        // mitgenommen: das waeren knapp fuenfhundert liegengebliebene
+        // Materialien je Minute Dauerfeuer. `HideAndDontSave` haelt das eine
+        // ueber den Szenenwechsel; wird es doch einmal abgeraeumt, ist der
+        // Unity-Vergleich mit null true und es entsteht ein neues.
+        static Material _tracerMat;
+        static readonly Color TracerFarbe = new Color(1.0f, 0.88f, 0.42f, 1.0f);
+
+        static Material TracerMaterial()
+        {
+            if (_tracerMat != null) return _tracerMat;
+
+            Shader shader = Shader.Find("Particles/Additive");
+            if (shader == null) shader = Shader.Find("Unlit/Color");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null) return null;
+
+            Material m = new Material(shader);
+            if (m.HasProperty("_Color")) m.SetColor("_Color", TracerFarbe);
+            if (m.HasProperty("_TintColor")) m.SetColor("_TintColor", TracerFarbe);
+            m.hideFlags = HideFlags.HideAndDontSave;
+            _tracerMat = m;
+            return _tracerMat;
+        }
+
         internal static void SpawnTracer(List<Vector3> points)
+        {
+            SpawnTracer(points, 0.035f, 0.012f, Color.white, TracerFarbe, 0.22f);
+        }
+
+        /// <summary>
+        /// Leuchtspur mit vorgegebener Breite, Farbe und Standzeit.
+        ///
+        /// Die Rakete braucht einen duennen Faden, das Panzergeschuetz einen
+        /// Balken - dieselbe Bahn, aber um mehr als eine Zehnerpotenz andere
+        /// Masse. Bis 0.5.2 hatten beide dieselben festen Werte, und die waren
+        /// an der Rakete ausgerichtet: 0.035 Spieleinheiten sind bei rund drei
+        /// Einheiten je Meter gut ein Zentimeter Breite. Fuer ein
+        /// 125-mm-Geschoss auf dreihundert Meter ist das nichts.
+        ///
+        /// Die Farbe kommt NICHT ueber das Material. Das ist seit 0.5.2 eines
+        /// fuer alle Spuren und wird geteilt (`sharedMaterial`) - wer es faerbt,
+        /// faerbt jede laufende Spur mit. Der LineRenderer hat dafuer eigene
+        /// Eckfarben, und `Particles/Additive` multipliziert sie mit der
+        /// Materialfarbe. Deshalb zwei Farben je Aufruf statt einer im Material.
+        ///
+        /// C# 3.0 kennt keine optionalen Argumente, deshalb eine Ueberladung
+        /// statt Standardwerten.
+        /// </summary>
+        internal static void SpawnTracer(List<Vector3> points, float startWidth,
+                                         float endWidth, Color vorn, Color hinten,
+                                         float standzeit)
         {
             if (points == null || points.Count < 2) return;
             GameObject tracer = new GameObject("NDR Leuchtspur");
@@ -1293,29 +1627,22 @@ namespace NextDayRevival
                 throw new MissingMemberException("LineRenderer konnte nicht erzeugt werden.");
             }
 
-            Shader shader = Shader.Find("Particles/Additive");
-            if (shader == null) shader = Shader.Find("Unlit/Color");
-            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
-            if (shader == null)
+            Material material = TracerMaterial();
+            if (material == null)
             {
                 UnityEngine.Object.Destroy(tracer);
                 throw new MissingMemberException("Shader fuer LAW-Leuchtspur nicht gefunden.");
             }
 
-            Material material = new Material(shader);
-            Color bright = new Color(1.0f, 0.88f, 0.42f, 1.0f);
-            if (material.HasProperty("_Color")) material.SetColor("_Color", bright);
-            if (material.HasProperty("_TintColor")) material.SetColor("_TintColor", bright);
-
-            line.material = material;
+            line.sharedMaterial = material;
             line.useWorldSpace = true;
             line.positionCount = points.Count;
-            line.startWidth = 0.035f;
-            line.endWidth = 0.012f;
-            line.startColor = Color.white;
-            line.endColor = bright;
+            line.startWidth = startWidth;
+            line.endWidth = endWidth;
+            line.startColor = vorn;
+            line.endColor = hinten;
             for (int i = 0; i < points.Count; i++) line.SetPosition(i, points[i]);
-            UnityEngine.Object.Destroy(tracer, 0.22f);
+            UnityEngine.Object.Destroy(tracer, standzeit);
         }
 
         static object GetField(object instance, string name)
@@ -1436,19 +1763,64 @@ namespace NextDayRevival
     }
 
     /// <summary>
-    /// Das Spiel kennt fuer die neue ID kein Photon-Drop-Prefab. Ohne diesen
-    /// Ersatz wirft DropWeaponFromHand eine NullReferenceException; beim Tod
-    /// bricht dadurch auch PlayerDeath vor dem Respawn-Bildschirm ab.
+    /// Puts an item of ours on the ground. The game cannot do it for our ids.
+    ///
+    /// WHY (CONFIRMED, IL, 2026-08-29) - PlayerInventoryManager::
+    /// DropInventoryItem builds the path
+    /// `GetItemCatData(id).PrefabPatch + id + "_Spawn"`, loads it through
+    /// Resources.Load(string) - which ResourceHook answers for our ids - and
+    /// then hands the same PATH to PhotonNetwork::InstantiateSceneObject.
+    /// Photon loads the prefab a SECOND time, through its own cache and its
+    /// own overload, and wants a PhotonView on the result. That second load
+    /// is not ours, so the drop ends in "DropItem null!" and nothing lies on
+    /// the ground. Same story in DropWeaponFromHand, only there the null
+    /// prefab is dereferenced and throws - which used to take PlayerDeath
+    /// down with it, before the respawn screen.
+    ///
+    /// So we drop the item ourselves, locally: mesh, material, collider,
+    /// rigidbody. It falls, it lies there, it is gone after five minutes.
+    /// What it is NOT: pickupable, and nobody else sees it. A real drop needs
+    /// a networked ItemSpawned and is a piece of work of its own.
     /// </summary>
-    public static class LawDropHook
+    public static class DropHook
     {
         const int LAW_ID = 1162;
 
+        /// <summary>How long a dropped item stays, in seconds.</summary>
+        const float Liegezeit = 300f;
+
+        /// <summary>
+        /// The drop out of the inventory, for EVERY id of ours - since 0.5.1
+        /// not the LAW alone. The drone hangs on exactly this: it is not a
+        /// weapon, it only ever lies in the backpack, and the game's own path
+        /// silently did nothing for it.
+        /// </summary>
         public static bool InventoryPrefix(object __instance, int __0, int __1,
                                            string __2, bool __3)
         {
-            if (__1 != LAW_ID) return true;
+            ItemDef def = RevivalPlugin.FindItem(__1);
+            if (def == null) return true;
             if (__2 != "WeaponSlot" && __2 != "BackpackSlot") return true;
+
+            // Since 0.5.3 the game's own path can carry our ids, so this hook
+            // steps aside. What lands on the ground is then a real scene object
+            // with a PhotonView and an ItemSpawned - everybody sees it and it can
+            // be picked up. See E-025: the only thing that was missing was the
+            // second Resources.Load overload, the one Photon uses.
+            //
+            // If Photon is not in a room, InstantiateSceneObject returns null
+            // without touching the inventory - the item would silently stay in
+            // the backpack. In that case the local piece of scenery of 0.5.1 is
+            // still better than nothing.
+            if (RevivalPlugin.CfgNetDrop != null && RevivalPlugin.CfgNetDrop.Value
+                && InRoom())
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogInfo(def.Name + ": drop through the game's own "
+                                            + "path (networked scene object).");
+                return true;
+            }
+
             try
             {
                 FieldInfo spawnerField = AccessTools.Field(__instance.GetType(), "ObjectSpawner");
@@ -1456,75 +1828,112 @@ namespace NextDayRevival
                     ? null : spawnerField.GetValue(__instance) as Transform;
                 Vector3 position = spawner == null
                     ? Vector3.zero : spawner.position;
-                Prefix(LAW_ID, 0, 0, position, Quaternion.identity, Vector3.zero);
+                Ablegen(def, position, Vector3.zero);
 
                 if (__2 == "WeaponSlot")
                 {
                     MethodInfo clear = AccessTools.Method(__instance.GetType(), "ClearWeaponSlot",
                         new Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool) }, null);
                     if (clear == null) throw new MissingMethodException("ClearWeaponSlot fehlt.");
-                    clear.Invoke(__instance, new object[] { __0, LAW_ID, true, false });
+                    clear.Invoke(__instance, new object[] { __0, def.Id, true, false });
                 }
                 else
                 {
                     MethodInfo clear = AccessTools.Method(__instance.GetType(), "ClearBackpackSlot",
                         new Type[] { typeof(int), typeof(int), typeof(bool) }, null);
                     if (clear == null) throw new MissingMethodException("ClearBackpackSlot fehlt.");
-                    clear.Invoke(__instance, new object[] { __0, LAW_ID, true });
+                    clear.Invoke(__instance, new object[] { __0, def.Id, true });
                 }
 
                 if (RevivalPlugin.L != null)
-                    RevivalPlugin.L.LogInfo("M72 LAW aus " + __2 + " " + __0
+                    RevivalPlugin.L.LogInfo(def.Name + " aus " + __2 + " " + __0
                                             + " entfernt und lokal abgelegt.");
             }
             catch (Exception ex)
             {
                 if (RevivalPlugin.L != null)
-                    RevivalPlugin.L.LogError("M72-LAW-Slotfreigabe fehlgeschlagen: " + ex);
+                    RevivalPlugin.L.LogError("Ablegen aus dem Inventar fehlgeschlagen ("
+                                             + def.Id + "): " + ex);
             }
             return false;
         }
 
+        /// <summary>
+        /// The drop out of the HAND. Still the LAW alone on purpose: the other
+        /// two weapons of ours have never been seen failing here, and a hook
+        /// that swallows a working path is worse than no hook.
+        /// </summary>
         public static bool Prefix(int __0, int __1, int __2, Vector3 __3,
                                   Quaternion __4, Vector3 __5)
         {
             if (__0 != LAW_ID) return true;
+            ItemDef law = RevivalPlugin.FindItem(LAW_ID);
+            if (law == null)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("LAW-ItemDef fehlt - Ablage nicht moeglich.");
+                return false;
+            }
+            Ablegen(law, __3, __5);
+
+            // Das Original wuerde fuer ID 1162 immer ein null-Drop-Prefab
+            // dereferenzieren. Der aufrufende Inventarcode entfernt den Slot.
+            return false;
+        }
+
+        /// <summary>
+        /// Is Photon in a room right now? Only then does
+        /// PhotonNetwork.InstantiateSceneObject do anything at all - outside a
+        /// room it logs and returns null.
+        /// </summary>
+        static bool InRoom()
+        {
             try
             {
-                ItemDef law = null;
-                for (int i = 0; i < RevivalPlugin.Items.Count; i++)
-                    if (RevivalPlugin.Items[i].Id == LAW_ID)
-                    {
-                        law = RevivalPlugin.Items[i];
-                        break;
-                    }
-                if (law == null) throw new MissingMemberException("LAW-ItemDef fehlt.");
+                Type t = AccessTools.TypeByName("PhotonNetwork");
+                if (t == null) return false;
+                MethodInfo getter = AccessTools.PropertyGetter(t, "inRoom");
+                if (getter == null) return false;
+                object v = getter.Invoke(null, null);
+                return v is bool && (bool)v;
+            }
+            catch { return false; }
+        }
 
-                GameObject model = law.Factory.GetModelPrefab();
-                if (model == null) throw new MissingMemberException("LAW-Modell-Prefab fehlt.");
-                MeshFilter sourceFilter = model.GetComponentInChildren<MeshFilter>(true);
-                MeshRenderer sourceRenderer = model.GetComponentInChildren<MeshRenderer>(true);
-                if (sourceFilter == null || sourceFilter.sharedMesh == null
-                    || sourceRenderer == null)
-                    throw new MissingMemberException("LAW-Modellgeometrie fehlt.");
+        /// <summary>
+        /// Builds the thing that lies on the ground: one MeshFilter, one
+        /// MeshRenderer, a box, a rigidbody. Nothing else.
+        ///
+        /// Deliberately NOT a clone of the spawn prefab: that one is full of
+        /// MeshFilters, ItemSpawned and Photon components. The LAW attempt
+        /// with it produced several tubes and a pickup prompt that could never
+        /// succeed. Geometry comes from the model prefab (weapons) or from the
+        /// inventory prefab (everything else - the drone).
+        /// </summary>
+        static void Ablegen(ItemDef def, Vector3 position, Vector3 velocity)
+        {
+            try
+            {
+                Mesh mesh;
+                Material[] mats;
+                if (!Quelle(def, out mesh, out mats))
+                    throw new MissingMemberException(def.Id + ": keine Geometrie zum Ablegen.");
 
-                // Kein Spawn-Prefab klonen: Es enthaelt viele MeshFilter und
-                // ItemSpawned/Photon-Komponenten. Das erzeugte mehrere Rohre
-                // und einen Pickup-Prompt, der niemals erfolgreich sein konnte.
-                GameObject drop = new GameObject("M72 LAW verbrauchtes Rohr");
+                GameObject drop = new GameObject(def.Name + " (abgelegt)");
                 MeshFilter filter = drop.AddComponent<MeshFilter>();
-                filter.sharedMesh = sourceFilter.sharedMesh;
+                filter.sharedMesh = mesh;
                 MeshRenderer renderer = drop.AddComponent<MeshRenderer>();
-                renderer.sharedMaterials = sourceRenderer.sharedMaterials;
-                drop.transform.position = __3 + Vector3.up * 0.35f;
-                drop.transform.rotation = Quaternion.Euler(0f, 0f, 90f);
+                renderer.sharedMaterials = mats;
+                drop.transform.position = position + Vector3.up * 0.35f;
+                drop.transform.rotation = def.Id == LAW_ID
+                    ? Quaternion.Euler(0f, 0f, 90f) : Quaternion.identity;
 
                 Type colliderType = AccessTools.TypeByName("UnityEngine.BoxCollider");
                 Component collider = colliderType == null ? null : drop.AddComponent(colliderType);
                 if (collider == null)
-                    throw new MissingMemberException("BoxCollider fuer LAW-Drop fehlt.");
-                SetProperty(collider, "center", sourceFilter.sharedMesh.bounds.center);
-                SetProperty(collider, "size", sourceFilter.sharedMesh.bounds.size);
+                    throw new MissingMemberException("BoxCollider fuer die Ablage fehlt.");
+                SetProperty(collider, "center", mesh.bounds.center);
+                SetProperty(collider, "size", mesh.bounds.size);
 
                 Type bodyType = AccessTools.TypeByName("UnityEngine.Rigidbody");
                 Component body = bodyType == null ? null : drop.GetComponent(bodyType);
@@ -1533,24 +1942,51 @@ namespace NextDayRevival
                 {
                     SetProperty(body, "useGravity", true);
                     SetProperty(body, "isKinematic", false);
-                    Vector3 velocity = __5;
-                    if (velocity.magnitude > 15f) velocity = velocity.normalized * 15f;
-                    SetProperty(body, "velocity", velocity);
+                    Vector3 v = velocity;
+                    if (v.magnitude > 15f) v = v.normalized * 15f;
+                    SetProperty(body, "velocity", v);
                     SetProperty(body, "angularVelocity", new Vector3(0f, 0.8f, 0f));
                 }
 
-                UnityEngine.Object.Destroy(drop, 300f);
+                UnityEngine.Object.Destroy(drop, Liegezeit);
                 if (RevivalPlugin.L != null)
-                    RevivalPlugin.L.LogInfo("M72 LAW lokal abgelegt (Bullets=" + __1 + ").");
+                    RevivalPlugin.L.LogInfo(def.Name + " liegt bei " + drop.transform.position
+                                            + ", " + (int)Liegezeit + " s lang.");
             }
             catch (Exception ex)
             {
                 if (RevivalPlugin.L != null)
-                    RevivalPlugin.L.LogError("M72-LAW-Ablage fehlgeschlagen: " + ex);
+                    RevivalPlugin.L.LogError("Ablage fehlgeschlagen (" + def.Id + "): " + ex);
             }
+        }
 
-            // Das Original wuerde fuer ID 1162 immer ein null-Drop-Prefab
-            // dereferenzieren. Der aufrufende Inventarcode entfernt den Slot.
+        /// <summary>
+        /// Mesh and materials for the dropped object. Weapons have a model
+        /// prefab for the hand; everything else has only the inventory prefab,
+        /// and its first MeshFilter carries our own geometry (SwapGeometry put
+        /// it there). Materials come from the SAME object as the mesh -
+        /// otherwise a drop ends up wearing the donor's material.
+        /// </summary>
+        static bool Quelle(ItemDef def, out Mesh mesh, out Material[] mats)
+        {
+            mesh = null;
+            mats = null;
+            GameObject source = null;
+            if (def.IsWeapon) source = def.Factory.GetModelPrefab();
+            if (source == null) source = def.Factory.GetSpawnPrefab(null);
+            if (source == null) return false;
+
+            MeshFilter[] filters = source.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < filters.Length; i++)
+            {
+                if (filters[i] == null || filters[i].sharedMesh == null) continue;
+                MeshRenderer r = filters[i].GetComponent<MeshRenderer>();
+                if (r == null) r = source.GetComponentInChildren<MeshRenderer>(true);
+                if (r == null) continue;
+                mesh = filters[i].sharedMesh;
+                mats = r.sharedMaterials;
+                return true;
+            }
             return false;
         }
 
@@ -1766,6 +2202,25 @@ namespace NextDayRevival
         public ItemFactory(ItemDef def) { _def = def; }
 
         public Component MySpawned { get { return _mySpawned; } }
+
+        /// <summary>
+        /// Is the built inventory template still there? Uses Unity's own null
+        /// operator on purpose: a destroyed object is not `null` in the CLR
+        /// sense, it only compares equal to null - and exactly that state is
+        /// what turns GetItemSpawnedScriptByID into a liar.
+        /// </summary>
+        public bool SpawnAlive
+        {
+            get { return _spawn != null && _mySpawned != null; }
+        }
+
+        /// <summary>Drops the cache so the next call builds a fresh template.</summary>
+        public void ForgetSpawn()
+        {
+            _spawn = null;
+            _mySpawned = null;
+            _spawnFailed = false;
+        }
 
         // Unterordner von LootSpawn laut ResourceManager. Die Spende kann in
         // jedem davon liegen, und die vom Spiel angefragte Kategorie muss nicht
@@ -2200,6 +2655,7 @@ namespace NextDayRevival
                 clone.SetActive(true);
 
                 _spawn = clone;
+                SpawnWatch.Remember(_def.Id, clone, holder);
                 RevivalPlugin.L.LogInfo(_def.Id + ": Inventarprefab gebaut ("
                     + all.Length + " Komponenten, " + patched + "x ItemID gesetzt).");
                 return _spawn;
@@ -2370,6 +2826,79 @@ namespace NextDayRevival
     /// dritte. Wer nur eines befuellt, bekommt "ItemSpawned is null!" beim
     /// Umlegen und das Item verschwindet.
     /// </summary>
+    /// <summary>
+    /// Says who destroys one of our inventory templates.
+    ///
+    /// The entry the game reads out of ItemSpawnedDictionary is a COMPONENT on
+    /// an object this plugin built. Destroy that object and the entry becomes
+    /// Unity's "fake null": the id still has a key, the value still looks like
+    /// an object, and every lookup answers null. The item is then unavailable
+    /// for the rest of the session - "ItemSpawned is null!".
+    ///
+    /// A prefix on Object.Destroy is the only place where the CALLER is still
+    /// on the stack; in OnDestroy it is long gone, because Unity destroys at
+    /// the end of the frame.
+    /// </summary>
+    public static class SpawnWatch
+    {
+        class Vorlage
+        {
+            public int Id;
+            public GameObject Go;
+            public GameObject Holder;
+        }
+
+        static readonly List<Vorlage> _vorlagen = new List<Vorlage>();
+
+        public static void Remember(int id, GameObject go, GameObject holder)
+        {
+            for (int i = 0; i < _vorlagen.Count; i++)
+                if (_vorlagen[i].Id == id) { _vorlagen.RemoveAt(i); break; }
+            Vorlage v = new Vorlage();
+            v.Id = id; v.Go = go; v.Holder = holder;
+            _vorlagen.Add(v);
+        }
+
+        public static void DestroyPrefix(UnityEngine.Object __0)
+        {
+            if (_vorlagen.Count == 0 || __0 == null) return;
+            try
+            {
+                GameObject go = __0 as GameObject;
+                if (go == null)
+                {
+                    Component c = __0 as Component;
+                    if (c == null) return;
+                    go = c.gameObject;
+                }
+                for (int i = 0; i < _vorlagen.Count; i++)
+                {
+                    Vorlage v = _vorlagen[i];
+                    if (!Betrifft(go, v)) continue;
+                    RevivalPlugin.L.LogWarning("VORLAGE " + v.Id + " wird zerstoert ("
+                        + __0.GetType().Name + " \"" + __0.name + "\"). Ohne sie ist das "
+                        + "Item bis zum Neustart weg. Aufrufer:");
+                    RevivalPlugin.L.LogWarning(Environment.StackTrace);
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Is `go` the template itself, its holder, or a child of it?</summary>
+        static bool Betrifft(GameObject go, Vorlage v)
+        {
+            Transform t = go.transform;
+            while (t != null)
+            {
+                if (ReferenceEquals(t.gameObject, v.Go)
+                    || ReferenceEquals(t.gameObject, v.Holder)) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+    }
+
     public static class Registry
     {
         public static void RegisterAll()
@@ -2549,6 +3078,80 @@ namespace NextDayRevival
             catch { return null; }
         }
 
+        static readonly Dictionary<int, int> _repairs = new Dictionary<int, int>();
+
+        /// <summary>
+        /// Puts an entry back that has died under us.
+        ///
+        /// Called right before the game looks an id up. If the template behind
+        /// that id is gone, it is rebuilt and written into the dictionaries
+        /// again - the game then gets a living object instead of the fake null
+        /// that made it say "ItemSpawned is null!" (E-029).
+        ///
+        /// Three attempts per id, then it gives up: a template that cannot be
+        /// built will not become buildable by trying harder, and a repair loop
+        /// inside a lookup would be worse than the missing item.
+        /// </summary>
+        public static void RepairIfDead(int id)
+        {
+            ItemDef d = null;
+            List<ItemDef> items = RevivalPlugin.Items;
+            for (int i = 0; i < items.Count; i++)
+                if (items[i].Id == id) { d = items[i]; break; }
+            if (d == null || d.Factory.SpawnAlive) return;
+
+            int mal = 0;
+            if (_repairs.TryGetValue(id, out mal) && mal >= 3) return;
+            _repairs[id] = mal + 1;
+
+            RevivalPlugin.L.LogWarning("Item " + id + ": Inventarvorlage ist weg - "
+                + "wird neu gebaut (Versuch " + (mal + 1) + " von 3).");
+            d.Factory.ForgetSpawn();
+            if (d.Factory.GetSpawnPrefab(null) == null)
+            {
+                RevivalPlugin.L.LogError("Item " + id + ": Vorlage laesst sich nicht "
+                    + "neu bauen.");
+                return;
+            }
+
+            object db = GetDb();
+            if (db == null) return;
+            Component mine = d.Factory.MySpawned;
+            int n = 0;
+            FieldInfo[] fields = db.GetType().GetFields(BindingFlags.Instance
+                                     | BindingFlags.Public | BindingFlags.NonPublic);
+            foreach (FieldInfo f in fields)
+            {
+                if (f.Name == "SpawnCategoriesDictionary") continue;
+                IDictionary dic = GetDic(db, f);
+                if (dic == null) continue;
+                object value = dic.Contains(d.DonorId) ? dic[d.DonorId] : null;
+                if (mine != null && (value == null || value.GetType().IsInstanceOfType(mine)))
+                    value = mine;
+                if (value == null) continue;
+                try { dic[d.Id] = value; n++; }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("  " + f.Name + ": " + ex.Message);
+                }
+            }
+            RevivalPlugin.L.LogInfo("Item " + id + ": Vorlage steht wieder, "
+                + n + " Woerterbuecher nachgetragen.");
+        }
+
+        /// <summary>
+        /// Prefix on ItemSpawnCategoriesDB::GetItemSpawnedScriptByID - the one
+        /// place every path goes through: giving, picking up, spawning loot.
+        /// </summary>
+        public static void LookupPrefix(int __0)
+        {
+            try { RepairIfDead(__0); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Vorlagenpruefung: " + ex.Message);
+            }
+        }
+
         static object GetDb()
         {
             Type t = AccessTools.TypeByName("ItemSpawnCategoriesDB");
@@ -2668,6 +3271,48 @@ namespace NextDayRevival
     /// gibt beim Einlegen zurueck, was die Datenbank fuer eine ID hergibt.
     /// Beide Stellen protokollieren hier, was sie sehen.
     /// </summary>
+    /// <summary>
+    /// Keeps a missing back model from taking the whole character screen with
+    /// it.
+    ///
+    /// `PlayerMenuCustomizationManager::WeaponSpineInstanceManager` hangs the
+    /// weapon on the character's back, and its IL reads:
+    ///
+    ///     Instantiate(Resources.Load("PlayerDataPrefabs/Weapons/" + id + "_Weapon"))
+    ///
+    /// The game DOES check that result against null - two instructions too
+    /// late, after the Instantiate ("NetworkShowWeaponSpine: not loaded!").
+    /// For an id without such a prefab - every item of ours that is not a
+    /// weapon, the drone 1163 in a weapon slot for instance -
+    /// Instantiate(null) throws ArgumentException,
+    /// CharacterOptionsUI.ShowCharacterData never returns, and the loading
+    /// screen stands at "Spielcharaktere laden" until the process is killed.
+    /// That cost several game starts on 2026-08-29; the stack trace is in
+    /// E-028.
+    ///
+    /// The finalizer swallows exactly that. By the time it runs, the method
+    /// has already cleared the old model off the back; what is missing
+    /// afterwards is the new one - which is right, the item is not a weapon.
+    /// </summary>
+    public static class SpineGuard
+    {
+        static bool _gemeldet;
+
+        public static Exception Finalizer(Exception __exception)
+        {
+            if (__exception == null) return null;
+            if (!_gemeldet)
+            {
+                _gemeldet = true;
+                RevivalPlugin.L.LogWarning("Rueckenmodell: "
+                    + __exception.GetType().Name + " geschluckt - ein Item im "
+                    + "Waffenslot hat kein _Weapon-Prefab. Ohne das haengt der "
+                    + "Charakterbildschirm beim Laden des Profils (E-028).");
+            }
+            return null;
+        }
+    }
+
     public static class Diag
     {
         static int _reload, _backpack;
@@ -3288,6 +3933,8 @@ namespace NextDayRevival
         static float _leerGemeldet;          // Log-Bremse fuer "keine Munition"
         static Texture2D _tankScope;         // Panzerzielfernrohr
         static bool _tankScopeTried;
+        static Texture2D _apcScope;          // Richtoptik des BTR
+        static bool _apcScopeTried;
 
         public static bool Manning { get { return _manning; } }
 
@@ -3318,14 +3965,22 @@ namespace NextDayRevival
         static float Bildwinkel()
         { return _tank ? RevivalPlugin.CfgTankFov.Value : RevivalPlugin.CfgTurretFov.Value; }
 
+        // Sprengwerte gibt es nur noch beim Panzer. Das BTR schiesst durch.
         static float Sprengschaden()
-        { return _tank ? RevivalPlugin.CfgTankExplosionDamage.Value : RevivalPlugin.CfgTurretExplosionDamage.Value; }
+        { return RevivalPlugin.CfgTankExplosionDamage.Value; }
 
         static float Sprengradius()
-        { return _tank ? RevivalPlugin.CfgTankExplosionRadius.Value : RevivalPlugin.CfgTurretExplosionRadius.Value; }
+        { return RevivalPlugin.CfgTankExplosionRadius.Value; }
 
         static int MunitionsId()
         { return _tank ? RevivalPlugin.CfgTankAmmoId.Value : RevivalPlugin.CfgTurretAmmoId.Value; }
+
+        // Der Unterschied, der die beiden Geschuetze trennt: der Panzer wirft
+        // eine Sprenggranate, das BTR schiesst durch - ohne Schalter, ohne
+        // Ausnahme. Beim BTR ist das keine Einstellung mehr, sondern die
+        // Bauart der Waffe.
+        static bool Sprengt()
+        { return _tank && RevivalPlugin.CfgTankExplosion.Value; }
 
         /// <summary>
         /// Der EINZIGE Weg, `_manning` zu aendern. Vorher stand das an sechs
@@ -3951,10 +4606,11 @@ namespace NextDayRevival
             Tracer(origin + dir * 3f, ende);
             if (struck == null) return true;
 
-            // Sprenggranate am Einschlag. Das BTR-80A schiesst 30 mm
-            // Sprengmunition, keine Gewehrkugeln: der Einschlag gehoert
-            // gesehen, und Flaechenwirkung gehoert dazu.
-            if (RevivalPlugin.CfgTurretExplosion.Value)
+            // Sprenggranate am Einschlag - beim Panzer. Das BTR schiesst seit
+            // 0.5.1 durch: ein einzelner, flacher Schuss mit Leuchtspur, der
+            // nur trifft, worauf die Bildmitte steht. Zu sehen ist er auch so,
+            // die Leuchtspur oben laeuft in jedem Fall.
+            if (Sprengt())
             {
                 try
                 {
@@ -3983,7 +4639,36 @@ namespace NextDayRevival
             _hinweisBis = Time.time + sekunden;
         }
 
-        /// <summary>Leuchtspur von der Muendung zum Einschlag.</summary>
+        // Farben der Leuchtspur. Weissglut im Kern, Orange aussen und am Ende -
+        // ein Leuchtspurgeschoss brennt vorn heisser als hinten.
+        static readonly Color SpurKern = new Color(1.00f, 0.96f, 0.78f, 1.0f);
+        static readonly Color SpurEnde = new Color(1.00f, 0.62f, 0.20f, 1.0f);
+        static readonly Color SpurHof = new Color(1.00f, 0.38f, 0.10f, 1.0f);
+
+        /// <summary>
+        /// Leuchtspur von der Muendung zum Einschlag.
+        ///
+        /// WARUM DREI LINIEN UND NICHT EINE (0.5.2)
+        /// Eine einzelne Linie hat genau eine Breite und eine Farbe. Damit ist
+        /// sie entweder duenn und hell oder dick und flau - was fehlt, ist der
+        /// Uebergang, an dem das Auge "gluehend" liest. Der Shader ist additiv,
+        /// also addiert sich, was uebereinander liegt: ein breiter, dunkler Hof
+        /// zuerst, darauf der schmale helle Kern, und in der Summe ein Balken
+        /// mit weissem Zentrum und orangem Rand. Dazu ein kurzes, sehr breites
+        /// Stueck am Anfang - das Muendungsfeuer.
+        ///
+        /// KEIN LICHT AM ANFANG DER BAHN
+        /// Naheliegend waere eine Punktlichtquelle als Muendungsfeuer. Sie
+        /// saesse aber im Auge des Spielers: `von` ist nicht die Muendung,
+        /// sondern die Kameraposition plus drei Einheiten, also gut einen Meter
+        /// vor dem Gesicht (siehe AimRay). Ein Licht mit Reichweite dort
+        /// ueberstrahlt das halbe Bild. Das Muendungsfeuer ist deshalb
+        /// Geometrie und kein Licht.
+        ///
+        /// Der Panzer bekommt den vollen Balken, das BTR eine schlankere Spur:
+        /// dessen Geschuetz schiesst acht mal je Sekunde, und acht Balken
+        /// gleichzeitig im Bild waeren kein Feuerstoss, sondern eine Wand.
+        /// </summary>
         static void Tracer(Vector3 von, Vector3 bis)
         {
             try
@@ -3991,7 +4676,35 @@ namespace NextDayRevival
                 List<Vector3> bahn = new List<Vector3>();
                 bahn.Add(von);
                 bahn.Add(bis);
-                RocketHook.SpawnTracer(bahn);
+
+                if (_tank)
+                {
+                    RocketHook.SpawnTracer(bahn, 1.20f, 0.50f, SpurHof, SpurHof, 0.30f);
+                    RocketHook.SpawnTracer(bahn, 0.44f, 0.17f, SpurKern, SpurEnde, 0.55f);
+                }
+                else
+                {
+                    RocketHook.SpawnTracer(bahn, 0.34f, 0.14f, SpurHof, SpurHof, 0.10f);
+                    RocketHook.SpawnTracer(bahn, 0.13f, 0.05f, SpurKern, SpurEnde, 0.18f);
+                }
+
+                // Muendungsfeuer: die ersten Meter der Bahn, sehr breit und
+                // sehr kurz. Es sitzt auf der Bahn und braucht deshalb weder
+                // die Muendungsposition noch die Rohrrichtung.
+                Vector3 achse = bis - von;
+                float laenge = achse.magnitude;
+                if (laenge > 0.01f)
+                {
+                    float feuer = _tank ? 7.0f : 3.0f;
+                    if (feuer > laenge) feuer = laenge;
+                    List<Vector3> muendung = new List<Vector3>();
+                    muendung.Add(von);
+                    muendung.Add(von + achse / laenge * feuer);
+                    RocketHook.SpawnTracer(muendung,
+                                           _tank ? 2.60f : 0.90f, 0.05f,
+                                           Color.white, SpurHof,
+                                           _tank ? 0.09f : 0.05f);
+                }
             }
             catch (Exception ex)
             {
@@ -4223,6 +4936,32 @@ namespace NextDayRevival
         /// onChangeInventory set - so UI and server data are updated too.
         /// It returns void, hence the count before and after.
         /// </summary>
+        static int _hasId = -1;
+        static bool _hasResult;
+        static float _hasUntil;
+
+        /// <summary>
+        /// Does item `wanted` lie in one of the local player's inventories?
+        /// The same three containers TakeItem walks, but nothing is taken.
+        ///
+        /// The answer is kept for half a second. The jammer asks in every
+        /// frame, and FindObjectsOfType(PlayerInventoryManager) per frame is
+        /// the kind of cost that never shows up in a log and always shows up
+        /// in the frame time.
+        /// </summary>
+        internal static bool HasItem(int wanted)
+        {
+            if (wanted == _hasId && Time.time < _hasUntil) return _hasResult;
+            bool found = false;
+            List<object> invs = PlayerInventories();
+            for (int i = 0; i < invs.Count && !found; i++)
+                if (CountItem(invs[i], wanted) > 0) found = true;
+            _hasId = wanted;
+            _hasResult = found;
+            _hasUntil = Time.time + 0.5f;
+            return found;
+        }
+
         internal static bool TakeItem(int wanted, string wer)
         {
             List<object> invs = PlayerInventories();
@@ -4524,15 +5263,17 @@ namespace NextDayRevival
             if (!_manning) return;
             try
             {
-                // Im Panzer sieht man durch ein Zielfernrohr, nicht ueber vier
-                // Striche im freien Bild: schwarze Fassung, runde Linse,
-                // Winkelmarke mit Entfernungsskala. Das Bild bringt sein
-                // Fadenkreuz selbst mit - deshalb bleibt daneben keines stehen.
-                bool panzerglas = _tank && RevivalPlugin.CfgTankScope.Value
-                                  && PanzerScope() != null;
-                if (panzerglas) Vollbild(PanzerScope());
+                // In beiden Fahrzeugen sieht man durch eine Optik, nicht ueber
+                // vier Striche im freien Bild - seit 0.5.1 auch im BTR. Die
+                // Bilder sind aber nicht dasselbe: der Panzer bekommt Winkel-
+                // marke und Entfernungsskala fuer eine Granate, die faellt, das
+                // BTR ein offenes Kreuz mit Vorhaltemarken fuer einen flachen
+                // Schuss auf ein bewegliches Ziel. Beide bringen ihr Fadenkreuz
+                // selbst mit - deshalb bleibt daneben keines stehen.
+                Texture2D glas = Blende();
+                if (glas != null) Vollbild(glas);
                 else if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
-                if (RevivalPlugin.CfgTurretCrosshair.Value && !panzerglas) DrawCrosshair();
+                if (RevivalPlugin.CfgTurretCrosshair.Value && glas == null) DrawCrosshair();
                 DrawLadeanzeige();
             }
             catch (Exception ex)
@@ -4550,6 +5291,30 @@ namespace NextDayRevival
             }
             if (_scope == null) return;
             Vollbild(_scope);
+        }
+
+        /// <summary>
+        /// Die Optik des Fahrzeugs, in dem gerade gesessen wird, oder null -
+        /// abgeschaltet oder Bild fehlt. Null heisst: einfaches Fadenkreuz.
+        /// </summary>
+        static Texture2D Blende()
+        {
+            if (_tank)
+                return RevivalPlugin.CfgTankScope.Value ? PanzerScope() : null;
+            return RevivalPlugin.CfgTurretScope.Value ? ApcScope() : null;
+        }
+
+        static Texture2D ApcScope()
+        {
+            if (!_apcScopeTried)
+            {
+                _apcScopeTried = true;
+                _apcScope = Assets.Texture("apc_scope.png", false, true);
+                if (_apcScope == null)
+                    RevivalPlugin.L.LogWarning("Geschuetz: apc_scope.png fehlt neben "
+                        + "der DLL - es bleibt beim einfachen Fadenkreuz.");
+            }
+            return _apcScope;
         }
 
         static Texture2D PanzerScope()
@@ -5800,11 +6565,17 @@ namespace NextDayRevival
         const string InstanzName = "BTR-80A_Spawn" + Marke;
 
         /// <summary>
-        /// Turmring des T-72 in der Wanne, in Spieleinheiten. Aus t72_mesh.py
-        /// (RING_Y und RING_Z mal U). Der BTR hat den Turm hoeher und weiter
-        /// vorn; bliebe die Transform stehen, schwebte der Panzerturm.
+        /// Turmring des T-72 in der Wanne, in Spieleinheiten. Der BTR hat den
+        /// Turm hoeher und weiter vorn; bliebe die Transform stehen, schwebte
+        /// der Panzerturm.
+        ///
+        /// Der Wert ist seit 0.5.3 nicht mehr gesetzt, sondern GEMESSEN:
+        /// `t72_import.py` liest die Baugruppe `t-72_wrecked_LOD0` aus dem
+        /// Spiel und gibt am Ende die Stellung aus, die die Turmtransform
+        /// bekommen muss. Wer den Import erneut laufen laesst, vergleicht die
+        /// letzte Zeile seiner Ausgabe mit dieser Zeile hier.
         /// </summary>
-        static readonly Vector3 Turmring = new Vector3(0f, -1.2f, 4.5f);
+        static readonly Vector3 Turmring = new Vector3(0f, -0.922f, 4.144f);
 
         /// <summary>
         /// Wo die Mitfahrer im Panzer sitzen, in Fahrzeugeinheiten relativ zu
@@ -5999,12 +6770,53 @@ namespace NextDayRevival
             m.mainTexture = diffuse;
             if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", diffuse);
             if (m.HasProperty("_Color")) m.SetColor("_Color", Color.white);
-            // Panzerlack ist matt und nicht metallisch. Die Werte der Waffen
-            // waeren hier zu glaenzend.
-            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.10f);
-            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.04f);
-            if (m.HasProperty("_MetallicGlossMap")) m.SetTexture("_MetallicGlossMap", null);
-            m.DisableKeyword("_METALLICGLOSSMAP");
+
+            // OBERFLAECHE WIE AM MTW - UND ZWAR AUS DESSEN EIGENEM MATERIAL
+            //
+            // Bis 0.5.1 stand hier Metallic 0.04 und Glossiness 0.10, mit der
+            // Begruendung "Panzerlack ist matt". Das war eine Annahme, und im
+            // Spiel sah der Panzer damit aus wie bemaltes Papier, waehrend der
+            // BTR direkt daneben metallisch glaenzte. Der Auftrag lautet
+            // ausdruecklich: dieselbe Oberflaeche wie der MTW.
+            //
+            // `research/dump_material.py btr-80a_alb` (2026-08-29) sagt, was
+            // der MTW wirklich benutzt: Standardshader mit den Keywords
+            // _METALLICGLOSSMAP und _NORMALMAP, dazu `_GlossMapScale` 0.4. Die
+            // Skalarwerte `_Metallic` 0.30 und `_Glossiness` 0.5 sind dabei
+            // WIRKUNGSLOS - liegt eine Map an, liest der Shader Metallic aus
+            // deren rotem Kanal und Smoothness aus deren Alpha. Gemessen an
+            // btr-80a_met: Rot im Mittel 0.15, Alpha ueberall 1.0 (DXT1 hat
+            // keinen Alphakanal), wirksame Smoothness also 0.40.
+            //
+            // t72_metal.png traegt genau diese Werte auf Wanne und Turm und
+            // hoehere am Laufwerk. `_GlossMapScale` bleibt deshalb auf 1.0 -
+            // die 0.4 stecken schon im Alphakanal. Die Skalarwerte werden
+            // trotzdem gesetzt, damit der Panzer auch dann vernuenftig
+            // aussieht, wenn die Map einmal fehlt.
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.40f);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.15f);
+            Texture2D metal = Assets.Texture("t72_metal.png", true, true);
+            if (metal != null && m.HasProperty("_MetallicGlossMap"))
+            {
+                m.SetTexture("_MetallicGlossMap", metal);
+                if (m.HasProperty("_GlossMapScale")) m.SetFloat("_GlossMapScale", 1.0f);
+                // 0 = Smoothness aus dem Alphakanal der Metallic-Map. Genau so
+                // steht es am MTW.
+                if (m.HasProperty("_SmoothnessTextureChannel"))
+                    m.SetFloat("_SmoothnessTextureChannel", 0f);
+                m.EnableKeyword("_METALLICGLOSSMAP");
+            }
+            else
+            {
+                if (m.HasProperty("_MetallicGlossMap")) m.SetTexture("_MetallicGlossMap", null);
+                m.DisableKeyword("_METALLICGLOSSMAP");
+            }
+            // Ohne diese beiden bleibt das Metall stumpf: der Standardshader
+            // rechnet Glanzlicht und Spiegelung nur, wenn beide anstehen.
+            if (m.HasProperty("_SpecularHighlights")) m.SetFloat("_SpecularHighlights", 1f);
+            if (m.HasProperty("_GlossyReflections")) m.SetFloat("_GlossyReflections", 1f);
+            m.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
+            m.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
             if (m.HasProperty("_Mode")) m.SetFloat("_Mode", 0f);
             if (m.HasProperty("_SrcBlend")) m.SetFloat("_SrcBlend", 1f);
             if (m.HasProperty("_DstBlend")) m.SetFloat("_DstBlend", 0f);
@@ -6024,7 +6836,8 @@ namespace NextDayRevival
             }
 
             RevivalPlugin.L.LogInfo("Panzer: Material auf Shader " + shader.name
-                + ", Normal Map " + (nrm != null) + ".");
+                + ", Normal Map " + (nrm != null)
+                + ", Metallic Map " + (metal != null) + ".");
             _mat = m;
             return m;
         }
@@ -6367,13 +7180,19 @@ namespace NextDayRevival
 
                 if (Input.GetKeyDown(Key()))
                 {
-                    if (_flying) Land(Grund.Abbruch);
+                    if (_flying) TasteImFlug();
                     else Launch();
                 }
-                if (!_flying) return;
-
-                Steer();
-                Move();
+                if (_flying)
+                {
+                    Steer();
+                    Move();
+                }
+                // Last, and after Move: the jammer may end the flight, and it
+                // measures against the position of THIS frame. It also runs
+                // while nothing flies - carrying a jammer is what makes a
+                // player dangerous to other people's drones.
+                Jammer.Tick();
             }
             catch (Exception ex)
             {
@@ -6459,6 +7278,7 @@ namespace NextDayRevival
             _flying = true;
             _start = Time.time;
             _armed = Time.time + ArmDelay();
+            Jammer.Reset();
             _nextNet = 0f;
             Net.Send(Net.Start, _pos, Forward(), 0f, true);
             StartOwnHum();
@@ -6491,6 +7311,49 @@ namespace NextDayRevival
             }
             RevivalPlugin.L.LogInfo("Drohne beendet (" + GrundText(grund)
                 + "), Blick zurueck beim Koerper.");
+        }
+
+        /// <summary>
+        /// The drone key, pressed while flying. Since 0.5.3 that is the
+        /// detonator and no longer an exit: whoever takes his hand off the drone
+        /// blows it up. It cannot come back anyway - the flight always ended
+        /// with the drone gone, only until now it ended without a bang.
+        ///
+        /// Two exceptions, and both matter more than the rule:
+        ///
+        ///   too close      Nearer to the pilot than SafeRadius the drone only
+        ///                  lands. A hand on the wrong key must not be able to
+        ///                  kill the pilot, and right after the start the drone
+        ///                  is by definition next to him.
+        ///   not armed yet  Before ArmDelay has passed nothing detonates - the
+        ///                  same rule that keeps the first frame from blowing up
+        ///                  in the pilot's face.
+        ///
+        /// Every other way out (empty battery, signal lost, an error in Tick)
+        /// keeps going through Land, unchanged.
+        /// </summary>
+        static void TasteImFlug()
+        {
+            if (RevivalPlugin.CfgDroneSelfDestruct == null
+                || !RevivalPlugin.CfgDroneSelfDestruct.Value)
+            {
+                Land(Grund.Abbruch);
+                return;
+            }
+
+            float abstand = Vector3.Distance(_pos, _home);
+            if (Time.time < _armed
+                || abstand < RevivalPlugin.CfgDroneSafeRadius.Value)
+            {
+                RevivalPlugin.L.LogInfo("Drohne: zu nah am Piloten ("
+                    + abstand.ToString("0.0") + " m, Sicherheitsabstand "
+                    + RevivalPlugin.CfgDroneSafeRadius.Value
+                    + " m) - sie wird abgesetzt statt gezuendet.");
+                Land(Grund.Abbruch);
+                return;
+            }
+
+            Impact(_pos);
         }
 
         static string GrundText(int grund)
@@ -6649,7 +7512,8 @@ namespace NextDayRevival
 
         static bool Motorlos()
         {
-            return FlightTime >= RevivalPlugin.CfgDroneFlightTime.Value;
+            return FlightTime >= RevivalPlugin.CfgDroneFlightTime.Value
+                || Jammer.Motorstop;
         }
 
         /// <summary>
@@ -6662,8 +7526,13 @@ namespace NextDayRevival
             float weit = RevivalPlugin.CfgDroneRange.Value;
             float ruhig = Mathf.Min(RevivalPlugin.CfgDroneNoiseFrom.Value, weit - 1f);
             float d = Entfernung();
-            if (d <= ruhig) return 1f;
-            return Mathf.Clamp01(1f - (d - ruhig) / Mathf.Max(1f, weit - ruhig));
+            float funk = d <= ruhig
+                ? 1f
+                : Mathf.Clamp01(1f - (d - ruhig) / Mathf.Max(1f, weit - ruhig));
+            // A jammer eats the picture the same way distance does. On
+            // purpose: the pilot already knows this noise and does not need to
+            // learn a second warning.
+            return Mathf.Min(funk, 1f - Jammer.Grad);
         }
 
         /// <summary>
@@ -6815,6 +7684,9 @@ namespace NextDayRevival
             public const int Start = 0;
             public const int Lauf = 1;
             public const int Ende = 2;
+            // The jammer rides on the drone's own channel: one event more, no
+            // second hook, and it is gone the moment the drone code is.
+            public const int Jam = 3;
 
             static bool _hooked;
             static bool _failed;
@@ -6869,7 +7741,7 @@ namespace NextDayRevival
 
                     _hooked = true;
                     RevivalPlugin.L.LogInfo("Drohnennetz eingehaengt: Ereigniscodes "
-                        + Code(Start) + "-" + Code(Ende) + ", Empfang ueber "
+                        + Code(Start) + "-" + Code(Jam) + ", Empfang ueber "
                         + "PhotonNetwork.OnEventCall.");
                 }
                 catch (Exception ex)
@@ -6909,13 +7781,14 @@ namespace NextDayRevival
                 try
                 {
                     int art = code - RevivalPlugin.CfgDroneEventCode.Value;
-                    if (art < Start || art > Ende) return;
+                    if (art < Start || art > Jam) return;
                     float[] d = inhalt as float[];
                     if (d == null || d.Length < 7) return;
 
                     Vector3 pos = new Vector3(d[0], d[1], d[2]);
                     Vector3 blick = new Vector3(d[3], d[4], d[5]);
 
+                    if (art == Jam) { Jammer.Fremdmeldung(absender, pos, d[6]); return; }
                     if (art == Ende) { Entferne(absender, (int)d[6]); return; }
 
                     Fremd f;
@@ -6965,6 +7838,24 @@ namespace NextDayRevival
                 for (int i = 0; i < _weg.Count; i++) Entferne(_weg[i], Grund.Abriss);
             }
 
+            /// <summary>
+            /// Is a foreign drone within `r` metres of `p`? The jammer asks
+            /// before it says anything at all: no drone nearby, no event, no
+            /// traffic. The position is the interpolated one - the same the
+            /// player sees.
+            /// </summary>
+            public static bool RemoteNear(Vector3 p, float r)
+            {
+                float rr = r * r;
+                foreach (KeyValuePair<int, Fremd> kv in _fremde)
+                {
+                    Fremd f = kv.Value;
+                    if (f.Go == null) continue;
+                    if ((f.Go.transform.position - p).sqrMagnitude <= rr) return true;
+                }
+                return false;
+            }
+
             static void Entferne(int absender, int grund)
             {
                 Fremd f;
@@ -6974,6 +7865,263 @@ namespace NextDayRevival
                 if (f.Go != null) UnityEngine.Object.Destroy(f.Go);
                 RevivalPlugin.L.LogInfo("Fremde Drohne von Spieler " + absender
                     + " ist weg (" + GrundText(grund) + ").");
+            }
+        }
+
+        // ----------------------------------------------------- Stoersender
+
+        /// <summary>
+        /// The counter to the drone: a carried jammer that ends every flight
+        /// inside its radius.
+        ///
+        /// Two halves, and they never run on the same machine at the same
+        /// time:
+        ///
+        ///   Sender   the local player carries a jammer. While a foreign drone
+        ///            is near, position and radius go out on the drone's own
+        ///            event channel (Net.Jam), five times a second.
+        ///   Pilot    the local drone measures itself against every field it
+        ///            knows about - the foreign ones from those events, the
+        ///            own one only if AffectsOwn says so.
+        ///
+        /// The pilot's client decides, because only there is anything to
+        /// decide: camera, warhead and flight all live on that machine. The
+        /// price is that a modified client could ignore a jammer. Among
+        /// friends that is no problem; as protection against cheating it is
+        /// worth nothing, and it is written down here so nobody takes it for
+        /// that.
+        /// </summary>
+        public static class Jammer
+        {
+            /// <summary>A jammer somebody else carries, as last reported.</summary>
+            class Quelle
+            {
+                public Vector3 Pos;
+                public float Radius;
+                public float Zuletzt;    // Time.time of the last message
+            }
+
+            static readonly Dictionary<int, Quelle> _quellen = new Dictionary<int, Quelle>();
+            static readonly List<int> _weg = new List<int>();
+            static bool _traegt;             // does the local player carry one
+            static bool _gemeldet;           // are we sending right now
+            static float _naechsteMeldung;
+            static float _zuendung;          // Time.time of the bang, 0 = nothing
+            static bool _motorstop;
+            static bool _draussen;           // own drone has left the own field once
+            static float _grad;              // 0 = clean picture, 1 = inside
+
+            /// <summary>Are the motors dead because of a jammer?</summary>
+            public static bool Motorstop { get { return _motorstop; } }
+
+            /// <summary>How badly the picture is jammed, 0 to 1.</summary>
+            public static float Grad { get { return _grad; } }
+
+            /// <summary>Is there anything to say on the overlay?</summary>
+            public static bool Warnt { get { return _grad > 0.02f; } }
+
+            /// <summary>A new flight starts with a clean slate.</summary>
+            public static void Reset()
+            {
+                _zuendung = 0f;
+                _motorstop = false;
+                _draussen = false;
+                _grad = 0f;
+            }
+
+            public static void Tick()
+            {
+                if (!RevivalPlugin.CfgJammer.Value) { _grad = 0f; return; }
+                try
+                {
+                    Aufraeumen();
+                    Tragen();
+                    Melden();
+                    if (_flying) Fliegen();
+                    else _grad = 0f;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Stoersender: " + ex.Message);
+                }
+            }
+
+            /// <summary>
+            /// A jammer reported by somebody else. Nothing is trusted further
+            /// than it must be: the radius is clamped, and a sender that goes
+            /// quiet is forgotten after a second and a half - which is also
+            /// what happens when he drops the thing.
+            /// </summary>
+            public static void Fremdmeldung(int absender, Vector3 pos, float radius)
+            {
+                if (!RevivalPlugin.CfgJammer.Value) return;
+                Quelle q;
+                if (!_quellen.TryGetValue(absender, out q))
+                {
+                    q = new Quelle();
+                    _quellen[absender] = q;
+                    RevivalPlugin.L.LogInfo("Stoersender von Spieler " + absender
+                        + " bei " + pos + ", Radius " + radius + " m.");
+                }
+                q.Pos = pos;
+                q.Radius = Mathf.Clamp(radius, 1f, 500f);
+                q.Zuletzt = Time.time;
+            }
+
+            static void Aufraeumen()
+            {
+                if (_quellen.Count == 0) return;
+                _weg.Clear();
+                foreach (KeyValuePair<int, Quelle> kv in _quellen)
+                    if (Time.time - kv.Value.Zuletzt > 1.5f) _weg.Add(kv.Key);
+                for (int i = 0; i < _weg.Count; i++)
+                {
+                    _quellen.Remove(_weg[i]);
+                    RevivalPlugin.L.LogInfo("Stoersender von Spieler " + _weg[i]
+                        + " meldet sich nicht mehr.");
+                }
+            }
+
+            static void Tragen()
+            {
+                bool jetzt = Turret.HasItem(RevivalPlugin.CfgJammerItemId.Value);
+                if (jetzt != _traegt)
+                    RevivalPlugin.L.LogInfo("Stoersender (Item "
+                        + RevivalPlugin.CfgJammerItemId.Value + ") "
+                        + (jetzt ? "getragen." : "abgelegt."));
+                _traegt = jetzt;
+            }
+
+            /// <summary>
+            /// Where the jammer stands: at the player, never at the camera.
+            /// While a drone is up the camera IS the drone, and a jammer that
+            /// flew along with it would jam whatever it approaches - the exact
+            /// opposite of a counter.
+            /// </summary>
+            static bool EigenePosition(out Vector3 p)
+            {
+                p = Vector3.zero;
+                Transform root = LocalPlayerRoot();
+                if (root != null) { p = root.position; return true; }
+                if (_flying) { p = _home; return true; }
+                Camera cam = CameraOwner.ViewCamera();
+                if (cam == null) return false;
+                p = cam.transform.position;
+                return true;
+            }
+
+            /// <summary>
+            /// Tell the others - but only while there is something to jam.
+            /// Without a foreign drone in sight this costs one walk through a
+            /// dictionary per frame and not a single packet.
+            /// </summary>
+            static void Melden()
+            {
+                if (!_traegt)
+                {
+                    _gemeldet = false;
+                    return;
+                }
+                float r = Mathf.Max(1f, RevivalPlugin.CfgJammerRadius.Value);
+                Vector3 p;
+                if (!EigenePosition(out p)) return;
+                if (!Net.RemoteNear(p, Reichweite(r) + 40f))
+                {
+                    _gemeldet = false;
+                    return;
+                }
+                if (!_gemeldet)
+                {
+                    _gemeldet = true;
+                    RevivalPlugin.L.LogInfo("Stoersender: fremde Drohne in "
+                        + "Reichweite, Stoerung geht raus (Radius " + r + " m).");
+                }
+                if (Time.time < _naechsteMeldung) return;
+                _naechsteMeldung = Time.time + 0.2f;
+                Net.Send(Net.Jam, p, Vector3.zero, r, false);
+            }
+
+            /// <summary>
+            /// Warn distance of a field with radius r. The ratio comes from
+            /// the own configuration: a foreign jammer sends one number, and
+            /// one number is enough.
+            /// </summary>
+            static float Reichweite(float r)
+            {
+                float eigen = Mathf.Max(1f, RevivalPlugin.CfgJammerRadius.Value);
+                float warn = RevivalPlugin.CfgJammerWarnRadius.Value;
+                return warn <= eigen ? r : r * (warn / eigen);
+            }
+
+            /// <summary>
+            /// The pilot's half: measure the own drone against every known
+            /// field, then act. Once the fuse is lit there is no way out - at
+            /// 32 m/s and four tenths of a second nobody leaves a fifty metre
+            /// bubble anyway, and a drone flickering in and out of its doom
+            /// would only look broken.
+            /// </summary>
+            static void Fliegen()
+            {
+                float grad = 0f;
+                bool drin = false;
+
+                foreach (KeyValuePair<int, Quelle> kv in _quellen)
+                    Messen(kv.Value.Pos, kv.Value.Radius, ref grad, ref drin);
+
+                // The own jammer, if it counts at all. It arms only after the
+                // drone has been outside once - otherwise every launch would
+                // end two metres in front of the pilot.
+                if (_traegt && RevivalPlugin.CfgJammerAffectsOwn.Value)
+                {
+                    Vector3 p;
+                    if (EigenePosition(out p))
+                    {
+                        float r = Mathf.Max(1f, RevivalPlugin.CfgJammerRadius.Value);
+                        if (!_draussen)
+                        {
+                            if (Vector3.Distance(_pos, p) > r)
+                            {
+                                _draussen = true;
+                                RevivalPlugin.L.LogInfo("Eigener Stoersender ist "
+                                    + "scharf - die Drohne ist draussen.");
+                            }
+                        }
+                        else Messen(p, r, ref grad, ref drin);
+                    }
+                }
+
+                _grad = _zuendung > 0f ? 1f : grad;
+
+                if (drin && _zuendung <= 0f && Time.time >= _armed)
+                {
+                    float t = Mathf.Max(0f, RevivalPlugin.CfgJammerDelay.Value);
+                    _zuendung = Time.time + t;
+                    RevivalPlugin.L.LogInfo("Drohne im Stoerfeld bei " + _pos
+                        + " - " + (RevivalPlugin.CfgJammerDetonate.Value
+                                   ? "sie zuendet" : "die Motoren gehen aus")
+                        + " in " + t + " s.");
+                }
+
+                if (_zuendung > 0f && Time.time >= _zuendung)
+                {
+                    _zuendung = 0f;
+                    if (RevivalPlugin.CfgJammerDetonate.Value) Impact(_pos);
+                    else _motorstop = true;
+                }
+            }
+
+            /// <summary>
+            /// One field against the drone. `drin` says the flight is over,
+            /// `grad` is what the picture shows on the way there.
+            /// </summary>
+            static void Messen(Vector3 mitte, float r, ref float grad, ref bool drin)
+            {
+                float d = Vector3.Distance(_pos, mitte);
+                if (d <= r) { drin = true; grad = 1f; return; }
+                float warn = Reichweite(r);
+                if (d >= warn) return;
+                float g = Mathf.Clamp01(1f - (d - r) / Mathf.Max(1f, warn - r));
+                if (g > grad) grad = g;
             }
         }
 
@@ -7219,7 +8367,8 @@ namespace NextDayRevival
                 + "   ENTF " + Mathf.RoundToInt(Entfernung()) + " m"
                 + "   HOEHE " + (hoehe < 0f ? "--" : Mathf.RoundToInt(hoehe).ToString()) + " m"
                 + "   SIG " + Mathf.RoundToInt(sig * 100f) + "%";
-            if (Motorlos()) zeile = "AKKU LEER - SIE FAELLT   " + zeile;
+            if (Jammer.Warnt) zeile = "STOERSENDER   " + zeile;
+            else if (Motorlos()) zeile = "AKKU LEER - SIE FAELLT   " + zeile;
             else if (sig < 0.35f) zeile = "SIGNAL SCHWACH   " + zeile;
 
             GUI.color = new Color(0f, 0f, 0f, 0.85f);
@@ -7375,6 +8524,447 @@ namespace NextDayRevival
             if (gepatcht == 0)
                 RevivalPlugin.L.LogWarning("Drohne: KEINE Sperre gepatcht - der "
                     + "Koerper laeuft mit, waehrend geflogen wird.");
+        }
+    }
+
+    /// <summary>
+    /// Puts fire on the game's explosion. Sits as a postfix on
+    /// `ExplosionObject::NetworkVisualizeExplode`, which is the RPC the game
+    /// sends to everyone nearby - so this runs once on the client that fired
+    /// and once on every other client with the plugin. Nothing of ours has to
+    /// go over the wire.
+    /// </summary>
+    public static class FireHook
+    {
+        static bool _logged;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                Component c = __instance as Component;
+                if (c == null) return;
+                float radius = Radius(c);
+                FireEffect.Spawn(c.transform.position, radius);
+                if (!_logged && RevivalPlugin.L != null)
+                {
+                    _logged = true;
+                    RevivalPlugin.L.LogInfo("Feuer: erste Explosion mit Radius "
+                                            + radius + " m ausgeschmueckt.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("Feuer fehlgeschlagen: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// The blast radius of that explosion, so a grenade does not look like a
+        /// 125 mm shell. The field may be an Obscured type - then the implicit
+        /// conversion to float is asked for by name, the same way WeaponData
+        /// reads the game's weapon values.
+        /// </summary>
+        static float Radius(Component c)
+        {
+            try
+            {
+                FieldInfo f = AccessTools.Field(c.GetType(), "ExplodeDamageRadius");
+                if (f == null) return 6f;
+                object v = f.GetValue(c);
+                if (v == null) return 6f;
+                if (v is float) return (float)v;
+                MethodInfo[] ms = v.GetType().GetMethods(BindingFlags.Public
+                                                         | BindingFlags.Static);
+                for (int i = 0; i < ms.Length; i++)
+                    if (ms[i].Name == "op_Implicit" && ms[i].ReturnType == typeof(float))
+                        return (float)ms[i].Invoke(null, new object[] { v });
+                return 6f;
+            }
+            catch { return 6f; }
+        }
+    }
+
+    /// <summary>
+    /// The fire itself: four particle systems and one light, all built at
+    /// runtime. No asset and no Blender - a flame is a bright blob that grows,
+    /// turns red and then goes transparent, and that is a texture of 64 by 64
+    /// pixels and a gradient.
+    ///
+    /// Two materials for all of it, not one per explosion. The lesson is the
+    /// one from the tracer (0.5.2): `Destroy(go)` does NOT take a material
+    /// created at runtime with it, and explosions happen more often than LAW
+    /// shots. `HideAndDontSave` carries them over a scene change.
+    ///
+    /// UNGEPRUEFT im Spiel - `Shader.Find` liefert nur, was auch im Build ist.
+    /// "Particles/Additive" ist dieselbe Wahl wie bei der Leuchtspur.
+    /// </summary>
+    public static class FireEffect
+    {
+        static Material _additive;
+        static Material _blended;
+        static Texture2D _blob;
+        static bool _noShader;
+
+        public static void Spawn(Vector3 point, float radius)
+        {
+            if (RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value) return;
+            if (_noShader) return;
+
+            float scale = RevivalPlugin.CfgFireScale == null
+                ? 1f : Mathf.Max(0.1f, RevivalPlugin.CfgFireScale.Value);
+            float r = Mathf.Clamp(radius, 1.5f, 20f) * scale;
+
+            Material add = Additive();
+            Material blend = Blended();
+            if (add == null || blend == null)
+            {
+                _noShader = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Feuer: kein Partikelshader im Build "
+                        + "gefunden - die Explosion bleibt, wie sie war.");
+                return;
+            }
+
+            GameObject root = new GameObject("NDR Feuerball");
+            root.transform.position = point;
+
+            Ball(root, r, add);
+            Zungen(root, r, add);
+            Funken(root, r, add);
+            Rauch(root, r, blend);
+            Blitz(root, r);
+
+            UnityEngine.Object.Destroy(root, 8f);
+        }
+
+        // -------------------------------------------------- die fuenf Teile
+
+        /// <summary>The bang itself: bright, fast, gone in half a second.</summary>
+        static void Ball(GameObject root, float r, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Ball", mat, true);
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 0.5f;
+            main.loop = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.30f, 0.65f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.6f, r * 1.4f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.55f, r * 1.05f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.92f, 0.62f, 1f), new Color(1.00f, 0.62f, 0.16f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.12f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 200;
+
+            Kugel(ps, r * 0.22f);
+            Ausbruch(ps, 34);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.45f, 1.25f);
+        }
+
+        /// <summary>Tongues that stand and climb after the bang.</summary>
+        static void Zungen(GameObject root, float r, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Zungen", mat, true);
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 1.2f;
+            main.loop = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.8f, 1.7f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.15f, r * 0.55f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.35f, r * 0.80f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.75f, 0.30f, 1f), new Color(1.00f, 0.40f, 0.08f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.28f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 120;
+
+            Kegel(ps, r * 0.35f, 22f);
+            Ausbruch(ps, 18);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.70f, 0.15f);
+        }
+
+        /// <summary>Sparks. Small, fast, and the only part that falls.</summary>
+        static void Funken(GameObject root, float r, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Funken", mat, true);
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 0.4f;
+            main.loop = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.6f, 1.6f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(r * 1.2f, r * 3.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.03f, r * 0.08f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.95f, 0.70f, 1f), new Color(1.00f, 0.55f, 0.15f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(1.1f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 160;
+
+            Kugel(ps, r * 0.15f);
+            Ausbruch(ps, 46);
+            Farbverlauf(ps, false);
+            Groesse(ps, 1.00f, 0.25f);
+        }
+
+        /// <summary>What is left over and stands in the air for a while.</summary>
+        static void Rauch(GameObject root, float r, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Rauch", mat, false);
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 1.5f;
+            main.loop = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(1.8f, 3.6f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.15f, r * 0.45f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.90f, r * 1.80f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.18f, 0.16f, 0.15f, 1f), new Color(0.42f, 0.39f, 0.36f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.06f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 80;
+
+            Kegel(ps, r * 0.5f, 28f);
+            Ausbruch(ps, 22);
+            Farbverlauf(ps, true);
+            Groesse(ps, 0.60f, 1.80f);
+
+            ParticleSystem.RotationOverLifetimeModule rot = ps.rotationOverLifetime;
+            rot.enabled = true;
+            rot.z = new ParticleSystem.MinMaxCurve(-0.7f, 0.7f);
+        }
+
+        /// <summary>
+        /// A short flash of light. Its own child object, because NdrFlash
+        /// destroys what it sits on when it is done - on the root that would
+        /// take the fire with it.
+        /// </summary>
+        static void Blitz(GameObject root, float r)
+        {
+            GameObject go = new GameObject("Blitz");
+            go.transform.parent = root.transform;
+            go.transform.localPosition = Vector3.up * (r * 0.25f);
+
+            Light light = go.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.color = new Color(1f, 0.72f, 0.38f, 1f);
+            light.range = Mathf.Clamp(r * 5f, 8f, 90f);
+            light.intensity = 7f;
+            light.shadows = LightShadows.None;
+
+            NdrFlash flash = go.AddComponent<NdrFlash>();
+            flash.Life = 0.45f;
+        }
+
+        // ------------------------------------------------------- Bausteine
+
+        static ParticleSystem Neu(GameObject root, string name, Material mat, bool vorn)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.parent = root.transform;
+            go.transform.localPosition = Vector3.zero;
+
+            ParticleSystem ps = go.AddComponent<ParticleSystem>();
+            ParticleSystemRenderer r = go.GetComponent<ParticleSystemRenderer>();
+            if (r != null)
+            {
+                // sharedMaterial, nicht material: `material` legt fuer JEDES
+                // System eine eigene Kopie an, und die bleibt beim Destroy liegen.
+                r.sharedMaterial = mat;
+                r.renderMode = ParticleSystemRenderMode.Billboard;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                r.receiveShadows = false;
+                r.sortingFudge = vorn ? -2f : 0f;
+            }
+            return ps;
+        }
+
+        static void Ausbruch(ParticleSystem ps, int anzahl)
+        {
+            ParticleSystem.EmissionModule em = ps.emission;
+            em.enabled = true;
+            em.rateOverTime = new ParticleSystem.MinMaxCurve(0f);
+            ParticleSystem.Burst[] bursts = new ParticleSystem.Burst[1];
+            bursts[0] = new ParticleSystem.Burst(0f, (short)anzahl);
+            em.SetBursts(bursts);
+        }
+
+        static void Kugel(ParticleSystem ps, float radius)
+        {
+            ParticleSystem.ShapeModule sh = ps.shape;
+            sh.enabled = true;
+            sh.shapeType = ParticleSystemShapeType.Sphere;
+            sh.radius = Mathf.Max(0.05f, radius);
+        }
+
+        static void Kegel(ParticleSystem ps, float radius, float winkel)
+        {
+            ParticleSystem.ShapeModule sh = ps.shape;
+            sh.enabled = true;
+            sh.shapeType = ParticleSystemShapeType.Cone;
+            sh.radius = Mathf.Max(0.05f, radius);
+            sh.angle = winkel;
+            sh.rotation = new Vector3(-90f, 0f, 0f);   // Kegel nach oben
+        }
+
+        /// <summary>
+        /// White to yellow to orange to dark red, and out. That order is what
+        /// makes a fire look like a fire and not like coloured dust.
+        /// </summary>
+        static void Farbverlauf(ParticleSystem ps, bool rauch)
+        {
+            ParticleSystem.ColorOverLifetimeModule col = ps.colorOverLifetime;
+            col.enabled = true;
+
+            Gradient g = new Gradient();
+            if (rauch)
+            {
+                g.SetKeys(
+                    new GradientColorKey[] {
+                        new GradientColorKey(new Color(0.55f, 0.42f, 0.30f), 0.00f),
+                        new GradientColorKey(new Color(0.32f, 0.30f, 0.28f), 0.35f),
+                        new GradientColorKey(new Color(0.22f, 0.21f, 0.20f), 1.00f) },
+                    new GradientAlphaKey[] {
+                        new GradientAlphaKey(0.00f, 0.00f),
+                        new GradientAlphaKey(0.55f, 0.18f),
+                        new GradientAlphaKey(0.35f, 0.60f),
+                        new GradientAlphaKey(0.00f, 1.00f) });
+            }
+            else
+            {
+                g.SetKeys(
+                    new GradientColorKey[] {
+                        new GradientColorKey(new Color(1.00f, 0.98f, 0.85f), 0.00f),
+                        new GradientColorKey(new Color(1.00f, 0.80f, 0.30f), 0.22f),
+                        new GradientColorKey(new Color(1.00f, 0.42f, 0.08f), 0.60f),
+                        new GradientColorKey(new Color(0.45f, 0.09f, 0.02f), 1.00f) },
+                    new GradientAlphaKey[] {
+                        new GradientAlphaKey(1.00f, 0.00f),
+                        new GradientAlphaKey(0.95f, 0.45f),
+                        new GradientAlphaKey(0.00f, 1.00f) });
+            }
+            col.color = new ParticleSystem.MinMaxGradient(g);
+        }
+
+        static void Groesse(ParticleSystem ps, float anfang, float ende)
+        {
+            ParticleSystem.SizeOverLifetimeModule size = ps.sizeOverLifetime;
+            size.enabled = true;
+            AnimationCurve curve = new AnimationCurve();
+            curve.AddKey(0.00f, anfang);
+            curve.AddKey(0.30f, Mathf.Max(anfang, ende) * 0.95f);
+            curve.AddKey(1.00f, ende);
+            size.size = new ParticleSystem.MinMaxCurve(1f, curve);
+        }
+
+        // ------------------------------------------------------ Werkstoffe
+
+        static Material Additive()
+        {
+            if (_additive != null) return _additive;
+            Shader s = Finde(new string[] {
+                "Particles/Additive", "Legacy Shaders/Particles/Additive",
+                "Mobile/Particles/Additive" });
+            if (s == null) return null;
+            _additive = Werkstoff(s);
+            return _additive;
+        }
+
+        static Material Blended()
+        {
+            if (_blended != null) return _blended;
+            Shader s = Finde(new string[] {
+                "Particles/Alpha Blended", "Legacy Shaders/Particles/Alpha Blended",
+                "Mobile/Particles/Alpha Blended", "Particles/Additive" });
+            if (s == null) return null;
+            _blended = Werkstoff(s);
+            return _blended;
+        }
+
+        static Shader Finde(string[] namen)
+        {
+            for (int i = 0; i < namen.Length; i++)
+            {
+                Shader s = Shader.Find(namen[i]);
+                if (s != null) return s;
+            }
+            return null;
+        }
+
+        static Material Werkstoff(Shader s)
+        {
+            Material m = new Material(s);
+            Texture2D t = Blob();
+            if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", t);
+            if (m.HasProperty("_TintColor"))
+                m.SetColor("_TintColor", new Color(0.5f, 0.5f, 0.5f, 0.5f));
+            if (m.HasProperty("_Color")) m.SetColor("_Color", Color.white);
+            m.hideFlags = HideFlags.HideAndDontSave;
+            return m;
+        }
+
+        /// <summary>
+        /// One soft blob, 64 by 64. Everything else - flame, spark, smoke - is
+        /// this same blob in a different colour and a different size. A texture
+        /// that lives in the plugin needs no asset file, no generator and no
+        /// entry in verify.py.
+        /// </summary>
+        static Texture2D Blob()
+        {
+            if (_blob != null) return _blob;
+            const int N = 64;
+            Texture2D t = new Texture2D(N, N, TextureFormat.ARGB32, false);
+            Color[] px = new Color[N * N];
+            for (int y = 0; y < N; y++)
+            {
+                for (int x = 0; x < N; x++)
+                {
+                    float dx = (x + 0.5f) / N * 2f - 1f;
+                    float dy = (y + 0.5f) / N * 2f - 1f;
+                    float d = Mathf.Sqrt(dx * dx + dy * dy);
+                    float a = Mathf.Clamp01(1f - d);
+                    a = a * a * (3f - 2f * a);              // weiche Kante
+                    px[y * N + x] = new Color(1f, 1f, 1f, a);
+                }
+            }
+            t.SetPixels(px);
+            t.Apply();
+            t.wrapMode = TextureWrapMode.Clamp;
+            t.filterMode = FilterMode.Bilinear;
+            t.hideFlags = HideFlags.HideAndDontSave;
+            _blob = t;
+            return _blob;
+        }
+    }
+
+    /// <summary>
+    /// Fades a light out and then removes the object it sits on. A
+    /// MonoBehaviour and not a coroutine: the fire has no MonoBehaviour of its
+    /// own to hang one on, and the plugin's own one would keep the coroutine
+    /// alive across a scene change.
+    /// </summary>
+    public class NdrFlash : MonoBehaviour
+    {
+        public float Life = 0.45f;
+
+        float _t;
+        float _start;
+        Light _light;
+
+        void Awake()
+        {
+            _light = GetComponent<Light>();
+            if (_light != null) _start = _light.intensity;
+        }
+
+        void Update()
+        {
+            if (_light == null) { UnityEngine.Object.Destroy(gameObject); return; }
+            _t += Time.deltaTime;
+            if (_t >= Life) { UnityEngine.Object.Destroy(gameObject); return; }
+            float k = 1f - _t / Life;
+            _light.intensity = _start * k * k * (0.78f + 0.22f * Mathf.Sin(_t * 70f));
         }
     }
 }

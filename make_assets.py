@@ -27,10 +27,14 @@ GROUPS = [
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),
     ("drone", ["drone_mesh.py", "drone_texture.py", "drone_icon.py"]),
-    ("t72", ["t72_mesh.py", "t72_texture.py", "t72_scope.py",
+    ("jammer", ["jammer_mesh.py", "jammer_texture.py", "jammer_icon.py"]),
+    # t72_import.py hat t72_mesh.py und t72_texture.py abgeloest: der Panzer
+    # kommt seit 0.5.3 als Modell UND Textur aus dem Spiel selbst. Die beiden
+    # Generatoren bleiben liegen, laufen aber nicht mehr mit.
+    ("t72", ["t72_import.py", "t72_scope.py",
              "shell125_mesh.py", "shell125_texture.py", "shell125_icon.py",
              "mesh_preview.py t72"]),
-    ("scope", ["scope50.py"]),
+    ("scope", ["scope50.py", "apc_scope.py"]),
     ("preview", ["mesh_preview.py"]),
 ]
 

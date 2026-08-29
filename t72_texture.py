@@ -1,4 +1,17 @@
-"""Erzeugt Diffuse und Normal Map des T-72 aus einem gemeinsamen Atlas.
+"""ABGELOEST SEIT 0.5.3 - dieses Skript laeuft nicht mehr mit.
+
+`make_assets.py` ruft stattdessen `t72_import.py` auf. Der Panzer kommt seit
+0.5.3 als Modell UND Textur aus dem Spiel selbst: `t-72_wrecked` in level10
+ist ein vollstaendiger, handmodellierter T-72 mit eigenen UV-Texturen. Drei
+Anlaeufe mit diesem Generator (0.4.7, 0.4.9, 0.5.2) haben die Silhouette
+getroffen und danach an der Oberflaeche verloren - ein Skript mit vierzig
+Konstanten ersetzt keine Handarbeit.
+
+Die Datei bleibt liegen, weil sie das Einzige ist, was ohne Spielinstallation
+einen Panzer erzeugt, und weil ihre Kommentare die Messungen am BTR und die
+Falle mit `ndmesh._uv` festhalten.
+
+Erzeugt Diffuse und Normal Map des T-72 aus einem gemeinsamen Atlas.
 
 DIE FARBE IST NICHT ERFUNDEN
 ----------------------------
@@ -51,20 +64,26 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HIER, "assets")
 OUT_D = os.path.join(ASSETS, "t72_diffuse.png")
 OUT_N = os.path.join(ASSETS, "t72_normal.png")
+OUT_M = os.path.join(ASSETS, "t72_metal.png")
 H = T.H
 
-# Am BTR gemessen, siehe Kopf - und dann bewusst abgedunkelt.
+# Am BTR gemessen - und seit 0.5.2 NICHT mehr abgedunkelt.
 #
-# Der Mittelwert von btr-80a_alb ist (60, 61, 44). Genau so hell hat der Panzer
-# im Spiel am 2026-08-29 ausgesehen: zu hell, und weil die Textur zusaetzlich
-# viel Kontrast trug, wirkte die Oberflaeche gekritzelt statt lackiert. Der BTR
-# ist aber auch ein anderes Fahrzeug - grosse Blechflaechen, viel Streulicht.
-# Ein Panzer soll daneben dunkel und stumpf stehen. Deshalb rund ein Drittel
-# dunkler als die Messung, und der Kontrast auf ein Drittel des alten Wertes.
-OLIV_WANNE = (41, 42, 31)
-OLIV_TURM = (39, 41, 32)
-STAHL_KETTE = (33, 32, 28)
-STAHL_ROLLE = (36, 36, 32)
+# 0.4.9 hatte die Messung um ein Drittel abgedunkelt, weil der Panzer im Spiel
+# zu hell wirkte. Der Blick am 2026-08-29 hat gezeigt, dass das die falsche
+# Stellschraube war: zu hell war er nie, er war zu BUNT und zu unruhig. Der
+# Benutzer will ausdruecklich denselben Ton wie der MTW daneben. Also steht
+# die Wanne jetzt exakt auf dem gemessenen Mittelwert von btr-80a_alb, und der
+# Kontrast faellt an anderer Stelle (siehe unten: keine Kratzer mehr).
+#
+# Messung an btr-80a_alb (2048x2048, alle 4 Mio Pixel):
+#     R Mittel 59.2  Median 57   p5 49  p95 73  Streuung 8.2
+#     G Mittel 60.0  Median 60   p5 48  p95 69  Streuung 8.1
+#     B Mittel 43.3  Median 41   p5 33  p95 57  Streuung 7.5
+OLIV_WANNE = (59, 60, 43)
+OLIV_TURM = (57, 58, 42)
+STAHL_KETTE = (38, 37, 33)
+STAHL_ROLLE = (43, 43, 38)
 STAUB = (0.42, 0.38, 0.26)
 
 
@@ -123,6 +142,58 @@ def ring_farbe(arr, w, h, gummi=(30, 30, 28), felge=(52, 52, 46)):
     return np.clip(out, 0, 1)
 
 
+def metall_viertel(r, metallic, smoothness, unruhe=0.05, maske=None):
+    """Ein Viertel der Metallic/Gloss-Map: R = Metallic, A = Smoothness.
+
+    Der Unity-Standardshader liest bei gesetztem `_MetallicGlossMap` das
+    Metallic aus dem ROTEN Kanal und die Smoothness aus dem ALPHAKANAL
+    (`_SmoothnessTextureChannel` = 0, so steht es auch am BTR). Gruen und Blau
+    sind unbenutzt; sie bekommen hier denselben Wert wie Rot, damit die Datei
+    beim Ansehen lesbar ist.
+
+    `unruhe` streut beide Werte leicht. Eine Flaeche mit exakt konstanter
+    Smoothness bekommt ein Glanzlicht wie eine Billardkugel - gleichmaessig und
+    tot. Erst die Streuung laesst sie nach gewalztem Blech aussehen.
+
+    `maske` ist optional (Wert 0..1) und mischt einen zweiten, matten Satz ein:
+    damit bekommt die Gummibandage der Laufrolle ihren eigenen Wert, ohne dass
+    das Viertel dafuer zerteilt werden muss.
+    """
+    n = T.grain(r, H, H, 4, unruhe)
+    m = np.clip(metallic + n, 0.0, 1.0)
+    g = np.clip(smoothness + n * 0.8, 0.0, 1.0)
+    if maske is not None:
+        k = np.clip(maske, 0.0, 1.0)
+        m = m * (1.0 - k) + 0.02 * k
+        g = g * (1.0 - k) + 0.10 * k
+    out = np.zeros((H, H, 4), np.float32)
+    out[..., 0] = m
+    out[..., 1] = m
+    out[..., 2] = m
+    out[..., 3] = g
+    return out
+
+
+def save_metal_atlas(quads, path):
+    """Wie T.save_atlas, aber mit Alphakanal - der traegt die Smoothness."""
+    tex = np.zeros((T.S, T.S, 4), np.float32)
+    tex[0:H, 0:H] = quads["shroud"]
+    tex[0:H, H:T.S] = quads["receiver"]
+    tex[H:T.S, 0:H] = quads["stock"]
+    tex[H:T.S, H:T.S] = quads["detail"]
+    img = Image.fromarray((np.clip(tex, 0, 1) * 255).astype(np.uint8), "RGBA")
+    img.save(path)
+    return img
+
+
+def gummi_maske(w, h):
+    """1 auf der Gummibandage der Laufrolle, 0 auf dem Stahl - weiche Kante."""
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx = cy = (w - 1) / 2.0
+    d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / (w / 2.0)
+    return np.clip((d - 0.78) / 0.04, 0.0, 1.0).astype(np.float32)
+
+
 if __name__ == "__main__":
     os.makedirs(ASSETS, exist_ok=True)
     r = T.rng(720721)
@@ -153,15 +224,29 @@ if __name__ == "__main__":
     # ueber eine ganze Platte laeuft, darf hoechstens eine weiche Schattierung
     # sein. Kratzer, Flecken und Koernung bleiben deshalb knapp ueber der
     # Sichtbarkeitsgrenze - sie sollen die Flaeche beleben, nicht bemalen.
-    wanne = T.base(r, H, H, OLIV_WANNE, 0.011, scale=7)
-    wanne = T.mottle(r, wanne, 0.008, 22, (0.90, 0.88, 0.70))
-    wanne = T.scratches(r, wanne, 14, 0.030, 40, direction=0.0)
+    # 0.5.2: KEINE Kratzer und KEINE Wolken mehr auf Wanne und Turm.
+    #
+    # Der Blick im Spiel am 2026-08-29 nannte die Oberflaeche "Gekritzel,
+    # Linien, billiges Tarnmuster". Das war woertlich zutreffend, und es war
+    # kein Zufall, sondern die Folge der Streckung: `scratches` legt vierzehn
+    # Striche von 40 Pixeln ins Viertel, und eine Wannenplatte sieht das ganze
+    # Viertel - aus jedem Strich wird ein METERLANGER heller Zug quer ueber die
+    # Platte, und weil jede Platte dasselbe Viertel sieht, liegt derselbe Zug
+    # auf jeder Platte. Dasselbe gilt fuer `mottle` bei Skala 22: aus der Wolke
+    # wird ein Fleck in Panzergroesse, also ein Tarnfleck.
+    #
+    # Es gibt fuer beides keine Dosierung, die hilft - der Fehler ist nicht die
+    # Staerke, sondern die Groesse. Was gestreckt wird, darf keine Struktur
+    # haben. Auf Wanne und Turm bleibt deshalb nur noch feine Koernung uebrig:
+    # `base` mit kleiner Skala, das gibt Lack auf Blech und nichts sonst. Der
+    # sichtbare Charakter der Oberflaeche kommt ab jetzt aus dem MATERIAL
+    # (Metallic und Smoothness, siehe t72_metal.png), nicht aus Bemalung.
+    wanne = T.base(r, H, H, OLIV_WANNE, 0.013, scale=3)
 
-    # Turm: derselbe Lack auf rauem Guss, deshalb minimal heller gesprenkelt.
-    turm = T.base(r, H, H, OLIV_TURM, 0.010, scale=6)
-    turm = T.mottle(r, turm, 0.007, 18, (0.90, 0.90, 0.72))
-    turm = np.clip(turm + guss(r, H, H, 0.007)[..., None], 0, 1)
-    turm = T.scratches(r, turm, 10, 0.026, 30, direction=0.0)
+    # Turm: derselbe Lack auf rauem Guss. Die Orangenhaut bleibt, sie ist fein
+    # genug - vier Oktaven auf 512 Pixel, also auch gestreckt noch ein Korn.
+    turm = T.base(r, H, H, OLIV_TURM, 0.012, scale=3)
+    turm = np.clip(turm + guss(r, H, H, 0.006)[..., None], 0, 1)
 
     # Kette: dunkler, brauner, oelig. Das Motordeck liegt seit 0.4.9 NICHT mehr
     # in diesem Viertel - gestreckt wurde aus den Kettenrippen dort ein
@@ -170,21 +255,26 @@ if __name__ == "__main__":
     # Kette und Laufrollen duerfen mehr Struktur tragen als die Wanne: ein
     # Kettenglied und eine Laufrolle sind KLEINE Flaechen, die vom Viertel nur
     # einen Ausschnitt sehen. Dort wird nichts panzergross gestreckt.
-    kette = T.base(r, H, H, STAHL_KETTE, 0.030, scale=5)
-    kette = T.mottle(r, kette, 0.022, 9, (0.80, 0.72, 0.56))
+    kette = T.base(r, H, H, STAHL_KETTE, 0.026, scale=5)
+    kette = T.mottle(r, kette, 0.016, 9, (0.80, 0.76, 0.66))
     kette = np.clip(kette + rippen(H, H, 11, 0.018, quer=True)[..., None], 0, 1)
-    kette = T.scratches(r, kette, 50, 0.085, 30, direction=90.0)
+    kette = T.scratches(r, kette, 50, 0.070, 30, direction=90.0)
 
     # Laufrollen: Stahlschuessel mit Gummibandage.
-    rolle = T.base(r, H, H, STAHL_ROLLE, 0.026, scale=5)
-    rolle = T.mottle(r, rolle, 0.020, 10, (0.84, 0.78, 0.60))
+    rolle = T.base(r, H, H, STAHL_ROLLE, 0.022, scale=5)
+    rolle = T.mottle(r, rolle, 0.014, 10, (0.84, 0.80, 0.68))
     rolle = ring_farbe(rolle, H, H)
-    rolle = T.scratches(r, rolle, 44, 0.07, 26, direction=0.0)
+    rolle = T.scratches(r, rolle, 44, 0.055, 26, direction=0.0)
 
     # Staub in den Vertiefungen, blanke Kanten auf den Graten. Am Laufwerk
     # kraeftiger als an der Wanne - dort sammelt sich der Dreck.
-    wanne = T.couple_height(wanne, h_wanne, 0.045, 0.022, 14, STAUB, 0.013)
-    turm = T.couple_height(turm, h_turm, 0.040, 0.020, 12, STAUB, 0.011)
+    # Auf Wanne und Turm ist auch diese Kopplung zurueckgenommen: sie arbeitet
+    # ueber einen Radius von 12 bis 14 Pixeln, und genau dieser Radius wird auf
+    # der Platte zu einem halben Meter. Was hier ein dunkler Grat ist, ist am
+    # Panzer eine Schliere. Am Laufwerk bleibt sie voll - dort wird nichts
+    # gestreckt, und dort gehoert Dreck hin.
+    wanne = T.couple_height(wanne, h_wanne, 0.018, 0.010, 14, STAUB, 0.004)
+    turm = T.couple_height(turm, h_turm, 0.016, 0.009, 12, STAUB, 0.004)
     kette = T.couple_height(kette, h_kette, 0.090, 0.050, 8, STAUB, 0.045)
     rolle = T.couple_height(rolle, h_rolle, 0.130, 0.080, 10, STAUB, 0.050)
 
@@ -195,7 +285,34 @@ if __name__ == "__main__":
     # (2.8 bis 3.2): eine Panzerplatte ist glatt. Zusammen mit den flacheren
     # Hoehenkarten oben ist die Walzhaut jetzt eine Andeutung und keine
     # Kraterlandschaft mehr.
-    T.save_height_atlas(heights, OUT_N, strength=0.9)
+    T.save_height_atlas(heights, OUT_N, strength=0.5)
+
+    # ------------------------------------------------- Metallic und Gloss
+    #
+    # WOHER DIE ZAHLEN KOMMEN
+    # Aus dem Material des MTW selbst. `research/dump_material.py btr-80a_alb`
+    # (2026-08-29) liefert: Standardshader mit den Keywords _METALLICGLOSSMAP
+    # und _NORMALMAP, `_GlossMapScale` 0.4, `_Metallic` 0.30, `_Glossiness`
+    # 0.5. Wirksam sind bei gesetzter Map aber nicht die beiden Zahlen, sondern
+    # die Map: `btr-80a_met` hat im roten Kanal Mittelwert 38 von 255, also
+    # Metallic rund 0.15 (Spanne 0.02 bis 0.28), und im Alphakanal ueberall
+    # 255 - die Datei liegt als DXT1 ohne Alpha vor. Die wirksame Smoothness
+    # des MTW ist damit gleichmaessig 1.0 * 0.4 = 0.40.
+    #
+    # Genau das steht hier auf Wanne und Turm. Der Panzer bekommt damit
+    # dieselbe Lichtantwort wie der MTW daneben - dieselbe Farbe UND dieselbe
+    # Oberflaeche, wie es der Auftrag verlangt.
+    #
+    # Laufwerk und Rollen duerfen davon abweichen, und zwar nach oben: eine
+    # Kettenlauffflaeche und ein Radkranz sind blanker Stahl, den die Fahrt
+    # poliert. Nur die Gummibandage ist matt, dafuer die Maske.
+    metall = {
+        "shroud": metall_viertel(r, 0.15, 0.40, 0.045),
+        "receiver": metall_viertel(r, 0.13, 0.36, 0.050),
+        "stock": metall_viertel(r, 0.55, 0.48, 0.090),
+        "detail": metall_viertel(r, 0.40, 0.44, 0.080, gummi_maske(H, H)),
+    }
+    save_metal_atlas(metall, OUT_M)
 
     print("T-72-Texturen")
     print("  %s" % OUT_D)
@@ -204,3 +321,5 @@ if __name__ == "__main__":
     print("    Kette  RGB %s" % (T.mean_rgb(kette),))
     print("    Rolle  RGB %s" % (T.mean_rgb(rolle),))
     print("  %s" % OUT_N)
+    print("  %s   R=Metallic, A=Smoothness" % OUT_M)
+    print("    Wanne  Metallic 0.15  Smoothness 0.40  (MTW: 0.15 / 0.40)")

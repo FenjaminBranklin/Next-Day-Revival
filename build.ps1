@@ -62,7 +62,11 @@ $refs = @(
     (Join-Path $managed "UnityEngine.IMGUIModule.dll"),
     # AudioModule: die Drohne rechnet ihr Surren zur Laufzeit aus (AudioClip.Create)
     # und haengt es an eine AudioSource. Ohne das hoert man sie nicht kommen.
-    (Join-Path $managed "UnityEngine.AudioModule.dll")
+    (Join-Path $managed "UnityEngine.AudioModule.dll"),
+    # ParticleSystemModule: das Feuer auf der Explosion (FireEffect) baut seine
+    # Partikelsysteme zur Laufzeit. Ohne diese Referenz kennt der Compiler
+    # ParticleSystem nicht.
+    (Join-Path $managed "UnityEngine.ParticleSystemModule.dll")
 ) | Where-Object { Test-Path $_ }
 
 $cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2", "/out:$staged")
@@ -103,8 +107,10 @@ $assets = @(
     "law_icon.png", "law_weapon_icon.png",
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
+    "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
     "t72_hull.ndmesh", "t72_turret.ndmesh", "t72_diffuse.png", "t72_normal.png",
-    "t72_scope.png",
+    "t72_metal.png", "t72_scope.png",
+    "apc_scope.png",
     "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
     "shell125_icon.png",
     "scope50.png"
