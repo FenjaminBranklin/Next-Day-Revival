@@ -1,11 +1,12 @@
 # Stufe 3 - Client-Patch: macht aus einer Steam-Installation einen Client,
 # der sich am eigenen Masterserver anmeldet.
 #
-# Vier Dinge, ein Aufruf:
+# Fuenf Dinge, ein Aufruf:
 #   1. ClientConfig.ini zeigt auf die Serverliste des VPS
 #   2. Assembly-CSharp.dll wird gepatcht, damit EAC im Spielcode aus ist
 #   3. BepInEx wird installiert, falls keins da ist und eins beiliegt
-#   4. Plugin und Assets liegen in BepInEx\plugins
+#   4. Das aktuelle T-72-Modell entsteht lokal aus den eigenen Spieldateien
+#   5. Plugin und Assets liegen in BepInEx\plugins
 #
 # Absichtlich eigenstaendig: kein Python, kein csc, kein Masterserver-Ordner,
 # kein Adminrecht. Es soll auch auf dem PC eines Mitspielers laufen, der nur
@@ -390,6 +391,14 @@ if ($NoPlugin) {
         if ($a -eq $b) { Gut ("installiert, {0} Bytes" -f $b) }
         else { Warn ("installiert, aber andere Groesse: {0} statt {1} Bytes" -f $b, $a) }
     } else { Warn "nicht installiert" }
+    if (Test-Path (Join-Path $root "t72_import.exe")) {
+        Gut "T-72-Extraktor liegt bereit"
+    } elseif ((Test-Path (Join-Path $root "t72_import.py")) -and
+              (Get-Command python -ErrorAction SilentlyContinue)) {
+        Gut "T-72-Entwicklungsskript und Python liegen bereit"
+    } else {
+        Bad "T-72-Extraktor fehlt - dieses Paket kann nur das alte Modell installieren."
+    }
 } else {
     New-Item -ItemType Directory -Force -Path $plugins | Out-Null
     Copy-Item $dllQuelle (Join-Path $plugins "NextDayRevivalToolkit.dll") -Force
@@ -398,6 +407,45 @@ if ($NoPlugin) {
     if (-not (Test-Path $assetQuelle)) {
         Bad ("assets\ fehlt: " + $assetQuelle)
     } else {
+        $t72Ok = $true
+        $t72Exe = Join-Path $root "t72_import.exe"
+        $t72Py = Join-Path $root "t72_import.py"
+        if (Test-Path $t72Exe) {
+            Info "Baue das aktuelle T-72-Modell aus der eigenen Spielinstallation ..."
+            & $t72Exe --game-data $dataDir --assets $assetQuelle
+            if ($LASTEXITCODE -ne 0) {
+                Bad ("T-72-Extraktor fehlgeschlagen (Code {0})." -f $LASTEXITCODE)
+                $t72Ok = $false
+            } else {
+                Gut "aktuelles T-72-Modell lokal erzeugt"
+            }
+        } elseif ((Test-Path $t72Py) -and (Get-Command python -ErrorAction SilentlyContinue)) {
+            # Development checkout only. Published packages carry the frozen
+            # executable and never require Python on the player's computer.
+            Info "Baue das aktuelle T-72-Modell mit dem Entwicklungsskript ..."
+            & python $t72Py --game-data $dataDir --assets $assetQuelle
+            if ($LASTEXITCODE -ne 0) {
+                Bad ("T-72-Entwicklungsskript fehlgeschlagen (Code {0})." -f $LASTEXITCODE)
+                $t72Ok = $false
+            } else {
+                Gut "aktuelles T-72-Modell lokal erzeugt"
+            }
+        } else {
+            Bad "T-72-Extraktor fehlt - Abbruch statt Installation des alten Modells."
+            $t72Ok = $false
+        }
+
+        foreach ($required in @("t72_hull.ndmesh", "t72_turret.ndmesh",
+                                "t72_diffuse.png", "t72_normal.png", "t72_metal.png")) {
+            if (-not (Test-Path (Join-Path $assetQuelle $required))) {
+                Bad ("T-72-Ausgabe fehlt: assets\" + $required)
+                $t72Ok = $false
+            }
+        }
+
+        if (-not $t72Ok) {
+            Warn "Assets werden nicht kopiert, damit kein halbfertiger Client entsteht."
+        } else {
         $assetZiel = Join-Path $plugins "assets"
         New-Item -ItemType Directory -Force -Path $assetZiel | Out-Null
 
@@ -422,6 +470,7 @@ if ($NoPlugin) {
             if (-not (Test-Path (Join-Path $assetQuelle $f.Name))) {
                 Warn ("altes Asset liegt noch da: " + $f.Name)
             }
+        }
         }
     }
 }

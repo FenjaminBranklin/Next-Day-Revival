@@ -98,17 +98,29 @@ herein: Punkt 9 prueft das Vorzeichen des Volumens.
     python t72_import.py
 """
 
+import argparse
 import math
 import os
 import struct
 import sys
+import types
 
 import numpy as np
 from PIL import Image
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# UnityPy's export package imports audio and ASTC support eagerly even when
+# this tool only exports meshes and DXT textures. The frozen release excludes
+# those optional packages (and the proprietary FMOD DLL they would pull in).
+# Tiny placeholders are sufficient because neither code path is called here.
+if getattr(sys, "frozen", False):
+    sys.modules["fmod_toolkit"] = types.ModuleType("fmod_toolkit")
+    sys.modules["astc_encoder"] = types.ModuleType("astc_encoder")
 
-HIER = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys.stdout, "reconfigure", None):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+HIER = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+        else os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(HIER, "assets")
 GAME = r"C:\Program Files (x86)\Steam\steamapps\common\Next Day Survival\nextday_game_Data"
 
@@ -120,6 +132,31 @@ OUT_TURRET = os.path.join(ASSETS, "t72_turret.ndmesh")
 OUT_D = os.path.join(ASSETS, "t72_diffuse.png")
 OUT_N = os.path.join(ASSETS, "t72_normal.png")
 OUT_M = os.path.join(ASSETS, "t72_metal.png")
+
+
+def configure_paths():
+    """Resolve input and output outside a frozen PyInstaller executable."""
+    global GAME, ASSETS, OUT_HULL, OUT_TURRET, OUT_D, OUT_N, OUT_M
+
+    parser = argparse.ArgumentParser(
+        description="Build the current T-72 assets from an installed copy of the game.")
+    parser.add_argument("--game-data", default=GAME,
+                        help="Path to nextday_game_Data or the game installation.")
+    parser.add_argument("--assets", default=ASSETS,
+                        help="Output directory for the five generated assets.")
+    args = parser.parse_args()
+
+    game = os.path.abspath(args.game_data)
+    nested = os.path.join(game, "nextday_game_Data")
+    if os.path.isdir(nested):
+        game = nested
+    GAME = game
+    ASSETS = os.path.abspath(args.assets)
+    OUT_HULL = os.path.join(ASSETS, "t72_hull.ndmesh")
+    OUT_TURRET = os.path.join(ASSETS, "t72_turret.ndmesh")
+    OUT_D = os.path.join(ASSETS, "t72_diffuse.png")
+    OUT_N = os.path.join(ASSETS, "t72_normal.png")
+    OUT_M = os.path.join(ASSETS, "t72_metal.png")
 
 TEX_BODY = "t-72_body_wreck_diff"
 TEX_BODY_N = "t-72_body_wrek_norm"
@@ -688,6 +725,7 @@ def zeichen(rgba, V, T, F):
 # ------------------------------------------------------------------- Lauf
 
 if __name__ == "__main__":
+    configure_paths()
     os.makedirs(ASSETS, exist_ok=True)
 
     teile = hierarchie()

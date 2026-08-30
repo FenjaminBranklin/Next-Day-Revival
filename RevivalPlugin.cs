@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.5";
+        public const string VERSION = "0.5.6";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -161,7 +161,9 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgTurretPitchMax;
         internal static ConfigEntry<bool> CfgTurretAmmo;
         internal static ConfigEntry<int> CfgTurretAmmoId;
+        internal static ConfigEntry<int> CfgTurretSpawnAmmo;
         internal static ConfigEntry<bool> CfgTurretAmmoBackpack;
+        internal static ConfigEntry<int> CfgTurretEventCode;
         internal static ConfigEntry<float> CfgTurretSensitivity;
         internal static ConfigEntry<float> CfgTurretRecoil;
         internal static ConfigEntry<float> CfgTurretEyeForward;
@@ -494,10 +496,17 @@ namespace NextDayRevival
                 + "Zugestaendnis an den vorhandenen Itembestand - ein eigener "
                 + "30-mm-Gurt waere ein eigenes Item mit eigener Id, eigenem "
                 + "Modell und einem Eintrag am Server.");
+            CfgTurretSpawnAmmo = Config.Bind("Turret", "SpawnAmmo", 200,
+                "So viele Schuss wandern beim manuellen Hinstellen eines BTR in "
+                + "den Kofferraum. Damit ist das Geschuetz sofort benutzbar. 0 "
+                + "schaltet die Beigabe ab.");
             CfgTurretAmmoBackpack = Config.Bind("Turret", "AmmoFromBackpack", true,
                 "Ist der Kofferraum leer, auch aus dem Rucksack des Spielers "
                 + "nehmen. Der Kofferraum gehoert dem Fahrzeug und ist nach dem "
                 + "naechsten Spielstart mitsamt Inhalt weg.");
+            CfgTurretEventCode = Config.Bind("Turret", "NetworkEventCode", 181,
+                "Photon event code for turret rotation. The default follows the "
+                + "five drone codes 176 through 180 and must not overlap them.");
             // Gezielt wird mit der Maus, nicht mit dem Kopf: die Kamera sitzt
             // waehrend des Schiessens im Rohr und koennte den Turm sonst nicht
             // mehr steuern - sie zeigt ja immer schon dorthin, wo er steht.
@@ -5380,6 +5389,8 @@ namespace NextDayRevival
             if (!RevivalPlugin.CfgTurret.Value) return;
             try
             {
+                Net.EnsureHooked();
+                Net.TickRemotes();
                 if (Time.time >= _nextScan)
                 {
                     _nextScan = Time.time + 0.4f;
@@ -5462,11 +5473,7 @@ namespace NextDayRevival
         /// <summary>Alle vier LOD-Tuerme einsammeln - die LODGroup blendet um.</summary>
         static void CollectTurrets(Transform root)
         {
-            List<Transform> found = new List<Transform>();
-            Transform[] all = root.GetComponentsInChildren<Transform>(true);
-            for (int i = 0; i < all.Length; i++)
-                if (all[i].name == "turret") found.Add(all[i]);
-            _turrets = found.ToArray();
+            _turrets = FindTurrets(root);
             _turretRenderer = null;
             for (int i = 0; i < _turrets.Length; i++)
             {
@@ -5476,6 +5483,16 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Geschuetz: " + _turrets.Length
                 + " Turmobjekte gefunden, Sitzindex " + _gunnerIndex
                 + ", Werteprofil " + (_tank ? "T-72" : "BTR-80A") + ".");
+        }
+
+        internal static Transform[] FindTurrets(Transform root)
+        {
+            List<Transform> found = new List<Transform>();
+            if (root == null) return found.ToArray();
+            Transform[] all = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < all.Length; i++)
+                if (all[i].name == "turret") found.Add(all[i]);
+            return found.ToArray();
         }
 
         // ------------------------------------------------------- Platzwechsel
@@ -5652,6 +5669,10 @@ namespace NextDayRevival
             for (int i = 0; i < _turrets.Length; i++)
                 _turrets[i].localRotation =
                     Quaternion.RotateTowards(_turrets[i].localRotation, want, step);
+
+            float actualYaw, actualPitch;
+            if (IstStellung(out actualYaw, out actualPitch))
+                Net.Publish(_vehicleRoot, actualYaw, actualPitch);
         }
 
         /// <summary>
@@ -5688,10 +5709,21 @@ namespace NextDayRevival
         /// </summary>
         static bool IstStellung(out float yaw, out float pitch)
         {
+            if (_turrets.Length == 0)
+            {
+                yaw = 0f;
+                pitch = 0f;
+                return false;
+            }
+            return AnglesFor(_turrets[0], out yaw, out pitch);
+        }
+
+        internal static bool AnglesFor(Transform turret, out float yaw, out float pitch)
+        {
             yaw = 0f;
             pitch = 0f;
-            if (_turrets.Length == 0) return false;
-            Vector3 d = _turrets[0].localRotation * new Vector3(0f, -1f, 0f);
+            if (turret == null) return false;
+            Vector3 d = turret.localRotation * new Vector3(0f, -1f, 0f);
             if (d.sqrMagnitude < 0.000001f) return false;
             d.Normalize();
             pitch = Mathf.Asin(Mathf.Clamp(d.z, -1f, 1f)) * Mathf.Rad2Deg;
@@ -6518,7 +6550,7 @@ namespace NextDayRevival
         /// bleiben ueber photonView.isMine draussen, aber unter den eigenen
         /// wird nicht mehr geraten, welches das richtige ist.
         /// </summary>
-        static List<object> PlayerInventories()
+        internal static List<object> PlayerInventories()
         {
             List<object> found = new List<object>();
             Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
@@ -6544,6 +6576,189 @@ namespace NextDayRevival
                 found.Add(all[i]);
             }
             return found;
+        }
+
+        /// <summary>
+        /// Sends the actual turret rotation, not the mouse target. Vehicle
+        /// movement already belongs to Photon; only the child named `turret`
+        /// is custom and therefore needs this small side channel.
+        /// </summary>
+        public static class Net
+        {
+            class Remote
+            {
+                public Transform Root;
+                public Transform[] Turrets;
+                public Quaternion From;
+                public Quaternion To;
+                public float T;
+                public float Duration;
+                public float Last;
+            }
+
+            static bool _hooked;
+            static bool _failed;
+            static MethodInfo _raise;
+            static MethodInfo _getView;
+            static MethodInfo _getViewId;
+            static MethodInfo _findView;
+            static Type _optType;
+            static FieldInfo _onEventCall;
+            static readonly Dictionary<int, int> _viewIds = new Dictionary<int, int>();
+            static readonly Dictionary<int, float> _nextSend = new Dictionary<int, float>();
+            static readonly Dictionary<int, Remote> _remote = new Dictionary<int, Remote>();
+            static readonly List<int> _remove = new List<int>();
+
+            public static void EnsureHooked()
+            {
+                if (_hooked || _failed) return;
+                try
+                {
+                    int code = RevivalPlugin.CfgTurretEventCode.Value;
+                    int drone = RevivalPlugin.CfgDroneEventCode.Value;
+                    if (code < 0 || code > 199 || (code >= drone && code <= drone + 4))
+                        throw new Exception("event code " + code
+                            + " is outside 0..199 or overlaps the drone channel");
+
+                    Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+                    Type viewType = RevivalPlugin.TypeByName("PhotonView");
+                    Type ext = RevivalPlugin.TypeByName("Extensions");
+                    if (photon == null || viewType == null || ext == null)
+                        throw new Exception("PhotonNetwork, PhotonView or Extensions missing");
+
+                    _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
+                    _onEventCall = AccessTools.Field(photon, "OnEventCall");
+                    _optType = RevivalPlugin.TypeByName("RaiseEventOptions");
+                    _getView = AccessTools.Method(ext, "GetPhotonView",
+                        new Type[] { typeof(GameObject) }, null);
+                    _getViewId = AccessTools.PropertyGetter(viewType, "viewID");
+                    _findView = AccessTools.Method(viewType, "Find",
+                        new Type[] { typeof(int) }, null);
+                    if (_raise == null || _onEventCall == null || _getView == null
+                        || _getViewId == null || _findView == null)
+                        throw new Exception("turret network reflection path incomplete");
+
+                    MethodInfo mine = typeof(Net).GetMethod("OnPhotonEvent",
+                        BindingFlags.Public | BindingFlags.Static);
+                    Delegate handler = Delegate.CreateDelegate(_onEventCall.FieldType, mine);
+                    Delegate current = _onEventCall.GetValue(null) as Delegate;
+                    _onEventCall.SetValue(null, Delegate.Combine(current, handler));
+                    _hooked = true;
+                    RevivalPlugin.L.LogInfo("Geschuetz-Netzwerk eingehaengt: Ereigniscode "
+                        + code + ".");
+                }
+                catch (Exception ex)
+                {
+                    _failed = true;
+                    RevivalPlugin.L.LogError("Geschuetz-Netzwerk nicht eingehaengt: " + ex);
+                }
+            }
+
+            internal static void Publish(Transform root, float yaw, float pitch)
+            {
+                if (!_hooked || root == null) return;
+                try
+                {
+                    int viewId = ViewId(root);
+                    if (viewId <= 0) return;
+                    float next;
+                    if (_nextSend.TryGetValue(viewId, out next) && Time.time < next) return;
+                    _nextSend[viewId] = Time.time + 0.08f;
+
+                    float[] data = new float[] { viewId, yaw, pitch };
+                    object opts = _optType == null ? null : Activator.CreateInstance(_optType);
+                    _raise.Invoke(null, new object[] {
+                        (byte)RevivalPlugin.CfgTurretEventCode.Value, data, false, opts });
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetz-Netzwerk senden: " + ex.Message);
+                }
+            }
+
+            static int ViewId(Transform root)
+            {
+                int instance = root.GetInstanceID();
+                int id;
+                if (_viewIds.TryGetValue(instance, out id)) return id;
+                object view = _getView.Invoke(null, new object[] { root.gameObject });
+                if (view == null) return -1;
+                id = Convert.ToInt32(_getViewId.Invoke(view, null));
+                if (id > 0) _viewIds[instance] = id;
+                return id;
+            }
+
+            public static void OnPhotonEvent(byte code, object content, int sender)
+            {
+                if (code != (byte)RevivalPlugin.CfgTurretEventCode.Value) return;
+                try
+                {
+                    float[] data = content as float[];
+                    if (data == null || data.Length < 3) return;
+                    int viewId = Mathf.RoundToInt(data[0]);
+                    object view = _findView.Invoke(null, new object[] { viewId });
+                    Component component = view as Component;
+                    if (component == null) return;
+
+                    Transform root = component.transform;
+                    Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
+                    if (vgsType != null)
+                    {
+                        Component vgs = component.gameObject.GetComponentInParent(vgsType);
+                        if (vgs == null) vgs = component.gameObject.GetComponentInChildren(vgsType, true);
+                        if (vgs != null) root = vgs.transform;
+                    }
+
+                    Transform[] turrets = FindTurrets(root);
+                    if (turrets.Length == 0) return;
+
+                    Remote state;
+                    bool first = !_remote.TryGetValue(viewId, out state);
+                    if (first)
+                    {
+                        state = new Remote();
+                        _remote[viewId] = state;
+                    }
+                    state.Root = root;
+                    state.Turrets = turrets;
+                    state.From = turrets[0].localRotation;
+                    state.To = LocalRotationFor(data[1], data[2]);
+                    state.Duration = first ? 0.08f
+                        : Mathf.Clamp(Time.time - state.Last, 0.02f, 0.25f);
+                    state.Last = Time.time;
+                    state.T = 0f;
+                    if (first)
+                        RevivalPlugin.L.LogInfo("Geschuetz-Netzwerk: Fahrzeug " + viewId
+                            + " von Spieler " + sender + " wird synchronisiert.");
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetz-Netzwerk empfangen: " + ex.Message);
+                }
+            }
+
+            public static void TickRemotes()
+            {
+                if (_remote.Count == 0) return;
+                _remove.Clear();
+                foreach (KeyValuePair<int, Remote> pair in _remote)
+                {
+                    Remote state = pair.Value;
+                    if (state.Root == null || Time.time - state.Last > 3f)
+                    {
+                        _remove.Add(pair.Key);
+                        continue;
+                    }
+                    if (_vehicleRoot == state.Root && _manning) continue;
+                    state.T = Mathf.Min(1f, state.T
+                        + Time.deltaTime / Mathf.Max(0.02f, state.Duration));
+                    Quaternion rotation = Quaternion.Slerp(state.From, state.To, state.T);
+                    for (int i = 0; i < state.Turrets.Length; i++)
+                        if (state.Turrets[i] != null)
+                            state.Turrets[i].localRotation = rotation;
+                }
+                for (int i = 0; i < _remove.Count; i++) _remote.Remove(_remove[i]);
+            }
         }
 
         /// <summary>
@@ -7292,11 +7507,11 @@ namespace NextDayRevival
     ///     AddBackpackItemFromValues(2051, 0, 0, 0, 0, 0, 5, 0, False)
     ///     AddBackpackItemFromValues(2050, 0, 0, 0, 0, 0, 200, 0, False)
     ///
-    /// Argument 0 ist die Item-Id, Argument 6 die Menge - belegt daran, dass
-    /// dort genau die Bullets-Werte der Item-Tabelle stehen. Die uebrigen
-    /// Argumente sind in allen beobachteten Aufrufen 0 beziehungsweise False;
-    /// was sie bedeuten, ist **Hypothese** und wird hier nicht geraten,
-    /// sondern auf den beobachteten Wert gesetzt.
+    /// Argument 0 ist die Item-Id, Argument 6 die Menge. IL shows that the
+    /// final bool controls OnChangedInventoryData: true refreshes the UI and
+    /// sends the recalculated inventory data. The method silently returns
+    /// without adding anything when no backpack slot is free, so both facts
+    /// have to be checked here instead of reporting success unconditionally.
     /// </summary>
     public static class Admin
     {
@@ -7534,6 +7749,18 @@ namespace NextDayRevival
                     return false;
                 }
 
+                int freieVorher = FreeBackpackSlots(pim);
+                if (freieVorher < 0)
+                {
+                    meldung = "Rucksackdaten nicht lesbar - nichts wurde gegeben.";
+                    return false;
+                }
+                if (freieVorher == 0)
+                {
+                    meldung = "Rucksack voll - kein freier Platz fuer " + id + ".";
+                    return false;
+                }
+
                 ParameterInfo[] ps = m.GetParameters();
                 object[] args = new object[ps.Length];
                 for (int i = 0; i < ps.Length; i++)
@@ -7548,11 +7775,23 @@ namespace NextDayRevival
                 // die Methode weniger Argumente, wird NICHT geraten.
                 bool mengeGesetzt = ps.Length > 6 && ps[6].ParameterType == typeof(int);
                 if (mengeGesetzt) args[6] = menge;
+                // IL: the last bool is onChangeInventory. Without true the
+                // item data changes, but UI and server copy stay stale.
+                bool aktualisiert = ps.Length > 0
+                    && ps[ps.Length - 1].ParameterType == typeof(bool);
+                if (aktualisiert) args[ps.Length - 1] = true;
 
                 m.Invoke(pim, args);
+                int freieNachher = FreeBackpackSlots(pim);
+                if (freieNachher >= freieVorher)
+                {
+                    meldung = "nicht gegeben: " + id + " wurde vom Inventar abgewiesen.";
+                    return false;
+                }
                 meldung = "gegeben: " + id + " x" + menge
                           + (mengeGesetzt ? "" : " (Argument 6 ist kein int - "
-                                                 + "Menge nicht gesetzt)");
+                                                 + "Menge nicht gesetzt)")
+                          + (aktualisiert ? "" : " (Inventar-Refresh fehlt)");
                 return true;
             }
             catch (Exception ex)
@@ -7564,23 +7803,62 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Der Manager ist eine Komponente in der Szene. Erst die ueblichen
-        /// Singleton-Namen probieren, dann in der Szene suchen - FindObjectOfType
-        /// ist teuer, aber das hier passiert nur auf Knopfdruck.
+        /// Pick only a manager owned by this client. FindObjectOfType returned
+        /// an arbitrary player's manager as soon as a second player joined.
         /// </summary>
         static object InventarManager()
         {
             Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
             if (t == null) return null;
+            List<object> own = Turret.PlayerInventories();
+            if (own.Count == 0) return null;
+
             string[] namen = new string[] { "current", "Instance", "instance" };
             for (int i = 0; i < namen.Length; i++)
             {
                 MethodInfo g = AccessTools.PropertyGetter(t, namen[i]);
                 if (g == null || !g.IsStatic) continue;
                 object o = g.Invoke(null, null);
-                if (o != null) return o;
+                if (o == null) continue;
+                for (int j = 0; j < own.Count; j++)
+                    if (System.Object.ReferenceEquals(o, own[j])) return o;
             }
-            return UnityEngine.Object.FindObjectOfType(t);
+            return own[0];
+        }
+
+        static int FreeBackpackSlots(object pim)
+        {
+            if (pim == null) return -1;
+            FieldInfo f = AccessTools.Field(pim.GetType(), "_backpackData");
+            object data = f == null ? null : f.GetValue(pim);
+            if (data == null) return -1;
+            FieldInfo idsField = AccessTools.Field(data.GetType(), "ItemID");
+            Array ids = idsField == null ? null : idsField.GetValue(data) as Array;
+            if (ids == null) return -1;
+            int free = 0;
+            for (int i = 0; i < ids.Length; i++)
+            {
+                object value = ids.GetValue(i);
+                if (value == null || ReadInt(value) == 0) free++;
+            }
+            return free;
+        }
+
+        static int ReadInt(object value)
+        {
+            if (value == null) return 0;
+            if (value is int) return (int)value;
+            Type t = value.GetType();
+            MethodInfo[] methods = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < methods.Length; i++)
+            {
+                if (methods[i].Name != "op_Implicit"
+                    || methods[i].ReturnType != typeof(int)) continue;
+                ParameterInfo[] ps = methods[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == t)
+                    return (int)methods[i].Invoke(null, new object[] { value });
+            }
+            return -1;
         }
 
         static void Melde(string s)
@@ -8383,8 +8661,8 @@ namespace NextDayRevival
             if (panzer)
             {
                 if (!Tank.IstPanzer(car.transform)) Tank.Umbauen(car);
-                Munitionsbeigabe();
             }
+            Munitionsbeigabe(car, panzer);
 
             RevivalPlugin.L.LogInfo((panzer ? "Panzer aus \"" : "Fahrzeug \"")
                 + name + "\" erzeugt bei " + pos
@@ -8459,16 +8737,77 @@ namespace NextDayRevival
         /// hinstellt, bekommt seine erste Ladung jetzt mit dazu; alles Weitere
         /// kommt aus Loot oder dem Adminmenue.
         /// </summary>
-        static void Munitionsbeigabe()
+        static void Munitionsbeigabe(GameObject car, bool panzer)
         {
-            int menge = RevivalPlugin.CfgTankSpawnAmmo.Value;
+            int menge = panzer ? RevivalPlugin.CfgTankSpawnAmmo.Value
+                               : RevivalPlugin.CfgTurretSpawnAmmo.Value;
             if (menge <= 0) return;
-            int id = RevivalPlugin.CfgTankAmmoId.Value;
+            int id = panzer ? RevivalPlugin.CfgTankAmmoId.Value
+                            : RevivalPlugin.CfgTurretAmmoId.Value;
+
+            if (!panzer)
+            {
+                int boxes = 1;
+                ItemDef def = RevivalPlugin.FindItem(id);
+                if (def != null && def.Bullets > 0)
+                    boxes = Mathf.Max(1, Mathf.CeilToInt((float)menge / def.Bullets));
+                int added = AddAmmoToTrunk(car, id, boxes);
+                if (added > 0)
+                {
+                    int rounds = def == null ? menge : added * def.Bullets;
+                    RevivalPlugin.L.LogInfo("MTW: Munitionsbeigabe " + added
+                        + " Behaelter Item " + id + " im Kofferraum ("
+                        + rounds + " Schuss).");
+                    Turret.Hinweis(rounds + " Schuss im MTW-Kofferraum", 4f);
+                    return;
+                }
+                RevivalPlugin.L.LogWarning("MTW: Kofferraum nahm Item " + id
+                    + " nicht an - versuche den lokalen Rucksack.");
+            }
+
             string meldung;
             bool ok = Admin.GibItem(id, menge, out meldung);
-            RevivalPlugin.L.LogInfo("Panzer: Munitionsbeigabe " + menge + "x "
-                + id + " - " + meldung);
-            if (ok) Turret.Hinweis(menge + " Granaten im Rucksack", 4f);
+            RevivalPlugin.L.LogInfo((panzer ? "Panzer" : "MTW")
+                + ": Munitionsbeigabe " + menge + "x " + id + " - " + meldung);
+            if (ok) Turret.Hinweis(menge
+                + (panzer ? " Granaten" : " Schuss") + " im Rucksack", 4f);
+            else Turret.Hinweis("Munition fehlgeschlagen: " + meldung, 6f);
+        }
+
+        static int AddAmmoToTrunk(GameObject car, int id, int boxes)
+        {
+            if (car == null || boxes <= 0) return 0;
+            try
+            {
+                Type type = RevivalPlugin.TypeByName("ItemsContainer");
+                if (type == null) return 0;
+                Component[] containers = car.GetComponentsInChildren(type, true);
+                if (containers.Length == 0) return 0;
+                object trunk = containers[0];
+                MethodInfo free = AccessTools.Method(type, "GetContainerFreeSlot",
+                    Type.EmptyTypes, null);
+                MethodInfo add = AccessTools.Method(type,
+                    "AddNewContainerItemFromResources",
+                    new Type[] { typeof(int) }, null);
+                if (free == null || add == null) return 0;
+
+                int added = 0;
+                for (int i = 0; i < boxes; i++)
+                {
+                    int before = Convert.ToInt32(free.Invoke(trunk, null));
+                    if (before < 0) break;
+                    add.Invoke(trunk, new object[] { id });
+                    int after = Convert.ToInt32(free.Invoke(trunk, null));
+                    if (after == before) break;
+                    added++;
+                }
+                return added;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("MTW: Munition in Kofferraum: " + ex.Message);
+                return 0;
+            }
         }
 
         /// <summary>
@@ -10567,6 +10906,9 @@ namespace NextDayRevival
                     u.Turrets[i].localRotation =
                         Quaternion.RotateTowards(u.Turrets[i].localRotation, want, step);
                 }
+                float actualYaw, actualPitch;
+                if (Turret.AnglesFor(u.Turrets[0], out actualYaw, out actualPitch))
+                    Turret.Net.Publish(u.Car.transform, actualYaw, actualPitch);
             }
 
             static Vector3 Rohrrichtung(Unit u)

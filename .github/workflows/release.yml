@@ -22,10 +22,38 @@ permissions:
   contents: write
 
 jobs:
+  t72-extractor:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build the local T-72 extractor
+        run: |
+          python -m pip install --disable-pip-version-check PyInstaller==6.22.2 UnityPy==1.25.3 numpy==2.5.2 Pillow==12.3.0
+          python -m PyInstaller --noconfirm --clean --onefile --name t72_import --distpath dist --workpath build/pyinstaller --specpath build --collect-all UnityPy --collect-all PIL --exclude-module fmod_toolkit --exclude-module pyfmodex --exclude-module astc_encoder --exclude-module archspec t72_import.py
+          dist\t72_import.exe --help
+          python t72_licenses.py --output dist/t72_licenses
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t72-extractor
+          path: dist
+          if-no-files-found: error
+
   package:
+    needs: t72-extractor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: t72-extractor
+          path: extractor
 
       - name: Version must match the tag
         run: |
@@ -48,18 +76,47 @@ jobs:
         # shrug. No release may go out unverified.
         run: python3 serversync.py
 
+      - name: The live server must advertise this exact client version
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          wanted = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          with urllib.request.urlopen(
+                  "http://187.124.117.145:12080/revival.json", timeout=10) as response:
+              live = json.load(response)
+          for key in ("contentVersion", "minClientVersion"):
+              if live.get(key) != wanted:
+                  raise SystemExit(
+                      "%s is %r on the live server, expected %r"
+                      % (key, live.get(key), wanted))
+          print("Live server advertises client version", wanted)
+          PY
+
       - name: Stage the package
         run: |
           NAME="NextDayRevival_Client_${GITHUB_REF_NAME#v}"
           mkdir -p "stage/$NAME"
           cp -r assets bepinex "stage/$NAME/"
           cp NextDayRevivalToolkit.dll VERSION "stage/$NAME/"
+          cp extractor/t72_import.exe "stage/$NAME/"
+          cp -r extractor/t72_licenses "stage/$NAME/"
           cp client_patch.ps1 start_game.ps1 launcher.ps1 "stage/$NAME/"
           cp 1_EINRICHTEN.bat 2_SPIELEN.bat Launcher.bat "stage/$NAME/"
           cp LIESMICH.txt README_EN.txt DRITTANBIETER.txt LICENSE "stage/$NAME/"
           # Working material of the generators - useless in the game.
           find "stage/$NAME/assets" -name "*_preview.png" -delete
           find "stage/$NAME/assets" -name "icon_vergleich.png" -delete
+          # The public tree carries the old generated tank only for source
+          # builds. A player package must never silently install it. The
+          # extractor creates these five files from the player's own game.
+          rm -f "stage/$NAME/assets/t72_hull.ndmesh" \
+                "stage/$NAME/assets/t72_turret.ndmesh" \
+                "stage/$NAME/assets/t72_diffuse.png" \
+                "stage/$NAME/assets/t72_normal.png" \
+                "stage/$NAME/assets/t72_metal.png"
           # The texts carry a @VERSION@ placeholder that make_package.ps1 fills
           # in when it builds a package. Copying them raw shipped a readme
           # whose first line literally read "Paket @VERSION@" in v0.4.0 and
@@ -83,6 +140,10 @@ jobs:
           fi
           test -f "stage/$NAME/NextDayRevivalToolkit.dll" || {
             echo "::error::the plugin DLL is missing from the package"; exit 1; }
+          test -f "stage/$NAME/t72_import.exe" || {
+            echo "::error::the local T-72 extractor is missing from the package"; exit 1; }
+          test -f "stage/$NAME/t72_licenses/INDEX.txt" || {
+            echo "::error::the T-72 extractor license notices are missing"; exit 1; }
           if grep -rl "@VERSION@" "stage/$NAME" >/dev/null 2>&1; then
             echo "::error::an unsubstituted @VERSION@ placeholder is still in:"
             grep -rl "@VERSION@" "stage/$NAME"

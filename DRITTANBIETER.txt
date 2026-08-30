@@ -21,12 +21,23 @@ HarmonyX, MonoMod und Mono.Cecil. Auch die gehoeren ihren jeweiligen
 Projekten und stehen unter deren Lizenzen.
 
 
+T-72-Extraktor
+--------------
+Datei t72_import.exe und Ordner t72_licenses\
+
+Der Extraktor baut beim Einrichten das aktuelle T-72-Modell aus den Dateien
+der eigenen Spielinstallation. Er enthaelt Python, UnityPy, NumPy, Pillow und
+deren Laufzeitbibliotheken. Namen, Fassungen und vollstaendige Lizenztexte
+liegen daneben im Ordner t72_licenses\. Das Programm enthaelt keine Modelle,
+Texturen oder sonstigen Daten aus dem Spiel.
+
+
 NICHT ENTHALTEN
 ---------------
 Kein Bestandteil des Spiels. Keine Assembly-CSharp.dll, nichts aus dem
 Ordner Managed, keine Texturen, keine Modelle und keine Spielstaende. Die
-Aenderung am Spielcode wird auf deiner eigenen Installation gerechnet, nicht
-als fertige Datei mitgeliefert.
+Aenderung am Spielcode und das T-72-Modell werden auf deiner eigenen
+Installation erzeugt, nicht als fertige Spieldateien mitgeliefert.
 
 Next Day: Survival gehoert SOFF Games. Dieses Paket ist ein privates
 Fanprojekt, steht in keiner Verbindung zum Studio und wird nicht verkauft.
