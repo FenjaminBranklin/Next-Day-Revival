@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.4";
+        public const string VERSION = "0.5.5";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -340,6 +340,7 @@ namespace NextDayRevival
             DroneInputHook.Install(_harmony);
             DroneNpcHook.Install(_harmony);
             Crew.Install(_harmony);
+            TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);
 
             StartCoroutine(Tank.Prewarm());
@@ -7811,11 +7812,10 @@ namespace NextDayRevival
     ///
     /// Zwei bewusste Abweichungen:
     ///
-    /// 1. Der Datenblock bleibt null. Sein erster Eintrag ist die PointId, und
-    ///    VehicleGameSystem::FindMySpawnPointAndSet setzt das Fahrzeug damit auf
-    ///    die Position des zugehoerigen Spawnpunkts zurueck - es stuende dann
-    ///    nicht mehr dort, wo es geprueft werden soll. Bei null kehrt die
-    ///    Methode gleich am Anfang zurueck (IL_000C..IL_0044).
+    /// 1. The data block keeps element zero null. VehicleGameSystem reads that
+    ///    element as a spawn point id and returns immediately when it is null.
+    ///    Element one carries only our T-72 marker, so the vehicle stays at the
+    ///    requested position while every client can build the same appearance.
     /// 2. Die drei Teile setzt LocalSetVehicleComponent direkt statt ueber
     ///    SetPartSpawn - das wuerfelt bei Modus 3 mit 50 Prozent, und ein
     ///    Fahrzeug ohne Zuendkerze faehrt nicht.
@@ -7855,11 +7855,11 @@ namespace NextDayRevival
     ///   `t72_mesh.py` baut genau so - deshalb wird hier nichts skaliert und
     ///   nichts gedreht.
     ///
-    /// WAS ANDERE SPIELER SEHEN: einen BTR. Uebertragen wird der Resources-
-    /// Pfad, nicht das Ergebnis; jeder Client baut sein eigenes Exemplar aus
-    /// demselben Prefab, und dieser Umbau ist rein oertlich. Der Weg dahin
-    /// stuende im fuenften Parameter von InstantiateSceneObject (object[]
-    /// data, heute null) - gebaut ist er nicht.
+    /// NETWORK APPEARANCE (CONFIRMED IL, 2026-08-31): Photon transmits the
+    /// prefab path, not a locally changed mesh. CarSpawn therefore writes a
+    /// marker into InstantiateSceneObject's object[] data. NetworkingPeer::
+    /// DoInstantiate receives that data on the creator, other players and late
+    /// joiners; TankNetwork's postfix applies this same conversion there.
     ///
     /// UNGEPRUEFT: alles, was Augen braucht. Steht in TASKS.md unter
     /// "Abnahme im Spiel".
@@ -8182,6 +8182,91 @@ namespace NextDayRevival
         }
     }
 
+    /// <summary>
+    /// Carries the T-72 decision in Photon's cached scene-instantiation event.
+    /// Element zero deliberately remains null because VehicleGameSystem treats
+    /// it as an Int32 spawn point id. The string in element one is independent
+    /// mod data and is safe for Photon to cache and replay to late joiners.
+    /// </summary>
+    public static class TankNetwork
+    {
+        const string Marker = "NDR_T72_V1";
+
+        public static object[] SpawnData(bool tank)
+        {
+            if (!tank) return null;
+            return new object[] { null, Marker };
+        }
+
+        static bool IsTankData(object value)
+        {
+            object[] data = value as object[];
+            return data != null && data.Length > 1 && data[0] == null
+                && string.Equals(data[1] as string, Marker, StringComparison.Ordinal);
+        }
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type peer = RevivalPlugin.TypeByName("NetworkingPeer");
+                if (peer == null)
+                {
+                    RevivalPlugin.L.LogWarning("Panzer-Netzwerk: NetworkingPeer fehlt.");
+                    return;
+                }
+
+                MethodInfo target = null;
+                MethodInfo[] methods = peer.GetMethods(BindingFlags.Instance
+                    | BindingFlags.Public | BindingFlags.NonPublic);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    MethodInfo candidate = methods[i];
+                    if (candidate.Name == "DoInstantiate"
+                        && candidate.ReturnType == typeof(GameObject)
+                        && candidate.GetParameters().Length == 3)
+                    {
+                        target = candidate;
+                        break;
+                    }
+                }
+                if (target == null)
+                {
+                    RevivalPlugin.L.LogWarning("Panzer-Netzwerk: DoInstantiate fehlt.");
+                    return;
+                }
+
+                harmony.Patch(target, null,
+                    new HarmonyMethod(typeof(TankNetwork).GetMethod("Postfix")),
+                    null, null, null);
+                RevivalPlugin.L.LogInfo("Panzer-Netzwerk: Spawnmarker aktiv.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Panzer-Netzwerk konnte nicht aktiviert werden: " + ex);
+            }
+        }
+
+        public static void Postfix(object __0, GameObject __result)
+        {
+            try
+            {
+                if (__result == null || Tank.IstPanzer(__result.transform)) return;
+                IDictionary eventData = __0 as IDictionary;
+                if (eventData == null || !eventData.Contains((byte)5)) return;
+                if (!IsTankData(eventData[(byte)5])) return;
+
+                Tank.Umbauen(__result);
+                RevivalPlugin.L.LogInfo("Panzer-Netzwerk: T-72 auf diesem Client aufgebaut: "
+                    + __result.name + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Panzer-Netzwerk, Spawnmarker: " + ex);
+            }
+        }
+    }
+
     public static class CarSpawn
     {
         // Aus VehicleSpawnPoint::InstantiateCar: Batterie, Schluessel, Kerze.
@@ -8233,7 +8318,8 @@ namespace NextDayRevival
             }
 
             string name = RevivalPlugin.CfgSpawnCarName.Value;
-            GameObject car = InstantiateSceneObject("VehicleSpawn\\" + name, pos, rot);
+            GameObject car = InstantiateSceneObject("VehicleSpawn\\" + name, pos, rot,
+                panzer);
             if (car == null)
             {
                 RevivalPlugin.L.LogWarning("Fahrzeugspawn: Photon lieferte null fuer \""
@@ -8242,7 +8328,7 @@ namespace NextDayRevival
             }
 
             Prepare(car);
-            if (panzer) Tank.Umbauen(car);
+            if (panzer && !Tank.IstPanzer(car.transform)) Tank.Umbauen(car);
             return car;
         }
 
@@ -8285,7 +8371,7 @@ namespace NextDayRevival
             Vector3 pos = ground + Vector3.up * 1.6f;
             Quaternion rot = Quaternion.LookRotation(ahead, Vector3.up);
 
-            GameObject car = InstantiateSceneObject(path, pos, rot);
+            GameObject car = InstantiateSceneObject(path, pos, rot, panzer);
             if (car == null)
             {
                 RevivalPlugin.L.LogWarning("Fahrzeugspawn: Photon lieferte null fuer \""
@@ -8296,7 +8382,7 @@ namespace NextDayRevival
             Prepare(car);
             if (panzer)
             {
-                Tank.Umbauen(car);
+                if (!Tank.IstPanzer(car.transform)) Tank.Umbauen(car);
                 Munitionsbeigabe();
             }
 
@@ -8457,7 +8543,7 @@ namespace NextDayRevival
         }
 
         static GameObject InstantiateSceneObject(string path, Vector3 position,
-                                                 Quaternion rotation)
+                                                 Quaternion rotation, bool panzer)
         {
             Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
@@ -8483,7 +8569,8 @@ namespace NextDayRevival
                     "PhotonNetwork.InstantiateSceneObject(string,Vector3,Quaternion,byte,object[])");
 
             return chosen.Invoke(null, new object[] {
-                path, position, rotation, (byte)0, null }) as GameObject;
+                path, position, rotation, (byte)0, TankNetwork.SpawnData(panzer) })
+                as GameObject;
         }
 
         static KeyCode TankKey()
