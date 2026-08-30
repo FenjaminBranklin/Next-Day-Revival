@@ -53,6 +53,14 @@ Kratzer, Schmutz - die ganze Handarbeit) und bekommt den gemessenen Olivton
 des MTW darueber. Ein Rest der alten Farbe bleibt stehen, sonst sieht der
 Panzer aus wie frisch lackiert.
 
+THE RED STAR
+------------
+The turret carries a red star on both cheeks. It is not drawn into the atlas
+at a spot picked by eye - the game's UV islands make that a lottery - but
+PROJECTED onto the turret from a plane beside it and rasterized in texel
+space, the way a decal is applied. Four numbers place the plane; everything
+else follows the casting. See "Markings" further down.
+
 WARUM EIN ATLAS UND NICHT ZWEI TEXTUREN
 ---------------------------------------
 Wanne und Turm haben im Spiel je eine eigene 1024er Textur und je ein eigenes
@@ -452,6 +460,231 @@ def speichern(arr, pfad):
     Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA").save(pfad)
 
 
+# ---------------------------------------------------------------- Markings
+
+# A tank without a marking reads as a prop. The red star is the one sign every
+# T-72 in Soviet and Russian service carried, so that is what goes on.
+#
+# IT IS NOT DRAWN INTO THE ATLAS BY HAND
+# --------------------------------------
+# The turret keeps the game's own UVs. They are hand made, they are neither
+# flat nor rectangular, and nothing in the file says which patch of the
+# 1024x1024 texture is the cheek of the turret. A star drawn at a guessed spot
+# would land on the roof, on a hatch, or across a seam.
+#
+# So the star is PROJECTED, the way a real decal is applied. A plane is put
+# beside the turret; every triangle that faces that plane and lies close to it
+# is rasterized IN TEXEL SPACE, and each texel asks where its own 3D point
+# falls on the plane. The star then follows the casting - it curves with the
+# cheek and stops at the edge - and it lands correctly no matter how the UV
+# island is cut. Only the plane has to be measured, and that is four numbers.
+#
+# Both sides are projected. If the model mirrors its UVs - many hand made
+# turrets do - the second pass writes the same texels as the first; coverage
+# is combined with a maximum, so nothing is painted twice.
+
+# Turret coordinates: z is up, -y is forward, the turret ring is the origin.
+# Measured on the turret's own side wall: the cheek runs z -0.2 .. 2.0 and is
+# widest around y = 0, at x = 4.0 .. 4.4. Roughly 3.18 units are a metre, so a
+# radius of 0.62 is a star 39 cm across - the size it is painted at.
+STERN_EBENE_X = 4.0        # the cheek, not the widest point of the turret
+STERN_MITTE = (0.6, 0.95)  # (y, z) on that plane
+STERN_R = 0.62
+STERN_TIEFE = 1.3          # how far off the plane a surface may lie and still be hit
+STERN_KANTE = 0.28         # how far a face may turn away from the plane (cosine)
+
+# Weathered, not signal red. The star has been on that turret for years, and
+# the vehicle beside it (the MTW) is a flat olive - a pure red would be the
+# brightest thing in the scene, which is the mistake 0.4.7 already made once.
+STERN_ROT = np.array([124.0, 34.0, 28.0], np.float32)
+STERN_ROT_DECKUNG = 0.80
+# The thin light rim is what makes the star readable against olive at distance.
+STERN_RAND = np.array([176.0, 172.0, 158.0], np.float32)
+STERN_RAND_DECKUNG = 0.45
+STERN_RAND_PIXEL = 4       # rim width in texels of the atlas
+
+
+def stern_polygon(zacken=5):
+    """The ten points of a five pointed star, radius 1, one point up.
+
+    The inner radius is not free: for the flanks of neighbouring points to lie
+    on one straight line - which is what makes a star look drawn rather than
+    spiky - it has to be cos(72 deg) / cos(36 deg) = 0.382.
+    """
+    innen = math.cos(math.radians(72.0)) / math.cos(math.radians(36.0))
+    pts = []
+    for i in range(2 * zacken):
+        r = 1.0 if i % 2 == 0 else innen
+        a = math.pi / 2.0 + i * math.pi / zacken
+        pts.append((r * math.cos(a), r * math.sin(a)))
+    return np.array(pts, np.float32)
+
+
+def im_polygon(poly, s, t):
+    """Even-odd test of many points against one polygon.
+
+    A star is concave, so the cheap "same side of every edge" test does not
+    work on it. Counting crossings does, and it costs one pass per edge.
+    """
+    innen = np.zeros(s.shape, bool)
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if y1 == y2:
+            continue
+        schneidet = (y1 > t) != (y2 > t)
+        xk = x1 + (t - y1) * (x2 - x1) / (y2 - y1)
+        innen ^= schneidet & (s < xk)
+    return innen
+
+
+def projizieren(deckung, V, T, F, mitte, achse, hoch, groesse, tiefe, form):
+    """Project one marking onto the mesh and record it in atlas texels.
+
+    `mitte`, `achse` and `hoch` place the projector in mesh space; `groesse`
+    is the half width of the marking in mesh units, so `form` always sees
+    coordinates in -1 .. +1. `tiefe` stops the projection from reaching
+    through the turret and painting the far wall as well.
+
+    `deckung` is a float buffer 0 .. 1 over the whole atlas and is filled with
+    a maximum, so two passes over the same texels do not add up.
+    """
+    H, W = deckung.shape
+    achse = np.asarray(achse, np.float32)
+    achse = achse / np.linalg.norm(achse)
+    hoch = np.asarray(hoch, np.float32)
+    hoch = hoch - achse * float(hoch @ achse)
+    hoch = hoch / np.linalg.norm(hoch)
+    # The projector looks along -achse, so this is the right hand side of what
+    # it sees. On the left cheek the axis flips and the marking mirrors with
+    # it - which is exactly what a decal does.
+    rechts = np.cross(hoch, achse)
+    mitte = np.asarray(mitte, np.float32)
+
+    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    fn = np.cross(b - a, c - a)
+    ln = np.linalg.norm(fn, axis=1)
+    fn = fn / np.where(ln > 0.0, ln, 1.0)[:, None]
+
+    rel = V - mitte
+    vs = (rel @ rechts) / groesse
+    vt = (rel @ hoch) / groesse
+    vd = rel @ achse
+
+    # A face counts when it turns towards the projector and at least one of
+    # its corners sits inside the marking's square and inside the depth window.
+    drin = (np.abs(vs) <= 1.0) & (np.abs(vt) <= 1.0) & (np.abs(vd) <= tiefe)
+    treffer = np.where((fn @ achse > STERN_KANTE) & drin[F].any(axis=1))[0]
+
+    # Texel coordinates. v = 0 is the BOTTOM of the image - Unity's own
+    # convention, and the texture is written out the same way it was read in.
+    px = T[:, 0] * W
+    py = (1.0 - T[:, 1]) * H
+
+    # Four subsamples per texel. Without them the points of the star turn into
+    # a staircase - the whole star is only about a hundred texels wide.
+    unter = ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
+
+    gemalt = 0
+    for i in treffer:
+        ia, ib, ic = F[i]
+        x = np.array([px[ia], px[ib], px[ic]], np.float64)
+        y = np.array([py[ia], py[ib], py[ic]], np.float64)
+        flaeche = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0])
+        if flaeche == 0.0:
+            continue
+        x0 = int(max(0, math.floor(x.min())))
+        x1 = int(min(W - 1, math.ceil(x.max())))
+        y0 = int(max(0, math.floor(y.min())))
+        y1 = int(min(H - 1, math.ceil(y.max())))
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5,
+                             np.arange(y0, y1 + 1) + 0.5)
+        deck = np.zeros(gx.shape, np.float32)
+        for dx, dy in unter:
+            sx, sy = gx + dx, gy + dy
+            w0 = ((x[1] - x[0]) * (sy - y[0]) - (sx - x[0]) * (y[1] - y[0])) / flaeche
+            w1 = ((sx - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (sy - y[0])) / flaeche
+            w2 = 1.0 - w0 - w1
+            m = (w0 >= 0.0) & (w1 >= 0.0) & (w2 >= 0.0)
+            if not m.any():
+                continue
+            ss = w2 * vs[ia] + w1 * vs[ib] + w0 * vs[ic]
+            tt = w2 * vt[ia] + w1 * vt[ib] + w0 * vt[ic]
+            dd = w2 * vd[ia] + w1 * vd[ib] + w0 * vd[ic]
+            m &= np.abs(dd) <= tiefe
+            if not m.any():
+                continue
+            deck[m & form(ss, tt)] += 0.25
+        if deck.any():
+            ziel = deckung[y0:y1 + 1, x0:x1 + 1]
+            np.maximum(ziel, deck, out=ziel)
+            gemalt += 1
+    return gemalt
+
+
+def aufweiten(deckung, radius):
+    """Grow a coverage buffer by `radius` texels - the rim around the star.
+
+    A rim of constant width in TEXELS, not a second star scaled up: a scaled
+    star has a fat rim at its points and almost none in its notches.
+    """
+    out = deckung.copy()
+    r = int(radius)
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx * dx + dy * dy > radius * radius:
+                continue
+            np.maximum(out, np.roll(np.roll(deckung, dy, axis=0), dx, axis=1),
+                       out=out)
+    return out
+
+
+def einbrennen(rgba, deckung, farbe, staerke):
+    """Paint a coverage buffer onto the diffuse, keeping the drawing under it.
+
+    Not a flat fill: every texel keeps its own brightness relative to the
+    average, so seams, scorch marks and dirt still come through the paint. A
+    marking that ignores them looks like a sticker stuck on a photograph.
+    """
+    lum = rgba[..., :3] @ np.array([0.299, 0.587, 0.114], np.float32)
+    gain = np.clip(lum / max(1.0, float(lum.mean())), 0.45, 1.55)[..., None]
+    ziel = np.clip(farbe.reshape(1, 1, 3) * gain, 0.0, 255.0)
+    a = (deckung * staerke)[..., None]
+    rgba[..., :3] = rgba[..., :3] * (1.0 - a) + ziel * a
+
+
+def zeichen(rgba, V, T, F):
+    """The red star on both cheeks of the turret.
+
+    Reports how many texels it covers, so a silent miss - a game patch that
+    moves the turret, a UV island that is no longer where it was - shows up as
+    a zero in the build log instead of as a missing star in the game.
+    """
+    H, W = rgba.shape[0], rgba.shape[1]
+    stern = stern_polygon()
+
+    def form(s, t):
+        return im_polygon(stern, s, t)
+
+    deckung = np.zeros((H, W), np.float32)
+    flaechen = 0
+    for seite in (1.0, -1.0):
+        mitte = np.array([seite * STERN_EBENE_X, STERN_MITTE[0], STERN_MITTE[1]],
+                         np.float32)
+        flaechen += projizieren(deckung, V, T, F, mitte,
+                                np.array([seite, 0.0, 0.0], np.float32),
+                                np.array([0.0, 0.0, 1.0], np.float32),
+                                STERN_R, STERN_TIEFE, form)
+
+    rand = np.clip(aufweiten(deckung, STERN_RAND_PIXEL) - deckung, 0.0, 1.0)
+    einbrennen(rgba, rand, STERN_RAND, STERN_RAND_DECKUNG)
+    einbrennen(rgba, deckung, STERN_ROT, STERN_ROT_DECKUNG)
+    return int((deckung > 0.5).sum()), flaechen
+
+
 # ------------------------------------------------------------------- Lauf
 
 if __name__ == "__main__":
@@ -504,10 +737,20 @@ if __name__ == "__main__":
           % (os.path.basename(OUT_TURRET), len(V), len(F),
              V[:, 0].min(), V[:, 0].max(), V[:, 1].min(), V[:, 1].max(),
              V[:, 2].min(), V[:, 2].max()))
+    # The star is projected onto exactly this geometry further down, and its
+    # UVs are already the atlas UVs - so mesh and texture cannot drift apart.
+    turm_geo = (V, T, F)
 
     body = spieltextur(TEX_BODY)
     turm_t = spieltextur(TEX_TURM)
     d = atlas(erwecken(body), erwecken(turm_t))
+    texel, flaechen = zeichen(d, *turm_geo)
+    if texel == 0:
+        raise SystemExit("The red star did not land on a single texel - the "
+                         "projection plane misses the turret. Check "
+                         "STERN_EBENE_X against the printed turret bounds.")
+    print("red star: %d texels on %d faces of the turret, both cheeks"
+          % (texel, flaechen))
     speichern(d, OUT_D)
     print("%s  %dx%d  Mittel RGB %s  (MTW: (59, 60, 43))"
           % (os.path.basename(OUT_D), d.shape[1], d.shape[0],

@@ -1,8 +1,41 @@
 # Project brief: the Revival Launcher
 
-Status: proposed, not started. **This one is yours** - it is self-contained,
-it cannot break anyone else's game, and at the end there is something you can
-actually look at.
+Status: **built, 2026-08-29.** `launcher.ps1` and `Launcher.bat` sit next to
+this file, M1 to M4 are all in, and switching versions has been driven up and
+down once (0.5.4 -> 0.5.0 -> 0.5.4, the plugin DLL byte-identical afterwards).
+The brief below is unchanged and is still the reasoning behind every decision
+in that file - read it before changing anything, especially the section about
+contentVersion.
+
+What ended up different from the plan, and why:
+
+- **A version list, not an Update button.** Every published release is
+  offered, newest first, marked INSTALLED / NEWEST / WHAT THE SERVER ASKS
+  FOR. Downgrading is the same button as upgrading, which is what two people
+  bisecting a bug actually need.
+- **The installed version is read out of the plugin DLL**, not out of a file
+  the launcher wrote: the BepInPlugin attribute keeps GUID, name and version
+  as three length-prefixed strings, so it also works on an installation that
+  predates the launcher.
+- **The exit code of `client_patch.ps1` does not decide whether the install
+  worked.** It also returns 1 when its master server probe fails, which is
+  every run against a local test server that is off. The verdict comes from
+  re-reading the DLL.
+- **`-ServerHost`** passes an address through to `client_patch.ps1`, so the
+  launcher does not silently overwrite a development machine's 127.0.0.1 with
+  the VPS.
+- **The master server is picked in the window, and passed on every call.**
+  Called without `-Server`, `client_patch.ps1` writes its own default into
+  `ClientConfig.ini` - which moved a machine off its local test server on the
+  first evening. The launcher starts from what the game already points at and
+  says whether the two still agree.
+- **Two probes, not one.** `/servers_report` is what the game itself asks for
+  and decides whether the server is up; `/revival.json` only adds version
+  numbers and exists on the VPS alone. Judging a server by the version file
+  declared a running local server dead.
+- **`-Console` and `-Install <version>`** do the same work without a window.
+  That is how the four states and the whole switch were tested against a mock
+  server, and it is what a script can call.
 
 ## The problem it solves
 

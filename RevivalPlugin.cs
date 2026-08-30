@@ -31,6 +31,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -87,10 +88,45 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.3";
+        public const string VERSION = "0.5.4";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
+
+        /// <summary>
+        /// Memoized AccessTools.TypeByName.
+        ///
+        /// AccessTools.TypeByName has NO cache of its own (HarmonyX 2.9:
+        /// AccessTools carries exactly one static dictionary, and it is for
+        /// event handlers). For any type that Type.GetType cannot resolve -
+        /// which is every game type and every Unity type outside the four
+        /// modules build.ps1 references - it falls through to
+        /// AllTypes().FirstOrDefault(t => t.FullName == name). That walks
+        /// Assembly.GetTypes() of all 93 loaded assemblies, about 16,700
+        /// types, materializing a Type[] per assembly and a FullName string
+        /// per type. It costs milliseconds, every single call.
+        ///
+        /// Harmless where it is what it looks like - a lookup during setup.
+        /// Fatal in a loop that runs per frame or per physics step: three of
+        /// these per FixedUpdate is enough to push a physics step past its own
+        /// budget, and then Unity's catch-up pins the whole game at
+        /// 1 / Time.maximumDeltaTime = 3 FPS. That is what the first patrol
+        /// did (EXPERIMENTS.md, 2026-08-30).
+        ///
+        /// Only hits are cached. A miss stays slow, deliberately: a type that
+        /// is absent now may belong to an assembly that loads later, and a
+        /// cached null would make that absence permanent.
+        /// </summary>
+        static readonly Dictionary<string, Type> _typeCache = new Dictionary<string, Type>();
+
+        internal static Type TypeByName(string name)
+        {
+            Type t;
+            if (_typeCache.TryGetValue(name, out t)) return t;
+            t = AccessTools.TypeByName(name);
+            if (t != null) _typeCache[name] = t;
+            return t;
+        }
 
         internal static ConfigEntry<bool> CfgCursorFix;
         internal static ConfigEntry<bool> CfgConfine;
@@ -102,10 +138,19 @@ namespace NextDayRevival
         internal static ConfigEntry<int> CfgRenderQueue;
         internal static ConfigEntry<bool> CfgNoCold;
         internal static ConfigEntry<bool> CfgVerbose;
-        internal static ConfigEntry<string> CfgExtraScenes;
+        internal static ConfigEntry<bool> CfgNetWatch;
+        internal static ConfigEntry<float> CfgNetWatchHitch;
+        internal static ConfigEntry<float> CfgNetWatchEvery;
         internal static ConfigEntry<bool> CfgSceneJump;
         internal static ConfigEntry<int> CfgJumpScene;
+        internal static ConfigEntry<int> CfgJumpRegion;
         internal static ConfigEntry<string> CfgJumpKey;
+        internal static ConfigEntry<bool> CfgNewRegion;
+        internal static ConfigEntry<int> CfgNewRegionId;
+        internal static ConfigEntry<string> CfgNewRegionName;
+        internal static ConfigEntry<int> CfgNewRegionStart;
+        internal static ConfigEntry<string> CfgNewRegionScenes;
+        internal static ConfigEntry<bool> CfgNewRegionExclusive;
         internal static ConfigEntry<bool> CfgTurret;
         internal static ConfigEntry<string> CfgTurretKey;
         internal static ConfigEntry<float> CfgTurretDamage;
@@ -151,6 +196,45 @@ namespace NextDayRevival
         internal static ConfigEntry<string> CfgSpawnCarKey;
         internal static ConfigEntry<string> CfgSpawnCarName;
         internal static ConfigEntry<float> CfgSpawnCarDistance;
+        internal static ConfigEntry<bool> CfgPatrol;
+        internal static ConfigEntry<string> CfgPatrolKey;
+        internal static ConfigEntry<string> CfgPatrolRecordKey;
+        internal static ConfigEntry<string> CfgPatrolAutoKey;
+        internal static ConfigEntry<string> CfgPatrolFile;
+        internal static ConfigEntry<string> CfgPatrolRoute;
+        internal static ConfigEntry<string> CfgPatrolVehicle;
+        internal static ConfigEntry<int> CfgPatrolMax;
+        internal static ConfigEntry<bool> CfgPatrolAuto;
+        internal static ConfigEntry<float> CfgPatrolRespawn;
+        internal static ConfigEntry<bool> CfgPatrolGun;
+        internal static ConfigEntry<float> CfgPatrolGunRange;
+        internal static ConfigEntry<float> CfgPatrolGunEffective;
+        internal static ConfigEntry<float> CfgPatrolGunNotice;
+        internal static ConfigEntry<float> CfgPatrolGunForget;
+        internal static ConfigEntry<float> CfgPatrolGunAccuracy;
+        internal static ConfigEntry<float> CfgPatrolGunDamage;
+        internal static ConfigEntry<int> CfgPatrolGunBurst;
+        internal static ConfigEntry<float> CfgPatrolGunBurstPause;
+        internal static ConfigEntry<bool> CfgPatrolCrew;
+        internal static ConfigEntry<int> CfgPatrolCrewMax;
+        internal static ConfigEntry<float> CfgPatrolCrewHealth;
+        internal static ConfigEntry<int> CfgPatrolCrewLevel;
+        internal static ConfigEntry<float> CfgPatrolWreck;
+        internal static ConfigEntry<float> CfgPatrolSpeed;
+        internal static ConfigEntry<float> CfgPatrolRecordSeconds;
+        internal static ConfigEntry<float> CfgPatrolPassRadius;
+        internal static ConfigEntry<float> CfgPatrolStuck;
+        internal static ConfigEntry<float> CfgPatrolRam;
+        internal static ConfigEntry<float> CfgPatrolFree;
+        internal static ConfigEntry<string> CfgPatrolFraction;
+        internal static ConfigEntry<string> CfgPatrolEditorKey;
+        internal static ConfigEntry<float> CfgPatrolGunPointBlank;
+        internal static ConfigEntry<float> CfgPatrolShellDamage;
+        internal static ConfigEntry<float> CfgPatrolShellRadius;
+        internal static ConfigEntry<bool> CfgPatrolCrush;
+        internal static ConfigEntry<float> CfgPatrolCrushHeight;
+        internal static ConfigEntry<float> CfgPatrolCrushWidth;
+        internal static ConfigEntry<float> CfgPatrolCrewSensor;
         internal static ConfigEntry<bool> CfgAdmin;
         internal static ConfigEntry<string> CfgAdminKey;
         internal static ConfigEntry<string> CfgAdminIds;
@@ -183,6 +267,7 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgDroneRange;
         internal static ConfigEntry<float> CfgDroneNoiseFrom;
         internal static ConfigEntry<bool> CfgDroneOverlay;
+        internal static ConfigEntry<bool> CfgDroneWake;
         internal static ConfigEntry<bool> CfgDroneRequireItem;
         internal static ConfigEntry<int> CfgDroneItemId;
         internal static ConfigEntry<bool> CfgWatchTemplates;
@@ -194,6 +279,14 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgJammerDelay;
         internal static ConfigEntry<bool> CfgJammerAffectsOwn;
         internal static ConfigEntry<bool> CfgDroneSelfDestruct;
+        internal static ConfigEntry<bool> CfgDroneShootable;
+        internal static ConfigEntry<int> CfgDroneHitpoints;
+        internal static ConfigEntry<float> CfgDroneShootRange;
+        internal static ConfigEntry<bool> CfgDroneNpcFire;
+        internal static ConfigEntry<float> CfgDroneNpcFireRange;
+        internal static ConfigEntry<float> CfgDroneNpcAccuracy;
+        internal static ConfigEntry<float> CfgDroneNpcShotSeconds;
+        internal static ConfigEntry<int> CfgDroneNpcShooters;
         internal static ConfigEntry<bool> CfgFire;
         internal static ConfigEntry<float> CfgFireScale;
         internal static ConfigEntry<bool> CfgNetDrop;
@@ -239,12 +332,17 @@ namespace NextDayRevival
             PatchDestroyWatch();
             PatchReloadDiagnostics();
             PatchRocketImpact();
+            PatchDroneShot();
             PatchCustomDrop();
             PatchFire();
             Turret.Install(_harmony);
             ColdHook.Install(_harmony);
             DroneInputHook.Install(_harmony);
+            DroneNpcHook.Install(_harmony);
+            Crew.Install(_harmony);
+            Patrol.Install(_harmony);
 
+            StartCoroutine(Tank.Prewarm());
             StartCoroutine(LateSetup());
         }
 
@@ -289,25 +387,59 @@ namespace NextDayRevival
             CfgVerbose = Config.Bind("Debug", "Verbose", false,
                 "Ausfuehrliche Feld- und Ladeprotokolle. Fuer die Fehlersuche.");
 
-            // Der Build enthaelt zehn fertige Szenen, die die Release-Regionliste
-            // nicht benutzt - darunter Bunker_A65 (3), GW_Scene_2 (4) und
-            // Underground_Lab (18). Beides hier ist ein Erkundungswerkzeug und
-            // steht deshalb standardmaessig aus.
-            CfgExtraScenes = Config.Bind("Research", "ExtraScenes", "",
-                "Zusaetzliche Szenen-Buildindizes fuer Region 0, mit Komma getrennt, "
-                + "z. B. \"3,4,18\". Ohne Eintrag in der Szenenliste liefert "
-                + "GetRegionDataAtScene null und der Beitritt zum Raum scheitert. "
-                + "Leer lassen heisst: nichts aendern.");
+            // The scene jump assembles a LocationChangeTrigger and hands it to
+            // ChangeGameLocation. The number in it is a value of the GameScene
+            // enum, NOT a build index - see docs/ai/tasks/new-regions.md,
+            // section 1. The key ExtraScenes that used to be bound here is gone
+            // without replacement: it appended build indices to a list of enum
+            // values, and the four scenes it was meant to reach are in region 0
+            // already.
             CfgSceneJump = Config.Bind("Research", "EnableSceneJump", false,
-                "Auf Tastendruck in die unter JumpScene angegebene Szene wechseln. "
-                + "UNGETESTET - die ungenutzten Szenen koennen ohne Spawnpunkte oder "
-                + "ohne Loot dastehen. Vorher speichern.");
-            CfgJumpScene = Config.Bind("Research", "JumpScene", 3,
-                "Buildindex der Zielszene. 3 Bunker_A65, 4 GW_Scene_2, "
-                + "5 GW_Scene_3, 6 Catacombs, 7 GW_Scene_1, 8..17 Chunks 0..9, "
-                + "18 Underground_Lab.");
+                "Change into the scene given by JumpScene on a key press. An "
+                + "exploration tool, therefore off by default. Save first.");
+            CfgJumpScene = Config.Bind("Research", "JumpScene", 9,
+                "GameScene value of the target scene, not a build index. "
+                + "Present are 5 GW_Scene_1, 6 GW_Scene_2, 7 GW_Scene_3, "
+                + "9 Bunker_A65, 13 Catacombs, 14 Underground_Lab, 11 GL_Scene. "
+                + "All six world scenes are furnished: player spawns, loot, NPCs "
+                + "and exits are all present in the scene files.");
+            CfgJumpRegion = Config.Bind("Research", "JumpRegion", -1,
+                "Jump into a whole REGION instead of a scene: number of the "
+                + "GameRegion (0 Severoufimsk, 2 Uralsk). The target is then "
+                + "that region's startScene and JumpScene is not used. "
+                + "-1 means: scene jump as before.");
             CfgJumpKey = Config.Bind("Research", "JumpKey", "F9",
-                "Taste fuer den Szenenwechsel, Name aus UnityEngine.KeyCode.");
+                "Key for the scene change, a name from UnityEngine.KeyCode.");
+
+            // The second region. GameRegion.Uralsk = 2 is in the game's enum and
+            // has no data row in GameRegions - this section creates one at
+            // runtime. Reasoning, measurements and the four possible routes are
+            // in docs/ai/tasks/new-regions.md.
+            CfgNewRegion = Config.Bind("Regions", "Enabled", true,
+                "Register a second region in the game's RegionsList. It appears "
+                + "in the region drop-down of the room settings by itself.");
+            CfgNewRegionId = Config.Bind("Regions", "RegionId", 2,
+                "Number of the new region, from the GameRegion enum. 2 is "
+                + "Uralsk: the only free value that is neither DEV nor Test, and "
+                + "the only one the game already has a translated name for.");
+            CfgNewRegionName = Config.Bind("Regions", "RegionName", "",
+                "A name of your own. LEAVING THIS EMPTY IS THE RULE: the game "
+                + "has had a translated name for Uralsk all along - "
+                + "$GameRegion_Uralsk is in Localization_DB in five languages "
+                + "(ru Cyrillic, en/de Uralsk, fr Ouralsk). Only fill this in if "
+                + "you want to read something else; LocalizationHook then "
+                + "overrides the game's own text.");
+            CfgNewRegionStart = Config.Bind("Regions", "StartScene", 9,
+                "GameScene value of the new region's start scene. 9 Bunker_A65.");
+            CfgNewRegionScenes = Config.Bind("Regions", "Scenes", "9,14",
+                "Scenes of the new region, GameScene values separated by commas. "
+                + "Default: 9 Bunker_A65 and 14 Underground_Lab.");
+            CfgNewRegionExclusive = Config.Bind("Regions", "TakeFromRegion0", true,
+                "Remove those scenes from the list of region 0. NEEDED, because "
+                + "GetRegionDataAtScene returns the FIRST region that contains a "
+                + "scene - without the removal region 0 would always win and the "
+                + "new region would be a label and nothing else. Region 0 keeps "
+                + "GW_Scene_1, GW_Scene_2, GW_Scene_3 and Catacombs.");
 
             // Das Turmgeschuetz des BTR-80A. Der Sitz entsteht im Prefix auf
             // InitCar, weil das Spiel dort
@@ -479,20 +611,30 @@ namespace NextDayRevival
                 + "hier false eintragen.");
             CfgDroneKey = Config.Bind("Drone", "Key", "V",
                 "Taste zum Starten und Abbrechen, Name aus UnityEngine.KeyCode.");
-            CfgDroneThrust = Config.Bind("Drone", "Thrust", 16f,
-                "Schub vor und zurueck (W/S) in Metern je Sekundenquadrat.");
-            CfgDroneSideThrust = Config.Bind("Drone", "SideThrust", 11f,
+            // WARUM 30 UND NICHT 16 (2026-08-30). Die Endgeschwindigkeit einer
+            // Drohne ist Thrust/Drag, nicht MaxSpeed - MaxSpeed ist nur eine
+            // Kappe darueber. Mit 16/1.4 waren das 11,4 m/s = 41 km/h, und die
+            // Patrouille faehrt 45. Die Drohne konnte ein Fahrzeug also nie
+            // einholen, egal wie lange man drueckte. Jetzt: 30/0.95 = 31,6 m/s
+            // = 114 km/h, gekappt bei 38 m/s. Damit ist sie schneller als
+            // alles, was auf der Strasse faehrt, und das ist der Sinn: eine
+            // Patrouille ist nur dann konterbar, wenn man sie einholt.
+            CfgDroneThrust = Config.Bind("Drone", "Thrust", 30f,
+                "Schub vor und zurueck (W/S) in Metern je Sekundenquadrat. "
+                + "Zusammen mit Drag bestimmt das die Endgeschwindigkeit: "
+                + "Thrust/Drag, hier 31,6 m/s = 114 km/h.");
+            CfgDroneSideThrust = Config.Bind("Drone", "SideThrust", 20f,
                 "Schub seitwaerts (A/D).");
-            CfgDroneLift = Config.Bind("Drone", "Lift", 14f,
+            CfgDroneLift = Config.Bind("Drone", "Lift", 22f,
                 "Schub nach oben (Leertaste) und unten (Strg oder C).");
             CfgDroneGravity = Config.Bind("Drone", "Gravity", -5.5f,
                 "Schwerkraft auf die Drohne. Absichtlich schwaecher als die "
                 + "echten -9.81: eine Drohne haengt in der Luft, sie faellt nicht.");
-            CfgDroneDrag = Config.Bind("Drone", "Drag", 1.4f,
+            CfgDroneDrag = Config.Bind("Drone", "Drag", 0.95f,
                 "Luftwiderstand je Sekunde, geschwindigkeitsproportional. Groesser "
                 + "heisst traeger und stabiler, kleiner heisst schwebender. Zusammen "
                 + "mit Thrust bestimmt das die Endgeschwindigkeit (Thrust/Drag).");
-            CfgDroneMaxSpeed = Config.Bind("Drone", "MaxSpeed", 32f,
+            CfgDroneMaxSpeed = Config.Bind("Drone", "MaxSpeed", 38f,
                 "Harte Obergrenze der Geschwindigkeit in m/s.");
             CfgDroneSensitivity = Config.Bind("Drone", "Sensitivity", 2.4f,
                 "Mausempfindlichkeit fuer Nick und Gier.");
@@ -521,13 +663,20 @@ namespace NextDayRevival
             CfgDroneSafeRadius = Config.Bind("Drone", "SafeRadius", 2.5f,
                 "Treffer naeher als das am Startpunkt gelten als eigener Koerper.");
             CfgDroneEventCode = Config.Bind("Drone", "EventCode", 176,
-                "Erster von drei Photon-Ereigniscodes (Start, Lauf, Ende). Photon "
-                + "verwirft alles ab 200; das Spiel selbst benutzt nur 1 und 2.");
+                "First of five Photon event codes (Start, Lauf, Ende, Jam, "
+                + "Treffer). Photon drops everything from 200 up; the game "
+                + "itself uses only 1 and 2.");
             CfgDroneNetHz = Config.Bind("Drone", "NetHz", 15f,
                 "Wie oft je Sekunde Lage und Blickrichtung an die anderen gehen. "
                 + "Dazwischen wird bei ihnen interpoliert.");
-            CfgDroneModelScale = Config.Bind("Drone", "ModelScale", 1f,
-                "Groesse des Modells, das die anderen sehen.");
+            CfgDroneModelScale = Config.Bind("Drone", "ModelScale", 4f,
+                "Size of the model the others see, as a multiple of the mesh "
+                + "itself. The mesh is the INVENTORY model and is 36 cm across - "
+                + "at that size a drone is two pixels at thirty metres, and a "
+                + "weapon nobody can see is a weapon nobody can answer. Four "
+                + "makes it about 1.5 m and clearly visible against the sky. It "
+                + "is also the hitbox: Shootable measures against the model, so "
+                + "there is no second number to keep in step with this one.");
             CfgDroneSound = Config.Bind("Drone", "Sound", true,
                 "Surren. NICHT nur Verzierung: wer von einer Drohne getroffen wird, "
                 + "muss vorher die Gelegenheit gehabt haben, sie zu hoeren.");
@@ -538,17 +687,26 @@ namespace NextDayRevival
             CfgDroneFlightTime = Config.Bind("Drone", "FlightTime", 90f,
                 "Flugzeit in Sekunden. Danach gehen die Motoren aus: sie faellt, "
                 + "und beim Aufschlag detoniert sie NICHT.");
-            CfgDroneRange = Config.Bind("Drone", "Range", 300f,
+            CfgDroneRange = Config.Bind("Drone", "Range", 650f,
                 "Funkreichweite in Metern. Darueber reisst die Verbindung ab, der "
                 + "Blick faellt zum Koerper zurueck und die Drohne ist weg. Der "
                 + "Wert ist GERATEN und gehoert nachgemessen - er ist zugleich die "
                 + "billigste Absicherung dagegen, dass die Drohne aus dem geladenen "
-                + "Teil der Welt fliegt und durch den Boden faellt.");
+                + "Teil der Welt fliegt und durch den Boden faellt. Seit "
+                + "2026-08-30 650 statt 300: eine Patrouille faehrt bei 45 km/h "
+                + "in den 20 Sekunden, die der Anflug dauert, 250 m weit, und "
+                + "bei 300 m Leine ist sie draussen, bevor man sie hat.");
             CfgDroneNoiseFrom = Config.Bind("Drone", "NoiseFrom", 250f,
                 "Ab dieser Entfernung rauscht das Bild. Das ist die Vorwarnung vor "
                 + "dem Abriss.");
             CfgDroneOverlay = Config.Bind("Drone", "Overlay", true,
                 "Videoeinblendung: Akku, Entfernung, Hoehe, Fadenkreuz, Rauschen.");
+            CfgDroneWake = Config.Bind("Drone", "WakeNpc", true,
+                "Die Drohne weckt die NPCs, ueber die sie fliegt. Ohne das "
+                + "stehen sie in T-Pose ueber dem Boden: eine Siedlung schaltet "
+                + "die Animation und die KI ab, sobald KEIN SPIELER in "
+                + "CheckPlayersDistRadius steht, und der Pilot steht "
+                + "hunderte Meter weit weg. Siehe RE 22.");
             CfgDroneRequireItem = Config.Bind("Drone", "RequireItem", true,
                 "Der Start verbraucht eine Drohne aus dem Rucksack. Auf false "
                 + "startet sie aus dem Nichts - zum Ausprobieren, nicht zum Spielen.");
@@ -610,6 +768,62 @@ namespace NextDayRevival
                 + "is, instead of quietly ending the flight. Nearer to the pilot "
                 + "than SafeRadius it still only lands - a mis-press must not be "
                 + "able to kill you.");
+
+            // Shooting a drone down. The cheap answer to the jammer's
+            // expensive one: no item, no 26 kg, just the gun already in your
+            // hands - and it needs a drone you can SEE, which is why
+            // ModelScale moved up in the same step.
+            //
+            // Who decides is what it always is in this file: the PILOT's
+            // client. The shooter reports "I hit the drone of player X", the
+            // pilot subtracts it from his own and fires the warhead when
+            // nothing is left. A modified client could throw that report
+            // away. Among friends that is no problem, as protection against
+            // cheating it is worth nothing, and it is written here so nobody
+            // takes it for that.
+            //
+            // The shot is measured from the camera through the drone's
+            // middle - no spread, no bullet drop, no travel time. The game
+            // keeps all of that to itself inside FireOneShot, and guessing at
+            // it would mean a second ballistics model that disagrees with the
+            // first. What the player sees instead is honest: the crosshair
+            // was on the drone, so it was a hit.
+            CfgDroneShootable = Config.Bind("Drone", "Shootable", true,
+                "A drone can be shot down. Every shot that goes through the model "
+                + "takes one hit point; at zero the drone detonates where it flies. "
+                + "The blast is the normal one, so whoever shot it dies only if he "
+                + "was inside Radius metres of it anyway.");
+            CfgDroneHitpoints = Config.Bind("Drone", "Hitpoints", 3,
+                "Shots a drone survives. Every firearm counts the same - a drone is "
+                + "a plastic frame and four motors, and the difference between a "
+                + "pistol and a rifle is the chance of hitting it at all, not what "
+                + "happens when you do.");
+            CfgDroneShootRange = Config.Bind("Drone", "ShootRange", 250f,
+                "How far a shot at a drone reaches, in metres. Not a weapon value: "
+                + "it is the distance at which aiming at a 1.5 m object from the "
+                + "hip of a hitscan test stops being fair.");
+            CfgDroneNpcFire = Config.Bind("Drone", "NpcFire", true,
+                "Hostile NPCs fire at the drone while it keeps their settlement "
+                + "awake. The real NPC firearm makes the shot and tracer; this "
+                + "setting only adds the drone as a possible target.");
+            CfgDroneNpcFireRange = Config.Bind("Drone", "NpcFireRange", 110f,
+                "Metres. Also extends the drone's NPC wake radius so the shooter "
+                + "is active before it fires.");
+            CfgDroneNpcAccuracy = Config.Bind("Drone", "NpcAccuracy", 0.25f,
+                "Chance per NPC shot at point blank. It falls to half this "
+                + "value at maximum range. A drone over a camp is the most "
+                + "dangerous thing in it and everyone shoots at it first, so "
+                + "this is not a token defence: at 0.25, three men with line "
+                + "of sight take a three-hit drone down in about four seconds "
+                + "of hovering. Flying fast, high and behind cover is the "
+                + "answer, not a lower number here.");
+            CfgDroneNpcShotSeconds = Config.Bind("Drone", "NpcShotSeconds", 0.8f,
+                "Average seconds between NPC volleys at the drone.");
+            CfgDroneNpcShooters = Config.Bind("Drone", "NpcShooters", 8,
+                "How many hostile NPCs fire at the drone in one volley, "
+                + "closest first. Everyone in range with a clear line would "
+                + "shoot at it, so this is a ceiling against a whole camp "
+                + "firing at once, not a squad size.");
 
             // ------------------------------------------------------- Effects
             CfgFire = Config.Bind("Effects", "Fire", true,
@@ -726,6 +940,216 @@ namespace NextDayRevival
             CfgSpawnCarDistance = Config.Bind("Research", "SpawnCarDistance", 12f,
                 "Wie weit vor dem Spieler das Fahrzeug entsteht. Weniger als "
                 + "die halbe Fahrzeuglaenge setzt es in den Spieler.");
+
+            // ------------------------------------------------------- Patrols
+            //
+            // Only the keys phase 2 actually uses are bound here. Every key
+            // bound today is written into the installed
+            // nextday.revival.toolkit.cfg and a later change to its default
+            // never reaches that installation (CLAUDE.md, point 4) - so the
+            // numbers for detection, convoy and loot are NOT reserved in
+            // advance. They arrive with the phase that uses them.
+            CfgPatrol = Config.Bind("Patrol", "Enabled", false,
+                "NPC vehicle patrols: vehicles that drive a recorded road on "
+                + "their own. Off by default until it has been seen once. "
+                + "The driver, the gun and the crew - no convoy yet.");
+            CfgPatrolKey = Config.Bind("Patrol", "Key", "F11",
+                "Puts one more patrol vehicle on the active route. Hold Shift "
+                + "to take every patrol off the road again. Name out of "
+                + "UnityEngine.KeyCode.");
+            CfgPatrolAutoKey = Config.Bind("Patrol", "RecordAutoKey", "F5",
+                "Toggles route recording: a waypoint every RecordSeconds while "
+                + "you walk or drive. This is how a route is made.");
+            CfgPatrolRecordKey = Config.Bind("Patrol", "RecordKey", "F6",
+                "Appends a single waypoint where you stand, recording or not.");
+            CfgPatrolFile = Config.Bind("Patrol", "RouteFile", "ndr_routes.tsv",
+                "The route file, next to the DLL in BepInEx\\plugins\\assets. "
+                + "The recorder writes it, python routecheck.py --pull fetches "
+                + "it back into the repository.");
+            CfgPatrolRoute = Config.Bind("Patrol", "RouteName", "R1",
+                "Which route is driven, and which one the recorder appends to.");
+            // The old boolean "Tank" is gone from the code on purpose. A key
+            // that is bound writes its value into the installed
+            // nextday.revival.toolkit.cfg and that value wins forever
+            // (CLAUDE.md point 4) - the way to retire a setting is to stop
+            // binding it. An orphaned Tank=false line in an old config file
+            // is now ignored.
+            CfgPatrolVehicle = Config.Bind("Patrol", "Vehicle", "mixed",
+                "What drives the route: btr, tank, or mixed. Mixed alternates "
+                + "- the first patrol is a BTR-80A, the second a T-72, and so "
+                + "on, so both kinds are on the road at once.");
+            CfgPatrolMax = Config.Bind("Patrol", "MaxVehicles", 4,
+                "How many patrol vehicles may be out at once. Each press of "
+                + "Key puts one more down; Shift plus Key takes them all off "
+                + "the road again.");
+            CfgPatrolAuto = Config.Bind("Patrol", "AutoStart", true,
+                "Patrols without a key press: MaxVehicles of them go out by "
+                + "themselves once the world is up, and a lost one is replaced "
+                + "after RespawnSeconds. They start on the far side of the "
+                + "route, not in front of the player. Shift plus the patrol key "
+                + "takes them all off AND switches the automatic off until the "
+                + "key is pressed again.");
+            CfgPatrolRespawn = Config.Bind("Patrol", "RespawnSeconds", 300f,
+                "Seconds between a patrol being destroyed and the next one "
+                + "taking its place. Counted from the destruction, not from the "
+                + "moment the wreck disappears, so a value under WreckSeconds "
+                + "means the replacement is already driving while the wreck "
+                + "still burns. 0 fills the road once and never again.");
+            CfgPatrolGun = Config.Bind("Patrol", "Gun", true,
+                "The gun on a patrol vehicle looks for players by itself and "
+                + "shoots at them. Off leaves the turret pointing forward.");
+            CfgPatrolGunRange = Config.Bind("Patrol", "GunRange", 120f,
+                "Metres. Beyond this a player is not a target at all. Also "
+                + "the range at which the hit chance has fallen to zero. It "
+                + "was 220 until 2026-08-30, which is further than a man can "
+                + "make out a BTR against a treeline - being shot from there "
+                + "is being shot by nothing.");
+            CfgPatrolGunEffective = Config.Bind("Patrol", "GunEffectiveRange", 30f,
+                "Metres. Inside this the gun shoots as well as it can; between "
+                + "here and GunRange the hit chance falls off along a cosine, "
+                + "the same shape NPC_FirearmWeaponController uses. At 30 m the "
+                + "whole middle distance becomes a falling chance instead of a "
+                + "certainty.");
+            CfgPatrolGunPointBlank = Config.Bind("Patrol", "GunPointBlank", 12f,
+                "Metres under which a shot is displaced by a hand's width "
+                + "whatever the roll says. The game's own NPCs use 30 m for "
+                + "this, and that ring is the single reason a patrol was an "
+                + "80 percent death sentence: inside it accuracy meant "
+                + "nothing. 0 switches the free ring off and rolls every "
+                + "shot.");
+            CfgPatrolGunNotice = Config.Bind("Patrol", "GunNotice", 2.5f,
+                "Seconds a target has to be visible before the first shot. "
+                + "Without it you are hit in the frame you step out of cover.");
+            CfgPatrolGunForget = Config.Bind("Patrol", "GunForget", 8f,
+                "Seconds out of sight before the gun gives the target up.");
+            CfgPatrolGunAccuracy = Config.Bind("Patrol", "GunAccuracy", 0.45f,
+                "Multiplier on the hit chance. 1 is the game's own NPC "
+                + "behaviour, 0.5 makes every second aimed shot a miss, 0 "
+                + "makes the gun harmless. It applies at every distance now, "
+                + "point blank included - see GunPointBlank.");
+            CfgPatrolGunDamage = Config.Bind("Patrol", "GunDamage", 22f,
+                "Damage of ONE hit from a patrol gun. 0 takes the vehicle's "
+                + "own value out of [Turret] or [Tank] instead - and those are "
+                + "meant for a vehicle, not for a man: 120 a shot at eight "
+                + "shots a second is not a fight, it is a verdict. The tank's "
+                + "shell explodes on top of this, and that is where a tank "
+                + "gets its lethality from.");
+            CfgPatrolGunBurst = Config.Bind("Patrol", "GunBurst", 3,
+                "Shots in one burst before the gun pauses. Only for a fast "
+                + "gun - anything that reloads for a second or more, which "
+                + "means the tank, fires single shots whatever stands here.");
+            CfgPatrolGunBurstPause = Config.Bind("Patrol", "GunBurstPause", 3.5f,
+                "Seconds between two bursts. This, not the damage, is what "
+                + "gives a man time to get behind something.");
+            CfgPatrolCrew = Config.Bind("Patrol", "Crew", true,
+                "Every seat carries a man. They are counted while the vehicle "
+                + "drives and they climb out when it is destroyed - marauders "
+                + "who then hunt whoever killed it. No player can take a seat "
+                + "on a patrol vehicle while its crew is aboard.");
+            CfgPatrolCrewMax = Config.Bind("Patrol", "CrewMax", 4,
+                "Upper limit on the men who climb out of one wreck, whatever "
+                + "the vehicle has seats for. Six marauders at once out of one "
+                + "BTR is a firefight nobody survives.");
+            CfgPatrolCrewHealth = Config.Bind("Patrol", "CrewHealth", 120f,
+                "Hit points of one crewman.");
+            CfgPatrolCrewLevel = Config.Bind("Patrol", "CrewLevel", 2,
+                "NPC level of the crew. Feeds the game's own level table.");
+            CfgPatrolWreck = Config.Bind("Patrol", "WreckSeconds", 240f,
+                "Seconds a destroyed patrol vehicle stays on the road before "
+                + "it is removed. 0 leaves the wreck where it is.");
+            CfgPatrolSpeed = Config.Bind("Patrol", "Speed", 45f,
+                "Target speed in km/h on a straight leg. A waypoint may name "
+                + "its own speed in the file; this is what 0 there means. "
+                + "A BTR with a 12 ton centre of mass rolls over in a corner "
+                + "long before it runs out of engine.");
+            CfgPatrolRecordSeconds = Config.Bind("Patrol", "RecordSeconds", 3f,
+                "Seconds between two recorded waypoints. At 45 km/h three "
+                + "seconds are about 37 m, which is the spacing routecheck.py "
+                + "asks for (25 to 40). Recording on foot writes a much denser "
+                + "route - that is allowed, it only means routecheck.py will "
+                + "warn about the spacing. A waypoint is never written twice "
+                + "at the same spot: three metres of movement are required "
+                + "however long the wait was.");
+            CfgPatrolPassRadius = Config.Bind("Patrol", "PassRadius", 12f,
+                "How near a waypoint counts as reached. Too large and the "
+                + "vehicle skips whole corners.");
+            CfgPatrolStuck = Config.Bind("Patrol", "StuckSeconds", 3f,
+                "Seconds with the throttle down and under 3 km/h before the "
+                + "vehicle counts as stuck and starts backing up.");
+            CfgPatrolRam = Config.Bind("Patrol", "RamAfter", 8f,
+                "Seconds stuck before it stops avoiding and drives through "
+                + "whatever is there.");
+            CfgPatrolFree = Config.Bind("Patrol", "FreeAfter", 25f,
+                "Seconds stuck before the vehicle is lifted onto the next "
+                + "waypoint. Every one of those is logged, because it names a "
+                + "waypoint that wants fixing.");
+
+            // ------------------------------------------- the AI tank shell
+            //
+            // [Tank] holds what a PLAYER fires: 1600 damage in a 16 m radius,
+            // which is artillery and is meant to be. An AI landing that shell
+            // anywhere near a man kills him with no counterplay at all, and no
+            // accuracy setting helps - the blast does not care where the shell
+            // went. So the AI gets its own two numbers.
+            CfgPatrolShellDamage = Config.Bind("Patrol", "ShellDamage", 260f,
+                "Blast damage of a shell fired by an AI tank. A player in his "
+                + "own tank keeps [Tank] ExplosionDamage (1600). 0 takes the "
+                + "player value, which is very nearly a guaranteed kill.");
+            CfgPatrolShellRadius = Config.Bind("Patrol", "ShellRadius", 6f,
+                "Blast radius of a shell fired by an AI tank, in metres. A "
+                + "player keeps [Tank] ExplosionRadius (16). 0 takes the "
+                + "player value.");
+
+            // ------------------------------------------ routes and factions
+            CfgPatrolFraction = Config.Bind("Patrol", "Fraction", "looter",
+                "Which side a patrol is on when its route does not say. One "
+                + "of civilian, looter, traitor, neutral. civilian attacks "
+                + "everyone but civilians, looter everyone but looters, "
+                + "traitor attacks EVERYONE including other traitors, and "
+                + "neutral attacks traitors only. A route carries its own "
+                + "choice in the flags of its first waypoint "
+                + "(fraction=looter); the route editor writes that for you.");
+            CfgPatrolEditorKey = Config.Bind("Patrol", "EditorKey", "F4",
+                "Opens the route editor: record a route, drop single "
+                + "waypoints, pick the faction, the vehicle and the number of "
+                + "patrols per route, and put one on the road now. Name out "
+                + "of UnityEngine.KeyCode. NOT F12: that is Steam's screenshot "
+                + "key by default, and every press of it would leave a "
+                + "picture behind.");
+
+            // ------------------------------------------------ the obstacles
+            CfgPatrolCrush = Config.Bind("Patrol", "Crush", true,
+                "Drive THROUGH the small stuff. The map is full of knee-high "
+                + "fences, posts and road junk that stop twelve tons dead, and "
+                + "a driver that steers around them ends up in the ditch. "
+                + "Anything small enough by CrushHeight and CrushWidth loses "
+                + "its collider the moment a patrol pushes into it. Only on "
+                + "this machine, and only for what a patrol actually hits.");
+            CfgPatrolCrushHeight = Config.Bind("Patrol", "CrushHeight", 2.2f,
+                "Metres. Taller than this and it is a wall, not a fence - the "
+                + "driver steers around it instead of through it.");
+            CfgPatrolCrushWidth = Config.Bind("Patrol", "CrushWidth", 9f,
+                "Metres. Wider than this and it is a building, whatever its "
+                + "height.");
+
+            CfgPatrolCrewSensor = Config.Bind("Patrol", "CrewSensor", 70f,
+                "Metres a crewman out of a wreck can see. It is the "
+                + "settlement's SensorVisibleDist, and an AddComponent leaves "
+                + "that at 0 - a crew that sees nothing stands around its "
+                + "wreck and does nothing.");
+
+            // ------------------------------------------------- Diagnostics
+            CfgNetWatch = Config.Bind("Diagnostics", "NetWatch", true,
+                "Write a wall clock time, every long frame and the Photon "
+                + "peer's own counters into the log. It is the only thing that "
+                + "tells a busy client apart from a bad link when the game "
+                + "reports DisconnectByClientTimeout. It reads, it never "
+                + "writes, and it changes no behaviour.");
+            CfgNetWatchHitch = Config.Bind("Diagnostics", "NetWatchHitch", 0.5f,
+                "Seconds. A frame longer than this is written to the log with "
+                + "the peer counters of that moment.");
+            CfgNetWatchEvery = Config.Bind("Diagnostics", "NetWatchEvery", 5f,
+                "Seconds between the regular peer reports.");
         }
 
         // Die Tabelle. Spende-IDs sind bewusst artverwandt gewaehlt: das RPD ist
@@ -914,7 +1338,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("LocalizationManager");
+                Type t = RevivalPlugin.TypeByName("LocalizationManager");
                 if (t == null) { L.LogWarning("LocalizationManager nicht gefunden."); return; }
                 MethodInfo m = null;
                 foreach (MethodInfo cand in t.GetMethods(BindingFlags.Instance | BindingFlags.Public
@@ -938,7 +1362,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerFirearmWeaponController");
+                Type t = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
                 if (t == null) { L.LogWarning("PlayerFirearmWeaponController nicht gefunden."); return; }
                 MethodInfo m = AccessTools.Method(t, "ReloadWeapon", null, null);
                 if (m == null) { L.LogWarning("ReloadWeapon nicht gefunden."); return; }
@@ -953,7 +1377,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerFirearmWeaponController");
+                Type t = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
                 if (t == null)
                 {
                     L.LogWarning("PlayerFirearmWeaponController fuer LAW nicht gefunden.");
@@ -968,11 +1392,53 @@ namespace NextDayRevival
             catch (Exception ex) { L.LogError("LAW-Patch fehlgeschlagen: " + ex); }
         }
 
+        /// <summary>
+        /// The second postfix on `FireOneShot`, and the whole of "a drone can
+        /// be shot down". The game's shot is not touched; the hook only reads
+        /// the camera the controller aims with and offers that line to the
+        /// drones in the sky.
+        ///
+        /// Two postfixes on one method is deliberate: RocketHook answers for
+        /// the LAW and returns immediately for every other weapon, and mixing
+        /// the drone into it would tie two features that have nothing to do
+        /// with each other to one another's mistakes.
+        /// </summary>
+        void PatchDroneShot()
+        {
+            try
+            {
+                if (!CfgDrone.Value || !CfgDroneShootable.Value)
+                {
+                    L.LogInfo("Drohnen lassen sich nicht abschiessen (abgeschaltet).");
+                    return;
+                }
+                Type t = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
+                if (t == null)
+                {
+                    L.LogWarning("PlayerFirearmWeaponController fuer den "
+                        + "Drohnenbeschuss nicht gefunden.");
+                    return;
+                }
+                MethodInfo m = AccessTools.Method(t, "FireOneShot", null, null);
+                if (m == null)
+                {
+                    L.LogWarning("FireOneShot fuer den Drohnenbeschuss nicht gefunden.");
+                    return;
+                }
+                _harmony.Patch(m, null,
+                    new HarmonyMethod(typeof(DroneShotHook).GetMethod("Postfix")),
+                    null, null, null);
+                L.LogInfo("Drohnenbeschuss aktiv: " + CfgDroneHitpoints.Value
+                    + " Treffer bis " + CfgDroneShootRange.Value + " m.");
+            }
+            catch (Exception ex) { L.LogError("Drohnenbeschuss-Patch fehlgeschlagen: " + ex); }
+        }
+
         void PatchCustomDrop()
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerInventoryManager");
+                Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
                 if (t == null) { L.LogWarning("PlayerInventoryManager fuer LAW-Drop fehlt."); return; }
                 MethodInfo m = AccessTools.Method(t, "DropWeaponFromHand",
                     new Type[] { typeof(int), typeof(int), typeof(int), typeof(Vector3),
@@ -1009,7 +1475,7 @@ namespace NextDayRevival
             try
             {
                 if (!CfgFire.Value) { L.LogInfo("Fire effect switched off."); return; }
-                Type t = AccessTools.TypeByName("ExplosionObject");
+                Type t = RevivalPlugin.TypeByName("ExplosionObject");
                 if (t == null) { L.LogWarning("ExplosionObject fehlt - kein Feuer."); return; }
                 MethodInfo m = null;
                 foreach (MethodInfo cand in t.GetMethods(BindingFlags.Instance
@@ -1037,7 +1503,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerMenuCustomizationManager");
+                Type t = RevivalPlugin.TypeByName("PlayerMenuCustomizationManager");
                 if (t == null)
                 {
                     L.LogWarning("PlayerMenuCustomizationManager nicht gefunden.");
@@ -1064,7 +1530,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("ItemSpawnCategoriesDB");
+                Type t = RevivalPlugin.TypeByName("ItemSpawnCategoriesDB");
                 if (t == null) { L.LogWarning("ItemSpawnCategoriesDB nicht gefunden."); return; }
                 MethodInfo m = AccessTools.Method(t, "GetItemSpawnedScriptByID", null, null);
                 if (m == null) { L.LogWarning("GetItemSpawnedScriptByID nicht gefunden."); return; }
@@ -1106,7 +1572,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerInventoryManager");
+                Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
                 if (t == null) { L.LogWarning("PlayerInventoryManager nicht gefunden."); return; }
                 MethodInfo m = null;
                 foreach (MethodInfo cand in t.GetMethods(BindingFlags.Instance | BindingFlags.Public
@@ -1127,6 +1593,11 @@ namespace NextDayRevival
             // Die Item-Datenbank ist ein ScriptableObject, das erst beim ersten
             // Zugriff aus Resources geladen wird. Vorher gibt es nichts zu ergaenzen.
             yield return new WaitForSeconds(8f);
+
+            // The region list has nothing to do with our own items, so it is
+            // handled before the bail-out below.
+            Regions.Apply(true);
+
             if (!CfgCustomItems.Value) yield break;
 
             L.LogInfo("--- Selbsttest ---");
@@ -1147,7 +1618,6 @@ namespace NextDayRevival
             Registry.RegisterAll();
             if (CfgLootTables.Value) Registry.AddToLootTables();
             Research.ReportRegions();
-            Research.ApplyExtraScenes();
             L.LogInfo("--- Selbsttest Ende ---");
             SetupDone = true;
 
@@ -1184,17 +1654,27 @@ namespace NextDayRevival
 
         void Update()
         {
+            // First in the frame: it measures the gap to the previous frame,
+            // and everything below is part of that gap.
+            NetWatch.Tick();
             Admin.Tick();
             // Solange das Menue offen ist, gehoert der Zeiger dem Menue -
             // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
             // man kann keinen Knopf treffen.
-            if (Admin.IsOpen) CursorGuard.Release();
+            if (Admin.IsOpen || Patrol.EditorOpen) CursorGuard.Release();
             else CursorGuard.Tick();
+            Regions.Tick();
             Research.Tick();
             Turret.Tick();
             Drone.Tick();
             Arena.Tick();
             CarSpawn.Tick();
+            Patrol.Tick();
+        }
+
+        void FixedUpdate()
+        {
+            Patrol.FixedTick();
         }
 
         void LateUpdate()
@@ -1207,6 +1687,7 @@ namespace NextDayRevival
             Turret.DrawScope();
             Drone.Draw();
             Admin.Draw();
+            Patrol.Draw();
         }
 
         void OnApplicationFocus(bool hasFocus)
@@ -1407,6 +1888,7 @@ namespace NextDayRevival
         public static void Postfix(string __0, ref string __result)
         {
             if (__0 == null || __0.Length < 3 || __0[0] != '$') return;
+            if (Regions.Label(__0, ref __result)) return;
             List<ItemDef> items = RevivalPlugin.Items;
             for (int i = 0; i < items.Count; i++)
             {
@@ -1483,7 +1965,7 @@ namespace NextDayRevival
             if (spawned == null)
                 throw new InvalidOperationException("PhotonNetwork.Instantiate lieferte null.");
 
-            Type bodyType = AccessTools.TypeByName("UnityEngine.Rigidbody");
+            Type bodyType = RevivalPlugin.TypeByName("UnityEngine.Rigidbody");
             Component body = bodyType == null ? null : spawned.GetComponent(bodyType);
             if (body == null && bodyType != null)
                 body = spawned.GetComponentInChildren(bodyType);
@@ -1496,13 +1978,13 @@ namespace NextDayRevival
             }
 
             int ignoreLayer = LayerMask.NameToLayer("IgnoreLocalPlayer");
-            Type colliderType = AccessTools.TypeByName("UnityEngine.Collider");
+            Type colliderType = RevivalPlugin.TypeByName("UnityEngine.Collider");
             Component[] colliders = colliderType == null
                 ? new Component[0] : spawned.GetComponentsInChildren(colliderType, true);
             for (int i = 0; i < colliders.Length; i++)
                 colliders[i].gameObject.layer = ignoreLayer;
 
-            Type explosionType = AccessTools.TypeByName("ExplosionObject");
+            Type explosionType = RevivalPlugin.TypeByName("ExplosionObject");
             if (explosionType == null)
                 throw new MissingMemberException("ExplosionObject nicht gefunden.");
             Component explosion = spawned.GetComponent(explosionType);
@@ -1687,8 +2169,8 @@ namespace NextDayRevival
         {
             point = Vector3.zero;
             normal = Vector3.zero;
-            Type physicsType = AccessTools.TypeByName("UnityEngine.Physics");
-            Type hitType = AccessTools.TypeByName("UnityEngine.RaycastHit");
+            Type physicsType = RevivalPlugin.TypeByName("UnityEngine.Physics");
+            Type hitType = RevivalPlugin.TypeByName("UnityEngine.RaycastHit");
             if (physicsType == null || hitType == null)
                 throw new MissingMemberException("UnityEngine.Physics oder RaycastHit nicht gefunden.");
 
@@ -1738,7 +2220,7 @@ namespace NextDayRevival
         static GameObject PhotonInstantiate(string path, Vector3 position,
                                             Quaternion rotation, byte group)
         {
-            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
             MethodInfo chosen = null;
             MethodInfo[] methods = photon.GetMethods(BindingFlags.Public | BindingFlags.Static);
@@ -1890,7 +2372,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PhotonNetwork");
+                Type t = RevivalPlugin.TypeByName("PhotonNetwork");
                 if (t == null) return false;
                 MethodInfo getter = AccessTools.PropertyGetter(t, "inRoom");
                 if (getter == null) return false;
@@ -1928,14 +2410,14 @@ namespace NextDayRevival
                 drop.transform.rotation = def.Id == LAW_ID
                     ? Quaternion.Euler(0f, 0f, 90f) : Quaternion.identity;
 
-                Type colliderType = AccessTools.TypeByName("UnityEngine.BoxCollider");
+                Type colliderType = RevivalPlugin.TypeByName("UnityEngine.BoxCollider");
                 Component collider = colliderType == null ? null : drop.AddComponent(colliderType);
                 if (collider == null)
                     throw new MissingMemberException("BoxCollider fuer die Ablage fehlt.");
                 SetProperty(collider, "center", mesh.bounds.center);
                 SetProperty(collider, "size", mesh.bounds.size);
 
-                Type bodyType = AccessTools.TypeByName("UnityEngine.Rigidbody");
+                Type bodyType = RevivalPlugin.TypeByName("UnityEngine.Rigidbody");
                 Component body = bodyType == null ? null : drop.GetComponent(bodyType);
                 if (body == null && bodyType != null) body = drop.AddComponent(bodyType);
                 if (body != null)
@@ -2111,6 +2593,21 @@ namespace NextDayRevival
             catch (Exception ex) { RevivalPlugin.L.LogWarning(fileName + ": " + ex.Message); }
             _tex[fileName] = t;
             return t;
+        }
+
+        /// <summary>
+        /// Wie <see cref="Texture"/>, aber still, wenn die Datei nicht da ist.
+        /// Fuer Karten, die nur MANCHE Stuecke haben - die Metallic/Gloss-Map
+        /// liegt neben MG42 und LAW, nicht neben Gurt, Munition und TAC-50.
+        /// `Texture` wuerde dort bei jedem Bau eine Warnung ins Log schreiben,
+        /// die nichts meldet ausser "ist so gedacht".
+        /// </summary>
+        public static Texture2D TextureIfPresent(string fileName)
+        {
+            if (fileName == null) return null;
+            if (_tex.ContainsKey(fileName)) return _tex[fileName];
+            if (!File.Exists(Path.Combine(RevivalPlugin.AssetDir, fileName))) return null;
+            return Texture(fileName, true, true);
         }
 
         /// <summary>Liest eine .ndmesh. Prueft die Normalen, bevor sie ins Spiel geht.</summary>
@@ -2341,24 +2838,51 @@ namespace NextDayRevival
         /// </summary>
         Material MakeMaterial(GameObject donor)
         {
-            Shader shader = null;
+            Shader spende = null;
             try
             {
                 if (donor != null)
                 {
                     MeshRenderer[] rs = donor.GetComponentsInChildren<MeshRenderer>(true);
-                    for (int i = 0; i < rs.Length && shader == null; i++)
+                    for (int i = 0; i < rs.Length && spende == null; i++)
                         if (rs[i] != null && rs[i].sharedMaterial != null)
-                            shader = rs[i].sharedMaterial.shader;
-                    if (shader != null)
-                        RevivalPlugin.L.LogInfo(_def.Id + ": Shader von Spende-Waffe: " + shader.name);
+                            spende = rs[i].sharedMaterial.shader;
                 }
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Spende-Shader: " + ex.Message); }
 
-            if (shader == null) shader = Shader.Find("Standard");
+            // DER SHADER DES PANZERS, NICHT DER DER SPENDE-WAFFE (2026-08-30)
+            //
+            // Bis hierher wurde der Shader der Spende uebernommen, und genau
+            // das war der Grund, warum die Waffen matt blieben, obwohl neben
+            // ihnen eine Metallic-Map lag. `research/dump_material.py` ueber
+            // alle 1708 Materialien in resources.assets, nach Texturslots
+            // sortiert:
+            //
+            //   Shader 56  Standard                   nur _MetallicGlossMap
+            //   Shader 55  Standard (Specular setup)  nur _SpecGlossMap
+            //   Shader 57  Standard (Roughness setup) BEIDE
+            //
+            // Der T-72 erbt vom MTW und landet auf 56. Dort ist die Smoothness
+            // der Alphakanal der Metallic-Map - der Panzer sieht deshalb
+            // metallisch aus. Die Waffen erben von ihrer Spende und landen auf
+            // 57, und dort kommt die Smoothness NICHT aus dem Alpha, sondern
+            // als Roughness aus `_SpecGlossMap`. Der Slot war leer, sein
+            // Vorgabewert ist "white" - Roughness 1.0, also Smoothness 0 und
+            // kein einziges Glanzlicht auf der ganzen Waffe. Das Log sagte die
+            // ganze Zeit "Metall-Map=mg42_metal.png", und sie wurde auch
+            // benutzt: nur die Haelfte davon, die das Metallic traegt.
+            //
+            // Also derselbe Shader wie beim Panzer. Die Spende bleibt der
+            // Rueckfall, und darunter steht `_SpecGlossMap`, damit auch dieser
+            // Rueckfall nicht wieder matt ist.
+            Shader shader = Shader.Find("Standard");
+            if (shader == null) shader = spende;
             if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
             if (shader == null) throw new Exception("kein brauchbarer Shader gefunden");
+            RevivalPlugin.L.LogInfo(_def.Id + ": Shader " + shader.name
+                + " (Spende-Waffe: "
+                + (spende == null ? "unbekannt" : spende.name) + ")");
 
             Texture2D diffuse = Assets.Texture(_def.Diffuse, false, true);
             Material mat = new Material(shader);
@@ -2371,10 +2895,71 @@ namespace NextDayRevival
             if (mat.HasProperty("_Metallic"))
                 mat.SetFloat("_Metallic", RevivalPlugin.CfgMetallic.Value);
 
-            // Keine Metallic/Gloss-Map. Falls der geerbte Zustand eine hat oder
-            // das Keyword traegt, hier abraeumen.
-            if (mat.HasProperty("_MetallicGlossMap")) mat.SetTexture("_MetallicGlossMap", null);
-            mat.DisableKeyword("_METALLICGLOSSMAP");
+            // Metallic/Gloss-Map, wenn neben der Diffuse eine liegt:
+            // <stamm>_metal.png. Der Standardshader liest dann Metallic aus
+            // deren ROTEM Kanal und Smoothness aus dem ALPHAKANAL; die beiden
+            // Skalarwerte darueber sind damit wirkungslos. So haengt die Karte
+            // am MTW des Spiels und seit 0.5.2 am T-72 - und erst sie hat den
+            // Panzer aufhoeren lassen, neben dem MTW wie bemaltes Papier
+            // auszusehen. Bis 0.5.4 stand hier, es gebe keine solche Karte;
+            // das war vor der Messung an btr-80a_alb richtig und ist es nicht
+            // mehr. Waffen ohne eigene Karte - TAC-50, Gurt, Munition - gehen
+            // weiter durch den unteren Zweig und bleiben, wie sie waren.
+            string stamm = null;
+            if (_def.Diffuse != null && _def.Diffuse.EndsWith("_diffuse.png"))
+                stamm = _def.Diffuse.Substring(
+                    0, _def.Diffuse.Length - "_diffuse.png".Length);
+            string metalName = stamm == null ? null : stamm + "_metal.png";
+            string roughName = stamm == null ? null : stamm + "_rough.png";
+            Texture2D metal = Assets.TextureIfPresent(metalName);
+            if (metal != null && mat.HasProperty("_MetallicGlossMap"))
+            {
+                mat.SetTexture("_MetallicGlossMap", metal);
+                // 1.0, weil die Daempfung schon im Alphakanal der Karte steckt.
+                if (mat.HasProperty("_GlossMapScale")) mat.SetFloat("_GlossMapScale", 1.0f);
+                // 0 = Smoothness aus dem Alphakanal der Karte, so wie am MTW.
+                if (mat.HasProperty("_SmoothnessTextureChannel"))
+                    mat.SetFloat("_SmoothnessTextureChannel", 0f);
+                mat.EnableKeyword("_METALLICGLOSSMAP");
+                // Ohne diese beiden bleibt das Metall stumpf: Glanzlicht und
+                // Spiegelung rechnet der Standardshader nur, wenn beide
+                // anstehen. Am Panzer stehen sie aus demselben Grund.
+                if (mat.HasProperty("_SpecularHighlights")) mat.SetFloat("_SpecularHighlights", 1f);
+                if (mat.HasProperty("_GlossyReflections")) mat.SetFloat("_GlossyReflections", 1f);
+                mat.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
+                mat.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
+            }
+            else
+            {
+                // Keine Karte. Falls der geerbte Zustand eine hat oder das
+                // Keyword traegt, hier abraeumen.
+                if (mat.HasProperty("_MetallicGlossMap")) mat.SetTexture("_MetallicGlossMap", null);
+                mat.DisableKeyword("_METALLICGLOSSMAP");
+            }
+
+            // `Standard (Roughness setup)` liest die Smoothness NICHT aus dem
+            // Alphakanal oben, sondern als Roughness aus diesem Slot - siehe
+            // den Block ueber der Shaderwahl. Hat das Material den Slot, ist es
+            // dieser Shader, und dann entscheidet allein diese Datei, ob die
+            // Waffe glaenzt. `<stamm>_rough.png` ist der umgekehrte Alphakanal
+            // derselben Karte, geschrieben von texlib.save_rough_atlas.
+            Texture2D rauh = Assets.TextureIfPresent(roughName);
+            if (mat.HasProperty("_SpecGlossMap"))
+            {
+                if (rauh != null)
+                {
+                    mat.SetTexture("_SpecGlossMap", rauh);
+                    mat.EnableKeyword("_SPECGLOSSMAP");
+                }
+                else
+                {
+                    // Ohne eigene Karte waere der Vorgabewert "white", also
+                    // Roughness 1 und ein vollstaendig mattes Stueck. Den Slot
+                    // leeren heisst hier: der Skalarwert entscheidet wieder.
+                    mat.SetTexture("_SpecGlossMap", null);
+                    mat.DisableKeyword("_SPECGLOSSMAP");
+                }
+            }
 
             // Blend-Modus hart auf Opaque: liefert das Spende-Material einen
             // Transparenzmodus mit, wird der sonst mitgeerbt und die Waffe wird
@@ -2405,7 +2990,10 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo(_def.Id + ": Material Metallic="
                 + RevivalPlugin.CfgMetallic.Value + " Glossiness="
                 + RevivalPlugin.CfgGlossiness.Value + " renderQueue=" + q
-                + " Normal=" + (nrm != null));
+                + " Normal=" + (nrm != null)
+                + " Metall-Map=" + (metal != null ? metalName : "keine")
+                + " Rauheits-Map=" + (rauh != null ? roughName : "keine")
+                + " SpecGlossSlot=" + mat.HasProperty("_SpecGlossMap"));
             return mat;
         }
 
@@ -2480,7 +3068,7 @@ namespace NextDayRevival
             string[] names = { "WeaponTranformManager", "ItemTransformManager" };
             for (int i = 0; i < names.Length; i++)
             {
-                Type t = AccessTools.TypeByName(names[i]);
+                Type t = RevivalPlugin.TypeByName(names[i]);
                 if (t == null) continue;
                 Component c = root.GetComponent(t);
                 if (c == null) continue;
@@ -3154,7 +3742,7 @@ namespace NextDayRevival
 
         static object GetDb()
         {
-            Type t = AccessTools.TypeByName("ItemSpawnCategoriesDB");
+            Type t = RevivalPlugin.TypeByName("ItemSpawnCategoriesDB");
             if (t == null) { RevivalPlugin.L.LogWarning("ItemSpawnCategoriesDB nicht gefunden."); return null; }
             MethodInfo cur = AccessTools.PropertyGetter(t, "current");
             if (cur == null) { RevivalPlugin.L.LogWarning("ItemSpawnCategoriesDB.current fehlt."); return null; }
@@ -3178,7 +3766,7 @@ namespace NextDayRevival
 
         public static object Get(int itemId)
         {
-            Type t = AccessTools.TypeByName("xmlItemsDataManager");
+            Type t = RevivalPlugin.TypeByName("xmlItemsDataManager");
             if (t == null) return null;
             MethodInfo inst = AccessTools.PropertyGetter(t, "Instance");
             object mgr = inst == null ? null : inst.Invoke(null, null);
@@ -3365,7 +3953,7 @@ namespace NextDayRevival
                 L.LogInfo("=== AddBackpackItemFromValues(" + sb + ")");
                 if (mine == null) return;
 
-                Type dm = AccessTools.TypeByName("ItemSpawnCategoriesDB");
+                Type dm = RevivalPlugin.TypeByName("ItemSpawnCategoriesDB");
                 MethodInfo cur = dm == null ? null : AccessTools.PropertyGetter(dm, "current");
                 object db = cur == null ? null : cur.Invoke(null, null);
                 if (db == null) { L.LogWarning("  DB NULL"); return; }
@@ -3402,6 +3990,276 @@ namespace NextDayRevival
             return null;
         }
     }
+    // ------------------------------------------------------------- Netzwacht
+
+    /// <summary>
+    /// The one measurement E-043 and E-044 were missing.
+    ///
+    /// Both read `DisconnectByClientTimeout` as "the main thread was busy",
+    /// and both ruled out the other side by checking the LOCAL master server.
+    /// That check proves nothing about this message. The local master only
+    /// serves login, profile, static data and the server list. The room the
+    /// timeout belongs to is a PHOTON CLOUD room - own app id, region 0, see
+    /// MASTERSERVER.md section 2 - so the peer that timed out is a UDP link
+    /// over the internet, not a socket to 127.0.0.1. A healthy master log is
+    /// consistent with every one of the causes below.
+    ///
+    /// Three of them produce the same line and need different fixes:
+    ///
+    ///   the main thread stalled   Update stops for longer than the peer
+    ///                             tolerates. Shows up here as a frame gap.
+    ///   the link degraded         packets stop arriving. Shows up as a
+    ///                             rising round trip time and resent reliable
+    ///                             commands while the frame gaps stay small.
+    ///   the room is flooded       more traffic than the plan carries. Shows
+    ///                             up as a growing outgoing queue.
+    ///
+    /// The symptoms reported on 2026-08-30 - after F9, in the loading screen,
+    /// and at no particular moment - cannot all be the tank construction, so
+    /// the cause is not yet known. This class does not fix anything. It reads
+    /// the peer's own counters, never writes them, and costs one report every
+    /// `NetWatchEvery` seconds plus one subtraction per frame.
+    /// </summary>
+    public static class NetWatch
+    {
+        static bool _first = true;
+        static float _lastFrame;
+        static float _nextReport;
+        static float _worstSinceReport;
+        static float _worstEver;
+        static string _lastState = "";
+
+        static object _peer;
+        static float _nextPeerLook;
+        static Type _network;
+        static PropertyInfo _stateDetailed;
+        static bool _looked;
+
+        static double _lastIn, _lastOut, _lastMs;
+        static bool _statsOn;
+
+        public static void Tick()
+        {
+            if (RevivalPlugin.CfgNetWatch == null || !RevivalPlugin.CfgNetWatch.Value) return;
+
+            float now = Time.realtimeSinceStartup;
+            if (_first)
+            {
+                _first = false;
+                _lastFrame = now;
+                _nextReport = now;
+                RevivalPlugin.L.LogInfo("Netzwacht " + Uhr()
+                    + " active - frame gaps above "
+                    + RevivalPlugin.CfgNetWatchHitch.Value.ToString("0.00")
+                    + " s and a Photon report every "
+                    + RevivalPlugin.CfgNetWatchEvery.Value.ToString("0") + " s.");
+                return;
+            }
+
+            float gap = now - _lastFrame;
+            _lastFrame = now;
+            if (gap > _worstSinceReport) _worstSinceReport = gap;
+
+            // The gap is measured on the frame AFTER the pause, so a
+            // synchronous scene load or a first-time asset load lands here
+            // whole. Time.realtimeSinceStartup keeps running while Unity does
+            // not, which is exactly why it and not Time.deltaTime is used.
+            float grenze = Mathf.Max(0.05f, RevivalPlugin.CfgNetWatchHitch.Value);
+            if (gap > grenze)
+            {
+                bool schlimmster = gap > _worstEver;
+                if (schlimmster) _worstEver = gap;
+                RevivalPlugin.L.LogWarning("Netzwacht " + Uhr() + " frame gap "
+                    + gap.ToString("0.00") + " s"
+                    + (schlimmster ? " (worst so far)" : "")
+                    + " - " + PeerText() + ".");
+                // A gap this long has already moved the report clock past due.
+                // Report right after it as well, so the counters either show
+                // the damage or show that the link was never the problem.
+                _nextReport = now;
+            }
+
+            if (now < _nextReport) return;
+            _nextReport = now + Mathf.Max(1f, RevivalPlugin.CfgNetWatchEvery.Value);
+
+            string state = StateText();
+            bool gewechselt = state != _lastState;
+            _lastState = state;
+            RevivalPlugin.L.LogInfo("Netzwacht " + Uhr() + " state=" + state
+                + (gewechselt ? " (changed)" : "")
+                + " " + PeerText() + " " + VerkehrText()
+                + " worstframe=" + _worstSinceReport.ToString("0.00") + " s.");
+            _worstSinceReport = 0f;
+        }
+
+        static string Uhr()
+        {
+            return DateTime.Now.ToString("HH:mm:ss.fff");
+        }
+
+        /// <summary>The peer's own counters. `RoundTripTime` and
+        /// `ResentReliableCommands` separate a dead link from a busy client;
+        /// `QueuedOutgoingCommands` separates both from us sending more than
+        /// the room carries. `DisconnectTimeout` is here because the F9 guard
+        /// raises it and nothing has ever confirmed that it held.</summary>
+        static string PeerText()
+        {
+            object peer = Peer();
+            if (peer == null) return "no peer";
+            return "rtt=" + Zahl(peer, "RoundTripTime")
+                + "/" + Zahl(peer, "RoundTripTimeVariance") + " ms"
+                + " out=" + Zahl(peer, "QueuedOutgoingCommands")
+                + " in=" + Zahl(peer, "QueuedIncomingCommands")
+                + " resent=" + Zahl(peer, "ResentReliableCommands")
+                + " losscrc=" + Zahl(peer, "PacketLossByCrc")
+                + " timeout=" + Zahl(peer, "DisconnectTimeout");
+        }
+
+        static string StateText()
+        {
+            Look();
+            if (_stateDetailed == null) return "?";
+            try
+            {
+                object v = _stateDetailed.GetValue(null, null);
+                return v == null ? "?" : v.ToString();
+            }
+            catch { return "?"; }
+        }
+
+        /// <summary>The peer is replaced on every reconnect, so it is looked
+        /// up again every second instead of cached for the session.</summary>
+        static object Peer()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (_peer != null && now < _nextPeerLook) return _peer;
+            _nextPeerLook = now + 1f;
+            _peer = null;
+            try
+            {
+                Look();
+                if (_network == null) return null;
+                FieldInfo f = AccessTools.Field(_network, "networkingPeer");
+                if (f != null) _peer = f.GetValue(null);
+                if (_peer == null)
+                {
+                    PropertyInfo p = AccessTools.Property(_network, "networkingPeer");
+                    if (p != null) _peer = p.GetValue(null, null);
+                }
+            }
+            catch { _peer = null; }
+            return _peer;
+        }
+
+        static void Look()
+        {
+            if (_looked) return;
+            _looked = true;
+            _network = RevivalPlugin.TypeByName("PhotonNetwork");
+            if (_network == null)
+            {
+                RevivalPlugin.L.LogWarning("Netzwacht: PhotonNetwork not found - "
+                    + "only the frame gaps are measured.");
+                return;
+            }
+            _stateDetailed = AccessTools.Property(_network, "connectionStateDetailed");
+        }
+
+        /// <summary>
+        /// Bytes per second in each direction, from the peer's own traffic
+        /// counters. This is the only reading that separates "we send more
+        /// than the room carries" from the other two causes: a queue length is
+        /// drained every frame and is therefore almost always zero, even while
+        /// the client is well over the plan's message rate.
+        ///
+        /// Switching the counters on is the one write this class makes. It is
+        /// a diagnostic flag on the peer, it changes no traffic, and Photon
+        /// ships it for exactly this purpose.
+        /// </summary>
+        static string VerkehrText()
+        {
+            object peer = Peer();
+            if (peer == null) return "";
+            try
+            {
+                if (!_statsOn)
+                {
+                    PropertyInfo on = AccessTools.Property(peer.GetType(),
+                                                           "TrafficStatsEnabled");
+                    if (on == null || !on.CanWrite) return "";
+                    on.SetValue(peer, true, null);
+                    _statsOn = true;
+                    _lastMs = 0d;
+                    return "traffic=on";
+                }
+
+                double ms = Wert(peer, "TrafficStatsElapsedMs");
+                double ein = Bytes(peer, "TrafficStatsIncoming");
+                double aus = Bytes(peer, "TrafficStatsOutgoing");
+                double spanne = ms - _lastMs;
+                string text = "traffic=?";
+                if (_lastMs > 0d && spanne > 0d)
+                    text = "in=" + ((ein - _lastIn) * 1000d / spanne).ToString("0")
+                         + " out=" + ((aus - _lastOut) * 1000d / spanne).ToString("0")
+                         + " B/s";
+                _lastMs = ms;
+                _lastIn = ein;
+                _lastOut = aus;
+                return text;
+            }
+            catch { return ""; }
+        }
+
+        static double Bytes(object peer, string name)
+        {
+            PropertyInfo p = AccessTools.Property(peer.GetType(), name);
+            object stats = p == null ? null : p.GetValue(peer, null);
+            if (stats == null)
+            {
+                FieldInfo f = AccessTools.Field(peer.GetType(), name);
+                if (f != null) stats = f.GetValue(peer);
+            }
+            return stats == null ? 0d : Wert(stats, "TotalPacketBytes");
+        }
+
+        static double Wert(object o, string name)
+        {
+            if (o == null) return 0d;
+            try
+            {
+                object v = null;
+                PropertyInfo p = AccessTools.Property(o.GetType(), name);
+                if (p != null) v = p.GetValue(o, null);
+                else
+                {
+                    FieldInfo f = AccessTools.Field(o.GetType(), name);
+                    if (f != null) v = f.GetValue(o);
+                }
+                return v == null ? 0d : Convert.ToDouble(v);
+            }
+            catch { return 0d; }
+        }
+
+        static string Zahl(object o, string name)
+        {
+            if (o == null) return "?";
+            try
+            {
+                object v = null;
+                PropertyInfo p = AccessTools.Property(o.GetType(), name);
+                if (p != null) v = p.GetValue(o, null);
+                else
+                {
+                    FieldInfo f = AccessTools.Field(o.GetType(), name);
+                    if (f != null) v = f.GetValue(o);
+                }
+                if (v == null) return "?";
+                return Convert.ToDouble(v).ToString("0");
+            }
+            catch { return "?"; }
+        }
+    }
+
     // ------------------------------------------------------------ Research
 
     /// <summary>
@@ -3456,55 +4314,14 @@ namespace NextDayRevival
                     Type rt = r.GetType();
                     object region = Val(rt, r, "region");
                     object start = Val(rt, r, "startScene");
-                    object scenes = Val(rt, r, "scenes");
-                    RevivalPlugin.L.LogInfo("  region=" + region + " startScene=" + start
-                                            + " scenes=" + WeaponData.Arr(scenes, 32));
+                    IEnumerable scenes = Val(rt, r, "scenes") as IEnumerable;
+                    RevivalPlugin.L.LogInfo("  region=" + Regions.RegionName(region)
+                                            + " startScene=" + Regions.SceneName(start)
+                                            + " scenes=" + Regions.SceneNames(scenes));
                 }
-                RevivalPlugin.L.LogInfo("  Buildindizes: 3 Bunker_A65, 4 GW_Scene_2, "
-                    + "5 GW_Scene_3, 6 Catacombs, 7 GW_Scene_1, 8..17 Chunk 0..9, "
-                    + "18 Underground_Lab");
                 RevivalPlugin.L.LogInfo("--- Regionen Ende ---");
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Regionen: " + ex.Message); }
-        }
-
-        /// <summary>Haengt die konfigurierten Buildindizes an die Szenenliste von Region 0.</summary>
-        public static void ApplyExtraScenes()
-        {
-            string cfg = RevivalPlugin.CfgExtraScenes.Value;
-            if (string.IsNullOrEmpty(cfg)) return;
-            try
-            {
-                object data = GetRegionsData();
-                FieldInfo fl = data == null ? null : AccessTools.Field(data.GetType(), "RegionsList");
-                IEnumerable list = fl == null ? null : fl.GetValue(data) as IEnumerable;
-                if (list == null) { RevivalPlugin.L.LogWarning("ExtraScenes: keine RegionsList."); return; }
-
-                object first = null;
-                foreach (object r in list) { first = r; break; }
-                if (first == null) { RevivalPlugin.L.LogWarning("ExtraScenes: Region 0 fehlt."); return; }
-
-                IList scenes = Val(first.GetType(), first, "scenes") as IList;
-                if (scenes == null) { RevivalPlugin.L.LogWarning("ExtraScenes: keine Szenenliste."); return; }
-
-                string[] parts = cfg.Split(',');
-                int added = 0;
-                for (int i = 0; i < parts.Length; i++)
-                {
-                    string p = parts[i].Trim();
-                    if (p.Length == 0) continue;
-                    int idx;
-                    try { idx = Convert.ToInt32(p); }
-                    catch { RevivalPlugin.L.LogWarning("ExtraScenes: kein Zahlenwert: " + p); continue; }
-                    if (scenes.Contains(idx)) continue;
-                    scenes.Add(idx);
-                    added++;
-                    RevivalPlugin.L.LogInfo("ExtraScenes: Szene " + idx + " zu Region 0 ergaenzt.");
-                }
-                RevivalPlugin.L.LogInfo("ExtraScenes: " + added + " Szenen ergaenzt, Liste jetzt "
-                                        + WeaponData.Arr(scenes, 32));
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("ExtraScenes: " + ex.Message); }
         }
 
         public static void Tick()
@@ -3527,20 +4344,30 @@ namespace NextDayRevival
             }
             if (_key == KeyCode.None) return;
             if (!Input.GetKeyDown(_key)) return;
-            Jump(RevivalPlugin.CfgJumpScene.Value);
+            int region = RevivalPlugin.CfgJumpRegion.Value;
+            if (region >= 0) JumpToRegion(region);
+            else Jump(RevivalPlugin.CfgJumpScene.Value);
         }
 
         /// <summary>
-        /// Baut einen LocationChangeTrigger zusammen und uebergibt ihn an
-        /// ChangeGameLocation. Typ 2 heisst Unterort, und dann ist SubLocation
-        /// direkt der Buildindex der Zielszene.
+        /// Assembles a LocationChangeTrigger and hands it to
+        /// ChangeGameLocation. Type 2 means sub-location, and then SubLocation
+        /// is the GameScene VALUE of the target scene - not a build index.
+        ///
+        /// Evidence from GenerateServerOptions: for type 2 it writes
+        /// trigger.SubLocation and for type 1
+        /// GetGameRegionData(trigger.Region).startScene into the same field
+        /// _gameScene. Both numbers therefore have the same type, and that
+        /// type is the GameScene enum. Cross-check against the scene files:
+        /// the door trigger in Bunker_A65 carries SubLocation 6, which is
+        /// GW_Scene_2, and Bunker_A65 itself reports CurrentScene 9.
         /// </summary>
-        public static void Jump(int buildIndex)
+        public static void Jump(int gameScene)
         {
             try
             {
-                Type tTrig = AccessTools.TypeByName("LocationChangeTrigger");
-                Type tMgr = AccessTools.TypeByName("GameLocationChangeManager");
+                Type tTrig = RevivalPlugin.TypeByName("LocationChangeTrigger");
+                Type tMgr = RevivalPlugin.TypeByName("GameLocationChangeManager");
                 if (tTrig == null || tMgr == null)
                 {
                     RevivalPlugin.L.LogWarning("Szenenwechsel: Typen nicht gefunden.");
@@ -3562,9 +4389,9 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogWarning("Szenenwechsel: Trigger nicht anlegbar.");
                     return;
                 }
-                SetField(tTrig, trig, "Id", 9000 + buildIndex);
+                SetField(tTrig, trig, "Id", 9000 + gameScene);
                 SetField(tTrig, trig, "LocationaChangeType", 2);
-                SetField(tTrig, trig, "SubLocation", buildIndex);
+                SetField(tTrig, trig, "SubLocation", gameScene);
                 SetField(tTrig, trig, "ShowOnMapUI", false);
 
                 MethodInfo m = AccessTools.Method(tMgr, "ChangeGameLocation", null, null);
@@ -3574,10 +4401,66 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogWarning("Szenenwechsel: ChangeGameLocation nicht gefunden.");
                     return;
                 }
-                RevivalPlugin.L.LogInfo("Szenenwechsel nach Buildindex " + buildIndex + " ...");
+                RevivalPlugin.L.LogInfo("Szenenwechsel nach "
+                                        + Regions.SceneName(gameScene) + " ...");
                 m.Invoke(mgrObj, new object[] { trig });
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Szenenwechsel: " + ex); }
+        }
+
+        /// <summary>
+        /// Changes into the start scene of a whole region. That is change
+        /// type 1: GenerateServerOptions then fetches
+        /// GetGameRegionData(Region).startScene by itself. It is exactly how
+        /// the three bunker doors in the game send the player back up to the
+        /// surface - type 1, Region 0, SubLocation 0.
+        /// </summary>
+        public static void JumpToRegion(int region)
+        {
+            try
+            {
+                Type tTrig = RevivalPlugin.TypeByName("LocationChangeTrigger");
+                Type tMgr = RevivalPlugin.TypeByName("GameLocationChangeManager");
+                if (tTrig == null || tMgr == null)
+                {
+                    RevivalPlugin.L.LogWarning("Region change: types not found.");
+                    return;
+                }
+                UnityEngine.Object mgrObj = UnityEngine.Object.FindObjectOfType(tMgr);
+                if (mgrObj == null)
+                {
+                    RevivalPlugin.L.LogWarning("Region change: no "
+                        + "GameLocationChangeManager in the scene.");
+                    return;
+                }
+
+                GameObject go = new GameObject("NextDayRevival_RegionJump");
+                Component trig = go.AddComponent(tTrig);
+                if (trig == null)
+                {
+                    UnityEngine.Object.Destroy(go);
+                    RevivalPlugin.L.LogWarning("Region change: cannot add the trigger.");
+                    return;
+                }
+                SetField(tTrig, trig, "Id", 9500 + region);
+                SetField(tTrig, trig, "LocationaChangeType", 1);
+                SetField(tTrig, trig, "Region", region);
+                SetField(tTrig, trig, "SubLocation", 0);
+                SetField(tTrig, trig, "ShowOnMapUI", false);
+
+                MethodInfo m = AccessTools.Method(tMgr, "ChangeGameLocation", null, null);
+                if (m == null)
+                {
+                    UnityEngine.Object.Destroy(go);
+                    RevivalPlugin.L.LogWarning("Region change: ChangeGameLocation "
+                        + "not found.");
+                    return;
+                }
+                RevivalPlugin.L.LogInfo("Region change to "
+                                        + Regions.RegionName(region) + " ...");
+                m.Invoke(mgrObj, new object[] { trig });
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Region change: " + ex); }
         }
 
         static void SetField(Type t, object o, string name, object value)
@@ -3602,12 +4485,49 @@ namespace NextDayRevival
             try { return f.GetValue(o); } catch { return null; }
         }
 
-        static object GetRegionsData()
+        /// <summary>
+        /// Gets hold of the GameRegionsData.
+        ///
+        /// FindObjectOfType CANNOT find this manager, and that is not a
+        /// timing problem - it never could. Measured 2026-08-29 from the IL:
+        ///
+        ///     GameRegionsManager::.cctor
+        ///         newobj GameRegionsManager::.ctor
+        ///         stsfld Instance
+        ///
+        /// The class derives from MonoBehaviour but its instance is built by
+        /// the **static constructor** with `new`, and it is never attached to
+        /// a GameObject. There is no such component in any scene, so
+        /// FindObjectOfType returns null for the whole session. That is why
+        /// ReportRegions had been printing "kein GameRegionsData" since it
+        /// was written, and why the second region was never registered on the
+        /// first try in the game.
+        ///
+        /// The static field `Instance` is the way in - it is what the game
+        /// itself uses (`ldsfld Instance` in UseTransition). Reading it also
+        /// runs the static constructor, so the manager exists from the first
+        /// attempt on.
+        ///
+        /// `mgr` is deliberately typed `object`: an instance created with
+        /// `new` has no native peer, and UnityEngine.Object's overloaded
+        /// `==` would report it as null. With the static type `object` the
+        /// comparison is an ordinary reference check.
+        /// </summary>
+        internal static object GetRegionsData()
         {
-            Type t = AccessTools.TypeByName("GameRegionsManager");
+            Type t = RevivalPlugin.TypeByName("GameRegionsManager");
             if (t == null) return null;
-            UnityEngine.Object mgr = UnityEngine.Object.FindObjectOfType(t);
+
+            object mgr = null;
+            FieldInfo inst = AccessTools.Field(t, "Instance");
+            if (inst != null && inst.IsStatic)
+            {
+                try { mgr = inst.GetValue(null); }
+                catch { }
+            }
+            if (mgr == null) mgr = UnityEngine.Object.FindObjectOfType(t);
             if (mgr == null) return null;
+
             FieldInfo f = AccessTools.Field(t, "_gameRegionsData");
             object data = f == null ? null : f.GetValue(mgr);
             if (data == null)
@@ -3623,6 +4543,350 @@ namespace NextDayRevival
                 }
             }
             return data;
+        }
+    }
+
+    // -------------------------------------------------------------- Regions
+
+    /// <summary>
+    /// Adds a second region to the game's region list.
+    ///
+    /// WHY THIS WORKS AT ALL
+    /// ---------------------
+    /// Until 2026-08-29 REVERSE_ENGINEERING.md said that a region's
+    /// `startScene` and `scenes` were build indices - so a new region would
+    /// need a new scene in the build, and that would need a rebuild of the
+    /// game. That was a misreading. They are values of the `GameScene` enum.
+    ///
+    /// EVIDENCE - `GameLocationChangeManager::GenerateServerOptions` writes
+    /// into the one field `_gameScene` either
+    ///     GetGameRegionData(trigger.Region).startScene   (change type 1)
+    ///     trigger.SubLocation                            (change type 2)
+    /// so both numbers have the same type. Cross-check against the scene
+    /// files, measured 2026-08-29:
+    ///     level3  Bunker_A65       SceneGamePlayDataObjects.CurrentScene  9
+    ///     level4  GW_Scene_2                                              6
+    ///     level6  Catacombs                                              13
+    ///     level18 Underground_Lab                                        14
+    /// Those are the enum values, not the build indices 3, 4, 6 and 18.
+    ///
+    /// WHAT THIS CLASS DOES
+    /// --------------------
+    /// `GameRegionsManager.gameRegionsList` is a plain array of
+    /// `GameRegionData` with the three fields `region`, `startScene`,
+    /// `scenes`. This class appends one element to that array - the same kind
+    /// of work `Registry` does for the item databases.
+    /// `GameModeOptionsUI::UpdateGameRegionsPopUp` walks the same array to
+    /// fill the region drop-down of the room settings, so the new region
+    /// shows up there by itself.
+    ///
+    /// WHY THE SCENES HAVE TO LEAVE REGION 0
+    /// -------------------------------------
+    /// `GetRegionDataAtScene` walks the list from index 0 and returns the
+    /// FIRST region whose `scenes` contains the value. Region 0 comes first.
+    /// If Bunker_A65 and Underground_Lab stayed in its list, region 0 would
+    /// win every lookup and the new region would be a label and nothing else.
+    /// That is what `TakeFromRegion0` is for. Region 0 keeps GW_Scene_1,
+    /// GW_Scene_2, GW_Scene_3 and Catacombs - the whole surface world.
+    ///
+    /// NOT A SERVER MATTER. `Stage64Server.cs` knows neither game scenes nor
+    /// game regions; both travel between clients in the Photon room options.
+    /// Both players do need the same plugin, or one of them has a region the
+    /// other cannot resolve.
+    ///
+    /// NOT YET ACCEPTED IN THE GAME - state 2026-08-29. The plan and the open
+    /// points are in docs/ai/tasks/new-regions.md.
+    /// </summary>
+    public static class Regions
+    {
+        static float _next;
+        static bool _loggedFail;
+
+        /// <summary>Name of a GameScene value, from the game's own enum.</summary>
+        public static string SceneName(object value)
+        {
+            return EnumName("GameScene", value);
+        }
+
+        /// <summary>Name of a GameRegion value, from the game's own enum.</summary>
+        public static string RegionName(object value)
+        {
+            return EnumName("GameRegion", value);
+        }
+
+        /// <summary>A scene list as "[9 Bunker_A65, 14 Underground_Lab]".</summary>
+        public static string SceneNames(IEnumerable scenes)
+        {
+            if (scenes == null) return "[]";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder("[");
+            bool first = true;
+            foreach (object o in scenes)
+            {
+                if (!first) sb.Append(", ");
+                first = false;
+                sb.Append(SceneName(o));
+            }
+            return sb.Append("]").ToString();
+        }
+
+        static string EnumName(string typeName, object value)
+        {
+            if (value == null) return "null";
+            int n;
+            try { n = Convert.ToInt32(value); }
+            catch { return value.ToString(); }
+            try
+            {
+                Type t = RevivalPlugin.TypeByName(typeName);
+                if (t != null && t.IsEnum)
+                {
+                    string name = Enum.GetName(t, Enum.ToObject(t, n));
+                    if (!string.IsNullOrEmpty(name)) return n + " " + name;
+                }
+            }
+            catch { }
+            return n + " ?";
+        }
+
+        /// <summary>
+        /// Called every frame, does work at most every two seconds. The
+        /// GameRegionsManager only exists once the menu is up, and its data
+        /// can be reloaded on a scene change - so this does not register once
+        /// and forget, it checks whether the region is still in the list.
+        ///
+        /// While the list is out of reach the interval grows to ten seconds.
+        /// `GetRegionsData` calls `SetupGameRegionsData`, and that reads a
+        /// ScriptableObject out of Resources - not something to do every two
+        /// seconds for a whole session if the data never turns up.
+        /// </summary>
+        public static void Tick()
+        {
+            if (RevivalPlugin.CfgNewRegion == null || !RevivalPlugin.CfgNewRegion.Value) return;
+            if (Time.realtimeSinceStartup < _next) return;
+            bool reached = false;
+            try { reached = Apply(false); }
+            catch (Exception ex)
+            {
+                if (!_loggedFail)
+                {
+                    _loggedFail = true;
+                    RevivalPlugin.L.LogWarning("Region: " + ex.Message);
+                }
+            }
+            _next = Time.realtimeSinceStartup + (reached ? 2f : 10f);
+        }
+
+        /// <summary>
+        /// Registers the region if it is missing. `loud` also logs when there
+        /// was nothing to do. Returns whether the region list could be
+        /// reached at all - not whether anything was changed.
+        /// </summary>
+        public static bool Apply(bool loud)
+        {
+            object data = Research.GetRegionsData();
+            if (data == null)
+            {
+                if (loud) RevivalPlugin.L.LogInfo("Region: no GameRegionsData yet.");
+                return false;
+            }
+            FieldInfo fList = AccessTools.Field(data.GetType(), "RegionsList");
+            Array arr = fList == null ? null : fList.GetValue(data) as Array;
+            if (arr == null)
+            {
+                if (loud) RevivalPlugin.L.LogWarning("Region: no RegionsList.");
+                return false;
+            }
+
+            int id = RevivalPlugin.CfgNewRegionId.Value;
+            for (int i = 0; i < arr.Length; i++)
+            {
+                object row = arr.GetValue(i);
+                if (row == null) continue;
+                if (IntField(row, "region") == id)
+                {
+                    if (loud)
+                        RevivalPlugin.L.LogInfo("Region " + RegionName(id)
+                            + " is already in the list.");
+                    return true;
+                }
+            }
+
+            int start = RevivalPlugin.CfgNewRegionStart.Value;
+            List<int> scenes = Parse(RevivalPlugin.CfgNewRegionScenes.Value);
+            if (!scenes.Contains(start))
+            {
+                // Otherwise GetRegionDataAtScene would not find our own start
+                // scene in our own region, and the room switch would end up in
+                // the wrong region or in none at all.
+                scenes.Insert(0, start);
+                RevivalPlugin.L.LogInfo("Region: startScene " + SceneName(start)
+                    + " was missing from the scene list and has been prepended.");
+            }
+
+            Type tRow = arr.GetType().GetElementType();
+            object fresh = NewRow(tRow, id, start, scenes);
+            if (fresh == null) return true;   // reached, but unusable - do not hammer it
+
+            if (RevivalPlugin.CfgNewRegionExclusive.Value) TakeFromOthers(arr, scenes);
+
+            Array longer = Array.CreateInstance(tRow, arr.Length + 1);
+            Array.Copy(arr, longer, arr.Length);
+            longer.SetValue(fresh, arr.Length);
+            fList.SetValue(data, longer);
+
+            RevivalPlugin.L.LogInfo("Region " + RegionName(id) + " registered: startScene "
+                + SceneName(start) + ", scenes " + SceneNames(scenes)
+                + (RevivalPlugin.CfgNewRegionExclusive.Value
+                   ? ", taken out of the other regions." : ", other regions unchanged."));
+            Research.ReportRegions();
+            return true;
+        }
+
+        /// <summary>Fills a fresh GameRegionData with the three fields.</summary>
+        static object NewRow(Type tRow, int region, int startScene, List<int> scenes)
+        {
+            if (tRow == null)
+            {
+                RevivalPlugin.L.LogWarning("Region: no GameRegionData type.");
+                return null;
+            }
+            object row;
+            try { row = Activator.CreateInstance(tRow); }
+            catch
+            {
+                // No public default constructor: allocate uninitialised. All
+                // three fields are written right below anyway.
+                row = System.Runtime.Serialization.FormatterServices
+                          .GetUninitializedObject(tRow);
+            }
+            if (row == null) return null;
+
+            FieldInfo fRegion = AccessTools.Field(tRow, "region");
+            FieldInfo fStart = AccessTools.Field(tRow, "startScene");
+            FieldInfo fScenes = AccessTools.Field(tRow, "scenes");
+            if (fRegion == null || fStart == null || fScenes == null)
+            {
+                RevivalPlugin.L.LogWarning("Region: GameRegionData does not have the "
+                    + "three expected fields.");
+                return null;
+            }
+
+            fRegion.SetValue(row, Enum.ToObject(fRegion.FieldType, region));
+            fStart.SetValue(row, Enum.ToObject(fStart.FieldType, startScene));
+
+            IList list = Activator.CreateInstance(fScenes.FieldType) as IList;
+            if (list == null)
+            {
+                RevivalPlugin.L.LogWarning("Region: scenes is not a list.");
+                return null;
+            }
+            Type element = ElementType(fScenes.FieldType);
+            for (int i = 0; i < scenes.Count; i++)
+                list.Add(element != null && element.IsEnum
+                         ? Enum.ToObject(element, scenes[i]) : (object)scenes[i]);
+            fScenes.SetValue(row, list);
+            return row;
+        }
+
+        static Type ElementType(Type listType)
+        {
+            try
+            {
+                Type[] args = listType.GetGenericArguments();
+                if (args != null && args.Length == 1) return args[0];
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// Takes the given scenes away from every region that already exists.
+        ///
+        /// Not just region 0, even though only region 0 is in question today:
+        /// the new row is APPENDED, and GetRegionDataAtScene returns the first
+        /// region that contains the scene. Any row in front of ours would win,
+        /// whatever number it carries.
+        /// </summary>
+        static void TakeFromOthers(Array arr, List<int> scenes)
+        {
+            for (int r = 0; r < arr.Length; r++)
+            {
+                object row = arr.GetValue(r);
+                if (row == null) continue;
+                FieldInfo f = AccessTools.Field(row.GetType(), "scenes");
+                IList list = f == null ? null : f.GetValue(row) as IList;
+                if (list == null) continue;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    int value;
+                    try { value = Convert.ToInt32(list[i]); }
+                    catch { continue; }
+                    if (!scenes.Contains(value)) continue;
+                    list.RemoveAt(i);
+                    RevivalPlugin.L.LogInfo("  " + SceneName(value) + " removed from region "
+                        + RegionName(IntField(row, "region")) + ".");
+                }
+            }
+        }
+
+        static int IntField(object o, string name)
+        {
+            FieldInfo f = AccessTools.Field(o.GetType(), name);
+            if (f == null) return int.MinValue;
+            try { return Convert.ToInt32(f.GetValue(o)); }
+            catch { return int.MinValue; }
+        }
+
+        static List<int> Parse(string csv)
+        {
+            List<int> values = new List<int>();
+            if (string.IsNullOrEmpty(csv)) return values;
+            string[] parts = csv.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string t = parts[i].Trim();
+                if (t.Length == 0) continue;
+                try { values.Add(Convert.ToInt32(t)); }
+                catch { RevivalPlugin.L.LogWarning("Region: not a number: " + t); }
+            }
+            return values;
+        }
+
+        /// <summary>
+        /// Label for the drop-down - only when the config asks for a name of
+        /// its own.
+        ///
+        /// CORRECTION TO new-regions.md section 3: the key is NOT
+        /// "$GameRegion_2". `UpdateGameRegionsPopUp` puts the `region` field
+        /// into `String.Concat` with `box GameRegion`, so the call ends up in
+        /// `Enum.ToString()` and the key carries the NAME. For region 2 that
+        /// is "$GameRegion_Uralsk" - and that entry is already in the game's
+        /// Localization_DB, translated into five languages. The new region
+        /// names itself; the plugin has nothing to do. Only a value with no
+        /// name in the enum falls back to the number, which is why both forms
+        /// are answered here.
+        /// </summary>
+        public static bool Label(string key, ref string result)
+        {
+            if (RevivalPlugin.CfgNewRegion == null || !RevivalPlugin.CfgNewRegion.Value)
+                return false;
+            string own = RevivalPlugin.CfgNewRegionName.Value;
+            if (string.IsNullOrEmpty(own)) return false;
+
+            int id = RevivalPlugin.CfgNewRegionId.Value;
+            if (key == "$GameRegion_" + id) { result = own; return true; }
+
+            Type t = RevivalPlugin.TypeByName("GameRegion");
+            if (t != null && t.IsEnum)
+            {
+                string name = Enum.GetName(t, Enum.ToObject(t, id));
+                if (!string.IsNullOrEmpty(name) && key == "$GameRegion_" + name)
+                {
+                    result = own;
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -4015,7 +5279,7 @@ namespace NextDayRevival
             if (!RevivalPlugin.CfgTurret.Value) return;
             try
             {
-                Type vgs = AccessTools.TypeByName("VehicleGameSystem");
+                Type vgs = RevivalPlugin.TypeByName("VehicleGameSystem");
                 if (vgs == null)
                 {
                     RevivalPlugin.L.LogWarning("Geschuetz: VehicleGameSystem nicht gefunden.");
@@ -4086,12 +5350,18 @@ namespace NextDayRevival
         /// <summary>
         /// Der Geschuetzplatz wird nicht automatisch vergeben. Sonst landet
         /// irgendein Mitfahrer ohne Vorwarnung im Turm.
+        ///
+        /// Seit den Patrouillen haengt hier ein zweiter Riegel: auf einem
+        /// Patrouillenfahrzeug sitzt auf JEDEM Platz ein Mann, also gibt es
+        /// keinen freien Platz. Ohne das koennte man ein Fahrzeug, das gerade
+        /// auf einen schiesst, einfach besteigen und wegfahren.
         /// </summary>
         public static void FreeSeatPostfix(object __instance, ref int __result)
         {
             try
             {
                 if (__result < 0) return;
+                if (Patrol.Besetzt(__instance)) { __result = -1; return; }
                 MonoBehaviour mb = __instance as MonoBehaviour;
                 if (mb == null || !IsBtr(mb.transform)) return;
                 Transform seatPoints = Field(__instance, "SeatPoints") as Transform;
@@ -4142,7 +5412,7 @@ namespace NextDayRevival
         /// <summary>Sucht das Fahrzeug, in dem der lokale Spieler sitzt.</summary>
         static void Rescan()
         {
-            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
             if (vgsType == null) { _vgs = null; return; }
 
             if (_vgs != null)
@@ -4396,7 +5666,7 @@ namespace NextDayRevival
         /// Korrekturdrehung - damit stimmt der Drehsinn, ohne Vorzeichen zu
         /// raten.
         /// </summary>
-        static Quaternion LocalRotationFor(float yaw, float pitch)
+        internal static Quaternion LocalRotationFor(float yaw, float pitch)
         {
             float a = yaw * Mathf.Deg2Rad;
             float e = pitch * Mathf.Deg2Rad;
@@ -4790,11 +6060,53 @@ namespace NextDayRevival
                                                  float range, out Vector3 point)
         {
             point = Vector3.zero;
-            Type physicsType = AccessTools.TypeByName("UnityEngine.Physics");
-            Type hitType = AccessTools.TypeByName("UnityEngine.RaycastHit");
-            if (physicsType == null || hitType == null) return null;
+            if (!LookUpRaycast()) return null;
 
-            MethodInfo chosen = null;
+            object[] args = new object[] {
+                origin, direction, Activator.CreateInstance(_hitType), range };
+            if (!(bool)_raycast.Invoke(null, args)) return null;
+
+            if (_hitPoint != null) point = (Vector3)_hitPoint.GetValue(args[2], null);
+
+            Component hitCollider = _hitCollider.GetValue(args[2], null) as Component;
+            return hitCollider == null ? null : hitCollider.gameObject;
+        }
+
+        static Type _hitType;
+        static MethodInfo _raycast;
+        static PropertyInfo _hitPoint, _hitCollider;
+        static bool _raycastLookedUp;
+
+        /// <summary>
+        /// Resolves Physics.Raycast and the two RaycastHit properties once.
+        ///
+        /// This used to happen inside RaycastObject, per cast. Two type
+        /// lookups, a GetMethods over all ~120 public statics of
+        /// UnityEngine.Physics with a linear scan for the right overload, and
+        /// two GetProperty calls - milliseconds of reflection for a cast that
+        /// takes microseconds. The turret survived it because it casts when a
+        /// shell leaves the barrel; the patrol driver casts three obstacle
+        /// rays every FixedUpdate and put the game on the floor at 3 FPS.
+        ///
+        /// A failure is remembered, unlike a missing type in
+        /// RevivalPlugin.TypeByName: if UnityEngine.PhysicsModule is not
+        /// there on the first cast it will not appear later, and repeating
+        /// the full scan per frame is the very thing this exists to stop.
+        /// </summary>
+        static bool LookUpRaycast()
+        {
+            if (_raycastLookedUp) return _raycast != null;
+            _raycastLookedUp = true;
+
+            Type physicsType = RevivalPlugin.TypeByName("UnityEngine.Physics");
+            _hitType = RevivalPlugin.TypeByName("UnityEngine.RaycastHit");
+            if (physicsType == null || _hitType == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: UnityEngine.Physics oder "
+                    + "RaycastHit nicht gefunden - kein Raycast.");
+                return false;
+            }
+
             MethodInfo[] methods = physicsType.GetMethods(BindingFlags.Public | BindingFlags.Static);
             for (int i = 0; i < methods.Length; i++)
             {
@@ -4804,32 +6116,30 @@ namespace NextDayRevival
                 if (ps.Length == 4 && ps[0].ParameterType == typeof(Vector3)
                     && ps[1].ParameterType == typeof(Vector3)
                     && ps[2].ParameterType.IsByRef
-                    && ps[2].ParameterType.GetElementType() == hitType
+                    && ps[2].ParameterType.GetElementType() == _hitType
                     && ps[3].ParameterType == typeof(float))
                 {
-                    chosen = m;
+                    _raycast = m;
                     break;
                 }
             }
-            if (chosen == null)
+            if (_raycast == null)
             {
                 RevivalPlugin.L.LogWarning("Geschuetz: Physics.Raycast nicht gefunden.");
-                return null;
+                return false;
             }
 
-            object[] args = new object[] {
-                origin, direction, Activator.CreateInstance(hitType), range };
-            if (!(bool)chosen.Invoke(null, args)) return null;
-
-            PropertyInfo pointProperty = hitType.GetProperty("point",
+            _hitPoint = _hitType.GetProperty("point",
                 BindingFlags.Public | BindingFlags.Instance);
-            if (pointProperty != null) point = (Vector3)pointProperty.GetValue(args[2], null);
-
-            PropertyInfo colliderProperty = hitType.GetProperty("collider",
+            _hitCollider = _hitType.GetProperty("collider",
                 BindingFlags.Public | BindingFlags.Instance);
-            if (colliderProperty == null) return null;
-            Component hitCollider = colliderProperty.GetValue(args[2], null) as Component;
-            return hitCollider == null ? null : hitCollider.gameObject;
+            if (_hitCollider == null)
+            {
+                RevivalPlugin.L.LogWarning("Geschuetz: RaycastHit.collider nicht gefunden.");
+                _raycast = null;
+                return false;
+            }
+            return true;
         }
 
         /// <summary>
@@ -4839,9 +6149,9 @@ namespace NextDayRevival
         /// Schaden, alles andere den Vorgabewert seines Typs. Passt keine
         /// Signatur, wird das protokolliert statt geraten.
         /// </summary>
-        static bool TryDamage(GameObject struck, string typeName, string rpc, float damage)
+        internal static bool TryDamage(GameObject struck, string typeName, string rpc, float damage)
         {
-            Type t = AccessTools.TypeByName(typeName);
+            Type t = RevivalPlugin.TypeByName(typeName);
             if (t == null) return false;
             Component target = struck.GetComponentInParent(t);
             if (target == null) return false;
@@ -5210,7 +6520,7 @@ namespace NextDayRevival
         static List<object> PlayerInventories()
         {
             List<object> found = new List<object>();
-            Type t = AccessTools.TypeByName("PlayerInventoryManager");
+            Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
             if (t == null) return found;
             UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
             for (int i = 0; i < all.Length; i++)
@@ -5245,7 +6555,7 @@ namespace NextDayRevival
         static object TrunkContainer()
         {
             if (_vehicleRoot == null) return null;
-            Type ic = AccessTools.TypeByName("ItemsContainer");
+            Type ic = RevivalPlugin.TypeByName("ItemsContainer");
             if (ic == null) return null;
             Component[] all = _vehicleRoot.GetComponentsInChildren(ic, true);
             return all.Length == 0 ? null : all[0];
@@ -5764,7 +7074,7 @@ namespace NextDayRevival
             quelle = null;
             try
             {
-                Type t = AccessTools.TypeByName("UnityEngine.Terrain");
+                Type t = RevivalPlugin.TypeByName("UnityEngine.Terrain");
                 if (t == null) return null;
                 MethodInfo aktiv = AccessTools.PropertyGetter(t, "activeTerrain");
                 if (aktiv == null) return null;
@@ -6054,7 +7364,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("SteamInterface");
+                Type t = RevivalPlugin.TypeByName("SteamInterface");
                 if (t == null) return null;
                 MethodInfo m = AccessTools.Method(t, "GetSteamID", null, null);
                 if (m == null) return null;
@@ -6259,7 +7569,7 @@ namespace NextDayRevival
         /// </summary>
         static object InventarManager()
         {
-            Type t = AccessTools.TypeByName("PlayerInventoryManager");
+            Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
             if (t == null) return null;
             string[] namen = new string[] { "current", "Instance", "instance" };
             for (int i = 0; i < namen.Length; i++)
@@ -6322,7 +7632,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("CameraFPSController");
+                Type t = RevivalPlugin.TypeByName("CameraFPSController");
                 if (t == null)
                 {
                     RevivalPlugin.L.LogWarning("Geschuetzkamera: CameraFPSController "
@@ -6453,7 +7763,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerLifeDataManager");
+                Type t = RevivalPlugin.TypeByName("PlayerLifeDataManager");
                 if (t == null)
                 {
                     RevivalPlugin.L.LogWarning("Erkaeltung: PlayerLifeDataManager nicht gefunden.");
@@ -6590,6 +7900,35 @@ namespace NextDayRevival
 
         static Material _mat;
 
+        /// <summary>
+        /// The first F9 spawn used to load two meshes and three 2K textures in
+        /// one Update call. Unity could not service Photon during that work,
+        /// and the combined pause exceeded its 15 second disconnect timeout.
+        /// Fill the existing Assets caches near startup instead, yielding one
+        /// frame between every expensive file/decode step. The actual tank
+        /// construction remains synchronous but has no disk work left.
+        /// </summary>
+        public static IEnumerator Prewarm()
+        {
+            if (RevivalPlugin.CfgTank == null || !RevivalPlugin.CfgTank.Value
+                || RevivalPlugin.CfgTankSwapMesh == null
+                || !RevivalPlugin.CfgTankSwapMesh.Value)
+                yield break;
+
+            yield return null;
+            Assets.Load("t72_hull.ndmesh");
+            yield return null;
+            Assets.Load("t72_turret.ndmesh");
+            yield return null;
+            Assets.Texture("t72_diffuse.png", false, true);
+            yield return null;
+            Assets.Texture("t72_metal.png", true, true);
+            yield return null;
+            Assets.Texture("t72_normal.png", true, true);
+            yield return null;
+            RevivalPlugin.L.LogInfo("Panzer: resources prewarmed for F9.");
+        }
+
         public static bool IstPanzer(Transform root)
         {
             if (root == null) return false;
@@ -6617,7 +7956,7 @@ namespace NextDayRevival
 
         static void Sitze(GameObject car)
         {
-            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
             if (vgsType == null) return;
             Component vgs = car.GetComponent(vgsType);
             if (vgs == null) return;
@@ -6852,6 +8191,7 @@ namespace NextDayRevival
         static bool _keyParsed;
         static KeyCode _tankKey = KeyCode.None;
         static bool _tankKeyParsed;
+        static bool _tankTimeoutRaised;
 
         public static void Tick()
         {
@@ -6862,6 +8202,7 @@ namespace NextDayRevival
                 // ist Spielinhalt und standardmaessig an.
                 if (RevivalPlugin.CfgTank.Value && Input.GetKeyDown(TankKey()))
                 {
+                    GuardTankTimeout();
                     Spawn(true);
                     return;
                 }
@@ -6875,8 +8216,39 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>
+        /// Put a vehicle down at a given place. Same path as the F7/F9 keys -
+        /// same prefab, same three parts, same tank and durability - only the
+        /// position comes from the caller instead of from the camera. The
+        /// patrol driver spawns through here so there is exactly one place
+        /// that knows how a vehicle is built.
+        /// </summary>
+        internal static GameObject SpawnAt(Vector3 pos, Quaternion rot, bool panzer)
+        {
+            if (!IsMasterClient())
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: dieser Client ist nicht "
+                    + "Masterclient. InstantiateSceneObject wird von Photon abgewiesen.");
+                return null;
+            }
+
+            string name = RevivalPlugin.CfgSpawnCarName.Value;
+            GameObject car = InstantiateSceneObject("VehicleSpawn\\" + name, pos, rot);
+            if (car == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: Photon lieferte null fuer \""
+                    + name + "\". Ist der Prefabname richtig?");
+                return null;
+            }
+
+            Prepare(car);
+            if (panzer) Tank.Umbauen(car);
+            return car;
+        }
+
         static void Spawn(bool panzer)
         {
+            float started = Time.realtimeSinceStartup;
             Camera cam = Camera.main;
             if (cam == null)
             {
@@ -6930,7 +8302,66 @@ namespace NextDayRevival
 
             RevivalPlugin.L.LogInfo((panzer ? "Panzer aus \"" : "Fahrzeug \"")
                 + name + "\" erzeugt bei " + pos
-                + ", Boden \"" + under.name + "\".");
+                + ", Boden \"" + under.name + "\" in "
+                + (Time.realtimeSinceStartup - started).ToString("0.00") + " s.");
+        }
+
+        /// <summary>
+        /// Photon 15 seconds is too aggressive for the synchronous first tank
+        /// construction on this Unity version. Raise the existing peer value
+        /// immediately before F9 and keep it for the session. This does not
+        /// affect normal traffic; it only delays declaring a genuinely dead
+        /// connection while the main thread is occupied.
+        /// </summary>
+        static void GuardTankTimeout()
+        {
+            if (_tankTimeoutRaised) return;
+            try
+            {
+                Type network = RevivalPlugin.TypeByName("PhotonNetwork");
+                if (network == null) throw new Exception("PhotonNetwork missing");
+
+                object peer = null;
+                FieldInfo peerField = AccessTools.Field(network, "networkingPeer");
+                if (peerField != null) peer = peerField.GetValue(null);
+                if (peer == null)
+                {
+                    PropertyInfo peerProperty = AccessTools.Property(network,
+                                                                    "networkingPeer");
+                    if (peerProperty != null)
+                        peer = peerProperty.GetValue(null, null);
+                }
+                if (peer == null) throw new Exception("networkingPeer missing");
+
+                const int wanted = 60000;
+                int previous = -1;
+                PropertyInfo property = AccessTools.Property(peer.GetType(),
+                                                              "DisconnectTimeout");
+                if (property != null && property.CanWrite)
+                {
+                    object old = property.GetValue(peer, null);
+                    if (old != null) previous = Convert.ToInt32(old);
+                    property.SetValue(peer, wanted, null);
+                }
+                else
+                {
+                    FieldInfo field = AccessTools.Field(peer.GetType(),
+                                                        "DisconnectTimeout");
+                    if (field == null) throw new Exception("DisconnectTimeout missing");
+                    object old = field.GetValue(peer);
+                    if (old != null) previous = Convert.ToInt32(old);
+                    field.SetValue(peer, wanted);
+                }
+
+                _tankTimeoutRaised = true;
+                RevivalPlugin.L.LogInfo("Panzer: Photon timeout " + previous
+                    + " -> " + wanted + " ms for F9 construction.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Panzer: Photon timeout guard failed - "
+                    + ex.Message);
+            }
         }
 
         /// <summary>
@@ -6959,7 +8390,7 @@ namespace NextDayRevival
         /// </summary>
         static void Prepare(GameObject car)
         {
-            Type vgsType = AccessTools.TypeByName("VehicleGameSystem");
+            Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
             if (vgsType == null)
             {
                 RevivalPlugin.L.LogWarning("Fahrzeugspawn: VehicleGameSystem nicht gefunden.");
@@ -7015,7 +8446,7 @@ namespace NextDayRevival
 
         static bool IsMasterClient()
         {
-            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (photon == null) return false;
             MethodInfo getter = AccessTools.PropertyGetter(photon, "isMasterClient");
             if (getter == null) getter = AccessTools.PropertyGetter(photon, "IsMasterClient");
@@ -7028,7 +8459,7 @@ namespace NextDayRevival
         static GameObject InstantiateSceneObject(string path, Vector3 position,
                                                  Quaternion rotation)
         {
-            Type photon = AccessTools.TypeByName("PhotonNetwork");
+            Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
 
             MethodInfo chosen = null;
@@ -7089,6 +8520,4281 @@ namespace NextDayRevival
                     + RevivalPlugin.CfgSpawnCarKey.Value + " unbekannt, benutze F7.");
             }
             return _key;
+        }
+    }
+
+    // ------------------------------------------------------ NPC vehicle patrols
+
+    /// <summary>
+    /// Vehicles that drive the road on their own.
+    ///
+    /// This is **phase 2** of `docs/ai/tasks/npc-vehicle-patrols.md`: the
+    /// driver, and nothing else. One vehicle, one route, no gun, no convoy,
+    /// no loot. Its acceptance needs no eyes - switch it on, let it run ten
+    /// minutes, and read the lap counter out of `BepInEx\LogOutput.log`.
+    ///
+    /// HOW A VEHICLE WITH NOBODY IN IT DRIVES (REVERSE_ENGINEERING.md 20)
+    ///
+    ///   The game's own way in is closed. `VehicleGameSystem::InputAxis`
+    ///   returns at once while `_playersCount &lt;= 0`, and it would not help
+    ///   anyway: it writes `VerticalAxis` / `HorizontalAxis`, which are only
+    ///   the wish. `RCCCarControllerV2::KeyboardControlling` - which reads no
+    ///   keyboard - turns that wish into `gasInput` by lerping towards it at
+    ///   10 per second. Write `gasInput` yourself and that lerp erases it.
+    ///
+    ///   The door is one bool. `RCCCarControllerV2::Update` skips
+    ///   `KeyboardControlling` when `AIController` is true, and skips the
+    ///   branch that zeroes the inputs when `canControl` is false as well.
+    ///   So: set `AIController = true`, and the four input fields are ours
+    ///   alone. `canControl` gates nothing we need - `Engine`, `Braking` and
+    ///   `ApplySteering` sit after that gate in `FixedUpdate`.
+    ///
+    ///   What DOES stop the vehicle is sleep mode, and it is two paths, not
+    ///   one. The timer puts an empty vehicle to sleep 25 s after it is left
+    ///   alone; `ForceSleepModeController` disables its physics after about
+    ///   ONE second of standing still with an empty driver's seat - which is
+    ///   what a patrol looks like in the moment it spawns. Both end in
+    ///   `DisablePhys`, which sets `RCCCarControllerV2.IsMine = false`, and
+    ///   RCC's `FixedUpdate` returns on its first line when that is false.
+    ///
+    ///   Faking `_playersCount` is the obvious idea and it is wrong:
+    ///   `RefreshPlayersCount` recomputes it from the seats, and while it
+    ///   holds, `VehicleGameSystem::Update` runs the HOST's own
+    ///   `KeyboardControlling` on the patrol vehicle - his keys would drive
+    ///   it and his engine key would switch it off. So the sleep is stopped
+    ///   with two Harmony prefixes instead, and only for vehicles this class
+    ///   owns. Every other vehicle in the world keeps its sleep mode.
+    ///
+    /// REVERSE IS THE BRAKE. `RCCCarControllerV2::GearBox` shifts into
+    /// reverse when `brakeInput > 0.1` while the local forward velocity is
+    /// under 1 m/s. With `autoReverse` on, `canGoReverseNow` is always true,
+    /// so **any** braking below walking pace flips the vehicle into reverse.
+    /// That is why <see cref="Drive"/> never brakes under
+    /// <see cref="CoastBelow"/> km/h unless it means to reverse.
+    ///
+    /// UNTESTED: all of it. Nothing in this class has been seen in the game.
+    /// </summary>
+    public static class Patrol
+    {
+        /// <summary>Below this speed the driver coasts instead of braking,
+        /// because braking here means reverse gear. See the class comment.</summary>
+        const float CoastBelow = 8f;
+
+        /// <summary>Steering angle in degrees that means full lock.</summary>
+        const float FullLockAt = 25f;
+
+        /// <summary>How far ahead of the hull the obstacle rays start. The
+        /// BTR-80A is about 7.6 m long, so 4.2 m clears its own collider.</summary>
+        const float NoseOffset = 4.2f;
+
+        // ------------------------------------------------------------- the file
+
+        class Point
+        {
+            public Vector3 Pos;
+            public float Speed;          // km/h on the leg starting here, 0 = config
+            public string Flags;
+        }
+
+        /// <summary>
+        /// One route, and everything about the patrol that drives it.
+        ///
+        /// WHERE THE SETTINGS LIVE. In the FLAGS of waypoint 0, as
+        /// `spawn,fraction=looter,vehicle=btr,count=2`. Not in a second file
+        /// and not in a new column: the recorder writes this file from inside
+        /// the game, `routecheck.py` reads it, `build.ps1` refuses to
+        /// overwrite it, and every one of those three would have needed
+        /// teaching. A flag on the first waypoint needed none of them - the
+        /// loader already splits flags on commas and the checker already
+        /// ignores what it does not know.
+        /// </summary>
+        class Route
+        {
+            public string Name;
+            public List<Point> P = new List<Point>();
+
+            /// <summary>civilian, looter, traitor or neutral - see
+            /// <see cref="Fraktion"/>. Empty means the one in the config.</summary>
+            public string Fraction = "";
+
+            /// <summary>btr, tank or mixed. Empty means the one in the
+            /// config.</summary>
+            public string Vehicle = "";
+
+            /// <summary>How many patrols this route should carry. The
+            /// automatic keeps that many alive on it, inside the global
+            /// MaxVehicles.</summary>
+            public int Count = 1;
+
+            /// <summary>Does the automatic use this route at all? A route
+            /// being recorded, or one whose waypoints are wrong, is switched
+            /// off without being deleted.</summary>
+            public bool Enabled = true;
+
+            public string Seite
+            {
+                get
+                {
+                    string f = Fraktion.Sauber(Fraction);
+                    if (f.Length > 0) return f;
+                    f = Fraktion.Sauber(RevivalPlugin.CfgPatrolFraction.Value);
+                    return f.Length > 0 ? f : "neutral";
+                }
+            }
+
+            public string Wagen
+            {
+                get
+                {
+                    string v = Vehicle == null ? "" : Vehicle.Trim().ToLowerInvariant();
+                    if (v == "btr" || v == "tank" || v == "mixed") return v;
+                    v = RevivalPlugin.CfgPatrolVehicle.Value;
+                    if (v == null) return "mixed";
+                    v = v.Trim().ToLowerInvariant();
+                    return (v == "btr" || v == "tank") ? v : "mixed";
+                }
+            }
+        }
+
+        static Dictionary<string, Route> _routes = new Dictionary<string, Route>();
+        static List<string> _order = new List<string>();
+        static bool _loaded;
+
+        // ------------------------------------------------------------ one patrol
+
+        class Unit
+        {
+            public GameObject Car;
+            public Component Vgs;        // VehicleGameSystem
+            public Component Rcc;        // RCCCarControllerV2
+            public object Body;          // UnityEngine.Rigidbody, by reflection
+            public Route Route;
+            public int Next;             // waypoint being driven to
+            public int Lap;
+            public bool Armed;
+            public float Wait;           // seconds waited for IsInitialized
+            public float Stuck;          // seconds with throttle and no speed
+            public int Stage;            // 0 drive 1 reverse 2 ram
+            public float StageTime;
+            public int Frees;
+            public int Reported;         // last lap written to the log
+
+            // ---------------------------------------------------- the gun
+            public bool Tank;            // which of the two value profiles
+            public Transform[] Turrets = new Transform[0];
+            public Renderer TurretRend;  // for the muzzle, see Muendung
+            public float Yaw, Pitch;     // where the barrel is being sent
+            public Transform Target;     // the player being engaged
+            public float Held;           // seconds this target has been held
+            public float Lost;           // seconds since it was last seen
+            public float NextShot;       // Time.time the gun may fire again
+            public float NextLook;       // Time.time of the next target scan
+            public int Burst;            // shots fired in the running burst
+            public int Shots, Hits;
+
+            // --------------------------------------------------- the crew
+            public string Seite;         // which side climbs out of the wreck
+            public int CrewSize;         // men aboard, one per seat
+            public bool CrewOut;         // they have climbed out
+            public float Died;           // Time.time the vehicle was killed
+        }
+
+        static List<Unit> _units = new List<Unit>();
+
+        // --------------------------------------------------- the automatic
+
+        /// <summary>Seconds between two vehicles while the road is being
+        /// FILLED. A replacement waits `RespawnSeconds` instead; this is only
+        /// so the first MaxVehicles do not all appear in the same second.</summary>
+        const float FillEvery = 12f;
+
+        /// <summary>Seconds after the world comes up before the first patrol
+        /// goes out. The scene is still settling in the first few seconds -
+        /// terrain, colliders, the player's own body - and a vehicle dropped
+        /// into that lands on nothing.</summary>
+        const float SettleFirst = 25f;
+
+        /// <summary>Metres an automatic patrol keeps away from the player when
+        /// it is put down. A patrol appearing at 150 m is a vehicle coming down
+        /// the road; one appearing at 30 m is a bug report.</summary>
+        const float AutoAway = 150f;
+
+        /// <summary>Is the automatic allowed to act? Shift plus the patrol key
+        /// switches it off, the key alone switches it back on - otherwise a
+        /// road cleared by hand would refill by itself within seconds.</summary>
+        static bool _auto = true;
+
+        /// <summary>Does the automatic still replace losses? `RespawnSeconds`
+        /// at 0 fills the road once and never again.</summary>
+        static bool _refill = true;
+
+        /// <summary>Was the world up on the last tick? The change from false
+        /// to true is what starts the first patrol.</summary>
+        static bool _welt;
+
+        /// <summary>`Time.time` the automatic may put the next vehicle down.</summary>
+        static float _nextAuto;
+
+        /// <summary>Instance ids of the VehicleGameSystem components this class
+        /// owns. The sleep prefixes consult it, so it must be filled BEFORE the
+        /// vehicle is woken and cleared when it is given up.</summary>
+        static Dictionary<int, bool> _owned = new Dictionary<int, bool>();
+
+        // ------------------------------------------------------------ recording
+
+        static bool _recording;
+        static Vector3 _lastRecorded;
+        static bool _haveLastRecorded;
+        static float _nextRecord;
+
+        /// <summary>Metres the recorder must have moved before it writes
+        /// another waypoint, however long it waited. Not a setting: it is a
+        /// floor against a file full of the same point, not a taste.</summary>
+        const float MinStep = 3f;
+
+        // ------------------------------------------------------------------ keys
+
+        static KeyCode _key, _recKey, _autoKey, _editKey;
+        static bool _keysParsed;
+
+        // =====================================================================
+        //  Harmony: keep our own vehicles out of sleep mode
+        // =====================================================================
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
+                if (t == null)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol: VehicleGameSystem not found - "
+                        + "patrol vehicles would fall asleep, the class stays off.");
+                    return;
+                }
+
+                MethodInfo disable = AccessTools.Method(t, "DisablePhys", null, null);
+                if (disable != null)
+                    harmony.Patch(disable,
+                        new HarmonyMethod(typeof(Patrol).GetMethod("DisablePhysPrefix")),
+                        null, null, null, null);
+                else
+                    RevivalPlugin.L.LogWarning("Patrol: DisablePhys not found.");
+
+                MethodInfo sleep = AccessTools.Method(t, "SetSleepModeEnabled",
+                    new Type[] { typeof(bool) }, null);
+                if (sleep != null)
+                    harmony.Patch(sleep,
+                        new HarmonyMethod(typeof(Patrol).GetMethod("SleepPrefix")),
+                        null, null, null, null);
+                else
+                    RevivalPlugin.L.LogWarning("Patrol: SetSleepModeEnabled not found.");
+
+                RevivalPlugin.L.LogInfo("Patrol: sleep mode suppressed for own vehicles.");
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol install: " + ex); }
+        }
+
+        /// <summary>False = swallow the call. Only for vehicles we own.</summary>
+        public static bool DisablePhysPrefix(object __instance)
+        {
+            return !Owned(__instance);
+        }
+
+        /// <summary>Let a wake-up through, swallow a sleep. Sleeping would also
+        /// switch the net sync off, and then a second player sees a vehicle
+        /// standing where it no longer is.</summary>
+        public static bool SleepPrefix(object __instance, bool __0)
+        {
+            if (!__0) return true;
+            return !Owned(__instance);
+        }
+
+        static bool Owned(object instance)
+        {
+            if (_owned.Count == 0) return false;
+            UnityEngine.Object o = instance as UnityEngine.Object;
+            if (o == null) return false;
+            return _owned.ContainsKey(o.GetInstanceID());
+        }
+
+        // =====================================================================
+        //  Per frame
+        // =====================================================================
+
+        public static void Tick()
+        {
+            if (!RevivalPlugin.CfgPatrol.Value) return;
+            try
+            {
+                ParseKeys();
+                if (Input.GetKeyDown(_key))
+                {
+                    if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+                        StopAll();
+                    else
+                        Toggle();
+                }
+                if (Input.GetKeyDown(_autoKey)) ToggleRecording();
+                if (Input.GetKeyDown(_recKey)) RecordHere(true);
+                if (_recording) RecordWhileWalking();
+                Editor.Tick();
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol tick: " + ex); }
+
+            try { Nachschub(); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol auto: " + ex); }
+
+            // The gun runs at frame rate, not in the physics step: the turret
+            // is turned by RotateTowards and a turret that steps 50 times a
+            // second while the picture is drawn 120 times stutters visibly.
+            // The driving stays in FixedTick, where it belongs.
+            try { Gun.Tick(_units); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol gun: " + ex); }
+        }
+
+        /// <summary>The driving itself. Belongs in FixedUpdate: it writes the
+        /// same fields RCC reads in ITS FixedUpdate, and a driver running at
+        /// frame rate would fight the physics step.</summary>
+        /// <summary>The editor window. Belongs in OnGUI, like every other
+        /// piece of IMGUI in this plugin.</summary>
+        public static void Draw()
+        {
+            if (!RevivalPlugin.CfgPatrol.Value) return;
+            try { Editor.Draw(); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol editor: " + ex); }
+        }
+
+        /// <summary>Is the editor window open? RevivalPlugin.Update asks,
+        /// because the cursor belongs to the window while it is.</summary>
+        public static bool EditorOpen
+        {
+            get { return RevivalPlugin.CfgPatrol.Value && Editor.IsOpen; }
+        }
+
+        public static void FixedTick()
+        {
+            if (!RevivalPlugin.CfgPatrol.Value) return;
+            if (_units.Count == 0) return;
+            try
+            {
+                for (int i = _units.Count - 1; i >= 0; i--)
+                {
+                    Unit u = _units[i];
+                    if (u.Car == null)
+                    {
+                        Forget(u);
+                        _units.RemoveAt(i);
+                        RevivalPlugin.L.LogInfo("Patrol: vehicle on " + u.Route.Name
+                            + " is gone after " + u.Lap + " lap(s).");
+                        Verloren();
+                        continue;
+                    }
+                    if (!u.Armed) { Arm(u); continue; }
+                    if (Gefallen(u)) continue;
+                    Keep(u);
+                    Drive(u);
+                }
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol drive: " + ex); }
+        }
+
+        // =====================================================================
+        //  Start and stop
+        // =====================================================================
+
+        static void Toggle()
+        {
+            // The key is also the way back: whoever presses it wants patrols,
+            // so the automatic that Shift switched off is switched on again.
+            if (!_auto)
+            {
+                _auto = true;
+                _refill = true;
+                _nextAuto = Time.time + FillEvery;
+                RevivalPlugin.L.LogInfo("Patrol: the automatic is on again.");
+            }
+
+            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+            if (_units.Count >= max)
+            {
+                RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) are "
+                    + "already out, MaxVehicles is " + max
+                    + ". Shift plus the key takes them off the road.");
+                Turret.Hinweis(_units.Count + " patrols out - Shift+key stops them", 3f);
+                return;
+            }
+
+            Load(false);
+            // The named route first, because the key has always meant "one
+            // more on the route I am working on". Since every route is a
+            // patrol of its own, a name that is not in the file is no longer a
+            // dead end: the route most in need gets the vehicle instead.
+            Route r = Active();
+            if (r == null) r = Duenn();
+            if (r == null)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: route \""
+                    + RevivalPlugin.CfgPatrolRoute.Value + "\" is not in "
+                    + RevivalPlugin.CfgPatrolFile.Value
+                    + " and no other route wants a patrol. Record one - the "
+                    + "editor key is " + RevivalPlugin.CfgPatrolEditorKey.Value + ".");
+                Turret.Hinweis("No route \"" + RevivalPlugin.CfgPatrolRoute.Value + "\"", 4f);
+                return;
+            }
+            if (r.P.Count < 3)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: route " + r.Name + " has "
+                    + r.P.Count + " waypoints. A loop needs at least three.");
+                return;
+            }
+            Spawn(r, false);
+        }
+
+        /// <summary>
+        /// The patrols nobody pressed a key for.
+        ///
+        /// Until 2026-08-30 a patrol existed only between one F11 and the end
+        /// of the session, and the user asked for what the game's own NPCs do:
+        /// be there when the world comes up, and come back some time after
+        /// they are killed. This is that, and it is deliberately made of the
+        /// pieces that were already there - `Spawn` puts one down, `Active`
+        /// finds the route, `MaxVehicles` bounds the road.
+        ///
+        /// EVERY ROUTE IS A PATROL. Since 2026-08-30 the automatic does not
+        /// serve one route out of the config but every route in the file:
+        /// each says how many patrols it wants (`count=` in its first
+        /// waypoint's flags) and which side drives it, `Duenn` picks the one
+        /// furthest short of its number, and `MaxVehicles` is the ceiling over
+        /// all of them together. That is what makes a looter patrol outside
+        /// the looter base and a civilian one around the civilian base a
+        /// setting rather than a rebuild.
+        ///
+        /// TWO CLOCKS, and they mean different things. The road is FILLED at
+        /// `FillEvery` - a short interval, so the first MaxVehicles are out
+        /// within a minute of the world coming up. A LOSS is replaced after
+        /// `RespawnSeconds`, and that clock starts when the vehicle is
+        /// destroyed (see <see cref="Verloren"/>), not when its wreck is
+        /// cleared away - otherwise the two waits would add up and the road
+        /// would stay empty for nine minutes after a kill.
+        ///
+        /// It waits for the world. `Gun.WeltLaeuft` asks the game's own player
+        /// list, which is empty in the menu and in the loading screen; the
+        /// first patrol goes out `SettleFirst` seconds after it fills, because
+        /// a vehicle dropped into a scene that is still building lands on
+        /// nothing.
+        /// </summary>
+        static void Nachschub()
+        {
+            if (!RevivalPlugin.CfgPatrolAuto.Value || !_auto || !_refill) return;
+
+            bool welt = Gun.WeltLaeuft();
+            if (welt != _welt)
+            {
+                _welt = welt;
+                if (welt)
+                {
+                    _nextAuto = Time.time + SettleFirst;
+                    RevivalPlugin.L.LogInfo("Patrol: the world is up - the first "
+                        + "automatic patrol goes out in " + SettleFirst.ToString("0")
+                        + " s.");
+                }
+                else
+                {
+                    // The scene is gone and so is everything that stood in it.
+                    // The units would be a list of destroyed GameObjects, and
+                    // the next world would inherit them.
+                    _units.Clear();
+                    _owned.Clear();
+                    _refill = true;
+                }
+                return;
+            }
+            if (!welt) return;
+
+            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+            if (_units.Count >= max) return;
+            if (Time.time < _nextAuto) return;
+
+            Load(false);
+            Route r = Duenn();
+            if (r == null)
+            {
+                // Said once a minute, not once a frame. Both reasons for
+                // landing here are normal states, not errors: no route
+                // recorded yet, or every route already carrying the patrols
+                // it asked for.
+                _nextAuto = Time.time + 60f;
+                if (_order.Count == 0)
+                    RevivalPlugin.L.LogWarning("Patrol: AutoStart is on and no "
+                        + "route is recorded - press the editor key ("
+                        + RevivalPlugin.CfgPatrolEditorKey.Value + ") and drive "
+                        + "one.");
+                return;
+            }
+
+            int before = _units.Count;
+            Spawn(r, true);
+            if (_units.Count == before)
+            {
+                // CarSpawn has already said why. Trying again next frame would
+                // say it sixty times a second.
+                _nextAuto = Time.time + 30f;
+                return;
+            }
+            _nextAuto = Time.time + FillEvery;
+        }
+
+        /// <summary>
+        /// The route most in need of a vehicle, or null when every one of them
+        /// has what it asked for.
+        ///
+        /// EVERY route is a patrol now, not just the one named in the config.
+        /// The user's plan is patrols at many places on the map - a looter
+        /// patrol outside the looter base, a civilian one around the civilian
+        /// base - and that means the automatic has to keep several routes
+        /// stocked at once instead of one. Each route says how many it wants
+        /// (`count=` in its first waypoint's flags, 1 when it does not say),
+        /// and `MaxVehicles` is the ceiling over the whole map.
+        ///
+        /// "Most in need" is the largest shortfall, so a route that wants
+        /// three and has none is filled before one that wants one and has
+        /// none. A tie goes to the route that comes first in the file, which
+        /// makes the order predictable while a route is being tuned.
+        /// </summary>
+        static Route Duenn()
+        {
+            Route best = null;
+            int bestFehlt = 0;
+            for (int i = 0; i < _order.Count; i++)
+            {
+                Route r = _routes[_order[i]];
+                if (!r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
+                int fehlt = r.Count - Fahren(r.Name);
+                if (fehlt <= 0) continue;
+                if (best == null || fehlt > bestFehlt) { best = r; bestFehlt = fehlt; }
+            }
+            return best;
+        }
+
+        /// <summary>How many patrols are on this route right now, wrecks
+        /// included - a burning BTR still counts as that route's vehicle
+        /// until `RespawnSeconds` says otherwise.</summary>
+        static int Fahren(string name)
+        {
+            int n = 0;
+            for (int i = 0; i < _units.Count; i++)
+                if (_units[i].Car != null && _units[i].Route != null
+                    && _units[i].Route.Name == name) n++;
+            return n;
+        }
+
+        /// <summary>
+        /// A patrol is gone, and the clock for its replacement starts here.
+        /// Called the moment a vehicle is destroyed, not when the wreck is
+        /// removed - `WreckSeconds` and `RespawnSeconds` are two waits that
+        /// must not add up.
+        /// </summary>
+        static void Verloren()
+        {
+            if (!RevivalPlugin.CfgPatrolAuto.Value || !_auto) return;
+            float wait = RevivalPlugin.CfgPatrolRespawn.Value;
+            if (wait <= 0f)
+            {
+                if (_refill)
+                    RevivalPlugin.L.LogInfo("Patrol: RespawnSeconds is 0 - this one "
+                        + "is not replaced.");
+                _refill = false;
+                return;
+            }
+            float when = Time.time + wait;
+            if (when > _nextAuto) _nextAuto = when;
+            RevivalPlugin.L.LogInfo("Patrol: the next patrol goes out in "
+                + wait.ToString("0") + " s.");
+        }
+
+        public static void StopAll()
+        {
+            // Shift takes them off AND keeps them off. A road cleared by hand
+            // that fills itself again within a minute is not a stop button.
+            _auto = false;
+
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                Forget(u);
+                Weg(u.Car);
+            }
+            RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) taken off the road.");
+            _units.Clear();
+            Crew.StopAll();
+        }
+
+        /// <summary>
+        /// Does this VehicleGameSystem belong to a patrol whose crew is still
+        /// aboard? `Turret.FreeSeatPostfix` asks, and the answer decides
+        /// whether a player may climb in. Cheap: an empty dictionary is the
+        /// normal case and returns on the first line.
+        /// </summary>
+        internal static bool Besetzt(object vgs)
+        {
+            if (_units.Count == 0) return false;
+            UnityEngine.Object o = vgs as UnityEngine.Object;
+            if (o == null) return false;
+            int id = o.GetInstanceID();
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.Vgs == null || u.Vgs.GetInstanceID() != id) continue;
+                return RevivalPlugin.CfgPatrolCrew.Value && !u.CrewOut && u.CrewSize > 0;
+            }
+            return false;
+        }
+
+        static MethodInfo _photonDestroy;
+        static bool _photonDestroyLookedUp;
+
+        /// <summary>
+        /// Take a patrol vehicle out of the world - on EVERY client.
+        ///
+        /// It was put there with `PhotonNetwork.InstantiateSceneObject`
+        /// (CarSpawn), so a plain `Object.Destroy` removes it on this machine
+        /// and leaves a BTR standing on the road of every other one. Photon's
+        /// own Destroy is only allowed to the master client, which is the only
+        /// machine this class runs on anyway; if it is not to be had, the
+        /// local Destroy is still better than a vehicle that stays.
+        /// </summary>
+        static void Weg(GameObject car)
+        {
+            if (car == null) return;
+            if (!_photonDestroyLookedUp)
+            {
+                _photonDestroyLookedUp = true;
+                Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+                if (photon != null)
+                    _photonDestroy = AccessTools.Method(photon, "Destroy",
+                        new Type[] { typeof(GameObject) }, null);
+                if (_photonDestroy == null)
+                    RevivalPlugin.L.LogWarning("Patrol: PhotonNetwork.Destroy(GameObject) "
+                        + "not found - a removed patrol vehicle stays standing on the "
+                        + "other clients.");
+            }
+            if (_photonDestroy != null)
+            {
+                try
+                {
+                    _photonDestroy.Invoke(null, new object[] { car });
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol: PhotonNetwork.Destroy refused ("
+                        + ex.Message + ") - removing it locally instead.");
+                }
+            }
+            UnityEngine.Object.Destroy(car);
+        }
+
+        /// <summary>Give a vehicle back to the game: out of the owner list, so
+        /// its sleep mode works again the moment we stop steering it.</summary>
+        static void Forget(Unit u)
+        {
+            if (u.Vgs == null) return;
+            int id = u.Vgs.GetInstanceID();
+            if (_owned.ContainsKey(id)) _owned.Remove(id);
+        }
+
+        /// <summary>
+        /// Put one patrol vehicle on the route.
+        ///
+        /// `auto` decides WHERE, and the two answers are opposites on purpose.
+        /// A patrol asked for with the key should be visible at once, so it
+        /// starts at the nearest waypoint that is not on top of the man who
+        /// pressed it. A patrol the automatic puts out should NOT appear in
+        /// front of anybody - it starts as far from the player and from every
+        /// other patrol as the route allows, and drives to him.
+        /// </summary>
+        static void Spawn(Route src, bool auto)
+        {
+            Route r = OutAndBack(src);
+
+            int start = 0;
+            for (int i = 0; i < r.P.Count; i++)
+                if (HasFlag(r.P[i], "spawn")) { start = i; break; }
+
+            Vector3 me = Where();
+            float away = -1f;
+
+            int pick = auto ? Verteilt(r, me) : -1;
+            if (pick >= 0)
+            {
+                start = pick;
+                if (me != Vector3.zero) away = Flat(r.P[start].Pos - me);
+            }
+            // The spawn flag sits where the RECORDING began, which can be a
+            // kilometre from where the key is pressed - and a patrol nobody
+            // ever sees is indistinguishable from one that never started. So
+            // it starts at the nearest waypoint instead, but not one so close
+            // that the vehicle lands on the man watching.
+            else if (me != Vector3.zero)
+            {
+                int near = -1;
+                float best = 0f;
+                for (int i = 0; i < r.P.Count; i++)
+                {
+                    float d = Flat(r.P[i].Pos - me);
+                    if (d < 20f) continue;
+                    if (near < 0 || d < best) { near = i; best = d; }
+                }
+                if (near >= 0 && best <= 400f) { start = near; away = best; }
+                else
+                    RevivalPlugin.L.LogInfo("Patrol: no waypoint of " + r.Name
+                        + " within 400 m - starting at waypoint " + start
+                        + ", where the recording began.");
+            }
+
+            // The waypoints come from the CAMERA, which sits above the driver
+            // and, in a vehicle, well above the road. Dropping the patrol from
+            // that height is survivable but ugly - the ground under the
+            // waypoint is the honest place, found the same way the F7 spawn
+            // finds it.
+            Vector3 pos = r.P[start].Pos + Vector3.up * 1.6f;
+            Vector3 ground;
+            GameObject under = Turret.RaycastObject(r.P[start].Pos + Vector3.up * 30f,
+                                                    Vector3.down, 200f, out ground);
+            if (under != null) pos = ground + Vector3.up * 1.6f;
+
+            Vector3 ahead = r.P[(start + 1) % r.P.Count].Pos - r.P[start].Pos;
+            ahead.y = 0f;
+            if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
+            ahead.Normalize();
+
+            bool tank = TankThisTime(r);
+            GameObject car = CarSpawn.SpawnAt(pos, Quaternion.LookRotation(ahead, Vector3.up),
+                                              tank);
+            if (car == null) return;      // CarSpawn has already said why
+
+            Unit u = new Unit();
+            u.Car = car;
+            u.Route = r;
+            u.Tank = tank;
+            u.Seite = r.Seite;
+            u.Next = (start + 1) % r.P.Count;
+            _units.Add(u);
+            _spawned++;
+
+            RevivalPlugin.L.LogInfo("Patrol: "
+                + (auto ? "automatic " : "")
+                + (tank ? "tank" : "BTR")
+                + " (" + u.Seite + ") put down on " + r.Name
+                + " at waypoint " + start
+                + " " + pos + ", driving to " + u.Next
+                + (away >= 0f ? ", " + away.ToString("0") + " m from the player" : "")
+                + ".");
+            Turret.Hinweis(away >= 0f
+                ? "Patrol " + r.Name + " (" + u.Seite + "), "
+                  + away.ToString("0") + " m away"
+                : "Patrol " + r.Name + " (" + u.Seite + ") started", 4f);
+        }
+
+        /// <summary>
+        /// The waypoint an AUTOMATIC patrol starts at: the one whose nearest
+        /// neighbour - the player, or another patrol already on the road - is
+        /// as far away as the route allows.
+        ///
+        /// One number decides it, the smallest of those distances, and taking
+        /// the largest of THOSE spreads the vehicles over the route by itself:
+        /// with an empty road it is the far end, with one patrol out it is the
+        /// opposite side, with three it is whatever gap is left. No slots, no
+        /// division of the route into sectors, and nothing to keep in sync
+        /// when a vehicle is lost.
+        ///
+        /// Returns -1 when the whole route lies inside `AutoAway` of the
+        /// player. Then the caller falls back to the near rule - a patrol on a
+        /// short route in front of the player is still better than none.
+        /// </summary>
+        static int Verteilt(Route r, Vector3 me)
+        {
+            int best = -1;
+            float bestScore = 0f;
+            for (int i = 0; i < r.P.Count; i++)
+            {
+                Vector3 pos = r.P[i].Pos;
+
+                float score = 100000f;
+                if (me != Vector3.zero)
+                {
+                    float d = Flat(pos - me);
+                    if (d < AutoAway) continue;
+                    score = d;
+                }
+                for (int k = 0; k < _units.Count; k++)
+                {
+                    if (_units[k].Car == null) continue;
+                    float d = Flat(pos - _units[k].Car.transform.position);
+                    if (d < score) score = d;
+                }
+                if (best < 0 || score > bestScore) { best = i; bestScore = score; }
+            }
+            return best;
+        }
+
+        /// <summary>How many patrols have been put down since the game
+        /// started. Only "mixed" reads it, and only to alternate.</summary>
+        static int _spawned;
+
+        /// <summary>
+        /// btr, tank, or mixed - and mixed ALTERNATES instead of rolling a
+        /// die. Two dice throws in a row give two BTRs often enough that a
+        /// player would report "the tank patrol does not work"; alternating
+        /// means the second key press is always the other kind.
+        /// </summary>
+        static bool TankThisTime(Route r)
+        {
+            string want = r.Wagen;
+            if (want == "tank") return true;
+            if (want == "btr") return false;
+            return (_spawned % 2) == 1;
+        }
+
+        /// <summary>
+        /// A recorded route is OPEN: it ends where the driver stopped, and the
+        /// leg from the last waypoint back to the first is a line across
+        /// country that nobody drove. On R1, recorded 2026-08-30, that line is
+        /// 1998 m long - driving it is the difference between a patrol and a
+        /// vehicle disappearing into the woods.
+        ///
+        /// An open route is therefore mirrored: out along the road, and back
+        /// the same way. The driver stays a pure loop driver, needs no second
+        /// code path, and the two ends become u-turns - which is what the
+        /// stuck escalation is there for. A route whose ends already meet is
+        /// left alone.
+        ///
+        /// The copy belongs to the patrol. What stands in `_routes` stays as
+        /// recorded, because the recorder writes THAT back to the file.
+        /// </summary>
+        static Route OutAndBack(Route r)
+        {
+            int n = r.P.Count;
+            if (n < 3) return r;
+
+            float sum = 0f;
+            for (int i = 0; i < n - 1; i++)
+                sum += Flat(r.P[i + 1].Pos - r.P[i].Pos);
+            float avg = sum / (n - 1);
+            float closing = Flat(r.P[0].Pos - r.P[n - 1].Pos);
+            if (closing <= Mathf.Max(80f, 3f * avg)) return r;
+
+            Route back = new Route();
+            back.Name = r.Name;
+            back.Fraction = r.Fraction;
+            back.Vehicle = r.Vehicle;
+            back.Count = r.Count;
+            back.Enabled = r.Enabled;
+            for (int i = 0; i < n; i++) back.P.Add(r.P[i]);
+            for (int i = n - 2; i >= 1; i--) back.P.Add(r.P[i]);
+
+            RevivalPlugin.L.LogInfo("Patrol: " + r.Name + " is open - the two ends "
+                + "are " + closing.ToString("0") + " m apart while the legs average "
+                + avg.ToString("0") + " m. Driving it out and back: "
+                + back.P.Count + " waypoints, a u-turn at each end.");
+            return back;
+        }
+
+        /// <summary>Length in the ground plane. Height is never a distance here:
+        /// the waypoints carry camera height, the vehicle carries its own.</summary>
+        static float Flat(Vector3 v)
+        {
+            v.y = 0f;
+            return v.magnitude;
+        }
+
+        // =====================================================================
+        //  Arming: the four settings that make an empty vehicle drivable
+        // =====================================================================
+
+        static void Arm(Unit u)
+        {
+            u.Wait += Time.fixedDeltaTime;
+
+            Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
+            if (vgsType == null) { Drop(u, "VehicleGameSystem not found"); return; }
+
+            if (u.Vgs == null) u.Vgs = u.Car.GetComponent(vgsType);
+            if (u.Vgs == null) { Drop(u, "the spawned object has no VehicleGameSystem"); return; }
+
+            // The vehicle needs a few frames. Until IsInitialized is true,
+            // SetSleepModeEnabled returns without doing anything and the
+            // component references are not filled in yet.
+            if (!GetBool(u.Vgs, "IsInitialized", false))
+            {
+                if (u.Wait > 15f)
+                    Drop(u, "IsInitialized stayed false for 15 s");
+                return;
+            }
+
+            u.Rcc = GetField(u.Vgs, "_carController") as Component;
+            if (u.Rcc == null) { Drop(u, "_carController is empty"); return; }
+            u.Body = GetField(u.Vgs, "_rigidbody");
+
+            // From here on the sleep prefixes protect this vehicle. Entering it
+            // in the owner list BEFORE waking it is deliberate: EnablePhys is
+            // safe, but anything that runs in between must not put it back to
+            // sleep.
+            _owned[u.Vgs.GetInstanceID()] = true;
+
+            // The one bool that takes the car out of every input path the game
+            // has (REVERSE_ENGINEERING.md 20.1). The two next to it are what
+            // RCCAICarController::Awake sets on a car it is going to drive.
+            SetBool(u.Rcc, "AIController", true);
+            SetBool(u.Rcc, "autoReverse", true);
+            SetBool(u.Rcc, "canEngineStall", false);
+            SetBool(u.Rcc, "automaticGear", true);
+
+            // Physics on. NOT SetSleepModeEnabled(false) - EnablePhys is the
+            // call that puts the wheels back and sets IsMine, and our own
+            // prefix would swallow nothing of it (20.5).
+            Invoke(u.Vgs, "EnablePhys");
+
+            SetFloat(u.Vgs, "Fuel", 4000f);
+            SetBool(u.Rcc, "engineRunning", true);
+
+            Gun.Collect(u);
+            u.CrewSize = Besatzung(u);
+
+            u.Armed = true;
+            RevivalPlugin.L.LogInfo("Patrol: vehicle armed on " + u.Route.Name
+                + " - AIController set, physics on, engine running, "
+                + u.Turrets.Length + " turret object(s), " + u.CrewSize
+                + " man crew.");
+        }
+
+        /// <summary>
+        /// One man per seat, minus the gunner's seat, which is not a seat the
+        /// game hands out (Turret.FreeSeatPostfix) - the gunner is the turret
+        /// code itself. Capped by CrewMax, because six marauders climbing out
+        /// of one BTR is not a fight, it is a verdict.
+        /// </summary>
+        static int Besatzung(Unit u)
+        {
+            if (!RevivalPlugin.CfgPatrolCrew.Value) return 0;
+            Transform seats = GetField(u.Vgs, "SeatPoints") as Transform;
+            if (seats == null) return 0;
+            int n = 0;
+            for (int i = 0; i < seats.childCount; i++)
+                if (seats.GetChild(i).name != Turret.SeatName) n++;
+            return Mathf.Clamp(n, 0, Mathf.Max(0, RevivalPlugin.CfgPatrolCrewMax.Value));
+        }
+
+        static void Drop(Unit u, string why)
+        {
+            RevivalPlugin.L.LogWarning("Patrol: giving up on this vehicle - " + why + ".");
+            Forget(u);
+            Weg(u.Car);
+            _units.Remove(u);
+            Verloren();
+        }
+
+        /// <summary>
+        /// Is this vehicle dead, and what happens then.
+        ///
+        /// `VehicleGameSystem::SetDurabilityValue` kills the engine at
+        /// `Durability &lt;= 0`, turns the damage smoke on and starts a respawn
+        /// timer (RE 20.9). It does NOT destroy the object - the wreck stands
+        /// there. That is the moment the crew climbs out: whoever killed the
+        /// vehicle is standing within a few dozen metres, and now there are
+        /// men on the ground who want a word.
+        ///
+        /// The wreck is removed after WreckSeconds so a long session does not
+        /// leave the road lined with burnt out BTRs. The crew stays - they are
+        /// ordinary NPCs from that moment on, and they die like ordinary NPCs.
+        /// </summary>
+        static bool Gefallen(Unit u)
+        {
+            if (u.Died <= 0f)
+            {
+                if (GetFloat(u.Vgs, "Durability", 1f) > 0f) return false;
+
+                u.Died = Time.time;
+                u.Target = null;
+                SetFloat(u.Rcc, "gasInput", 0f);
+                SetFloat(u.Rcc, "brakeInput", 1f);
+                SetFloat(u.Rcc, "steerInput", 0f);
+                RevivalPlugin.L.LogInfo("Patrol: the " + (u.Tank ? "tank" : "BTR")
+                    + " on " + u.Route.Name + " is destroyed after " + u.Lap
+                    + " lap(s), " + u.Shots + " shot(s), " + u.Hits + " hit(s).");
+
+                // The game's DamageSmoke is a dense cloud close to the hull.
+                // Keep it, and add the part visible from down the road: fire on
+                // the deck and a tall column that lives exactly as long as the
+                // wreck. The effect is a child, so Weg(u.Car) removes it too.
+                FireEffect.SpawnWreck(u.Car, u.Tank);
+
+                if (!u.CrewOut && u.CrewSize > 0)
+                {
+                    u.CrewOut = true;
+                    Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite);
+                }
+
+                Verloren();
+            }
+
+            float bleibt = RevivalPlugin.CfgPatrolWreck.Value;
+            if (bleibt > 0f && Time.time - u.Died >= bleibt)
+            {
+                RevivalPlugin.L.LogInfo("Patrol: wreck on " + u.Route.Name
+                    + " removed after " + bleibt.ToString("0") + " s.");
+                Forget(u);
+                Weg(u.Car);
+                _units.Remove(u);
+            }
+            return true;
+        }
+
+        /// <summary>Everything that has to be held every step, because the game
+        /// keeps undoing it.</summary>
+        static void Keep(Unit u)
+        {
+            // ExpendFuel drains an unmanned vehicle exactly as fast as a driven
+            // one and kills the engine at zero (20.6). A patrol meant to run
+            // for hours needs its tank held up.
+            if (GetFloat(u.Vgs, "Fuel", 1f) < 500f) SetFloat(u.Vgs, "Fuel", 4000f);
+
+            // StartEngine is a TOGGLE, not a start - calling it on a running
+            // engine switches it off. Write the field.
+            if (!GetBool(u.Rcc, "engineRunning", true)) SetBool(u.Rcc, "engineRunning", true);
+
+            // Belt and braces: if some path we have not read got the physics
+            // off anyway, the vehicle is a statue until this puts it back.
+            if (!GetBool(u.Vgs, "EnabledPhys", true)) Invoke(u.Vgs, "EnablePhys");
+        }
+
+        // =====================================================================
+        //  The driver
+        // =====================================================================
+
+        static void Drive(Unit u)
+        {
+            Transform t = u.Car.transform;
+            Vector3 pos = t.position;
+            Route r = u.Route;
+            int n = r.P.Count;
+            float dt = Time.fixedDeltaTime;
+
+            Vector3 vel = Velocity(u.Body);
+            float kmh = vel.magnitude * 3.6f;
+            float forward = t.InverseTransformDirection(vel).z;
+
+            Advance(u, pos);
+
+            // --- where to aim ------------------------------------------------
+            float look = Mathf.Clamp(vel.magnitude * 1.1f, 10f, 35f);
+            Vector3 aim = LookAhead(r, u.Next, pos, look);
+
+            Vector3 local = t.InverseTransformPoint(aim);
+            local.y = 0f;
+            float angle = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
+
+            // --- how fast ----------------------------------------------------
+            float want = r.P[u.Next].Speed;
+            if (want <= 0f) want = RevivalPlugin.CfgPatrolSpeed.Value;
+            want *= CornerFactor(r, u.Next);
+            want = Mathf.Max(want, 12f);
+
+            float steer = Mathf.Clamp(angle / FullLockAt, -1f, 1f);
+            float gas, brake;
+            Throttle(want, kmh, out gas, out brake);
+
+            // --- what is in the way ------------------------------------------
+            float dodge = Avoid(u, t, vel.magnitude);
+            if (dodge != 0f)
+            {
+                steer = Mathf.Clamp(steer + dodge, -1f, 1f);
+                if (want > 25f) { gas *= 0.5f; }
+            }
+
+            // --- stuck? -------------------------------------------------------
+            if (gas > 0.3f && kmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+            Escalate(u, ref gas, ref brake, ref steer, kmh, forward, pos);
+
+            // Braking under walking pace is a gear change, not a brake
+            // (see the class comment). Coast instead.
+            if (u.Stage == 0 && kmh < CoastBelow && brake > 0f) { brake = 0f; }
+
+            SetFloat(u.Rcc, "gasInput", Mathf.Clamp01(gas));
+            SetFloat(u.Rcc, "brakeInput", Mathf.Clamp01(brake));
+            SetFloat(u.Rcc, "steerInput", Mathf.Clamp(steer, -1f, 1f));
+            SetFloat(u.Rcc, "handbrakeInput", 0f);
+
+            if (u.Lap != u.Reported)
+            {
+                u.Reported = u.Lap;
+                RevivalPlugin.L.LogInfo("Patrol: " + r.Name + " lap " + u.Lap
+                    + " done, " + u.Frees + " free event(s) so far.");
+            }
+        }
+
+        /// <summary>Walk the waypoint index forward past everything we have
+        /// already reached or driven past.</summary>
+        static void Advance(Unit u, Vector3 pos)
+        {
+            Route r = u.Route;
+            int n = r.P.Count;
+            float pass = RevivalPlugin.CfgPatrolPassRadius.Value;
+            int moved = 0;
+
+            while (moved < n)
+            {
+                Vector3 w = r.P[u.Next].Pos;
+                Vector3 to = w - pos; to.y = 0f;
+                bool close = to.sqrMagnitude < pass * pass;
+
+                bool past = false;
+                Vector3 prev = r.P[(u.Next - 1 + n) % n].Pos;
+                Vector3 leg = w - prev; leg.y = 0f;
+                if (leg.sqrMagnitude > 0.01f)
+                {
+                    Vector3 back = pos - w; back.y = 0f;
+                    past = Vector3.Dot(back, leg.normalized) > 0f;
+                }
+
+                if (!close && !past) break;
+
+                u.Next++;
+                moved++;
+                if (u.Next >= n) { u.Next = 0; u.Lap++; }
+            }
+
+            if (moved >= n)
+                RevivalPlugin.L.LogWarning("Patrol: " + r.Name + " skipped a whole "
+                    + "lap in one step - the vehicle is nowhere near its route. "
+                    + "PassRadius too large, or the route has duplicate points.");
+        }
+
+        /// <summary>A point <paramref name="dist"/> metres along the route,
+        /// measured from the vehicle. Pure pursuit aims at this, not at the
+        /// waypoint: aiming straight at a waypoint makes a vehicle hunt.</summary>
+        static Vector3 LookAhead(Route r, int next, Vector3 pos, float dist)
+        {
+            int n = r.P.Count;
+            Vector3 cur = pos;
+            Vector3 target = r.P[next].Pos;
+            float rest = dist;
+            int i = next;
+
+            for (int step = 0; step < n; step++)
+            {
+                Vector3 w = r.P[i].Pos;
+                Vector3 seg = w - cur;
+                float len = seg.magnitude;
+                if (len > 0.001f)
+                {
+                    if (len >= rest) return cur + seg * (rest / len);
+                    rest -= len;
+                }
+                cur = w;
+                target = w;
+                i = (i + 1) % n;
+            }
+            return target;
+        }
+
+        /// <summary>1 on a straight, less the sharper the next corner is.</summary>
+        static float CornerFactor(Route r, int next)
+        {
+            int n = r.P.Count;
+            Vector3 a = r.P[(next - 1 + n) % n].Pos;
+            Vector3 b = r.P[next].Pos;
+            Vector3 c = r.P[(next + 1) % n].Pos;
+            Vector3 u = b - a; u.y = 0f;
+            Vector3 v = c - b; v.y = 0f;
+            if (u.sqrMagnitude < 0.01f || v.sqrMagnitude < 0.01f) return 1f;
+            float deg = Vector3.Angle(u, v);
+            return Mathf.Clamp(1f - deg / 120f, 0.25f, 1f);
+        }
+
+        static void Throttle(float wantKmh, float isKmh, out float gas, out float brake)
+        {
+            float err = wantKmh - isKmh;
+            gas = Mathf.Clamp01(err / 8f);
+            brake = Mathf.Clamp01(-err / 8f);
+        }
+
+        // =====================================================================
+        //  Obstacles
+        // =====================================================================
+
+        /// <summary>Three rays as RCC casts them. Returns a steering correction,
+        /// 0 when the road ahead is clear.</summary>
+        static float Avoid(Unit u, Transform t, float speed)
+        {
+            float range = Mathf.Clamp(speed * 1.5f, 8f, 25f);
+            Vector3 nose = t.position + t.forward * NoseOffset + Vector3.up * 1.2f;
+
+            // Ramming steers by nothing - but it is exactly the moment the
+            // hull is pressed against whatever stopped it, so the one ray
+            // that can still help is cast: if that thing is small, it goes.
+            if (u.Stage == 2)
+            {
+                Hit(u, nose, t.forward, CrushReach);
+                return 0f;
+            }
+
+            float wide = Hit(u, nose, t.forward, range);
+            float left = Hit(u, nose, Quaternion.AngleAxis(-25f, t.up) * t.forward, range * 0.7f);
+            float right = Hit(u, nose, Quaternion.AngleAxis(25f, t.up) * t.forward, range * 0.7f);
+
+            if (wide < 0f && left < 0f && right < 0f) return 0f;
+
+            // Steer towards whichever side has more room. Both blocked and the
+            // escalation takes over on its own, because we will stop moving.
+            float freeLeft = left < 0f ? range : left;
+            float freeRight = right < 0f ? range : right;
+            float push = freeLeft > freeRight ? -0.6f : 0.6f;
+            if (wide >= 0f) push *= Mathf.Clamp01(1f - wide / range) + 0.4f;
+            return push;
+        }
+
+        /// <summary>Distance to the first thing that is not this vehicle and
+        /// not small enough to drive through, or -1 for a clear ray.</summary>
+        static float Hit(Unit u, Vector3 origin, Vector3 dir, float range)
+        {
+            Vector3 point;
+            GameObject go = Turret.RaycastObject(origin, dir, range, out point);
+            if (go == null) return -1f;
+            if (u.Car != null && go.transform.IsChildOf(u.Car.transform)) return -1f;
+            float d = (point - origin).magnitude;
+
+            Transform klein = Kleinkram(go);
+            if (klein == null) return d;
+            // Small enough to drive through: never steer around it, and take
+            // it out of the way once the hull is actually against it.
+            if (d <= CrushReach) Zerbrechen(u, klein);
+            return -1f;
+        }
+
+        // =====================================================================
+        //  The small stuff on the road
+        // =====================================================================
+
+        /// <summary>Metres in front of the nose at which a crushable thing is
+        /// actually crushed. Anything further off is only ignored - a fence
+        /// that vanishes twenty metres before the vehicle reaches it is a
+        /// bug report.</summary>
+        const float CrushReach = 6f;
+
+        /// <summary>The answer for one hit object, so the same fence is not
+        /// measured again on every ray of every physics step. Value null means
+        /// "not crushable", which is the expensive answer and the common
+        /// one.</summary>
+        static Dictionary<int, Transform> _klein = new Dictionary<int, Transform>();
+
+        /// <summary>Ids of things already crushed. Keeps the log to one line
+        /// each and the work to one pass.</summary>
+        static Dictionary<int, bool> _zerbrochen = new Dictionary<int, bool>();
+
+        static Type _colliderType;
+        static PropertyInfo _colliderEnabled;
+        static bool _physLookedUp;
+
+        /// <summary>
+        /// Is this hit a knee-high fence, a post, a bit of road junk - the kind
+        /// of thing twelve tons goes through rather than around?
+        ///
+        /// WHY THIS EXISTS. The map is full of small obstacles, and a driver
+        /// that treats every one of them as a wall does two wrong things at
+        /// once: it steers off the road for a fence it would have flattened,
+        /// and having steered off the road it gets stuck for real. Every FREE
+        /// event in the run of 2026-08-30 - waypoints 67, 68, 71, 72, 73, 74 -
+        /// began that way.
+        ///
+        /// The test is SIZE and nothing else, because size is the one thing
+        /// that means the same for every prop on the map. It walks up from the
+        /// hit object while the whole candidate still fits inside CrushHeight
+        /// and CrushWidth, so a fence hit on one plank gives up the whole
+        /// fence and not just that plank. A candidate that grows too large
+        /// ends the walk, which is what keeps a house from being crushed
+        /// because a doorstep was hit.
+        ///
+        /// What is NEVER crushed, whatever its size: anything belonging to a
+        /// player, an NPC, an animal or a vehicle. Those are small and would
+        /// pass the size test easily, and taking a man's collider away is not
+        /// a driving aid, it is a hole in the game.
+        /// </summary>
+        static Transform Kleinkram(GameObject go)
+        {
+            if (!RevivalPlugin.CfgPatrolCrush.Value || go == null) return null;
+
+            int id = go.GetInstanceID();
+            Transform found;
+            if (_klein.TryGetValue(id, out found)) return found;
+            if (_klein.Count > 4096) _klein.Clear();
+
+            found = Suchen(go);
+            _klein[id] = found;
+            return found;
+        }
+
+        /// <summary>
+        /// The largest thing around this hit that is still small enough to
+        /// drive through, or null.
+        ///
+        /// THE WALK UP STOPS AT A CONTAINER. Every step up is an
+        /// `Ausmasse` over a bigger subtree, and a map has objects whose
+        /// parent is a bin holding a thousand props. Two things keep that
+        /// from being the next E-032: a parent with more than
+        /// `ContainerAb` children is taken as a bin and ends the walk before
+        /// it is measured, and `Ausmasse` stops counting the moment the box
+        /// is already too big. Nothing here runs twice for the same object -
+        /// the answer is cached in `_klein`.
+        /// </summary>
+        static Transform Suchen(GameObject go)
+        {
+            if (Lebendig(go.transform)) return null;
+
+            float hoch = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolCrushHeight.Value);
+            float breit = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolCrushWidth.Value);
+
+            Transform best = null;
+            Transform t = go.transform;
+            for (int i = 0; i < 4 && t != null; i++)
+            {
+                if (!Passt(t, hoch, breit)) break;
+                best = t;
+                Transform hoeher = t.parent;
+                if (hoeher == null) break;
+                if (hoeher.childCount > ContainerAb) break;
+                t = hoeher;
+            }
+            return best;
+        }
+
+        /// <summary>Direct children from which a transform is taken for a bin
+        /// of props rather than one prop. A fence has planks, a car has
+        /// wheels; nothing that is ONE thing has two dozen children.</summary>
+        const int ContainerAb = 24;
+
+        /// <summary>
+        /// Does everything under this transform fit inside the two limits?
+        /// False also when there is nothing measurable - a bare collider with
+        /// no mesh is a thing we cannot size up, and a thing we cannot size up
+        /// is a thing we do not crush.
+        /// </summary>
+        static bool Passt(Transform t, float hoch, float breit)
+        {
+            Renderer[] rs = t.GetComponentsInChildren<Renderer>(true);
+            bool any = false;
+            Bounds b = new Bounds();
+            for (int i = 0; i < rs.Length; i++)
+            {
+                if (rs[i] == null || !rs[i].enabled) continue;
+                if (!any) { b = rs[i].bounds; any = true; }
+                else b.Encapsulate(rs[i].bounds);
+                Vector3 s = b.size;
+                if (s.y > hoch || s.x > breit || s.z > breit) return false;
+            }
+            return any;
+        }
+
+        /// <summary>
+        /// Is this part of something alive or something driven?
+        ///
+        /// Walked UP a few levels with `GetComponent`, not down from the root
+        /// with `GetComponentInChildren`. The root of a scene prop can be a
+        /// container holding half the map, and searching that five times per
+        /// obstacle is exactly the shape of mistake that put the driver at
+        /// 3 FPS once (E-032). A vehicle, an NPC and a player all carry their
+        /// marker component within a few levels of any collider they own.
+        /// </summary>
+        static bool Lebendig(Transform t)
+        {
+            Type[] typen = Marker();
+            for (int hoehe = 0; hoehe < 6 && t != null; hoehe++)
+            {
+                for (int i = 0; i < typen.Length; i++)
+                {
+                    if (typen[i] == null) continue;
+                    if (t.GetComponent(typen[i]) != null) return true;
+                }
+                t = t.parent;
+            }
+            return false;
+        }
+
+        static Type[] _marker;
+
+        static Type[] Marker()
+        {
+            if (_marker != null) return _marker;
+            _marker = new Type[Unantastbar.Length];
+            for (int i = 0; i < Unantastbar.Length; i++)
+                _marker[i] = RevivalPlugin.TypeByName(Unantastbar[i]);
+            return _marker;
+        }
+
+        /// <summary>Types whose objects are never crushed. Names, not types:
+        /// the plugin references no Assembly-CSharp.</summary>
+        static readonly string[] Unantastbar = new string[] {
+            "NPC_AI2", "PlayerNetworkController", "VehicleGameSystem",
+            "Animal_AI", "ItemSpawned",
+        };
+
+        /// <summary>
+        /// Take the colliders off, and only the colliders. The prop stays
+        /// where it is and stays visible - a fence that disappears is a
+        /// glitch, a fence a BTR drives through is a BTR driving through a
+        /// fence. Local only: the patrol runs on the master client, the other
+        /// machines never had a reason to steer around it.
+        /// </summary>
+        static void Zerbrechen(Unit u, Transform was)
+        {
+            if (was == null) return;
+            int id = was.GetInstanceID();
+            if (_zerbrochen.ContainsKey(id)) return;
+            _zerbrochen[id] = true;
+
+            if (!PhysLookUp()) return;
+            try
+            {
+                Component[] cs = was.GetComponentsInChildren(_colliderType, true);
+                int n = 0;
+                for (int i = 0; i < cs.Length; i++)
+                {
+                    if (cs[i] == null) continue;
+                    object on = _colliderEnabled.GetValue(cs[i], null);
+                    if (on is bool && !(bool)on) continue;
+                    _colliderEnabled.SetValue(cs[i], false, null);
+                    n++;
+                }
+                if (n > 0)
+                    RevivalPlugin.L.LogInfo("Patrol: drove through \"" + was.name
+                        + "\" on " + u.Route.Name + " - " + n + " collider(s) off.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: \"" + was.name + "\" not "
+                    + "crushed - " + ex.Message);
+            }
+        }
+
+        static bool PhysLookUp()
+        {
+            if (_physLookedUp) return _colliderEnabled != null;
+            _physLookedUp = true;
+            _colliderType = RevivalPlugin.TypeByName("UnityEngine.Collider");
+            if (_colliderType != null)
+                _colliderEnabled = _colliderType.GetProperty("enabled",
+                    BindingFlags.Public | BindingFlags.Instance);
+            if (_colliderEnabled == null)
+                RevivalPlugin.L.LogWarning("Patrol: UnityEngine.Collider.enabled not "
+                    + "found - patrols cannot drive through anything and will "
+                    + "steer around every fence on the map.");
+            return _colliderEnabled != null;
+        }
+
+        // =====================================================================
+        //  The escalation, stage by stage
+        // =====================================================================
+
+        static void Escalate(Unit u, ref float gas, ref float brake, ref float steer,
+                             float kmh, float forward, Vector3 pos)
+        {
+            float stuckFor = RevivalPlugin.CfgPatrolStuck.Value;
+            float ramAfter = RevivalPlugin.CfgPatrolRam.Value;
+            float freeAfter = RevivalPlugin.CfgPatrolFree.Value;
+
+            if (u.Stuck <= 0f)
+            {
+                if (u.Stage != 0)
+                {
+                    RevivalPlugin.L.LogInfo("Patrol: " + u.Route.Name
+                        + " is moving again, back to driving.");
+                    u.Stage = 0;
+                    u.StageTime = 0f;
+                }
+                return;
+            }
+
+            if (u.Stuck < stuckFor) return;         // still just avoiding
+
+            if (u.Stuck >= freeAfter)
+            {
+                Free(u, pos);
+                return;
+            }
+
+            int want = u.Stuck >= ramAfter ? 2 : 1;
+            if (want != u.Stage)
+            {
+                u.Stage = want;
+                u.StageTime = 0f;
+                RevivalPlugin.L.LogInfo("Patrol: " + u.Route.Name + " stuck for "
+                    + u.Stuck.ToString("0.0") + " s at waypoint " + u.Next
+                    + " - " + (want == 1 ? "backing up" : "going through it") + ".");
+            }
+            u.StageTime += Time.fixedDeltaTime;
+
+            if (u.Stage == 1)
+            {
+                // Reverse IS the brake: GearBox shifts back when brakeInput is
+                // over 0.1 below 1 m/s forward. Steer the other way so the nose
+                // comes off whatever it is against.
+                gas = 0f;
+                brake = 1f;
+                steer = -steer;
+                // Once actually rolling backwards, ease off so it does not
+                // reverse into the ditch on the other side.
+                if (forward < -1.5f) brake = 0.45f;
+            }
+            else
+            {
+                // Full throttle, straight ahead, avoidance off. A BTR against a
+                // fence is the fence's problem.
+                gas = 1f;
+                brake = 0f;
+                steer *= 0.3f;
+            }
+        }
+
+        /// <summary>Last resort: put the vehicle back on the route. Ugly, and
+        /// it is the reason a patrol never dies in a ditch. Every one of these
+        /// names a waypoint that wants fixing.</summary>
+        static void Free(Unit u, Vector3 pos)
+        {
+            Route r = u.Route;
+            int n = r.P.Count;
+            int to = (u.Next + 1) % n;
+
+            Vector3 target = r.P[to].Pos + Vector3.up * 1.5f;
+            Vector3 ahead = r.P[(to + 1) % n].Pos - r.P[to].Pos;
+            ahead.y = 0f;
+            if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
+
+            Stop(u.Body);
+            u.Car.transform.position = target;
+            u.Car.transform.rotation = Quaternion.LookRotation(ahead.normalized, Vector3.up);
+
+            u.Frees++;
+            u.Next = to;
+            u.Stuck = 0f;
+            u.Stage = 0;
+            u.StageTime = 0f;
+
+            RevivalPlugin.L.LogWarning("Patrol: FREE on " + r.Name + " - stuck at "
+                + pos + " near waypoint " + u.Next + ", lifted onto waypoint " + to
+                + ". That waypoint wants fixing. (" + u.Frees + " so far)");
+        }
+
+        // =====================================================================
+        //  The gunner
+        // =====================================================================
+
+        /// <summary>
+        /// The gun of a patrol vehicle, aimed by a state machine instead of by
+        /// a mouse. It is the SAME gun the player mans - the same turret
+        /// transforms, the same two value profiles out of [Turret] and [Tank],
+        /// the same tracer - and this class adds only the three things a human
+        /// brings: it looks for a target, it turns the barrel, and it misses.
+        ///
+        /// HOW IT MISSES, AND WHY EXACTLY LIKE THIS (read out of the game,
+        /// 2026-08-30: NPC_AI2::ShootToTarget, NPC_AI2::CalcChancesToHit,
+        /// NPC_FirearmWeaponController::GetSqrDistanceModifier)
+        ///
+        ///   The game's own NPCs do not spray a cone. They roll ONE chance per
+        ///   shot and then displace the aim point by whole metres:
+        ///
+        ///       chance = base by target stance (0.5 crouched to 1.0 standing)
+        ///                minus the distance loss, clamped to 0..1
+        ///       loss   = 0 inside the weapon's effective range, rising along
+        ///                a cosine to 1 at maximum range, and a loss over 0.95
+        ///                sets the chance to zero outright
+        ///       offset = 0.2 m under 30 m - practically a hit
+        ///                a rolled hit:  up to 2.5 m
+        ///                a rolled miss: 3 m
+        ///
+        ///   That is the "factor common among the NPCs" this gun uses. THREE
+        ///   things are deliberately different. The offset here goes in a
+        ///   random DIRECTION around the aim point instead of into +x and +y
+        ///   together, because the game's version puts every miss of every NPC
+        ///   on the same diagonal. A rolled hit is displaced by 0.25 m, not by
+        ///   2.5: the game gets away with the large number because
+        ///   NPC_FirearmWeaponController::FireTo decides the damage itself,
+        ///   while this gun is a raycast - at 150 m a 2.5 m offset would miss
+        ///   a man every time and the chance above would mean nothing.
+        ///
+        ///   And the third, added on 2026-08-30 after the user reported a
+        ///   patrol as "an 80 percent death sentence": the free ring under
+        ///   30 m is GONE as a constant. It is `GunPointBlank` now, 12 m by
+        ///   default, and the chance is rolled inside it like anywhere else.
+        ///   That one line was the whole difficulty problem - a road vehicle
+        ///   and a man on foot end up inside 30 m of each other in every
+        ///   fight, and inside that ring the gun was perfect no matter what
+        ///   GunAccuracy said.
+        ///
+        /// COST. A patrol with no player within GunRange does nothing at all
+        /// beyond one square distance per player per half second, and that
+        /// player list is fetched once for every vehicle on the road. The line
+        /// of sight ray is cast for ONE candidate, not for all of them, and
+        /// only twice a second. The turret is turned only while there is a
+        /// target or the barrel is not yet back at rest.
+        /// </summary>
+        static class Gun
+        {
+            /// <summary>Degrees between barrel and target inside which the
+            /// gun considers itself laid and pulls the trigger.</summary>
+            const float FireWithin = 2.5f;
+
+            /// <summary>Seconds between two target scans of one vehicle. The
+            /// scan is the expensive half - it casts a ray.</summary>
+            const float ScanEvery = 0.5f;
+
+            // ------------------------------------------------------- targets
+
+            class Spieler
+            {
+                public Transform Tr;
+                public Component States;     // PlayerStatesController, may be null
+            }
+
+            static List<Spieler> _players = new List<Spieler>();
+            static float _nextRefresh;
+
+            static Type _ngs, _statesType;
+            static PropertyInfo _instance;
+            static FieldInfo _networkPlayers, _stateField;
+            static object _death;
+            static bool _lookedUp;
+
+            /// <summary>
+            /// The list of players, refreshed at most twice a second and
+            /// shared by every patrol vehicle.
+            ///
+            /// NetworkGameServer.Instance.NetworkPlayers is the game's own
+            /// list of player GameObjects - the same one
+            /// NPC_Settlement::PlayersDistanceControll walks. Reading it costs
+            /// two field accesses; FindObjectsOfType, which would be the
+            /// obvious way, walks every object in the scene and is the kind of
+            /// call that put the driver at 3 FPS once already (E-032).
+            /// </summary>
+            static void Refresh()
+            {
+                if (Time.time < _nextRefresh) return;
+                _nextRefresh = Time.time + ScanEvery;
+                _players.Clear();
+
+                if (!LookUp()) return;
+                object server = _instance.GetValue(null, null);
+                if (server == null) return;
+                IList list = _networkPlayers.GetValue(server) as IList;
+                if (list == null) return;
+
+                for (int i = 0; i < list.Count; i++)
+                {
+                    GameObject go = list[i] as GameObject;
+                    if (go == null) continue;
+                    Spieler s = new Spieler();
+                    s.Tr = go.transform;
+                    if (_statesType != null) s.States = go.GetComponent(_statesType);
+                    _players.Add(s);
+                }
+            }
+
+            static bool LookUp()
+            {
+                if (_lookedUp) return _networkPlayers != null;
+                _lookedUp = true;
+
+                _ngs = RevivalPlugin.TypeByName("NetworkGameServer");
+                if (_ngs == null)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol gun: NetworkGameServer not found - "
+                        + "the gun has no way to see a player and stays quiet.");
+                    return false;
+                }
+                _instance = _ngs.GetProperty("Instance",
+                    BindingFlags.Public | BindingFlags.Static);
+                _networkPlayers = AccessTools.Field(_ngs, "NetworkPlayers");
+                if (_instance == null || _networkPlayers == null)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol gun: NetworkGameServer.Instance or "
+                        + ".NetworkPlayers is missing - the gun stays quiet.");
+                    _networkPlayers = null;
+                    return false;
+                }
+
+                // Dead players are not targets. The state lives on
+                // PlayerStatesController; a missing type is not fatal, it only
+                // means a corpse is shot at once more.
+                _statesType = RevivalPlugin.TypeByName("PlayerStatesController");
+                if (_statesType != null)
+                {
+                    _stateField = AccessTools.Field(_statesType, "_characterState");
+                    if (_stateField != null && _stateField.FieldType.IsEnum)
+                    {
+                        try { _death = Enum.Parse(_stateField.FieldType, "Death"); }
+                        catch { _death = null; }
+                    }
+                }
+                return true;
+            }
+
+            /// <summary>
+            /// Is the world up - is there a player in the game's own list?
+            /// Empty in the menu, empty in the loading screen, one entry the
+            /// moment the local player exists. The automatic patrol start asks
+            /// this before it puts anything down; the answer is at most half a
+            /// second old, because `Refresh` is what limits it.
+            /// </summary>
+            internal static bool WeltLaeuft()
+            {
+                Refresh();
+                for (int i = 0; i < _players.Count; i++)
+                    if (_players[i].Tr != null) return true;
+                return false;
+            }
+
+            static bool Lebt(Spieler s)
+            {
+                if (s.States == null || _stateField == null || _death == null) return true;
+                return !_death.Equals(_stateField.GetValue(s.States));
+            }
+
+            // --------------------------------------------------------- frame
+
+            public static void Tick(List<Unit> units)
+            {
+                if (!RevivalPlugin.CfgPatrolGun.Value) return;
+                if (units.Count == 0) return;
+                Refresh();
+
+                for (int i = 0; i < units.Count; i++)
+                {
+                    Unit u = units[i];
+                    if (!u.Armed || u.Died > 0f || u.Car == null) continue;
+                    if (u.Turrets.Length == 0) continue;
+                    Einer(u);
+                }
+            }
+
+            /// <summary>Turret objects of one vehicle. Four of them - the
+            /// LODGroup swaps between them, and a barrel that only turns on
+            /// LOD0 stands still as soon as the player steps back.</summary>
+            public static void Collect(Unit u)
+            {
+                List<Transform> found = new List<Transform>();
+                Transform[] all = u.Car.GetComponentsInChildren<Transform>(true);
+                for (int i = 0; i < all.Length; i++)
+                    if (all[i].name == "turret") found.Add(all[i]);
+                u.Turrets = found.ToArray();
+                u.TurretRend = null;
+                for (int i = 0; i < u.Turrets.Length; i++)
+                {
+                    Renderer r = u.Turrets[i].GetComponent<Renderer>();
+                    if (r != null) { u.TurretRend = r; break; }
+                }
+            }
+
+            static void Einer(Unit u)
+            {
+                float dt = Time.deltaTime;
+
+                if (Time.time >= u.NextLook)
+                {
+                    u.NextLook = Time.time + ScanEvery;
+                    Suchen(u);
+                }
+
+                if (u.Target == null)
+                {
+                    Ruhen(u, dt);
+                    return;
+                }
+
+                u.Held += dt;
+
+                Vector3 ziel = Zielpunkt(u.Target);
+                if (!Winkel(u, ziel, out u.Yaw, out u.Pitch)) return;
+                Drehen(u, dt);
+
+                if (u.Held < RevivalPlugin.CfgPatrolGunNotice.Value) return;
+                if (Time.time < u.NextShot) return;
+                if (Vector3.Angle(Rohrrichtung(u), ziel - Muendung(u)) > FireWithin) return;
+
+                Nachladen(u);
+                Schiessen(u, ziel);
+            }
+
+            /// <summary>
+            /// When the gun may fire again. A fast gun fires a BURST and then
+            /// pauses; without that a BTR at 0.12 s a shot empties a man in a
+            /// tenth of a second and there is nothing to react to. A gun that
+            /// reloads for a second or more - the tank - is its own pause and
+            /// is left alone.
+            /// </summary>
+            static void Nachladen(Unit u)
+            {
+                float delay = Ladezeit(u);
+                int burst = delay >= 1f ? 1 : Mathf.Max(1, RevivalPlugin.CfgPatrolGunBurst.Value);
+
+                u.Burst++;
+                if (u.Burst < burst)
+                {
+                    u.NextShot = Time.time + delay;
+                    return;
+                }
+                u.Burst = 0;
+                u.NextShot = Time.time + Mathf.Max(delay,
+                    RevivalPlugin.CfgPatrolGunBurstPause.Value);
+            }
+
+            /// <summary>Barrel back to straight ahead. Costs nothing once it
+            /// is there, which is the normal case.</summary>
+            static void Ruhen(Unit u, float dt)
+            {
+                if (Mathf.Abs(u.Yaw) < 0.5f && Mathf.Abs(u.Pitch) < 0.5f) return;
+                float step = Drehgeschwindigkeit(u) * dt;
+                u.Yaw = Mathf.MoveTowards(u.Yaw, 0f, step);
+                u.Pitch = Mathf.MoveTowards(u.Pitch, 0f, step);
+                Drehen(u, dt);
+            }
+
+            // -------------------------------------------------------- target
+
+            /// <summary>
+            /// Pick a target, or keep the one we have. Cheap test first:
+            /// distance, then the line of sight, and the ray is cast for one
+            /// candidate only.
+            /// </summary>
+            static void Suchen(Unit u)
+            {
+                float range = RevivalPlugin.CfgPatrolGunRange.Value;
+                Vector3 from = Muendung(u);
+
+                // Keep the current target while it is alive, near and visible.
+                if (u.Target != null)
+                {
+                    bool weg = Flat(u.Target.position - from) > range * 1.15f;
+                    if (!weg && Sicht(u, u.Target))
+                    {
+                        u.Lost = 0f;
+                        return;
+                    }
+                    u.Lost += ScanEvery;
+                    if (!weg && u.Lost < RevivalPlugin.CfgPatrolGunForget.Value) return;
+
+                    RevivalPlugin.L.LogInfo("Patrol gun: target lost on " + u.Route.Name
+                        + " after " + u.Held.ToString("0.0") + " s.");
+                    u.Target = null;
+                    u.Held = 0f;
+                    u.Lost = 0f;
+                    u.Burst = 0;
+                }
+
+                Transform best = null;
+                float bestDist = 0f;
+                for (int i = 0; i < _players.Count; i++)
+                {
+                    Spieler s = _players[i];
+                    if (s.Tr == null) continue;
+                    float d = Flat(s.Tr.position - from);
+                    if (d > range) continue;
+                    if (!Lebt(s)) continue;
+                    if (best != null && d >= bestDist) continue;
+                    best = s.Tr;
+                    bestDist = d;
+                }
+                if (best == null) return;
+                if (!Sicht(u, best)) return;
+
+                u.Target = best;
+                u.Held = 0f;
+                u.Lost = 0f;
+                RevivalPlugin.L.LogInfo("Patrol gun: " + (u.Tank ? "tank" : "BTR")
+                    + " on " + u.Route.Name + " has a target at "
+                    + bestDist.ToString("0") + " m.");
+            }
+
+            /// <summary>One ray from the muzzle to the target's chest. Hits on
+            /// our own vehicle are stepped over - the BTR's muzzle sits inside
+            /// its own bow plate (RE 18).</summary>
+            static bool Sicht(Unit u, Transform ziel)
+            {
+                Vector3 from = Muendung(u);
+                Vector3 to = Zielpunkt(ziel);
+                Vector3 dir = to - from;
+                float dist = dir.magnitude;
+                if (dist < 0.5f) return true;
+                dir /= dist;
+
+                Vector3 point;
+                GameObject hit = Strahl(u, from, dir, dist, out point);
+                if (hit == null) return true;           // nothing in between
+                // The target itself is allowed to be in the way of itself.
+                if (hit.transform.IsChildOf(ziel)) return true;
+                return (to - point).sqrMagnitude < 2.25f;
+            }
+
+            /// <summary>Chest height. The transform of a player sits at his
+            /// feet, and a gun that aims there shoots the ground in front of
+            /// him at any distance.</summary>
+            static Vector3 Zielpunkt(Transform t)
+            {
+                return t.position + Vector3.up * 1.1f;
+            }
+
+            // --------------------------------------------------------- aiming
+
+            /// <summary>
+            /// World point to the turret's own two angles. The inverse of
+            /// Turret.LocalRotationFor: in turret space -Y is the barrel and
+            /// +Z is up, so a local direction d means pitch = asin(d.z) and
+            /// yaw = atan2(-d.x, -d.y).
+            /// </summary>
+            static bool Winkel(Unit u, Vector3 world, out float yaw, out float pitch)
+            {
+                yaw = u.Yaw;
+                pitch = u.Pitch;
+                Transform turm = u.Turrets[0];
+                if (turm == null) return false;
+                Transform parent = turm.parent;
+                if (parent == null) return false;
+
+                Vector3 d = parent.InverseTransformPoint(world) - turm.localPosition;
+                if (d.sqrMagnitude < 0.0001f) return false;
+                d.Normalize();
+
+                pitch = Mathf.Clamp(Mathf.Asin(Mathf.Clamp(d.z, -1f, 1f)) * Mathf.Rad2Deg,
+                                    RevivalPlugin.CfgTurretPitchMin.Value,
+                                    RevivalPlugin.CfgTurretPitchMax.Value);
+                yaw = Mathf.Atan2(-d.x, -d.y) * Mathf.Rad2Deg;
+                return true;
+            }
+
+            static void Drehen(Unit u, float dt)
+            {
+                Quaternion want = Turret.LocalRotationFor(u.Yaw, u.Pitch);
+                float step = Drehgeschwindigkeit(u) * dt;
+                for (int i = 0; i < u.Turrets.Length; i++)
+                {
+                    if (u.Turrets[i] == null) continue;
+                    u.Turrets[i].localRotation =
+                        Quaternion.RotateTowards(u.Turrets[i].localRotation, want, step);
+                }
+            }
+
+            static Vector3 Rohrrichtung(Unit u)
+            {
+                return u.Turrets[0].TransformDirection(new Vector3(0f, -1f, 0f)).normalized;
+            }
+
+            /// <summary>Muzzle out of the WORLD bounds of the turret renderer,
+            /// exactly as the manned gun does it (Turret.Muzzle).</summary>
+            static Vector3 Muendung(Unit u)
+            {
+                Vector3 dir = Rohrrichtung(u);
+                if (u.TurretRend == null) return u.Turrets[0].position + dir;
+                Bounds b = u.TurretRend.bounds;
+                float reach = Vector3.Dot(b.extents, new Vector3(
+                    Mathf.Abs(dir.x), Mathf.Abs(dir.y), Mathf.Abs(dir.z)));
+                return b.center + dir * (reach + 0.5f);
+            }
+
+            // -------------------------------------------------------- firing
+
+            static void Schiessen(Unit u, Vector3 ziel)
+            {
+                Vector3 from = Muendung(u);
+                float dist = Vector3.Distance(from, ziel);
+                Vector3 aim = ziel + Streuung(u, dist);
+
+                Vector3 dir = aim - from;
+                if (dir.sqrMagnitude < 0.0001f) return;
+                dir.Normalize();
+
+                float range = Reichweite(u);
+                Vector3 impact;
+                GameObject struck = Strahl(u, from, dir, range, out impact);
+                Vector3 ende = struck == null ? from + dir * range : impact;
+
+                Spur(u, from + dir * 2f, ende);
+                u.Shots++;
+                if (struck == null) return;
+
+                if (u.Tank && RevivalPlugin.CfgTankExplosion.Value)
+                {
+                    try
+                    {
+                        // NOT the player's shell. [Tank] is 1600 damage in a
+                        // 16 m radius, which is artillery and is meant to be -
+                        // but a blast does not care how well the gun was
+                        // pointed, so an AI firing it kills with no counter
+                        // and GunAccuracy cannot soften it. The AI gets its
+                        // own two numbers; a player in the same tank keeps the
+                        // artillery.
+                        float scha = RevivalPlugin.CfgPatrolShellDamage.Value;
+                        float rad = RevivalPlugin.CfgPatrolShellRadius.Value;
+                        if (scha <= 0f) scha = RevivalPlugin.CfgTankExplosionDamage.Value;
+                        if (rad <= 0f) rad = RevivalPlugin.CfgTankExplosionRadius.Value;
+                        RocketHook.Detonate(impact - dir * 0.15f, scha, rad, 3f);
+                    }
+                    catch (Exception ex)
+                    {
+                        RevivalPlugin.L.LogError("Patrol gun: impact without explosion - "
+                            + ex.Message);
+                    }
+                }
+
+                if (Schaden(struck, Schadenswert(u), impact, from))
+                {
+                    u.Hits++;
+                    RevivalPlugin.L.LogInfo("Patrol gun: hit at "
+                        + dist.ToString("0") + " m (" + u.Hits + " of " + u.Shots + ").");
+                }
+            }
+
+            /// <summary>
+            /// The miss. See the class comment for where the numbers come
+            /// from - this is the game's own model with the direction made
+            /// random, the hit case tightened, and ONE deliberate departure.
+            ///
+            /// THE DEPARTURE (2026-08-30). The game's model gives every shot
+            /// under 30 m a free pass: offset 0.2 m, no roll, accuracy not
+            /// consulted. That single line is why a patrol read as an 80
+            /// percent death sentence - every fight with a road vehicle
+            /// happens inside 30 m sooner or later, and inside it the gun was
+            /// perfect no matter what GunAccuracy said. So the free ring is a
+            /// setting now (`GunPointBlank`, 12 m) and the roll happens at
+            /// EVERY distance. Point blank a rolled miss still lands close,
+            /// because a man standing at arm's length from a BTR should not be
+            /// safe either.
+            /// </summary>
+            static Vector3 Streuung(Unit u, float dist)
+            {
+                float weit = Mathf.Max(1f, RevivalPlugin.CfgPatrolGunRange.Value);
+                float nah = Mathf.Clamp(RevivalPlugin.CfgPatrolGunEffective.Value, 1f, weit);
+
+                float loss;
+                if (dist <= nah) loss = 0f;
+                else if (dist >= weit) loss = 1f;
+                else loss = 0.5f * (1f - Mathf.Cos(Mathf.PI * (dist - nah) / (weit - nah)));
+
+                float chance = loss > 0.95f
+                    ? 0f
+                    : Mathf.Clamp01((1f - loss) * RevivalPlugin.CfgPatrolGunAccuracy.Value);
+
+                bool nahdran = dist < RevivalPlugin.CfgPatrolGunPointBlank.Value;
+                float betrag;
+                if (UnityEngine.Random.value <= chance) betrag = nahdran ? 0.2f : 0.25f;
+                else betrag = nahdran ? 1.1f : 3f;
+
+                // A direction perpendicular to the shot, so a miss goes past
+                // the man or over him and never falls short and hits anyway.
+                Vector3 achse = Rohrrichtung(u);
+                Vector3 seite = Vector3.Cross(Vector3.up, achse);
+                if (seite.sqrMagnitude < 0.0001f) seite = Vector3.right;
+                seite.Normalize();
+                Vector3 hoch = Vector3.Cross(achse, seite).normalized;
+                float a = UnityEngine.Random.value * Mathf.PI * 2f;
+                return (seite * Mathf.Cos(a) + hoch * Mathf.Sin(a)) * betrag;
+            }
+
+            /// <summary>Ray that steps over our own vehicle, up to four
+            /// times. Same reason as Turret.RaycastPastVehicle.</summary>
+            static GameObject Strahl(Unit u, Vector3 from, Vector3 dir, float range,
+                                     out Vector3 point)
+            {
+                point = Vector3.zero;
+                Vector3 start = from;
+                float rest = range;
+                for (int i = 0; i < 4 && rest > 0f; i++)
+                {
+                    Vector3 hit;
+                    GameObject go = Turret.RaycastObject(start, dir, rest, out hit);
+                    if (go == null) return null;
+                    if (u.Car == null || !go.transform.IsChildOf(u.Car.transform))
+                    {
+                        point = hit;
+                        return go;
+                    }
+                    rest -= Vector3.Distance(start, hit) + 0.25f;
+                    start = hit + dir * 0.25f;
+                }
+                return null;
+            }
+
+            static void Spur(Unit u, Vector3 von, Vector3 bis)
+            {
+                try
+                {
+                    List<Vector3> bahn = new List<Vector3>();
+                    bahn.Add(von);
+                    bahn.Add(bis);
+                    if (u.Tank)
+                    {
+                        RocketHook.SpawnTracer(bahn, 1.20f, 0.50f, SpurHof, SpurHof, 0.30f);
+                        RocketHook.SpawnTracer(bahn, 0.44f, 0.17f, SpurKern, SpurEnde, 0.55f);
+                    }
+                    else
+                    {
+                        RocketHook.SpawnTracer(bahn, 0.34f, 0.14f, SpurHof, SpurHof, 0.10f);
+                        RocketHook.SpawnTracer(bahn, 0.13f, 0.05f, SpurKern, SpurEnde, 0.18f);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogError("Patrol gun: tracer - " + ex.Message);
+                }
+            }
+
+            static readonly Color SpurKern = new Color(1.00f, 0.96f, 0.78f, 1.0f);
+            static readonly Color SpurEnde = new Color(1.00f, 0.62f, 0.20f, 1.0f);
+            static readonly Color SpurHof = new Color(1.00f, 0.38f, 0.10f, 1.0f);
+
+            // -------------------------------------------------------- damage
+
+            static Type _pncType;
+            static PropertyInfo _photonPlayer;
+            static MethodInfo _getView, _rpc;
+            static bool _damageLookedUp;
+
+            /// <summary>
+            /// Damage on the struck object, by the game's own three roads.
+            ///
+            /// A PLAYER is hit over the wire, not by hand: FireOneShot does
+            /// Extensions.GetPhotonView(go).RPC("PlayerApplyDamage", victim,
+            /// damage, partType, 4, hitPoint, shooterPosition), and health
+            /// lives on the victim's own client. Calling the method directly
+            /// on our copy of a remote player would change a number nobody
+            /// reads.
+            /// </summary>
+            static bool Schaden(GameObject struck, float damage, Vector3 point, Vector3 from)
+            {
+                if (SpielerSchaden(struck, damage, point, from)) return true;
+                if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return true;
+                if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return true;
+                return false;
+            }
+
+            static bool SpielerSchaden(GameObject struck, float damage, Vector3 point,
+                                       Vector3 from)
+            {
+                if (!DamageLookUp()) return false;
+                Component pnc = struck.GetComponentInParent(_pncType);
+                if (pnc == null) return false;
+
+                object victim = _photonPlayer.GetValue(pnc, null);
+                if (victim == null) return false;
+                object view = _getView.Invoke(null, new object[] { pnc.gameObject });
+                if (view == null) return false;
+
+                // partType 0 is the body, 4 is the damage kind FireOneShot
+                // passes for a bullet. Both were read out of its IL.
+                _rpc.Invoke(view, new object[] {
+                    "PlayerApplyDamage", victim,
+                    new object[] { damage, 0, 4, point, from } });
+                return true;
+            }
+
+            static bool DamageLookUp()
+            {
+                if (_damageLookedUp) return _rpc != null;
+                _damageLookedUp = true;
+
+                _pncType = RevivalPlugin.TypeByName("PlayerNetworkController");
+                Type ext = RevivalPlugin.TypeByName("Extensions");
+                Type viewType = RevivalPlugin.TypeByName("PhotonView");
+                if (_pncType == null || ext == null || viewType == null)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol gun: PlayerNetworkController, "
+                        + "Extensions or PhotonView not found - the gun cannot hurt "
+                        + "a player.");
+                    return false;
+                }
+
+                _photonPlayer = _pncType.GetProperty("GetPhotonPlayer",
+                    BindingFlags.Public | BindingFlags.Instance);
+                _getView = AccessTools.Method(ext, "GetPhotonView",
+                    new Type[] { typeof(GameObject) }, null);
+
+                MethodInfo[] ms = viewType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+                for (int i = 0; i < ms.Length; i++)
+                {
+                    if (ms[i].Name != "RPC") continue;
+                    ParameterInfo[] ps = ms[i].GetParameters();
+                    if (ps.Length != 3) continue;
+                    if (ps[0].ParameterType != typeof(string)) continue;
+                    if (ps[2].ParameterType != typeof(object[])) continue;
+                    if (ps[1].ParameterType.Name != "PhotonPlayer") continue;
+                    _rpc = ms[i];
+                    break;
+                }
+
+                if (_photonPlayer == null || _getView == null || _rpc == null)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol gun: the player damage road is "
+                        + "incomplete (GetPhotonPlayer " + (_photonPlayer != null)
+                        + ", GetPhotonView " + (_getView != null)
+                        + ", RPC " + (_rpc != null) + ") - the gun stays harmless "
+                        + "to players.");
+                    _rpc = null;
+                    return false;
+                }
+                return true;
+            }
+
+            // ------------------------------------------------- value profile
+
+            static float Schadenswert(Unit u)
+            {
+                float own = RevivalPlugin.CfgPatrolGunDamage.Value;
+                if (own > 0f) return own;
+                return u.Tank ? RevivalPlugin.CfgTankDamage.Value
+                              : RevivalPlugin.CfgTurretDamage.Value;
+            }
+
+            static float Reichweite(Unit u)
+            {
+                return u.Tank ? RevivalPlugin.CfgTankRange.Value
+                              : RevivalPlugin.CfgTurretRange.Value;
+            }
+
+            static float Ladezeit(Unit u)
+            {
+                return u.Tank ? RevivalPlugin.CfgTankDelay.Value
+                              : RevivalPlugin.CfgTurretDelay.Value;
+            }
+
+            static float Drehgeschwindigkeit(Unit u)
+            {
+                return u.Tank ? RevivalPlugin.CfgTankTurnSpeed.Value
+                              : RevivalPlugin.CfgTurretTurnSpeed.Value;
+            }
+        }
+
+        // =====================================================================
+        //  The recorder
+        // =====================================================================
+
+        static void ToggleRecording()
+        {
+            _recording = !_recording;
+            _haveLastRecorded = false;
+            _nextRecord = 0f;
+            if (_recording)
+            {
+                Load(false);
+                RevivalPlugin.L.LogInfo("Patrol: recording route \""
+                    + RevivalPlugin.CfgPatrolRoute.Value + "\" - a waypoint every "
+                    + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
+                    + " s. F5 again to stop.");
+                Turret.Hinweis("Recording " + RevivalPlugin.CfgPatrolRoute.Value, 3f);
+            }
+            else
+            {
+                Route r = Active();
+                int count = r == null ? 0 : r.P.Count;
+                RevivalPlugin.L.LogInfo("Patrol: recording stopped, "
+                    + RevivalPlugin.CfgPatrolRoute.Value + " has " + count + " waypoints.");
+                Turret.Hinweis("Recorded " + count + " waypoints", 3f);
+            }
+        }
+
+        /// <summary>
+        /// A waypoint every `RecordSeconds`, which is the clock and not the
+        /// tape measure. The recorder counted METRES until 2026-08-30 and the
+        /// user asked for the clock: a route is recorded by driving it, and at
+        /// a steady speed the two are the same thing - three seconds at
+        /// 45 km/h is 37 m. Where they differ is the corner, where the driver
+        /// slows down, and there the clock puts the waypoints closer
+        /// together - which is exactly where a route wants them.
+        ///
+        /// `MinStep` is the one thing left of the metres: without it a
+        /// recorder left running while its owner stands still writes the same
+        /// point every three seconds until the file is full.
+        /// </summary>
+        static void RecordWhileWalking()
+        {
+            if (Time.time < _nextRecord) return;
+            Vector3 p = Where();
+            if (p == Vector3.zero) return;
+            if (_haveLastRecorded)
+            {
+                Vector3 d = p - _lastRecorded; d.y = 0f;
+                if (d.sqrMagnitude < MinStep * MinStep) return;
+            }
+            _nextRecord = Time.time
+                        + Mathf.Max(0.2f, RevivalPlugin.CfgPatrolRecordSeconds.Value);
+            RecordHere(false);
+        }
+
+        static void RecordHere(bool loud)
+        {
+            Vector3 p = Where();
+            if (p == Vector3.zero)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: no camera - nothing to record.");
+                return;
+            }
+
+            Load(false);
+            string name = RevivalPlugin.CfgPatrolRoute.Value;
+            Route r;
+            if (!_routes.TryGetValue(name, out r))
+            {
+                r = new Route();
+                r.Name = name;
+                _routes[name] = r;
+                _order.Add(name);
+            }
+
+            Point pt = new Point();
+            pt.Pos = p;
+            pt.Speed = 0f;
+            pt.Flags = r.P.Count == 0 ? "spawn" : "";
+            r.P.Add(pt);
+
+            _lastRecorded = p;
+            _haveLastRecorded = true;
+
+            Save();
+            if (loud)
+            {
+                RevivalPlugin.L.LogInfo("Patrol: " + name + " waypoint "
+                    + (r.P.Count - 1) + " at " + p);
+                Turret.Hinweis(name + " #" + (r.P.Count - 1), 2f);
+            }
+        }
+
+        /// <summary>Where the player stands. The camera sits at his head, which
+        /// is close enough for a road.</summary>
+        static Vector3 Where()
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return Vector3.zero;
+            return cam.transform.position;
+        }
+
+        // =====================================================================
+        //  File
+        // =====================================================================
+
+        public static void Load(bool force)
+        {
+            if (_loaded && !force) return;
+            _loaded = true;
+            _routes.Clear();
+            _order.Clear();
+
+            string path = Path.Combine(RevivalPlugin.AssetDir,
+                                       RevivalPlugin.CfgPatrolFile.Value);
+            if (!File.Exists(path))
+            {
+                RevivalPlugin.L.LogWarning("Patrol: " + path + " does not exist. "
+                    + "No route until one is recorded.");
+                return;
+            }
+
+            try
+            {
+                string[] lines = File.ReadAllLines(path);
+                int bad = 0;
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string raw = lines[i];
+                    if (raw == null) continue;
+                    string trimmed = raw.Trim();
+                    if (trimmed.Length == 0 || trimmed[0] == '#') continue;
+
+                    string[] c = raw.Split('\t');
+                    if (c.Length < 5) { bad++; continue; }
+
+                    float x, y, z;
+                    int index;
+                    if (!int.TryParse(c[1].Trim(), out index)) { bad++; continue; }
+                    if (!float.TryParse(c[2].Trim(), NumberStyles.Float,
+                                        CultureInfo.InvariantCulture, out x)
+                        || !float.TryParse(c[3].Trim(), NumberStyles.Float,
+                                        CultureInfo.InvariantCulture, out y)
+                        || !float.TryParse(c[4].Trim(), NumberStyles.Float,
+                                        CultureInfo.InvariantCulture, out z))
+                    { bad++; continue; }
+
+                    float speed = 0f;
+                    if (c.Length > 5 && c[5].Trim().Length > 0)
+                        float.TryParse(c[5].Trim(), NumberStyles.Float,
+                                       CultureInfo.InvariantCulture, out speed);
+
+                    string name = c[0].Trim();
+                    if (name.Length == 0) { bad++; continue; }
+
+                    Route r;
+                    if (!_routes.TryGetValue(name, out r))
+                    {
+                        r = new Route();
+                        r.Name = name;
+                        _routes[name] = r;
+                        _order.Add(name);
+                    }
+                    Point p = new Point();
+                    p.Pos = new Vector3(x, y, z);
+                    p.Speed = speed;
+                    p.Flags = c.Length > 6 ? c[6].Trim() : "";
+                    r.P.Add(p);
+                }
+
+                for (int i = 0; i < _order.Count; i++)
+                {
+                    Route r = _routes[_order[i]];
+                    MetaLesen(r);
+                    RevivalPlugin.L.LogInfo("Patrol: route " + r.Name + ", "
+                        + r.P.Count + " waypoints, " + r.Seite + " ("
+                        + Fraktion.Erklaerung(r.Seite) + "), " + r.Wagen + ", "
+                        + r.Count + " patrol(s)"
+                        + (r.Enabled ? "" : ", SWITCHED OFF") + ".");
+                }
+                if (bad > 0)
+                    RevivalPlugin.L.LogWarning("Patrol: " + bad + " line(s) in "
+                        + RevivalPlugin.CfgPatrolFile.Value + " were not readable.");
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol: reading routes: " + ex); }
+        }
+
+        static void Save()
+        {
+            string path = Path.Combine(RevivalPlugin.AssetDir,
+                                       RevivalPlugin.CfgPatrolFile.Value);
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("# ndr_routes.tsv - written by the in-game recorder.");
+                lines.Add("# route\tindex\tx\ty\tz\tspeed\tflags");
+                lines.Add("# Pull it into the repository with: python routecheck.py --pull");
+                for (int i = 0; i < _order.Count; i++)
+                {
+                    Route r = _routes[_order[i]];
+                    MetaSchreiben(r);
+                    for (int k = 0; k < r.P.Count; k++)
+                    {
+                        Point p = r.P[k];
+                        lines.Add(r.Name + "\t" + k.ToString(CultureInfo.InvariantCulture)
+                            + "\t" + p.Pos.x.ToString("0.00", CultureInfo.InvariantCulture)
+                            + "\t" + p.Pos.y.ToString("0.00", CultureInfo.InvariantCulture)
+                            + "\t" + p.Pos.z.ToString("0.00", CultureInfo.InvariantCulture)
+                            + "\t" + p.Speed.ToString("0.#", CultureInfo.InvariantCulture)
+                            + "\t" + (p.Flags == null ? "" : p.Flags));
+                    }
+                }
+                File.WriteAllLines(path, lines.ToArray());
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol: writing routes: " + ex); }
+        }
+
+        static Route Active()
+        {
+            Route r;
+            return _routes.TryGetValue(RevivalPlugin.CfgPatrolRoute.Value, out r) ? r : null;
+        }
+
+        static bool HasFlag(Point p, string flag)
+        {
+            if (p.Flags == null || p.Flags.Length == 0) return false;
+            string[] parts = p.Flags.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+                if (parts[i].Trim() == flag) return true;
+            return false;
+        }
+
+        /// <summary>The value of a `key=value` flag, empty when it is not
+        /// there.</summary>
+        static string FlagValue(Point p, string key)
+        {
+            if (p.Flags == null || p.Flags.Length == 0) return "";
+            string[] parts = p.Flags.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string one = parts[i].Trim();
+                if (one.Length <= key.Length + 1) continue;
+                if (!one.StartsWith(key + "=")) continue;
+                return one.Substring(key.Length + 1).Trim();
+            }
+            return "";
+        }
+
+        /// <summary>
+        /// The route's own settings, out of the flags of its first waypoint.
+        /// A route recorded before 2026-08-30 has none of them and gets the
+        /// values from the config - which is what it did all along.
+        /// </summary>
+        static void MetaLesen(Route r)
+        {
+            if (r.P.Count == 0) return;
+            Point p = r.P[0];
+            r.Fraction = Fraktion.Sauber(FlagValue(p, "fraction"));
+            r.Vehicle = FlagValue(p, "vehicle");
+            r.Enabled = !HasFlag(p, "off");
+            int n;
+            if (int.TryParse(FlagValue(p, "count"), out n)) r.Count = Mathf.Clamp(n, 0, 16);
+            else r.Count = 1;
+        }
+
+        /// <summary>
+        /// The other direction: the settings back into the flags, replacing
+        /// whatever stood there. `spawn` is kept because the driver reads it,
+        /// and any flag this class does not know is kept too - somebody may
+        /// have written it by hand.
+        /// </summary>
+        static void MetaSchreiben(Route r)
+        {
+            if (r.P.Count == 0) return;
+            Point p = r.P[0];
+            List<string> keep = new List<string>();
+            keep.Add("spawn");
+            if (p.Flags != null)
+            {
+                string[] parts = p.Flags.Split(',');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string one = parts[i].Trim();
+                    if (one.Length == 0 || one == "spawn" || one == "off") continue;
+                    if (one.StartsWith("fraction=") || one.StartsWith("vehicle=")
+                        || one.StartsWith("count=")) continue;
+                    keep.Add(one);
+                }
+            }
+            string f = Fraktion.Sauber(r.Fraction);
+            if (f.Length > 0) keep.Add("fraction=" + f);
+            string v = r.Vehicle == null ? "" : r.Vehicle.Trim().ToLowerInvariant();
+            if (v == "btr" || v == "tank" || v == "mixed") keep.Add("vehicle=" + v);
+            keep.Add("count=" + r.Count.ToString(CultureInfo.InvariantCulture));
+            if (!r.Enabled) keep.Add("off");
+            p.Flags = string.Join(",", keep.ToArray());
+        }
+
+
+        // =====================================================================
+        //  The route editor
+        // =====================================================================
+
+        /// <summary>
+        /// The window that makes a route without a text file.
+        ///
+        /// Everything it does was already possible from `nextday.revival.toolkit.cfg`
+        /// plus three keys, and that is exactly the problem it solves: the
+        /// settings that matter are PER ROUTE - which side patrols it, what
+        /// drives it, how many - and a config file has one of each. The user's
+        /// plan is patrols at many places on the map, a looter patrol outside
+        /// the looter base and a civilian one around the civilian base, and
+        /// that plan needs a place to say so per route. This is that place,
+        /// and it writes what it is told straight into the flags of each
+        /// route's first waypoint (see <see cref="Route"/>).
+        ///
+        /// It is nested inside Patrol on purpose: it works on `Route`, which
+        /// is Patrol's own type, and a second class outside would have needed
+        /// a translation layer of strings for no gain.
+        /// </summary>
+        internal static class Editor
+        {
+            const int FensterId = 0x4E445242;
+
+            static bool _offen;
+            static bool _fokusLoesen;
+            static Rect _fenster = new Rect(60f, 60f, 470f, 0f);
+            static Vector2 _rollen;
+            static string _neu = "";
+            static string _status = "";
+            static string _loeschFrage = "";
+
+            public static bool IsOpen { get { return _offen; } }
+
+            public static void Tick()
+            {
+                if (!Input.GetKeyDown(_editKey)) return;
+                _offen = !_offen;
+                if (_offen) Load(false);
+                else { _fokusLoesen = true; CursorZurueck(); }
+                RevivalPlugin.L.LogInfo("Patrol editor " + (_offen ? "open" : "closed") + ".");
+            }
+
+            static void CursorZurueck()
+            {
+                if (!CursorTracker.SawCall) return;
+                CursorTracker.Restoring = true;
+                try
+                {
+                    Cursor.lockState = CursorTracker.DesiredLock;
+                    Cursor.visible = CursorTracker.DesiredVisible;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Patrol editor cursor: " + ex.Message);
+                }
+                finally { CursorTracker.Restoring = false; }
+            }
+
+            public static void Draw()
+            {
+                if (_fokusLoesen)
+                {
+                    _fokusLoesen = false;
+                    GUIUtility.keyboardControl = 0;
+                    GUIUtility.hotControl = 0;
+                }
+                if (!_offen || !RevivalPlugin.CfgPatrol.Value) return;
+
+                CursorTracker.Restoring = true;
+                try
+                {
+                    Cursor.visible = true;
+                    Cursor.lockState = CursorLockMode.None;
+                }
+                finally { CursorTracker.Restoring = false; }
+
+                _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
+                                            "Revival - Patrol routes");
+            }
+
+            static void Inhalt(int id)
+            {
+                // ------------------------------------------------ recording
+                GUILayout.Label(_recording
+                    ? "RECORDING into \"" + RevivalPlugin.CfgPatrolRoute.Value
+                      + "\" - a waypoint every "
+                      + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
+                      + " s while you drive."
+                    : "Not recording. Drive the road you want patrolled, then stop.");
+
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(_recording ? "stop recording" : "record",
+                                     GUILayout.Width(130f)))
+                {
+                    ToggleRecording();
+                    Melde(_recording ? "recording " + RevivalPlugin.CfgPatrolRoute.Value
+                                     : "recording stopped");
+                }
+                if (GUILayout.Button("waypoint here", GUILayout.Width(120f)))
+                {
+                    RecordHere(true);
+                    Melde("waypoint added to " + RevivalPlugin.CfgPatrolRoute.Value);
+                }
+                if (GUILayout.Button("undo last", GUILayout.Width(90f))) Zurueck();
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("New route:", GUILayout.Width(70f));
+                _neu = GUILayout.TextField(_neu, 24, GUILayout.Width(140f));
+                if (GUILayout.Button("create and record", GUILayout.Width(150f))) Anlegen();
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(6f);
+
+                // --------------------------------------------------- routes
+                GUILayout.Label("Routes - each one is its own patrol");
+                _rollen = GUILayout.BeginScrollView(_rollen, GUILayout.Height(260f));
+                for (int i = 0; i < _order.Count; i++) Zeile(_routes[_order[i]]);
+                if (_order.Count == 0)
+                    GUILayout.Label("None yet. Type a name above, press "
+                        + "\"create and record\", and drive the road.");
+                GUILayout.EndScrollView();
+
+                GUILayout.Space(6f);
+
+                // ------------------------------------------------ the road
+                int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+                GUILayout.Label("On the road: " + _units.Count + " of " + max
+                    + " (MaxVehicles). Automatic: " + (_auto ? "on" : "OFF"));
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(_auto ? "automatic off" : "automatic on",
+                                     GUILayout.Width(130f)))
+                {
+                    if (_auto) { StopAll(); Melde("all patrols off the road"); }
+                    else { Toggle(); Melde("automatic on"); }
+                }
+                if (GUILayout.Button("clear the road", GUILayout.Width(120f)))
+                {
+                    StopAll();
+                    Melde("all patrols off the road");
+                }
+                if (GUILayout.Button("save file", GUILayout.Width(90f)))
+                {
+                    Save();
+                    Melde("written to " + RevivalPlugin.CfgPatrolFile.Value);
+                }
+                if (GUILayout.Button("reload", GUILayout.Width(70f)))
+                {
+                    Load(true);
+                    Melde("read back from " + RevivalPlugin.CfgPatrolFile.Value);
+                }
+                GUILayout.EndHorizontal();
+
+                if (_status.Length > 0) GUILayout.Label(_status);
+                GUILayout.Label("civilian attacks everyone but civilians. looter "
+                    + "everyone but looters. traitor attacks EVERYONE. neutral "
+                    + "attacks traitors only.");
+
+                if (GUILayout.Button("close")) { _offen = false; CursorZurueck(); }
+                GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+            }
+
+            /// <summary>
+            /// One route. Every change here is written to the file at once:
+            /// the alternative is a window whose state is lost when the world
+            /// ends, and a route editor that loses routes is worse than no
+            /// route editor. `Save` is a few dozen lines of text - it can be
+            /// afforded on a button press.
+            /// </summary>
+            static void Zeile(Route r)
+            {
+                bool aktiv = RevivalPlugin.CfgPatrolRoute.Value == r.Name;
+                GUILayout.BeginVertical(GUI.skin.box);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label((aktiv ? "> " : "  ") + r.Name + "  "
+                    + r.P.Count + " wp  " + Fahren(r.Name) + "/" + r.Count + " out",
+                    GUILayout.Width(190f));
+                bool an = GUILayout.Toggle(r.Enabled, "on", GUILayout.Width(45f));
+                if (an != r.Enabled)
+                {
+                    r.Enabled = an;
+                    Sichern(r.Name + (an ? " is on" : " is off - the automatic "
+                                            + "leaves it alone"));
+                }
+                if (GUILayout.Button("-", GUILayout.Width(24f)) && r.Count > 0)
+                {
+                    r.Count--;
+                    Sichern(r.Name + " carries " + r.Count + " patrol(s)");
+                }
+                GUILayout.Label(r.Count.ToString(), GUILayout.Width(20f));
+                if (GUILayout.Button("+", GUILayout.Width(24f)) && r.Count < 16)
+                {
+                    r.Count++;
+                    Sichern(r.Name + " carries " + r.Count + " patrol(s)");
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("side", GUILayout.Width(34f));
+                for (int i = 0; i < Fraktion.Namen.Length; i++)
+                {
+                    string n = Fraktion.Namen[i];
+                    // `Seite` is the EFFECTIVE side, so a route that never
+                    // chose one shows the config's choice as selected. Pressing
+                    // that same button is therefore not a no-op: it pins the
+                    // choice to the route, which is what the user meant by
+                    // pressing it.
+                    if (GUILayout.Toggle(r.Seite == n, n, GUI.skin.button,
+                                         GUILayout.Width(72f))
+                        && r.Fraction != n)
+                    {
+                        r.Fraction = n;
+                        Sichern(r.Name + " is " + n + " - " + Fraktion.Erklaerung(n));
+                    }
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("car", GUILayout.Width(34f));
+                Wagenknopf(r, "btr");
+                Wagenknopf(r, "tank");
+                Wagenknopf(r, "mixed");
+                if (GUILayout.Button("record into", GUILayout.Width(90f)))
+                {
+                    RevivalPlugin.CfgPatrolRoute.Value = r.Name;
+                    if (!_recording) ToggleRecording();
+                    Melde("recording into " + r.Name);
+                }
+                if (GUILayout.Button("patrol now", GUILayout.Width(85f))) Jetzt(r);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                if (_loeschFrage == r.Name)
+                {
+                    GUILayout.Label("Delete " + r.Name + " and its " + r.P.Count
+                        + " waypoints?", GUILayout.Width(250f));
+                    if (GUILayout.Button("yes, delete", GUILayout.Width(90f))) Loeschen(r);
+                    if (GUILayout.Button("no", GUILayout.Width(40f))) _loeschFrage = "";
+                }
+                else
+                {
+                    if (GUILayout.Button("delete route", GUILayout.Width(100f)))
+                        _loeschFrage = r.Name;
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.EndVertical();
+            }
+
+            static void Wagenknopf(Route r, string was)
+            {
+                if (GUILayout.Toggle(r.Wagen == was, was, GUI.skin.button,
+                                     GUILayout.Width(54f))
+                    && r.Vehicle != was)
+                {
+                    r.Vehicle = was;
+                    Sichern(r.Name + " drives " + was);
+                }
+            }
+
+            /// <summary>Say it and write it. Every setting in this window goes
+            /// through here.</summary>
+            static void Sichern(string text)
+            {
+                Save();
+                Melde(text);
+            }
+
+            static void Anlegen()
+            {
+                string name = _neu == null ? "" : _neu.Trim();
+                if (name.Length == 0) { Melde("a route needs a name"); return; }
+                if (name.IndexOf('\t') >= 0 || name[0] == '#')
+                {
+                    Melde("no tabs and no leading # - the file is a TSV");
+                    return;
+                }
+                Load(false);
+                if (_routes.ContainsKey(name))
+                {
+                    Melde("\"" + name + "\" is already there - use \"record into\"");
+                    return;
+                }
+                Route r = new Route();
+                r.Name = name;
+                _routes[name] = r;
+                _order.Add(name);
+                RevivalPlugin.CfgPatrolRoute.Value = name;
+                _neu = "";
+                if (!_recording) ToggleRecording();
+                Melde("recording " + name + " - drive the road, then press stop");
+            }
+
+            static void Zurueck()
+            {
+                Route r = Active();
+                if (r == null || r.P.Count == 0) { Melde("nothing to undo"); return; }
+                r.P.RemoveAt(r.P.Count - 1);
+                Save();
+                Melde(r.Name + " now has " + r.P.Count + " waypoints");
+            }
+
+            static void Loeschen(Route r)
+            {
+                _loeschFrage = "";
+                _routes.Remove(r.Name);
+                _order.Remove(r.Name);
+                Save();
+                Melde(r.Name + " deleted");
+                RevivalPlugin.L.LogInfo("Patrol: route " + r.Name + " deleted from "
+                    + RevivalPlugin.CfgPatrolFile.Value + ".");
+            }
+
+            /// <summary>One patrol on this route now, wherever the player is
+            /// standing. It goes through the same Spawn the automatic uses, so
+            /// a route that works here works there.</summary>
+            static void Jetzt(Route r)
+            {
+                if (r.P.Count < 3) { Melde(r.Name + " needs at least three waypoints"); return; }
+                int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+                if (_units.Count >= max)
+                {
+                    Melde("MaxVehicles is " + max + " and " + _units.Count
+                          + " are out - clear the road first");
+                    return;
+                }
+                int before = _units.Count;
+                Spawn(r, false);
+                Melde(_units.Count > before
+                    ? r.Name + ": one " + r.Seite + " patrol on the road"
+                    : "the vehicle could not be put down - see the log");
+            }
+
+            static void Melde(string text)
+            {
+                _status = text;
+                RevivalPlugin.L.LogInfo("Patrol editor: " + text);
+            }
+        }
+
+        // =====================================================================
+        //  Reflection, cached. The plugin references no Assembly-CSharp and no
+        //  PhysicsModule, so every field here goes through AccessTools - and a
+        //  fresh lookup per physics step for six vehicles is not free.
+        // =====================================================================
+
+        static Dictionary<string, FieldInfo> _fieldCache = new Dictionary<string, FieldInfo>();
+        static Dictionary<string, MethodInfo> _methodCache = new Dictionary<string, MethodInfo>();
+        static PropertyInfo _velocity, _angular;
+        static bool _bodyLookedUp;
+
+        static FieldInfo Field(object o, string name)
+        {
+            if (o == null) return null;
+            Type t = o.GetType();
+            string key = t.FullName + "|" + name;
+            FieldInfo fi;
+            if (_fieldCache.TryGetValue(key, out fi)) return fi;
+            fi = AccessTools.Field(t, name);
+            _fieldCache[key] = fi;
+            if (fi == null)
+                RevivalPlugin.L.LogWarning("Patrol: field " + name + " not on " + t.Name + ".");
+            return fi;
+        }
+
+        static object GetField(object o, string name)
+        {
+            FieldInfo fi = Field(o, name);
+            return fi == null ? null : fi.GetValue(o);
+        }
+
+        static float GetFloat(object o, string name, float fallback)
+        {
+            FieldInfo fi = Field(o, name);
+            if (fi == null || fi.FieldType != typeof(float)) return fallback;
+            return (float)fi.GetValue(o);
+        }
+
+        static void SetFloat(object o, string name, float value)
+        {
+            FieldInfo fi = Field(o, name);
+            if (fi != null && fi.FieldType == typeof(float)) fi.SetValue(o, value);
+        }
+
+        static bool GetBool(object o, string name, bool fallback)
+        {
+            FieldInfo fi = Field(o, name);
+            if (fi == null || fi.FieldType != typeof(bool)) return fallback;
+            return (bool)fi.GetValue(o);
+        }
+
+        static void SetBool(object o, string name, bool value)
+        {
+            FieldInfo fi = Field(o, name);
+            if (fi != null && fi.FieldType == typeof(bool)) fi.SetValue(o, value);
+        }
+
+        static void Invoke(object o, string name)
+        {
+            if (o == null) return;
+            Type t = o.GetType();
+            string key = t.FullName + "|()" + name;
+            MethodInfo mi;
+            if (!_methodCache.TryGetValue(key, out mi))
+            {
+                mi = AccessTools.Method(t, name, null, null);
+                _methodCache[key] = mi;
+                if (mi == null)
+                    RevivalPlugin.L.LogWarning("Patrol: method " + name + " not on " + t.Name + ".");
+            }
+            if (mi != null) mi.Invoke(o, null);
+        }
+
+        static void LookUpBody()
+        {
+            if (_bodyLookedUp) return;
+            _bodyLookedUp = true;
+            Type rb = RevivalPlugin.TypeByName("UnityEngine.Rigidbody");
+            if (rb == null)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: UnityEngine.Rigidbody not found - "
+                    + "speed will be read as zero and the driver will floor it.");
+                return;
+            }
+            _velocity = rb.GetProperty("velocity", BindingFlags.Public | BindingFlags.Instance);
+            _angular = rb.GetProperty("angularVelocity", BindingFlags.Public | BindingFlags.Instance);
+        }
+
+        static Vector3 Velocity(object body)
+        {
+            LookUpBody();
+            if (body == null || _velocity == null) return Vector3.zero;
+            return (Vector3)_velocity.GetValue(body, null);
+        }
+
+        static void Stop(object body)
+        {
+            LookUpBody();
+            if (body == null) return;
+            if (_velocity != null) _velocity.SetValue(body, Vector3.zero, null);
+            if (_angular != null) _angular.SetValue(body, Vector3.zero, null);
+        }
+
+        // =====================================================================
+        //  Keys
+        // =====================================================================
+
+        static void ParseKeys()
+        {
+            if (_keysParsed) return;
+            _keysParsed = true;
+            _key = ParseKey(RevivalPlugin.CfgPatrolKey.Value, KeyCode.F11, "Key");
+            _autoKey = ParseKey(RevivalPlugin.CfgPatrolAutoKey.Value, KeyCode.F5, "RecordAutoKey");
+            _recKey = ParseKey(RevivalPlugin.CfgPatrolRecordKey.Value, KeyCode.F6, "RecordKey");
+            _editKey = ParseKey(RevivalPlugin.CfgPatrolEditorKey.Value, KeyCode.F4, "EditorKey");
+        }
+
+        static KeyCode ParseKey(string text, KeyCode fallback, string which)
+        {
+            try { return (KeyCode)Enum.Parse(typeof(KeyCode), text, true); }
+            catch
+            {
+                RevivalPlugin.L.LogWarning("Patrol: " + which + " \"" + text
+                    + "\" is not a KeyCode, using " + fallback + ".");
+                return fallback;
+            }
+        }
+    }
+
+    // ------------------------------------------------------- who shoots whom
+
+    /// <summary>
+    /// The four sides a patrol can be on, and what each of them attacks.
+    ///
+    /// The game already has the enum - `Fraction`, eight values, Neutral 0,
+    /// Marauder 1, Peace 2, Hermit 3, Wildman 4, Military 5, Traitor 6,
+    /// MilitaryNeutral 7 - and it already has the one method that decides a
+    /// fight (read out of Assembly-CSharp.dll on 2026-08-30, RE 23):
+    ///
+    ///     NPC_AI2::IsEnemyFraction(player)
+    ///         fraction = PlayerStatisticsManager.GetPlayerInfo(player).fraction
+    ///         walk THIS NPC's MainOptions.HatedFractions
+    ///         return true if the player's fraction is in it
+    ///
+    /// So enmity is not a table somewhere: it is an ARRAY on the NPC, and
+    /// whoever fills that array decides who is shot at. `NPC_Settlement::
+    /// SetNpcParams` copies it from the settlement's `FractionOptions` (or the
+    /// spawn point's `IndividualFraction` where `UseIndividualFraction` is
+    /// set), and both of those are ours to write.
+    ///
+    /// The game's own hardcoded relations (PlayerStatisticsManager::
+    /// GetHatedFractionsOfNPC) are only used for the map markers and are NOT
+    /// what an NPC fights by. They are listed here because they are the reason
+    /// the four names below map onto the enum values they do - a patrol whose
+    /// marker colour disagreed with its trigger finger would be a bug report:
+    ///
+    ///     Neutral   hates Marauder
+    ///     Marauder  hates everyone except Marauder and MilitaryNeutral
+    ///     Peace     hates Marauder, Military, Traitor
+    ///     Hermit    hates Traitor
+    ///     Wildman   hates Marauder, Traitor
+    ///     Military  hates everyone except Military and MilitaryNeutral
+    ///     Traitor   hates EVERYONE, itself included
+    ///     MilitaryNeutral returns null - never use it, IsHatedFraction does
+    ///                     ldlen on the result and would throw.
+    ///
+    /// The four names the user asked for, and what each becomes:
+    ///
+    ///     civilian  Peace     hates all seven others - everyone but civilians
+    ///     looter    Marauder  hates all seven others - everyone but looters
+    ///     traitor   Traitor   hates all EIGHT, itself included
+    ///     neutral   Neutral   hates Traitor only
+    ///
+    /// The hated arrays are written out in full rather than taken from the
+    /// game's own table, because the user's rule and the game's table differ
+    /// in one place that matters: the game's Peace tolerates Hermits and
+    /// Wildmen, and "attacks everyone but civilians" does not.
+    /// </summary>
+    public static class Fraktion
+    {
+        /// <summary>The enum values, by name, so nothing here depends on a
+        /// number staying where it is.</summary>
+        const string Neutral = "Neutral";
+        const string Marauder = "Marauder";
+        const string Peace = "Peace";
+        const string Hermit = "Hermit";
+        const string Wildman = "Wildman";
+        const string Military = "Military";
+        const string Traitor = "Traitor";
+        const string MilitaryNeutral = "MilitaryNeutral";
+
+        /// <summary>The four names a route may carry, in the order the editor
+        /// shows them.</summary>
+        public static readonly string[] Namen =
+            new string[] { "civilian", "looter", "traitor", "neutral" };
+
+        /// <summary>One line each, for the editor and the log.</summary>
+        public static string Erklaerung(string name)
+        {
+            switch (Sauber(name))
+            {
+                case "civilian": return "attacks everyone but civilians";
+                case "looter": return "attacks everyone but looters";
+                case "traitor": return "attacks EVERYONE, traitors included";
+                default: return "attacks traitors only";
+            }
+        }
+
+        /// <summary>A name the rest of the code can rely on. Anything
+        /// unreadable becomes the configured default, and that is said once
+        /// where it happens, not once a frame.</summary>
+        public static string Sauber(string name)
+        {
+            if (name == null) return "neutral";
+            string n = name.Trim().ToLowerInvariant();
+            for (int i = 0; i < Namen.Length; i++)
+                if (Namen[i] == n) return n;
+            return "";
+        }
+
+        /// <summary>The game's own enum value this side is.</summary>
+        static string Eigene(string name)
+        {
+            switch (name)
+            {
+                case "civilian": return Peace;
+                case "looter": return Marauder;
+                case "traitor": return Traitor;
+                default: return Neutral;
+            }
+        }
+
+        /// <summary>Everything this side shoots at.</summary>
+        static string[] Gehasste(string name)
+        {
+            switch (name)
+            {
+                case "civilian":
+                    return new string[] { Neutral, Marauder, Hermit, Wildman,
+                                          Military, Traitor, MilitaryNeutral };
+                case "looter":
+                    return new string[] { Neutral, Peace, Hermit, Wildman,
+                                          Military, Traitor, MilitaryNeutral };
+                case "traitor":
+                    return new string[] { Neutral, Marauder, Peace, Hermit,
+                                          Wildman, Military, Traitor,
+                                          MilitaryNeutral };
+                default:
+                    return new string[] { Traitor };
+            }
+        }
+
+        /// <summary>
+        /// Build one `NPCMainOptions` for this side: MyFraction, the hated
+        /// array, and an EMPTY friendly array.
+        ///
+        /// The empty array is not tidiness. `FriendlyFractions` is never read
+        /// by the AI - only `HatedFractions` is - but a null array in a field
+        /// the game may one day walk is a crash waiting for a patch, and an
+        /// empty one costs nothing. `HatedFractions` itself MUST be an array:
+        /// `IsEnemyFraction` does `ldlen` on it with no null check.
+        /// </summary>
+        public static object Optionen(string name)
+        {
+            Type t = RevivalPlugin.TypeByName("NPCMainOptions");
+            Type f = RevivalPlugin.TypeByName("Fraction");
+            if (t == null || f == null || !f.IsEnum)
+            {
+                RevivalPlugin.L.LogWarning("Fraktion: NPCMainOptions or the "
+                    + "Fraction enum is missing - a patrol crew will use "
+                    + "whatever the game gives it.");
+                return null;
+            }
+
+            string wer = Sauber(name);
+            if (wer.Length == 0) wer = "neutral";
+
+            object o;
+            try { o = Activator.CreateInstance(t); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Fraktion: NPCMainOptions could not "
+                    + "be built - " + ex.Message);
+                return null;
+            }
+
+            Feld(o, "MyFraction", Wert(f, Eigene(wer)));
+            Feld(o, "HatedFractions", Liste(f, Gehasste(wer)));
+            Feld(o, "FriendlyFractions", Array.CreateInstance(f, 0));
+            Feld(o, "ID", "");
+            Feld(o, "GroupID", "");
+            return o;
+        }
+
+        static object Wert(Type enumType, string name)
+        {
+            try { return Enum.Parse(enumType, name, true); }
+            catch
+            {
+                RevivalPlugin.L.LogWarning("Fraktion: the Fraction enum has no "
+                    + name + " - falling back to the first value.");
+                return Enum.ToObject(enumType, 0);
+            }
+        }
+
+        static Array Liste(Type enumType, string[] namen)
+        {
+            Array a = Array.CreateInstance(enumType, namen.Length);
+            for (int i = 0; i < namen.Length; i++)
+                a.SetValue(Wert(enumType, namen[i]), i);
+            return a;
+        }
+
+        static void Feld(object o, string name, object value)
+        {
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null)
+            {
+                RevivalPlugin.L.LogWarning("Fraktion: NPCMainOptions has no "
+                    + name + ".");
+                return;
+            }
+            try { fi.SetValue(o, value); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Fraktion: " + name + " not set - "
+                    + ex.Message);
+            }
+        }
+    }
+
+    // ------------------------------------------------- the crew of a patrol
+
+    /// <summary>
+    /// The men in the vehicle, and what happens when it burns.
+    ///
+    /// WHILE IT DRIVES the crew is a NUMBER, not bodies. One man per seat is
+    /// counted in <see cref="Patrol"/>, the seats are closed to players
+    /// (Turret.FreeSeatPostfix asks Patrol.Besetzt), and that is all. Putting
+    /// real NPCs into the seats was tried on paper first and dropped, for two
+    /// reasons that are both read out of the game, not guessed:
+    ///
+    ///   1  `VehicleGameSystem::SetDamageToAllPassengers` and
+    ///      `GetPassengersPlayerIds` walk `Passengers` and call
+    ///      `GetComponent&lt;PlayerNetworkController&gt;().GetPhotonPlayer` on
+    ///      every entry. On an NPC GameObject that GetComponent returns null
+    ///      and the call throws - and SetDamageToAllPassengers runs exactly
+    ///      when the vehicle is destroyed, which is the one moment that must
+    ///      not fail.
+    ///   2  A body parented to the seat is parented on the HOST only. The
+    ///      other clients get the NPC's own position sync and would see the
+    ///      crew standing in the road where the vehicle once spawned. The
+    ///      hull is closed - nobody can see the crew inside it anyway.
+    ///
+    /// WHEN IT IS DESTROYED the number becomes bodies. That is the moment
+    /// they are worth their cost: the man who killed the vehicle is standing
+    /// within a few dozen metres, and now there are marauders on the ground
+    /// looking for him.
+    ///
+    /// HOW THE BODIES ARE MADE. Not by hand. The game builds an NPC out of a
+    /// **settlement** plus one **spawn point** per man, and every value an NPC
+    /// needs - appearance, weapon, level, behaviour - is derived from those
+    /// two by the game's own code (RE 10, `NPC_Settlement::InitSpawnNpc`). So
+    /// this class builds a settlement the size of one wreck: a GameObject at
+    /// the wreck, a spawn point at each of the vehicle's own GetOutPoints, a
+    /// ring of walk points around it, and then `StartMainInit` - the game's
+    /// own entry point - does the rest, including
+    /// `PhotonNetwork.InstantiateSceneObject` so every client sees them.
+    ///
+    /// The settlement is what makes them hunt: its `Update` runs
+    /// `PlayersDistanceControll` and the sensors that hand an NPC a target.
+    /// Behaviour Aggressive, respawn switched off - they die once and stay
+    /// dead. WHICH SIDE they are on comes from the route the vehicle was
+    /// driving (`fraction=` in its first waypoint's flags) and is written into
+    /// the settlement's `FractionOptions` by <see cref="Fraktion"/>; that one
+    /// object is what `NPC_AI2::IsEnemyFraction` reads, so it is the whole
+    /// answer to "who do these men shoot at" (RE 23).
+    ///
+    /// TWO THINGS AN AddComponent DOES NOT GIVE, and both of them stopped this
+    /// class dead once each:
+    ///
+    ///   the lists and the little classes   `Listen`, and the reasons are at
+    ///       that method. The second run died on `NPC_SpawnPoint.Quests` being
+    ///       null, after the men had already been built.
+    ///   the designers' numbers             `Abschreiben`. A settlement built
+    ///       at runtime has SensorVisibleDist 0 - a crew that cannot see. The
+    ///       values are copied off a settlement the map already has instead of
+    ///       being invented here.
+    ///
+    /// THE PHOTONVIEW WITH ID 0 IS DELIBERATE. `InitSpawnNpc` puts
+    /// `photonView.viewID` into the instantiation data as element 0, and on
+    /// the other clients `NPC_AI2::FindMySpawnPointAndSet` looks that id up in
+    /// `LocalSettlementsDictionary`. A settlement built at runtime is not in
+    /// that dictionary on any machine, so the lookup misses and the method
+    /// returns - after it has read the weapon id out of element 2, which is
+    /// what a remote client needs to draw the rifle in his hands. An
+    /// unregistered PhotonView (viewID 0) gives exactly that: a non-null
+    /// element 0, a lookup that misses cleanly, and no id that could collide
+    /// with a real scene object.
+    ///
+    /// UNTESTED. Every line of this is read IL. Nothing here has run.
+    /// </summary>
+    public static class Crew
+    {
+        /// <summary>Metres between the walk points the crew wanders over.
+        /// Wide enough that they spread out around the wreck, tight enough
+        /// that they stay a group.</summary>
+        const float RingRadius = 9f;
+
+        /// <summary>Tactical points used by the game's real alarm state. They
+        /// sit between the ordinary patrol points so an alarm makes the crew
+        /// spread out instead of walking the same ring a little faster.</summary>
+        const float TacticalRingRadius = 12f;
+
+        /// <summary>The name every crew settlement carries. It is how the
+        /// template search tells the map's settlements from our own.</summary>
+        internal const string Name = "NDR_PatrolCrew";
+
+        static List<GameObject> _settlements = new List<GameObject>();
+
+        /// <summary>Wreck crews are permanent combatants, not settlements
+        /// waiting for a nearby player. The vanilla distance shutdown calls
+        /// SetActiveAI(false), which stops the legacy Animation and leaves its
+        /// skinned mesh in the bind pose. Skip only that shutdown for the
+        /// generated crew settlement; every map settlement keeps the vanilla
+        /// distance optimization.</summary>
+        public static bool AutoDisablePrefix(object __instance)
+        {
+            Component settlement = __instance as Component;
+            return settlement == null || settlement.gameObject == null
+                || settlement.gameObject.name != Name;
+        }
+
+        /// <summary>
+        /// The switch that froze them, and the same switch that made them
+        /// unkillable. One call, four effects (`NPC_AI2::SetPlayVisualizationValue`):
+        ///
+        ///     Anim.enabled = false            the legacy Animation stops
+        ///                                     where it stands - the frozen
+        ///                                     figure with the frozen weapon
+        ///     RagdollController.SetPhysActive(false)
+        ///                                     detectCollisions = false on
+        ///                                     EVERY ragdoll rigidbody
+        ///     _colliderMain.enabled = false
+        ///     _rigidbody.Sleep()
+        ///
+        /// The second line is why a drone detonating beside them does nothing.
+        /// `ExplosionObject::ExplosionPhysicsEffect` damages an NPC only
+        /// through a collider tagged `RagdollBone` that `Physics.OverlapSphere`
+        /// reports, and a rigidbody with collision detection switched off is
+        /// not reported by that query. 550 damage in 7 m never reaches them,
+        /// and no damage value would have.
+        ///
+        /// It is switched off whenever the local player BODY is not in
+        /// `PlayersAround`: `CheckVisualizationForLocalPlayer` and
+        /// `StartAutoDisableTimer` both do it, neither looks at the camera, and
+        /// a drone is not a body. So a wreck crew that is flown to instead of
+        /// walked to is frozen and invulnerable at once, from one line.
+        ///
+        /// E-042 found the neighbouring switch - `SetActiveAI(false)`, which
+        /// calls `Animation.Stop()` - and this one was left standing. Same rule
+        /// as there, and same reason: only the generated crew settlement
+        /// refuses it, every settlement the map brought keeps the vanilla
+        /// distance optimization. Enabling is never refused.
+        /// </summary>
+        public static bool PlayVisualizationPrefix(object __instance, bool __0)
+        {
+            if (__0) return true;
+            Component settlement = __instance as Component;
+            return settlement == null || settlement.gameObject == null
+                || settlement.gameObject.name != Name;
+        }
+
+        internal static void Install(Harmony harmony)
+        {
+            Type type = RevivalPlugin.TypeByName("NPC_Settlement");
+            if (type == null)
+            {
+                RevivalPlugin.L.LogWarning("Crew: NPC_Settlement not found - distant "
+                    + "wreck crews stay frozen and cannot be hit.");
+                return;
+            }
+
+            // Two switches, two patches, and one must not cost the other: a
+            // missing method used to return out of this method and silently
+            // skip whatever came after it.
+            // The two prefixes are named in full here on purpose: verify.py
+            // reads these literals out of the source and checks that the
+            // method still exists in the built DLL. A name in a variable is
+            // invisible to it.
+            Haengen(harmony, type, "AutoDisableControl",
+                typeof(Crew).GetMethod("AutoDisablePrefix"),
+                "Crew: wreck crews stay animated at any distance.",
+                "distant wreck crews may enter the T-pose");
+            Haengen(harmony, type, "SetPlayVisualizationValue",
+                typeof(Crew).GetMethod("PlayVisualizationPrefix"),
+                "Crew: wreck crews keep animation, collision and ragdoll at any distance.",
+                "a wreck crew reached by drone stays frozen and cannot be hit");
+        }
+
+        static void Haengen(Harmony harmony, Type type, string spielMethode,
+                            MethodInfo eigene, string erfolg, string folge)
+        {
+            try
+            {
+                MethodInfo method = AccessTools.Method(type, spielMethode, null, null);
+                if (method == null || eigene == null)
+                {
+                    RevivalPlugin.L.LogWarning("Crew: NPC_Settlement." + spielMethode
+                        + " not found - " + folge + ".");
+                    return;
+                }
+                harmony.Patch(method, new HarmonyMethod(eigene), null, null, null, null);
+                RevivalPlugin.L.LogInfo(erfolg);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Crew: " + spielMethode + " hook failed - " + ex);
+            }
+        }
+
+        /// <summary>
+        /// The crew of a destroyed vehicle climbs out.
+        /// </summary>
+        public static void Aussteigen(GameObject car, Component vgs, int count,
+                                      bool tank, string fraktion)
+        {
+            if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
+            if (car == null) return;
+
+            GameObject settlement = null;
+            try
+            {
+                Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
+                Type pType = RevivalPlugin.TypeByName("NPC_SpawnPoint");
+                Type wType = RevivalPlugin.TypeByName("NPC_WP");
+                if (sType == null || pType == null || wType == null)
+                {
+                    RevivalPlugin.L.LogWarning("Crew: NPC_Settlement, NPC_SpawnPoint "
+                        + "or NPC_WP not found - the wreck stays empty.");
+                    return;
+                }
+
+                Vector3[] wo = Ausstiege(car, vgs, count);
+
+                settlement = new GameObject(Name);
+                settlement.transform.position = car.transform.position;
+
+                GameObject leute = new GameObject("People");
+                leute.transform.SetParent(settlement.transform, false);
+                GameObject wege = new GameObject("WalkPoints");
+                wege.transform.SetParent(settlement.transform, false);
+                for (int i = 0; i < 8; i++)
+                {
+                    GameObject wp = new GameObject("WP" + i);
+                    wp.transform.SetParent(wege.transform, false);
+                    float a = i * Mathf.PI * 2f / 8f;
+                    wp.transform.localPosition = new Vector3(
+                        Mathf.Cos(a) * RingRadius, 0f, Mathf.Sin(a) * RingRadius);
+
+                    // StartMainInit does not collect transforms here. It asks
+                    // AllWalkPointsTr for NPC_WP components, then filters them
+                    // by Type. Without this component every NPC receives an
+                    // empty _mainWalkPoints list and IdleStateAction indexes
+                    // element zero forever. NPC_WP::.ctor sets Type to 1,
+                    // which is the settlement's ordinary patrol-point type.
+                    wp.AddComponent(wType);
+
+                    // An aggressive NPC switches to TemporaryTask Tactical
+                    // when the settlement alarm is raised. That task reads
+                    // NPC_WP type 5, not the patrol list above. With no type 5
+                    // points RepairTemporaryWalkPointsList indexes an empty
+                    // list on every state change and the otherwise complete
+                    // AI freezes. Real tactical points carry default values;
+                    // their point type is the complete behavioural contract.
+                    GameObject tactical = new GameObject("Tactical" + i);
+                    tactical.transform.SetParent(wege.transform, false);
+                    float ta = a + Mathf.PI / 8f;
+                    tactical.transform.localPosition = new Vector3(
+                        Mathf.Cos(ta) * TacticalRingRadius, 0f,
+                        Mathf.Sin(ta) * TacticalRingRadius);
+                    Component tacticalPoint = tactical.AddComponent(wType);
+                    SetEnum(tacticalPoint, "Type", "Tactical");
+                }
+
+                // The spawn points, one per man. They must exist BEFORE the
+                // settlement component: StartMainInit collects them with
+                // GetComponentsInChildren when _npcSpawnPoints is null.
+                for (int i = 0; i < count; i++)
+                {
+                    GameObject sp = new GameObject("Crew" + i);
+                    sp.transform.SetParent(settlement.transform, true);
+                    sp.transform.position = wo[i];
+                    Component punkt = sp.AddComponent(pType);
+                    Listen(punkt, 0);
+                    Abschreiben(punkt, VorlagePunkt(pType));
+                    Punkt(punkt);
+                }
+
+                // An unregistered PhotonView - see the class comment.
+                Type viewType = RevivalPlugin.TypeByName("PhotonView");
+                if (viewType != null) settlement.AddComponent(viewType);
+
+                Component sied = settlement.AddComponent(sType);
+                Listen(sied, 0);
+                Abschreiben(sied, VorlageSiedlung(sType, settlement));
+                Siedlung(sied, leute.transform, wege.transform, fraktion);
+
+                // The game's own entry point. On the master client it runs
+                // InitSpawnNpc and InitSetupNpc, and those two build the men.
+                Invoke(sied, "StartMainInit");
+                Set(sied, "AllInitializationDone", true);
+                Absichern(sied);
+
+                string wer = Fraktion.Sauber(fraktion);
+                if (wer.Length == 0) wer = "neutral";
+                _settlements.Add(settlement);
+                RevivalPlugin.L.LogInfo("Crew: " + count + " " + wer
+                    + " out of the "
+                    + (tank ? "tank" : "BTR") + " at " + car.transform.position
+                    + " - " + _settlements.Count + " crew(s) on the ground.");
+                Turret.Hinweis(count + " " + wer + " out of the wreck", 4f);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Crew: nobody climbed out - " + ex);
+                if (settlement != null) UnityEngine.Object.Destroy(settlement);
+            }
+        }
+
+        /// <summary>
+        /// Runtime truth after the game's complete initialization. The spawn
+        /// point already requests GodMode=false and InitSetupNpc normally sets
+        /// IsInitialized=true. Repeat those two safety-critical facts on the
+        /// resulting NPC and log them: damage returns immediately when either
+        /// is wrong, so a future report no longer has to infer killability from
+        /// a model on screen.
+        /// </summary>
+        static void Absichern(Component settlement)
+        {
+            FieldInfo nf = AccessTools.Field(settlement.GetType(), "NpcAI");
+            Array npcs = nf == null ? null : nf.GetValue(settlement) as Array;
+            if (npcs == null)
+            {
+                RevivalPlugin.L.LogWarning("Crew: NpcAI array missing after initialization.");
+                return;
+            }
+
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai == null)
+                {
+                    RevivalPlugin.L.LogWarning("Crew: NPC " + i
+                        + " missing after initialization.");
+                    continue;
+                }
+
+                MethodInfo god = AccessTools.Method(ai.GetType(), "SetGodMode",
+                    new Type[] { typeof(bool) }, null);
+                if (god != null) god.Invoke(ai, new object[] { false });
+                if (!Bool(ai, "IsInitialized")) Set(ai, "IsInitialized", true);
+            }
+
+            // Photon-spawned NPCs run Unity Start on the next frame. Until
+            // then their game data is complete but _aimIk is still null.
+            // SetGeneralAlarm calls ClearKillTarget, which dereferences that
+            // component without a null check. Arm the real alarm only after
+            // Unity has completed every NPC component; a delayed failure must
+            // never escape into Aussteigen's spawn-cleanup catch.
+            CrewAlarm delayed = settlement.gameObject.AddComponent<CrewAlarm>();
+            delayed.Begin(settlement, npcs);
+        }
+
+        /// <summary>Enter the game's own settlement alarm once Unity Start has
+        /// populated the components SetGeneralAlarm assumes. False with an
+        /// empty problem means "not ready yet"; false with text is a real
+        /// reflection/runtime failure for CrewAlarm to report once.</summary>
+        internal static bool TryStartAlarm(Component settlement, Array npcs,
+                                           out string problem)
+        {
+            problem = "";
+            if (settlement == null || npcs == null) return false;
+
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai == null) return false;
+                FieldInfo af = AccessTools.Field(ai.GetType(), "_aimIk");
+                object aim = af == null ? null : af.GetValue(ai);
+                if (aim == null) return false;
+                FieldInfo solver = AccessTools.Field(aim.GetType(), "solver");
+                if (solver != null && solver.GetValue(aim) == null) return false;
+            }
+
+            // EnabledAI is copied as true before the NPCs exist. That field
+            // alone does not play their legacy Animation: OnPlayerEnterZone
+            // calls SetEnableNpcAi(true) only after a previous disable made
+            // the settlement field false. Invoke the same local game method
+            // once after Unity Start so every NPC enters its current
+            // walk/combat animation even when the crew spawned far from the
+            // player's body (for example while piloting the drone).
+            MethodInfo enable = AccessTools.Method(settlement.GetType(),
+                "SetEnableNpcAi", new Type[] { typeof(bool) }, null);
+            if (enable == null)
+            {
+                problem = "NPC_Settlement.SetEnableNpcAi(bool) is missing";
+                return false;
+            }
+            try { enable.Invoke(settlement, new object[] { true }); }
+            catch (Exception ex)
+            {
+                Exception cause = ex.InnerException == null ? ex : ex.InnerException;
+                problem = "crew animation activation failed - " + cause.Message;
+                return false;
+            }
+
+            // THE SECOND SWITCH. `SetEnableNpcAi` alone leaves the crew frozen
+            // and unhittable whenever the player body is not in PlayersAround
+            // - the reasons are at PlayVisualizationPrefix. The prefix refuses
+            // every later attempt to switch it off again; this is the one call
+            // that switches it ON, and it has to be a real call because the
+            // game does the work in a coroutine, not in the field.
+            MethodInfo visual = AccessTools.Method(settlement.GetType(),
+                "SetPlayVisualizationValue", new Type[] { typeof(bool) }, null);
+            if (visual == null)
+            {
+                problem = "NPC_Settlement.SetPlayVisualizationValue(bool) is missing";
+                return false;
+            }
+            try { visual.Invoke(settlement, new object[] { true }); }
+            catch (Exception ex)
+            {
+                Exception cause = ex.InnerException == null ? ex : ex.InnerException;
+                problem = "crew visualization activation failed - " + cause.Message;
+                return false;
+            }
+
+            // The runtime settlement has no registered Photon view. Mark the
+            // persistent local alarm before any NPC sensor can ask the
+            // settlement to broadcast it through illegal view id 0.
+            Set(settlement, "AlarmEnabled", true);
+            SetNumber(settlement, "_alarmTimer", float.MaxValue);
+
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                MethodInfo alarm = AccessTools.Method(ai.GetType(),
+                    "SetGeneralAlarm", new Type[] { typeof(bool) }, null);
+                if (alarm == null)
+                {
+                    problem = "NPC_AI2.SetGeneralAlarm(bool) is missing";
+                    Set(settlement, "AlarmEnabled", false);
+                    return false;
+                }
+                try { alarm.Invoke(ai, new object[] { true }); }
+                catch (Exception ex)
+                {
+                    Exception cause = ex.InnerException == null ? ex : ex.InnerException;
+                    problem = "NPC " + i + " alarm failed - " + cause.Message;
+                    Set(settlement, "AlarmEnabled", false);
+                    return false;
+                }
+            }
+
+            for (int i = 0; i < npcs.Length; i++)
+                LogNpc(npcs.GetValue(i) as Component, i);
+            return true;
+        }
+
+        static void LogNpc(Component ai, int index)
+        {
+            if (ai == null) return;
+            FieldInfo sf = AccessTools.Field(ai.GetType(), "Specifications");
+            object specs = sf == null ? null : sf.GetValue(ai);
+            RevivalPlugin.L.LogInfo("Crew: NPC " + index
+                + " initialized=" + Bool(ai, "IsInitialized")
+                + ", enabled=" + Bool(ai, "EnabledAI")
+                + ", sensor=" + Bool(ai, "SensorIsActive")
+                + ", godmode=" + Bool(ai, "GodModeEnabled")
+                + ", alarm=" + Bool(ai, "AlarmIsEnabled")
+                + ", task=" + GetNumber(ai, "TemporaryTask").ToString("0")
+                + ", tactical=" + Count(ai, "_temporaryWalkPoints")
+                // The two that decide whether he moves and whether he can be
+                // hit. `visual` false means Anim.enabled false and every
+                // ragdoll rigidbody with detectCollisions off - frozen and
+                // immune at the same time, see PlayVisualizationPrefix.
+                + ", visual=" + Bool(ai, "IsPlayVisualizationEnabled")
+                + ", safe=" + Bool(ai, "_isSafeSettlement")
+                + ", health=" + GetNumber(specs, "Health").ToString("0.#")
+                + "/" + GetNumber(specs, "HealthMax").ToString("0.#") + ".");
+        }
+
+        static bool Bool(object o, string name)
+        {
+            if (o == null) return false;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null || fi.FieldType != typeof(bool)) return false;
+            try { return (bool)fi.GetValue(o); }
+            catch { return false; }
+        }
+
+        static int Count(object o, string name)
+        {
+            if (o == null) return -1;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null) return -1;
+            try
+            {
+                ICollection values = fi.GetValue(o) as ICollection;
+                return values == null ? -1 : values.Count;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>Take every crew off the map again. Shift plus the patrol
+        /// key does this, so a test run can be reset without a restart.</summary>
+        public static void StopAll()
+        {
+            if (_settlements.Count == 0) return;
+            int n = _settlements.Count;
+            for (int i = 0; i < _settlements.Count; i++)
+                if (_settlements[i] != null)
+                    UnityEngine.Object.Destroy(_settlements[i]);
+            _settlements.Clear();
+            RevivalPlugin.L.LogInfo("Crew: " + n + " crew(s) removed.");
+        }
+
+        /// <summary>
+        /// Where the men appear. The vehicle carries its own answer:
+        /// `GetOutPoints` is a single Transform whose children Point0..Point9
+        /// are the places the game itself puts a player who leaves the vehicle
+        /// (RE 10). A ring around the hull is only the fallback.
+        /// </summary>
+        static Vector3[] Ausstiege(GameObject car, Component vgs, int count)
+        {
+            Vector3[] wo = new Vector3[count];
+            Transform points = null;
+            if (vgs != null)
+            {
+                FieldInfo fi = AccessTools.Field(vgs.GetType(), "GetOutPoints");
+                if (fi != null) points = fi.GetValue(vgs) as Transform;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                if (points != null && points.childCount > 0)
+                {
+                    wo[i] = points.GetChild(i % points.childCount).position;
+                }
+                else
+                {
+                    float a = i * Mathf.PI * 2f / Mathf.Max(1, count);
+                    wo[i] = car.transform.position
+                          + new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a)) * 4.5f;
+                }
+
+                // Onto the ground. A man dropped at hatch height falls, and a
+                // NavMeshAgent that starts in the air never finds the mesh.
+                Vector3 boden;
+                GameObject unter = Turret.RaycastObject(wo[i] + Vector3.up * 6f,
+                                                        Vector3.down, 30f, out boden);
+                if (unter != null) wo[i] = boden + Vector3.up * 0.1f;
+            }
+            return wo;
+        }
+
+        // ----------------------------------------------------- the template
+
+        static Component _vorlageSiedlung, _vorlagePunkt;
+        static bool _vorlageGesucht;
+
+        /// <summary>
+        /// Fields a template must NOT hand over: they are running state, not
+        /// a designer's choice, and a settlement that starts life already
+        /// initialised never runs its own init.
+        /// </summary>
+        static readonly string[] Tabu = new string[] {
+            "IsInitialized", "InitializationState", "AllInitializationDone",
+            "AlarmEnabled", "IsPlayVisualizationEnabled",
+            "IsMain", "SettlementType", "MyNPC", "Active",
+        };
+
+        /// <summary>
+        /// The one thing an `AddComponent` cannot give us: the numbers the
+        /// game's own level designers put on a settlement.
+        ///
+        /// A component built at runtime has whatever its constructor writes,
+        /// and for a MonoBehaviour that is almost nothing - every float in the
+        /// inspector is 0. `SensorVisibleDist` at 0 means a crew that cannot
+        /// see; `UnitsPerEnemy` at 0, `AlarmTimeDelay` at 0, `FloorDelta*` at
+        /// 0 are all the same kind of quiet wrong. Rather than invent a value
+        /// for each, this copies them off a settlement THE MAP ALREADY HAS -
+        /// found once per session, and then the handful that matter are
+        /// overwritten by `Siedlung` on top.
+        ///
+        /// Three limits, each for its own reason:
+        ///   value types and strings only   an object reference belongs to the
+        ///       template's own scene objects and would point a wreck's crew at
+        ///       some village's walk points. Lists are `Listen`'s job.
+        ///   PUBLIC fields only             the designer's knobs are public and
+        ///       the running state is private with an underscore -
+        ///       `_aliveNPCsCount`, `_killedCount`, `_respawnQueueIndex`. A
+        ///       fresh settlement that starts life believing twelve of its men
+        ///       are already alive is worse than one with a zero in it.
+        ///   the Tabu list                  the handful of PUBLIC fields that
+        ///       are running state anyway. A settlement copied as already
+        ///       initialised never initialises.
+        /// </summary>
+        static void Abschreiben(Component ziel, Component vorlage)
+        {
+            if (ziel == null || vorlage == null) return;
+            if (vorlage.GetType() != ziel.GetType()) return;
+            int n = 0;
+            for (Type t = ziel.GetType(); t != null && t != typeof(MonoBehaviour);
+                 t = t.BaseType)
+            {
+                FieldInfo[] fs = t.GetFields(BindingFlags.Instance | BindingFlags.Public
+                                           | BindingFlags.DeclaredOnly);
+                for (int i = 0; i < fs.Length; i++)
+                {
+                    Type ft = fs[i].FieldType;
+                    if (!ft.IsValueType && ft != typeof(string)) continue;
+                    if (Verboten(fs[i].Name)) continue;
+                    try { fs[i].SetValue(ziel, fs[i].GetValue(vorlage)); n++; }
+                    catch { }
+                }
+            }
+            if (n > 0)
+                RevivalPlugin.L.LogInfo("Crew: " + n + " value(s) copied off an "
+                    + "existing " + ziel.GetType().Name + ".");
+        }
+
+        static bool Verboten(string name)
+        {
+            for (int i = 0; i < Tabu.Length; i++)
+                if (Tabu[i] == name) return true;
+            return false;
+        }
+
+        /// <summary>A settlement of the map's own, never one of ours. The
+        /// search costs a FindObjectsOfType and happens at most once a
+        /// session - a vehicle has to be destroyed first.</summary>
+        static Component VorlageSiedlung(Type sType, GameObject eigen)
+        {
+            Suchen(sType, null);
+            if (_vorlageSiedlung != null && _vorlageSiedlung.gameObject == eigen)
+                return null;
+            return _vorlageSiedlung;
+        }
+
+        static Component VorlagePunkt(Type pType)
+        {
+            Suchen(null, pType);
+            return _vorlagePunkt;
+        }
+
+        static void Suchen(Type sType, Type pType)
+        {
+            if (_vorlageGesucht) return;
+            _vorlageGesucht = true;
+            try
+            {
+                if (sType == null) sType = RevivalPlugin.TypeByName("NPC_Settlement");
+                if (pType == null) pType = RevivalPlugin.TypeByName("NPC_SpawnPoint");
+                if (sType != null)
+                {
+                    UnityEngine.Object[] alle = UnityEngine.Object.FindObjectsOfType(sType);
+                    for (int i = 0; i < alle.Length; i++)
+                    {
+                        Component c = alle[i] as Component;
+                        if (c == null || c.gameObject.name == Name) continue;
+                        _vorlageSiedlung = c;
+                        break;
+                    }
+                }
+                if (pType != null)
+                {
+                    UnityEngine.Object[] alle = UnityEngine.Object.FindObjectsOfType(pType);
+                    for (int i = 0; i < alle.Length; i++)
+                    {
+                        Component c = alle[i] as Component;
+                        if (c == null) continue;
+                        if (c.transform.parent != null
+                            && c.transform.parent.name == Name) continue;
+                        _vorlagePunkt = c;
+                        break;
+                    }
+                }
+                RevivalPlugin.L.LogInfo("Crew: template settlement "
+                    + (_vorlageSiedlung == null ? "NOT found - the crew will "
+                       + "run on hand written numbers"
+                       : "\"" + _vorlageSiedlung.gameObject.name + "\"")
+                    + ", template spawn point "
+                    + (_vorlagePunkt == null ? "NOT found"
+                       : "\"" + _vorlagePunkt.gameObject.name + "\"") + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: looking for a template - "
+                    + ex.Message);
+            }
+        }
+
+        // ------------------------------------------------------- the values
+
+        /// <summary>
+        /// One spawn point. Only the fields whose meaning is CONFIRMED are
+        /// written; everything else keeps the value the component ships with.
+        /// GrantWeaponType 4 is the case in `NPC_Settlement::GetWeaponId` that
+        /// pulls a random assault rifle out of the "Default" group, so no
+        /// weapon id has to be invented here.
+        /// </summary>
+        static void Punkt(Component sp)
+        {
+            Set(sp, "Active", true);
+            SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value);
+            SetNumber(sp, "Level", RevivalPlugin.CfgPatrolCrewLevel.Value);
+            SetEnum(sp, "BehaviorPattern", "Aggressive");
+            SetNumber(sp, "NPCType", 0);              // -> prefab Marauder_NPC_01
+            SetNumber(sp, "GrantWeaponType", 4);      // random assault rifle
+            SetNumber(sp, "AppearanceType", 0);       // the default customization
+            Set(sp, "UseCustomAppearance", false);
+            Set(sp, "UseIndividualFraction", false);  // the settlement decides
+            Set(sp, "UseIndividualGodMode", true);
+            Set(sp, "GodModeEnabled", false);
+            Set(sp, "UseIndividualWalkPoints", false);
+            Set(sp, "RandomWalkPoint", true);
+
+            // PlayerInteractingManager always localizes this key before it
+            // draws the NPC name plate. A runtime NPCQuestData has a null key,
+            // and Dictionary.ContainsKey(null) aborts the whole hover path.
+            // A non-localized key longer than five characters is deliberately
+            // returned verbatim by LocalizationManager; the faction is drawn
+            // separately from MainOptions.MyFraction.
+            FieldInfo qf = AccessTools.Field(sp.GetType(), "Quests");
+            object quests = qf == null ? null : qf.GetValue(sp);
+            if (quests != null) Set(quests, "NameKey", "Patrol Crew");
+
+            // Loot on the body is phase 5 and needs SpawnCategories, which is
+            // a list this class has no business inventing. At 0 the game's own
+            // GenerateOtherItems returns an empty array without ever reading
+            // that list - the weapon in his hands still drops.
+            SetNumber(sp, "RandomItemsCount", 0);
+        }
+
+        static void Siedlung(Component s, Transform leute, Transform wege,
+                             string fraktion)
+        {
+            Set(s, "AllPeopleTr", leute);
+            Set(s, "AllWalkPointsTr", wege);
+            Set(s, "IsSafeSettlement", false);
+            Set(s, "SensorIsEnabled", true);
+            Set(s, "EnabledAI", true);
+            Set(s, "VisibleNpc", true);
+            Set(s, "IsIndoors", false);
+            Set(s, "UseFloorBounds", false);
+            Set(s, "UseCustomFractionOptions", true);
+            SetNumber(s, "SettlementType", 0);
+            SetNumber(s, "CheckPlayersDistRadius", 120f);
+            SetNumber(s, "DisableAiTimer", 600f);
+
+            // What a crewman can SEE. SetupNpcSettlements hands this straight
+            // to NPC_AI2::SetSensorVisibleDist, and an AddComponent leaves it
+            // at 0 - men who stand around their own wreck and never look up.
+            // A template settlement will already have overwritten it with the
+            // map's own number; this is the floor under that.
+            if (GetNumber(s, "SensorVisibleDist") < 5f)
+                SetNumber(s, "SensorVisibleDist",
+                          RevivalPlugin.CfgPatrolCrewSensor.Value);
+            if (GetNumber(s, "UnitsPerEnemy") < 1f) SetNumber(s, "UnitsPerEnemy", 1f);
+            if (GetNumber(s, "AlarmTimeDelay") < 0.1f) SetNumber(s, "AlarmTimeDelay", 20f);
+
+            // No second wave. RespawnQueueActions would put the crew back on
+            // its feet at RespawnTimeInSec, and a wreck that keeps producing
+            // gunmen is a bug report, not a feature.
+            SetNumber(s, "RespawnTimeInSec", 1000000f);
+
+            // WHO THEY SHOOT AT. `SetNpcParams` copies this object straight
+            // into every NPC's `MainOptions`, and `IsEnemyFraction` walks its
+            // `HatedFractions` - so this one field IS the answer to "which
+            // side is this patrol on" (RE 23). An AddComponent leaves it null,
+            // which is worse than wrong: `MainOptions` would be null on every
+            // crewman and the first sensor hit would throw.
+            object opts = Fraktion.Optionen(fraktion);
+            if (opts != null)
+            {
+                Set(s, "FractionOptions", opts);
+                RevivalPlugin.L.LogInfo("Crew: the crew is " + Fraktion.Sauber(fraktion)
+                    + " - " + Fraktion.Erklaerung(fraktion) + ".");
+            }
+            Notausgang(s);
+        }
+
+        /// <summary>
+        /// Whatever went wrong above, `HatedFractions` must not be null.
+        ///
+        /// `IsEnemyFraction` does `ldlen` on it with no null check (RE 23), so
+        /// a crew whose fraction could not be built would not merely be
+        /// harmless - it would throw on its first sensor hit, once per NPC per
+        /// scan. `Listen` has already put an empty `NPCMainOptions` in the
+        /// field; this fills its array with nothing, and a crew that attacks
+        /// nobody is a bug you can walk away from.
+        /// </summary>
+        static void Notausgang(Component s)
+        {
+            try
+            {
+                FieldInfo fo = AccessTools.Field(s.GetType(), "FractionOptions");
+                if (fo == null) return;
+                object opts = fo.GetValue(s);
+                if (opts == null)
+                {
+                    if (fo.FieldType.GetConstructor(Type.EmptyTypes) == null) return;
+                    opts = Activator.CreateInstance(fo.FieldType);
+                    fo.SetValue(s, opts);
+                }
+                FieldInfo hf = AccessTools.Field(opts.GetType(), "HatedFractions");
+                if (hf == null || !hf.FieldType.IsArray) return;
+                if (hf.GetValue(opts) != null) return;
+                hf.SetValue(opts, Array.CreateInstance(
+                    hf.FieldType.GetElementType(), 0));
+                RevivalPlugin.L.LogWarning("Crew: the fraction could not be set - "
+                    + "HatedFractions is an empty array, so this crew attacks "
+                    + "nobody. It would otherwise have thrown on its first "
+                    + "sensor scan.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: HatedFractions - " + ex.Message);
+            }
+        }
+
+        // -------------------------------------------------------- reflection
+
+        /// <summary>
+        /// Every empty list the component would have brought with it out of a
+        /// prefab, and does not bring out of `AddComponent`.
+        ///
+        /// This is what stopped the crew on the first run (E-033). A Unity
+        /// component built at runtime gets exactly the fields its CONSTRUCTOR
+        /// writes; a `List&lt;T&gt;` that the game only ever fills in the
+        /// inspector is `null`. `NPC_Settlement::.ctor` builds `_enemysDic`
+        /// and `_enemysTargets` and NOT `_enemysTr`, so the third line of
+        /// `ClearEnemys` - the third call in `StartMainInit` - threw a
+        /// NullReference before a single man was built. Seven more of the
+        /// settlement's lists are in the same state, `TacticalPoints` and
+        /// `enemyeOwnerId` among them, and those are read from `Update` while
+        /// the crew is fighting.
+        ///
+        /// So: every instance field that is a plain data type with a
+        /// parameterless constructor and is null gets an empty instance - which
+        /// is precisely what a component placed in the editor has. That means
+        /// `List&lt;T&gt;` and `Dictionary&lt;K,V&gt;`, and it ALSO means the
+        /// serialisable little classes: `NPC_SpawnPoint.Quests` is an
+        /// `NPCQuestData`, and its being null is what stopped the crew the
+        /// SECOND time (2026-08-30, run two of E-033):
+        ///
+        ///     QuestManager.ConfigNPC   point.Quests.StartQuest.Count
+        ///     NPC_Settlement.SetupNpcSettlements
+        ///     NPC_Settlement.InitSetupNpc
+        ///     NPC_Settlement.StartMainInit
+        ///
+        /// The men were already built by then - `InitSpawnNpc` runs first and
+        /// had done its work - and this one null threw them all away again.
+        /// Hence the RECURSION: an `NPCQuestData` built by `Activator` has the
+        /// same problem one level down, its `StartQuest` list being null, and
+        /// `ConfigNPC` reads exactly that.
+        ///
+        /// WHAT IS LEFT ALONE, and why each one:
+        ///   ARRAYS      `StartMainInit` fills `_npcSpawnPoints` itself, but
+        ///               only while it is null, and a helpful empty array here
+        ///               would leave the settlement without any men. The one
+        ///               array that MUST be filled, `HatedFractions`, is
+        ///               written by `Fraktion.Optionen` by name.
+        ///   UnityEngine.Object   a null Texture is a missing icon; a NEW
+        ///               Texture is a leak, and `AddComponent` on a type we
+        ///               guessed is worse.
+        ///   string      null and "" behave the same everywhere the game
+        ///               reads these, and `Abschreiben` copies strings anyway.
+        /// </summary>
+        static void Listen(object o, int tiefe)
+        {
+            if (o == null || tiefe > 3) return;
+            int n = 0;
+            for (Type t = o.GetType(); t != null && t != typeof(MonoBehaviour)
+                 && t != typeof(object); t = t.BaseType)
+            {
+                FieldInfo[] fs = t.GetFields(BindingFlags.Instance | BindingFlags.Public
+                                           | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                for (int i = 0; i < fs.Length; i++)
+                {
+                    Type ft = fs[i].FieldType;
+                    if (IstCache(fs[i].Name)) continue;
+                    if (!Fuellbar(ft)) continue;
+                    try
+                    {
+                        object hat = fs[i].GetValue(o);
+                        if (hat != null)
+                        {
+                            if (!ft.IsGenericType) Listen(hat, tiefe + 1);
+                            continue;
+                        }
+                        object neu = Activator.CreateInstance(ft);
+                        fs[i].SetValue(o, neu);
+                        n++;
+                        if (!ft.IsGenericType) Listen(neu, tiefe + 1);
+                    }
+                    catch (Exception ex)
+                    {
+                        RevivalPlugin.L.LogWarning("Crew: field " + fs[i].Name
+                            + " not filled - " + ex.Message);
+                    }
+                }
+            }
+            if (n > 0)
+                RevivalPlugin.L.LogInfo("Crew: " + n + " empty value(s) put into "
+                    + o.GetType().Name + ".");
+        }
+
+        /// <summary>Is this a type the Unity serialiser would have handed us an
+        /// instance of? See the rules in <see cref="Listen"/>.</summary>
+        static bool Fuellbar(Type ft)
+        {
+            if (ft.IsValueType || ft.IsArray) return false;
+            if (ft == typeof(string)) return false;
+            if (ft.IsAbstract || ft.IsInterface) return false;
+            if (typeof(UnityEngine.Object).IsAssignableFrom(ft)) return false;
+            if (typeof(Delegate).IsAssignableFrom(ft)) return false;
+            return ft.GetConstructor(Type.EmptyTypes) != null;
+        }
+
+        /// <summary>
+        /// Null is meaningful for these three lists: their getters use it as
+        /// "not built yet" and then filter the NPC_WP components collected by
+        /// StartMainInit. An empty list is not equivalent - PatrolPoints in
+        /// particular is returned unchanged, every NPC receives it, and
+        /// IdleStateAction indexes element zero forever. These are caches, not
+        /// inspector data for Listen to recreate.
+        /// </summary>
+        static bool IstCache(string name)
+        {
+            return name == "PatrolPoints" || name == "EscapePoints"
+                || name == "SleepPoints";
+        }
+
+        static void Set(object o, string name, object value)
+        {
+            if (o == null) return;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null)
+            {
+                RevivalPlugin.L.LogWarning("Crew: field " + name + " not on "
+                    + o.GetType().Name + ".");
+                return;
+            }
+            try { fi.SetValue(o, value); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: " + name + " not set - " + ex.Message);
+            }
+        }
+
+        /// <summary>Reads a numeric field as a float, 0 when it is not
+        /// there. Used to tell a value a template handed over from the 0 an
+        /// AddComponent leaves behind.</summary>
+        static float GetNumber(object o, string name)
+        {
+            if (o == null) return 0f;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null) return 0f;
+            try
+            {
+                object v = fi.GetValue(o);
+                if (v == null) return 0f;
+                return Convert.ToSingle(v);
+            }
+            catch { return 0f; }
+        }
+
+        /// <summary>Writes a number into whatever numeric type the field
+        /// happens to be. Health is an int in the spawn point and a float
+        /// everywhere it is used, and guessing wrong throws.</summary>
+        static void SetNumber(object o, string name, float value)
+        {
+            if (o == null) return;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null)
+            {
+                RevivalPlugin.L.LogWarning("Crew: field " + name + " not on "
+                    + o.GetType().Name + ".");
+                return;
+            }
+            try
+            {
+                Type t = fi.FieldType;
+                if (t.IsEnum) fi.SetValue(o, Enum.ToObject(t, (int)value));
+                else if (t == typeof(float)) fi.SetValue(o, value);
+                else if (t == typeof(int)) fi.SetValue(o, (int)value);
+                else if (t == typeof(double)) fi.SetValue(o, (double)value);
+                else fi.SetValue(o, Convert.ChangeType(value, t));
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: " + name + " not set - " + ex.Message);
+            }
+        }
+
+        /// <summary>An enum field by NAME. The numbers behind
+        /// NPCBehaviorPattern and Fraction are known (RE 10), but a name that
+        /// no longer exists says so in the log instead of quietly picking the
+        /// wrong behaviour.</summary>
+        static void SetEnum(object o, string name, string value)
+        {
+            if (o == null) return;
+            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            if (fi == null || !fi.FieldType.IsEnum)
+            {
+                RevivalPlugin.L.LogWarning("Crew: enum field " + name + " not on "
+                    + o.GetType().Name + ".");
+                return;
+            }
+            try { fi.SetValue(o, Enum.Parse(fi.FieldType, value, true)); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: " + name + " = " + value
+                    + " not set - " + ex.Message);
+            }
+        }
+
+        static void Invoke(object o, string name)
+        {
+            if (o == null) return;
+            MethodInfo mi = AccessTools.Method(o.GetType(), name, null, null);
+            if (mi == null)
+                throw new MissingMethodException(o.GetType().Name + "." + name);
+            mi.Invoke(o, null);
+        }
+    }
+
+    /// <summary>
+    /// The crew NPCs are created inside NPC_Settlement.StartMainInit. Their
+    /// Unity Start methods, including FinalIK discovery, run after that call
+    /// returns. This tiny one-shot waits for those components and then enters
+    /// the real alarm state. It never owns or replaces NPC behaviour.
+    /// </summary>
+    public sealed class CrewAlarm : MonoBehaviour
+    {
+        Component _settlement;
+        Array _npcs;
+        float _next;
+        float _deadline;
+        string _lastProblem = "";
+
+        public void Begin(Component settlement, Array npcs)
+        {
+            _settlement = settlement;
+            _npcs = npcs;
+            _next = Time.time + 0.25f;
+            _deadline = Time.time + 10f;
+        }
+
+        void Update()
+        {
+            if (Time.time < _next) return;
+            _next = Time.time + 0.25f;
+
+            string problem;
+            if (Crew.TryStartAlarm(_settlement, _npcs, out problem))
+            {
+                RevivalPlugin.L.LogInfo("Crew: aggravated settlement AI is active.");
+                UnityEngine.Object.Destroy(this);
+                return;
+            }
+            if (problem.Length > 0) _lastProblem = problem;
+            if (Time.time < _deadline) return;
+
+            RevivalPlugin.L.LogWarning("Crew: spawned normally, but aggravated "
+                + "state did not start within 10 s"
+                + (_lastProblem.Length == 0 ? "." : " - " + _lastProblem + "."));
+            UnityEngine.Object.Destroy(this);
         }
     }
 
@@ -7160,10 +12866,48 @@ namespace NextDayRevival
         static AudioSource _ownHum;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
+        static float _hp;                    // Trefferpunkte, was davon uebrig ist
+        static float _markeBis;              // Trefferzeichen fuer den SCHUETZEN
+        static bool _markeTot;
+        static MethodInfo _spielerGet;       // PhotonNetwork.player
+        static MethodInfo _nummerGet;        // PhotonPlayer.ID
+        static bool _nummerGesucht;
 
         public static bool Flying { get { return _flying; } }
         public static Vector3 Position { get { return _pos; } }
         public static Vector3 Home { get { return _home; } }
+
+        /// <summary>
+        /// Wo der Koerper des Piloten steht, waehrend die Drohne fliegt.
+        /// `DroneNpcHook` braucht das, um in der Spielerliste des Spiels die
+        /// eine Zeile zu erkennen, die der Pilot selbst ist. `_pilotRoot` wird
+        /// beim Start gesetzt; fehlt es, ist `_home` dieselbe Stelle - da hat
+        /// er beim Start gestanden, und wer eine Drohne fliegt, laeuft nicht.
+        /// </summary>
+        internal static bool PilotAt(out Vector3 p)
+        {
+            p = Vector3.zero;
+            if (!_flying) return false;
+
+            // THE BODY, NOT THE LAUNCH CAMERA (2026-08-30).
+            //
+            // `DroneNpcHook` uses this to recognise the one row in the game's
+            // own player list that is the pilot, and it allows two metres. On
+            // foot that holds - the camera stands over the body. In a vehicle
+            // it does not: the camera sits at the turret, several metres from
+            // the body, no row matches, and the settlement is never told that
+            // the drone is there. The crew then stays frozen while the drone
+            // hovers over it, which is exactly the reported case.
+            //
+            // The reason the launch camera was used at all - transform.root
+            // being the shared "ServerObjects" container - was fixed in
+            // `LocalPlayerRoot` itself (E-039). It returns the transform that
+            // IS the listed player object, so the match is now exact.
+            if (_pilotRoot == null) _pilotRoot = LocalPlayerRoot();
+            if (_pilotRoot != null) { p = _pilotRoot.position; return true; }
+            p = _home;
+            return true;
+        }
         public static float FlightTime { get { return Time.time - _start; } }
 
         static float ArmDelay() { return RevivalPlugin.CfgDroneArmDelay.Value; }
@@ -7187,6 +12931,7 @@ namespace NextDayRevival
                 {
                     Steer();
                     Move();
+                    DroneNpcFire.Tick();
                 }
                 // Last, and after Move: the jammer may end the flight, and it
                 // measures against the position of THIS frame. It also runs
@@ -7278,7 +13023,9 @@ namespace NextDayRevival
             _flying = true;
             _start = Time.time;
             _armed = Time.time + ArmDelay();
+            _hp = Mathf.Max(1, RevivalPlugin.CfgDroneHitpoints.Value);
             Jammer.Reset();
+            DroneNpcFire.Reset();
             _nextNet = 0f;
             Net.Send(Net.Start, _pos, Forward(), 0f, true);
             StartOwnHum();
@@ -7307,6 +13054,7 @@ namespace NextDayRevival
             catch (Exception ex) { RevivalPlugin.L.LogError("Drohne beenden: " + ex); }
             finally
             {
+                DroneNpcFire.Reset();
                 CameraOwner.Release(CameraOwner.Drohne);
             }
             RevivalPlugin.L.LogInfo("Drohne beendet (" + GrundText(grund)
@@ -7354,6 +13102,120 @@ namespace NextDayRevival
             }
 
             Impact(_pos);
+        }
+
+        // ---------------------------------------------------------- Abschuss
+
+        /// <summary>
+        /// A hit somebody else's client reported. Only the pilot acts on it,
+        /// and only for his own drone.
+        ///
+        /// Which drone is meant is the actor number, with the distance as a
+        /// fallback: `PhotonNetwork.player` is read through reflection, and a
+        /// drone that cannot be shot down because a property was renamed in a
+        /// game update would be a silent hole. Eight metres around the
+        /// reported point is close enough: the point comes from the shooter's
+        /// interpolated picture and may lag a few metres at 32 m/s, and two
+        /// drones that near each other are one bang either way.
+        ///
+        /// Shot down before ArmDelay has passed, it falls instead of
+        /// detonating. That is the same rule that keeps the first frame from
+        /// going off in the pilot's face, and it is the only case in which a
+        /// destroyed drone does not explode.
+        /// </summary>
+        internal static void Beschossen(int schuetze, Vector3 punkt, int ziel, float schaden)
+        {
+            if (!_flying) return;
+            if (!RevivalPlugin.CfgDroneShootable.Value) return;
+
+            int ich = MeineNummer();
+            if (ich >= 0) { if (ziel != ich) return; }
+            else if (Vector3.Distance(punkt, _pos) > 8f) return;
+
+            _hp -= Mathf.Max(0.1f, schaden);
+            RevivalPlugin.L.LogInfo("Drohne getroffen von Spieler " + schuetze
+                + " - noch " + _hp.ToString("0.#") + " von "
+                + RevivalPlugin.CfgDroneHitpoints.Value + ".");
+            if (_hp > 0f) return;
+
+            if (Time.time < _armed) { Land(Grund.Absturz); return; }
+            RevivalPlugin.L.LogInfo("Drohne abgeschossen von Spieler " + schuetze + ".");
+            Impact(_pos);
+        }
+
+        /// <summary>A real NPC firearm shot that the local pilot resolved as
+        /// a hit. NPCs are not Photon players, so this stays on the pilot's
+        /// client just like the hit points themselves.</summary>
+        internal static void NpcTreffer(Vector3 schuetzenPos)
+        {
+            if (!_flying || !RevivalPlugin.CfgDroneShootable.Value) return;
+            _hp -= 1f;
+            float dist = Vector3.Distance(schuetzenPos, _pos);
+            RevivalPlugin.L.LogInfo("Drohne von NPC auf " + dist.ToString("0")
+                + " m getroffen - noch " + _hp.ToString("0.#") + " von "
+                + RevivalPlugin.CfgDroneHitpoints.Value + ".");
+            if (_hp > 0f) return;
+
+            if (Time.time < _armed) { Land(Grund.Absturz); return; }
+            RevivalPlugin.L.LogInfo("Drohne von NPC abgeschossen.");
+            Impact(_pos);
+        }
+
+        /// <summary>
+        /// The own actor number in the Photon room. Read fresh every time and
+        /// never cached: it is handed out per room, so a value kept over a
+        /// rejoin would point at somebody else. Only the two reflection
+        /// handles are kept.
+        ///
+        /// -1 means "not known", and the caller falls back on the distance.
+        /// </summary>
+        static int MeineNummer()
+        {
+            try
+            {
+                if (!_nummerGesucht)
+                {
+                    _nummerGesucht = true;
+                    Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+                    if (photon != null)
+                    {
+                        _spielerGet = AccessTools.PropertyGetter(photon, "player");
+                        if (_spielerGet == null)
+                            _spielerGet = AccessTools.PropertyGetter(photon, "LocalPlayer");
+                    }
+                    if (_spielerGet == null)
+                        RevivalPlugin.L.LogWarning("Drohne: eigene Spielernummer nicht "
+                            + "gefunden - ein Abschuss wird ueber die Entfernung "
+                            + "zugeordnet.");
+                }
+                if (_spielerGet == null) return -1;
+                object spieler = _spielerGet.Invoke(null, null);
+                if (spieler == null) return -1;
+                if (_nummerGet == null)
+                {
+                    _nummerGet = AccessTools.PropertyGetter(spieler.GetType(), "ID");
+                    if (_nummerGet == null)
+                        _nummerGet = AccessTools.PropertyGetter(spieler.GetType(),
+                                                                "ActorNumber");
+                }
+                if (_nummerGet == null) return -1;
+                return (int)_nummerGet.Invoke(spieler, null);
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>
+        /// The shooter's only feedback, and it is worth the twelve lines: a
+        /// drone is small, fast and far away, and without a mark on the
+        /// screen nobody can tell a hit from a miss. Red and wider means the
+        /// drone actually went up - that one is set when the detonation comes
+        /// back over the wire, not when the shot leaves, so it never promises
+        /// a kill that did not happen.
+        /// </summary>
+        internal static void Marke(bool tot)
+        {
+            _markeTot = tot;
+            _markeBis = Time.time + (tot ? 0.55f : 0.25f);
         }
 
         static string GrundText(int grund)
@@ -7583,7 +13445,7 @@ namespace NextDayRevival
         {
             try
             {
-                Type t = AccessTools.TypeByName("PlayerMovementController");
+                Type t = RevivalPlugin.TypeByName("PlayerMovementController");
                 if (t == null) return null;
                 UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
                 for (int i = 0; i < all.Length; i++)
@@ -7591,7 +13453,11 @@ namespace NextDayRevival
                     MonoBehaviour mb = all[i] as MonoBehaviour;
                     if (mb == null) continue;
                     if (!IsMine(mb)) continue;
-                    return mb.transform.root;
+                    // transform.root is the common "ServerObjects" scene
+                    // container, not this player. The controller itself sits
+                    // on the player object and is the ancestor needed by the
+                    // launch-collision guard.
+                    return mb.transform;
                 }
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Drohne: Pilot nicht gefunden: " + ex.Message); }
@@ -7687,6 +13553,10 @@ namespace NextDayRevival
             // The jammer rides on the drone's own channel: one event more, no
             // second hook, and it is gone the moment the drone code is.
             public const int Jam = 3;
+            // A shot that went through a foreign drone. Travels the other way
+            // round to everything else here: not from the pilot outwards, but
+            // from a shooter to the one client that owns the drone.
+            public const int Treffer = 4;
 
             static bool _hooked;
             static bool _failed;
@@ -7707,6 +13577,7 @@ namespace NextDayRevival
                 public float T;              // 0..1 zwischen Von und Nach
                 public float Dauer;          // Sekunden zwischen zwei Meldungen
                 public float Zuletzt;        // Time.time der letzten Meldung
+                public float Getroffen;      // Time.time des letzten eigenen Treffers
             }
 
             public static void EnsureHooked()
@@ -7714,7 +13585,7 @@ namespace NextDayRevival
                 if (_hooked || _failed) return;
                 try
                 {
-                    Type photon = AccessTools.TypeByName("PhotonNetwork");
+                    Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
                     if (photon == null)
                     {
                         _failed = true;
@@ -7724,7 +13595,7 @@ namespace NextDayRevival
                     }
                     _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
                     _onEventCall = AccessTools.Field(photon, "OnEventCall");
-                    _optType = AccessTools.TypeByName("RaiseEventOptions");
+                    _optType = RevivalPlugin.TypeByName("RaiseEventOptions");
                     if (_raise == null || _onEventCall == null)
                     {
                         _failed = true;
@@ -7741,7 +13612,7 @@ namespace NextDayRevival
 
                     _hooked = true;
                     RevivalPlugin.L.LogInfo("Drohnennetz eingehaengt: Ereigniscodes "
-                        + Code(Start) + "-" + Code(Jam) + ", Empfang ueber "
+                        + Code(Start) + "-" + Code(Treffer) + ", Empfang ueber "
                         + "PhotonNetwork.OnEventCall.");
                 }
                 catch (Exception ex)
@@ -7781,7 +13652,7 @@ namespace NextDayRevival
                 try
                 {
                     int art = code - RevivalPlugin.CfgDroneEventCode.Value;
-                    if (art < Start || art > Jam) return;
+                    if (art < Start || art > Treffer) return;
                     float[] d = inhalt as float[];
                     if (d == null || d.Length < 7) return;
 
@@ -7790,6 +13661,13 @@ namespace NextDayRevival
 
                     if (art == Jam) { Jammer.Fremdmeldung(absender, pos, d[6]); return; }
                     if (art == Ende) { Entferne(absender, (int)d[6]); return; }
+                    // Treffer: d[3] carries the pilot's actor number where the
+                    // other events carry a view direction - see SendTreffer.
+                    if (art == Treffer)
+                    {
+                        Beschossen(absender, pos, (int)d[3], d[6]);
+                        return;
+                    }
 
                     Fremd f;
                     if (!_fremde.TryGetValue(absender, out f))
@@ -7856,6 +13734,88 @@ namespace NextDayRevival
                 return false;
             }
 
+            /// <summary>
+            /// One shot of the local player, measured against every foreign
+            /// drone. Called from the postfix on the game's own FireOneShot,
+            /// so it runs exactly as often as a bullet leaves the barrel.
+            ///
+            /// Geometry, not physics: the closest approach of the aiming line
+            /// to the drone's middle, against the radius of the model.
+            /// Deliberate - `UnityEngine.PhysicsModule` is not referenced (see
+            /// Turret.RaycastObject), so there is no SphereCast to be had, and
+            /// a collider on the drone would put an obstacle into the game's
+            /// own ray casts for a test we can do in six lines.
+            ///
+            /// The one ray that IS cast is the line of sight, and it starts a
+            /// metre out: the camera sits inside the player's own head, and a
+            /// ray from there hits his backpack before anything else. A
+            /// vehicle the shooter sits in blocks a shot it should not - the
+            /// price of not knowing where the game puts its muzzle.
+            /// </summary>
+            public static bool Beschuss(Vector3 origin, Vector3 dir, float reichweite,
+                                        float schaden)
+            {
+                if (_fremde.Count == 0) return false;
+                if (dir.sqrMagnitude < 0.000001f) return false;
+                dir.Normalize();
+                float r = Trefferradius();
+
+                int wer = 0;
+                Fremd getroffen = null;
+                float nah = float.MaxValue;
+                Vector3 punkt = Vector3.zero;
+                foreach (KeyValuePair<int, Fremd> kv in _fremde)
+                {
+                    Fremd f = kv.Value;
+                    if (f.Go == null) continue;
+                    Vector3 hin = f.Go.transform.position - origin;
+                    float t = Vector3.Dot(hin, dir);
+                    if (t < 1f || t > reichweite || t >= nah) continue;
+                    if ((hin - dir * t).sqrMagnitude > r * r) continue;
+                    nah = t;
+                    wer = kv.Key;
+                    getroffen = f;
+                    punkt = f.Go.transform.position;
+                }
+                if (getroffen == null) return false;
+
+                Vector3 egal;
+                if (nah > 2.2f
+                    && Turret.RaycastObject(origin + dir, dir, nah - 1.2f, out egal) != null)
+                    return false;
+
+                getroffen.Getroffen = Time.time;
+                SendTreffer(wer, punkt, schaden);
+                Drone.Marke(false);
+                RevivalPlugin.L.LogInfo("Drohne von Spieler " + wer + " getroffen auf "
+                    + Mathf.RoundToInt(nah) + " m.");
+                return true;
+            }
+
+            /// <summary>
+            /// How wide a drone is as a target: the model, nothing else. The
+            /// mesh is 36 cm across before ModelScale, so half of it is 0.18.
+            /// One number for size and hitbox both - a second knob would be a
+            /// knob that can fall out of step with what the shooter sees.
+            /// </summary>
+            static float Trefferradius()
+            {
+                return Mathf.Max(0.30f, 0.18f * RevivalPlugin.CfgDroneModelScale.Value);
+            }
+
+            /// <summary>
+            /// The only event whose seven floats mean something else: d[0..2]
+            /// is where the drone was hit, d[3] the actor number of its pilot,
+            /// d[4] and d[5] stay empty, d[6] is the damage. It rides on
+            /// `Send` on purpose - the array keeps its shape, so the length
+            /// check and the serialization on the other end stay exactly as
+            /// they were.
+            /// </summary>
+            static void SendTreffer(int ziel, Vector3 punkt, float schaden)
+            {
+                Send(Treffer, punkt, new Vector3(ziel, 0f, 0f), schaden, true);
+            }
+
             static void Entferne(int absender, int grund)
             {
                 Fremd f;
@@ -7863,6 +13823,12 @@ namespace NextDayRevival
                 _fremde.Remove(absender);
                 if (f.Src != null) f.Src.Stop();
                 if (f.Go != null) UnityEngine.Object.Destroy(f.Go);
+                // Blown up right after we hit it: that was our kill, and the
+                // shooter gets to see it. Tied to the detonation coming back
+                // over the wire and not to the shot going out, so the mark
+                // never promises something that did not happen.
+                if (grund == Grund.Detonation && Time.time - f.Getroffen < 1.5f)
+                    Drone.Marke(true);
                 RevivalPlugin.L.LogInfo("Fremde Drohne von Spieler " + absender
                     + " ist weg (" + GrundText(grund) + ").");
             }
@@ -8142,17 +14108,35 @@ namespace NextDayRevival
             /// den eingebauten Notnagel zurueck, statt still gar nichts
             /// anzuzeigen - eine unsichtbare Drohne waere schlimmer als eine
             /// haessliche.
+            ///
+            /// Zwei Objekte statt einem, seit 0.5.5: `drone.ndmesh` ist das
+            /// INVENTARMODELL und wurde auf Lage und Groesse eines Magazins
+            /// eingepasst (`drone_mesh.py`, `fit_box`) - seine Mitte liegt
+            /// deshalb rund 20 cm hinter seinem Nullpunkt. In der Hand ist das
+            /// genau richtig; am Himmel bedeutet es, dass die Drohne hinter
+            /// dem Punkt gezeichnet wird, an dem sie wirklich fliegt. Bei
+            /// ModelScale 4 sind das 80 cm - und dieselben 80 cm daneben fuer
+            /// jeden, der auf sie schiesst. Ein Kind, um die eigenen Bounds
+            /// verschoben, legt die Mitte der Drohne auf den Transform.
             /// </summary>
             public static GameObject Bauen()
             {
                 GameObject go = new GameObject("NDR_Drone");
-                MeshFilter mf = go.AddComponent<MeshFilter>();
-                MeshRenderer mr = go.AddComponent<MeshRenderer>();
-                Mesh mesh = Assets.Load("drone.ndmesh");
-                mf.sharedMesh = mesh != null ? mesh : Notnagel();
-                mr.sharedMaterial = Werkstoff();
                 float s = RevivalPlugin.CfgDroneModelScale.Value;
                 go.transform.localScale = new Vector3(s, s, s);
+
+                GameObject koerper = new GameObject("Body");
+                koerper.transform.parent = go.transform;
+                koerper.transform.localRotation = Quaternion.identity;
+                koerper.transform.localScale = Vector3.one;
+
+                MeshFilter mf = koerper.AddComponent<MeshFilter>();
+                MeshRenderer mr = koerper.AddComponent<MeshRenderer>();
+                Mesh mesh = Assets.Load("drone.ndmesh");
+                if (mesh == null) mesh = Notnagel();
+                mf.sharedMesh = mesh;
+                mr.sharedMaterial = Werkstoff();
+                koerper.transform.localPosition = -mesh.bounds.center;
                 return go;
             }
 
@@ -8249,16 +14233,17 @@ namespace NextDayRevival
         /// </summary>
         public static void Draw()
         {
-            if (!_flying || !RevivalPlugin.CfgDroneOverlay.Value) return;
+            if (!RevivalPlugin.CfgDrone.Value) return;
             try
             {
-                if (_dot == null)
-                {
-                    _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
-                    _dot.SetPixel(0, 0, Color.white);
-                    _dot.Apply();
-                    _dot.hideFlags = HideFlags.HideAndDontSave;
-                }
+                Punkt();
+
+                // Before the flying check, and that is the point: the mark
+                // belongs to the SHOOTER, who is standing on the ground with
+                // a rifle and no overlay of his own.
+                if (Time.time < _markeBis) Treffermarke();
+
+                if (!_flying || !RevivalPlugin.CfgDroneOverlay.Value) return;
 
                 float w = Screen.width, h = Screen.height;
                 float sig = Signal();
@@ -8275,6 +14260,52 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogError("Drohnenanzeige: " + ex);
             }
+        }
+
+        /// <summary>Die 1x1-Textur, aus der alles hier gezeichnet wird.</summary>
+        static Texture2D Punkt()
+        {
+            if (_dot == null)
+            {
+                _dot = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                _dot.SetPixel(0, 0, Color.white);
+                _dot.Apply();
+                _dot.hideFlags = HideFlags.HideAndDontSave;
+            }
+            return _dot;
+        }
+
+        /// <summary>
+        /// Four short bars around the middle of the screen, turned by 45
+        /// degrees: the mark a shooter gets when his bullet went through a
+        /// drone. Wider and red when the drone actually blew up.
+        /// </summary>
+        static void Treffermarke()
+        {
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
+            float gap = Mathf.Max(7f, Screen.height * 0.013f);
+            float arm = Mathf.Max(7f, Screen.height * (_markeTot ? 0.021f : 0.013f));
+            float th = _markeTot ? 3f : 2f;
+
+            Color altFarbe = GUI.color;
+            Matrix4x4 altMatrix = GUI.matrix;
+            GUIUtility.RotateAroundPivot(45f, new Vector2(cx, cy));
+            GUI.color = new Color(0f, 0f, 0f, 0.5f);
+            MarkeBalken(cx + 1f, cy + 1f, gap, arm, th);
+            GUI.color = _markeTot
+                ? new Color(1f, 0.35f, 0.25f, 0.95f)
+                : new Color(1f, 1f, 1f, 0.9f);
+            MarkeBalken(cx, cy, gap, arm, th);
+            GUI.matrix = altMatrix;
+            GUI.color = altFarbe;
+        }
+
+        static void MarkeBalken(float cx, float cy, float gap, float arm, float th)
+        {
+            GUI.DrawTexture(new Rect(cx - gap - arm, cy - th * 0.5f, arm, th), _dot);
+            GUI.DrawTexture(new Rect(cx + gap, cy - th * 0.5f, arm, th), _dot);
+            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy - gap - arm, th, arm), _dot);
+            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy + gap, th, arm), _dot);
         }
 
         /// <summary>
@@ -8464,6 +14495,430 @@ namespace NextDayRevival
     /// wer eine Drohne startet, sucht sich vorher Deckung.
     /// </summary>
     [HarmonyPatch]
+    /// <summary>
+    /// Die Drohne weckt, worueber sie fliegt.
+    ///
+    /// DER BEFUND (Benutzer, 2026-08-30): weit weg vom eigenen Koerper
+    /// geflogen, und alle NPCs standen in T-Pose ueber dem Boden, nicht
+    /// bekaempfbar. Das ist kein Fehler des Spiels, sondern seine
+    /// Entfernungsabschaltung - siehe RE 22:
+    ///
+    ///     NPC_Settlement.Update
+    ///       -> PlayersDistanceControll   alle 2 s, laeuft
+    ///          NetworkPlayers ab und misst gegen CheckPlayersDistRadius
+    ///       -> AutoDisableControl        kein Spieler in Reichweite, 5 s
+    ///          Nachlauf, dann DisableForLocalPlayer
+    ///            -> SetEnableNpcAi(false) -> NPC_AI2.SetActiveAI(false)
+    ///               -> Anim.Stop()
+    ///
+    /// `Anim` ist eine LEGACY-`Animation`. Angehalten faellt das Skinned Mesh
+    /// in seine Bindepose zurueck, und die Bindepose ist genau die T-Pose, die
+    /// der Benutzer gesehen hat.
+    ///
+    /// Die Kamera ist waehrend des Fluges die Drohne, und `DynamicObjectsManager`
+    /// misst von der KAMERA - Tueren, Items und Spielerphysik folgen der Drohne
+    /// also schon. Nur die Siedlung misst von SPIELERN, und der Pilot steht
+    /// hunderte Meter weit weg.
+    ///
+    /// DER EINGRIFF ist eine Zeile Antwort auf eine Frage, die das Spiel sich
+    /// selbst stellt: `HasBesideDistance(_settlementPos, spielerFlach, r2)`.
+    /// Sie wird NUR aus `PlayersDistanceControll` gerufen (mit
+    /// `scan_call.py` geprueft), also faelscht dieser Postfix nichts anderes.
+    /// Steht die Drohne im Radius der Siedlung, ist die Antwort "ja" - und
+    /// danach laeuft der eigene Weg des Spiels: OnPlayerEnterZone, KI an,
+    /// Animation an, und beim Wegfliegen OnPlayerExitZone von selbst wieder
+    /// aus.
+    ///
+    /// NUR DIE ZEILE DES PILOTEN wird gefaelscht. `OnPlayerEnterZone` schaltet
+    /// die sichtbare Darstellung nur fuer den lokalen Spieler ein; eine fremde
+    /// Zeile mitzufaelschen wuerde einem anderen Spieler NPCs an den Hals
+    /// haengen, die nicht bei ihm sind. Erkannt wird sie an der Position: die
+    /// uebergebene ist die des Spielerobjekts mit y = 0, und der Pilot steht
+    /// still.
+    /// </summary>
+    public static class DroneNpcHook
+    {
+        /// <summary>Meter, innerhalb derer eine Position als "der Pilot" gilt.
+        /// Der Koerper steht still, das Spielerobjekt wackelt um Zentimeter -
+        /// zwei Meter sind grosszuegig und trotzdem eindeutig, solange nicht
+        /// zwei Spieler aufeinander stehen.</summary>
+        const float Selbst = 2f;
+
+        /// <summary>__0 = _settlementPos (y = 0), __1 = Spielerposition
+        /// (y = 0), __2 = Radius zum Quadrat.</summary>
+        public static void Postfix(Vector3 __0, Vector3 __1, float __2,
+                                   ref bool __result)
+        {
+            if (__result) return;
+            if (!RevivalPlugin.CfgDroneWake.Value) return;
+            if (!Drone.Flying) return;
+
+            Vector3 pilot;
+            if (!Drone.PilotAt(out pilot)) return;
+            pilot.y = 0f;
+            if ((pilot - __1).sqrMagnitude > Selbst * Selbst) return;
+
+            Vector3 drohne = Drone.Position;
+            drohne.y = 0f;
+            float radius2 = __2;
+            if (RevivalPlugin.CfgDroneNpcFire != null
+                && RevivalPlugin.CfgDroneNpcFire.Value)
+            {
+                float r = Mathf.Max(0f, RevivalPlugin.CfgDroneNpcFireRange.Value);
+                radius2 = Mathf.Max(radius2, r * r);
+            }
+            if ((drohne - __0).sqrMagnitude < radius2) __result = true;
+        }
+
+        public static void Install(Harmony harmony)
+        {
+            if (!RevivalPlugin.CfgDrone.Value) return;
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("NPC_Settlement");
+                MethodInfo m = t == null ? null
+                             : AccessTools.Method(t, "HasBesideDistance", null, null);
+                if (m == null || m.ReturnType != typeof(bool))
+                {
+                    RevivalPlugin.L.LogWarning("Drohne: NPC_Settlement.HasBesideDistance "
+                        + "nicht gefunden - NPCs bleiben in T-Pose, wenn die Drohne "
+                        + "allein bei ihnen ist.");
+                    return;
+                }
+                harmony.Patch(m, null,
+                    new HarmonyMethod(typeof(DroneNpcHook).GetMethod("Postfix")),
+                    null, null, null);
+                RevivalPlugin.L.LogInfo("Drohne: NPCs unter der Drohne bleiben wach.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Drohne: NPC-Weckruf nicht eingehaengt - " + ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hostile NPCs answer a drone with their REAL firearm controller. The
+    /// game's target field cannot be used: `NPC_AI2.ShootToTarget` assumes the
+    /// target has a PlayerNetworkController and dereferences it before
+    /// `FireTo`. A drone is deliberately not a fake player. Instead this class
+    /// does the missing target choice, then calls
+    /// `NPC_FirearmWeaponController.FireTo` with a world point. That preserves
+    /// the weapon's own muzzle flash, sound, spread, raycast and tracer.
+    ///
+    /// Only the local drone is considered. Its pilot owns its hit points, so
+    /// the same client decides the deliberately low hit chance and subtracts a
+    /// hit. Remote clients receive the real firearm effect through the game's
+    /// weapon network path. At most three closest hostile NPCs fire per volley;
+    /// no drone, no scan and no cost.
+    /// </summary>
+    public static class DroneNpcFire
+    {
+        /// <summary>How much of the point blank chance is left at maximum
+        /// range. A rifle at 110 m against a moving 40 cm target is a worse
+        /// shot than at 10 m, but not a hopeless one.</summary>
+        const float Abfall = 0.5f;
+
+        /// <summary>Seconds before the same man is asked to reload again.
+        /// `NPC_AI2.OnBulletsEnded` starts `ReloadingCor(3f)`, so anything
+        /// above that is enough; five leaves room for the animation.</summary>
+        const float NachladeWarten = 5f;
+
+        class Shooter
+        {
+            public Component Ai;
+            public Component Gun;
+            public Vector3 Muzzle;
+            public float Distance2;
+        }
+
+        static float _next;
+        static GameObject _pilot;
+        static object _pilotTarget;
+        static bool _announced;
+        static bool _lookedUp, _failed;
+
+        /// <summary>Instance id of an NPC -> when it may be asked to reload
+        /// again. Without this a man who empties his magazine at the drone
+        /// never fires again: the game reloads inside its own shooting
+        /// actions, and this class deliberately does not go through them.</summary>
+        static Dictionary<int, float> _nachladen = new Dictionary<int, float>();
+
+        static Type _aiType, _ngsType, _enemyTargetType;
+        static FieldInfo _gunField, _sensorField, _initializedField;
+        static FieldInfo _networkPlayers, _rateDelay;
+        static PropertyInfo _instance;
+        static MethodInfo _isEnemy, _isAlive, _fireTo, _getMuzzle;
+        static MethodInfo _hasBullets, _cantWork, _bulletsEnded;
+
+        public static void Reset()
+        {
+            _next = Time.time + 0.5f;
+            _pilot = null;
+            _pilotTarget = null;
+            _announced = false;
+            _nachladen.Clear();
+        }
+
+        public static void Tick()
+        {
+            if (!Drone.Flying) return;
+            if (RevivalPlugin.CfgDroneNpcFire == null
+                || !RevivalPlugin.CfgDroneNpcFire.Value) return;
+            if (Time.time < _next) return;
+
+            float seconds = Mathf.Max(0.35f,
+                RevivalPlugin.CfgDroneNpcShotSeconds.Value);
+            _next = Time.time + seconds * UnityEngine.Random.Range(0.8f, 1.2f);
+
+            try
+            {
+                if (!LookUp()) return;
+                if (_pilot == null)
+                {
+                    _pilot = FindPilot();
+                    if (_pilot != null) _pilotTarget = FindEnemyTarget(_pilot);
+                }
+                if (_pilot == null) return;
+                if (_pilotTarget == null)
+                {
+                    Fail("pilot has no " + _enemyTargetType.Name + " component");
+                    return;
+                }
+
+                float range = Mathf.Max(1f,
+                    RevivalPlugin.CfgDroneNpcFireRange.Value);
+                float range2 = range * range;
+                List<Shooter> closest = new List<Shooter>();
+                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_aiType);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Component ai = all[i] as Component;
+                    if (ai == null || !ai.gameObject.activeInHierarchy) continue;
+                    if (!Bool(_initializedField, ai, true)) continue;
+                    if (!Bool(_sensorField, ai, true)) continue;
+                    if (!(bool)_isAlive.Invoke(ai, null)) continue;
+                    if (!(bool)_isEnemy.Invoke(ai,
+                                               new object[] { _pilotTarget })) continue;
+
+                    Component gun = _gunField.GetValue(ai) as Component;
+                    if (gun == null || !Ready(ai, gun)) continue;
+                    Vector3 muzzle = (Vector3)_getMuzzle.Invoke(gun, null);
+                    if (muzzle == Vector3.zero) muzzle = ai.transform.position + Vector3.up * 1.4f;
+                    float d2 = (Drone.Position - muzzle).sqrMagnitude;
+                    if (d2 < 4f || d2 > range2) continue;
+                    if (!Visible(ai, muzzle, Mathf.Sqrt(d2))) continue;
+
+                    Shooter s = new Shooter();
+                    s.Ai = ai;
+                    s.Gun = gun;
+                    s.Muzzle = muzzle;
+                    s.Distance2 = d2;
+                    Insert(closest, s);
+                }
+
+                if (closest.Count == 0) return;
+                if (!_announced)
+                {
+                    _announced = true;
+                    RevivalPlugin.L.LogInfo("Drohne: " + closest.Count
+                        + " hostile NPC(s) open fire, accuracy "
+                        + RevivalPlugin.CfgDroneNpcAccuracy.Value.ToString("0.00")
+                        + ", range " + range.ToString("0") + " m.");
+                }
+
+                for (int i = 0; i < closest.Count && Drone.Flying; i++)
+                    Fire(closest[i], range);
+            }
+            catch (Exception ex)
+            {
+                // NPC fire is an optional counter to the drone. A reflection
+                // mismatch must disable this volley, never abort the flight.
+                RevivalPlugin.L.LogWarning("Drohne: NPC-Beschuss - " + ex.Message);
+            }
+        }
+
+        static void Insert(List<Shooter> list, Shooter s)
+        {
+            int at = 0;
+            while (at < list.Count && list[at].Distance2 <= s.Distance2) at++;
+            list.Insert(at, s);
+            int max = Mathf.Max(1, RevivalPlugin.CfgDroneNpcShooters.Value);
+            while (list.Count > max) list.RemoveAt(list.Count - 1);
+        }
+
+        static void Fire(Shooter s, float range)
+        {
+            Vector3 to = Drone.Position - s.Muzzle;
+            float dist = to.magnitude;
+            if (dist < 0.1f) return;
+            Vector3 dir = to / dist;
+
+            float chance = Mathf.Clamp01(RevivalPlugin.CfgDroneNpcAccuracy.Value);
+            chance *= 1f - (1f - Abfall) * Mathf.Clamp01(dist / range);
+            bool hit = UnityEngine.Random.value < chance;
+            Vector3 aim = Drone.Position;
+            if (!hit)
+            {
+                Vector3 side = Vector3.Cross(dir, Vector3.up);
+                if (side.sqrMagnitude < 0.01f) side = Vector3.right;
+                side.Normalize();
+                Vector3 up = Vector3.Cross(side, dir).normalized;
+                float spread = Mathf.Max(2.5f, dist * 0.08f);
+                float x = UnityEngine.Random.Range(-spread, spread);
+                float y = UnityEngine.Random.Range(-spread, spread);
+                if (Mathf.Abs(x) + Mathf.Abs(y) < spread * 0.5f)
+                    x += x < 0f ? -spread : spread;
+                aim += side * x + up * y;
+            }
+
+            _fireTo.Invoke(s.Gun, new object[] { aim, true });
+            if (hit) Drone.NpcTreffer(s.Ai.transform.position);
+        }
+
+        static bool Visible(Component ai, Vector3 muzzle, float distance)
+        {
+            Vector3 dir = (Drone.Position - muzzle) / distance;
+            Vector3 from = muzzle + dir * 0.35f;
+            float left = distance - 1.0f;
+            for (int i = 0; i < 3 && left > 0.1f; i++)
+            {
+                Vector3 point;
+                GameObject block = Turret.RaycastObject(from, dir, left, out point);
+                if (block == null) return true;
+                if (block.transform.IsChildOf(ai.transform)
+                    || ai.transform.IsChildOf(block.transform))
+                {
+                    float step = Vector3.Distance(from, point) + 0.35f;
+                    left -= step;
+                    from = point + dir * 0.35f;
+                    continue;
+                }
+                return false;
+            }
+            return left <= 0.1f;
+        }
+
+        static bool Ready(Component ai, Component gun)
+        {
+            if (!(bool)_hasBullets.Invoke(gun, null)) { Nachladen(ai); return false; }
+            if ((bool)_cantWork.Invoke(gun, null)) return false;
+            if (_rateDelay != null)
+            {
+                object v = _rateDelay.GetValue(gun);
+                if (v is float && (float)v >= Time.time) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Let the man reload, with the game's own method and its own
+        /// animation. `NPC_AI2.OnBulletsEnded` tells the other clients, stops
+        /// his rotation, puts him into the reload state and starts
+        /// `ReloadingCor(3f)`, which refills the magazine at the end. Calling
+        /// it again while that runs would restart the animation, hence the
+        /// wait.
+        /// </summary>
+        static void Nachladen(Component ai)
+        {
+            if (_bulletsEnded == null || ai == null) return;
+            int id = ai.GetInstanceID();
+            float frei;
+            if (_nachladen.TryGetValue(id, out frei) && Time.time < frei) return;
+            _nachladen[id] = Time.time + NachladeWarten;
+            try { _bulletsEnded.Invoke(ai, null); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Drohne: NPC-Nachladen - " + ex.Message);
+                _bulletsEnded = null;
+            }
+        }
+
+        static bool Bool(FieldInfo field, object instance, bool fallback)
+        {
+            if (field == null) return fallback;
+            try { return (bool)field.GetValue(instance); }
+            catch { return fallback; }
+        }
+
+        static GameObject FindPilot()
+        {
+            object server = _instance.GetValue(null, null);
+            if (server == null) return null;
+            IList players = _networkPlayers.GetValue(server) as IList;
+            if (players == null) return null;
+
+            GameObject best = null;
+            float best2 = 0f;
+            for (int i = 0; i < players.Count; i++)
+            {
+                GameObject go = players[i] as GameObject;
+                if (go == null) continue;
+                float d2 = (go.transform.position - Drone.Home).sqrMagnitude;
+                if (best == null || d2 < best2) { best = go; best2 = d2; }
+            }
+            return best;
+        }
+
+        static object FindEnemyTarget(GameObject pilot)
+        {
+            if (pilot == null || _enemyTargetType == null) return null;
+            if (_enemyTargetType == typeof(GameObject)) return pilot;
+            if (_enemyTargetType.IsInstanceOfType(pilot)) return pilot;
+            if (typeof(Component).IsAssignableFrom(_enemyTargetType))
+                return pilot.GetComponent(_enemyTargetType);
+            return null;
+        }
+
+        static bool LookUp()
+        {
+            if (_failed) return false;
+            if (_lookedUp) return true;
+            _lookedUp = true;
+
+            _aiType = RevivalPlugin.TypeByName("NPC_AI2");
+            _ngsType = RevivalPlugin.TypeByName("NetworkGameServer");
+            if (_aiType == null || _ngsType == null) return Fail("NPC_AI2 or NetworkGameServer missing");
+
+            _gunField = AccessTools.Field(_aiType, "_firearmWeaponController");
+            _sensorField = AccessTools.Field(_aiType, "SensorIsActive");
+            _initializedField = AccessTools.Field(_aiType, "IsInitialized");
+            _isEnemy = AccessTools.Method(_aiType, "IsEnemyFraction", null, null);
+            _isAlive = AccessTools.Method(_aiType, "IsAlive", Type.EmptyTypes, null);
+            _bulletsEnded = AccessTools.Method(_aiType, "OnBulletsEnded",
+                                               Type.EmptyTypes, null);
+            _instance = _ngsType.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static);
+            _networkPlayers = AccessTools.Field(_ngsType, "NetworkPlayers");
+            if (_gunField == null || _isEnemy == null || _isAlive == null
+                || _instance == null || _networkPlayers == null)
+                return Fail("NPC target fields or player list missing");
+            ParameterInfo[] enemyParams = _isEnemy.GetParameters();
+            if (enemyParams.Length != 1)
+                return Fail("NPC enemy test has " + enemyParams.Length + " parameters");
+            _enemyTargetType = enemyParams[0].ParameterType;
+
+            Type gunType = _gunField.FieldType;
+            _fireTo = AccessTools.Method(gunType, "FireTo",
+                new Type[] { typeof(Vector3), typeof(bool) }, null);
+            _getMuzzle = AccessTools.Method(gunType, "GetMuzzlePos", Type.EmptyTypes, null);
+            _hasBullets = AccessTools.Method(gunType, "HasBullets", Type.EmptyTypes, null);
+            _cantWork = AccessTools.Method(gunType, "CantWorkWeapon", Type.EmptyTypes, null);
+            _rateDelay = AccessTools.Field(gunType, "CurrentRateOfFireDelay");
+            if (_fireTo == null || _getMuzzle == null || _hasBullets == null
+                || _cantWork == null)
+                return Fail("NPC firearm methods missing");
+            return true;
+        }
+
+        static bool Fail(string why)
+        {
+            _failed = true;
+            RevivalPlugin.L.LogWarning("Drohne: NPC-Beschuss abgeschaltet - " + why + ".");
+            return false;
+        }
+    }
+
     public static class DroneInputHook
     {
         /// <summary>Typ::Methode. Alle liefern bool und heissen "geht nicht".</summary>
@@ -8499,7 +14954,7 @@ namespace NextDayRevival
                                                   StringSplitOptions.None);
                 try
                 {
-                    Type t = AccessTools.TypeByName(teile[0]);
+                    Type t = RevivalPlugin.TypeByName(teile[0]);
                     MethodInfo m = t == null ? null
                                  : AccessTools.Method(t, teile[1], null, null);
                     if (m == null || m.ReturnType != typeof(bool))
@@ -8524,6 +14979,63 @@ namespace NextDayRevival
             if (gepatcht == 0)
                 RevivalPlugin.L.LogWarning("Drohne: KEINE Sperre gepatcht - der "
                     + "Koerper laeuft mit, waehrend geflogen wird.");
+        }
+    }
+
+    /// <summary>
+    /// Every shot the local player fires, offered to the drones in the sky.
+    ///
+    /// It sits on `PlayerFirearmWeaponController::FireOneShot` - the method
+    /// the reverse engineering notes name as the place where the game hands
+    /// out its own damage, and the same one RocketHook already watches for
+    /// the LAW. A postfix, so the game's shot is over and done with before
+    /// anything of ours happens; nothing is changed, only read.
+    ///
+    /// The aiming line comes from the controller's own `MainCamera` field,
+    /// which is how the LAW finds its direction as well. That means no
+    /// spread, no drop and no travel time: what counted is where the
+    /// crosshair was. Anything else would be a second ballistics model
+    /// disagreeing with the game's own.
+    /// </summary>
+    public static class DroneShotHook
+    {
+        static FieldInfo _kamera;
+        static bool _gesucht;
+
+        public static void Postfix(object __instance)
+        {
+            try
+            {
+                if (RevivalPlugin.CfgDroneShootable == null
+                    || !RevivalPlugin.CfgDroneShootable.Value) return;
+                if (!RevivalPlugin.CfgDrone.Value) return;
+                if (__instance == null) return;
+                // While flying, the body cannot shoot at all (DroneInputHook).
+                // If it ever could, a pilot must not be able to shoot his own
+                // drone down through his own camera.
+                if (Drone.Flying) return;
+
+                if (!_gesucht)
+                {
+                    _gesucht = true;
+                    _kamera = AccessTools.Field(__instance.GetType(), "MainCamera");
+                    if (_kamera == null)
+                        RevivalPlugin.L.LogWarning("Drohnenbeschuss: MainCamera am "
+                            + "Waffencontroller nicht gefunden - Drohnen lassen sich "
+                            + "nicht abschiessen.");
+                }
+                if (_kamera == null) return;
+
+                Transform t = _kamera.GetValue(__instance) as Transform;
+                if (t == null) return;
+                Drone.Net.Beschuss(t.position, t.forward,
+                                   RevivalPlugin.CfgDroneShootRange.Value, 1f);
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Drohnenbeschuss: " + ex.Message);
+            }
         }
     }
 
@@ -8637,6 +15149,172 @@ namespace NextDayRevival
             Blitz(root, r);
 
             UnityEngine.Object.Destroy(root, 8f);
+        }
+
+        /// <summary>
+        /// Long-lived fire for a destroyed patrol vehicle. The game's own
+        /// DamageSmoke remains untouched near the hull; this adds the missing
+        /// flames and the high column above it. The root is parented to the
+        /// vehicle and has no timer, so the patrol's normal wreck cleanup is
+        /// also the only cleanup this effect needs.
+        /// </summary>
+        public static void SpawnWreck(GameObject vehicle, bool tank)
+        {
+            if (vehicle == null || _noShader) return;
+
+            Material add = Additive();
+            Material blend = Blended();
+            if (add == null || blend == null)
+            {
+                _noShader = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Wrackfeuer: kein Partikelshader im "
+                        + "Build gefunden - es bleibt beim DamageSmoke des Spiels.");
+                return;
+            }
+
+            GameObject root = new GameObject("NDR Wrackfeuer");
+            root.transform.position = vehicle.transform.position
+                                    + Vector3.up * (tank ? 1.9f : 2.1f);
+            root.transform.rotation = Quaternion.identity;
+            root.transform.parent = vehicle.transform;
+
+            WrackFlammen(root, add, -0.75f, tank ? 1.15f : 1.25f);
+            WrackFlammen(root, add,  0.75f, tank ? 1.15f : 1.25f);
+            WrackFeuerkrone(root, add, tank ? 1.35f : 1.50f);
+            WrackRauch(root, blend, tank ? 1.15f : 1.30f);
+            WrackLicht(root, tank ? 34f : 38f);
+
+            if (RevivalPlugin.L != null)
+                RevivalPlugin.L.LogInfo("Patrol: tall smoke and fire attached to "
+                    + (tank ? "tank" : "BTR") + " wreck.");
+        }
+
+        /// <summary>One of two continuously burning patches on the deck.</summary>
+        static void WrackFlammen(GameObject root, Material mat, float x, float r)
+        {
+            ParticleSystem ps = Neu(root, "Wrackflammen", mat, true);
+            ps.transform.localPosition = new Vector3(x, 0f, 0f);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 2f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.65f, 1.45f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(0.7f, 2.5f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.75f, r * 1.65f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.88f, 0.38f, 1f),
+                new Color(1.00f, 0.30f, 0.03f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.10f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 110;
+
+            Kegel(ps, r * 0.55f, 24f);
+            Dauer(ps, 28f);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.80f, 0.08f);
+            ps.Play();
+        }
+
+        /// <summary>
+        /// The high part of the fire. The two deck patches give the wreck a
+        /// burning base; this narrower and faster system throws visible flame
+        /// tongues well above the turret or troop compartment.
+        /// </summary>
+        static void WrackFeuerkrone(GameObject root, Material mat, float r)
+        {
+            ParticleSystem ps = Neu(root, "Wrackfeuerkrone", mat, true);
+            ps.transform.localPosition = Vector3.up * 0.35f;
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 3f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(2.2f, 4.2f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(2.8f, 6.2f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 1.2f, r * 2.4f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.96f, 0.60f, 1f),
+                new Color(1.00f, 0.24f, 0.02f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.18f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 190;
+
+            Kegel(ps, r * 0.75f, 17f);
+            Dauer(ps, 38f);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.85f, 0.06f);
+            ps.Play();
+        }
+
+        /// <summary>
+        /// The landmark: dark smoke rises roughly 140 to 300 metres before it
+        /// fades, widening into a column that can be read from kilometres away.
+        /// Ten particles per second keep that scale affordable even when all
+        /// four patrol vehicles are burning at once.
+        /// </summary>
+        static void WrackRauch(GameObject root, Material mat, float r)
+        {
+            ParticleSystem ps = Neu(root, "Wrackrauchsaule", mat, false);
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 16f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(18f, 28f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(7.5f, 11f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 2.2f, r * 4.5f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.06f, 0.055f, 0.05f, 0.98f),
+                new Color(0.18f, 0.17f, 0.16f, 0.92f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.02f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 320;
+
+            Kegel(ps, r * 1.15f, 7f);
+            Dauer(ps, 10f);
+            WrackRauchFarbe(ps);
+            Groesse(ps, 0.55f, 3.10f);
+
+            ParticleSystem.RotationOverLifetimeModule rot = ps.rotationOverLifetime;
+            rot.enabled = true;
+            rot.z = new ParticleSystem.MinMaxCurve(-0.18f, 0.18f);
+            ps.Play();
+        }
+
+        /// <summary>Opaque low down, slowly greyer, transparent only at the top.</summary>
+        static void WrackRauchFarbe(ParticleSystem ps)
+        {
+            ParticleSystem.ColorOverLifetimeModule col = ps.colorOverLifetime;
+            col.enabled = true;
+            Gradient g = new Gradient();
+            g.SetKeys(
+                new GradientColorKey[] {
+                    new GradientColorKey(new Color(0.07f, 0.06f, 0.055f), 0.00f),
+                    new GradientColorKey(new Color(0.10f, 0.09f, 0.08f), 0.18f),
+                    new GradientColorKey(new Color(0.17f, 0.16f, 0.15f), 0.62f),
+                    new GradientColorKey(new Color(0.30f, 0.29f, 0.28f), 1.00f) },
+                new GradientAlphaKey[] {
+                    new GradientAlphaKey(0.00f, 0.00f),
+                    new GradientAlphaKey(0.86f, 0.06f),
+                    new GradientAlphaKey(0.72f, 0.68f),
+                    new GradientAlphaKey(0.00f, 1.00f) });
+            col.color = new ParticleSystem.MinMaxGradient(g);
+        }
+
+        /// <summary>Warm light under the smoke; the particles provide motion.</summary>
+        static void WrackLicht(GameObject root, float range)
+        {
+            GameObject go = new GameObject("Wrackglut");
+            go.transform.parent = root.transform;
+            go.transform.localPosition = Vector3.up * 0.6f;
+
+            Light light = go.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.color = new Color(1f, 0.40f, 0.10f, 1f);
+            light.range = range;
+            light.intensity = 4.0f;
+            light.shadows = LightShadows.None;
         }
 
         // -------------------------------------------------- die fuenf Teile
@@ -8788,6 +15466,13 @@ namespace NextDayRevival
             ParticleSystem.Burst[] bursts = new ParticleSystem.Burst[1];
             bursts[0] = new ParticleSystem.Burst(0f, (short)anzahl);
             em.SetBursts(bursts);
+        }
+
+        static void Dauer(ParticleSystem ps, float proSekunde)
+        {
+            ParticleSystem.EmissionModule em = ps.emission;
+            em.enabled = true;
+            em.rateOverTime = new ParticleSystem.MinMaxCurve(proSekunde);
         }
 
         static void Kugel(ParticleSystem ps, float radius)

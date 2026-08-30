@@ -373,3 +373,245 @@ def save_height_atlas(quads, path, strength=3.2):
     img = height_to_normal(np.clip(hgt, 0.0, 1.0), strength * PX)
     img.save(path)
     return img
+
+
+# ----------------------------------------------------- Metall statt Tapete
+#
+# WARUM ES `machined` NEBEN `base` GIBT
+# ------------------------------------
+# `base` gewichtet bewusst die FEINSTE Oktave am staerksten (siehe dort). Das
+# ist richtig fuer Lack, Gummi und Bakelit - und falsch fuer Metall. Bei einem
+# `rough` von 0.04 traegt die Oktave auf Skala 2 rund plus/minus zehn
+# Helligkeitsstufen, in jedem zweiten Pixel ein anderer Wert. Aus einem halben
+# Meter Abstand - und naeher steht die Waffe in der ersten Person nie - liest
+# sich das nicht als Metall, sondern als Raufasertapete: dichtes, ungerichtetes
+# Korn ohne Glanz.
+#
+# Geschmiedeter, gefraester oder bruenierter Stahl sieht anders aus. Er ist
+# fast gleichmaessig. Was ihn belebt, ist erstens eine WEICHE Grosstruktur
+# (ungleicher Abrieb, Oel, Anlassfarben) und zweitens feine, GERICHTETE
+# Polierzuege aus der Fertigung. Beides hat wenig Amplitude. Der sichtbare
+# Charakter kommt nicht aus der Bemalung, sondern aus der Lichtantwort - also
+# aus Metallic und Smoothness, siehe `gloss_quarter` weiter unten.
+#
+# Genau diesen Weg ist der T-72 in 0.5.2 schon gegangen: erst als Farbe und
+# Kontrast zurueckgenommen und die Oberflaeche dem Material ueberlassen wurden,
+# stand er neben dem MTW nicht mehr wie bemaltes Papier da.
+
+
+def _snapped_wavelength(n, pitch):
+    """Wellenlaenge so runden, dass sie ganzzahlig in n passt - sonst hat die
+    Riffelung an der Viertelgrenze eine Kante."""
+    wl = max(3.0, float(px(pitch)))
+    k = max(1, int(round(n / wl)))
+    return float(n) / k
+
+
+def polish(r, arr, amount=0.010, pitch=3, axis="u", octaves=4):
+    """Feine, gerichtete Polierzuege - der Unterschied zwischen Metall und Papier.
+
+    Sehr schwach dosiert: die Zuege sollen den Blick ueber die Flaeche fuehren,
+    nicht als Riffelblech auffallen. `axis` waehlt die Richtung: "u" laeuft
+    laengs (konstant ueber Spalten), "v" quer.
+
+    Die Staerke schwankt ueber die Flaeche (`fade`), sonst entsteht eine
+    durchgehende, gleichmaessige Riffelung - und die sieht wieder nach Textil
+    aus statt nach Metall.
+    """
+    h, w, _ = arr.shape
+    n = w if axis == "u" else h
+    line = np.zeros(n, np.float32)
+    coord = np.arange(n, dtype=np.float32)
+    for i in range(octaves):
+        wl = _snapped_wavelength(n, pitch * (1.0 + 0.9 * i))
+        gain = 1.0 / (1.0 + 1.1 * i)
+        line += np.sin(coord * 2.0 * np.pi / wl + r.random() * 2.0 * np.pi) * gain
+    std = float(line.std())
+    if std > 1.0e-6:
+        line = line / std
+    band = line[None, :] if axis == "u" else line[:, None]
+    fade = np.clip(0.55 + grain(r, w, h, 24, 0.60), 0.0, 1.6)
+    return np.clip(arr + (band * fade)[..., None] * amount, 0, 1)
+
+
+def machined(r, w, h, rgb, unruhe=0.013, sheen=0.010, pitch=3, axis="u"):
+    """Grundflaeche fuer Metall: weiche Grosstruktur, kaum Feinkorn.
+
+    Die Gewichtung steht genau andersherum als in `base`. Die groebste Oktave
+    fuehrt, das Feinkorn ist nur noch eine Andeutung - es soll die Flaeche vor
+    dem Bandenmuster einer reinen Verlaufsflaeche bewahren und sonst nichts.
+    """
+    g = (grain(r, w, h, 28, unruhe)
+         + grain(r, w, h, 12, unruhe * 0.55)
+         + grain(r, w, h, 5, unruhe * 0.26)
+         + grain(r, w, h, 2, unruhe * 0.09))
+    out = np.zeros((h, w, 3), np.float32)
+    for i in range(3):
+        out[..., i] = np.clip(rgb[i] / 255.0 + g, 0, 1)
+    if sheen > 0:
+        out = polish(r, out, sheen, pitch, axis)
+    return out
+
+
+def gunmetal(r, w, h, rgb, unruhe=0.006, sheen=0.011, pitch=3, axis="u",
+             wolken=0.004):
+    """Grundflaeche fuer bruenierten oder parkerisierten Stahl.
+
+    Noch eine Stufe ruhiger als `machined`, und das ist der Punkt. Echte
+    Waffenbruenierung ist im ALBEDO fast einfarbig - alles, was man an ihr
+    sieht, ist Glanz, und der steht in der Metallic/Roughness-Map, nicht hier.
+    Jede Wolke, die man dem Diffusebild mitgibt, ist Farbe, die auch im
+    Schatten sichtbar bleibt, und Farbwolken auf einer glatten Flaeche sehen
+    aus wie Putz.
+
+    Gegenueber `machined`: die grobe Oktave ist auf ein Drittel gedaempft
+    (`wolken`), das Feinkorn bleibt als Kachelschutz, und die gerichteten
+    Polierzuege sind das staerkste Element der Flaeche.
+
+    NICHT ZU VERWECHSELN mit `steel` weiter oben. Das ist die alte, viel
+    groebere Flaeche auf `base` plus kraeftigen Kratzern; Drohne, Stoersender
+    und Rakete benutzen sie und sollen sie behalten - dort sind es gestanzte
+    Blechteile, keine polierte Waffe.
+    """
+    g = (grain(r, w, h, 28, wolken)
+         + grain(r, w, h, 11, unruhe * 0.7)
+         + grain(r, w, h, 4, unruhe)
+         + grain(r, w, h, 2, unruhe * 0.5))
+    out = np.zeros((h, w, 3), np.float32)
+    for i in range(3):
+        out[..., i] = np.clip(rgb[i] / 255.0 + g, 0, 1)
+    if sheen > 0:
+        out = polish(r, out, sheen, pitch, axis)
+    return out
+
+
+def wear_edges(arr, height, color, strength=0.10, radius=11,
+               low=86.0, high=98.5):
+    """Nur die hoechsten Grate zum blanken Traegermaterial abreiben.
+
+    Dieselbe Rechnung, die bisher dreimal getrennt in mg42_texture
+    (`blue_edge_wear`) und sniper50_texture (`anodize_wear`) stand.
+    """
+    local = periodic_blur(np.asarray(height, np.float32), px(radius) / 3.0)
+    ridge = np.clip(height - local, 0, None)
+    lo = float(np.percentile(ridge, low))
+    hi = max(lo + 1.0e-5, float(np.percentile(ridge, high)))
+    mask = np.clip((ridge - lo) / (hi - lo), 0, 1)[..., None]
+    c = np.asarray(color, np.float32).reshape(1, 1, 3) / 255.0
+    mix = mask * strength
+    return np.clip(arr * (1.0 - mix) + c * mix, 0, 1)
+
+
+# ------------------------------------------------- Metallic/Smoothness-Map
+#
+# WAS DIE MAP IM SPIEL TUT - UND WARUM SIE FRUEHER FEHLTE
+# ------------------------------------------------------
+# Der Unity-Standardshader liest bei gesetztem `_MetallicGlossMap` das Metallic
+# aus dem ROTEN Kanal und die Smoothness aus dem ALPHAKANAL
+# (`_SmoothnessTextureChannel` = 0). Die Skalarwerte `_Metallic` und
+# `_Glossiness` sind dann wirkungslos.
+#
+# Bis hierher stand in RevivalPlugin.cs, kein Spielmaterial benutze eine solche
+# Map. Das war 0.2.0 richtig gemessen und ist seit 0.5.2 ueberholt:
+# `research/dump_material.py btr-80a_alb` hat am MTW genau diese Map gefunden,
+# und der T-72 benutzt sie seitdem. Der Panzer ist damit das einzige Stueck des
+# Toolkits, dem der Benutzer eine metallische Oberflaeche bescheinigt.
+#
+# DIE ZAHLEN BLEIBEN MASSVOLL. Ein Metallic nahe 1.0 nimmt seine Farbe
+# vollstaendig aus der Umgebungsspiegelung; in einem dunklen Innenraum wird die
+# Waffe dann schwarz. Der MTW steht auf Metallic 0.15 und Smoothness 0.40, und
+# genau in dieser Groessenordnung bleiben auch die Waffen - nur die blanken
+# Stahlteile gehen darueber.
+#
+# WARUM ES ZWEI DATEIEN SIND (2026-08-30)
+# ---------------------------------------
+# Die Map allein hat nichts geaendert, und der Grund ist der Shader. Gemessen
+# an `resources.assets`, 1708 Materialien nach ihren Texturslots sortiert:
+#
+#     Shader 56  Standard                    _MetallicGlossMap          773
+#     Shader 55  Standard (Specular setup)   _SpecGlossMap              466
+#     Shader 57  Standard (Roughness setup)  BEIDE                      165
+#
+# Der T-72 erbt sein Material vom MTW und landet auf 56 - dort ist die
+# Smoothness der Alphakanal der Metallic-Map, und der Panzer sieht metallisch
+# aus. Die WAFFEN erben ihr Material von ihrer Spende-Waffe und landen auf 57.
+# In dieser Fassung des Standardshaders kommt die Smoothness NICHT aus dem
+# Alpha, sondern als ROUGHNESS aus `_SpecGlossMap`, und ein nicht gesetzter
+# Slot ist dort "white" - Roughness 1.0, Smoothness 0, vollstaendig matt. Genau
+# das war "sieht extrem nach Raufasertapete aus": das Metallic stimmte, es gab
+# nur nirgends ein Glanzlicht.
+#
+# Deshalb schreibt jedes Waffenskript jetzt BEIDE Dateien:
+#     <stamm>_metal.png   RGBA, R = Metallic, A = Smoothness   (Shader 56)
+#     <stamm>_rough.png   RGB,  = 1 - Smoothness               (Shader 57)
+# Das Plugin setzt beide, wenn das Material den jeweiligen Slot hat. Welcher
+# Shader am Ende gewinnt, ist damit egal.
+
+
+def gloss_quarter(r, metallic, smoothness, unruhe=0.05, mask=None,
+                  mask_metallic=0.02, mask_smoothness=0.10):
+    """Ein Viertel der Metallic/Gloss-Map: R = Metallic, A = Smoothness.
+
+    `unruhe` streut beide Werte leicht. Eine Flaeche mit exakt konstanter
+    Smoothness bekommt ein Glanzlicht wie eine Billardkugel - gleichmaessig und
+    tot. Erst die Streuung laesst sie nach gewalztem Blech aussehen.
+
+    `mask` (0..1) mischt einen zweiten, matten Satz ein - fuer Gummi, Lack oder
+    Griffschalen, die im selben Viertel liegen.
+
+    Gruen und Blau bekommen denselben Wert wie Rot, damit die Datei beim
+    Ansehen lesbar ist; der Shader benutzt sie nicht.
+    """
+    # Zwei Oktaven statt einer. Die feine bricht das Glanzlicht pro Zentimeter
+    # auf, die grobe laesst ganze Handflaechen matter oder blanker werden - das
+    # ist der Unterschied zwischen gewalztem Blech und einer Billardkugel, und
+    # er faellt erst auf, wenn sich die Waffe im Licht dreht.
+    n = grain(r, H, H, 5, unruhe) + grain(r, H, H, 22, unruhe * 0.9)
+    m = np.clip(metallic + n * 0.6, 0.0, 1.0)
+    g = np.clip(smoothness + n, 0.0, 1.0)
+    if mask is not None:
+        k = np.clip(np.asarray(mask, np.float32), 0.0, 1.0)
+        m = m * (1.0 - k) + mask_metallic * k
+        g = g * (1.0 - k) + mask_smoothness * k
+    out = np.zeros((H, H, 4), np.float32)
+    out[..., 0] = m
+    out[..., 1] = m
+    out[..., 2] = m
+    out[..., 3] = g
+    return out
+
+
+def save_gloss_atlas(quads, path):
+    """Wie save_atlas, aber mit Alphakanal - der traegt die Smoothness."""
+    tex = np.zeros((S, S, 4), np.float32)
+    tex[0:H, 0:H] = quads["shroud"]
+    tex[0:H, H:S] = quads["receiver"]
+    tex[H:S, 0:H] = quads["stock"]
+    tex[H:S, H:S] = quads["detail"]
+    img = Image.fromarray((np.clip(tex, 0, 1) * 255).astype(np.uint8), "RGBA")
+    img.save(path)
+    return img
+
+
+def save_rough_atlas(quads, path):
+    """Dieselben Viertel als ROUGHNESS-Map fuer `_SpecGlossMap`.
+
+    Roughness ist das Gegenteil von Smoothness, und die Smoothness steht im
+    Alphakanal der Gloss-Viertel. Es ist also genau eine Umkehrung - keine
+    zweite Kunst, sondern dieselbe Aussage fuer den anderen Shader (siehe den
+    Abschnitt ueber die zwei Dateien weiter oben).
+
+    Geschrieben wird RGB ohne Alpha: `Standard (Roughness setup)` liest den
+    ROTEN Kanal, und eine Datei ohne Alphakanal kann von keiner Importregel
+    versehentlich als Transparenz gelesen werden.
+    """
+    tex = np.zeros((S, S, 3), np.float32)
+    for name, (y0, y1, x0, x1) in (("shroud", (0, H, 0, H)),
+                                   ("receiver", (0, H, H, S)),
+                                   ("stock", (H, S, 0, H)),
+                                   ("detail", (H, S, H, S))):
+        rough = 1.0 - np.clip(quads[name][..., 3], 0.0, 1.0)
+        tex[y0:y1, x0:x1] = rough[..., None]
+    img = Image.fromarray((np.clip(tex, 0, 1) * 255).astype(np.uint8), "RGB")
+    img.save(path)
+    return img

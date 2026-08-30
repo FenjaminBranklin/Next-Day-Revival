@@ -97,14 +97,15 @@ $assetDst = Join-Path $plugins "assets"
 New-Item -ItemType Directory -Force -Path $assetDst | Out-Null
 
 $assets = @(
-    "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
-    "mg42_icon.png", "mg42_weapon_icon.png",
+    "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png", "mg42_metal.png",
+    "mg42_rough.png", "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
+    "sniper50_metal.png", "sniper50_rough.png",
     "sniper50_icon.png", "sniper50_weapon_icon.png",
     "mgbelt.ndmesh", "mgbelt_diffuse.png", "mgbelt_normal.png", "mgbelt_icon.png",
     "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png",
-    "law.ndmesh", "law_diffuse.png", "law_normal.png",
-    "law_icon.png", "law_weapon_icon.png",
+    "law.ndmesh", "law_diffuse.png", "law_normal.png", "law_metal.png",
+    "law_rough.png", "law_icon.png", "law_weapon_icon.png",
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
     "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
@@ -121,6 +122,25 @@ $assets = @(
 foreach ($f in @("mg42_metallic.png")) {
     $p = Join-Path $assetDst $f
     if (Test-Path $p) { Remove-Item $p -Force; Write-Host ("  Alt entfernt: {0}" -f $f) }
+}
+
+# ndr_routes.tsv is the one asset the GAME writes: the in-game recorder
+# appends to the installed copy. Copying the repository version over it would
+# throw away every route recorded since the last build, which is exactly the
+# kind of loss that is only noticed after the next test drive. So it is placed
+# once and never overwritten - python routecheck.py --pull is the way back.
+$routes = "ndr_routes.tsv"
+$routeSrc = Join-Path $assetSrc $routes
+$routeDst = Join-Path $assetDst $routes
+if (-not (Test-Path $routeSrc)) {
+    throw "Assets fehlen: $routes`nErst die Generatoren laufen lassen: python make_assets.py"
+}
+if (Test-Path $routeDst) {
+    Write-Host ("  Route-Datei behalten: {0} (im Spiel aufgezeichnet, nicht ueberschrieben)" -f $routes)
+    Write-Host ("    zurueck ins Repository: python routecheck.py --pull")
+} else {
+    Copy-Item $routeSrc $routeDst -Force
+    Write-Host ("  Asset kopiert: {0,-26} {1,8} bytes" -f $routes, (Get-Item $routeDst).Length)
 }
 
 $missing = @()

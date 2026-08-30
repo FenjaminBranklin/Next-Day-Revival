@@ -54,8 +54,8 @@ jobs:
           mkdir -p "stage/$NAME"
           cp -r assets bepinex "stage/$NAME/"
           cp NextDayRevivalToolkit.dll VERSION "stage/$NAME/"
-          cp client_patch.ps1 start_game.ps1 "stage/$NAME/"
-          cp 1_EINRICHTEN.bat 2_SPIELEN.bat "stage/$NAME/"
+          cp client_patch.ps1 start_game.ps1 launcher.ps1 "stage/$NAME/"
+          cp 1_EINRICHTEN.bat 2_SPIELEN.bat Launcher.bat "stage/$NAME/"
           cp LIESMICH.txt README_EN.txt DRITTANBIETER.txt LICENSE "stage/$NAME/"
           # Working material of the generators - useless in the game.
           find "stage/$NAME/assets" -name "*_preview.png" -delete

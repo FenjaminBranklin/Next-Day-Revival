@@ -303,6 +303,121 @@ class Mesh(object):
         self.prism(y0, y1, self.circle(cx, cz, r0, seg), self.circle(cx, cz, r1, seg),
                    region, smooth=True, center=(cx, cz))
 
+    def pipe(self, cx, cz, y0, y1, r_out, r_in, region, bore_region=None,
+             seg=24, open_y0=True, open_y1=True, inner=True):
+        """Rohr MIT Bohrung: Aussenwand, Innenwand und Ringflaechen an den Enden.
+
+        `tube` ist ein voller Zylinder mit zwei Deckeln. Fuer ein Startrohr, eine
+        Muendung oder einen Laufmantel ist das falsch: von vorn sieht man dort
+        eine Blechscheibe statt in ein Rohr hinein. Genau das war der Befund an
+        der M72 LAW am 2026-08-30 - "nicht mal ein hohles Rohr".
+
+        Die Innenwand bekommt eigene, nach INNEN zeigende Normalen. Ohne sie
+        waere sie von innen unbeleuchtet und - weil die Spielmaterialien
+        Rueckseiten cullen - von der Muendung aus gar nicht da.
+
+        `bore_region` faerbt die Bohrung ueber ein anderes Viertel des Atlas
+        ein; ohne Angabe traegt sie dasselbe Muster wie die Aussenwand.
+
+        `inner=False` laesst die Innenwand weg und baut nur Aussenwand und
+        Ringflaechen. Das ist fuer ein Rohr aus MEHREREN aufeinanderfolgenden
+        Abschnitten gedacht: acht Ringe hintereinander bauen sonst acht kurze
+        Innenwaende, die sich an den Stossstellen ueberlappen und dort
+        flimmern. Ein einziges durchgehendes `bore` (siehe unten) an ihrer
+        Stelle ist ruhiger, billiger und sieht auch wirklich nach einer
+        Bohrung aus.
+        """
+        if bore_region is None:
+            bore_region = region
+        # Eine Wand mit negativer Dicke gibt es nicht. Bei r_in >= r_out laufen
+        # die beiden Ringflaechen an den Enden verkehrt herum um, und das Teil
+        # zeigt dort im Spiel seine Rueckseite - sichtbar wird das erst in
+        # verify.py, lange nach dem Bauen. Deshalb hier, wo die Zahl steht.
+        if r_in >= r_out:
+            raise ValueError("%s: Rohr mit Bohrung %.4f >= Aussenradius %.4f"
+                             % (self.name, r_in, r_out))
+        outer0 = self.circle(cx, cz, r_out, seg)
+        inner0 = self.circle(cx, cz, r_in, seg)
+
+        # Aussenwand ohne Deckel - die Deckel sind hier Ringe, keine Scheiben.
+        self.prism(y0, y1, outer0, outer0, region, smooth=True, caps=False,
+                   center=(cx, cz))
+
+        k = len(inner0)
+        if inner:
+            self.bore(cx, cz, y0, y1, r_in, bore_region, seg=seg)
+
+        # Endflaechen: offener Ring oder voller Deckel.
+        for yy, up, offen in ((y1, 1.0, open_y1), (y0, -1.0, open_y0)):
+            plane = (0.0, up, 0.0)
+            if not offen:
+                pts = [(p[0], yy, p[1]) for p in outer0]
+                self.fan(pts if up > 0 else list(reversed(pts)), region, plane)
+                continue
+            for i in range(k):
+                j = (i + 1) % k
+                oi = (outer0[i][0], yy, outer0[i][1])
+                oj = (outer0[j][0], yy, outer0[j][1])
+                ii = (inner0[i][0], yy, inner0[i][1])
+                ij = (inner0[j][0], yy, inner0[j][1])
+                q = (oi, oj, ij, ii) if up > 0 else (ii, ij, oj, oi)
+                self.quad(q[0], q[1], q[2], q[3], region,
+                          (plane, plane, plane, plane))
+
+    def bore(self, cx, cz, y0, y1, r, region, seg=24):
+        """Nur die Innenwand einer Bohrung: nach INNEN gedrehte Normalen.
+
+        Ohne die eigenen Normalen waere die Wand von innen unbeleuchtet und -
+        weil die Spielmaterialien Rueckseiten cullen - von der Muendung aus gar
+        nicht vorhanden. Man saehe durch das Rohr hindurch ins Freie.
+        """
+        ring = self.circle(cx, cz, r, seg)
+        k = len(ring)
+        for i in range(k):
+            j = (i + 1) % k
+            a0 = (ring[i][0], y0, ring[i][1])
+            a1 = (ring[j][0], y0, ring[j][1])
+            b1 = (ring[j][0], y1, ring[j][1])
+            b0 = (ring[i][0], y1, ring[i][1])
+            ni = norm((cx - ring[i][0], 0.0, cz - ring[i][1]))
+            nj = norm((cx - ring[j][0], 0.0, cz - ring[j][1]))
+            if ni is None or nj is None:
+                continue
+            self.quad(a1, a0, b0, b1, region, (nj, ni, ni, nj))
+
+    def crown(self, cx, cz, y_out, y_in, r_out, r_in, region, seg=24):
+        """Die Fase an einer Muendung: ein Kegelring, der nach AUSSEN sieht.
+
+        Der Unterschied zwischen einem Loch und einem gemalten Kreis. Eine
+        ebene Ringflaeche an der Muendung faengt genau ein Glanzlicht - dasselbe
+        wie die Rohrwand daneben - und ist damit von ihr nicht zu
+        unterscheiden. Eine Fase steht schraeg, faengt ein anderes, und erst
+        dieser helle Kranz sagt dem Auge, dass dahinter etwas aufhoert.
+
+        `y_out` ist die Kante aussen, `y_in` die innere Kante weiter im Rohr.
+        """
+        outer = self.circle(cx, cz, r_out, seg)
+        inner = self.circle(cx, cz, r_in, seg)
+        k = len(outer)
+        vor = -1.0 if y_in > y_out else 1.0
+        for i in range(k):
+            j = (i + 1) % k
+            oi = (outer[i][0], y_out, outer[i][1])
+            oj = (outer[j][0], y_out, outer[j][1])
+            ii = (inner[i][0], y_in, inner[i][1])
+            ij = (inner[j][0], y_in, inner[j][1])
+            # Normale der Fase: halb nach aussen, halb laengs.
+            ni = norm((outer[i][0] - cx, vor * (r_out - r_in) * 1.4,
+                       outer[i][1] - cz))
+            nj = norm((outer[j][0] - cx, vor * (r_out - r_in) * 1.4,
+                       outer[j][1] - cz))
+            if ni is None or nj is None:
+                continue
+            if vor < 0:
+                self.quad(oi, oj, ij, ii, region, (ni, nj, nj, ni))
+            else:
+                self.quad(ii, ij, oj, oi, region, (ni, nj, nj, ni))
+
     def angled_box(self, y_c, z_c, length, thick, width, angle_deg, region,
                    x_c=0.0, c=0.008):
         """Gefaster Balken, in der YZ-Ebene gekippt - Griff, Zweibein, Schaft."""

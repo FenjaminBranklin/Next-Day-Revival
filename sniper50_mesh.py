@@ -1,18 +1,56 @@
 """Erzeugt das Mesh der .50 (TAC-50) und schreibt es als .ndmesh.
 
-Gleiche Werkstatt und dieselbe Ausrichtung wie beim MG42: der Pistolengriff
-liegt auf y = 0.624 und die Laufachse auf z = 0.096, beides aus dem RPD-Mesh
-gemessen. Damit greift die rechte Hand am Griff, ohne dass irgendein Anker
-verschoben werden muesste - die Waffe wird ueber dieselben kopierten
-WeaponTranformManager-Werte angelegt.
+DIE BEZUGSPUNKTE KOMMEN VON DER SVD, NICHT VOM RPD (2026-08-30)
+---------------------------------------------------------------
+Der Befund des Benutzers war, dass die Handhaltung nicht zum Griff passt und
+dass der Griff keinen Abzug hat. Das zweite stimmte woertlich; das erste hatte
+eine messbare Ursache.
+
+Bis hierher stand in dieser Datei GRIP_Y = 0.624 und BZ = 0.096, "aus dem
+RPD-Mesh gemessen". Das ist die richtige Referenz fuer das MG42 - dessen
+Spende-Waffe IST das RPD (1023). Die TAC-50 wird dagegen von der **SVD (1010)**
+abgeleitet, und `CopyDonorComponents` uebernimmt deren
+WeaponTranformManager-Werte. Die rechte Hand landet also dort, wo die SVD ihren
+Pistolengriff hat - und nicht dort, wo das RPD seinen hat.
+
+DIE ERSTE MESSUNG WAR UM 79 mm FALSCH (2026-08-30, zweiter Befund)
+------------------------------------------------------------------
+Der Benutzer meldete dieselbe Sache noch einmal: die Hand passt nicht zum
+Griff. Also nachgemessen, diesmal am Mesh selbst statt an Augenmass.
+
+`m.export()` auf das Mesh "SVD" aus `resources.assets` (UnityPy liefert
+`m_Vertices` seit einer Version nicht mehr direkt - die OBJ-Ausgabe schon),
+dann in Scheiben von 0.04 laengs der Waffe geschnitten und je Scheibe
+gefragt, wie weit sie unter die Laufachse reicht und wie breit sie dort ist.
+Ein Pistolengriff ist SCHMAL und TIEF; ein Schaft ist breit:
+
+    y 0.36..0.44   z bis -0.167   x -0.033..0.024   Abzug und Buegel
+    y 0.56..0.80   z bis -0.172   x -0.021..0.022   PISTOLENGRIFF
+    y 0.80..1.00   z bis -0.316   x -0.046..0.031   Daumenlochschaft
+    y 1.06..1.62   z bis -0.293                     Kolben und Wangenauflage
+
+Die bisherigen 0.801..0.966 sind also NICHT der Griff, sondern der Rahmen des
+Daumenlochschafts dahinter - dort ist das Mesh am tiefsten, und genau darauf
+ist die erste Messung hereingefallen. Der Griff sitzt bei y 0.56..0.80, Mitte
+**0.68**, und der Abzug bei y 0.40.
+
+    GRIP_Y  0.884 -> 0.680     0.204 Einheiten = 79 mm weiter VORN
+    Abzug   GRIP_Y-0.162 -> GRIP_Y-0.235
+
+`GRIP_Y` ist zugleich der Anker von `y()`, die ganze Waffe wandert also
+geschlossen mit - Lauf, Gehaeuse und Schaft behalten ihre Verhaeltnisse, nur
+der Griff kommt dorthin, wo die Hand der Spende zugreift.
+
+    Laufachse       x  0.000            z  0.026   (SVD_Muzzle 0, -1.675, 0.026)
+    Bounds          x +-0.101   y +-1.581   z +-0.316
 
 Massstab: 1 Einheit = 393.5 mm (aus der RPD hergeleitet, siehe mg42_mesh.py).
 
     TAC-50 real     Gesamtlaenge 1448 mm, Lauf 737 mm, 5 Schuss .50 BMG
-    im Mesh         y -2.120 .. 1.559   =  3.68 Einheiten
-    zum Vergleich   MG42  3.10 Einheiten, RPD 2.64 Einheiten
+    im Mesh         3.68 Einheiten
+    zum Vergleich   SVD 3.16 Einheiten, MG42 3.10, RPD 2.64
 
-Die Waffe ist damit deutlich groesser als das MG42 - so gewollt.
+Die Waffe ist damit deutlich groesser als die Spende - so gewollt.
 
 Das Zielfernrohr steckt im Mesh, weil es zur Silhouette gehoert. Das
 Bildschirm-Overlay beim Zielen ist davon unabhaengig und kommt aus scope50.py.
@@ -31,8 +69,8 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HIER, "assets", "sniper50.ndmesh")
 
 MM = 1.0 / 393.5
-GRIP_Y = 0.624            # Handposition, aus dem RPD-Mesh
-BZ = 0.096                # Laufachse, aus dem RPD-Mesh
+GRIP_Y = 0.680            # Handposition, Mitte des SVD-Griffs (0.56..0.80)
+BZ = 0.026                # Laufachse, aus SVD_Muzzle
 GRIP_D = 1080.0           # mm von der Muendung bis zur Griffmitte
 
 
@@ -67,8 +105,11 @@ m.angled_box(y(980), BZ + 0.086, 130 * MM, 0.022, 0.022, 62.0, "detail",
              x_c=0.070, c=0.005)
 m.cbox(0.098, y(1002), BZ + 0.052, 0.030, 30 * MM, 0.030, "detail", c=0.008)
 
-# Magazin, 5 Schuss .50 - ein tiefer Kasten unter dem Gehaeuse
-m.cbox(0.0, y(900), BZ - 0.150, 0.062, 150 * MM, 0.200, "detail", c=0.012)
+# Magazin, 5 Schuss .50 - ein tiefer Kasten unter dem Gehaeuse. 860 statt 900
+# mm: bei 900 reichte sein hinteres Ende bis y GRIP_Y-0.266 und damit in den
+# Abzugsbuegel hinein, der jetzt an der gemessenen Stelle sitzt. Ein Magazin
+# gehoert VOR den Buegel, nicht in ihn.
+m.cbox(0.0, y(860), BZ - 0.150, 0.062, 150 * MM, 0.200, "detail", c=0.012)
 
 # ------------------------------------------------------------ Zielfernrohr
 SZ = BZ + 0.208                                   # Hoehe der Rohrachse
@@ -84,9 +125,50 @@ for d in (830, 1060):
            "detail", c=0.006)
 
 # ------------------------------------------------------- Griff und Abzug
-m.angled_box(GRIP_Y, BZ - 0.176, 0.310, 0.064, 0.052, 14.0, "stock", c=0.018)
-m.cbox(0.0, y(1020), BZ - 0.112, 0.026, 110 * MM, 0.018, "detail", c=0.005)
-m.cbox(0.0, y(986), BZ - 0.076, 0.022, 26 * MM, 0.052, "detail", c=0.005)
+#
+# Der Griff fuellt die GEMESSENE Huelle des SVD-Griffs: z -0.179..-0.025 gegen
+# gemessene -0.172..-0.030, x +-0.034 gegen gemessene -0.021..0.022. Er ist
+# absichtlich eine Spur breiter als die Spende - das SVD-Mesh ist an dieser
+# Stelle sehr grob, und ein 13 mm breiter Griff sieht in der Hand aus wie ein
+# Lineal.
+GZ = BZ - 0.128                       # Mitte des Griffs in der Hoehe
+m.angled_box(GRIP_Y + 0.010, GZ, 0.160, 0.108, 0.068, 15.0, "stock", c=0.018)
+# Ruecken mit Handballenauflage - ohne ihn ist der Griff ein Brett.
+m.angled_box(GRIP_Y + 0.052, GZ + 0.006, 0.124, 0.040, 0.060, 15.0,
+             "stock", c=0.014)
+# Zwei Fingerrillen an der Vorderkante. Sie kosten zwoelf Dreiecke und sind
+# das, was einen Griff in der ersten Person als Griff lesbar macht.
+for dz in (-0.030, 0.026):
+    m.angled_box(GRIP_Y - 0.040, GZ + dz, 0.030, 0.028, 0.062, 15.0,
+                 "stock", c=0.008)
+# Zwischenstueck vom Gehaeuseboden zum Griffkopf und die Griffkappe unten.
+m.cbox(0.0, GRIP_Y - 0.018, BZ - 0.072, 0.076, 0.132, 0.062, "receiver", c=0.010)
+m.cbox(0.0, GRIP_Y + 0.032, BZ - 0.206, 0.074, 0.116, 0.020, "detail", c=0.006)
+
+# ABZUGSBUEGEL ALS GESCHLOSSENER RING (2026-08-30)
+#
+# Bis hierher waren es zwei Teile - ein Bodenbuegel und ein Steg davor - und
+# das ist ein L, kein Buegel: von der Seite fehlte der Ring, und der Abzug
+# stand darin ohne erkennbare Fassung. Vier Teile schliessen ihn: Boden, Steg
+# vorn, Steg hinten in den Griff, und oben die Decke am Gehaeuseboden.
+# Der hintere Steg sitzt an der VORDERKANTE DES GRIFFS, nicht davor. Beim
+# ersten Versuch stand er bei GRIP_Y-0.122 und der Griff beginnt bei
+# GRIP_Y-0.044 - dazwischen klaffte ein Spalt von 24 mm, und ein Buegel, der
+# den Griff nicht beruehrt, ist kein Buegel.
+BUEGEL_Z = BZ - 0.152                 # Unterkante des Rings
+m.cbox(0.0, GRIP_Y - 0.172, BUEGEL_Z, 0.030, 0.270, 0.024, "detail", c=0.005)
+m.cbox(0.0, GRIP_Y - 0.290, BZ - 0.112, 0.028, 0.030, 0.104, "detail", c=0.005)
+m.cbox(0.0, GRIP_Y - 0.055, BZ - 0.116, 0.030, 0.038, 0.096, "detail", c=0.005)
+m.cbox(0.0, GRIP_Y - 0.172, BZ - 0.066, 0.030, 0.280, 0.022, "detail", c=0.005)
+
+# DER ABZUG, an der gemessenen Stelle (SVD: y 0.40, hier GRIP_Y-0.235) und
+# gross genug, um einer zu sein. Das Blatt haengt aus dem Gehaeuseboden in den
+# Ring und ist nach hinten geneigt; unten sitzt der breitere Abzugsschuh.
+m.angled_box(GRIP_Y - 0.235, BZ - 0.100, 0.088, 0.026, 0.022, 20.0,
+             "detail", c=0.004)
+m.cbox(0.0, GRIP_Y - 0.219, BZ - 0.140, 0.026, 0.038, 0.018, "detail", c=0.003)
+# Sicherungsfluegel ueber dem Abzug, rechts am Gehaeuse.
+m.cbox(0.052, GRIP_Y - 0.090, BZ - 0.040, 0.026, 0.062, 0.030, "detail", c=0.005)
 
 # ----------------------------------------------------------------- Schaft
 m.ctaper(y(1160), y(1300),
@@ -113,9 +195,11 @@ m.report(OUT)
 print()
 print("  Bezugspunkte")
 print("    Muendung        y %.3f" % y(0))
-print("    Griffmitte      y %.3f   (RPD 0.624, MG42 0.624)" % GRIP_Y)
-print("    Laufachse       z %.3f   (RPD 0.096)" % BZ)
+print("    Griffmitte      y %.3f   (SVD gemessen 0.56..0.80, Mitte 0.68)"
+      % GRIP_Y)
+print("    Abzug           y %.3f   (SVD gemessen 0.40)" % (GRIP_Y - 0.235))
+print("    Laufachse       z %.3f   (SVD_Muzzle 0.026)" % BZ)
 print("    Zielfernrohr    z %.3f" % SZ)
 print("    Gesamtlaenge    %.0f mm  (TAC-50 real 1448 mm, MG42 1220 mm)"
       % ((yy1 - yy0) / MM))
-print("    Breite          %.0f mm  (MG42 83 mm, RPD 54 mm)" % ((x1 - x0) / MM))
+print("    Breite          %.0f mm  (SVD 79 mm, MG42 83 mm)" % ((x1 - x0) / MM))

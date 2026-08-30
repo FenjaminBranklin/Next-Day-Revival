@@ -9,8 +9,27 @@ Bewusst anders als das MG42: das MG42 ist bruenierter Stahl mit braunem Bakelit,
 die .50 ist ein modernes Chassis-Gewehr - kuehle Grautoene, kein Braun. So sind
 die beiden Waffen schon am Farbklang auseinanderzuhalten.
 
-Keine Metallic/Smoothness-Map, aus demselben Grund wie beim MG42: kein einziges
-Spielmaterial benutzt eine (research/FINDINGS.md).
+SIE HATTE KEINE METALLKARTE, UND DAS WAR DER GROSSTE EINZELFEHLER
+-----------------------------------------------------------------
+Hier stand bis 2026-08-30: "Keine Metallic/Smoothness-Map, aus demselben Grund
+wie beim MG42: kein einziges Spielmaterial benutzt eine". Der Satz war schon
+fuer das MG42 ueberholt (der MTW hat eine, `dump_material.py btr-80a_alb`) und
+fuer die .50 hatte er die Folge, die im Log stand:
+
+    1161: Material Metallic=0 Glossiness=0,6 ... Metall-Map=keine
+
+Metallic 0 heisst Nichtmetall. Ein Scharfschuetzengewehr aus lackiertem Stahl
+sah damit aus wie ein Gewehr aus Karton, und keine noch so gute Diffusetextur
+kann das ausgleichen - Metall erkennt das Auge am Glanzverhalten, nicht an der
+Farbe. Jetzt liegen `sniper50_metal.png` und `sniper50_rough.png` daneben; was
+die zweite Datei soll, steht in texlib bei `save_rough_atlas`.
+
+Zusammen damit ist die Grundflaeche der drei Metallviertel von `texlib.base`
+auf `texlib.gunmetal` umgestellt. `base` gewichtet die feinste Oktave am
+staerksten - richtig fuer Lack und Polymer, falsch fuer Stahl, und in
+Verbindung mit `mottle` bei 0.022 war das dieselbe Raufasertapete, die der
+Benutzer am MG42 gemeldet hatte. Das Polymer des Griffs bleibt auf `base`; es
+IST koernig.
 """
 
 import os
@@ -29,6 +48,8 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HIER, "assets")
 OUT_D = os.path.join(ASSETS, "sniper50_diffuse.png")
 OUT_N = os.path.join(ASSETS, "sniper50_normal.png")
+OUT_M = os.path.join(ASSETS, "sniper50_metal.png")
+OUT_R = os.path.join(ASSETS, "sniper50_rough.png")
 
 r = T.rng(50500)
 H = T.H
@@ -125,14 +146,14 @@ heights = {"shroud": h_shroud, "receiver": h_receiver,
            "stock": h_stock, "detail": h_detail}
 
 # ------------------------------------------------------------------ Diffuse
-shroud = T.base(r, H, H, (65, 67, 71), 0.042, scale=7)
-shroud = T.mottle(r, shroud, 0.0225, 12, (0.90, 0.94, 1.0))
+shroud = T.gunmetal(r, H, H, (65, 67, 71), unruhe=0.007, sheen=0.012, axis="u")
+shroud = T.mottle(r, shroud, 0.005, 12, (0.90, 0.94, 1.0))
 shroud = flutes(shroud, pitch=22, depth=0.05)
 shroud = T.scratches(r, shroud, 58, 0.12, 42, direction=90.0)
 shroud = T.couple_height(shroud, h_shroud, 0.09, 0.05, 11)
 
-receiver = T.base(r, H, H, (81, 83, 87), 0.040, scale=6)
-receiver = T.mottle(r, receiver, 0.022, 13, (0.88, 0.94, 1.0))
+receiver = T.gunmetal(r, H, H, (81, 83, 87), unruhe=0.006, sheen=0.011, axis="u")
+receiver = T.mottle(r, receiver, 0.005, 13, (0.88, 0.94, 1.0))
 receiver = machining(receiver, pitch=9, depth=0.025)
 receiver = brushed(r, receiver, 0.014, pitch=3)
 receiver = T.scratches(r, receiver, 65, 0.10, 46, direction=0.0)
@@ -140,13 +161,13 @@ receiver = T.couple_height(receiver, h_receiver, 0.09, 0.05, 10)
 receiver = anodize_wear(receiver, h_receiver, 0.14)
 
 # Polymer: matt, minimal gruenstichig, sehr feine Koernung - kein Bakelit.
-stock = T.base(r, H, H, (58, 60, 56), 0.043, scale=9)
-stock = T.mottle(r, stock, 0.023, 11, (0.86, 0.91, 0.84))
+stock = T.base(r, H, H, (58, 60, 56), 0.034, scale=9)
+stock = T.mottle(r, stock, 0.014, 11, (0.86, 0.91, 0.84))
 stock = T.scratches(r, stock, 22, 0.055, 28, direction=0.0)
 stock = T.couple_height(stock, h_stock, 0.09, 0.05, 6)
 
-detail = T.base(r, H, H, (36, 37, 40), 0.043, scale=5)
-detail = T.mottle(r, detail, 0.023, 10, (0.85, 0.90, 1.0))
+detail = T.gunmetal(r, H, H, (36, 37, 40), unruhe=0.006, sheen=0.013, axis="v")
+detail = T.mottle(r, detail, 0.005, 10, (0.85, 0.90, 1.0))
 detail = T.scratches(r, detail, 82, 0.13, 36, direction=5.0)
 detail = T.couple_height(detail, h_detail, 0.09, 0.05, 8)
 
@@ -162,3 +183,25 @@ print("  unten rechts Optik/Kleinteile,Mittelwert RGB %s" % (T.mean_rgb(detail),
 
 T.save_height_atlas(heights, OUT_N, strength=2.6)
 print("Sniper50-Normal : %s" % OUT_N)
+
+# ------------------------------------------------- Metallic und Smoothness
+#
+# Die .50 ist nicht bruenierter Stahl wie das MG42, sondern lackiertes und
+# eloxiertes Metall - also dieselbe Metallizitaet, aber deutlich weniger
+# Glanz. Der Lauf ist blanker als das Chassis (er wird nicht angefasst), die
+# Optik ist das glaenzendste Teil der Waffe, das Polymer des Griffs ist kein
+# Metall.
+metall = {
+    "shroud": T.gloss_quarter(r, 0.60, 0.40, 0.050),
+    "receiver": T.gloss_quarter(r, 0.55, 0.32, 0.045),
+    "stock": T.gloss_quarter(r, 0.02, 0.24, 0.035),
+    "detail": T.gloss_quarter(r, 0.68, 0.50, 0.055),
+}
+T.save_gloss_atlas(metall, OUT_M)
+T.save_rough_atlas(metall, OUT_R)
+print("Sniper50-Metal  : %s   R=Metallic, A=Smoothness" % OUT_M)
+print("Sniper50-Rough  : %s   R=Roughness = 1-Smoothness" % OUT_R)
+print("    Lauf     Metallic 0.60  Smoothness 0.40")
+print("    Chassis  Metallic 0.55  Smoothness 0.32   (matt lackiert)")
+print("    Polymer  Metallic 0.02  Smoothness 0.24")
+print("    Optik    Metallic 0.68  Smoothness 0.50")

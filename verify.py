@@ -145,8 +145,8 @@ def check_dll():
         types.add(a._s(td.TypeName))
     want_types = ["RevivalPlugin", "ItemDef", "ItemFactory", "ResourceHook",
                   "LocalizationHook", "CursorTracker", "CursorGuard", "Assets",
-                   "Registry", "WeaponData", "Diag", "Research", "RocketHook",
-                   "Turret", "Arena"]
+                   "Registry", "WeaponData", "Diag", "Research", "Regions",
+                   "RocketHook", "Turret", "Arena"]
     for t in want_types:
         if t in types:
             ok("Typ " + t)
@@ -208,7 +208,12 @@ def check_item_table():
     print("[3] Item-Tabelle gegen das assets-Verzeichnis")
     src = io.open(SRC, encoding="utf-8").read()
     import re
-    named = set(re.findall(r'"([A-Za-z0-9_]+\.(?:ndmesh|png))"', src))
+    # Der Name muss mit Buchstabe oder Ziffer anfangen. Was mit Unterstrich
+    # beginnt, ist im Quelltext kein Dateiname, sondern eine ENDUNG: das
+    # Waffenmaterial baut "<stamm>_diffuse.png" zu "<stamm>_metal.png" um.
+    # Ohne diese Einschraenkung meldet die Pruefung zwei Dateien als fehlend,
+    # die es nie geben soll.
+    named = set(re.findall(r'"([A-Za-z0-9][A-Za-z0-9_]*\.(?:ndmesh|png))"', src))
     for f in sorted(named):
         p = os.path.join(ASSETS, f)
         if os.path.exists(p):
@@ -418,7 +423,21 @@ def check_winding():
       2. Je geschlossenem Koerper: vorzeichenbehaftetes Volumen positiv.
 
     Bis 2026-08-28 war beides im ganzen Baukasten verkehrt herum.
+
+    BEDINGUNG 2 GILT NUR FUER GESCHLOSSENE KOERPER, und nicht jedes Mesh ist
+    einer. Wer eine Bohrung hat, hat eine nach INNEN gedrehte Flaeche darin,
+    und die zaehlt negativ; wer zusaetzlich eine zweite Flaechenschicht traegt,
+    zaehlt sein Volumen ein zweites Mal mit umgekehrtem Vorzeichen. Bei solchen
+    Meshes sagt das Vorzeichen nichts ueber den Umlaufsinn - Bedingung 1 sagt
+    es weiterhin, und die ist die schaerfere von beiden. Sie stehen in
+    `NICHT_GESCHLOSSEN`, jedes mit dem Grund, aus dem es dort steht.
     """
+    # Mesh -> warum sein Volumen nicht aussagekraeftig ist.
+    NICHT_GESCHLOSSEN = {
+        "law.ndmesh": "Bohrung ueber die ganze Laenge, dazu eine zweite "
+                      "Flaechenschicht auf der Aussenhaut",
+    }
+
     print("[9] Vorderseiten und Umlaufsinn")
     for f in MESHES:
         p = os.path.join(ASSETS, f)
@@ -452,6 +471,9 @@ def check_winding():
         if gegen:
             bad(line + "  -> %d Dreiecke zeigen die Rueckseite nach aussen "
                        "(im Spiel unsichtbar)" % gegen)
+        elif f in NICHT_GESCHLOSSEN:
+            ok(line + "  Vorderseiten stimmen (kein geschlossener Koerper: "
+               + NICHT_GESCHLOSSEN[f] + ")")
         elif vol < -1e-9:
             bad(line + "  -> Koerper ist nach innen gewickelt")
         elif abs(vol) <= 1e-9:
