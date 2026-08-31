@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.8";
+        public const string VERSION = "0.5.9";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -12863,51 +12863,26 @@ namespace NextDayRevival
             Matrix4x4 oldMatrix = GUI.matrix;
             try
             {
-                float half = RevivalPlugin.CfgPatrolRouteMapWidth == null
-                    ? 60f : Mathf.Max(55f,
-                        RevivalPlugin.CfgPatrolRouteMapWidth.Value);
                 for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                 {
                     Route route;
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 2) continue;
 
-                    // The Locator-style red of the game's own target-area
-                    // rings (measured RGB 183,33,32), not orange - the user
-                    // wants the patrol border to read as the same marker.
-                    GUI.color = route.Enabled
-                        ? new Color(0.72f, 0.13f, 0.125f, 0.95f)
-                        : new Color(0.72f, 0.13f, 0.125f, 0.42f);
-                    List<Vector3> center = CoarseRoute(route);
-                    List<Vector3> left = new List<Vector3>();
-                    List<Vector3> right = new List<Vector3>();
-                    for (int i = 0; i < center.Count; i++)
-                    {
-                        Vector3 along;
-                        if (i == 0) along = center[1] - center[0];
-                        else if (i == center.Count - 1)
-                            along = center[i] - center[i - 1];
-                        else along = center[i + 1] - center[i - 1];
-                        along.y = 0f;
-                        if (along.sqrMagnitude < 0.01f) continue;
-                        along.Normalize();
-                        Vector3 side = new Vector3(-along.z, 0f, along.x) * half;
-                        left.Add(center[i] + side);
-                        right.Add(center[i] - side);
-                    }
-                    // One continuous dash phase per edge, so the gaps survive
-                    // corners instead of every short segment restarting at a
-                    // full stroke and filling the border into a solid line.
-                    DrawDashedEdge(left, texture, camera, world, map);
-                    DrawDashedEdge(right, texture, camera, world, map);
-                    if (left.Count > 1)
-                    {
-                        int last = left.Count - 1;
-                        DrawDashedEdge(new List<Vector3> { right[0], left[0] },
-                                       texture, camera, world, map);
-                        DrawDashedEdge(new List<Vector3> { right[last], left[last] },
-                                       texture, camera, world, map);
-                    }
+                    // One dashed line that follows the waypoints themselves,
+                    // not a two-sided corridor - the user's map shows a single
+                    // Locator-style dashed border tracing the route. The colour
+                    // is the patrol's faction: looter and traitor red (the
+                    // game's own target-ring red), civilian green, neutral
+                    // white.
+                    GUI.color = RouteColor(route.Seite, route.Enabled);
+                    List<Vector3> center = new List<Vector3>(route.P.Count);
+                    for (int i = 0; i < route.P.Count; i++)
+                        center.Add(route.P[i].Pos);
+                    // One continuous dash phase along the whole line, so the
+                    // gaps survive corners instead of every short segment
+                    // restarting at a full stroke and filling into a solid line.
+                    DrawDashedEdge(center, texture, camera, world, map);
 
                     Vector2 label;
                     if (MapTools.WorldToGui(route.P[0].Pos, texture, camera,
@@ -12932,28 +12907,28 @@ namespace NextDayRevival
             }
         }
 
-        static List<Vector3> CoarseRoute(Route route)
+        /// <summary>
+        /// The dash colour for a patrol route, by its faction: looter and
+        /// traitor draw the game's own target-ring red (measured RGB
+        /// 183,33,32), civilian green, neutral white. A disabled route keeps
+        /// its hue but drops to a faint alpha.
+        /// </summary>
+        static Color RouteColor(string faction, bool enabled)
         {
-            List<Vector3> result = new List<Vector3>();
-            if (route == null || route.P.Count == 0) return result;
-            result.Add(route.P[0].Pos);
-            for (int i = 1; i < route.P.Count - 1; i++)
+            Color c;
+            switch (faction)
             {
-                Vector3 candidate = route.P[i].Pos;
-                Vector3 incoming = candidate - result[result.Count - 1];
-                Vector3 outgoing = route.P[i + 1].Pos - candidate;
-                incoming.y = 0f;
-                outgoing.y = 0f;
-                bool corner = incoming.sqrMagnitude > 0.01f
-                    && outgoing.sqrMagnitude > 0.01f
-                    && Vector3.Angle(incoming, outgoing) >= 28f;
-                if (incoming.magnitude >= 70f || corner) result.Add(candidate);
+                case "civilian":
+                    c = new Color(0.22f, 0.78f, 0.30f); break;   // green
+                case "neutral":
+                    c = new Color(0.95f, 0.95f, 0.95f); break;   // white
+                case "looter":
+                case "traitor":
+                default:
+                    c = new Color(0.72f, 0.13f, 0.125f); break;  // Locator red
             }
-            Vector3 end = route.P[route.P.Count - 1].Pos;
-            if ((end - result[result.Count - 1]).sqrMagnitude > 0.01f)
-                result.Add(end);
-            if (result.Count == 1) result.Add(end);
-            return result;
+            c.a = enabled ? 0.95f : 0.42f;
+            return c;
         }
 
         // Measured directly from the game's own AreaMarkerCut texture (the red
