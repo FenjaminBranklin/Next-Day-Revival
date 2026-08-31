@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.9";
+        public const string VERSION = "0.5.10";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -7884,6 +7884,43 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>
+        /// The map texture's rectangle in GUI coordinates. Everything drawn
+        /// over the map must be clipped to this - a route waypoint north of the
+        /// visible map still projects to a screen point, and without this rect
+        /// its dashes would be painted over the 3D scene above the map panel
+        /// (the "civ" line leaking into the sky). Built from the same NGUI
+        /// widget bounds that MouseWorld uses, so it is exactly the drawn map.
+        /// </summary>
+        public static bool MapScreenRect(Component texture, Camera cam,
+                                         out Rect rect)
+        {
+            rect = new Rect();
+            try
+            {
+                if (texture == null || cam == null) return false;
+                Type math = RevivalPlugin.TypeByName("NGUIMath");
+                MethodInfo boundsMethod = math == null ? null
+                    : AccessTools.Method(math, "CalculateAbsoluteWidgetBounds",
+                        new Type[] { typeof(Transform) }, null);
+                if (boundsMethod == null) return false;
+                Bounds b = (Bounds)boundsMethod.Invoke(null,
+                    new object[] { texture.transform });
+                if (b.size == Vector3.zero) return false;
+                Vector3 s0 = cam.WorldToScreenPoint(b.min);
+                Vector3 s1 = cam.WorldToScreenPoint(b.max);
+                float x0 = Mathf.Min(s0.x, s1.x);
+                float x1 = Mathf.Max(s0.x, s1.x);
+                float g0 = Screen.height - s0.y;
+                float g1 = Screen.height - s1.y;
+                float y0 = Mathf.Min(g0, g1);
+                float y1 = Mathf.Max(g0, g1);
+                rect = new Rect(x0, y0, x1 - x0, y1 - y0);
+                return rect.width > 1f && rect.height > 1f;
+            }
+            catch { return false; }
+        }
+
         /// <summary>The same click conversion used by
         /// MapUIManager.PlacePlayerCustomMarker, including its terrain ray.</summary>
         public static bool MouseWorld(out Vector3 point)
@@ -12859,6 +12896,14 @@ namespace NextDayRevival
                                   out world, out map)) return;
             Load(false);
 
+            // The visible map rectangle. Dashes are clipped to it so a route
+            // that runs off the shown map does not paint over the game scene
+            // around the panel. If the bounds are unavailable, fall back to the
+            // whole screen rather than draw nothing.
+            Rect clip;
+            if (!MapTools.MapScreenRect(texture, camera, out clip))
+                clip = new Rect(0f, 0f, Screen.width, Screen.height);
+
             Color old = GUI.color;
             Matrix4x4 oldMatrix = GUI.matrix;
             try
@@ -12869,24 +12914,31 @@ namespace NextDayRevival
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 2) continue;
 
-                    // One dashed line that follows the waypoints themselves,
-                    // not a two-sided corridor - the user's map shows a single
-                    // Locator-style dashed border tracing the route. The colour
-                    // is the patrol's faction: looter and traitor red (the
-                    // game's own target-ring red), civilian green, neutral
-                    // white.
+                    // The waypoints, CONNECTED, are one line. The line is then
+                    // cut into evenly spaced Locator-style dashes by walking its
+                    // arc length - the individual waypoints are never dashes of
+                    // their own. Colour is the patrol's faction: looter and
+                    // traitor red, civilian green, neutral white.
                     GUI.color = RouteColor(route.Seite, route.Enabled);
-                    List<Vector3> center = new List<Vector3>(route.P.Count);
+
+                    // Project the waypoints to the map, splitting into runs
+                    // wherever a point cannot be projected.
+                    List<Vector2> run = new List<Vector2>(route.P.Count);
+                    float phase = 0f;
                     for (int i = 0; i < route.P.Count; i++)
-                        center.Add(route.P[i].Pos);
-                    // One continuous dash phase along the whole line, so the
-                    // gaps survive corners instead of every short segment
-                    // restarting at a full stroke and filling into a solid line.
-                    DrawDashedEdge(center, texture, camera, world, map);
+                    {
+                        Vector2 g;
+                        if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
+                                                world, map, out g))
+                            run.Add(g);
+                        else { DashRun(run, ref phase, clip); run.Clear(); }
+                    }
+                    DashRun(run, ref phase, clip);
 
                     Vector2 label;
                     if (MapTools.WorldToGui(route.P[0].Pos, texture, camera,
-                                            world, map, out label))
+                                            world, map, out label)
+                        && clip.Contains(label))
                         GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
                                   route.Name + (route.Enabled ? "" : " (disabled)"));
                 }
@@ -12931,58 +12983,70 @@ namespace NextDayRevival
             return c;
         }
 
-        // Measured directly from the game's own AreaMarkerCut texture (the red
-        // target-area ring): four strokes of ~76 degrees at mid-radius 41.3 in
-        // the 87x87 source, ring thickness 4.5 px. The map does not zoom and
-        // renders the ring at native size (a red circle on screen measured
-        // mid-radius ~43 px), so along the arc a Locator stroke is a 55 px dash,
-        // a 10 px gap, 4.5 px thick. The patrol border uses the same numbers.
-        const float RouteDash = 55f;
-        const float RouteGap = 10f;
-        const float RouteStroke = 4.5f;
+        // Bold, blunt, clearly separated dashes, tuned to the user's map: thick
+        // strokes with a visible gap roughly as long as the stroke, not the fine
+        // ring geometry (which read as a busy, over-detailed line). 46 px dash,
+        // 44 px gap, 9 px thick - a near 1:1 dash-to-gap so the gaps are
+        // unmistakable, and the RouteMapDash capsule keeps the ends round.
+        const float RouteDash = 46f;
+        const float RouteGap = 44f;
+        const float RouteStroke = 9f;
 
         /// <summary>
-        /// Draws one edge of the corridor as a single dashed line whose stroke
-        /// and gap pattern runs unbroken across every waypoint, so the border
-        /// reads as separate red Locator-style dashes instead of a solid line.
+        /// Cuts one connected run of screen points into evenly spaced dashes by
+        /// walking its arc length. Each dash is ONE straight stroke between the
+        /// two arc-length points that bound it, so it steps cleanly over the
+        /// jitter of the dense recorded waypoints instead of bending at every
+        /// one - that per-waypoint bending is what made the old line a scribble.
+        /// The dash phase carries across runs so the pattern stays regular.
         /// </summary>
-        static void DrawDashedEdge(List<Vector3> edge, Component texture,
-                                   Camera camera, Vector2 world, Vector2 map)
+        static void DashRun(List<Vector2> pts, ref float phase, Rect clip)
         {
-            if (edge == null || edge.Count < 2) return;
+            if (pts == null || pts.Count < 2) return;
+            int n = pts.Count;
+            float[] cum = new float[n];
+            for (int i = 1; i < n; i++)
+                cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).magnitude;
+            float total = cum[n - 1];
+            if (total < 1f) { phase = 0f; return; }
+
             Texture2D dashTexture = RouteMapDash();
             float period = RouteDash + RouteGap;
-            float phase = 0f;               // distance already walked on the edge
-            Vector2 a, b;
-            bool haveA = MapTools.WorldToGui(edge[0], texture, camera,
-                                             world, map, out a);
-            for (int i = 1; i < edge.Count; i++)
+            // Begin at the dash boundary preceding this run, so a dash that was
+            // mid-stroke at the previous run's end continues seamlessly here.
+            for (float ds = -(phase % period); ds < total; ds += period)
             {
-                bool haveB = MapTools.WorldToGui(edge[i], texture, camera,
-                                                 world, map, out b);
-                if (!haveA || !haveB) { a = b; haveA = haveB; phase = 0f; continue; }
-
+                float start = Mathf.Max(ds, 0f);
+                float end = Mathf.Min(ds + RouteDash, total);
+                if (end <= start) continue;
+                Vector2 a = PointAtArc(pts, cum, start);
+                Vector2 b = PointAtArc(pts, cum, end);
+                if (!clip.Contains(a) || !clip.Contains(b)) continue;
                 Vector2 d = b - a;
-                float length = d.magnitude;
-                if (length < 0.5f) { a = b; continue; }
+                float len = d.magnitude;
+                if (len < 0.5f) continue;
                 float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
                 Matrix4x4 before = GUI.matrix;
                 GUIUtility.RotateAroundPivot(angle, a);
-                // Start at the dash boundary that precedes this segment so the
-                // pattern is continuous with the segment before it.
-                for (float ds = -(phase % period); ds < length; ds += period)
-                {
-                    float start = Mathf.Max(ds, 0f);
-                    float end = Mathf.Min(ds + RouteDash, length);
-                    if (end > start)
-                        GUI.DrawTexture(new Rect(a.x + start,
-                            a.y - RouteStroke * 0.5f, end - start, RouteStroke),
-                            dashTexture);
-                }
+                GUI.DrawTexture(new Rect(a.x, a.y - RouteStroke * 0.5f,
+                    len, RouteStroke), dashTexture);
                 GUI.matrix = before;
-                phase += length;
-                a = b;
             }
+            phase = (phase + total) % period;
+        }
+
+        /// <summary>The point at arc length <paramref name="d"/> along the
+        /// screen polyline, interpolated within the segment it falls in.</summary>
+        static Vector2 PointAtArc(List<Vector2> pts, float[] cum, float d)
+        {
+            int n = pts.Count;
+            if (d <= 0f) return pts[0];
+            if (d >= cum[n - 1]) return pts[n - 1];
+            int i = 1;
+            while (i < n - 1 && cum[i] < d) i++;
+            float segLen = cum[i] - cum[i - 1];
+            float t = segLen > 1e-4f ? (d - cum[i - 1]) / segLen : 0f;
+            return Vector2.Lerp(pts[i - 1], pts[i], t);
         }
 
         /// <summary>A softly antialiased capsule, like the rounded red map
@@ -12991,7 +13055,9 @@ namespace NextDayRevival
         static Texture2D RouteMapDash()
         {
             if (_routeMapDash != null) return _routeMapDash;
-            const int width = 128;
+            // Width close to the dash aspect (46 x 9) so the rounded caps stay
+            // circular after the texture is stretched to the dash rectangle.
+            const int width = 80;
             const int height = 16;
             float radius = (height - 1) * 0.5f;
             _routeMapDash = new Texture2D(width, height, TextureFormat.ARGB32, false);
