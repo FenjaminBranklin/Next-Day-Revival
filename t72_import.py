@@ -180,6 +180,18 @@ KONTRAST = 0.55
 # der unbeschaedigten Rollen abgelesen.
 X_RAD = 4.192
 
+# The source wreck has the left turret hatch open. Its circular rim is a
+# disconnected group centred here in turret-local coordinates. The live tank
+# needs an armoured lid over that opening; otherwise the gunner body can be
+# seen through a black hole even after the seat itself has been lowered.
+HATCH_X = -1.765
+HATCH_Y = 0.980
+HATCH_Z = 2.535
+HATCH_RADIUS = 0.96
+HATCH_THICKNESS = 0.14
+HATCH_SEGMENTS = 32
+HATCH_UV = (0.90, 0.65)  # quiet olive patch in the turret half of the atlas
+
 
 # ------------------------------------------------------------------ Spiel
 
@@ -393,6 +405,81 @@ def bauen(gerichtet, welche, y_versatz, ursprung):
         off += len(v)
     return (np.concatenate(V), np.concatenate(N),
             np.concatenate(T), np.concatenate(F))
+
+
+def luke_schliessen(V, N, T, F):
+    """Add one closed circular armour lid above the source wreck's open hatch.
+
+    The lid is intentionally a shallow solid, not a one-sided polygon. It is
+    visible from grazing angles and has a real edge instead of looking painted
+    over. UVs stay inside a small, quiet part of the existing turret atlas, so
+    no sixth asset or second material is needed.
+    """
+    seg = HATCH_SEGMENTS
+    verts = []
+    norms = []
+    uvs = []
+    faces = []
+
+    # Top face: one centre and one shared circular ring.
+    verts.append((HATCH_X, HATCH_Y, HATCH_Z))
+    norms.append((0.0, 0.0, 1.0))
+    uvs.append(HATCH_UV)
+    for i in range(seg):
+        a = 2.0 * math.pi * i / seg
+        ca, sa = math.cos(a), math.sin(a)
+        verts.append((HATCH_X + HATCH_RADIUS * ca,
+                      HATCH_Y + HATCH_RADIUS * sa, HATCH_Z))
+        norms.append((0.0, 0.0, 1.0))
+        uvs.append((HATCH_UV[0] + ca * 0.018,
+                    HATCH_UV[1] + sa * 0.018))
+    for i in range(seg):
+        faces.append((0, 1 + i, 1 + (i + 1) % seg))
+
+    # Vertical armour edge. Separate vertices keep its normals horizontal.
+    side = len(verts)
+    bottom_z = HATCH_Z - HATCH_THICKNESS
+    for i in range(seg):
+        a = 2.0 * math.pi * i / seg
+        ca, sa = math.cos(a), math.sin(a)
+        x = HATCH_X + HATCH_RADIUS * ca
+        y = HATCH_Y + HATCH_RADIUS * sa
+        verts.append((x, y, HATCH_Z))
+        verts.append((x, y, bottom_z))
+        norms.append((ca, sa, 0.0))
+        norms.append((ca, sa, 0.0))
+        u = HATCH_UV[0] + (float(i) / seg - 0.5) * 0.036
+        uvs.append((u, HATCH_UV[1] + 0.018))
+        uvs.append((u, HATCH_UV[1] - 0.018))
+    for i in range(seg):
+        j = (i + 1) % seg
+        ti, bi = side + 2 * i, side + 2 * i + 1
+        tj, bj = side + 2 * j, side + 2 * j + 1
+        faces.append((ti, bi, bj))
+        faces.append((ti, bj, tj))
+
+    # Bottom closes the solid when the barrel is depressed and the roof edge
+    # can be seen from below.
+    lower = len(verts)
+    verts.append((HATCH_X, HATCH_Y, bottom_z))
+    norms.append((0.0, 0.0, -1.0))
+    uvs.append(HATCH_UV)
+    for i in range(seg):
+        a = 2.0 * math.pi * i / seg
+        ca, sa = math.cos(a), math.sin(a)
+        verts.append((HATCH_X + HATCH_RADIUS * ca,
+                      HATCH_Y + HATCH_RADIUS * sa, bottom_z))
+        norms.append((0.0, 0.0, -1.0))
+        uvs.append((HATCH_UV[0] + ca * 0.018,
+                    HATCH_UV[1] + sa * 0.018))
+    for i in range(seg):
+        faces.append((lower, lower + 1 + (i + 1) % seg, lower + 1 + i))
+
+    off = len(V)
+    return (np.concatenate((V, np.asarray(verts, np.float32))),
+            np.concatenate((N, np.asarray(norms, np.float32))),
+            np.concatenate((T, np.asarray(uvs, np.float32))),
+            np.concatenate((F, np.asarray(faces, np.int32) + off)))
 
 
 def richten(V, N, F):
@@ -767,6 +854,9 @@ if __name__ == "__main__":
             continue
         lokal.append((n, k, p if n != "turret" else np.zeros(3, np.float32), m, g))
     V, N, T, F = bauen(lokal, "turm", 0.0, np.zeros(3, np.float32))
+    V, N, T, F = luke_schliessen(V, N, T, F)
+    print("Turret hatch: closed lid at (%.3f, %.3f, %.3f), radius %.2f"
+          % (HATCH_X, HATCH_Y, HATCH_Z, HATCH_RADIUS))
     F, gedreht = richten(V, N, F)
     if gedreht:
         print("Turm: %d Dreiecke umgewickelt" % gedreht)
