@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.7";
+        public const string VERSION = "0.5.8";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -12872,9 +12872,12 @@ namespace NextDayRevival
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 2) continue;
 
+                    // The Locator-style red of the game's own target-area
+                    // rings (measured RGB 183,33,32), not orange - the user
+                    // wants the patrol border to read as the same marker.
                     GUI.color = route.Enabled
-                        ? new Color(1f, 0.43f, 0.05f, 0.92f)
-                        : new Color(1f, 0.43f, 0.05f, 0.38f);
+                        ? new Color(0.72f, 0.13f, 0.125f, 0.95f)
+                        : new Color(0.72f, 0.13f, 0.125f, 0.42f);
                     List<Vector3> center = CoarseRoute(route);
                     List<Vector3> left = new List<Vector3>();
                     List<Vector3> right = new List<Vector3>();
@@ -12892,16 +12895,18 @@ namespace NextDayRevival
                         left.Add(center[i] + side);
                         right.Add(center[i] - side);
                     }
-                    for (int i = 0; i < left.Count - 1; i++)
-                    {
-                        MapSegment(left[i], left[i + 1], texture, camera, world, map);
-                        MapSegment(right[i], right[i + 1], texture, camera, world, map);
-                    }
+                    // One continuous dash phase per edge, so the gaps survive
+                    // corners instead of every short segment restarting at a
+                    // full stroke and filling the border into a solid line.
+                    DrawDashedEdge(left, texture, camera, world, map);
+                    DrawDashedEdge(right, texture, camera, world, map);
                     if (left.Count > 1)
                     {
-                        MapSegment(right[0], left[0], texture, camera, world, map);
                         int last = left.Count - 1;
-                        MapSegment(right[last], left[last], texture, camera, world, map);
+                        DrawDashedEdge(new List<Vector3> { right[0], left[0] },
+                                       texture, camera, world, map);
+                        DrawDashedEdge(new List<Vector3> { right[last], left[last] },
+                                       texture, camera, world, map);
                     }
 
                     Vector2 label;
@@ -12951,34 +12956,58 @@ namespace NextDayRevival
             return result;
         }
 
-        static void MapSegment(Vector3 worldA, Vector3 worldB, Component texture,
-                               Camera camera, Vector2 world, Vector2 map)
-        {
-            Vector2 a, b;
-            if (!MapTools.WorldToGui(worldA, texture, camera, world, map, out a)
-                || !MapTools.WorldToGui(worldB, texture, camera, world, map, out b))
-                return;
-            Vector2 d = b - a;
-            float length = d.magnitude;
-            if (length < 1f) return;
-            float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
-            Matrix4x4 before = GUI.matrix;
-            GUIUtility.RotateAroundPivot(angle, a);
-            Texture2D dashTexture = RouteMapDash();
+        // Measured directly from the game's own AreaMarkerCut texture (the red
+        // target-area ring): four strokes of ~76 degrees at mid-radius 41.3 in
+        // the 87x87 source, ring thickness 4.5 px. The map does not zoom and
+        // renders the ring at native size (a red circle on screen measured
+        // mid-radius ~43 px), so along the arc a Locator stroke is a 55 px dash,
+        // a 10 px gap, 4.5 px thick. The patrol border uses the same numbers.
+        const float RouteDash = 55f;
+        const float RouteGap = 10f;
+        const float RouteStroke = 4.5f;
 
-            // Measured from the game's own TargetAreaMarkerCut texture and
-            // its UITexture: 87 source pixels displayed at 88 px, four red
-            // strokes of 75..79 degrees at radius 40..46. On the tangent that
-            // is 58 px long, 6 px thick, with about 10 px between strokes.
-            // These are the red map-marker dimensions the orange route must
-            // match, not another guessed style pass.
-            const float dash = 58f;
-            const float gap = 10f;
-            const float stroke = 6.25f;
-            for (float x = 0f; x < length; x += dash + gap)
-                GUI.DrawTexture(new Rect(a.x + x, a.y - stroke * 0.5f,
-                    Mathf.Min(dash, length - x), stroke), dashTexture);
-            GUI.matrix = before;
+        /// <summary>
+        /// Draws one edge of the corridor as a single dashed line whose stroke
+        /// and gap pattern runs unbroken across every waypoint, so the border
+        /// reads as separate red Locator-style dashes instead of a solid line.
+        /// </summary>
+        static void DrawDashedEdge(List<Vector3> edge, Component texture,
+                                   Camera camera, Vector2 world, Vector2 map)
+        {
+            if (edge == null || edge.Count < 2) return;
+            Texture2D dashTexture = RouteMapDash();
+            float period = RouteDash + RouteGap;
+            float phase = 0f;               // distance already walked on the edge
+            Vector2 a, b;
+            bool haveA = MapTools.WorldToGui(edge[0], texture, camera,
+                                             world, map, out a);
+            for (int i = 1; i < edge.Count; i++)
+            {
+                bool haveB = MapTools.WorldToGui(edge[i], texture, camera,
+                                                 world, map, out b);
+                if (!haveA || !haveB) { a = b; haveA = haveB; phase = 0f; continue; }
+
+                Vector2 d = b - a;
+                float length = d.magnitude;
+                if (length < 0.5f) { a = b; continue; }
+                float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
+                Matrix4x4 before = GUI.matrix;
+                GUIUtility.RotateAroundPivot(angle, a);
+                // Start at the dash boundary that precedes this segment so the
+                // pattern is continuous with the segment before it.
+                for (float ds = -(phase % period); ds < length; ds += period)
+                {
+                    float start = Mathf.Max(ds, 0f);
+                    float end = Mathf.Min(ds + RouteDash, length);
+                    if (end > start)
+                        GUI.DrawTexture(new Rect(a.x + start,
+                            a.y - RouteStroke * 0.5f, end - start, RouteStroke),
+                            dashTexture);
+                }
+                GUI.matrix = before;
+                phase += length;
+                a = b;
+            }
         }
 
         /// <summary>A softly antialiased capsule, like the rounded red map
