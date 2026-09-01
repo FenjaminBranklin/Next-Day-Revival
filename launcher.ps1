@@ -420,6 +420,42 @@ function Get-Releases {
 }
 
 
+# ====================================== do the assets match the installed plugin
+
+# The version lives inside the DLL, so every check that reads only the version
+# is blind to the files next to it. A failed asset copy leaves a current plugin
+# on the previous version's art: the launcher says "In sync", the game draws old
+# models, and nothing anywhere disagrees. Seen on 2026-08-31 on a 0.5.12 client
+# that was still rendering 0.5.0 weapons - 15 assets stale, 15 missing, and both
+# the status line and Repair called it fine.
+#
+# Size settles almost every case for the price of a directory listing, so the
+# hash is only computed when the sizes agree.
+function Get-AssetDrift($game, $src) {
+    $r = @{ checked = $false; total = 0; ok = 0; stale = 0; missing = 0 }
+    if (-not $game -or -not $src) { return $r }
+    $from = Join-Path $src "assets"
+    $to   = Join-Path (Join-Path (Join-Path $game "BepInEx") "plugins") "assets"
+    if (-not (Test-Path $from)) { return $r }
+    $r.checked = $true
+    foreach ($f in Get-ChildItem $from -File) {
+        # The same exclusions client_patch.ps1 uses: generator previews are
+        # never shipped, and the route file belongs to the in-game recorder.
+        if ($f.Name -like "*_preview.png")   { continue }
+        if ($f.Name -eq "icon_vergleich.png") { continue }
+        if ($f.Name -eq "ndr_routes.tsv")     { continue }
+        $r.total++
+        $t = Join-Path $to $f.Name
+        if (-not (Test-Path $t))                { $r.missing++; continue }
+        if ((Get-Item $t).Length -ne $f.Length) { $r.stale++;   continue }
+        if ((Get-FileHash $f.FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash $t          -Algorithm SHA256).Hash) { $r.stale++ }
+        else { $r.ok++ }
+    }
+    return $r
+}
+
+
 # ================================================================= the brain
 
 function Get-State {
@@ -435,6 +471,13 @@ function Get-State {
 
     $s.package   = Read-FolderVersion $root
     $s.packageOk = Test-SourceFolder $root
+
+    # Measured against the folder Repair would actually repair from, so the
+    # number in the status line is the number Repair can fix.
+    $s.assetSrc = ""
+    if ($s.installed) { $s.assetSrc = Find-LocalSource $s $s.installed }
+    if (-not $s.assetSrc -and $s.packageOk) { $s.assetSrc = $root }
+    $s.assets = Get-AssetDrift $s.game $s.assetSrc
 
     # Which master server: whatever the game already points at wins, then
     # -ServerHost, then the built-in one. Decided once; after that the window
@@ -521,6 +564,15 @@ function Get-State {
         $s.state   = "sync"
         $s.verdict = "In sync. Ready to play."
         $s.detail  = "Client $($s.installed), server content $($s.server.contentVersion), server asks for $($s.server.minClientVersion) or newer."
+    }
+
+    # Runs after the version verdict and overrides it on purpose: matching
+    # version numbers are not the same as a matching installation, and old art
+    # is a real problem even when every number on screen lines up.
+    if ($s.installed -and $s.assets.checked -and ($s.assets.missing + $s.assets.stale) -gt 0) {
+        $s.state   = "assetdrift"
+        $s.verdict = "Plugin " + $s.installed + " is installed, but its assets are not."
+        $s.detail  = "" + $s.assets.missing + " missing and " + $s.assets.stale + " outdated of " + $s.assets.total + " asset files. The game draws the previous version's models, and any item whose mesh is missing fails to load entirely. Press Repair."
     }
 
     # Selected here is not the same as written into the game. Say which is
@@ -816,9 +868,20 @@ function Invoke-Repair($state) {
     if ($state.serverHost) { $argList += @("-Server", $state.serverHost) }
     if ($state.game) { $argList += @("-Game", $state.game) }
     $code = Start-Child "powershell.exe" $argList $src
-    $now = Read-PluginVersion $state.pluginDll
-    if ($now) { Say ("Repaired: server address, EAC patch, BepInEx, plugin " + $now + " and assets are in place again.") "ok" }
-    else { Say "The plugin is still not in the game folder - read the lines above." "bad" }
+    # Re-measure instead of assuming. This line used to claim the assets were
+    # back purely because the DLL carried a version string, which is how a
+    # failed asset copy could be reported as a successful repair.
+    $now   = Read-PluginVersion $state.pluginDll
+    $drift = Get-AssetDrift $state.game $src
+    if (-not $now) {
+        Say "The plugin is still not in the game folder - read the lines above." "bad"
+    } elseif (-not $drift.checked) {
+        Say ("Repaired: server address, EAC patch, BepInEx and plugin " + $now + ". Assets could not be verified from " + $src + ".") "warn"
+    } elseif (($drift.missing + $drift.stale) -eq 0) {
+        Say ("Repaired: server address, EAC patch, BepInEx, plugin " + $now + " and all " + $drift.total + " asset files are in place.") "ok"
+    } else {
+        Say ("Plugin " + $now + " is installed, but " + $drift.missing + " assets are still missing and " + $drift.stale + " are still outdated. The repair did NOT complete - read the lines above.") "bad"
+    }
     if ($code -ne 0) { Say ("client_patch.ps1 ended with exit code " + $code + ", so read the log above as well.") "warn" }
 }
 
@@ -986,6 +1049,7 @@ function Show-Console($s) {
     if ($s.state -eq "offline") { $colour = "Yellow" }
     if ($s.state -eq "ahead" -or $s.state -eq "noinfo") { $colour = "Cyan" }
     if ($s.state -eq "nogame")  { $colour = "Red" }
+    if ($s.state -eq "assetdrift") { $colour = "Yellow" }
     Write-Host ("  " + $s.verdict) -ForegroundColor $colour
     Write-Host ("  " + $s.detail)
     Write-Host ""

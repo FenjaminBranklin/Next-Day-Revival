@@ -401,9 +401,13 @@ if ($NoPlugin) {
     }
 } else {
     New-Item -ItemType Directory -Force -Path $plugins | Out-Null
-    Copy-Item $dllQuelle (Join-Path $plugins "NextDayRevivalToolkit.dll") -Force
-    Gut ("NextDayRevivalToolkit.dll  {0} Bytes" -f (Get-Item $dllQuelle).Length)
 
+    # The DLL is installed LAST, after the assets are safely in place. It used
+    # to be copied here, before the T-72 gate below - so a failed extraction
+    # left a new plugin sitting on the previous version's art, which no check
+    # that only reads the version could see. A client that keeps its old
+    # plugin AND its old assets is consistent and recoverable; a new plugin on
+    # old assets is the bug this ordering prevents.
     if (-not (Test-Path $assetQuelle)) {
         Bad ("assets\ fehlt: " + $assetQuelle)
     } else {
@@ -422,6 +426,20 @@ if ($NoPlugin) {
         } elseif ((Test-Path $t72Py) -and (Get-Command python -ErrorAction SilentlyContinue)) {
             # Development checkout only. Published packages carry the frozen
             # executable and never require Python on the player's computer.
+            #
+            # t72_import.py needs UnityPy, and nothing else in this repository
+            # does - so a machine that has numpy and pillow can still fail on
+            # that single import, take the whole asset copy down with it and
+            # leave the client on old art. Install it once instead of aborting.
+            & python -c "import UnityPy" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Info "UnityPy fehlt - wird einmalig nachinstalliert ..."
+                & python -m pip install --quiet UnityPy
+                & python -c "import UnityPy" 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Bad "UnityPy laesst sich nicht installieren - der T-72 kann nicht aus dem Spiel gebaut werden."
+                }
+            }
             Info "Baue das aktuelle T-72-Modell mit dem Entwicklungsskript ..."
             & python $t72Py --game-data $dataDir --assets $assetQuelle
             if ($LASTEXITCODE -ne 0) {
@@ -444,7 +462,7 @@ if ($NoPlugin) {
         }
 
         if (-not $t72Ok) {
-            Warn "Assets werden nicht kopiert, damit kein halbfertiger Client entsteht."
+            Bad "Assets werden nicht kopiert, damit kein halbfertiger Client entsteht - das Plugin wird deshalb ebenfalls nicht installiert."
         } else {
         $assetZiel = Join-Path $plugins "assets"
         New-Item -ItemType Directory -Force -Path $assetZiel | Out-Null
@@ -472,6 +490,11 @@ if ($NoPlugin) {
             $n++
         }
         Gut ("{0} Assets kopiert -> BepInEx\plugins\assets" -f $n)
+
+        # Assets are in place - now the plugin that expects them. See the
+        # note at the top of this block for why this is the last step.
+        Copy-Item $dllQuelle (Join-Path $plugins "NextDayRevivalToolkit.dll") -Force
+        Gut ("NextDayRevivalToolkit.dll  {0} Bytes" -f (Get-Item $dllQuelle).Length)
 
         # Nicht loeschen, nur melden: was hier liegt und nicht mehr erzeugt wird,
         # stiftet spaeter bei der Fehlersuche Verwirrung.
