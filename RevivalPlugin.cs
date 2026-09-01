@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.14";
+        public const string VERSION = "0.5.15";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -1208,14 +1208,14 @@ namespace NextDayRevival
                 + "its own speed in the file; this is what 0 there means. "
                 + "A BTR with a 12 ton centre of mass rolls over in a corner "
                 + "long before it runs out of engine.");
-            CfgPatrolRecordSeconds = Config.Bind("Patrol", "RecordSeconds", 3f,
-                "Seconds between two recorded waypoints. At 45 km/h three "
-                + "seconds are about 37 m, which is the spacing routecheck.py "
-                + "asks for (25 to 40). Recording on foot writes a much denser "
-                + "route - that is allowed, it only means routecheck.py will "
-                + "warn about the spacing. A waypoint is never written twice "
-                + "at the same spot: three metres of movement are required "
-                + "however long the wait was.");
+            CfgPatrolRecordSeconds = Config.Bind("Patrol", "RecordSeconds", 0.2f,
+                "Seconds between two recorded waypoints. Defaults to 0.2, i.e. "
+                + "five waypoints a second, so a driven route is captured densely "
+                + "enough that the map line follows the road the driver took. "
+                + "The old 3 m minimum-movement rule is gone; only a 5 cm hair "
+                + "remains, so a parked recorder writes nothing while any real "
+                + "driving records every step. A dense route makes routecheck.py "
+                + "warn about spacing - that is expected and harmless.");
             CfgPatrolPassRadius = Config.Bind("Patrol", "PassRadius", 12f,
                 "How near a waypoint counts as reached. Too large and the "
                 + "vehicle skips whole corners.");
@@ -10852,9 +10852,12 @@ namespace NextDayRevival
         static float _nextRecord;
 
         /// <summary>Metres the recorder must have moved before it writes
-        /// another waypoint, however long it waited. Not a setting: it is a
-        /// floor against a file full of the same point, not a taste.</summary>
-        const float MinStep = 3f;
+        /// another waypoint. The old 3 m rule was retired on the user's word: at
+        /// 5 waypoints a second it thinned corners, exactly where a route wants
+        /// its points closest. What remains is a hair against a stationary
+        /// recorder writing the same point five times a second - a parked
+        /// recorder writes nothing; any real driving clears it every frame.</summary>
+        const float MinStep = 0.05f;
 
         // ------------------------------------------------------------------ keys
 
@@ -12953,16 +12956,17 @@ namespace NextDayRevival
 
         /// <summary>
         /// A waypoint every `RecordSeconds`, which is the clock and not the
-        /// tape measure. The recorder counted METRES until 2026-08-30 and the
-        /// user asked for the clock: a route is recorded by driving it, and at
-        /// a steady speed the two are the same thing - three seconds at
-        /// 45 km/h is 37 m. Where they differ is the corner, where the driver
-        /// slows down, and there the clock puts the waypoints closer
-        /// together - which is exactly where a route wants them.
+        /// tape measure. `RecordSeconds` now defaults to 0.2, so a driven route
+        /// is captured at five waypoints a second - dense enough that the drawn
+        /// line traces the road the driver actually followed instead of a
+        /// smoothed guess between sparse points. Where the driver slows, in a
+        /// corner, the clock naturally puts the points closer together, which is
+        /// exactly where a route wants them.
         ///
-        /// `MinStep` is the one thing left of the metres: without it a
-        /// recorder left running while its owner stands still writes the same
-        /// point every three seconds until the file is full.
+        /// `MinStep` is the only distance rule left, and it is a hair (5 cm):
+        /// without it a recorder left running while its owner stands still would
+        /// write the same point five times a second until the file is full. Any
+        /// real driving clears it on the very next frame.
         /// </summary>
         static void RecordWhileWalking()
         {
@@ -13227,8 +13231,6 @@ namespace NextDayRevival
         //  Map overlay
         // =====================================================================
 
-        static Texture2D _routeMapBrush;
-
         /// <summary>
         /// Draws every recorded route as one faction-coloured dashed line along
         /// its waypoints. Editing and deletion stay in the existing F4 route
@@ -13247,10 +13249,12 @@ namespace NextDayRevival
                                   out world, out map)) return;
             Load(false);
 
-            // The visible map rectangle. Dashes are clipped to it so a route
-            // that runs off the shown map does not paint over the game scene
-            // around the panel. If the bounds are unavailable, fall back to the
-            // whole screen rather than draw nothing.
+            // The visible map rectangle. Dashes are HARD-clipped to it with
+            // GUI.BeginClip so a route that runs off the shown map cannot paint
+            // over the game scene around the panel - the earlier per-point test
+            // let a stroke leak past the map edge into the grass. If the bounds
+            // are unavailable, fall back to the whole screen rather than draw
+            // nothing.
             Rect clip;
             if (!MapTools.MapScreenRect(texture, camera, out clip))
                 clip = new Rect(0f, 0f, Screen.width, Screen.height);
@@ -13259,49 +13263,59 @@ namespace NextDayRevival
             Matrix4x4 oldMatrix = GUI.matrix;
             try
             {
-                // Every dash centre drawn so far, so a route crossing one drawn
-                // earlier can be trimmed back around the crossing. Routes are
-                // drawn in file order; the earlier route keeps its line whole.
-                ClearGrid grid = new ClearGrid(RouteClearance);
-
-                for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+                // BeginClip scissors every following draw to the map and moves
+                // the origin to the map's top-left, so all dash coordinates are
+                // LOCAL to the clip. Projected points are offset by -clip.pos to
+                // match, and the dash routines cull against the local rect.
+                Rect localClip = new Rect(0f, 0f, clip.width, clip.height);
+                GUI.BeginClip(clip);
+                try
                 {
-                    Route route;
-                    if (!_routes.TryGetValue(_order[routeIndex], out route)
-                        || route == null || route.P.Count < 2) continue;
+                    // Every dash point drawn so far, so a route crossing one
+                    // drawn earlier is trimmed around the crossing. Routes are
+                    // drawn in file order; the earlier route keeps its line.
+                    ClearGrid grid = new ClearGrid(RouteClearance);
 
-                    // The waypoints, CONNECTED, are one line. The line is then
-                    // cut into evenly spaced Locator-style dashes by walking its
-                    // arc length - the individual waypoints are never dashes of
-                    // their own. Colour is the patrol's faction: looter and
-                    // traitor red, civilian green, neutral white.
-                    GUI.color = RouteColor(route.Seite, route.Enabled);
-
-                    // This route's own dash centres. Collected while drawing and
-                    // added to the grid only after the whole route is done, so a
-                    // route never clears against itself.
-                    List<Vector2> ink = new List<Vector2>();
-
-                    // Project the waypoints to the map, splitting into runs
-                    // wherever a point cannot be projected.
-                    List<Vector2> run = new List<Vector2>(route.P.Count);
-                    float phase = 0f;
-                    for (int i = 0; i < route.P.Count; i++)
+                    for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                     {
-                        Vector2 g;
-                        if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
-                                                world, map, out g))
-                            run.Add(g);
-                        else
-                        {
-                            DashRun(run, ref phase, clip, grid, ink);
-                            run.Clear();
-                        }
-                    }
-                    DashRun(run, ref phase, clip, grid, ink);
+                        Route route;
+                        if (!_routes.TryGetValue(_order[routeIndex], out route)
+                            || route == null || route.P.Count < 2) continue;
 
-                    grid.Add(ink);
+                        // The waypoints, CONNECTED, are one line, cut into evenly
+                        // spaced dashes by walking its arc length - the individual
+                        // waypoints are never dashes of their own. Colour is the
+                        // patrol's faction: looter and traitor red, civilian
+                        // green, neutral white.
+                        GUI.color = RouteColor(route.Seite, route.Enabled);
+
+                        // This route's own dash points. Added to the grid only
+                        // after the whole route is done, so it never clears
+                        // against itself.
+                        List<Vector2> ink = new List<Vector2>();
+
+                        // Project the waypoints to the map (local to the clip),
+                        // splitting into runs wherever a point cannot project.
+                        List<Vector2> run = new List<Vector2>(route.P.Count);
+                        float phase = 0f;
+                        for (int i = 0; i < route.P.Count; i++)
+                        {
+                            Vector2 g;
+                            if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
+                                                    world, map, out g))
+                                run.Add(g - clip.position);
+                            else
+                            {
+                                DashRun(run, ref phase, localClip, grid, ink);
+                                run.Clear();
+                            }
+                        }
+                        DashRun(run, ref phase, localClip, grid, ink);
+
+                        grid.Add(ink);
+                    }
                 }
+                finally { GUI.EndClip(); }
 
                 // Labels belong above the lines, including lines from routes
                 // later in the file.
@@ -13360,21 +13374,28 @@ namespace NextDayRevival
             return c;
         }
 
-        // Dash cadence in SCREEN pixels, chosen against the offline preview so
-        // the line reads like the game's own thick, evenly separated markers
-        // rather than a fine scribble. Dash and gap are the on/off run lengths
-        // walked along the route's arc length; stroke is the line thickness.
+        // Dash cadence in SCREEN pixels. Dash and gap are the on/off run
+        // lengths walked along the route's arc length; stroke is the line
+        // thickness. Each dash is drawn as ONE straight rectangle with SQUARE
+        // butt caps (see <see cref="DrawStraightDash"/>) - the user asked for
+        // square edges, not the round-capped stamps that read as wobbly
+        // ("krakelig") at the dash ends. The stroke was thinned from 8.5.
         const float RouteDash = 46f;
         const float RouteGap = 30f;
-        const float RouteStroke = 8.5f;
+        const float RouteStroke = 6f;
 
         // Path shaping, all in screen pixels / iterations. Resampling drops the
         // projected waypoints onto an even arc-length grid FIRST, so the dash
-        // cadence no longer depends on how many points the recorder wrote - 86
-        // sparse points or hundreds from a 3-per-second recording shape the
-        // same line. Chaikin then rounds the corners.
-        const float RouteResample = 24f;
-        const int RouteSmoothPasses = 4;
+        // cadence no longer depends on how many points the recorder wrote.
+        // Smoothing is deliberately LIGHT: at 5 waypoints a second the recorded
+        // path already traces the driven road faithfully, and heavy Chaikin
+        // corner-cutting used to pull the line to the inside of bends and off
+        // the road (the "line runs beside the road" the user reported). One
+        // low-pass pass plus two Chaikin passes rounds jitter without leaving
+        // the road; a straight chord per dash then keeps the ends square.
+        const float RouteResample = 20f;
+        const int RouteSmoothPasses = 2;
+        const int RouteLowpassPasses = 1;
 
         // A route that crosses one drawn earlier is trimmed back within this
         // radius of the earlier line, reopening a clean gap instead of letting
@@ -13384,13 +13405,14 @@ namespace NextDayRevival
         /// <summary>
         /// Cuts one connected run of screen points into evenly spaced dashes by
         /// walking its arc length. The projected waypoints are shaped first
-        /// (see <see cref="ShapeMapRun"/>), then each dash is stamped along that
-        /// curve. It therefore follows bends instead of cutting them with one
-        /// rigid chord, and because the run is resampled onto an even grid the
-        /// cadence does not depend on the waypoint count. The dash phase carries
-        /// across runs so the pattern stays regular. Stamps that fall within the
-        /// clearance of an earlier route are dropped; the ones that survive are
-        /// collected into <paramref name="ink"/> for later routes to clear on.
+        /// (see <see cref="ShapeMapRun"/>), then each dash is drawn as one
+        /// straight rectangle between its two arc-length points. Because the
+        /// shaped run turns only at the gaps between dashes, the sequence still
+        /// traces the bend, but every individual dash keeps square ends. The
+        /// dash phase carries across runs so the pattern stays regular. Dashes
+        /// within the clearance of an earlier route are dropped; the survivors
+        /// are collected into <paramref name="ink"/> for later routes to clear
+        /// on. Coordinates are LOCAL to the map clip (see <see cref="DrawMap"/>).
         /// </summary>
         static void DashRun(List<Vector2> pts, ref float phase, Rect clip,
                             ClearGrid grid, List<Vector2> ink)
@@ -13405,7 +13427,6 @@ namespace NextDayRevival
             float total = cum[n - 1];
             if (total < 1f) { phase = 0f; return; }
 
-            Texture2D brush = RouteMapBrush();
             float period = RouteDash + RouteGap;
             // Begin at the dash boundary preceding this run, so a dash that was
             // mid-stroke at the previous run's end continues seamlessly here.
@@ -13414,7 +13435,7 @@ namespace NextDayRevival
                 float start = Mathf.Max(ds, 0f);
                 float end = Mathf.Min(ds + RouteDash, total);
                 if (end <= start) continue;
-                DrawCurvedDash(pts, cum, start, end, clip, brush, grid, ink);
+                DrawStraightDash(pts, cum, start, end, clip, grid, ink);
             }
             phase = (phase + total) % period;
         }
@@ -13427,7 +13448,7 @@ namespace NextDayRevival
         static List<Vector2> ShapeMapRun(List<Vector2> pts)
         {
             if (pts.Count < 3) return pts;
-            List<Vector2> s = Lowpass(pts, 2);
+            List<Vector2> s = Lowpass(pts, RouteLowpassPasses);
             s = Resample(s, RouteResample);
             s = Chaikin(s, RouteSmoothPasses);
             return s;
@@ -13509,37 +13530,39 @@ namespace NextDayRevival
             return cur;
         }
 
-        /// <summary>Draw one dash as overlapping antialiased circles following
-        /// the smoothed arc. The first and last brush centres are inset by the
-        /// brush radius, so the rounded caps stay inside the measured 55 px dash
-        /// and do not steal 4.5 px from the visible 10 px gap.</summary>
-        static void DrawCurvedDash(List<Vector2> pts, float[] cum,
-                                   float start, float end, Rect clip,
-                                   Texture2D brush, ClearGrid grid,
-                                   List<Vector2> ink)
+        /// <summary>Draw one dash as a single straight rectangle between its two
+        /// arc-length points, rotated to the chord's heading. The rectangle has
+        /// SQUARE butt caps - no round stamps, so the dash ends read as clean
+        /// straight edges rather than the wobbly blobs the round brush produced.
+        /// The dash is dropped if its midpoint falls within an earlier route's
+        /// clearance; the two endpoints and the midpoint are handed to
+        /// <paramref name="ink"/> so later routes clear against this line. The
+        /// caller has already set <see cref="GUI.color"/> to the faction hue and
+        /// wrapped the draw in a hard map clip, so nothing can leave the map.
+        /// </summary>
+        static void DrawStraightDash(List<Vector2> pts, float[] cum,
+                                     float start, float end, Rect clip,
+                                     ClearGrid grid, List<Vector2> ink)
         {
-            float radius = RouteStroke * 0.5f;
-            float centerStart = start + radius;
-            float centerEnd = end - radius;
-            if (centerEnd < centerStart)
-                centerStart = centerEnd = (start + end) * 0.5f;
+            Vector2 a = PointAtArc(pts, cum, start);
+            Vector2 b = PointAtArc(pts, cum, end);
+            Vector2 mid = (a + b) * 0.5f;
+            // Cheap cull; the surrounding GUI.BeginClip is the real boundary.
+            if (!clip.Contains(mid)) return;
+            if (grid != null && grid.Blocked(mid)) return;
 
-            const float step = 1.5f;
-            for (float d = centerStart; d < centerEnd; d += step)
-                DrawMapBrush(PointAtArc(pts, cum, d), clip, brush, grid, ink);
-            DrawMapBrush(PointAtArc(pts, cum, centerEnd), clip, brush, grid, ink);
-        }
+            Vector2 dir = b - a;
+            float len = dir.magnitude;
+            if (len < 0.5f) return;
+            float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
 
-        static void DrawMapBrush(Vector2 p, Rect clip, Texture2D brush,
-                                 ClearGrid grid, List<Vector2> ink)
-        {
-            if (!clip.Contains(p)) return;
-            // Yield to any earlier route within the clearance radius.
-            if (grid != null && grid.Blocked(p)) return;
-            float radius = RouteStroke * 0.5f;
-            GUI.DrawTexture(new Rect(p.x - radius, p.y - radius,
-                                     RouteStroke, RouteStroke), brush);
-            if (ink != null) ink.Add(p);
+            Matrix4x4 m = GUI.matrix;
+            GUIUtility.RotateAroundPivot(angle, mid);
+            GUI.DrawTexture(new Rect(mid.x - len * 0.5f, mid.y - RouteStroke * 0.5f,
+                                     len, RouteStroke), Texture2D.whiteTexture);
+            GUI.matrix = m;
+
+            if (ink != null) { ink.Add(a); ink.Add(mid); ink.Add(b); }
         }
 
         /// <summary>The point at arc length <paramref name="d"/> along the
@@ -13556,32 +13579,6 @@ namespace NextDayRevival
             return Vector2.Lerp(pts[i - 1], pts[i], t);
         }
 
-        /// <summary>A softly antialiased circular brush. Stamping it along a
-        /// smoothed arc makes curved dashes with genuinely round end caps.</summary>
-        static Texture2D RouteMapBrush()
-        {
-            if (_routeMapBrush != null) return _routeMapBrush;
-            const int size = 16;
-            float radius = (size - 1) * 0.5f;
-            _routeMapBrush = new Texture2D(size, size, TextureFormat.ARGB32, false);
-            _routeMapBrush.name = "NDR Patrol Route Brush";
-            _routeMapBrush.hideFlags = HideFlags.HideAndDontSave;
-            _routeMapBrush.wrapMode = TextureWrapMode.Clamp;
-            _routeMapBrush.filterMode = FilterMode.Bilinear;
-            for (int y = 0; y < size; y++)
-            {
-                for (int x = 0; x < size; x++)
-                {
-                    float dx = x - radius;
-                    float dy = y - radius;
-                    float alpha = Mathf.Clamp01(radius + 0.5f
-                        - Mathf.Sqrt(dx * dx + dy * dy));
-                    _routeMapBrush.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
-                }
-            }
-            _routeMapBrush.Apply(false, true);
-            return _routeMapBrush;
-        }
 
         /// <summary>
         /// A coarse spatial hash of the dash centres drawn so far, so a route
