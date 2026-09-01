@@ -51,8 +51,17 @@ namespace NextDayRevival
         public int Id;
         public int DonorId;            // vorhandenes Item, von dem geklont wird
         public bool IsWeapon;          // braucht PlayerDataPrefabs/Weapons/<id>_Weapon
-        public string Name;
-        public string Descr;
+        // Name und Beschreibung tragen beide Spielersprachen. Das Spiel liest
+        // sie ueber LocalizationHook mit der aktiven Sprache; die Properties
+        // Name/Descr liefern die richtige, sodass jede Anzeige (Inventar,
+        // Adminmenue, Log) automatisch stimmt. Russisch ist die Sprache der
+        // Mehrheit, Englisch der Rueckfall fuer alle anderen (Loc.T).
+        public string NameRu;
+        public string NameEn;
+        public string DescrRu;
+        public string DescrEn;
+        public string Name  { get { return Loc.T(NameRu, NameEn); } }
+        public string Descr { get { return Loc.T(DescrRu, DescrEn); } }
         public string Mesh;            // Datei im assets-Verzeichnis
         public string Diffuse;
         public string Normal;
@@ -63,17 +72,92 @@ namespace NextDayRevival
         public float Weight;
         public ItemFactory Factory;
 
-        public ItemDef(int id, int donorId, bool isWeapon, string name, string descr,
+        public ItemDef(int id, int donorId, bool isWeapon,
+                       string nameRu, string nameEn,
+                       string descrRu, string descrEn,
                        string mesh, string diffuse, string normal,
                        string icon, string weaponIcon,
                        int bullets, int clipItemId, float weight)
         {
             Id = id; DonorId = donorId; IsWeapon = isWeapon;
-            Name = name; Descr = descr;
+            NameRu = nameRu; NameEn = nameEn;
+            DescrRu = descrRu; DescrEn = descrEn;
             Mesh = mesh; Diffuse = diffuse; Normal = normal;
             Icon = icon; WeaponIcon = weaponIcon;
             Bullets = bullets; ClipItemId = clipItemId; Weight = weight;
             Factory = new ItemFactory(this);
+        }
+    }
+
+    /// <summary>
+    /// The one place that answers "which language is the player in".
+    ///
+    /// The game keeps its whole UI in five languages and resolves them in
+    /// `LocalizationManager.GetLocalizationText`: it calls
+    /// `SteamInterface.GetCurrentGameLanguage` ("russian"/"english"/"german"/
+    /// "french"), maps it to an index (ru=0, en=1, de=2, fr=3) and picks that
+    /// slot of the string array. Everything the toolkit puts on screen goes
+    /// through <see cref="T"/> so it follows the SAME setting - the player
+    /// never has to configure the mod's language separately.
+    ///
+    /// Ninety percent of the players are Russian, the rest English-speaking,
+    /// so the toolkit carries Russian and English. Any other setting (a
+    /// German or French client) falls back to English, which is the intended
+    /// lingua franca of the second audience. German text is gone from every
+    /// player-facing surface on purpose.
+    /// </summary>
+    public static class Loc
+    {
+        static MethodInfo _getLang;
+        static bool _resolved;
+        static int _lang = 1;      // english until proven otherwise
+        static float _next;        // realtime of the next re-read
+
+        /// <summary>Language index the game uses: ru=0, en=1, de=2, fr=3.</summary>
+        public static int Lang()
+        {
+            // A player can switch language in the options mid-session, so this
+            // is not read once. The reflection call is cheap, but the OSD asks
+            // several times per frame, so cache it for a second.
+            float now = Time.realtimeSinceStartup;
+            if (now >= _next)
+            {
+                _next = now + 1f;
+                _lang = Read();
+            }
+            return _lang;
+        }
+
+        public static bool Ru { get { return Lang() == 0; } }
+
+        /// <summary>Russian when the client is Russian, English otherwise.</summary>
+        public static string T(string ru, string en)
+        {
+            return Lang() == 0 ? ru : en;
+        }
+
+        static int Read()
+        {
+            try
+            {
+                if (!_resolved)
+                {
+                    _resolved = true;
+                    Type t = RevivalPlugin.TypeByName("SteamInterface");
+                    if (t != null)
+                        _getLang = AccessTools.Method(t, "GetCurrentGameLanguage", null, null);
+                }
+                if (_getLang != null)
+                {
+                    string s = _getLang.Invoke(null, null) as string;
+                    if (s == "russian") return 0;
+                    if (s == "german") return 2;
+                    if (s == "french") return 3;
+                    return 1;   // english and anything unknown
+                }
+            }
+            catch { }
+            return 1;
         }
     }
 
@@ -88,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.13";
+        public const string VERSION = "0.5.14";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -258,6 +342,7 @@ namespace NextDayRevival
         internal static ConfigEntry<string> CfgAdminKey;
         internal static ConfigEntry<string> CfgAdminIds;
         internal static ConfigEntry<int> CfgAdminEventCode;
+        internal static ConfigEntry<bool> CfgMapTeleport;
         internal static ConfigEntry<bool> CfgDrone;
         internal static ConfigEntry<string> CfgDroneKey;
         internal static ConfigEntry<float> CfgDroneThrust;
@@ -637,6 +722,10 @@ namespace NextDayRevival
             CfgAdminEventCode = Config.Bind("Admin", "NetworkEventCode", 182,
                 "Photon event code for temporary admin grants, remote loadouts "
                 + "and map teleport. It must not overlap drone or turret events.");
+            CfgMapTeleport = Config.Bind("Admin", "MapTeleport", true,
+                "With the map open, right-click a spot and press the Teleport "
+                + "button that appears there to warp yourself to it. Uses the "
+                + "same admin access as the menu; false turns it off.");
 
             // ------------------------------------------------------- Drohne
             //
@@ -1251,94 +1340,123 @@ namespace NextDayRevival
             Items.Clear();
             Items.Add(new ItemDef(
                 1160, 1023, true,
-                "MG42",
-                "Maschinengewehr 42. Gurtzufuehrung, 7,62 mm, offener Verschluss. "
-                + "Hoechste Feuerrate im Feld - ein voller Gurt ist in zehn Sekunden durch. "
-                + "Frisst MG-Gurte, notfalls auch Kisten und Magazine.",
+                "MG42", "MG42",
+                "Пулемёт MG42. Ленточное питание, 7,62 мм, открытый затвор. "
+                + "Самая высокая скорострельность в поле - полная лента уходит за десять секунд. "
+                + "Ест пулемётные ленты, при нужде и коробки с магазинами.",
+                "Maschinengewehr 42. Belt-fed, 7.62 mm, open bolt. "
+                + "Highest rate of fire in the field - a full belt is gone in ten seconds. "
+                + "Eats MG belts, and boxes or magazines at a pinch.",
                 "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
                 "mg42_icon.png", "mg42_weapon_icon.png",
                 200, 2050, 12.0f));
 
             Items.Add(new ItemDef(
                 1161, 1010, true,
-                "TAC-50",
-                "Repetierbuechse im Kaliber .50 BMG. Fuenf Schuss, schwerer Lauf, "
-                + "grosse Muendungsbremse. Zwischen zwei Schuessen muss reproduziert "
-                + "werden, und ein Magazinwechsel dauert eine halbe Ewigkeit. "
-                + "Dafuer haelt kaum etwas einen Treffer aus.",
+                "TAC-50", "TAC-50",
+                "Магазинная винтовка под .50 BMG. Пять патронов, тяжёлый ствол, "
+                + "крупный дульный тормоз. Между выстрелами нужно передёрнуть затвор, "
+                + "а смена магазина длится целую вечность. "
+                + "Зато попадание почти никто не переживёт.",
+                "Bolt-action rifle in .50 BMG. Five rounds, heavy barrel, "
+                + "large muzzle brake. You must cycle the bolt between shots, "
+                + "and a magazine change takes half an eternity. "
+                + "In return, almost nothing survives a hit.",
                 "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
                 "sniper50_icon.png", "sniper50_weapon_icon.png",
                 5, 2051, 14.5f));
 
             Items.Add(new ItemDef(
                 2050, 2030, false,
-                "MG-Gurt 7,62 (200)",
-                "Gurtkasten mit 200 Schuss 7,62 fuer das MG42. Doppelt so viel wie "
-                + "eine Kiste - und doppelt so schwer.",
+                "Лента 7,62 (200)", "7.62 MG belt (200)",
+                "Короб с лентой на 200 патронов 7,62 для MG42. Вдвое больше коробки "
+                + "- и вдвое тяжелее.",
+                "Belt box with 200 rounds of 7.62 for the MG42. Twice as much as "
+                + "a box - and twice the weight.",
                 "mgbelt.ndmesh", "mgbelt_diffuse.png", "mgbelt_normal.png",
                 "mgbelt_icon.png", null,
                 200, 0, 4.0f));
 
             Items.Add(new ItemDef(
                 2051, 2030, false,
-                ".50 BMG Kiste (10)",
-                "Zehn Patronen .50 BMG in der Blechkiste. Passt in nichts ausser "
-                + "die TAC-50, wiegt entsprechend.",
+                "Ящик .50 BMG (10)", ".50 BMG box (10)",
+                "Десять патронов .50 BMG в жестяном ящике. Подходит только к TAC-50 "
+                + "и весит соответственно.",
+                "Ten rounds of .50 BMG in a tin box. Fits nothing but the TAC-50, "
+                + "and weighs accordingly.",
                 "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
                 "ammo50_icon.png", null,
                 10, 0, 3.2f));
 
             Items.Add(new ItemDef(
                 1162, 1010, true,
-                "M72 LAW",
-                "Leichter 66-mm-Einweg-Raketenwerfer mit fest geladener "
-                + "Hohlladungsrakete. Nach dem einzigen Schuss bleibt ein leeres, "
-                + "nicht nachladbares Rohr zurueck. Der Gefahrenbereich hinter dem "
-                + "Rohr ist kein Ort fuer Freunde.",
+                "M72 LAW", "M72 LAW",
+                "Лёгкий одноразовый 66-мм гранатомёт с уже снаряжённой "
+                + "кумулятивной ракетой. После единственного выстрела остаётся "
+                + "пустая труба, перезарядить её нельзя. Позади трубы - опасная "
+                + "зона, друзьям там не место.",
+                "Light 66 mm single-use rocket launcher with a pre-loaded "
+                + "shaped-charge rocket. After the one shot an empty, "
+                + "non-reloadable tube is all that is left. The backblast area "
+                + "behind the tube is no place for friends.",
                 "law.ndmesh", "law_diffuse.png", "law_normal.png",
                 "law_icon.png", "law_weapon_icon.png",
                 1, 0, 2.5f));
 
             Items.Add(new ItemDef(
                 2052, 2030, false,
-                "M72 Rakete (1)",
-                "Ausstellungsstueck einer 66-mm-Hohlladungsrakete. Die M72 wird "
-                + "ab Werk geladen und kann im Feld nicht nachgeladen werden.",
+                "Ракета M72 (1)", "M72 rocket (1)",
+                "Выставочный образец 66-мм кумулятивной ракеты. M72 снаряжается "
+                + "на заводе и в поле не перезаряжается.",
+                "A display piece of a 66 mm shaped-charge rocket. The M72 is "
+                + "loaded at the factory and cannot be reloaded in the field.",
                 "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png",
                 "rocket_icon.png", null,
                 1, 0, 6.0f));
 
             Items.Add(new ItemDef(
                 2053, 2030, false,
-                "125-mm-Granate (1)",
-                "Eine Granate fuer die 2A46 des T-72. Getrennt geladen: Geschoss "
-                + "mit Aufschlagzuender, dahinter die Treibladung. Ein Einschlag "
-                + "reisst mehr weg als die LAW - dafuer dauert das Nachladen im "
-                + "Turm zwoelf Sekunden.",
+                "125-мм снаряд (1)", "125 mm shell (1)",
+                "Снаряд для пушки 2А46 танка Т-72. Раздельное заряжание: снаряд "
+                + "с ударным взрывателем, за ним метательный заряд. Разрушений от "
+                + "попадания больше, чем у LAW, но перезарядка в башне занимает "
+                + "двенадцать секунд.",
+                "A round for the T-72's 2A46 gun. Separately loaded: projectile "
+                + "with impact fuze, propellant charge behind it. An impact tears "
+                + "away more than the LAW - but reloading in the turret takes "
+                + "twelve seconds.",
                 "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
                 "shell125_icon.png", null,
                 1, 0, 9.0f));
 
             Items.Add(new ItemDef(
                 1163, 2030, false,
-                "FPV-Drohne",
-                "Kleiner Quadrokopter mit Kamera und fest verbautem Sprengkopf. "
-                + "Wird auf Tastendruck gestartet und aus der Ferne geflogen; "
-                + "waehrenddessen steht man selbst unbeweglich in der Gegend "
-                + "herum. Kommt nicht zurueck.",
+                "FPV-дрон", "FPV drone",
+                "Небольшой квадрокоптер с камерой и встроенной боевой частью. "
+                + "Запускается по нажатию клавиши и управляется дистанционно; "
+                + "пока вы им управляете, вы стоите неподвижно на открытом "
+                + "месте. Обратно не возвращается.",
+                "Small quadcopter with a camera and a built-in warhead. "
+                + "Launched at the press of a key and flown remotely; while you "
+                + "fly it you stand motionless out in the open. It does not come "
+                + "back.",
                 "drone.ndmesh", "drone_diffuse.png", "drone_normal.png",
                 "drone_icon.png", null,
                 1, 0, 1.4f));
 
             Items.Add(new ItemDef(
                 2054, 2030, false,
-                "Stoersender R-330 (tragbar)",
-                "Breitbandstoerer im Traggestell: Batteriekasten, Verstaerker, "
-                + "vier Peitschenantennen. Wer ihn traegt, nimmt jeder Drohne "
-                + "im Umkreis von 50 m die Funkstrecke - und weil der Zuender "
-                + "davon nichts weiss, geht sie dort hoch, wo sie gerade "
-                + "fliegt. Der Preis steht auf der Waage: 26 kg, die sonst "
-                + "Munition waeren.",
+                "Постановщик помех Р-330 (носимый)", "R-330 jammer (portable)",
+                "Широкополосный постановщик помех на носимой раме: аккумуляторный "
+                + "ящик, усилитель, четыре штыревые антенны. Тот, кто его несёт, "
+                + "обрывает радиоканал любого дрона в радиусе 50 м - а поскольку "
+                + "взрыватель об этом не знает, дрон подрывается там, где летит. "
+                + "Цена видна на весах: 26 кг, которые иначе были бы боезапасом.",
+                "Broadband jammer on a carry frame: battery box, amplifier, four "
+                + "whip antennas. Whoever carries it cuts the radio link of every "
+                + "drone within 50 m - and since the fuze knows nothing of that, "
+                + "the drone goes off wherever it happens to be flying. The price "
+                + "is on the scale: 26 kg that would otherwise be ammunition.",
                 "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
                 "jammer_icon.png", null,
                 1, 0, 26.0f));
@@ -1753,6 +1871,7 @@ namespace NextDayRevival
             // and everything below is part of that gap.
             NetWatch.Tick();
             Admin.Tick();
+            MapTeleport.Tick();
             // Solange das Menue offen ist, gehoert der Zeiger dem Menue -
             // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
             // man kann keinen Knopf treffen.
@@ -1783,6 +1902,7 @@ namespace NextDayRevival
             Turret.DrawScope();
             Drone.Draw();
             Patrol.DrawMap();
+            MapTeleport.Draw();
             Admin.Draw();
             Patrol.Draw();
         }
@@ -6106,8 +6226,10 @@ namespace NextDayRevival
         {
             if (RevivalPlugin.CfgTurretAmmo.Value && !TakeRound())
             {
-                Hinweis("Keine Munition - Item " + MunitionsId()
-                        + " fehlt in Kofferraum, Rucksack und Weste", 2.5f);
+                Hinweis(Loc.T("Нет боеприпасов - предмет " + MunitionsId()
+                        + " отсутствует в багажнике, рюкзаке и разгрузке",
+                              "No ammunition - item " + MunitionsId()
+                        + " missing from trunk, backpack and vest"), 2.5f);
                 // Der Mausknopf bleibt gedrueckt; ohne Bremse stuende diese
                 // Zeile jede Sekunde im Log.
                 if (Time.time >= _leerGemeldet)
@@ -7268,7 +7390,7 @@ namespace NextDayRevival
             GUI.DrawTexture(new Rect(x, y, w * voll, h), Punkt());
             GUI.color = new Color(0.88f, 1f, 0.88f, 0.90f);
             GUI.Label(new Rect(x, y + h + 3f, w, 22f),
-                      "Laedt " + rest.ToString("0.0") + " s");
+                      Loc.T("Заряжание ", "Loading ") + rest.ToString("0.0") + " s");
             GUI.color = old;
         }
 
@@ -8097,7 +8219,7 @@ namespace NextDayRevival
             GameObject player = LocalPlayer();
             if (player == null)
             {
-                message = "local player not found";
+                message = Loc.T("локальный игрок не найден", "local player not found");
                 return false;
             }
             try
@@ -8131,13 +8253,13 @@ namespace NextDayRevival
                     if (property != null)
                         property.SetValue(controllers[i], enabled[i], null);
                 }
-                message = "teleported to " + point;
+                message = Loc.T("телепортирован в ", "teleported to ") + point;
                 RevivalPlugin.L.LogInfo("Admin teleport: local player -> " + point + ".");
                 return true;
             }
             catch (Exception ex)
             {
-                message = "teleport failed: " + ex.Message;
+                message = Loc.T("телепорт не удался: ", "teleport failed: ") + ex.Message;
                 return false;
             }
         }
@@ -8147,6 +8269,124 @@ namespace NextDayRevival
             PropertyInfo property = AccessTools.Property(component.GetType(), name);
             if (property != null && property.CanWrite)
                 property.SetValue(component, value, null);
+        }
+    }
+
+    /// <summary>
+    /// Self-service map teleport. With the map open, right-click a spot on it:
+    /// a small "Teleport" button appears at the click, and pressing it warps the
+    /// LOCAL player to that world position. Right-clicking again moves the
+    /// pending target; Escape or closing the map clears it.
+    ///
+    /// This is the F8 admin "teleport on map" without the menu detour. It only
+    /// ever teleports the caller - teleporting OTHER players stays in the Admin
+    /// menu. It reuses MapTools.MouseWorld (the terrain-ray click conversion the
+    /// game itself uses for map markers) and MapTools.TeleportLocal, and is
+    /// gated by the same admin access as the menu, so an ordinary package
+    /// download does not get free teleport.
+    ///
+    /// Tick() reads the right-click in Update; Draw() paints the button in
+    /// OnGUI. The click point is stored in screen pixels (y up, as Unity's
+    /// Input.mousePosition reports it) and flipped to GUI space (y down) only
+    /// when the button is laid out.
+    /// </summary>
+    public static class MapTeleport
+    {
+        static bool _pending;
+        static Vector3 _target;
+        static Vector2 _clickScreen;
+        static string _status;
+        static float _statusUntil;
+
+        static bool Enabled
+        {
+            get
+            {
+                return RevivalPlugin.CfgMapTeleport != null
+                    && RevivalPlugin.CfgMapTeleport.Value
+                    && Admin.HasAccess;
+            }
+        }
+
+        public static void Tick()
+        {
+            if (!Enabled) { _pending = false; return; }
+            // Only act while the map screen is actually up.
+            Component manager, texture;
+            Camera cam;
+            Vector2 world, map;
+            if (!MapTools.Context(out manager, out texture, out cam, out world, out map))
+            {
+                _pending = false;
+                return;
+            }
+            try
+            {
+                if (_pending && Input.GetKeyDown(KeyCode.Escape))
+                {
+                    _pending = false;
+                    return;
+                }
+                if (Input.GetMouseButtonDown(1))
+                {
+                    Vector3 point;
+                    if (MapTools.MouseWorld(out point))
+                    {
+                        _target = point;
+                        _clickScreen = Input.mousePosition;
+                        _pending = true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Map teleport tick: " + ex.Message);
+                _pending = false;
+            }
+        }
+
+        public static void Draw()
+        {
+            if (!_pending || !Enabled) return;
+            // Confirm the map is still open before painting over it.
+            Component manager, texture;
+            Camera cam;
+            Vector2 world, map;
+            if (!MapTools.Context(out manager, out texture, out cam, out world, out map))
+            {
+                _pending = false;
+                return;
+            }
+
+            const float w = 90f;
+            const float h = 26f;
+            float mx = _clickScreen.x;
+            float my = Screen.height - _clickScreen.y;
+
+            // A small marker where the click landed.
+            GUI.Label(new Rect(mx - 5f, my - 12f, 16f, 20f), "x");
+
+            // Button just off the cursor, flipped back onto the screen if it
+            // would run off an edge.
+            float x = mx + 8f;
+            float y = my + 8f;
+            if (x + w > Screen.width) x = mx - w - 8f;
+            if (y + h > Screen.height) y = my - h - 8f;
+            if (x < 0f) x = 0f;
+            if (y < 0f) y = 0f;
+
+            if (GUI.Button(new Rect(x, y, w, h), Loc.T("Телепорт", "Teleport")))
+            {
+                string message;
+                MapTools.TeleportLocal(_target, out message);
+                _pending = false;
+                _status = message;
+                _statusUntil = Time.time + 4f;
+                RevivalPlugin.L.LogInfo("Map teleport: " + message);
+            }
+
+            if (!string.IsNullOrEmpty(_status) && Time.time < _statusUntil)
+                GUI.Label(new Rect(x, y + h + 2f, 280f, 22f), _status);
         }
     }
 
@@ -8298,7 +8538,8 @@ namespace NextDayRevival
             Vector3 point;
             if (!MapTools.MouseWorld(out point))
             {
-                Melde("map click could not be converted to a world position");
+                Melde(Loc.T("клик по карте не удалось перевести в мировую позицию",
+                            "map click could not be converted to a world position"));
                 return;
             }
             _teleportArmed = false;
@@ -8398,18 +8639,20 @@ namespace NextDayRevival
             }
             finally { CursorTracker.Restoring = false; }
             _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
-                                        "Revival - Admin");
+                                        Loc.T("Revival - Админ",
+                                              "Revival - Admin"));
         }
 
         static void Inhalt(int id)
         {
-            GUILayout.Label("Target player");
+            GUILayout.Label(Loc.T("Игрок-цель", "Target player"));
             GUILayout.BeginHorizontal();
-            if (_players.Count == 0) GUILayout.Label("No player in the world yet.");
+            if (_players.Count == 0)
+                GUILayout.Label(Loc.T("В мире пока нет игроков.", "No player in the world yet."));
             for (int i = 0; i < _players.Count; i++)
             {
                 PlayerRow p = _players[i];
-                string text = (p.Mine ? "me: " : "") + p.Name;
+                string text = (p.Mine ? Loc.T("я: ", "me: ") : "") + p.Name;
                 if (GUILayout.Toggle(_targetActor == p.Actor, text, GUI.skin.button,
                                      GUILayout.Width(125f)))
                     _targetActor = p.Actor;
@@ -8417,58 +8660,60 @@ namespace NextDayRevival
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("grant admin", GUILayout.Width(120f)))
+            if (GUILayout.Button(Loc.T("выдать админа", "grant admin"), GUILayout.Width(120f)))
             {
                 string message;
                 Net.Grant(_targetActor, out message);
                 Melde(message);
             }
-            if (GUILayout.Button("teleport on map", GUILayout.Width(145f)))
+            if (GUILayout.Button(Loc.T("телепорт по карте", "teleport on map"), GUILayout.Width(145f)))
             {
-                if (_targetActor < 0) Melde("select a player first");
+                if (_targetActor < 0) Melde(Loc.T("сначала выберите игрока", "select a player first"));
                 else
                 {
                     _teleportArmed = true;
                     _offen = false;
                     CursorZurueck();
-                    Melde("open the map and click the destination");
+                    Melde(Loc.T("откройте карту и щёлкните по месту назначения",
+                                "open the map and click the destination"));
                 }
             }
-            if (_teleportArmed && GUILayout.Button("cancel teleport", GUILayout.Width(125f)))
+            if (_teleportArmed && GUILayout.Button(Loc.T("отменить телепорт", "cancel teleport"), GUILayout.Width(125f)))
             {
                 _teleportArmed = false;
-                Melde("map teleport cancelled");
+                Melde(Loc.T("телепорт по карте отменён", "map teleport cancelled"));
             }
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("god mode ON", GUILayout.Width(120f)))
+            if (GUILayout.Button(Loc.T("бессмертие ВКЛ", "god mode ON"), GUILayout.Width(120f)))
             {
                 string message;
                 Net.GodMode(_targetActor, true, out message);
                 Melde(message);
             }
-            if (GUILayout.Button("god mode OFF", GUILayout.Width(120f)))
+            if (GUILayout.Button(Loc.T("бессмертие ВЫКЛ", "god mode OFF"), GUILayout.Width(120f)))
             {
                 string message;
                 Net.GodMode(_targetActor, false, out message);
                 Melde(message);
             }
             GUILayout.Label(_targetActor == Net.OwnActor()
-                ? (_godMode ? "local: protected" : "local: vulnerable")
-                : "applies to selected player");
+                ? (_godMode ? Loc.T("локально: защищён", "local: protected")
+                            : Loc.T("локально: уязвим", "local: vulnerable"))
+                : Loc.T("применяется к выбранному игроку", "applies to selected player"));
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
-            GUILayout.Label("Complete loadout");
+            GUILayout.Label(Loc.T("Полное снаряжение", "Complete loadout"));
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("full loadout", GUILayout.Width(150f)))
+            if (GUILayout.Button(Loc.T("полный набор", "full loadout"), GUILayout.Width(150f)))
             {
                 string message;
                 Net.Loadout(_targetActor, false, out message);
                 Melde(message);
             }
-            if (GUILayout.Button("full loadout UKB armor", GUILayout.Width(190f)))
+            if (GUILayout.Button(Loc.T("полный набор + броня УКБ", "full loadout UKB armor"), GUILayout.Width(190f)))
             {
                 string message;
                 Net.Loadout(_targetActor, true, out message);
@@ -8477,9 +8722,9 @@ namespace NextDayRevival
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
-            GUILayout.Label("Items in den Rucksack legen");
+            GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Menge (leer = Standard):", GUILayout.Width(170f));
+            GUILayout.Label(Loc.T("Кол-во (пусто = станд.):", "Amount (empty = default):"), GUILayout.Width(170f));
             _menge = GUILayout.TextField(_menge, 6, GUILayout.Width(60f));
             GUILayout.EndHorizontal();
 
@@ -8490,36 +8735,36 @@ namespace NextDayRevival
                 ItemDef d = items[i];
                 GUILayout.BeginHorizontal();
                 GUILayout.Label(d.Id + "  " + d.Name, GUILayout.Width(250f));
-                if (GUILayout.Button("geben", GUILayout.Width(90f)))
+                if (GUILayout.Button(Loc.T("выдать", "give"), GUILayout.Width(90f)))
                     Geben(d);
                 GUILayout.EndHorizontal();
             }
             GUILayout.EndScrollView();
 
             GUILayout.Space(6f);
-            GUILayout.Label("Werkzeuge");
+            GUILayout.Label(Loc.T("Инструменты", "Tools"));
             RevivalPlugin.CfgTurret.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgTurret.Value,
-                                 "Geschuetz (Taste " + RevivalPlugin.CfgTurretKey.Value + ")");
+                                 Loc.T("Пушка (клавиша ", "Gun (key ") + RevivalPlugin.CfgTurretKey.Value + ")");
             RevivalPlugin.CfgArena.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgArena.Value,
-                                 "Testflaeche (Taste " + RevivalPlugin.CfgArenaKey.Value + ")");
+                                 Loc.T("Полигон (клавиша ", "Test area (key ") + RevivalPlugin.CfgArenaKey.Value + ")");
             RevivalPlugin.CfgSpawnCar.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgSpawnCar.Value,
-                                 "Fahrzeugspawn (Taste " + RevivalPlugin.CfgSpawnCarKey.Value + ")");
+                                 Loc.T("Спавн техники (клавиша ", "Vehicle spawn (key ") + RevivalPlugin.CfgSpawnCarKey.Value + ")");
             RevivalPlugin.CfgTank.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgTank.Value,
-                                 "Panzer T-72 (Taste " + RevivalPlugin.CfgTankKey.Value + ")");
+                                 Loc.T("Танк Т-72 (клавиша ", "T-72 tank (key ") + RevivalPlugin.CfgTankKey.Value + ")");
             RevivalPlugin.CfgSceneJump.Value =
                 GUILayout.Toggle(RevivalPlugin.CfgSceneJump.Value,
-                                 "Szenensprung (Taste " + RevivalPlugin.CfgJumpKey.Value + ")");
+                                 Loc.T("Переход сцены (клавиша ", "Scene jump (key ") + RevivalPlugin.CfgJumpKey.Value + ")");
 
             GUILayout.Space(6f);
             GUILayout.Label(_status);
-            GUILayout.Label("Alles hier landet auch im BepInEx-Log. "
-                            + "Auswerten mit: python playlog.py");
+            GUILayout.Label(Loc.T("Всё это также попадает в лог BepInEx. Разбор: python playlog.py",
+                                  "Everything here also goes to the BepInEx log. Read it with: python playlog.py"));
 
-            if (GUILayout.Button("schliessen")) _offen = false;
+            if (GUILayout.Button(Loc.T("закрыть", "close"))) _offen = false;
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
         }
 
@@ -8549,8 +8794,10 @@ namespace NextDayRevival
                 object pim = InventarManager();
                 if (pim == null)
                 {
-                    meldung = "PlayerInventoryManager nicht gefunden - im Hauptmenue "
-                              + "gibt es keinen. Erst ins Spiel gehen.";
+                    meldung = Loc.T("PlayerInventoryManager не найден - в главном меню "
+                              + "его нет. Сначала зайдите в игру.",
+                                    "PlayerInventoryManager not found - there is none "
+                              + "in the main menu. Enter the world first.");
                     return false;
                 }
 
@@ -8560,19 +8807,22 @@ namespace NextDayRevival
                     if (alle[i].Name == "AddBackpackItemFromValues") { m = alle[i]; break; }
                 if (m == null)
                 {
-                    meldung = "AddBackpackItemFromValues fehlt - Spielversion anders?";
+                    meldung = Loc.T("AddBackpackItemFromValues отсутствует - другая версия игры?",
+                                    "AddBackpackItemFromValues missing - different game version?");
                     return false;
                 }
 
                 int freieVorher = FreeBackpackSlots(pim);
                 if (freieVorher < 0)
                 {
-                    meldung = "Rucksackdaten nicht lesbar - nichts wurde gegeben.";
+                    meldung = Loc.T("Данные рюкзака не читаются - ничего не выдано.",
+                                    "Backpack data unreadable - nothing was given.");
                     return false;
                 }
                 if (freieVorher == 0)
                 {
-                    meldung = "Rucksack voll - kein freier Platz fuer " + id + ".";
+                    meldung = Loc.T("Рюкзак полон - нет места для " + id + ".",
+                                    "Backpack full - no free slot for " + id + ".");
                     return false;
                 }
 
@@ -8600,10 +8850,11 @@ namespace NextDayRevival
                 int freieNachher = FreeBackpackSlots(pim);
                 if (freieNachher >= freieVorher)
                 {
-                    meldung = "nicht gegeben: " + id + " wurde vom Inventar abgewiesen.";
+                    meldung = Loc.T("не выдано: " + id + " отклонён инвентарём.",
+                                    "not given: " + id + " was refused by the inventory.");
                     return false;
                 }
-                meldung = "gegeben: " + id + " x" + menge
+                meldung = Loc.T("выдано: ", "given: ") + id + " x" + menge
                           + (mengeGesetzt ? "" : " (Argument 6 ist kein int - "
                                                  + "Menge nicht gesetzt)")
                           + (aktualisiert ? "" : " (Inventar-Refresh fehlt)");
@@ -8611,7 +8862,7 @@ namespace NextDayRevival
             }
             catch (Exception ex)
             {
-                meldung = "fehlgeschlagen: " + ex.Message;
+                meldung = Loc.T("ошибка: ", "failed: ") + ex.Message;
                 RevivalPlugin.L.LogError("Item geben: " + ex);
                 return false;
             }
@@ -8854,7 +9105,8 @@ namespace NextDayRevival
             object pim = InventarManager();
             if (pim == null)
             {
-                message = "inventory not found - enter the world first";
+                message = Loc.T("инвентарь не найден - сначала зайдите в игру",
+                                "inventory not found - enter the world first");
                 return false;
             }
             try
@@ -8864,8 +9116,10 @@ namespace NextDayRevival
                 List<BackpackItem> saved = SnapshotBackpack(pim);
                 if (saved.Count > capacity)
                 {
-                    message = "current backpack has " + saved.Count + " items, but "
-                        + backpack + " has only " + capacity + " slots; nothing changed";
+                    message = Loc.T("в текущем рюкзаке предметов: " + saved.Count + ", а у "
+                        + backpack + " всего слотов: " + capacity + "; ничего не изменено",
+                                    "current backpack has " + saved.Count + " items, but "
+                        + backpack + " has only " + capacity + " slots; nothing changed");
                     return false;
                 }
                 if (!EquipBackpack(pim, backpack, saved, out message)) return false;
@@ -8889,14 +9143,16 @@ namespace NextDayRevival
                     if (GibItem(supplies[i, 0], supplies[i, 1], out one)) added++;
                     else break;
                 }
-                message = (ukb ? "full UKB loadout" : "full loadout")
-                    + " equipped; " + added + " supply slots added";
+                message = (ukb ? Loc.T("полный набор УКБ", "full UKB loadout")
+                               : Loc.T("полный набор", "full loadout"))
+                    + Loc.T(" выдан; добавлено слотов снабжения: ", " equipped; ") + added
+                    + Loc.T("", " supply slots added");
                 RevivalPlugin.L.LogInfo("Admin: " + message + ".");
                 return true;
             }
             catch (Exception ex)
             {
-                message = "loadout failed: " + ex.Message;
+                message = Loc.T("снаряжение не удалось: ", "loadout failed: ") + ex.Message;
                 RevivalPlugin.L.LogError("Admin loadout: " + ex);
                 return false;
             }
@@ -8933,7 +9189,7 @@ namespace NextDayRevival
             int current = ReadInt(Field(data, "BackpackID"));
             if (current == wanted)
             {
-                message = "backpack already equipped";
+                message = Loc.T("рюкзак уже надет", "backpack already equipped");
                 return true;
             }
 
@@ -8964,12 +9220,13 @@ namespace NextDayRevival
             data = Field(pim, "_backpackData");
             if (ReadInt(Field(data, "BackpackID")) != wanted)
             {
-                message = "backpack " + wanted + " was refused";
+                message = Loc.T("рюкзак " + wanted + " отклонён", "backpack " + wanted + " was refused");
                 return false;
             }
             for (int i = 0; i < saved.Count; i++) AddBackpackValues(pim, saved[i]);
-            message = "backpack " + wanted + " equipped and " + saved.Count
-                + " existing item(s) restored";
+            message = Loc.T("рюкзак " + wanted + " надет, восстановлено предметов: " + saved.Count,
+                            "backpack " + wanted + " equipped and " + saved.Count
+                + " existing item(s) restored");
             return true;
         }
 
@@ -9148,47 +9405,49 @@ namespace NextDayRevival
 
             public static void Grant(int target, out string message)
             {
-                if (target <= 0) { message = "select a player first"; return; }
+                if (target <= 0) { message = Loc.T("сначала выберите игрока", "select a player first"); return; }
                 if (target == OwnActor())
                 {
                     _sessionGranted = true;
-                    message = "admin access already active for this session";
+                    message = Loc.T("админ-доступ уже активен в этой сессии",
+                                    "admin access already active for this session");
                     return;
                 }
                 message = Send(new float[] { GrantAction, target }, true)
-                    ? "temporary admin access sent to player #" + target
-                    : "admin grant could not be sent";
+                    ? Loc.T("временный админ-доступ отправлен игроку #", "temporary admin access sent to player #") + target
+                    : Loc.T("не удалось отправить выдачу админа", "admin grant could not be sent");
             }
 
             public static void Item(int target, int item, int amount, out string message)
             {
-                if (target <= 0) { message = "select a player first"; return; }
+                if (target <= 0) { message = Loc.T("сначала выберите игрока", "select a player first"); return; }
                 if (target == OwnActor())
                 {
                     GibItem(item, amount, out message);
                     return;
                 }
                 message = Send(new float[] { ItemAction, target, item, amount }, true)
-                    ? "item " + item + " sent to player #" + target
-                    : "item command could not be sent";
+                    ? Loc.T("предмет ", "item ") + item + Loc.T(" отправлен игроку #", " sent to player #") + target
+                    : Loc.T("не удалось отправить команду выдачи", "item command could not be sent");
             }
 
             public static void Loadout(int target, bool ukb, out string message)
             {
-                if (target <= 0) { message = "select a player first"; return; }
+                if (target <= 0) { message = Loc.T("сначала выберите игрока", "select a player first"); return; }
                 if (target == OwnActor())
                 {
                     ApplyLoadout(ukb, out message);
                     return;
                 }
                 message = Send(new float[] { LoadoutAction, target, ukb ? 1f : 0f }, true)
-                    ? (ukb ? "UKB loadout" : "loadout") + " sent to player #" + target
-                    : "loadout command could not be sent";
+                    ? (ukb ? Loc.T("набор УКБ", "UKB loadout") : Loc.T("набор", "loadout"))
+                        + Loc.T(" отправлен игроку #", " sent to player #") + target
+                    : Loc.T("не удалось отправить команду снаряжения", "loadout command could not be sent");
             }
 
             public static void Teleport(int target, Vector3 point, out string message)
             {
-                if (target <= 0) { message = "select a player first"; return; }
+                if (target <= 0) { message = Loc.T("сначала выберите игрока", "select a player first"); return; }
                 if (target == OwnActor())
                 {
                     MapTools.TeleportLocal(point, out message);
@@ -9196,13 +9455,13 @@ namespace NextDayRevival
                 }
                 message = Send(new float[] {
                     TeleportAction, target, point.x, point.y, point.z }, true)
-                    ? "teleport sent to player #" + target
-                    : "teleport command could not be sent";
+                    ? Loc.T("телепорт отправлен игроку #", "teleport sent to player #") + target
+                    : Loc.T("не удалось отправить телепорт", "teleport command could not be sent");
             }
 
             public static void GodMode(int target, bool enabled, out string message)
             {
-                if (target <= 0) { message = "select a player first"; return; }
+                if (target <= 0) { message = Loc.T("сначала выберите игрока", "select a player first"); return; }
                 if (target == OwnActor())
                 {
                     SetGodMode(enabled, out message);
@@ -9210,9 +9469,9 @@ namespace NextDayRevival
                 }
                 message = Send(new float[] {
                     GodModeAction, target, enabled ? 1f : 0f }, true)
-                    ? "god mode " + (enabled ? "ON" : "OFF")
-                        + " sent to player #" + target
-                    : "god mode command could not be sent";
+                    ? Loc.T("бессмертие ", "god mode ") + (enabled ? Loc.T("ВКЛ", "ON") : Loc.T("ВЫКЛ", "OFF"))
+                        + Loc.T(" отправлено игроку #", " sent to player #") + target
+                    : Loc.T("не удалось отправить команду бессмертия", "god mode command could not be sent");
             }
 
             public static void OnPhotonEvent(byte code, object content, int sender)
@@ -9231,8 +9490,8 @@ namespace NextDayRevival
                     {
                         _sessionGranted = true;
                         _zutritt = 1;
-                        message = "player #" + sender
-                            + " granted temporary admin access for this session";
+                        message = Loc.T("игрок #" + sender + " выдал вам временный админ-доступ на эту сессию",
+                                        "player #" + sender + " granted temporary admin access for this session");
                     }
                     else if (action == ItemAction && data.Length >= 4)
                         GibItem(Mathf.RoundToInt(data[2]), Mathf.RoundToInt(data[3]),
@@ -9260,8 +9519,8 @@ namespace NextDayRevival
         static void SetGodMode(bool enabled, out string message)
         {
             _godMode = enabled;
-            message = "god mode " + (enabled ? "ON" : "OFF")
-                + " for this session";
+            message = Loc.T("бессмертие ", "god mode ") + (enabled ? Loc.T("ВКЛ", "ON") : Loc.T("ВЫКЛ", "OFF"))
+                + Loc.T(" на эту сессию", " for this session");
             RevivalPlugin.L.LogInfo("Admin: " + message + ".");
         }
 
@@ -10175,7 +10434,8 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("MTW: Munitionsbeigabe " + added
                         + " Behaelter Item " + id + " im Kofferraum ("
                         + rounds + " Schuss).");
-                    Turret.Hinweis(rounds + " Schuss im MTW-Kofferraum", 4f);
+                    Turret.Hinweis(rounds + Loc.T(" патронов в багажнике БТР",
+                                                  " rounds in the APC trunk"), 4f);
                     return;
                 }
                 RevivalPlugin.L.LogWarning("MTW: Kofferraum nahm Item " + id
@@ -10187,8 +10447,9 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo((panzer ? "Panzer" : "MTW")
                 + ": Munitionsbeigabe " + menge + "x " + id + " - " + meldung);
             if (ok) Turret.Hinweis(menge
-                + (panzer ? " Granaten" : " Schuss") + " im Rucksack", 4f);
-            else Turret.Hinweis("Munition fehlgeschlagen: " + meldung, 6f);
+                + (panzer ? Loc.T(" снарядов в рюкзаке", " shells in the backpack")
+                          : Loc.T(" патронов в рюкзаке", " rounds in the backpack")), 4f);
+            else Turret.Hinweis(Loc.T("боеприпасы не выданы: ", "ammunition failed: ") + meldung, 6f);
         }
 
         static int AddAmmoToTrunk(GameObject car, int id, int boxes)
@@ -10764,7 +11025,8 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) are "
                     + "already out, MaxVehicles is " + max
                     + ". Shift plus the key takes them off the road.");
-                Turret.Hinweis(_units.Count + " patrols out - Shift+key stops them", 3f);
+                Turret.Hinweis(_units.Count + Loc.T(" патрулей в рейсе - Shift+клавиша убирает",
+                                                    " patrols out - Shift+key stops them"), 3f);
                 return;
             }
 
@@ -10782,7 +11044,7 @@ namespace NextDayRevival
                     + RevivalPlugin.CfgPatrolFile.Value
                     + " and no other route wants a patrol. Record one - the "
                     + "editor key is " + RevivalPlugin.CfgPatrolEditorKey.Value + ".");
-                Turret.Hinweis("No route \"" + RevivalPlugin.CfgPatrolRoute.Value + "\"", 4f);
+                Turret.Hinweis(Loc.T("Нет маршрута \"", "No route \"") + RevivalPlugin.CfgPatrolRoute.Value + "\"", 4f);
                 return;
             }
             if (r.P.Count < 3)
@@ -11135,9 +11397,10 @@ namespace NextDayRevival
                 + (away >= 0f ? ", " + away.ToString("0") + " m from the player" : "")
                 + ".");
             Turret.Hinweis(away >= 0f
-                ? "Patrol " + r.Name + " (" + u.Seite + "), "
-                  + away.ToString("0") + " m away"
-                : "Patrol " + r.Name + " (" + u.Seite + ") started", 4f);
+                ? Loc.T("Патруль ", "Patrol ") + r.Name + " (" + u.Seite + "), "
+                  + away.ToString("0") + Loc.T(" м от игрока", " m away")
+                : Loc.T("Патруль ", "Patrol ") + r.Name + " (" + u.Seite + ")"
+                  + Loc.T(" запущен", " started"), 4f);
         }
 
         /// <summary>
@@ -12675,7 +12938,7 @@ namespace NextDayRevival
                     + RevivalPlugin.CfgPatrolRoute.Value + "\" - a waypoint every "
                     + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
                     + " s. F5 again to stop.");
-                Turret.Hinweis("Recording " + RevivalPlugin.CfgPatrolRoute.Value, 3f);
+                Turret.Hinweis(Loc.T("Запись ", "Recording ") + RevivalPlugin.CfgPatrolRoute.Value, 3f);
             }
             else
             {
@@ -12683,7 +12946,8 @@ namespace NextDayRevival
                 int count = r == null ? 0 : r.P.Count;
                 RevivalPlugin.L.LogInfo("Patrol: recording stopped, "
                     + RevivalPlugin.CfgPatrolRoute.Value + " has " + count + " waypoints.");
-                Turret.Hinweis("Recorded " + count + " waypoints", 3f);
+                Turret.Hinweis(Loc.T("Записано точек: ", "Recorded ") + count
+                               + Loc.T("", " waypoints"), 3f);
             }
         }
 
@@ -12995,6 +13259,11 @@ namespace NextDayRevival
             Matrix4x4 oldMatrix = GUI.matrix;
             try
             {
+                // Every dash centre drawn so far, so a route crossing one drawn
+                // earlier can be trimmed back around the crossing. Routes are
+                // drawn in file order; the earlier route keeps its line whole.
+                ClearGrid grid = new ClearGrid(RouteClearance);
+
                 for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                 {
                     Route route;
@@ -13008,6 +13277,11 @@ namespace NextDayRevival
                     // traitor red, civilian green, neutral white.
                     GUI.color = RouteColor(route.Seite, route.Enabled);
 
+                    // This route's own dash centres. Collected while drawing and
+                    // added to the grid only after the whole route is done, so a
+                    // route never clears against itself.
+                    List<Vector2> ink = new List<Vector2>();
+
                     // Project the waypoints to the map, splitting into runs
                     // wherever a point cannot be projected.
                     List<Vector2> run = new List<Vector2>(route.P.Count);
@@ -13020,12 +13294,13 @@ namespace NextDayRevival
                             run.Add(g);
                         else
                         {
-                            DashRun(run, ref phase, clip);
+                            DashRun(run, ref phase, clip, grid, ink);
                             run.Clear();
                         }
                     }
-                    DashRun(run, ref phase, clip);
+                    DashRun(run, ref phase, clip, grid, ink);
 
+                    grid.Add(ink);
                 }
 
                 // Labels belong above the lines, including lines from routes
@@ -13041,12 +13316,13 @@ namespace NextDayRevival
                         || !clip.Contains(label)) continue;
                     GUI.color = RouteColor(route.Seite, route.Enabled);
                     GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
-                              route.Name + (route.Enabled ? "" : " (disabled)"));
+                              route.Name + (route.Enabled ? "" : Loc.T(" (выкл)", " (disabled)")));
                 }
 
                 GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f);
                 GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
-                          "F4: edit or delete patrol routes");
+                          Loc.T("F4: изменить или удалить маршруты патрулей",
+                                "F4: edit or delete patrol routes"));
             }
             catch (Exception ex)
             {
@@ -13084,26 +13360,45 @@ namespace NextDayRevival
             return c;
         }
 
-        // Measured from the game's Locator ring at its native map size. The
-        // 10 px value is only the cadence gap ALONG each waypoint route. Camp
-        // circles, other routes and bends never remove a route dash.
-        const float RouteDash = 55f;
-        const float RouteGap = 10f;
-        const float RouteStroke = 4.5f;
+        // Dash cadence in SCREEN pixels, chosen against the offline preview so
+        // the line reads like the game's own thick, evenly separated markers
+        // rather than a fine scribble. Dash and gap are the on/off run lengths
+        // walked along the route's arc length; stroke is the line thickness.
+        const float RouteDash = 46f;
+        const float RouteGap = 30f;
+        const float RouteStroke = 8.5f;
+
+        // Path shaping, all in screen pixels / iterations. Resampling drops the
+        // projected waypoints onto an even arc-length grid FIRST, so the dash
+        // cadence no longer depends on how many points the recorder wrote - 86
+        // sparse points or hundreds from a 3-per-second recording shape the
+        // same line. Chaikin then rounds the corners.
+        const float RouteResample = 24f;
+        const int RouteSmoothPasses = 4;
+
+        // A route that crosses one drawn earlier is trimmed back within this
+        // radius of the earlier line, reopening a clean gap instead of letting
+        // the two sets of dashes pile into a blob at the crossing.
+        const float RouteClearance = 18f;
 
         /// <summary>
         /// Cuts one connected run of screen points into evenly spaced dashes by
-        /// walking its arc length. The projected waypoints are smoothed first,
-        /// then each dash is stamped along that curve. It therefore follows
-        /// bends instead of cutting them with one rigid chord, without reviving
-        /// the waypoint-to-waypoint jitter of the old implementation. The dash
-        /// phase carries across runs so the pattern stays regular.
+        /// walking its arc length. The projected waypoints are shaped first
+        /// (see <see cref="ShapeMapRun"/>), then each dash is stamped along that
+        /// curve. It therefore follows bends instead of cutting them with one
+        /// rigid chord, and because the run is resampled onto an even grid the
+        /// cadence does not depend on the waypoint count. The dash phase carries
+        /// across runs so the pattern stays regular. Stamps that fall within the
+        /// clearance of an earlier route are dropped; the ones that survive are
+        /// collected into <paramref name="ink"/> for later routes to clear on.
         /// </summary>
-        static void DashRun(List<Vector2> pts, ref float phase, Rect clip)
+        static void DashRun(List<Vector2> pts, ref float phase, Rect clip,
+                            ClearGrid grid, List<Vector2> ink)
         {
             if (pts == null || pts.Count < 2) return;
-            pts = SmoothMapRun(pts);
+            pts = ShapeMapRun(pts);
             int n = pts.Count;
+            if (n < 2) { phase = 0f; return; }
             float[] cum = new float[n];
             for (int i = 1; i < n; i++)
                 cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).magnitude;
@@ -13119,19 +13414,33 @@ namespace NextDayRevival
                 float start = Mathf.Max(ds, 0f);
                 float end = Mathf.Min(ds + RouteDash, total);
                 if (end <= start) continue;
-                DrawCurvedDash(pts, cum, start, end, clip, brush);
+                DrawCurvedDash(pts, cum, start, end, clip, brush, grid, ink);
             }
             phase = (phase + total) % period;
         }
 
-        /// <summary>A short symmetric low-pass pass over dense screen points.
-        /// Three passes suppress recorder jitter while keeping the route's broad
-        /// direction changes. Endpoints remain exactly where they were.</summary>
-        static List<Vector2> SmoothMapRun(List<Vector2> pts)
+        /// <summary>Turns a dense, jittery projected run into a clean line:
+        /// a short low-pass knocks down recorder noise, resampling drops the
+        /// points onto an even arc-length grid (so the dash cadence no longer
+        /// tracks the waypoint count), and Chaikin corner-cutting rounds the
+        /// bends. Endpoints are preserved throughout.</summary>
+        static List<Vector2> ShapeMapRun(List<Vector2> pts)
+        {
+            if (pts.Count < 3) return pts;
+            List<Vector2> s = Lowpass(pts, 2);
+            s = Resample(s, RouteResample);
+            s = Chaikin(s, RouteSmoothPasses);
+            return s;
+        }
+
+        /// <summary>A short symmetric [1,2,1]/4 low-pass, N passes. Suppresses
+        /// point-to-point jitter while keeping the broad direction changes.
+        /// Endpoints remain exactly where they were.</summary>
+        static List<Vector2> Lowpass(List<Vector2> pts, int passes)
         {
             if (pts.Count < 3) return pts;
             List<Vector2> current = new List<Vector2>(pts);
-            for (int pass = 0; pass < 3; pass++)
+            for (int pass = 0; pass < passes; pass++)
             {
                 List<Vector2> next = new List<Vector2>(current.Count);
                 next.Add(current[0]);
@@ -13144,13 +13453,70 @@ namespace NextDayRevival
             return current;
         }
 
+        /// <summary>Resamples a polyline to a uniform arc-length spacing, so the
+        /// number of output points depends on the line's LENGTH, never on how
+        /// many points described it. Endpoints are kept.</summary>
+        static List<Vector2> Resample(List<Vector2> pts, float spacing)
+        {
+            if (pts.Count < 2 || spacing <= 0.01f) return pts;
+            List<Vector2> outp = new List<Vector2>();
+            outp.Add(pts[0]);
+            Vector2 cur = pts[0];
+            float need = spacing;             // distance left to the next sample
+            for (int i = 1; i < pts.Count; i++)
+            {
+                Vector2 next = pts[i];
+                Vector2 seg = next - cur;
+                float d = seg.magnitude;
+                if (d < 1e-6f) { cur = next; continue; }
+                Vector2 dir = seg / d;
+                while (need <= d)
+                {
+                    cur = cur + dir * need;
+                    outp.Add(cur);
+                    d -= need;
+                    need = spacing;
+                }
+                need -= d;
+                cur = next;
+            }
+            Vector2 last = pts[pts.Count - 1];
+            if ((outp[outp.Count - 1] - last).magnitude > spacing * 0.5f)
+                outp.Add(last);
+            return outp;
+        }
+
+        /// <summary>Chaikin corner-cutting. Each pass replaces every interior
+        /// corner with two points a quarter in from each side, rounding the
+        /// line. Endpoints are preserved.</summary>
+        static List<Vector2> Chaikin(List<Vector2> pts, int iters)
+        {
+            List<Vector2> cur = pts;
+            for (int it = 0; it < iters; it++)
+            {
+                if (cur.Count < 3) break;
+                List<Vector2> next = new List<Vector2>(cur.Count * 2);
+                next.Add(cur[0]);
+                for (int i = 0; i < cur.Count - 1; i++)
+                {
+                    Vector2 a = cur[i], b = cur[i + 1];
+                    next.Add(a * 0.75f + b * 0.25f);
+                    next.Add(a * 0.25f + b * 0.75f);
+                }
+                next.Add(cur[cur.Count - 1]);
+                cur = next;
+            }
+            return cur;
+        }
+
         /// <summary>Draw one dash as overlapping antialiased circles following
         /// the smoothed arc. The first and last brush centres are inset by the
         /// brush radius, so the rounded caps stay inside the measured 55 px dash
         /// and do not steal 4.5 px from the visible 10 px gap.</summary>
         static void DrawCurvedDash(List<Vector2> pts, float[] cum,
                                    float start, float end, Rect clip,
-                                   Texture2D brush)
+                                   Texture2D brush, ClearGrid grid,
+                                   List<Vector2> ink)
         {
             float radius = RouteStroke * 0.5f;
             float centerStart = start + radius;
@@ -13160,16 +13526,20 @@ namespace NextDayRevival
 
             const float step = 1.5f;
             for (float d = centerStart; d < centerEnd; d += step)
-                DrawMapBrush(PointAtArc(pts, cum, d), clip, brush);
-            DrawMapBrush(PointAtArc(pts, cum, centerEnd), clip, brush);
+                DrawMapBrush(PointAtArc(pts, cum, d), clip, brush, grid, ink);
+            DrawMapBrush(PointAtArc(pts, cum, centerEnd), clip, brush, grid, ink);
         }
 
-        static void DrawMapBrush(Vector2 p, Rect clip, Texture2D brush)
+        static void DrawMapBrush(Vector2 p, Rect clip, Texture2D brush,
+                                 ClearGrid grid, List<Vector2> ink)
         {
             if (!clip.Contains(p)) return;
+            // Yield to any earlier route within the clearance radius.
+            if (grid != null && grid.Blocked(p)) return;
             float radius = RouteStroke * 0.5f;
             GUI.DrawTexture(new Rect(p.x - radius, p.y - radius,
                                      RouteStroke, RouteStroke), brush);
+            if (ink != null) ink.Add(p);
         }
 
         /// <summary>The point at arc length <paramref name="d"/> along the
@@ -13211,6 +13581,70 @@ namespace NextDayRevival
             }
             _routeMapBrush.Apply(false, true);
             return _routeMapBrush;
+        }
+
+        /// <summary>
+        /// A coarse spatial hash of the dash centres drawn so far, so a route
+        /// can ask whether a candidate stamp lands within the clearance of any
+        /// line drawn before it. Cells are one clearance wide, so a 3x3
+        /// neighbourhood covers the whole clearance radius around a point.
+        /// </summary>
+        sealed class ClearGrid
+        {
+            readonly float _cell;
+            readonly float _r2;
+            readonly Dictionary<long, List<Vector2>> _cells =
+                new Dictionary<long, List<Vector2>>();
+
+            public ClearGrid(float clearance)
+            {
+                _cell = Mathf.Max(4f, clearance);
+                _r2 = clearance * clearance;
+            }
+
+            static long Key(int cx, int cy)
+            {
+                // Offset well clear of zero so negative cells stay distinct.
+                return ((long)(cx + 1048576)) * 4194304L + (cy + 1048576);
+            }
+
+            public void Add(List<Vector2> pts)
+            {
+                if (pts == null) return;
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    Vector2 p = pts[i];
+                    long k = Key((int)Mathf.Floor(p.x / _cell),
+                                 (int)Mathf.Floor(p.y / _cell));
+                    List<Vector2> list;
+                    if (!_cells.TryGetValue(k, out list))
+                    {
+                        list = new List<Vector2>();
+                        _cells[k] = list;
+                    }
+                    list.Add(p);
+                }
+            }
+
+            public bool Blocked(Vector2 p)
+            {
+                if (_r2 <= 0f || _cells.Count == 0) return false;
+                int cx = (int)Mathf.Floor(p.x / _cell);
+                int cy = (int)Mathf.Floor(p.y / _cell);
+                for (int gx = cx - 1; gx <= cx + 1; gx++)
+                    for (int gy = cy - 1; gy <= cy + 1; gy++)
+                    {
+                        List<Vector2> list;
+                        if (!_cells.TryGetValue(Key(gx, gy), out list)) continue;
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            float dx = p.x - list[i].x;
+                            float dy = p.y - list[i].y;
+                            if (dx * dx + dy * dy < _r2) return true;
+                        }
+                    }
+                return false;
+            }
         }
 
         // =====================================================================
@@ -13292,88 +13726,104 @@ namespace NextDayRevival
                 finally { CursorTracker.Restoring = false; }
 
                 _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
-                                            "Revival - Patrol routes");
+                                            Loc.T("Revival - Маршруты патрулей",
+                                                  "Revival - Patrol routes"));
             }
 
             static void Inhalt(int id)
             {
                 // ------------------------------------------------ recording
                 GUILayout.Label(_recording
-                    ? "RECORDING into \"" + RevivalPlugin.CfgPatrolRoute.Value
-                      + "\" - a waypoint every "
-                      + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
-                      + " s while you drive."
-                    : "Not recording. Drive the road you want patrolled, then stop.");
+                    ? Loc.T("ЗАПИСЬ в \"" + RevivalPlugin.CfgPatrolRoute.Value
+                          + "\" - точка каждые "
+                          + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
+                          + " с во время езды.",
+                            "RECORDING into \"" + RevivalPlugin.CfgPatrolRoute.Value
+                          + "\" - a waypoint every "
+                          + RevivalPlugin.CfgPatrolRecordSeconds.Value.ToString("0.#")
+                          + " s while you drive.")
+                    : Loc.T("Запись не идёт. Проедьте дорогу для патруля, затем остановитесь.",
+                            "Not recording. Drive the road you want patrolled, then stop."));
 
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button(_recording ? "stop recording" : "record",
+                if (GUILayout.Button(_recording ? Loc.T("стоп запись", "stop recording")
+                                                : Loc.T("запись", "record"),
                                      GUILayout.Width(130f)))
                 {
                     ToggleRecording();
-                    Melde(_recording ? "recording " + RevivalPlugin.CfgPatrolRoute.Value
-                                     : "recording stopped");
+                    Melde(_recording ? Loc.T("запись ", "recording ") + RevivalPlugin.CfgPatrolRoute.Value
+                                     : Loc.T("запись остановлена", "recording stopped"));
                 }
-                if (GUILayout.Button("waypoint here", GUILayout.Width(120f)))
+                if (GUILayout.Button(Loc.T("точка здесь", "waypoint here"), GUILayout.Width(120f)))
                 {
                     RecordHere(true);
-                    Melde("waypoint added to " + RevivalPlugin.CfgPatrolRoute.Value);
+                    Melde(Loc.T("точка добавлена в ", "waypoint added to ") + RevivalPlugin.CfgPatrolRoute.Value);
                 }
-                if (GUILayout.Button("undo last", GUILayout.Width(90f))) Zurueck();
+                if (GUILayout.Button(Loc.T("отменить последнюю", "undo last"), GUILayout.Width(90f))) Zurueck();
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("New route:", GUILayout.Width(70f));
+                GUILayout.Label(Loc.T("Новый маршрут:", "New route:"), GUILayout.Width(70f));
                 _neu = GUILayout.TextField(_neu, 24, GUILayout.Width(140f));
-                if (GUILayout.Button("create and record", GUILayout.Width(150f))) Anlegen();
+                if (GUILayout.Button(Loc.T("создать и записать", "create and record"), GUILayout.Width(150f))) Anlegen();
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(6f);
 
                 // --------------------------------------------------- routes
-                GUILayout.Label("Routes - each one is its own patrol");
+                GUILayout.Label(Loc.T("Маршруты - каждый это отдельный патруль",
+                                      "Routes - each one is its own patrol"));
                 _rollen = GUILayout.BeginScrollView(_rollen, GUILayout.Height(260f));
                 for (int i = 0; i < _order.Count; i++) Zeile(_routes[_order[i]]);
                 if (_order.Count == 0)
-                    GUILayout.Label("None yet. Type a name above, press "
-                        + "\"create and record\", and drive the road.");
+                    GUILayout.Label(Loc.T("Пока пусто. Впишите имя выше, нажмите "
+                        + "\"создать и записать\" и проедьте дорогу.",
+                            "None yet. Type a name above, press "
+                        + "\"create and record\", and drive the road."));
                 GUILayout.EndScrollView();
 
                 GUILayout.Space(6f);
 
                 // ------------------------------------------------ the road
                 int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-                GUILayout.Label("On the road: " + _units.Count + " of " + max
-                    + " (MaxVehicles). Automatic: " + (_auto ? "on" : "OFF"));
+                GUILayout.Label(Loc.T("На дороге: ", "On the road: ") + _units.Count
+                    + Loc.T(" из ", " of ") + max
+                    + Loc.T(" (MaxVehicles). Автоматика: ", " (MaxVehicles). Automatic: ")
+                    + (_auto ? Loc.T("вкл", "on") : Loc.T("ВЫКЛ", "OFF")));
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button(_auto ? "automatic off" : "automatic on",
+                if (GUILayout.Button(_auto ? Loc.T("автоматика выкл", "automatic off")
+                                           : Loc.T("автоматика вкл", "automatic on"),
                                      GUILayout.Width(130f)))
                 {
-                    if (_auto) { StopAll(); Melde("all patrols off the road"); }
-                    else { Toggle(); Melde("automatic on"); }
+                    if (_auto) { StopAll(); Melde(Loc.T("все патрули убраны с дороги", "all patrols off the road")); }
+                    else { Toggle(); Melde(Loc.T("автоматика включена", "automatic on")); }
                 }
-                if (GUILayout.Button("clear the road", GUILayout.Width(120f)))
+                if (GUILayout.Button(Loc.T("убрать с дороги", "clear the road"), GUILayout.Width(120f)))
                 {
                     StopAll();
-                    Melde("all patrols off the road");
+                    Melde(Loc.T("все патрули убраны с дороги", "all patrols off the road"));
                 }
-                if (GUILayout.Button("save file", GUILayout.Width(90f)))
+                if (GUILayout.Button(Loc.T("сохранить файл", "save file"), GUILayout.Width(90f)))
                 {
                     Save();
-                    Melde("written to " + RevivalPlugin.CfgPatrolFile.Value);
+                    Melde(Loc.T("записано в ", "written to ") + RevivalPlugin.CfgPatrolFile.Value);
                 }
-                if (GUILayout.Button("reload", GUILayout.Width(70f)))
+                if (GUILayout.Button(Loc.T("перезагрузить", "reload"), GUILayout.Width(70f)))
                 {
                     Load(true);
-                    Melde("read back from " + RevivalPlugin.CfgPatrolFile.Value);
+                    Melde(Loc.T("прочитано из ", "read back from ") + RevivalPlugin.CfgPatrolFile.Value);
                 }
                 GUILayout.EndHorizontal();
 
                 if (_status.Length > 0) GUILayout.Label(_status);
-                GUILayout.Label("civilian attacks everyone but civilians. looter "
+                GUILayout.Label(Loc.T(
+                    "civilian бьёт всех, кроме civilian. looter всех, кроме looter. "
+                    + "traitor бьёт ВСЕХ. neutral бьёт только traitor.",
+                    "civilian attacks everyone but civilians. looter "
                     + "everyone but looters. traitor attacks EVERYONE. neutral "
-                    + "attacks traitors only.");
+                    + "attacks traitors only."));
 
-                if (GUILayout.Button("close")) { _offen = false; CursorZurueck(); }
+                if (GUILayout.Button(Loc.T("закрыть", "close"))) { _offen = false; CursorZurueck(); }
                 GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
             }
 
@@ -13391,30 +13841,34 @@ namespace NextDayRevival
 
                 GUILayout.BeginHorizontal();
                 GUILayout.Label((aktiv ? "> " : "  ") + r.Name + "  "
-                    + r.P.Count + " wp  " + Fahren(r.Name) + "/" + r.Count + " out",
+                    + r.P.Count + Loc.T(" тчк  ", " wp  ") + Fahren(r.Name) + "/" + r.Count
+                    + Loc.T(" в рейсе", " out"),
                     GUILayout.Width(190f));
-                bool an = GUILayout.Toggle(r.Enabled, "on", GUILayout.Width(45f));
+                bool an = GUILayout.Toggle(r.Enabled, Loc.T("вкл", "on"), GUILayout.Width(45f));
                 if (an != r.Enabled)
                 {
                     r.Enabled = an;
-                    Sichern(r.Name + (an ? " is on" : " is off - the automatic "
-                                            + "leaves it alone"));
+                    Sichern(r.Name + (an ? Loc.T(" включён", " is on")
+                                         : Loc.T(" выключен - автоматика его не трогает",
+                                                 " is off - the automatic leaves it alone")));
                 }
                 if (GUILayout.Button("-", GUILayout.Width(24f)) && r.Count > 0)
                 {
                     r.Count--;
-                    Sichern(r.Name + " carries " + r.Count + " patrol(s)");
+                    Sichern(r.Name + Loc.T(" несёт патрулей: ", " carries ") + r.Count
+                            + Loc.T("", " patrol(s)"));
                 }
                 GUILayout.Label(r.Count.ToString(), GUILayout.Width(20f));
                 if (GUILayout.Button("+", GUILayout.Width(24f)) && r.Count < 16)
                 {
                     r.Count++;
-                    Sichern(r.Name + " carries " + r.Count + " patrol(s)");
+                    Sichern(r.Name + Loc.T(" несёт патрулей: ", " carries ") + r.Count
+                            + Loc.T("", " patrol(s)"));
                 }
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("side", GUILayout.Width(34f));
+                GUILayout.Label(Loc.T("сторона", "side"), GUILayout.Width(34f));
                 for (int i = 0; i < Fraktion.Namen.Length; i++)
                 {
                     string n = Fraktion.Namen[i];
@@ -13428,36 +13882,37 @@ namespace NextDayRevival
                         && r.Fraction != n)
                     {
                         r.Fraction = n;
-                        Sichern(r.Name + " is " + n + " - " + Fraktion.Erklaerung(n));
+                        Sichern(r.Name + Loc.T(" - ", " is ") + n + " - " + Fraktion.Erklaerung(n));
                     }
                 }
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("car", GUILayout.Width(34f));
+                GUILayout.Label(Loc.T("техника", "car"), GUILayout.Width(34f));
                 Wagenknopf(r, "btr");
                 Wagenknopf(r, "tank");
                 Wagenknopf(r, "mixed");
-                if (GUILayout.Button("record into", GUILayout.Width(90f)))
+                if (GUILayout.Button(Loc.T("писать сюда", "record into"), GUILayout.Width(90f)))
                 {
                     RevivalPlugin.CfgPatrolRoute.Value = r.Name;
                     if (!_recording) ToggleRecording();
-                    Melde("recording into " + r.Name);
+                    Melde(Loc.T("запись в ", "recording into ") + r.Name);
                 }
-                if (GUILayout.Button("patrol now", GUILayout.Width(85f))) Jetzt(r);
+                if (GUILayout.Button(Loc.T("патруль сейчас", "patrol now"), GUILayout.Width(85f))) Jetzt(r);
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
                 if (_loeschFrage == r.Name)
                 {
-                    GUILayout.Label("Delete " + r.Name + " and its " + r.P.Count
-                        + " waypoints?", GUILayout.Width(250f));
-                    if (GUILayout.Button("yes, delete", GUILayout.Width(90f))) Loeschen(r);
-                    if (GUILayout.Button("no", GUILayout.Width(40f))) _loeschFrage = "";
+                    GUILayout.Label(Loc.T("Удалить ", "Delete ") + r.Name
+                        + Loc.T(" и его точек: ", " and its ") + r.P.Count
+                        + Loc.T("?", " waypoints?"), GUILayout.Width(250f));
+                    if (GUILayout.Button(Loc.T("да, удалить", "yes, delete"), GUILayout.Width(90f))) Loeschen(r);
+                    if (GUILayout.Button(Loc.T("нет", "no"), GUILayout.Width(40f))) _loeschFrage = "";
                 }
                 else
                 {
-                    if (GUILayout.Button("delete route", GUILayout.Width(100f)))
+                    if (GUILayout.Button(Loc.T("удалить маршрут", "delete route"), GUILayout.Width(100f)))
                         _loeschFrage = r.Name;
                 }
                 GUILayout.EndHorizontal();
@@ -13472,7 +13927,7 @@ namespace NextDayRevival
                     && r.Vehicle != was)
                 {
                     r.Vehicle = was;
-                    Sichern(r.Name + " drives " + was);
+                    Sichern(r.Name + Loc.T(" - техника ", " drives ") + was);
                 }
             }
 
@@ -13487,16 +13942,18 @@ namespace NextDayRevival
             static void Anlegen()
             {
                 string name = _neu == null ? "" : _neu.Trim();
-                if (name.Length == 0) { Melde("a route needs a name"); return; }
+                if (name.Length == 0) { Melde(Loc.T("маршруту нужно имя", "a route needs a name")); return; }
                 if (name.IndexOf('\t') >= 0 || name[0] == '#')
                 {
-                    Melde("no tabs and no leading # - the file is a TSV");
+                    Melde(Loc.T("без табов и без # в начале - файл это TSV",
+                                "no tabs and no leading # - the file is a TSV"));
                     return;
                 }
                 Load(false);
                 if (_routes.ContainsKey(name))
                 {
-                    Melde("\"" + name + "\" is already there - use \"record into\"");
+                    Melde("\"" + name + "\"" + Loc.T(" уже есть - используйте \"писать сюда\"",
+                                                     " is already there - use \"record into\""));
                     return;
                 }
                 Route r = new Route();
@@ -13506,16 +13963,18 @@ namespace NextDayRevival
                 RevivalPlugin.CfgPatrolRoute.Value = name;
                 _neu = "";
                 if (!_recording) ToggleRecording();
-                Melde("recording " + name + " - drive the road, then press stop");
+                Melde(Loc.T("запись " + name + " - проедьте дорогу, затем стоп",
+                            "recording " + name + " - drive the road, then press stop"));
             }
 
             static void Zurueck()
             {
                 Route r = Active();
-                if (r == null || r.P.Count == 0) { Melde("nothing to undo"); return; }
+                if (r == null || r.P.Count == 0) { Melde(Loc.T("отменять нечего", "nothing to undo")); return; }
                 r.P.RemoveAt(r.P.Count - 1);
                 Save();
-                Melde(r.Name + " now has " + r.P.Count + " waypoints");
+                Melde(r.Name + Loc.T(" теперь имеет точек: ", " now has ") + r.P.Count
+                      + Loc.T("", " waypoints"));
             }
 
             static void Loeschen(Route r)
@@ -13524,7 +13983,7 @@ namespace NextDayRevival
                 _routes.Remove(r.Name);
                 _order.Remove(r.Name);
                 Save();
-                Melde(r.Name + " deleted");
+                Melde(r.Name + Loc.T(" удалён", " deleted"));
                 RevivalPlugin.L.LogInfo("Patrol: route " + r.Name + " deleted from "
                     + RevivalPlugin.CfgPatrolFile.Value + ".");
             }
@@ -13534,19 +13993,23 @@ namespace NextDayRevival
             /// a route that works here works there.</summary>
             static void Jetzt(Route r)
             {
-                if (r.P.Count < 3) { Melde(r.Name + " needs at least three waypoints"); return; }
+                if (r.P.Count < 3) { Melde(r.Name + Loc.T(" нужно минимум три точки", " needs at least three waypoints")); return; }
                 int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
                 if (_units.Count >= max)
                 {
-                    Melde("MaxVehicles is " + max + " and " + _units.Count
-                          + " are out - clear the road first");
+                    Melde(Loc.T("MaxVehicles = " + max + ", в рейсе " + _units.Count
+                          + " - сначала уберите с дороги",
+                            "MaxVehicles is " + max + " and " + _units.Count
+                          + " are out - clear the road first"));
                     return;
                 }
                 int before = _units.Count;
                 Spawn(r, false);
                 Melde(_units.Count > before
-                    ? r.Name + ": one " + r.Seite + " patrol on the road"
-                    : "the vehicle could not be put down - see the log");
+                    ? r.Name + Loc.T(": один патруль (" + r.Seite + ") на дороге",
+                                     ": one " + r.Seite + " patrol on the road")
+                    : Loc.T("технику не удалось выставить - см. лог",
+                            "the vehicle could not be put down - see the log"));
             }
 
             static void Melde(string text)
@@ -13757,10 +14220,10 @@ namespace NextDayRevival
         {
             switch (Sauber(name))
             {
-                case "civilian": return "attacks everyone but civilians";
-                case "looter": return "attacks everyone but looters";
-                case "traitor": return "attacks EVERYONE, traitors included";
-                default: return "attacks traitors only";
+                case "civilian": return Loc.T("бьёт всех, кроме civilian", "attacks everyone but civilians");
+                case "looter": return Loc.T("бьёт всех, кроме looter", "attacks everyone but looters");
+                case "traitor": return Loc.T("бьёт ВСЕХ, включая traitor", "attacks EVERYONE, traitors included");
+                default: return Loc.T("бьёт только traitor", "attacks traitors only");
             }
         }
 
@@ -14298,7 +14761,8 @@ namespace NextDayRevival
                     + " out of the "
                     + (tank ? "tank" : "BTR") + " at " + car.transform.position
                     + " - " + _settlements.Count + " crew(s) on the ground.");
-                Turret.Hinweis(count + " " + wer + " out of the wreck", 4f);
+                Turret.Hinweis(count + " " + wer + Loc.T(" выбрались из обломков",
+                                                         " out of the wreck"), 4f);
             }
             catch (Exception ex)
             {
@@ -15396,7 +15860,7 @@ namespace NextDayRevival
                 Net.Send(Net.Hit, remoteHit.Id, remoteHit.Go.transform.position,
                          Vector3.zero, remoteHit.Owner, true);
             }
-            Turret.Hinweis("Crew drone hit", 0.6f);
+            Turret.Hinweis(Loc.T("Дрон экипажа подбит", "Crew drone hit"), 0.6f);
             return true;
         }
 
@@ -17256,13 +17720,13 @@ namespace NextDayRevival
             GUI.DrawTexture(new Rect(bx, by, bw * akku, bh), _dot);
 
             float hoehe = Hoehe();
-            string zeile = "AKKU " + Mathf.RoundToInt(akku * 100f) + "%"
-                + "   ENTF " + Mathf.RoundToInt(Entfernung()) + " m"
-                + "   HOEHE " + (hoehe < 0f ? "--" : Mathf.RoundToInt(hoehe).ToString()) + " m"
+            string zeile = Loc.T("БАТ ", "BAT ") + Mathf.RoundToInt(akku * 100f) + "%"
+                + Loc.T("   ДИСТ ", "   DIST ") + Mathf.RoundToInt(Entfernung()) + " m"
+                + Loc.T("   ВЫС ", "   ALT ") + (hoehe < 0f ? "--" : Mathf.RoundToInt(hoehe).ToString()) + " m"
                 + "   SIG " + Mathf.RoundToInt(sig * 100f) + "%";
-            if (Jammer.Warnt) zeile = "STOERSENDER   " + zeile;
-            else if (Motorlos()) zeile = "AKKU LEER - SIE FAELLT   " + zeile;
-            else if (sig < 0.35f) zeile = "SIGNAL SCHWACH   " + zeile;
+            if (Jammer.Warnt) zeile = Loc.T("ГЛУШИТЕЛЬ", "JAMMER") + "   " + zeile;
+            else if (Motorlos()) zeile = Loc.T("БАТ РАЗРЯЖЕНА - ПАДЕНИЕ", "BATTERY EMPTY - FALLING") + "   " + zeile;
+            else if (sig < 0.35f) zeile = Loc.T("СЛАБЫЙ СИГНАЛ", "WEAK SIGNAL") + "   " + zeile;
 
             GUI.color = new Color(0f, 0f, 0f, 0.85f);
             GUI.Label(new Rect(bx + 1f, by + bh + 5f, w, 22f), zeile);

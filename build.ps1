@@ -69,7 +69,13 @@ $refs = @(
     (Join-Path $managed "UnityEngine.ParticleSystemModule.dll")
 ) | Where-Object { Test-Path $_ }
 
-$cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2", "/out:$staged")
+# /codepage:65001 - RevivalPlugin.cs is UTF-8 (no BOM) and now carries Russian
+# string literals for the in-game text. Without this flag csc reads the source
+# under the system ANSI code page and the Cyrillic turns into mojibake in the
+# compiled strings. The file stays BOM-less so the Python tools that read it as
+# plain UTF-8 (verify.py) see no leading marker.
+$cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2",
+             "/codepage:65001", "/out:$staged")
 foreach ($r in $refs) { $cscArgs += "/reference:$r" }
 $cscArgs += $src
 
