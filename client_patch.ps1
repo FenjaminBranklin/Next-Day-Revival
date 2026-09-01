@@ -459,7 +459,16 @@ if ($NoPlugin) {
             $skip = $false
             foreach ($p in $aus) { if ($f.Name -like $p) { $skip = $true } }
             if ($skip) { continue }
-            Copy-Item $f.FullName (Join-Path $assetZiel $f.Name) -Force
+
+            $assetAusgabe = Join-Path $assetZiel $f.Name
+            # The in-game recorder writes this file. An update must never
+            # replace locally recorded routes with the package's starter file.
+            # build.ps1 follows the same rule.
+            if ($f.Name -eq "ndr_routes.tsv" -and (Test-Path $assetAusgabe)) {
+                Info "Route-Datei behalten: BepInEx\plugins\assets\ndr_routes.tsv"
+                continue
+            }
+            Copy-Item $f.FullName $assetAusgabe -Force
             $n++
         }
         Gut ("{0} Assets kopiert -> BepInEx\plugins\assets" -f $n)
