@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.15";
+        public const string VERSION = "0.5.16";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -13268,12 +13268,24 @@ namespace NextDayRevival
                 // LOCAL to the clip. Projected points are offset by -clip.pos to
                 // match, and the dash routines cull against the local rect.
                 Rect localClip = new Rect(0f, 0f, clip.width, clip.height);
+
+                // Hovering the enclosed area of a route pops a note about the
+                // patrols it carries. The ring is tested in clip-LOCAL space, so
+                // the absolute cursor is shifted by -clip.position to match; the
+                // box itself is drawn after EndClip in absolute coordinates so it
+                // can sit over the map edge and is never scissored.
+                Vector2 mouseAbs = Event.current.mousePosition;
+                Vector2 mouseLocal = mouseAbs - clip.position;
+                string hoverText = null;
+                Vector2 hoverAt = Vector2.zero;
+                Color hoverColor = Color.white;
+
                 GUI.BeginClip(clip);
                 try
                 {
-                    // Every dash point drawn so far, so a route crossing one
-                    // drawn earlier is trimmed around the crossing. Routes are
-                    // drawn in file order; the earlier route keeps its line.
+                    // Every dash point drawn so far, so a later route's ring is
+                    // trimmed where it crosses one drawn earlier. Routes are
+                    // drawn in file order; the earlier ring keeps its line.
                     ClearGrid grid = new ClearGrid(RouteClearance);
 
                     for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
@@ -13282,37 +13294,58 @@ namespace NextDayRevival
                         if (!_routes.TryGetValue(_order[routeIndex], out route)
                             || route == null || route.P.Count < 2) continue;
 
-                        // The waypoints, CONNECTED, are one line, cut into evenly
-                        // spaced dashes by walking its arc length - the individual
-                        // waypoints are never dashes of their own. Colour is the
-                        // patrol's faction: looter and traitor red, civilian
-                        // green, neutral white.
-                        GUI.color = RouteColor(route.Seite, route.Enabled);
-
-                        // This route's own dash points. Added to the grid only
-                        // after the whole route is done, so it never clears
-                        // against itself.
-                        List<Vector2> ink = new List<Vector2>();
-
-                        // Project the waypoints to the map (local to the clip),
-                        // splitting into runs wherever a point cannot project.
-                        List<Vector2> run = new List<Vector2>(route.P.Count);
-                        float phase = 0f;
+                        // Project every waypoint that lands on the map, keeping
+                        // the world position beside it so the metre->pixel scale
+                        // can be measured for the outward padding.
+                        List<Vector2> proj = new List<Vector2>(route.P.Count);
+                        List<Vector3> wpos = new List<Vector3>(route.P.Count);
                         for (int i = 0; i < route.P.Count; i++)
                         {
                             Vector2 g;
                             if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
                                                     world, map, out g))
-                                run.Add(g - clip.position);
-                            else
                             {
-                                DashRun(run, ref phase, localClip, grid, ink);
-                                run.Clear();
+                                proj.Add(g - clip.position);
+                                wpos.Add(route.P[i].Pos);
                             }
                         }
-                        DashRun(run, ref phase, localClip, grid, ink);
+                        if (proj.Count < 2) continue;
 
+                        // Instead of dashing the connected line, ENCIRCLE the
+                        // whole run with ONE smooth closed boundary: the convex
+                        // hull of the waypoints, pushed outward by the configured
+                        // half-width (metres -> pixels), corner-cut into a clean
+                        // loop. The dashes then trace that ring, never the
+                        // individual waypoints, so nothing scribbles.
+                        float ppm = PixelsPerMetre(proj, wpos);
+                        float pad = RouteMapPad(ppm);
+                        List<Vector2> ring = EncircleRun(proj, pad);
+                        if (ring == null || ring.Count < 3) continue;
+
+                        // Colour is the patrol's faction: looter and traitor
+                        // red, civilian green, neutral white.
+                        Color col = RouteColor(route.Seite, route.Enabled);
+                        GUI.color = col;
+
+                        // This ring's own dash points, added to the grid only
+                        // after it is fully drawn so it never clears itself.
+                        List<Vector2> ink = new List<Vector2>();
+                        DashClosed(ring, localClip, grid, ink);
                         grid.Add(ink);
+
+                        // First ring under the cursor wins the note.
+                        if (hoverText == null && PointInPolygon(ring, mouseLocal))
+                        {
+                            hoverText = Loc.T(
+                                "Здесь регулярно проходят патрули. Возможно, "
+                                + "они везут ценный груз, но они опасны, хорошо "
+                                + "вооружены и имеют FPV-дрон.",
+                                "Regular patrols pass through here. They may be "
+                                + "carrying valuable cargo, but they are dangerous, "
+                                + "heavily armed, and have an FPV drone.");
+                            hoverAt = mouseAbs;
+                            hoverColor = col;
+                        }
                     }
                 }
                 finally { GUI.EndClip(); }
@@ -13337,6 +13370,11 @@ namespace NextDayRevival
                 GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
                           Loc.T("F4: изменить или удалить маршруты патрулей",
                                 "F4: edit or delete patrol routes"));
+
+                // The hover note, on top of everything, beside the cursor and
+                // clamped onto the screen.
+                if (hoverText != null)
+                    DrawHoverNote(hoverText, hoverAt, hoverColor);
             }
             catch (Exception ex)
             {
@@ -13375,103 +13413,247 @@ namespace NextDayRevival
         }
 
         // Dash cadence in SCREEN pixels. Dash and gap are the on/off run
-        // lengths walked along the route's arc length; stroke is the line
-        // thickness. Each dash is drawn as ONE straight rectangle with SQUARE
-        // butt caps (see <see cref="DrawStraightDash"/>) - the user asked for
-        // square edges, not the round-capped stamps that read as wobbly
-        // ("krakelig") at the dash ends. The stroke was thinned from 8.5.
-        const float RouteDash = 46f;
-        const float RouteGap = 30f;
-        const float RouteStroke = 6f;
+        // lengths walked along the enclosing RING's arc length; stroke is the
+        // line thickness. Each dash is a short chain of ANTIALIASED feathered
+        // bars (see <see cref="Bar"/>) that FOLLOWS the ring's arc, so the dash
+        // itself curves smoothly with the boundary; the long SIDES are feathered
+        // (smooth, not pixelated) and constant in thickness, while the two ENDS
+        // stay hard and FLAT (kantig) - no round caps. RouteDash/RouteGap are
+        // nominal: the ring is tiled with a whole number of them so the gaps are
+        // even the whole way round with no seam (see <see cref="DashClosed"/>).
+        const float RouteDash = 40f;
+        const float RouteGap = 28f;
+        const float RouteStroke = 4.5f;
 
-        // Path shaping, all in screen pixels / iterations. Resampling drops the
-        // projected waypoints onto an even arc-length grid FIRST, so the dash
-        // cadence no longer depends on how many points the recorder wrote.
-        // Smoothing is deliberately LIGHT: at 5 waypoints a second the recorded
-        // path already traces the driven road faithfully, and heavy Chaikin
-        // corner-cutting used to pull the line to the inside of bends and off
-        // the road (the "line runs beside the road" the user reported). One
-        // low-pass pass plus two Chaikin passes rounds jitter without leaving
-        // the road; a straight chord per dash then keeps the ends square.
-        const float RouteResample = 20f;
-        const int RouteSmoothPasses = 2;
-        const int RouteLowpassPasses = 1;
+        // The length of each straight bar inside a curved dash, and the small
+        // overlap that keeps consecutive bars meeting without a notch on the
+        // outside of a bend. Shorter step -> smoother curve. A dash FOLLOWS the
+        // ring's arc, so its ends are tangent to the ring and each dash points
+        // at the next - the eye draws one continuous line through them - and a
+        // dash only curves where the ring actually bends; on a straight run it
+        // stays straight.
+        const float RouteCurveStep = 5f;
+        const float RouteSegOverlap = 1.2f;
 
-        // A route that crosses one drawn earlier is trimmed back within this
-        // radius of the earlier line, reopening a clean gap instead of letting
-        // the two sets of dashes pile into a blob at the crossing.
-        const float RouteClearance = 18f;
+        // The enclosing ring is resampled to this even spacing before dashing,
+        // and corner-cut this many times, so the hull reads as a smooth loop
+        // rather than a polygon and the bars have a clean arc to follow.
+        const float RouteResample = 6f;
+        const int RouteRingSmooth = 4;
+
+        // Half-width, in metres, of the ring around a route when the config is
+        // unavailable, and the pixel range the metre padding is clamped to so a
+        // near-collinear route still gets a visible ring and a sprawling one
+        // does not balloon off the map.
+        const float RoutePadMetres = 45f;
+        const float RoutePadMinPx = 22f;
+        const float RoutePadMaxPx = 140f;
+
+        // A route ring that crosses one drawn earlier is trimmed back within
+        // this radius of the earlier line, reopening a clean gap instead of
+        // letting the two sets of dashes pile into a blob at the crossing.
+        const float RouteClearance = 14f;
+
+        /// <summary>The measured screen-pixels-per-metre of the map, from the
+        /// total projected pixel length of the run over its total world (XZ)
+        /// length. The map does not zoom, so one number holds for the whole
+        /// overlay; averaging the whole run shrugs off any single bad pair. A
+        /// safe fallback is returned when the run has no measurable length.
+        /// </summary>
+        static float PixelsPerMetre(List<Vector2> proj, List<Vector3> wpos)
+        {
+            double pix = 0.0, met = 0.0;
+            int n = Mathf.Min(proj.Count, wpos.Count);
+            for (int i = 1; i < n; i++)
+            {
+                pix += (proj[i] - proj[i - 1]).magnitude;
+                float dx = wpos[i].x - wpos[i - 1].x;
+                float dz = wpos[i].z - wpos[i - 1].z;
+                met += Mathf.Sqrt(dx * dx + dz * dz);
+            }
+            if (met < 1e-3) return 0.35f;
+            return (float)(pix / met);
+        }
+
+        /// <summary>The outward padding of the ring in PIXELS: the configured
+        /// half-width in metres (falling back to a default) turned into pixels
+        /// by the measured scale, then clamped so a near-straight route still
+        /// gets a visible ring and a sprawling one does not balloon.</summary>
+        static float RouteMapPad(float ppm)
+        {
+            float metres = RoutePadMetres;
+            if (RevivalPlugin.CfgPatrolRouteMapWidth != null)
+                metres = RevivalPlugin.CfgPatrolRouteMapWidth.Value;
+            return Mathf.Clamp(metres * ppm, RoutePadMinPx, RoutePadMaxPx);
+        }
 
         /// <summary>
-        /// Cuts one connected run of screen points into evenly spaced dashes by
-        /// walking its arc length. The projected waypoints are shaped first
-        /// (see <see cref="ShapeMapRun"/>), then each dash is drawn as one
-        /// straight rectangle between its two arc-length points. Because the
-        /// shaped run turns only at the gaps between dashes, the sequence still
-        /// traces the bend, but every individual dash keeps square ends. The
-        /// dash phase carries across runs so the pattern stays regular. Dashes
-        /// within the clearance of an earlier route are dropped; the survivors
-        /// are collected into <paramref name="ink"/> for later routes to clear
-        /// on. Coordinates are LOCAL to the map clip (see <see cref="DrawMap"/>).
+        /// Builds ONE smooth closed boundary around a projected run: the convex
+        /// hull of the waypoints (a rectangle capsule when they are collinear),
+        /// pushed outward by <paramref name="pad"/>, corner-cut into a rounded
+        /// loop and resampled to an even spacing. The returned list is CLOSED
+        /// (its last point repeats the first) so the dasher can walk it as a
+        /// ring. Coordinates are LOCAL to the map clip.
         /// </summary>
-        static void DashRun(List<Vector2> pts, ref float phase, Rect clip,
-                            ClearGrid grid, List<Vector2> ink)
+        static List<Vector2> EncircleRun(List<Vector2> pts, float pad)
         {
-            if (pts == null || pts.Count < 2) return;
-            pts = ShapeMapRun(pts);
+            List<Vector2> hull = ConvexHull(pts);
+            List<Vector2> ring = hull.Count < 3 ? CapsuleRing(pts, pad)
+                                                : ExpandHull(hull, pad);
+            if (ring == null || ring.Count < 3) return null;
+            ring = ChaikinClosed(ring, RouteRingSmooth);
+            ring.Add(ring[0]);                       // close the loop
+            ring = Resample(ring, RouteResample);
+            return ring;
+        }
+
+        /// <summary>Andrew's monotone-chain convex hull. Returns the hull
+        /// vertices in order without the closing repeat; fewer than three means
+        /// the input was collinear.</summary>
+        static List<Vector2> ConvexHull(List<Vector2> points)
+        {
+            int n = points.Count;
+            if (n < 3) return new List<Vector2>(points);
+            List<Vector2> pts = new List<Vector2>(points);
+            pts.Sort(CompareVec);
+            Vector2[] h = new Vector2[2 * n];
+            int k = 0;
+            for (int i = 0; i < n; i++)                 // lower hull
+            {
+                while (k >= 2 && Cross(h[k - 2], h[k - 1], pts[i]) <= 0f) k--;
+                h[k++] = pts[i];
+            }
+            for (int i = n - 2, t = k + 1; i >= 0; i--) // upper hull
+            {
+                while (k >= t && Cross(h[k - 2], h[k - 1], pts[i]) <= 0f) k--;
+                h[k++] = pts[i];
+            }
+            List<Vector2> res = new List<Vector2>(k - 1);
+            for (int i = 0; i < k - 1; i++) res.Add(h[i]);
+            return res;
+        }
+
+        static int CompareVec(Vector2 a, Vector2 b)
+        {
+            if (a.x < b.x) return -1;
+            if (a.x > b.x) return 1;
+            if (a.y < b.y) return -1;
+            if (a.y > b.y) return 1;
+            return 0;
+        }
+
+        static float Cross(Vector2 o, Vector2 a, Vector2 b)
+        {
+            return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        }
+
+        /// <summary>Pushes every hull vertex outward along the average of its
+        /// two edge normals by <paramref name="pad"/> pixels, expanding the
+        /// convex polygon. The centroid disambiguates which way is out, so the
+        /// result never collapses inward. Chaikin later rounds the corners.
+        /// </summary>
+        static List<Vector2> ExpandHull(List<Vector2> hull, float pad)
+        {
+            int n = hull.Count;
+            Vector2 c = Vector2.zero;
+            for (int i = 0; i < n; i++) c += hull[i];
+            c /= n;
+            List<Vector2> outp = new List<Vector2>(n);
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 prev = hull[(i - 1 + n) % n];
+                Vector2 cur = hull[i];
+                Vector2 next = hull[(i + 1) % n];
+                Vector2 n0 = Outward(new Vector2((cur - prev).y, -(cur - prev).x), cur, c);
+                Vector2 n1 = Outward(new Vector2((next - cur).y, -(next - cur).x), cur, c);
+                Vector2 nrm = n0 + n1;
+                if (nrm.sqrMagnitude < 1e-6f) nrm = cur - c;
+                if (nrm.sqrMagnitude < 1e-6f) nrm = new Vector2(0f, -1f);
+                nrm.Normalize();
+                outp.Add(cur + nrm * pad);
+            }
+            return outp;
+        }
+
+        static Vector2 Outward(Vector2 nrm, Vector2 at, Vector2 centre)
+        {
+            if (nrm.sqrMagnitude < 1e-9f) return nrm;
+            nrm.Normalize();
+            return Vector2.Dot(nrm, at - centre) < 0f ? -nrm : nrm;
+        }
+
+        /// <summary>A four-corner rectangle around a collinear run: the two end
+        /// waypoints extended by <paramref name="pad"/> and offset to both
+        /// sides by the same, so a dead-straight route still encloses an area.
+        /// </summary>
+        static List<Vector2> CapsuleRing(List<Vector2> pts, float pad)
+        {
+            Vector2 a = pts[0], b = pts[pts.Count - 1];
+            Vector2 d = b - a;
+            if (d.sqrMagnitude < 1f) { b = a + new Vector2(1f, 0f); d = b - a; }
+            Vector2 dir = d.normalized;
+            Vector2 nrm = new Vector2(-dir.y, dir.x);
+            List<Vector2> r = new List<Vector2>(4);
+            r.Add(a - dir * pad + nrm * pad);
+            r.Add(b + dir * pad + nrm * pad);
+            r.Add(b + dir * pad - nrm * pad);
+            r.Add(a - dir * pad - nrm * pad);
+            return r;
+        }
+
+        /// <summary>Chaikin corner-cutting over a CLOSED polygon: every edge,
+        /// including the wrap from last vertex to first, is cut a quarter in
+        /// from each end. No endpoint is special, so the whole loop rounds
+        /// evenly with no seam.</summary>
+        static List<Vector2> ChaikinClosed(List<Vector2> pts, int iters)
+        {
+            List<Vector2> cur = new List<Vector2>(pts);
+            for (int it = 0; it < iters; it++)
+            {
+                int n = cur.Count;
+                if (n < 3) break;
+                List<Vector2> next = new List<Vector2>(n * 2);
+                for (int i = 0; i < n; i++)
+                {
+                    Vector2 a = cur[i], b = cur[(i + 1) % n];
+                    next.Add(a * 0.75f + b * 0.25f);
+                    next.Add(a * 0.25f + b * 0.75f);
+                }
+                cur = next;
+            }
+            return cur;
+        }
+
+        /// <summary>Walks the closed ring's arc length and lays down evenly
+        /// spaced curved dashes. The whole loop is tiled with a WHOLE number of
+        /// dash+gap periods, so the gap is even the whole way round and the seam
+        /// where the loop closes carries a proper gap too, not a doubled-up dash
+        /// (the "gap not kept at the top-left" the user saw). Each dash curves
+        /// gently along the boundary (see <see cref="DrawCurvedDash"/>). Dashes
+        /// within an earlier route's clearance are dropped, and the survivors
+        /// feed <paramref name="ink"/> for later routes. Coordinates are LOCAL
+        /// to the map clip.</summary>
+        static void DashClosed(List<Vector2> pts, Rect clip,
+                               ClearGrid grid, List<Vector2> ink)
+        {
             int n = pts.Count;
-            if (n < 2) { phase = 0f; return; }
+            if (n < 2) return;
             float[] cum = new float[n];
             for (int i = 1; i < n; i++)
                 cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).magnitude;
             float total = cum[n - 1];
-            if (total < 1f) { phase = 0f; return; }
+            if (total < 1f) return;
 
             float period = RouteDash + RouteGap;
-            // Begin at the dash boundary preceding this run, so a dash that was
-            // mid-stroke at the previous run's end continues seamlessly here.
-            for (float ds = -(phase % period); ds < total; ds += period)
+            int count = Mathf.Max(1, Mathf.RoundToInt(total / period));
+            float step = total / count;                   // even, seam-free
+            float dash = Mathf.Min(RouteDash, step - 4f);  // keep a real gap
+            if (dash < 2f) dash = step;
+            for (int k = 0; k < count; k++)
             {
-                float start = Mathf.Max(ds, 0f);
-                float end = Mathf.Min(ds + RouteDash, total);
-                if (end <= start) continue;
-                DrawStraightDash(pts, cum, start, end, clip, grid, ink);
+                float start = k * step;
+                DrawCurvedDash(pts, cum, start, start + dash, clip, grid, ink);
             }
-            phase = (phase + total) % period;
-        }
-
-        /// <summary>Turns a dense, jittery projected run into a clean line:
-        /// a short low-pass knocks down recorder noise, resampling drops the
-        /// points onto an even arc-length grid (so the dash cadence no longer
-        /// tracks the waypoint count), and Chaikin corner-cutting rounds the
-        /// bends. Endpoints are preserved throughout.</summary>
-        static List<Vector2> ShapeMapRun(List<Vector2> pts)
-        {
-            if (pts.Count < 3) return pts;
-            List<Vector2> s = Lowpass(pts, RouteLowpassPasses);
-            s = Resample(s, RouteResample);
-            s = Chaikin(s, RouteSmoothPasses);
-            return s;
-        }
-
-        /// <summary>A short symmetric [1,2,1]/4 low-pass, N passes. Suppresses
-        /// point-to-point jitter while keeping the broad direction changes.
-        /// Endpoints remain exactly where they were.</summary>
-        static List<Vector2> Lowpass(List<Vector2> pts, int passes)
-        {
-            if (pts.Count < 3) return pts;
-            List<Vector2> current = new List<Vector2>(pts);
-            for (int pass = 0; pass < passes; pass++)
-            {
-                List<Vector2> next = new List<Vector2>(current.Count);
-                next.Add(current[0]);
-                for (int i = 1; i < current.Count - 1; i++)
-                    next.Add((current[i - 1] + current[i] * 2f
-                              + current[i + 1]) * 0.25f);
-                next.Add(current[current.Count - 1]);
-                current = next;
-            }
-            return current;
         }
 
         /// <summary>Resamples a polyline to a uniform arc-length spacing, so the
@@ -13507,62 +13689,147 @@ namespace NextDayRevival
             return outp;
         }
 
-        /// <summary>Chaikin corner-cutting. Each pass replaces every interior
-        /// corner with two points a quarter in from each side, rounding the
-        /// line. Endpoints are preserved.</summary>
-        static List<Vector2> Chaikin(List<Vector2> pts, int iters)
+        /// <summary>Draw one dash by FOLLOWING the ring's arc between its two
+        /// arc-length points: it samples the smoothed ring itself, so the dash
+        /// is straight where the ring is straight and curves only where the ring
+        /// bends, and its two ends are TANGENT to the ring - each dash points at
+        /// the next, so the eye draws one continuous line through the whole loop.
+        /// It is tessellated into a chain of antialiased <see cref="Bar"/>
+        /// segments (smooth sides, constant thickness) with the two outer ends
+        /// left hard and FLAT. Dropped if its midpoint falls within an earlier
+        /// route's clearance; its sample points feed <paramref name="ink"/> so
+        /// later routes clear against it. The caller has set <see
+        /// cref="GUI.color"/> and a hard map clip.</summary>
+        static void DrawCurvedDash(List<Vector2> pts, float[] cum,
+                                   float start, float end, Rect clip,
+                                   ClearGrid grid, List<Vector2> ink)
         {
-            List<Vector2> cur = pts;
-            for (int it = 0; it < iters; it++)
-            {
-                if (cur.Count < 3) break;
-                List<Vector2> next = new List<Vector2>(cur.Count * 2);
-                next.Add(cur[0]);
-                for (int i = 0; i < cur.Count - 1; i++)
-                {
-                    Vector2 a = cur[i], b = cur[i + 1];
-                    next.Add(a * 0.75f + b * 0.25f);
-                    next.Add(a * 0.25f + b * 0.75f);
-                }
-                next.Add(cur[cur.Count - 1]);
-                cur = next;
-            }
-            return cur;
-        }
-
-        /// <summary>Draw one dash as a single straight rectangle between its two
-        /// arc-length points, rotated to the chord's heading. The rectangle has
-        /// SQUARE butt caps - no round stamps, so the dash ends read as clean
-        /// straight edges rather than the wobbly blobs the round brush produced.
-        /// The dash is dropped if its midpoint falls within an earlier route's
-        /// clearance; the two endpoints and the midpoint are handed to
-        /// <paramref name="ink"/> so later routes clear against this line. The
-        /// caller has already set <see cref="GUI.color"/> to the faction hue and
-        /// wrapped the draw in a hard map clip, so nothing can leave the map.
-        /// </summary>
-        static void DrawStraightDash(List<Vector2> pts, float[] cum,
-                                     float start, float end, Rect clip,
-                                     ClearGrid grid, List<Vector2> ink)
-        {
-            Vector2 a = PointAtArc(pts, cum, start);
-            Vector2 b = PointAtArc(pts, cum, end);
-            Vector2 mid = (a + b) * 0.5f;
+            Vector2 mid = PointAtArc(pts, cum, (start + end) * 0.5f);
             // Cheap cull; the surrounding GUI.BeginClip is the real boundary.
             if (!clip.Contains(mid)) return;
             if (grid != null && grid.Blocked(mid)) return;
 
+            float len = end - start;
+            if (len < 0.5f) return;
+            int steps = Mathf.Max(1, Mathf.CeilToInt(len / RouteCurveStep));
+            Vector2 prev = PointAtArc(pts, cum, start);
+            if (ink != null) ink.Add(prev);
+            for (int s = 1; s <= steps; s++)
+            {
+                float d = start + len * (s / (float)steps);
+                Vector2 p = PointAtArc(pts, cum, d);
+                DrawBar(prev, p, s > 1, s < steps);
+                if (ink != null) ink.Add(p);
+                prev = p;
+            }
+        }
+
+        /// <summary>One antialiased bar of a curved dash, from <paramref
+        /// name="a"/> to <paramref name="b"/>, rotated to the chord. It is grown
+        /// by half the overlap on any INNER end so consecutive bars meet with no
+        /// notch on the outside of a bend; the dash's two OUTER ends are left
+        /// flush so they stay flat and crisp. The <see cref="Bar"/> texture
+        /// feathers the long sides.</summary>
+        static void DrawBar(Vector2 a, Vector2 b, bool growA, bool growB)
+        {
             Vector2 dir = b - a;
             float len = dir.magnitude;
-            if (len < 0.5f) return;
+            if (len < 0.25f) return;
+            Vector2 u = dir / len;
+            if (growA) { a -= u * (RouteSegOverlap * 0.5f); }
+            if (growB) { b += u * (RouteSegOverlap * 0.5f); }
+            dir = b - a;
+            len = dir.magnitude;
+            Vector2 mid = (a + b) * 0.5f;
             float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
 
             Matrix4x4 m = GUI.matrix;
             GUIUtility.RotateAroundPivot(angle, mid);
             GUI.DrawTexture(new Rect(mid.x - len * 0.5f, mid.y - RouteStroke * 0.5f,
-                                     len, RouteStroke), Texture2D.whiteTexture);
+                                     len, RouteStroke), Bar());
             GUI.matrix = m;
+        }
 
-            if (ink != null) { ink.Add(a); ink.Add(mid); ink.Add(b); }
+        /// <summary>A cached bar texture for one dash: fully opaque across its
+        /// width so the dash ENDS stay hard and flat, with the top and bottom
+        /// rows feathered to zero alpha so the long SIDES are antialiased when
+        /// the bar is stretched to the stroke height and rotated. Bilinear
+        /// filtering and clamp wrapping keep the sides smooth and the ends crisp.
+        /// White RGB, so <see cref="GUI.color"/> tints it to the faction hue.
+        /// </summary>
+        static Texture2D _bar;
+        static Texture2D Bar()
+        {
+            if (_bar != null) return _bar;
+            const int w = 4, h = 16;
+            const float feather = 3f;      // rows faded at each side
+            Texture2D t = new Texture2D(w, h, TextureFormat.ARGB32, false);
+            t.wrapMode = TextureWrapMode.Clamp;
+            t.filterMode = FilterMode.Bilinear;
+            Color[] px = new Color[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                float edge = Mathf.Min(y, h - 1 - y) + 0.5f;   // dist to nearer side
+                float a = Mathf.Clamp01(edge / feather);
+                a = a * a * (3f - 2f * a);                      // smoothstep
+                for (int x = 0; x < w; x++)
+                    px[y * w + x] = new Color(1f, 1f, 1f, a);
+            }
+            t.SetPixels(px);
+            t.Apply();
+            _bar = t;
+            return t;
+        }
+
+        /// <summary>Even-odd ray cast: is the point inside the polygon? The ring
+        /// may carry a closing repeat of its first vertex; the degenerate edge
+        /// that makes is harmless here.</summary>
+        static bool PointInPolygon(List<Vector2> poly, Vector2 p)
+        {
+            int n = poly.Count;
+            bool inside = false;
+            for (int i = 0, j = n - 1; i < n; j = i++)
+            {
+                Vector2 a = poly[i], b = poly[j];
+                if (((a.y > p.y) != (b.y > p.y)) &&
+                    (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x))
+                    inside = !inside;
+            }
+            return inside;
+        }
+
+        /// <summary>The hover note beside the cursor: a dark panel with a
+        /// faction-coloured hairline border and word-wrapped text, clamped so it
+        /// stays on the screen. Drawn in ABSOLUTE GUI coordinates, after the map
+        /// clip is closed, so it may sit over the map's edge.</summary>
+        static void DrawHoverNote(string text, Vector2 at, Color accent)
+        {
+            const float w = 260f;
+            GUIStyle body = new GUIStyle(GUI.skin.label);
+            body.wordWrap = true;
+            body.padding = new RectOffset(9, 9, 8, 8);
+            body.normal.textColor = new Color(0.96f, 0.96f, 0.96f);
+            float h = body.CalcHeight(new GUIContent(text), w);
+
+            float x = at.x + 16f;
+            float y = at.y + 16f;
+            if (x + w > Screen.width) x = at.x - w - 16f;
+            if (x < 2f) x = 2f;
+            if (y + h > Screen.height) y = Screen.height - h - 2f;
+            if (y < 2f) y = 2f;
+            Rect box = new Rect(x, y, w, h);
+
+            GUI.color = new Color(0.05f, 0.05f, 0.06f, 0.9f);
+            GUI.DrawTexture(box, Texture2D.whiteTexture);
+            Color border = accent; border.a = 0.95f;
+            GUI.color = border;
+            GUI.DrawTexture(new Rect(box.x, box.y, box.width, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(box.x, box.yMax - 1f, box.width, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(box.x, box.y, 1f, box.height), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(box.xMax - 1f, box.y, 1f, box.height), Texture2D.whiteTexture);
+
+            GUI.color = Color.white;
+            GUI.Label(box, text, body);
         }
 
         /// <summary>The point at arc length <paramref name="d"/> along the
