@@ -283,18 +283,41 @@ function Read-FolderVersion($folder) {
     return ""
 }
 
-# Can this folder actually install? It needs the patch script, a plugin and the
-# assets. Anything less runs client_patch.ps1 into a warning instead of an
-# installation.
+# Can this folder actually install? The public GitHub source archive has a
+# VERSION, DLL, assets and the Python development extractor, but it deliberately
+# does not carry the workflow-built t72_import.exe. Treating that archive as a
+# release produced a split client: the new DLL was installed while every asset
+# stayed old after Python failed on a missing UnityPy module.
+#
+# So the requirement is not "is this a release package" but the narrower and
+# truer one: CAN THIS FOLDER BUILD THE T-72. A release package can, through the
+# frozen exe. A development checkout can, through t72_import.py - but only when
+# Python is present AND UnityPy imports, which is the exact module whose absence
+# caused the split install. A source zip on a player's machine fails both and is
+# rejected, which is the case that broke the second machine.
+function Test-T72Extractor($folder) {
+    if (Test-Path (Join-Path $folder "t72_import.exe")) { return $true }
+    if (-not (Test-Path (Join-Path $folder "t72_import.py"))) { return $false }
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $false }
+    # One python start per launcher run, not one per status refresh.
+    if ($null -eq $script:unityPyOk) {
+        & python -c "import UnityPy" 2>$null | Out-Null
+        $script:unityPyOk = ($LASTEXITCODE -eq 0)
+    }
+    return $script:unityPyOk
+}
+
 function Test-SourceFolder($folder) {
     if (-not $folder -or -not (Test-Path $folder)) { return $false }
     if (-not (Test-Path (Join-Path $folder "client_patch.ps1"))) { return $false }
     if (-not (Test-Path (Join-Path $folder "assets"))) { return $false }
+    if (-not (Test-T72Extractor $folder)) { return $false }
     foreach ($k in @("build\NextDayRevivalToolkit.dll", "NextDayRevivalToolkit.dll")) {
         if (Test-Path (Join-Path $folder $k)) { return $true }
     }
     return $false
 }
+
 
 
 # =============================================================== the network
@@ -420,6 +443,131 @@ function Get-Releases {
 }
 
 
+# ====================================== do the assets match the installed plugin
+
+# The version lives inside the DLL, so every check that reads only the version
+# is blind to the files next to it. A failed asset copy leaves a current plugin
+# on the previous version's art: the launcher says "In sync", the game draws old
+# models, and nothing anywhere disagrees. Seen on 2026-08-31 on a 0.5.12 client
+# that was still rendering 0.5.0 weapons - 15 assets stale, 15 missing, and both
+# the status line and Repair called it fine.
+#
+# Size settles almost every case for the price of a directory listing, so the
+# hash is only computed when the sizes agree.
+#
+# It also counts what the SOURCE is missing. Comparing a folder against itself
+# cannot see a T-72 that was never extracted: both sides lack the five files,
+# every present file matches, and the drift reads clean on an installation that
+# will draw the old tank. So the five outputs of the extractor are named here
+# and their absence in the source is its own number.
+function Get-AssetDrift($game, $src) {
+    $r = @{ checked = $false; total = 0; ok = 0; stale = 0; missing = 0
+            incomplete = 0; incompleteNames = @() }
+    if (-not $game -or -not $src) { return $r }
+    $from = Join-Path $src "assets"
+    $to   = Join-Path (Join-Path (Join-Path $game "BepInEx") "plugins") "assets"
+    if (-not (Test-Path $from)) { return $r }
+    $r.checked = $true
+    foreach ($required in @("t72_hull.ndmesh", "t72_turret.ndmesh",
+                            "t72_diffuse.png", "t72_normal.png", "t72_metal.png")) {
+        if (-not (Test-Path (Join-Path $from $required))) {
+            $r.incomplete++
+            $r.incompleteNames += $required
+        }
+    }
+    foreach ($f in Get-ChildItem $from -File) {
+        # The same exclusions client_patch.ps1 uses: generator previews are
+        # never shipped, and the route file belongs to the in-game recorder.
+        if ($f.Name -like "*_preview.png")   { continue }
+        if ($f.Name -eq "icon_vergleich.png") { continue }
+        if ($f.Name -eq "ndr_routes.tsv")     { continue }
+        $r.total++
+        $t = Join-Path $to $f.Name
+        if (-not (Test-Path $t))                { $r.missing++; continue }
+        if ((Get-Item $t).Length -ne $f.Length) { $r.stale++;   continue }
+        if ((Get-FileHash $f.FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash $t          -Algorithm SHA256).Hash) { $r.stale++ }
+        else { $r.ok++ }
+    }
+    return $r
+}
+
+
+# ================================== does the configuration match this version
+
+# The third leg, and the one nothing measured until now. Config.Bind takes the
+# value out of the existing nextday.revival.toolkit.cfg and ignores the default
+# in the code, so a client can carry a correct DLL and correct assets and still
+# behave like an old version. Measured on the second machine on 2026-08-31: the
+# file's header had been relabelled 0.5.12 by BepInEx while sixteen values were
+# still from an older build - turret damage 750 instead of 120, fire delay 0.9
+# instead of 0.12, drone model scale 1 instead of 4. That is why a correctly
+# installed client fired the wrong gun and drew no patrol.
+#
+# The file is its own reference: BepInEx writes "# Default value: X" above every
+# key from the DLL that last wrote the file, so the installed plugin's own
+# defaults are readable without any second artifact.
+#
+# Not every difference is a fault. These keys belong to the person at the
+# keyboard, not to the version, and are never counted or reset.
+#
+# A value can also differ on purpose. The file cannot tell a deliberate choice
+# from an older version's leftover, so the person at the keyboard says which is
+# which: put a line saying ndr-keep in a key's comment block and that key is
+# never counted and never reset.
+#
+#     # ndr-keep
+#     # Setting type: Boolean
+#     # Default value: false
+#     Enabled = true
+
+$script:configPlayerKeys = @(
+    "AllowedSteamIds",      # this machine's admins
+    "ConfineCursorToWindow", "CursorLockFix",
+    "InvertX", "InvertY", "Sensitivity",
+    "SoundVolume",
+    "Verbose", "NetWatch", "NetWatchEvery", "NetWatchHitch"
+)
+
+function Test-ConfigPlayerKey($key) {
+    if ($script:configPlayerKeys -contains $key) { return $true }
+    # Every key binding: ArenaKey, EditorKey, JumpKey, RecordKey, TurretKey, Key.
+    if ($key -eq "Key" -or $key.EndsWith("Key")) { return $true }
+    return $false
+}
+
+function Get-ConfigDrift($game) {
+    $r = @{ checked = $false; total = 0; drift = 0; names = @(); path = "" }
+    if (-not $game) { return $r }
+    $cfg = Join-Path $game "BepInEx\config\nextday.revival.toolkit.cfg"
+    if (-not (Test-Path $cfg)) { return $r }
+    $r.checked = $true
+    $r.path = $cfg
+    $default = $null
+    $pinned = $false
+    foreach ($line in (Get-Content -LiteralPath $cfg -ErrorAction SilentlyContinue)) {
+        if ($line -match 'ndr-keep') { $pinned = $true; continue }
+        $m = [regex]::Match($line, '^#\s*Default value:\s*(.*)$')
+        if ($m.Success) { $default = $m.Groups[1].Value.Trim(); continue }
+        $m = [regex]::Match($line, '^([A-Za-z0-9_ ]+?)\s*=\s*(.*)$')
+        if ($m.Success -and $null -ne $default) {
+            $key   = $m.Groups[1].Value.Trim()
+            $value = $m.Groups[2].Value.Trim()
+            if ((-not $pinned) -and (-not (Test-ConfigPlayerKey $key))) {
+                $r.total++
+                if ($value -ne $default) {
+                    $r.drift++
+                    if ($r.names.Count -lt 8) { $r.names += ($key + "=" + $value + " (soll " + $default + ")") }
+                }
+            }
+            $default = $null
+            $pinned = $false
+        }
+    }
+    return $r
+}
+
+
 # ================================================================= the brain
 
 function Get-State {
@@ -435,6 +583,14 @@ function Get-State {
 
     $s.package   = Read-FolderVersion $root
     $s.packageOk = Test-SourceFolder $root
+
+    # Measured against the folder Repair would actually repair from, so the
+    # number in the status line is the number Repair can fix.
+    $s.assetSrc = ""
+    if ($s.installed) { $s.assetSrc = Find-LocalSource $s $s.installed }
+    if (-not $s.assetSrc -and $s.packageOk) { $s.assetSrc = $root }
+    $s.assets = Get-AssetDrift $s.game $s.assetSrc
+    $s.config = Get-ConfigDrift $s.game
 
     # Which master server: whatever the game already points at wins, then
     # -ServerHost, then the built-in one. Decided once; after that the window
@@ -470,6 +626,8 @@ function Get-State {
             if (Test-SourceFolder $d.FullName) { $s.cached += $d.Name }
         }
     }
+    $s.sourceOnly = [bool]($s.package -and -not $s.packageOk -and
+        $s.package -eq $s.installed -and -not ($s.cached -contains $s.installed))
 
     # ---- the verdict. Four states, and the version strings decide only what
     # they are entitled to decide.
@@ -506,6 +664,10 @@ function Get-State {
         $s.state   = "missing"
         $s.verdict = "No Revival plugin installed yet."
         $s.detail  = "Pick a version below and press Install. That also installs BepInEx and switches EAC off inside the game code."
+    } elseif ($s.sourceOnly) {
+        $s.state   = "sourceonly"
+        $s.verdict = "The DLL is current, but this launcher folder is source code, not a complete release."
+        $s.detail  = "It cannot build the T-72: no t72_import.exe, and no Python with UnityPy either. Installing from here would put a new plugin on the previous version's models. Pick $($s.installed) below and press Install; the launcher will download the complete release package instead of using this folder."
     } elseif ($s.server.minClientVersion -and (Compare-Ver $s.installed $s.server.minClientVersion) -lt 0) {
         $s.state   = "old"
         $s.verdict = "Your client is older than the server expects."
@@ -521,6 +683,32 @@ function Get-State {
         $s.state   = "sync"
         $s.verdict = "In sync. Ready to play."
         $s.detail  = "Client $($s.installed), server content $($s.server.contentVersion), server asks for $($s.server.minClientVersion) or newer."
+    }
+
+    # Runs after the version verdict and overrides it on purpose: matching
+    # version numbers are not the same as a matching installation, and old art
+    # is a real problem even when every number on screen lines up.
+    if ($s.installed -and $s.assets.checked -and
+        ($s.assets.missing + $s.assets.stale + $s.assets.incomplete) -gt 0) {
+        $s.state   = "assetdrift"
+        $s.verdict = "Plugin " + $s.installed + " is installed, but its assets are not."
+        if ($s.assets.incomplete -gt 0) {
+            # Nothing to repair from: the T-72 was never extracted here, so
+            # Repair would copy the same gap it is supposed to close.
+            $s.detail  = "The T-72 was never built in " + $s.assetSrc + " - " + $s.assets.incomplete + " of its files are missing there (" + ($s.assets.incompleteNames -join ", ") + "). Repair cannot fix that. Pick a version below and press Install so the launcher fetches a complete release package."
+        } else {
+            $s.detail  = "" + $s.assets.missing + " missing and " + $s.assets.stale + " outdated of " + $s.assets.total + " asset files. The game draws the previous version's models, and any item whose mesh is missing fails to load entirely. Press Repair."
+        }
+    }
+
+    # Last of the three, and deliberately the weakest: wrong art is worse than
+    # wrong numbers, so this only speaks when the assets are already right.
+    if ($s.installed -and $s.config.checked -and $s.config.drift -gt 0 -and
+        $s.state -ne "assetdrift" -and $s.state -ne "sourceonly" -and
+        $s.state -ne "old" -and $s.state -ne "missing" -and $s.state -ne "nogame") {
+        $s.state   = "configdrift"
+        $s.verdict = "Plugin " + $s.installed + " and its assets are installed, but its settings are not."
+        $s.detail  = "" + $s.config.drift + " of " + $s.config.total + " version-owned settings still hold an older version's value, so the game behaves like that version: " + ($s.config.names -join "; ") + ". Press Repair to back the file up and reset them. Key bindings and personal settings are not touched."
     }
 
     # Selected here is not the same as written into the game. Say which is
@@ -771,9 +959,25 @@ function Invoke-Install($state, $version) {
     # off, and which has nothing to do with the copy that just succeeded. So
     # the verdict comes from the DLL on disk, and the exit code is only a
     # reason to read the log.
-    $now = Read-PluginVersion $state.pluginDll
+    # Two questions, not one: does the DLL say the right version, and did the
+    # art that DLL expects actually arrive. A yes to the first alone is exactly
+    # the state that shipped an 0.5.12 plugin onto 0.5.0 models.
+    $now   = Read-PluginVersion $state.pluginDll
+    $drift = Get-AssetDrift $state.game $src
+    if ($now -eq $version -and $drift.checked -and $drift.incomplete -gt 0) {
+        Say ("The DLL reports " + $version + ", but this source never produced " + $drift.incomplete + " T-72 files (" + ($drift.incompleteNames -join ", ") + "). Installation is NOT complete.") "bad"
+        return $false
+    }
+    if ($now -eq $version -and $drift.checked -and ($drift.missing + $drift.stale) -gt 0) {
+        Say ("The DLL reports " + $version + ", but " + $drift.missing + " of its assets are missing and " + $drift.stale + " are outdated. Installation is NOT complete.") "bad"
+        return $false
+    }
     if ($now -eq $version) {
-        Say ("Installed. " + $version + " is now the version in BepInEx\plugins.") "ok"
+        if ($drift.checked) {
+            Say ("Installed. Plugin " + $version + " and all " + $drift.total + " asset files are now together in BepInEx\plugins.") "ok"
+        } else {
+            Say ("Installed. " + $version + " is now the version in BepInEx\plugins, but its assets could not be verified from " + $src + ".") "warn"
+        }
         if ($code -ne 0) {
             Say ("client_patch.ps1 ended with exit code " + $code + " - the plugin is in place, but something above wants reading.") "warn"
         }
@@ -794,6 +998,7 @@ function Invoke-Repair($state) {
     $v = $state.installed
     $src = ""
     if ($v) { $src = Find-LocalSource $state $v }
+    if (-not $src -and $v) { $src = Get-VersionFolder $state $v }
     if (-not $src) {
         if ($state.packageOk) {
             $src = $root
@@ -815,17 +1020,43 @@ function Invoke-Repair($state) {
     # its own default and a repair moves the machine off its own server.
     if ($state.serverHost) { $argList += @("-Server", $state.serverHost) }
     if ($state.game) { $argList += @("-Game", $state.game) }
+    # Repair is the button the configdrift verdict points at, so it carries the
+    # reset. Only when something actually drifted: an install that changes
+    # nothing should not rewrite a settings file.
+    if ($state.config.checked -and $state.config.drift -gt 0) {
+        $argList += "-ResetConfig"
+        Say ("Resetting " + $state.config.drift + " settings that still hold an older version's value. The file is backed up first, and key bindings are not touched.") "dim"
+    }
     $code = Start-Child "powershell.exe" $argList $src
-    $now = Read-PluginVersion $state.pluginDll
-    if ($now) { Say ("Repaired: server address, EAC patch, BepInEx, plugin " + $now + " and assets are in place again.") "ok" }
-    else { Say "The plugin is still not in the game folder - read the lines above." "bad" }
+    # Re-measure instead of assuming. This line used to claim the assets were
+    # back purely because the DLL carried a version string, which is how a
+    # failed asset copy could be reported as a successful repair.
+    $now   = Read-PluginVersion $state.pluginDll
+    $drift = Get-AssetDrift $state.game $src
+    if (-not $now) {
+        Say "The plugin is still not in the game folder - read the lines above." "bad"
+    } elseif (-not $drift.checked) {
+        Say ("Repaired: server address, EAC patch, BepInEx and plugin " + $now + ". Assets could not be verified from " + $src + ".") "warn"
+    } elseif ($drift.incomplete -gt 0) {
+        Say ("Plugin " + $now + " is installed, but " + $src + " never produced " + $drift.incomplete + " T-72 files (" + ($drift.incompleteNames -join ", ") + "), so there is nothing here to repair them with. The repair did NOT complete.") "bad"
+    } elseif (($drift.missing + $drift.stale) -eq 0) {
+        Say ("Repaired: server address, EAC patch, BepInEx, plugin " + $now + " and all " + $drift.total + " asset files are in place.") "ok"
+        $cfg = Get-ConfigDrift $state.game
+        if ($cfg.checked -and $cfg.drift -gt 0) {
+            Say ("" + $cfg.drift + " settings still differ from this version after the reset - read the lines above.") "warn"
+        } elseif ($cfg.checked) {
+            Say ("All " + $cfg.total + " version-owned settings match this version too.") "ok"
+        }
+    } else {
+        Say ("Plugin " + $now + " is installed, but " + $drift.missing + " assets are still missing and " + $drift.stale + " are still outdated. The repair did NOT complete - read the lines above.") "bad"
+    }
     if ($code -ne 0) { Say ("client_patch.ps1 ended with exit code " + $code + ", so read the log above as well.") "warn" }
 }
 
 function Invoke-Check($state) {
     $src = ""
     if ($state.installed) { $src = Find-LocalSource $state $state.installed }
-    if (-not $src -and $state.packageOk) { $src = $root }
+    if (-not $src -and (Test-Path (Join-Path $root "client_patch.ps1"))) { $src = $root }
     if (-not $src) { Say "No client_patch.ps1 next to the launcher, so there is nothing to check with." "bad"; return }
     Say ""
     Say "Checking the installation - this changes nothing (client_patch.ps1 -Check)."
@@ -986,6 +1217,8 @@ function Show-Console($s) {
     if ($s.state -eq "offline") { $colour = "Yellow" }
     if ($s.state -eq "ahead" -or $s.state -eq "noinfo") { $colour = "Cyan" }
     if ($s.state -eq "nogame")  { $colour = "Red" }
+    if ($s.state -eq "assetdrift") { $colour = "Yellow" }
+    if ($s.state -eq "configdrift") { $colour = "Yellow" }
     Write-Host ("  " + $s.verdict) -ForegroundColor $colour
     Write-Host ("  " + $s.detail)
     Write-Host ""

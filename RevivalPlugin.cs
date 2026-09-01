@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.12";
+        public const string VERSION = "0.5.13";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -141,6 +141,7 @@ namespace NextDayRevival
         internal static ConfigEntry<bool> CfgNetWatch;
         internal static ConfigEntry<float> CfgNetWatchHitch;
         internal static ConfigEntry<float> CfgNetWatchEvery;
+        internal static ConfigEntry<int> CfgPhotonTimeout;
         internal static ConfigEntry<bool> CfgSceneJump;
         internal static ConfigEntry<int> CfgJumpScene;
         internal static ConfigEntry<int> CfgJumpRegion;
@@ -996,10 +997,14 @@ namespace NextDayRevival
             // never reaches that installation (CLAUDE.md, point 4) - so the
             // numbers for detection, convoy and loot are NOT reserved in
             // advance. They arrive with the phase that uses them.
-            CfgPatrol = Config.Bind("Patrol", "Enabled", false,
+            CfgPatrol = Config.Bind("Patrol", "Enabled", true,
                 "NPC vehicle patrols: vehicles that drive a recorded road on "
-                + "their own. Off by default until it has been seen once. "
-                + "The driver, the gun and the crew - no convoy yet.");
+                + "their own, and their route drawn on the map. ON by default "
+                + "since 0.5.13: it was off \"until it has been seen once\", "
+                + "and the effect was that the second machine installed every "
+                + "asset correctly and still saw an empty map, because this one "
+                + "line returns before anything is drawn. The driver, the gun "
+                + "and the crew - no convoy yet.");
             CfgPatrolKey = Config.Bind("Patrol", "Key", "F11",
                 "Puts one more patrol vehicle on the active route. Hold Shift "
                 + "to take every patrol off the road again. Name out of "
@@ -1219,12 +1224,17 @@ namespace NextDayRevival
                 + "player drone, turret or admin channels.");
 
             // ------------------------------------------------- Diagnostics
+            CfgPhotonTimeout = Config.Bind("Diagnostics", "PhotonTimeoutMs", 60000,
+                "Milliseconds without a Photon response before the room link is "
+                + "declared dead. The game's 15000 ms default drops both clients "
+                + "during a short shared UDP interruption; 60000 lets reliable "
+                + "commands recover when the link returns.");
             CfgNetWatch = Config.Bind("Diagnostics", "NetWatch", true,
                 "Write a wall clock time, every long frame and the Photon "
                 + "peer's own counters into the log. It is the only thing that "
                 + "tells a busy client apart from a bad link when the game "
-                + "reports DisconnectByClientTimeout. It reads, it never "
-                + "writes, and it changes no behaviour.");
+                + "reports DisconnectByClientTimeout. This switch controls "
+                + "logging only; PhotonTimeoutMs remains active independently.");
             CfgNetWatchHitch = Config.Bind("Diagnostics", "NetWatchHitch", 0.5f,
                 "Seconds. A frame longer than this is written to the log with "
                 + "the peer counters of that moment.");
@@ -4162,10 +4172,13 @@ namespace NextDayRevival
     ///                             up as a growing outgoing queue.
     ///
     /// The symptoms reported on 2026-08-30 - after F9, in the loading screen,
-    /// and at no particular moment - cannot all be the tank construction, so
-    /// the cause is not yet known. This class does not fix anything. It reads
-    /// the peer's own counters, never writes them, and costs one report every
-    /// `NetWatchEvery` seconds plus one subtraction per frame.
+    /// and at no particular moment - cannot all be the tank construction. The
+    /// 2026-09-01 two-client failure finally measured the degraded-link case:
+    /// 5052 reliable resends with a small outgoing queue and no long frame
+    /// before Photon's 15 second default disconnected both players. The guard
+    /// below raises every current or replacement peer to the configured 60
+    /// seconds. The optional reports remain read-only apart from enabling
+    /// Photon's own traffic counters.
     /// </summary>
     public static class NetWatch
     {
@@ -4184,9 +4197,11 @@ namespace NextDayRevival
 
         static double _lastIn, _lastOut, _lastMs;
         static bool _statsOn;
+        static float _nextTimeoutCheck;
 
         public static void Tick()
         {
+            GuardTimeout();
             if (RevivalPlugin.CfgNetWatch == null || !RevivalPlugin.CfgNetWatch.Value) return;
 
             float now = Time.realtimeSinceStartup;
@@ -4237,6 +4252,79 @@ namespace NextDayRevival
                 + " " + PeerText() + " " + VerkehrText()
                 + " worstframe=" + _worstSinceReport.ToString("0.00") + " s.");
             _worstSinceReport = 0f;
+        }
+
+        /// <summary>
+        /// Photon creates or resets its networking peer on every reconnect.
+        /// The old tank guard changed only the peer that happened to exist when
+        /// F9 was pressed, so ordinary play and every later peer kept the game's
+        /// 15 second default. Check once a second and raise any current peer
+        /// whose value is lower than the configured tolerance. A higher value
+        /// is preserved.
+        /// </summary>
+        static void GuardTimeout()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < _nextTimeoutCheck) return;
+            _nextTimeoutCheck = now + 1f;
+
+            object peer = Peer();
+            if (peer == null || RevivalPlugin.CfgPhotonTimeout == null) return;
+            int wanted = Mathf.Clamp(RevivalPlugin.CfgPhotonTimeout.Value,
+                                     15000, 120000);
+            try
+            {
+                Type type = peer.GetType();
+                PropertyInfo property = FindProperty(type, "DisconnectTimeout");
+                FieldInfo field = property == null
+                    ? FindField(type, "DisconnectTimeout") : null;
+                object old = property != null ? property.GetValue(peer, null)
+                    : field != null ? field.GetValue(peer) : null;
+                if (old == null) return;
+                int previous = Convert.ToInt32(old);
+                if (previous >= wanted) return;
+
+                if (property != null && property.CanWrite)
+                    property.SetValue(peer, wanted, null);
+                else if (field != null)
+                    field.SetValue(peer, wanted);
+                else
+                    return;
+
+                RevivalPlugin.L.LogInfo("Photon guard: timeout " + previous
+                    + " -> " + wanted + " ms on the current room peer.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Photon guard: timeout could not be set - "
+                    + ex.Message);
+            }
+        }
+
+        static PropertyInfo FindProperty(Type type, string name)
+        {
+            while (type != null)
+            {
+                PropertyInfo property = type.GetProperty(name,
+                    BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (property != null) return property;
+                type = type.BaseType;
+            }
+            return null;
+        }
+
+        static FieldInfo FindField(Type type, string name)
+        {
+            while (type != null)
+            {
+                FieldInfo field = type.GetField(name,
+                    BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field != null) return field;
+                type = type.BaseType;
+            }
+            return null;
         }
 
         static string Uhr()
