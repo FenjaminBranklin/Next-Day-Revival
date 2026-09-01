@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.16";
+        public const string VERSION = "0.5.17";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -1220,15 +1220,15 @@ namespace NextDayRevival
                 "How near a waypoint counts as reached. Too large and the "
                 + "vehicle skips whole corners.");
             CfgPatrolStuck = Config.Bind("Patrol", "StuckSeconds", 3f,
-                "Seconds with the throttle down and under 3 km/h before the "
-                + "vehicle counts as stuck and starts backing up.");
+                "Seconds under 3 km/h before the vehicle counts as stuck. It is "
+                + "then moved at least 5 m forward along the route immediately; "
+                + "throttle and obstacle avoidance do not reset this timer.");
             CfgPatrolRam = Config.Bind("Patrol", "RamAfter", 8f,
-                "Seconds stuck before it stops avoiding and drives through "
-                + "whatever is there.");
+                "Compatibility setting from the old staged recovery. No longer "
+                + "used: a stuck patrol is moved along the route immediately.");
             CfgPatrolFree = Config.Bind("Patrol", "FreeAfter", 25f,
-                "Seconds stuck before the vehicle is lifted onto the next "
-                + "waypoint. Every one of those is logged, because it names a "
-                + "waypoint that wants fixing.");
+                "Compatibility setting from the old staged recovery. No longer "
+                + "used: StuckSeconds is the complete recovery delay.");
 
             // ------------------------------------------- the AI tank shell
             //
@@ -10673,8 +10673,9 @@ namespace NextDayRevival
     /// reverse when `brakeInput > 0.1` while the local forward velocity is
     /// under 1 m/s. With `autoReverse` on, `canGoReverseNow` is always true,
     /// so **any** braking below walking pace flips the vehicle into reverse.
-    /// That is why <see cref="Drive"/> never brakes under
-    /// <see cref="CoastBelow"/> km/h unless it means to reverse.
+    /// That is why <see cref="Drive"/> coasts below <see cref="CoastBelow"/>
+    /// km/h. Recovery never reverses: after a short confirmed stop it moves
+    /// the vehicle forward along the route.
     ///
     /// UNTESTED: all of it. Nothing in this class has been seen in the game.
     /// </summary>
@@ -10777,9 +10778,7 @@ namespace NextDayRevival
             public int Lap;
             public bool Armed;
             public float Wait;           // seconds waited for IsInitialized
-            public float Stuck;          // seconds with throttle and no speed
-            public int Stage;            // 0 drive 1 reverse 2 ram
-            public float StageTime;
+            public float Stuck;          // seconds below walking speed
             public int Frees;
             public int Reported;         // last lap written to the log
 
@@ -11693,7 +11692,9 @@ namespace NextDayRevival
 
             Vector3 vel = Velocity(u.Body);
             float kmh = vel.magnitude * 3.6f;
-            float forward = t.InverseTransformDirection(vel).z;
+            Vector3 groundVel = vel;
+            groundVel.y = 0f;
+            float groundKmh = groundVel.magnitude * 3.6f;
 
             Advance(u, pos);
 
@@ -11724,12 +11725,15 @@ namespace NextDayRevival
             }
 
             // --- stuck? -------------------------------------------------------
-            if (gas > 0.3f && kmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
-            Escalate(u, ref gas, ref brake, ref steer, kmh, forward, pos);
+            // A patrol is stuck because it is not moving, regardless of what
+            // the throttle happens to say. The old throttle condition let the
+            // obstacle avoidance reset this timer indefinitely.
+            if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+            if (Escalate(u, pos)) return;
 
             // Braking under walking pace is a gear change, not a brake
             // (see the class comment). Coast instead.
-            if (u.Stage == 0 && kmh < CoastBelow && brake > 0f) { brake = 0f; }
+            if (kmh < CoastBelow && brake > 0f) { brake = 0f; }
 
             SetFloat(u.Rcc, "gasInput", Mathf.Clamp01(gas));
             SetFloat(u.Rcc, "brakeInput", Mathf.Clamp01(brake));
@@ -11840,15 +11844,6 @@ namespace NextDayRevival
         {
             float range = Mathf.Clamp(speed * 1.5f, 8f, 25f);
             Vector3 nose = t.position + t.forward * NoseOffset + Vector3.up * 1.2f;
-
-            // Ramming steers by nothing - but it is exactly the moment the
-            // hull is pressed against whatever stopped it, so the one ray
-            // that can still help is cast: if that thing is small, it goes.
-            if (u.Stage == 2)
-            {
-                Hit(u, nose, t.forward, CrushReach);
-                return 0f;
-            }
 
             float wide = Hit(u, nose, t.forward, range);
             float left = Hit(u, nose, Quaternion.AngleAxis(-25f, t.up) * t.forward, range * 0.7f);
@@ -12103,96 +12098,77 @@ namespace NextDayRevival
         }
 
         // =====================================================================
-        //  The escalation, stage by stage
+        //  Fail-fast recovery
         // =====================================================================
 
-        static void Escalate(Unit u, ref float gas, ref float brake, ref float steer,
-                             float kmh, float forward, Vector3 pos)
+        /// <summary>A confirmed stop has one outcome: move forward along the
+        /// route. There is deliberately no reverse or ramming stage. A blocked
+        /// patrol is worse for the game than a vehicle passing through scenery.</summary>
+        static bool Escalate(Unit u, Vector3 pos)
         {
-            float stuckFor = RevivalPlugin.CfgPatrolStuck.Value;
-            float ramAfter = RevivalPlugin.CfgPatrolRam.Value;
-            float freeAfter = RevivalPlugin.CfgPatrolFree.Value;
-
-            if (u.Stuck <= 0f)
-            {
-                if (u.Stage != 0)
-                {
-                    RevivalPlugin.L.LogInfo("Patrol: " + u.Route.Name
-                        + " is moving again, back to driving.");
-                    u.Stage = 0;
-                    u.StageTime = 0f;
-                }
-                return;
-            }
-
-            if (u.Stuck < stuckFor) return;         // still just avoiding
-
-            if (u.Stuck >= freeAfter)
-            {
-                Free(u, pos);
-                return;
-            }
-
-            int want = u.Stuck >= ramAfter ? 2 : 1;
-            if (want != u.Stage)
-            {
-                u.Stage = want;
-                u.StageTime = 0f;
-                RevivalPlugin.L.LogInfo("Patrol: " + u.Route.Name + " stuck for "
-                    + u.Stuck.ToString("0.0") + " s at waypoint " + u.Next
-                    + " - " + (want == 1 ? "backing up" : "going through it") + ".");
-            }
-            u.StageTime += Time.fixedDeltaTime;
-
-            if (u.Stage == 1)
-            {
-                // Reverse IS the brake: GearBox shifts back when brakeInput is
-                // over 0.1 below 1 m/s forward. Steer the other way so the nose
-                // comes off whatever it is against.
-                gas = 0f;
-                brake = 1f;
-                steer = -steer;
-                // Once actually rolling backwards, ease off so it does not
-                // reverse into the ditch on the other side.
-                if (forward < -1.5f) brake = 0.45f;
-            }
-            else
-            {
-                // Full throttle, straight ahead, avoidance off. A BTR against a
-                // fence is the fence's problem.
-                gas = 1f;
-                brake = 0f;
-                steer *= 0.3f;
-            }
+            float stuckFor = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolStuck.Value);
+            if (u.Stuck < stuckFor) return false;
+            Free(u, pos);
+            return true;
         }
 
-        /// <summary>Last resort: put the vehicle back on the route. Ugly, and
-        /// it is the reason a patrol never dies in a ditch. Every one of these
-        /// names a waypoint that wants fixing.</summary>
+        /// <summary>Put the vehicle on the first waypoint at least five metres
+        /// farther along the route, then face it down the following leg. Dense
+        /// recordings may need several points to cover those five metres.</summary>
         static void Free(Unit u, Vector3 pos)
         {
             Route r = u.Route;
             int n = r.P.Count;
-            int to = (u.Next + 1) % n;
+            int from = u.Next;
+            int to = from;
+            float advanced = 0f;
+            int steps = 0;
+            while (advanced < 5f && steps < n - 1)
+            {
+                int next = (to + 1) % n;
+                advanced += FlatDistance(r.P[to].Pos, r.P[next].Pos);
+                to = next;
+                steps++;
+            }
 
             Vector3 target = r.P[to].Pos + Vector3.up * 1.5f;
-            Vector3 ahead = r.P[(to + 1) % n].Pos - r.P[to].Pos;
-            ahead.y = 0f;
-            if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
+            Vector3 ahead = RouteDirection(r, to);
 
             Stop(u.Body);
+            SetFloat(u.Rcc, "gasInput", 0f);
+            SetFloat(u.Rcc, "brakeInput", 0f);
+            SetFloat(u.Rcc, "steerInput", 0f);
+            SetFloat(u.Rcc, "handbrakeInput", 0f);
             u.Car.transform.position = target;
             u.Car.transform.rotation = Quaternion.LookRotation(ahead.normalized, Vector3.up);
 
             u.Frees++;
             u.Next = to;
             u.Stuck = 0f;
-            u.Stage = 0;
-            u.StageTime = 0f;
 
             RevivalPlugin.L.LogWarning("Patrol: FREE on " + r.Name + " - stuck at "
-                + pos + " near waypoint " + u.Next + ", lifted onto waypoint " + to
-                + ". That waypoint wants fixing. (" + u.Frees + " so far)");
+                + pos + " near waypoint " + from + ", moved "
+                + advanced.ToString("0.0") + " m forward onto waypoint " + to
+                + ". (" + u.Frees + " so far)");
+        }
+
+        static float FlatDistance(Vector3 a, Vector3 b)
+        {
+            Vector3 d = b - a;
+            d.y = 0f;
+            return d.magnitude;
+        }
+
+        static Vector3 RouteDirection(Route r, int at)
+        {
+            int n = r.P.Count;
+            for (int step = 1; step < n; step++)
+            {
+                Vector3 ahead = r.P[(at + step) % n].Pos - r.P[at].Pos;
+                ahead.y = 0f;
+                if (ahead.sqrMagnitude >= 0.0001f) return ahead;
+            }
+            return Vector3.forward;
         }
 
         // =====================================================================
