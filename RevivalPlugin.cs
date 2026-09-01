@@ -88,7 +88,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.10";
+        public const string VERSION = "0.5.11";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -12877,11 +12877,17 @@ namespace NextDayRevival
 
         static Texture2D _routeMapDash;
 
+        sealed class MapDash
+        {
+            public Vector2 A;
+            public Vector2 B;
+            public Color Color;
+        }
+
         /// <summary>
-        /// Draws every recorded route as the two dashed sides of an orange
-        /// corridor. It follows the actual polyline instead of reducing the
-        /// patrol to a settlement-style circle. Editing and deletion stay in
-        /// the existing F4 route editor, whose confirmation protects the file.
+        /// Draws every recorded route as one faction-coloured dashed line along
+        /// its waypoints. Editing and deletion stay in the existing F4 route
+        /// editor, whose confirmation protects the file.
         /// </summary>
         public static void DrawMap()
         {
@@ -12908,6 +12914,7 @@ namespace NextDayRevival
             Matrix4x4 oldMatrix = GUI.matrix;
             try
             {
+                List<MapDash> candidates = new List<MapDash>();
                 for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                 {
                     Route route;
@@ -12919,7 +12926,8 @@ namespace NextDayRevival
                     // arc length - the individual waypoints are never dashes of
                     // their own. Colour is the patrol's faction: looter and
                     // traitor red, civilian green, neutral white.
-                    GUI.color = RouteColor(route.Seite, route.Enabled);
+                    Color routeColor = RouteColor(route.Seite, route.Enabled);
+                    GUI.color = routeColor;
 
                     // Project the waypoints to the map, splitting into runs
                     // wherever a point cannot be projected.
@@ -12931,16 +12939,53 @@ namespace NextDayRevival
                         if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
                                                 world, map, out g))
                             run.Add(g);
-                        else { DashRun(run, ref phase, clip); run.Clear(); }
+                        else
+                        {
+                            CollectDashRun(run, ref phase, clip, routeColor,
+                                           candidates);
+                            run.Clear();
+                        }
                     }
-                    DashRun(run, ref phase, clip);
+                    CollectDashRun(run, ref phase, clip, routeColor, candidates);
 
+                }
+
+                // Draw only dashes that retain the Locator gap to every dash
+                // already accepted. At a crossing the earlier route remains
+                // continuous and the conflicting dash on the later route is
+                // omitted instead of producing a knot of touching strokes.
+                List<MapDash> accepted = new List<MapDash>(candidates.Count);
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    MapDash candidate = candidates[i];
+                    bool clear = true;
+                    for (int j = 0; j < accepted.Count; j++)
+                    {
+                        if (!DashesHaveClearance(candidate, accepted[j]))
+                        {
+                            clear = false;
+                            break;
+                        }
+                    }
+                    if (!clear) continue;
+                    accepted.Add(candidate);
+                    DrawMapDash(candidate);
+                }
+
+                // Labels belong above the lines, including lines from routes
+                // later in the file.
+                for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+                {
+                    Route route;
+                    if (!_routes.TryGetValue(_order[routeIndex], out route)
+                        || route == null || route.P.Count < 1) continue;
                     Vector2 label;
-                    if (MapTools.WorldToGui(route.P[0].Pos, texture, camera,
-                                            world, map, out label)
-                        && clip.Contains(label))
-                        GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
-                                  route.Name + (route.Enabled ? "" : " (disabled)"));
+                    if (!MapTools.WorldToGui(route.P[0].Pos, texture, camera,
+                                             world, map, out label)
+                        || !clip.Contains(label)) continue;
+                    GUI.color = RouteColor(route.Seite, route.Enabled);
+                    GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
+                              route.Name + (route.Enabled ? "" : " (disabled)"));
                 }
 
                 GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f);
@@ -12983,14 +13028,12 @@ namespace NextDayRevival
             return c;
         }
 
-        // Bold, blunt, clearly separated dashes, tuned to the user's map: thick
-        // strokes with a visible gap roughly as long as the stroke, not the fine
-        // ring geometry (which read as a busy, over-detailed line). 46 px dash,
-        // 44 px gap, 9 px thick - a near 1:1 dash-to-gap so the gaps are
-        // unmistakable, and the RouteMapDash capsule keeps the ends round.
-        const float RouteDash = 46f;
-        const float RouteGap = 44f;
-        const float RouteStroke = 9f;
+        // Measured from the game's Locator ring at its native map size. The
+        // same 10 px gap is also the minimum edge-to-edge clearance where two
+        // route lines approach or cross; one conflicting dash is omitted.
+        const float RouteDash = 55f;
+        const float RouteGap = 10f;
+        const float RouteStroke = 4.5f;
 
         /// <summary>
         /// Cuts one connected run of screen points into evenly spaced dashes by
@@ -13000,7 +13043,8 @@ namespace NextDayRevival
         /// one - that per-waypoint bending is what made the old line a scribble.
         /// The dash phase carries across runs so the pattern stays regular.
         /// </summary>
-        static void DashRun(List<Vector2> pts, ref float phase, Rect clip)
+        static void CollectDashRun(List<Vector2> pts, ref float phase, Rect clip,
+                                   Color color, List<MapDash> candidates)
         {
             if (pts == null || pts.Count < 2) return;
             int n = pts.Count;
@@ -13010,7 +13054,6 @@ namespace NextDayRevival
             float total = cum[n - 1];
             if (total < 1f) { phase = 0f; return; }
 
-            Texture2D dashTexture = RouteMapDash();
             float period = RouteDash + RouteGap;
             // Begin at the dash boundary preceding this run, so a dash that was
             // mid-stroke at the previous run's end continues seamlessly here.
@@ -13025,14 +13068,89 @@ namespace NextDayRevival
                 Vector2 d = b - a;
                 float len = d.magnitude;
                 if (len < 0.5f) continue;
-                float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
-                Matrix4x4 before = GUI.matrix;
-                GUIUtility.RotateAroundPivot(angle, a);
-                GUI.DrawTexture(new Rect(a.x, a.y - RouteStroke * 0.5f,
-                    len, RouteStroke), dashTexture);
-                GUI.matrix = before;
+                MapDash dash = new MapDash();
+                dash.A = a;
+                dash.B = b;
+                dash.Color = color;
+                candidates.Add(dash);
             }
             phase = (phase + total) % period;
+        }
+
+        static void DrawMapDash(MapDash dash)
+        {
+            Vector2 d = dash.B - dash.A;
+            float len = d.magnitude;
+            if (len < 0.5f) return;
+            GUI.color = dash.Color;
+            float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
+            Matrix4x4 before = GUI.matrix;
+            GUIUtility.RotateAroundPivot(angle, dash.A);
+            GUI.DrawTexture(new Rect(dash.A.x, dash.A.y - RouteStroke * 0.5f,
+                len, RouteStroke), RouteMapDash());
+            GUI.matrix = before;
+        }
+
+        /// <summary>True when the visible capsules have at least one Locator
+        /// gap between their edges. The texture rectangle's endpoints are the
+        /// capsule tips, so its centre segment begins/ends one radius inward.</summary>
+        static bool DashesHaveClearance(MapDash first, MapDash second)
+        {
+            Vector2 a0, a1, b0, b1;
+            DashCore(first, out a0, out a1);
+            DashCore(second, out b0, out b1);
+            float minimum = RouteGap + RouteStroke;
+            return SegmentDistanceSquared(a0, a1, b0, b1)
+                + 0.01f >= minimum * minimum;
+        }
+
+        static void DashCore(MapDash dash, out Vector2 a, out Vector2 b)
+        {
+            Vector2 d = dash.B - dash.A;
+            float len = d.magnitude;
+            float radius = RouteStroke * 0.5f;
+            if (len <= RouteStroke || len < 1e-4f)
+            {
+                a = b = (dash.A + dash.B) * 0.5f;
+                return;
+            }
+            Vector2 inset = d * (radius / len);
+            a = dash.A + inset;
+            b = dash.B - inset;
+        }
+
+        static float SegmentDistanceSquared(Vector2 a, Vector2 b,
+                                            Vector2 c, Vector2 d)
+        {
+            Vector2 ab = b - a;
+            Vector2 cd = d - c;
+            float cross = Cross2(ab, cd);
+            if (Mathf.Abs(cross) > 1e-5f)
+            {
+                Vector2 ac = c - a;
+                float t = Cross2(ac, cd) / cross;
+                float u = Cross2(ac, ab) / cross;
+                if (t >= 0f && t <= 1f && u >= 0f && u <= 1f) return 0f;
+            }
+            return Mathf.Min(
+                Mathf.Min(PointSegmentDistanceSquared(a, c, d),
+                          PointSegmentDistanceSquared(b, c, d)),
+                Mathf.Min(PointSegmentDistanceSquared(c, a, b),
+                          PointSegmentDistanceSquared(d, a, b)));
+        }
+
+        static float PointSegmentDistanceSquared(Vector2 p, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a;
+            float lengthSquared = ab.sqrMagnitude;
+            if (lengthSquared < 1e-8f) return (p - a).sqrMagnitude;
+            float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / lengthSquared);
+            return (p - (a + ab * t)).sqrMagnitude;
+        }
+
+        static float Cross2(Vector2 a, Vector2 b)
+        {
+            return a.x * b.y - a.y * b.x;
         }
 
         /// <summary>The point at arc length <paramref name="d"/> along the
@@ -13055,9 +13173,9 @@ namespace NextDayRevival
         static Texture2D RouteMapDash()
         {
             if (_routeMapDash != null) return _routeMapDash;
-            // Width close to the dash aspect (46 x 9) so the rounded caps stay
-            // circular after the texture is stretched to the dash rectangle.
-            const int width = 80;
+            // Match the 55 x 4.5 dash aspect so the caps remain circular when
+            // this texture is stretched to the measured Locator rectangle.
+            const int width = 196;
             const int height = 16;
             float radius = (height - 1) * 0.5f;
             _routeMapDash = new Texture2D(width, height, TextureFormat.ARGB32, false);
