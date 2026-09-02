@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.0.0";
+        public const string VERSION = "6.1.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -437,6 +437,9 @@ namespace NextDayRevival
             BindConfig();
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
+            ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
+            VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
+            RevivalConvoy.BindConfig(Config);    // NDR convoy event
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -462,6 +465,8 @@ namespace NextDayRevival
             Admin.Install(_harmony);
             TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);
+            ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
+            VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
 
             StartCoroutine(Tank.Prewarm());
             StartCoroutine(LateSetup());
@@ -1516,6 +1521,11 @@ namespace NextDayRevival
 
             // The antenna, drone battery and surveillance drone (own file).
             DroneGear.AddItems(Items);
+            // Fire extinguisher and heavy tool kit for convoy repair (own file).
+            ConvoyRepair.AddItems(Items);
+
+            // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
+            M7Rifle.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -1944,6 +1954,8 @@ namespace NextDayRevival
             Arena.Tick();
             CarSpawn.Tick();
             Patrol.Tick();
+            ConvoyRepair.Tick();     // NDR convoy vehicle repair
+            RevivalConvoy.Tick();    // NDR convoy event
             CrewDrone.Tick();
             DroneAlert.Tick();
         }
@@ -1967,6 +1979,8 @@ namespace NextDayRevival
             MapTeleport.Draw();
             Admin.Draw();
             Patrol.Draw();
+            ConvoyRepair.Draw();     // NDR convoy vehicle repair
+            RevivalConvoy.Draw();    // NDR convoy event
             DroneAlert.Draw();
         }
 
@@ -6658,6 +6672,11 @@ namespace NextDayRevival
                 }
             }
 
+            // BTR-Bordgeschuetz gegen ein Fahrzeug: frisst dessen Panzerung.
+            // Ein Panzer-Schuetze (_tank) hat oben schon eine Granate gezuendet,
+            // GunHit macht fuer ihn nichts und wir fallen durch.
+            if (VehicleArmor.GunHit(struck, _tank)) return true;
+
             float damage = Damage();
 
             // Reihenfolge und Methodennamen wie in FireOneShot.
@@ -7011,29 +7030,40 @@ namespace NextDayRevival
         /// onChangeInventory set - so UI and server data are updated too.
         /// It returns void, hence the count before and after.
         /// </summary>
-        static int _hasId = -1;
-        static bool _hasResult;
-        static float _hasUntil;
+        // One cache entry PER id, not a single slot. A single slot
+        // (the old _hasId/_hasResult/_hasUntil) is defeated the instant two
+        // callers alternate ids within one frame: each call sees a different
+        // id than the last, misses, and runs a fresh FindObjectsOfType. The
+        // surveillance drone polls SurveillanceId and BatteryId back to back
+        // every frame (SurvDrone.TickCore), which turned this into TWO scene
+        // scans plus a List allocation every frame on foot - the 6.0.0 frame
+        // drop. A dictionary gives each id its own half-second answer, so the
+        // number of scans is bounded by the distinct ids asked, not the frame
+        // rate, no matter how many callers interleave.
+        static readonly Dictionary<int, float> _hasUntil = new Dictionary<int, float>();
+        static readonly Dictionary<int, bool> _hasResult = new Dictionary<int, bool>();
 
         /// <summary>
         /// Does item `wanted` lie in one of the local player's inventories?
         /// The same three containers TakeItem walks, but nothing is taken.
         ///
-        /// The answer is kept for half a second. The jammer asks in every
-        /// frame, and FindObjectsOfType(PlayerInventoryManager) per frame is
-        /// the kind of cost that never shows up in a log and always shows up
-        /// in the frame time.
+        /// The answer is kept for half a second per id. The jammer and the
+        /// surveillance drone ask in every frame, and
+        /// FindObjectsOfType(PlayerInventoryManager) per frame is the kind of
+        /// cost that never shows up in a log and always shows up in the frame
+        /// time.
         /// </summary>
         internal static bool HasItem(int wanted)
         {
-            if (wanted == _hasId && Time.time < _hasUntil) return _hasResult;
+            float until;
+            if (_hasUntil.TryGetValue(wanted, out until) && Time.time < until)
+                return _hasResult[wanted];
             bool found = false;
             List<object> invs = PlayerInventories();
             for (int i = 0; i < invs.Count && !found; i++)
                 if (CountItem(invs[i], wanted) > 0) found = true;
-            _hasId = wanted;
-            _hasResult = found;
-            _hasUntil = Time.time + 0.5f;
+            _hasResult[wanted] = found;
+            _hasUntil[wanted] = Time.time + 0.5f;
             return found;
         }
 
@@ -8608,6 +8638,60 @@ namespace NextDayRevival
                 if (b.size == Vector3.zero) return false;
                 Vector3 s0 = cam.WorldToScreenPoint(b.min);
                 Vector3 s1 = cam.WorldToScreenPoint(b.max);
+                float x0 = Mathf.Min(s0.x, s1.x);
+                float x1 = Mathf.Max(s0.x, s1.x);
+                float g0 = Screen.height - s0.y;
+                float g1 = Screen.height - s1.y;
+                float y0 = Mathf.Min(g0, g1);
+                float y1 = Mathf.Max(g0, g1);
+                rect = new Rect(x0, y0, x1 - x0, y1 - y0);
+                return rect.width > 1f && rect.height > 1f;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// The VISIBLE map window in GUI coordinates: the clip region of the
+        /// nearest enclosing NGUI UIPanel (a UIScrollView) that actually clips.
+        /// The map texture scrolls inside this panel, so when it is panned the
+        /// texture's own bounds (MapScreenRect) run far past the window; this is
+        /// the window itself. Read from UIPanel.finalClipRegion (centre x,y plus
+        /// width,height in the panel's LOCAL space) and converted to screen via
+        /// the panel transform and the UI camera. Returns false when there is no
+        /// clipping panel, so the caller keeps the texture rect as before.
+        /// </summary>
+        public static bool MapViewportRect(Component texture, Camera cam,
+                                           out Rect rect)
+        {
+            rect = new Rect();
+            try
+            {
+                if (texture == null || cam == null) return false;
+                Type panelType = RevivalPlugin.TypeByName("UIPanel");
+                if (panelType == null) return false;
+                FieldInfo clipField = AccessTools.Field(panelType, "mClipping");
+                MethodInfo getRegion = AccessTools.PropertyGetter(panelType, "finalClipRegion");
+                if (getRegion == null) return false;
+
+                Component panel = null;
+                for (Transform t = texture.transform; t != null; t = t.parent)
+                {
+                    Component p = t.GetComponent(panelType) as Component;
+                    if (p == null) continue;
+                    int mode = clipField == null ? 1
+                        : Convert.ToInt32(clipField.GetValue(p));
+                    if (mode != 0) { panel = p; break; }   // 0 = None
+                }
+                if (panel == null) return false;
+
+                Vector4 r = (Vector4)getRegion.Invoke(panel, null);
+                float hw = r.z * 0.5f, hh = r.w * 0.5f;
+                if (hw <= 0f || hh <= 0f) return false;
+                Transform pt = panel.transform;
+                Vector3 c0 = pt.TransformPoint(new Vector3(r.x - hw, r.y - hh, 0f));
+                Vector3 c1 = pt.TransformPoint(new Vector3(r.x + hw, r.y + hh, 0f));
+                Vector3 s0 = cam.WorldToScreenPoint(c0);
+                Vector3 s1 = cam.WorldToScreenPoint(c1);
                 float x0 = Mathf.Min(s0.x, s1.x);
                 float x1 = Mathf.Max(s0.x, s1.x);
                 float g0 = Screen.height - s0.y;
@@ -11281,6 +11365,25 @@ namespace NextDayRevival
                     return (v == "btr" || v == "tank") ? v : "mixed";
                 }
             }
+
+            // Cached map ring in WORLD space (XZ; y is 0 and ignored by
+            // WorldToGui). Built once from the waypoints and only PROJECTED each
+            // frame, so the encircling ring no longer jitters as the map or
+            // camera micro-moves - the convex hull is computed in one fixed
+            // world frame, not per frame in screen space where a waypoint
+            // flipping on or off the hull made the whole ring pop. Rebuilt only
+            // when the waypoint count or the padding changes.
+            internal List<Vector3> MapRing;
+            internal int MapRingN = -1;
+            internal float MapRingPad = -1f;
+
+            // NDR convoy (RevivalConvoy.cs): "convoy" marks a route the convoy
+            // event drives as a column of tanks and APCs. Empty/"patrol" is an
+            // ordinary auto-patrol route. Stored as kind= in the first
+            // waypoint's flags; the auto-patrol picker (Duenn) skips convoy
+            // routes so a convoy road never also spawns lone patrols.
+            internal string Kind = "";
+            internal bool IsConvoy { get { return Kind == "convoy"; } }
         }
 
         static Dictionary<string, Route> _routes = new Dictionary<string, Route>();
@@ -11322,6 +11425,15 @@ namespace NextDayRevival
             public int CrewSize;         // men aboard, one per seat
             public bool CrewOut;         // they have climbed out
             public float Died;           // Time.time the vehicle was killed
+
+            // NDR convoy (RevivalConvoy.cs). ConvoyId 0 = ordinary patrol; a
+            // non-zero id groups the vehicles of one convoy. Hold stops the
+            // vehicle where it stands (the gun keeps scanning and firing) - the
+            // convoy layer sets it for spacing and the behaviour agent uses it
+            // for hold-and-search. Stocked marks a trunk already given its loot.
+            public int ConvoyId;
+            public bool Hold;
+            public bool Stocked;
         }
 
         static List<Unit> _units = new List<Unit>();
@@ -11521,6 +11633,7 @@ namespace NextDayRevival
                     if (!u.Armed) { Arm(u); continue; }
                     if (Gefallen(u)) continue;
                     Keep(u);
+                    if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
                 }
             }
@@ -11544,7 +11657,7 @@ namespace NextDayRevival
             }
 
             int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-            if (_units.Count >= max)
+            if (PatrolUnitCount() >= max)   // NDR convoy: convoy vehicles do not count
             {
                 RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) are "
                     + "already out, MaxVehicles is " + max
@@ -11560,7 +11673,7 @@ namespace NextDayRevival
             // patrol of its own, a name that is not in the file is no longer a
             // dead end: the route most in need gets the vehicle instead.
             Route r = Active();
-            if (r == null) r = Duenn();
+            if (r == null || r.IsConvoy) r = Duenn();   // NDR convoy: F11 never puts a lone patrol on a convoy road
             if (r == null)
             {
                 RevivalPlugin.L.LogWarning("Patrol: route \""
@@ -11642,7 +11755,7 @@ namespace NextDayRevival
             if (!welt) return;
 
             int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-            if (_units.Count >= max) return;
+            if (PatrolUnitCount() >= max) return;   // NDR convoy: convoy vehicles do not count
             if (Time.time < _nextAuto) return;
 
             Load(false);
@@ -11698,6 +11811,7 @@ namespace NextDayRevival
             for (int i = 0; i < _order.Count; i++)
             {
                 Route r = _routes[_order[i]];
+                if (r.IsConvoy) continue;   // NDR convoy: driven by the convoy event, not the auto-patrol
                 if (!r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
                 int fehlt = r.Count - Fahren(r.Name);
                 if (fehlt <= 0) continue;
@@ -11715,6 +11829,17 @@ namespace NextDayRevival
             for (int i = 0; i < _units.Count; i++)
                 if (_units[i].Car != null && _units[i].Route != null
                     && _units[i].Route.Name == name) n++;
+            return n;
+        }
+
+        /// <summary>Units the auto-patrol accounting owns - convoy vehicles
+        /// (ConvoyId != 0) are managed by the convoy event and must not consume
+        /// a MaxVehicles slot from the ordinary patrols. NDR convoy.</summary>
+        static int PatrolUnitCount()
+        {
+            int n = 0;
+            for (int i = 0; i < _units.Count; i++)
+                if (_units[i].ConvoyId == 0) n++;
             return n;
         }
 
@@ -11757,6 +11882,163 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) taken off the road.");
             _units.Clear();
             Crew.StopAll();
+        }
+
+        // =====================================================================
+        //  NDR convoy seam (RevivalConvoy.cs)
+        //
+        //  A convoy vehicle is an ordinary patrol Unit tagged with a non-zero
+        //  ConvoyId, so it is driven, gunned, crewed and wrecked by exactly the
+        //  code above. The convoy layer only decides WHICH vehicles spawn WHERE,
+        //  keeps their spacing (Hold), reads their state for the behaviour agent,
+        //  and clears them when the next convoy comes. Everything here is a thin
+        //  handle over Unit; the convoy never sees the Unit type itself.
+        // =====================================================================
+
+        /// <summary>Spawn one convoy vehicle of a forced kind at a forced start
+        /// waypoint on a route, tagged with a convoy id. Returns an opaque handle
+        /// (the Unit) or null if the route is unusable or the spawn was refused
+        /// (e.g. this client is not the master). Uses the same out-and-back route
+        /// and ground raycast the ordinary spawn does.</summary>
+        internal static object SpawnConvoyUnit(string routeName, bool tank,
+                                               int startIndex, int convoyId)
+        {
+            Load(false);
+            Route src;
+            if (!_routes.TryGetValue(routeName, out src) || src == null
+                || src.P.Count < 3) return null;
+
+            Route r = OutAndBack(src);
+            int n = r.P.Count;
+            int start = ((startIndex % n) + n) % n;
+
+            Vector3 pos = r.P[start].Pos + Vector3.up * 1.6f;
+            Vector3 ground;
+            GameObject under = Turret.RaycastObject(r.P[start].Pos + Vector3.up * 30f,
+                                                    Vector3.down, 200f, out ground);
+            if (under != null) pos = ground + Vector3.up * 1.6f;
+
+            Vector3 ahead = r.P[(start + 1) % n].Pos - r.P[start].Pos;
+            ahead.y = 0f;
+            if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
+            ahead.Normalize();
+
+            GameObject car = CarSpawn.SpawnAt(pos,
+                Quaternion.LookRotation(ahead, Vector3.up), tank);
+            if (car == null) return null;
+
+            Unit u = new Unit();
+            u.Car = car;
+            u.Route = r;
+            u.Tank = tank;
+            u.Seite = r.Seite;
+            u.Next = (start + 1) % n;
+            u.ConvoyId = convoyId;
+            _units.Add(u);
+            _spawned++;
+            RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + (tank ? "tank" : "APC")
+                + " (" + u.Seite + ") on " + r.Name + " at waypoint " + start
+                + " of " + n + ".");
+            return u;
+        }
+
+        /// <summary>The convoy vehicle is on the road and not yet a wreck.</summary>
+        internal static bool ConvoyAlive(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Car != null && u.Died <= 0f;
+        }
+
+        /// <summary>The vehicle still exists in the world - alive OR a lingering
+        /// wreck. Used to know when a whole convoy has been fully cleared.</summary>
+        internal static bool ConvoyExists(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Car != null;
+        }
+
+        internal static bool ConvoyTank(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Tank;
+        }
+
+        internal static Vector3 ConvoyPos(object handle)
+        {
+            Unit u = handle as Unit;
+            return (u == null || u.Car == null) ? Vector3.zero
+                                                : u.Car.transform.position;
+        }
+
+        /// <summary>Progress along the route in waypoints (laps * count + next),
+        /// so "the road ahead is blocked by a wreck" is a comparison of numbers.
+        /// Higher means further along.</summary>
+        internal static float ConvoyArc(object handle)
+        {
+            Unit u = handle as Unit;
+            if (u == null || u.Route == null) return 0f;
+            return u.Lap * u.Route.P.Count + u.Next;
+        }
+
+        /// <summary>Stop this convoy vehicle where it stands, or release it back
+        /// to driving. The gun keeps working while held.</summary>
+        internal static void ConvoyHold(object handle, bool hold)
+        {
+            Unit u = handle as Unit;
+            if (u != null) u.Hold = hold;
+        }
+
+        /// <summary>Remove every vehicle of one convoy - living stragglers and
+        /// lingering wrecks alike - from the road. Called when the next convoy
+        /// spawns (the wrecks linger until then) or when a convoy is written
+        /// off as escaped/despawned.</summary>
+        internal static void ConvoyClearAll(int convoyId)
+        {
+            int removed = 0;
+            for (int i = _units.Count - 1; i >= 0; i--)
+            {
+                Unit u = _units[i];
+                if (u.ConvoyId != convoyId) continue;
+                Forget(u);
+                Weg(u.Car);
+                _units.RemoveAt(i);
+                removed++;
+            }
+            if (removed > 0)
+                RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + removed
+                    + " vehicle(s)/wreck(s) cleared from the road.");
+        }
+
+        /// <summary>The names of every route marked as a convoy route (kind=
+        /// convoy) with enough waypoints to drive. The convoy event picks from
+        /// these.</summary>
+        internal static List<string> ConvoyRouteNames()
+        {
+            Load(false);
+            List<string> names = new List<string>();
+            for (int i = 0; i < _order.Count; i++)
+            {
+                Route r;
+                if (_routes.TryGetValue(_order[i], out r) && r != null
+                    && r.IsConvoy && r.Enabled && r.P.Count >= 3)
+                    names.Add(r.Name);
+            }
+            return names;
+        }
+
+        /// <summary>The world positions of a route's ORIGINAL waypoints (not the
+        /// out-and-back copy). The convoy event reads these to choose a spawn
+        /// waypoint at the right distance from the player and to name the map
+        /// square. Indices line up with the forward leg the spawned vehicles
+        /// drive. Null if the route is unknown.</summary>
+        internal static List<Vector3> ConvoyRoutePoints(string name)
+        {
+            Load(false);
+            Route r;
+            if (!_routes.TryGetValue(name, out r) || r == null) return null;
+            List<Vector3> pts = new List<Vector3>(r.P.Count);
+            for (int i = 0; i < r.P.Count; i++) pts.Add(r.P[i].Pos);
+            return pts;
         }
 
         /// <summary>
@@ -11831,6 +12113,27 @@ namespace NextDayRevival
             if (u.Vgs == null) return;
             int id = u.Vgs.GetInstanceID();
             if (_owned.ContainsKey(id)) _owned.Remove(id);
+        }
+
+        /// <summary>
+        /// NDR convoy repair seam (RevivalConvoyRepair.cs). The player has
+        /// repaired a destroyed patrol vehicle, so Patrol must stop managing it:
+        /// out of the owner list AND out of the unit list, so no despawn timer
+        /// runs and no driver steers it. It is left standing in the world as an
+        /// ordinary vehicle - NOT destroyed. Returns true if this car was one of
+        /// ours. Additive; touches no existing line.
+        /// </summary>
+        internal static bool ReleaseRepaired(GameObject car)
+        {
+            if (car == null) return false;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                if (_units[i].Car != car) continue;
+                Forget(_units[i]);
+                _units.RemoveAt(i);
+                return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -12094,6 +12397,11 @@ namespace NextDayRevival
 
             u.Armed = true;
             VehicleModules.StockTrunk(u.Car.transform, u.Tank);   // NDR vehicle modules: trunk loot
+            // NDR convoy: a convoy vehicle carries about double a patrol's loot -
+            // the same module pool, stocked ExtraTrunkFills more times.
+            if (u.ConvoyId != 0)
+                for (int k = 0; k < RevivalConvoy.ExtraTrunkFills; k++)
+                    VehicleModules.StockTrunk(u.Car.transform, u.Tank);
             RevivalPlugin.L.LogInfo("Patrol: vehicle armed on " + u.Route.Name
                 + " - AIController set, physics on, engine running, "
                 + u.Turrets.Length + " turret object(s), " + u.CrewSize
@@ -12168,8 +12476,15 @@ namespace NextDayRevival
                     Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite);
                 }
 
-                Verloren();
+                if (u.ConvoyId == 0) Verloren();   // NDR convoy: convoy losses are not auto-refilled
             }
+
+            // NDR convoy: a convoy wreck does NOT despawn on the WreckSeconds
+            // clock. The user wants the burning column to stay on the road until
+            // the NEXT convoy event spawns, which is when RevivalConvoy calls
+            // ConvoyClearAll for the previous convoy. So a convoy unit lingers
+            // here forever and is only removed by that call.
+            if (u.ConvoyId != 0) return true;
 
             // NDR vehicle modules: a wreck whose trunk still holds module loot
             // lingers longer so the loot can be recovered (additive bonus).
@@ -12202,6 +12517,18 @@ namespace NextDayRevival
             // Belt and braces: if some path we have not read got the physics
             // off anyway, the vehicle is a statue until this puts it back.
             if (!GetBool(u.Vgs, "EnabledPhys", true)) Invoke(u.Vgs, "EnablePhys");
+        }
+
+        /// <summary>Hold the vehicle where it stands: no gas, full brake, wheels
+        /// straight. The gun runs on its own frame-rate tick, so a held vehicle
+        /// still scans and fires. NDR convoy: used for column spacing and for the
+        /// behaviour agent's hold-and-search.</summary>
+        static void HoldStill(Unit u)
+        {
+            if (u.Rcc == null) return;
+            SetFloat(u.Rcc, "gasInput", 0f);
+            SetFloat(u.Rcc, "brakeInput", 1f);
+            SetFloat(u.Rcc, "steerInput", 0f);
         }
 
         // =====================================================================
@@ -13305,30 +13632,12 @@ namespace NextDayRevival
             /// </summary>
             static bool PanzerSchaden(Unit shooter, GameObject struck)
             {
-                if (shooter == null || shooter.Tank || struck == null) return false;
-                float damage = RevivalPlugin.CfgPatrolGunTankDamage.Value;
-                if (damage <= 0f) return false;
-
-                Type type = RevivalPlugin.TypeByName("VehicleGameSystem");
-                Component vehicle = type == null ? null : struck.GetComponentInParent(type);
-                if (vehicle == null || !Tank.IstPanzer(vehicle.transform)) return false;
-
-                MethodInfo apply = AccessTools.Method(type, "ApplyDamage",
-                    new Type[] { typeof(float), typeof(int) }, null);
-                if (apply == null)
-                {
-                    RevivalPlugin.L.LogWarning("Patrol gun: VehicleGameSystem.ApplyDamage "
-                        + "is missing - APC fire cannot damage a tank.");
-                    return true;
-                }
-
-                float before = GetFloat(vehicle, "Durability", -1f);
-                apply.Invoke(vehicle, new object[] { damage, 10 });
-                float after = GetFloat(vehicle, "Durability", before);
-                if (after < before)
-                    RevivalPlugin.L.LogInfo("Patrol gun: APC armour hit "
-                        + before.ToString("0") + " -> " + after.ToString("0") + ".");
-                return true;
+                if (shooter == null) return false;
+                // Unified with the mounted turret in VehicleArmor.GunHit: the
+                // BTR autocannon eats a tank OR another APC on the game's armour
+                // path. A tank SHOOTER fired an explosive shell above, so GunHit
+                // no-ops for it and returns false.
+                return VehicleArmor.GunHit(struck, shooter.Tank);
             }
 
             static bool SpielerSchaden(GameObject struck, float damage, Vector3 point,
@@ -13693,6 +14002,7 @@ namespace NextDayRevival
             int n;
             if (int.TryParse(FlagValue(p, "count"), out n)) r.Count = Mathf.Clamp(n, 0, 16);
             else r.Count = 1;
+            r.Kind = FlagValue(p, "kind").Trim().ToLowerInvariant();   // NDR convoy
         }
 
         /// <summary>
@@ -13715,7 +14025,7 @@ namespace NextDayRevival
                     string one = parts[i].Trim();
                     if (one.Length == 0 || one == "spawn" || one == "off") continue;
                     if (one.StartsWith("fraction=") || one.StartsWith("vehicle=")
-                        || one.StartsWith("count=")) continue;
+                        || one.StartsWith("count=") || one.StartsWith("kind=")) continue;
                     keep.Add(one);
                 }
             }
@@ -13724,6 +14034,7 @@ namespace NextDayRevival
             string v = r.Vehicle == null ? "" : r.Vehicle.Trim().ToLowerInvariant();
             if (v == "btr" || v == "tank" || v == "mixed") keep.Add("vehicle=" + v);
             keep.Add("count=" + r.Count.ToString(CultureInfo.InvariantCulture));
+            if (r.IsConvoy) keep.Add("kind=convoy");   // NDR convoy
             if (!r.Enabled) keep.Add("off");
             p.Flags = string.Join(",", keep.ToArray());
         }
@@ -13761,6 +14072,16 @@ namespace NextDayRevival
             if (!MapTools.MapScreenRect(texture, camera, out clip))
                 clip = new Rect(0f, 0f, Screen.width, Screen.height);
 
+            // The map texture SCROLLS inside a clipping NGUI UIPanel (a
+            // UIScrollView). MapScreenRect is the WHOLE texture, which when the
+            // map is panned reaches far beyond the visible window - so dashes on
+            // the off-window part were painted over the surrounding UI (the "it
+            // lies over the whole UI when I scroll" bug). Clip to the panel's
+            // actual viewport as well, so nothing outside the map window draws.
+            Rect view;
+            if (MapTools.MapViewportRect(texture, camera, out view))
+                clip = Intersect(clip, view);
+
             Color old = GUI.color;
             Matrix4x4 oldMatrix = GUI.matrix;
             try
@@ -13796,37 +14117,33 @@ namespace NextDayRevival
                         if (!_routes.TryGetValue(_order[routeIndex], out route)
                             || route == null || route.P.Count < 2) continue;
 
-                        // Project every waypoint that lands on the map, keeping
-                        // the world position beside it so the metre->pixel scale
-                        // can be measured for the outward padding.
-                        List<Vector2> proj = new List<Vector2>(route.P.Count);
-                        List<Vector3> wpos = new List<Vector3>(route.P.Count);
-                        for (int i = 0; i < route.P.Count; i++)
+                        // ENCIRCLE the run with ONE smooth closed boundary. The
+                        // ring is built ONCE in world space (WorldRing, cached on
+                        // the route) and only PROJECTED here, so it no longer
+                        // jitters as the map/camera micro-moves - the convex hull
+                        // lives in a fixed world frame, not per frame in screen
+                        // space. Project every ring point; if any falls behind
+                        // the UI camera the ring is skipped this frame rather
+                        // than drawn broken.
+                        List<Vector3> wring = WorldRing(route);
+                        if (wring == null || wring.Count < 3) continue;
+                        List<Vector2> ring = new List<Vector2>(wring.Count);
+                        bool ringOk = true;
+                        for (int i = 0; i < wring.Count; i++)
                         {
                             Vector2 g;
-                            if (MapTools.WorldToGui(route.P[i].Pos, texture, camera,
-                                                    world, map, out g))
-                            {
-                                proj.Add(g - clip.position);
-                                wpos.Add(route.P[i].Pos);
-                            }
+                            if (!MapTools.WorldToGui(wring[i], texture, camera,
+                                                     world, map, out g))
+                            { ringOk = false; break; }
+                            ring.Add(g - clip.position);
                         }
-                        if (proj.Count < 2) continue;
-
-                        // Instead of dashing the connected line, ENCIRCLE the
-                        // whole run with ONE smooth closed boundary: the convex
-                        // hull of the waypoints, pushed outward by the configured
-                        // half-width (metres -> pixels), corner-cut into a clean
-                        // loop. The dashes then trace that ring, never the
-                        // individual waypoints, so nothing scribbles.
-                        float ppm = PixelsPerMetre(proj, wpos);
-                        float pad = RouteMapPad(ppm);
-                        List<Vector2> ring = EncircleRun(proj, pad);
-                        if (ring == null || ring.Count < 3) continue;
+                        if (!ringOk || ring.Count < 3) continue;
 
                         // Colour is the patrol's faction: looter and traitor
-                        // red, civilian green, neutral white.
-                        Color col = RouteColor(route.Seite, route.Enabled);
+                        // red, civilian green, neutral white. A convoy route is
+                        // amber, to read apart from the patrol areas. NDR convoy.
+                        Color col = route.IsConvoy ? ConvoyColor(route.Enabled)
+                                                   : RouteColor(route.Seite, route.Enabled);
                         GUI.color = col;
 
                         // This ring's own dash points, added to the grid only
@@ -13838,13 +14155,21 @@ namespace NextDayRevival
                         // First ring under the cursor wins the note.
                         if (hoverText == null && PointInPolygon(ring, mouseLocal))
                         {
-                            hoverText = Loc.T(
-                                "Здесь регулярно проходят патрули. Возможно, "
-                                + "они везут ценный груз, но они опасны, хорошо "
-                                + "вооружены и имеют FPV-дрон.",
-                                "Regular patrols pass through here. They may be "
-                                + "carrying valuable cargo, but they are dangerous, "
-                                + "heavily armed, and have an FPV drone.");
+                            hoverText = route.IsConvoy
+                                ? Loc.T(
+                                    "Маршрут военного конвоя: 2 танка и 2 БТР с "
+                                    + "ценным грузом. Появляется время от времени - "
+                                    + "следите за оповещением о квадрате.",
+                                    "Military convoy route: 2 tanks and 2 APCs "
+                                    + "carrying valuable cargo. Appears from time to "
+                                    + "time - watch for the square alert.")
+                                : Loc.T(
+                                    "Здесь регулярно проходят патрули. Возможно, "
+                                    + "они везут ценный груз, но они опасны, хорошо "
+                                    + "вооружены и имеют FPV-дрон.",
+                                    "Regular patrols pass through here. They may be "
+                                    + "carrying valuable cargo, but they are dangerous, "
+                                    + "heavily armed, and have an FPV drone.");
                             hoverAt = mouseAbs;
                             hoverColor = col;
                         }
@@ -13914,6 +14239,15 @@ namespace NextDayRevival
             return c;
         }
 
+        /// <summary>The dash colour for a convoy route: amber, so it reads apart
+        /// from the faction-coloured patrol areas. NDR convoy.</summary>
+        static Color ConvoyColor(bool enabled)
+        {
+            Color c = new Color(1f, 0.62f, 0.12f);   // amber
+            c.a = enabled ? 0.95f : 0.42f;
+            return c;
+        }
+
         // Dash cadence in SCREEN pixels. Dash and gap are the on/off run
         // lengths walked along the enclosing RING's arc length; stroke is the
         // line thickness. Each dash is a short chain of ANTIALIASED feathered
@@ -13942,6 +14276,12 @@ namespace NextDayRevival
         // rather than a polygon and the bars have a clean arc to follow.
         const float RouteResample = 6f;
         const int RouteRingSmooth = 4;
+
+        // World-space spacing (metres) the cached ring is resampled to before it
+        // is projected each frame. Dense enough that the projected polygon reads
+        // as a smooth loop at the fixed map scale; built once, so the count is
+        // cheap.
+        const float RouteResampleWorld = 4f;
 
         // Half-width, in metres, of the ring around a route when the config is
         // unavailable, and the pixel range the metre padding is clamped to so a
@@ -14007,6 +14347,63 @@ namespace NextDayRevival
             ring.Add(ring[0]);                       // close the loop
             ring = Resample(ring, RouteResample);
             return ring;
+        }
+
+        /// <summary>
+        /// The route's encircling ring in WORLD space (XZ; the stored y is 0 and
+        /// WorldToGui ignores it). Built once - convex hull of the waypoints,
+        /// pushed outward by the configured half-width in METRES, corner-cut and
+        /// resampled - and cached on the route, rebuilt only when the waypoint
+        /// count or the padding changes. DrawMap projects this each frame; doing
+        /// the hull in one fixed world frame instead of per frame in screen space
+        /// is what stops the ring jittering as the map or camera micro-moves.
+        /// </summary>
+        static List<Vector3> WorldRing(Route r)
+        {
+            float pad = RoutePadMetres;
+            if (RevivalPlugin.CfgPatrolRouteMapWidth != null)
+                pad = RevivalPlugin.CfgPatrolRouteMapWidth.Value;
+            if (r.MapRing != null && r.MapRingN == r.P.Count
+                && Mathf.Abs(r.MapRingPad - pad) < 0.01f)
+                return r.MapRing;
+
+            r.MapRingN = r.P.Count;
+            r.MapRingPad = pad;
+            r.MapRing = null;
+            if (r.P.Count < 2) return null;
+
+            List<Vector2> xz = new List<Vector2>(r.P.Count);
+            for (int i = 0; i < r.P.Count; i++)
+                xz.Add(new Vector2(r.P[i].Pos.x, r.P[i].Pos.z));
+
+            List<Vector2> hull = ConvexHull(xz);
+            List<Vector2> ring = hull.Count < 3 ? CapsuleRing(xz, pad)
+                                                : ExpandHull(hull, pad);
+            if (ring == null || ring.Count < 3) return null;
+            ring = ChaikinClosed(ring, RouteRingSmooth);
+            ring.Add(ring[0]);                       // close the loop
+            ring = Resample(ring, RouteResampleWorld);
+
+            List<Vector3> worldRing = new List<Vector3>(ring.Count);
+            for (int i = 0; i < ring.Count; i++)
+                worldRing.Add(new Vector3(ring[i].x, 0f, ring[i].y));
+            r.MapRing = worldRing;
+            return worldRing;
+        }
+
+        /// <summary>The overlap of two GUI rectangles. An empty overlap returns a
+        /// zero-size rect - the overlay then simply draws nothing - rather than
+        /// either input, so a stray panel state can never leak dashes over the
+        /// UI.</summary>
+        static Rect Intersect(Rect a, Rect b)
+        {
+            float x0 = Mathf.Max(a.xMin, b.xMin);
+            float y0 = Mathf.Max(a.yMin, b.yMin);
+            float x1 = Mathf.Min(a.xMax, b.xMax);
+            float y1 = Mathf.Min(a.yMax, b.yMax);
+            if (x1 < x0) x1 = x0;
+            if (y1 < y0) y1 = y0;
+            return new Rect(x0, y0, x1 - x0, y1 - y0);
         }
 
         /// <summary>Andrew's monotone-chain convex hull. Returns the hull
@@ -14665,6 +15062,28 @@ namespace NextDayRevival
                     Melde(Loc.T("запись в ", "recording into ") + r.Name);
                 }
                 if (GUILayout.Button(Loc.T("патруль сейчас", "patrol now"), GUILayout.Width(85f))) Jetzt(r);
+                GUILayout.EndHorizontal();
+
+                // NDR convoy: mark this route as a convoy route (a column of
+                // 2 tanks + 2 APCs that the convoy event drives), and force one
+                // out now for testing.
+                GUILayout.BeginHorizontal();
+                bool conv = GUILayout.Toggle(r.IsConvoy, Loc.T("конвой", "convoy"),
+                                             GUI.skin.button, GUILayout.Width(80f));
+                if (conv != r.IsConvoy)
+                {
+                    r.Kind = conv ? "convoy" : "";
+                    Sichern(conv
+                        ? r.Name + Loc.T(" - маршрут конвоя (танк-БТР-БТР-танк)",
+                                         " is a convoy route (tank-APC-APC-tank)")
+                        : r.Name + Loc.T(" - обычный патруль", " is an ordinary patrol"));
+                }
+                if (r.IsConvoy && GUILayout.Button(Loc.T("конвой сейчас", "convoy now"),
+                                                   GUILayout.Width(110f)))
+                    Melde(RevivalConvoy.SpawnOn(r.Name)
+                        ? Loc.T("конвой выехал на ", "convoy sent out on ") + r.Name
+                        : Loc.T("конвой не удалось запустить (см. лог)",
+                                "convoy could not start (see log)"));
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();

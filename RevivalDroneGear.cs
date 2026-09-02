@@ -54,6 +54,7 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgRequireAntenna;
         public static ConfigEntry<float> CfgDeploySeconds;
         public static ConfigEntry<float> CfgAntennaHeight;
+        public static ConfigEntry<string> CfgAntennaKey;
         // --- Launch hold: the seconds a drone key is held before it lifts
         public static ConfigEntry<float> CfgLaunchHoldSeconds;
         // --- Surveillance drone
@@ -80,6 +81,11 @@ namespace NextDayRevival
             CfgAntennaHeight = cfg.Bind("DroneGear", "AntennaHeight", 2.5f,
                 "Hoehe der ausgefahrenen Antenne in Metern - so weit ragt sie aus "
                 + "dem Rucksack.");
+            CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
+                "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
+                + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
+                + "startet das Ausfahren (Ladebalken, Spieler steht still), ein "
+                + "weiterer Druck faehrt sie wieder ein.");
             CfgLaunchHoldSeconds = cfg.Bind("DroneGear", "LaunchHoldSeconds", 20f,
                 "Sekunden, die die rechte Maustaste gehalten werden muss, bis die "
                 + "Drohne in der Hand tatsaechlich abhebt.");
@@ -319,16 +325,23 @@ namespace NextDayRevival
 
     /// <summary>
     /// The mast antenna: a mod-tracked deploy state that gates every drone
-    /// launch. When the player carries an antenna on foot it raises over
-    /// ~20 seconds - the player is frozen (DroneInputHook reads
-    /// <see cref="Deploying"/>) and a load bar counts down - after which
-    /// <see cref="Up"/> is true and a mast model stands out of the backpack.
-    /// Boarding a vehicle, or losing the antenna, retracts it.
+    /// launch. Pressing the antenna key (DroneGear/AntennaKey, default H) while
+    /// carrying an antenna on foot raises it over ~20 seconds - the player is
+    /// frozen (DroneInputHook reads <see cref="Deploying"/>) and a load bar
+    /// counts down - after which <see cref="Up"/> is true and a telescopic grey
+    /// mast stands up out of the backpack. Pressing the key again lowers it.
+    /// Boarding a vehicle, or losing the antenna, retracts it automatically.
     ///
-    /// Trigger note: the game has no item-use/right-click hook, so the raise
-    /// starts from carrying the antenna on foot (the closest detectable form of
-    /// "deploy it"). Gear-slot-only detection is a later refinement once in-game
-    /// testing shows whether the antenna can occupy an equip slot at all.
+    /// Trigger note: the game has no item-use/right-click hook, so deploy is a
+    /// dedicated key rather than a right-click on the item. The player asked for
+    /// a deliberate deploy (no surprise freeze the moment the antenna is picked
+    /// up), so raising is opt-in via the key.
+    ///
+    /// The mast is built from primitives at runtime (a telescopic stack of grey
+    /// cylinders that slide up as it deploys), not a mesh asset - a dedicated
+    /// .ndmesh is a later Codex asset job. It is placed in WORLD space at the
+    /// player's back each frame and forced upright, so it always rises clearly
+    /// out of the backpack instead of sitting inside the body.
     /// </summary>
     public static class Antenna
     {
@@ -339,7 +352,18 @@ namespace NextDayRevival
         static float _len;
         static float _end;
 
-        static GameObject _mast;
+        // The telescopic mast: a root placed at the player's back and a stack of
+        // grey cylinder segments (thinner towards the top) that slide up out of
+        // one another as the antenna deploys. Segment 0 is the fat base tube.
+        const int Segments = 4;
+        static GameObject _root;
+        static GameObject[] _seg;
+        static Transform _pilot;
+        static Material _grey;
+
+        // Deploy key, parsed once from the config string.
+        static KeyCode _key = KeyCode.H;
+        static bool _keyParsed;
 
         // 0.5 s cache so we do not thrash Turret.HasItem's single-slot cache
         // (the jammer already polls it every frame).
@@ -406,33 +430,54 @@ namespace NextDayRevival
                 return;
             }
 
+            bool press = Input.GetKeyDown(DeployKey());
+
             if (InVehicle())
             {
                 if (Deploying || Up) Retract("boarded a vehicle");
+                if (press)
+                    Turret.Hinweis(Loc.T("В машине антенну развернуть нельзя",
+                                         "The antenna cannot be deployed inside a vehicle"), 2.5f);
                 return;
             }
 
             if (!HaveAntenna())
             {
                 if (Deploying || Up) Retract("antenna gone");
+                if (press)
+                    Turret.Hinweis(Loc.T("Нужна мачтовая антенна в рюкзаке",
+                                         "Need the mast antenna in the pack"), 2.5f);
                 return;
             }
 
-            if (Up)
+            // The key is the deliberate deploy: press to raise, press again to
+            // lower (or to cancel a raise in progress).
+            if (press)
+            {
+                if (Up || Deploying) Retract("key");
+                else Begin();
+            }
+
+            if (Deploying)
+            {
+                float now = Time.time;
+                if (now >= _end) Finish();
+                else Grow((now - _start) / _len);
+            }
+            else if (Up)
             {
                 Hold();
-                return;
             }
+        }
 
-            if (!Deploying)
-            {
-                Begin();
-                return;
-            }
-
-            float now = Time.time;
-            if (now >= _end) Finish();
-            else Grow((now - _start) / _len);
+        static KeyCode DeployKey()
+        {
+            if (_keyParsed) return _key;
+            _keyParsed = true;
+            string s = DroneGear.CfgAntennaKey == null ? "H" : DroneGear.CfgAntennaKey.Value;
+            try { _key = (KeyCode)Enum.Parse(typeof(KeyCode), s, true); }
+            catch { _key = KeyCode.H; }
+            return _key;
         }
 
         static void Begin()
@@ -469,22 +514,35 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------- visual
 
+        // Segment radii, fat base to thin tip. A real telescopic whip tapers,
+        // so thinner tubes appear to slide out of thicker ones.
+        static readonly float[] SegRadius = new float[] { 0.050f, 0.037f, 0.027f, 0.020f };
+
         static void BuildMast()
         {
             DestroyMast();
             try
             {
                 GameObject body = MapTools.LocalPlayer();
-                Transform anchor = body == null ? null : body.transform;
+                _pilot = body == null ? null : body.transform;
 
-                _mast = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                _mast.name = "NDR_Antenna";
-                DroneGear.StripCollider(_mast);
-
-                if (anchor != null) _mast.transform.SetParent(anchor, false);
-                _mast.transform.localRotation = Quaternion.identity;
-                // base sits around backpack height, behind the spine
-                _mast.transform.localPosition = new Vector3(0f, 1.2f, -0.2f);
+                _root = new GameObject("NDR_Antenna");
+                _seg = new GameObject[Segments];
+                Material g = Grey();
+                for (int i = 0; i < Segments; i++)
+                {
+                    GameObject c = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                    c.name = "NDR_AntennaSeg" + i;
+                    DroneGear.StripCollider(c);
+                    c.transform.SetParent(_root.transform, false);
+                    if (g != null)
+                    {
+                        Renderer r = c.GetComponent<Renderer>();
+                        if (r != null) r.sharedMaterial = g;
+                    }
+                    _seg[i] = c;
+                }
+                Layout(0f);
             }
             catch (Exception ex)
             {
@@ -492,25 +550,105 @@ namespace NextDayRevival
             }
         }
 
-        static void Grow(float t)
+        /// <summary>
+        /// Places the mast root at the player's back, forced upright, and lays
+        /// the telescopic segments so that a fraction `t` of the configured
+        /// height is extended. Segments fill from the bottom, so the thin upper
+        /// tubes only rise once the fat lower ones are out - a telescope opening.
+        /// </summary>
+        static void Layout(float t)
         {
-            if (_mast == null) return;
-            float h = Mathf.Clamp01(t) * Mathf.Max(0.2f, DroneGear.CfgAntennaHeight.Value);
-            // Unity cylinder is 2 m tall at scale 1, pivot at its centre.
-            _mast.transform.localScale = new Vector3(0.03f, h * 0.5f, 0.03f);
-            _mast.transform.localPosition = new Vector3(0f, 1.2f + h * 0.5f, -0.2f);
+            if (_root == null) return;
+
+            // Anchor: behind the player (backpack side) and up at pack height,
+            // always vertical no matter how the body leans or animates.
+            if (_pilot != null)
+            {
+                Vector3 fwd = _pilot.forward; fwd.y = 0f;
+                if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward; else fwd.Normalize();
+                _root.transform.position = _pilot.position - fwd * 0.22f + Vector3.up * 1.25f;
+                _root.transform.rotation = Quaternion.identity;
+            }
+
+            float total = Mathf.Max(0.3f, DroneGear.CfgAntennaHeight.Value);
+            float segMax = total / Segments;
+            float h = Mathf.Clamp01(t) * total;
+
+            float bottom = 0f;
+            for (int i = 0; i < Segments; i++)
+            {
+                GameObject c = _seg == null ? null : _seg[i];
+                if (c == null) continue;
+
+                // How much of THIS segment is out: it starts extending only once
+                // everything below it is fully out.
+                float len = Mathf.Clamp(h - i * segMax, 0f, segMax);
+                bool shown = len > 0.001f;
+                // A collapsed segment shows a short stub at the current tip so
+                // the nested tubes read as a stowed telescope, not a gap.
+                if (!shown) len = 0.02f;
+
+                float r = SegRadius[Mathf.Min(i, SegRadius.Length - 1)];
+                // Unity cylinder: 2 m tall, 1 m across at scale 1, pivot centre.
+                c.transform.localRotation = Quaternion.identity;
+                c.transform.localScale = new Vector3(r * 2f, len * 0.5f, r * 2f);
+                c.transform.localPosition = new Vector3(0f, bottom + len * 0.5f, 0f);
+
+                bottom += shown ? len : 0f;
+            }
         }
+
+        static void Grow(float t) { Layout(t); }
 
         static void Hold()
         {
-            // Keep the mast alive; if the body was rebuilt (respawn) and lost
-            // the child, put it back.
-            if (_mast == null) { BuildMast(); Grow(1f); }
+            // Keep the mast alive and following the (moving) player each frame;
+            // if the body was rebuilt (respawn) and the mast is gone, rebuild.
+            if (_root == null) { BuildMast(); Layout(1f); }
+            else Layout(1f);
         }
 
         static void DestroyMast()
         {
-            if (_mast != null) { UnityEngine.Object.Destroy(_mast); _mast = null; }
+            if (_root != null) { UnityEngine.Object.Destroy(_root); _root = null; }
+            _seg = null;
+            _pilot = null;
+        }
+
+        /// <summary>
+        /// A grey metal material that is guaranteed to draw. Shader.Find only
+        /// returns shaders built into the game, so it falls back to a scene
+        /// material's shader - a renderer with no material draws magenta.
+        /// </summary>
+        static Material Grey()
+        {
+            if (_grey != null) return _grey;
+            Shader sh = Shader.Find("Standard");
+            if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
+            if (sh == null) sh = Shader.Find("Diffuse");
+            if (sh == null)
+            {
+                UnityEngine.Object[] all =
+                    UnityEngine.Object.FindObjectsOfType(typeof(Renderer));
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Renderer r = all[i] as Renderer;
+                    if (r != null && r.sharedMaterial != null && r.sharedMaterial.shader != null)
+                    { sh = r.sharedMaterial.shader; break; }
+                }
+            }
+            if (sh == null)
+            {
+                RevivalPlugin.L.LogWarning("Antenna: no shader found - mast may draw magenta.");
+                return null;
+            }
+            _grey = new Material(sh);
+            _grey.name = "NDR_Antenna_Material";
+            _grey.color = new Color(0.55f, 0.57f, 0.60f, 1f); // brushed grey
+            // Standard shader: nudge towards a metal read if the params exist.
+            try { if (_grey.HasProperty("_Metallic")) _grey.SetFloat("_Metallic", 0.6f); } catch {}
+            try { if (_grey.HasProperty("_Glossiness")) _grey.SetFloat("_Glossiness", 0.35f); } catch {}
+            return _grey;
         }
 
         // -------------------------------------------------------------- bar

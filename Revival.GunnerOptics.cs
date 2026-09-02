@@ -4,12 +4,13 @@
 // installed modules (Revival.Modules.cs).
 //
 // Rendering is pure IMGUI (this is called from Turret.DrawScope, inside OnGUI):
-//   - the scene tint (thermal cools the picture, night greens it) is a
+//   - the scene tint (thermal cools the picture blue, night greens it) is a
 //     full-screen translucent quad drawn OVER the 3D view;
-//   - warm bodies are drawn as glowing blobs at the screen position of every
-//     nearby NPC and player, so the modes are genuinely useful (spot crews
-//     through smoke and darkness) without a camera post-process, which an old
-//     Unity + BepInEx build cannot do reliably;
+//   - warm things glow ON TOP of that cold scene: vehicles light up as a soft
+//     glow sized to the machine (no marker shape), and crew and players as a
+//     bright warm blob each, so the modes are genuinely useful (spot vehicles
+//     and crews through smoke and darkness) without a camera post-process,
+//     which an old Unity + BepInEx build cannot do reliably;
 //   - the frame, reticle and status text are drawn on top.
 // A real camera post-effect (image inversion for true white-hot, light gain for
 // night) would be nicer and is a possible later enhancement; this version is
@@ -27,13 +28,16 @@ namespace NextDayRevival
     internal static class GunnerOptics
     {
         static Texture2D _px;
+        static Texture2D _disc;
 
         // Warm-target cache. FindObjectsOfType per frame is exactly the cost
         // that never shows in a log and always shows in the frame time, so the
         // list is rebuilt a few times a second and only projected each frame.
-        static readonly List<Transform> _warm = new List<Transform>();
+        static readonly List<Transform> _warm = new List<Transform>();   // people: crew + players
+        static readonly List<Transform> _veh = new List<Transform>();     // vehicles
+        static readonly List<float> _vehR = new List<float>();            // vehicle world radius (m)
         static float _warmUntil;
-        static Type _npcType, _playerType;
+        static Type _npcType, _playerType, _vehType;
         static bool _typesResolved;
 
         static Texture2D Px()
@@ -53,6 +57,39 @@ namespace NextDayRevival
             Color old = GUI.color;
             GUI.color = c;
             GUI.DrawTexture(r, Px());
+            GUI.color = old;
+        }
+
+        /// <summary>
+        /// A soft round glow texture, built once: opaque at the centre, fading to
+        /// zero alpha at the rim. Warm targets are drawn with this, so they read
+        /// as round heat blobs instead of the old concentric squares.
+        /// </summary>
+        static Texture2D Disc()
+        {
+            if (_disc != null) return _disc;
+            const int N = 64;
+            _disc = new Texture2D(N, N, TextureFormat.ARGB32, false);
+            _disc.hideFlags = HideFlags.HideAndDontSave;
+            float c = (N - 1) * 0.5f;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float dx = (x - c) / c, dy = (y - c) / c;
+                    float d = Mathf.Sqrt(dx * dx + dy * dy);      // 0 centre .. 1 rim
+                    float a = Mathf.Clamp01(1f - d);
+                    a = a * a;                                    // softer falloff
+                    _disc.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+                }
+            _disc.Apply();
+            return _disc;
+        }
+
+        static void Glow(Rect r, Color c)
+        {
+            Color old = GUI.color;
+            GUI.color = c;
+            GUI.DrawTexture(r, Disc());
             GUI.color = old;
         }
 
@@ -84,9 +121,11 @@ namespace NextDayRevival
         {
             if (mode == VisionMode.Normal) return;
 
+            // The whole scene goes cold: deep blue for thermal, green for night.
+            // Warm things (vehicles, crew, players) then glow ON TOP of it.
             Rect full = new Rect(0f, 0f, Screen.width, Screen.height);
             if (mode == VisionMode.Thermal)
-                Fill(full, new Color(0.02f, 0.05f, 0.09f, 0.62f)); // cool the scene
+                Fill(full, new Color(0.02f, 0.05f, 0.11f, 0.66f)); // cool the scene blue
             else
                 Fill(full, new Color(0.00f, 0.22f, 0.03f, 0.38f)); // green it
 
@@ -94,37 +133,73 @@ namespace NextDayRevival
             Camera cam = Camera.main;
             if (cam == null) return;
 
+            bool thermal = mode == VisionMode.Thermal;
+
+            // Vehicles first: a soft glow sized to the machine itself lights it
+            // up as a warm shape - no marker, no rectangle. People draw over it.
+            Color vehHot = thermal ? new Color(1.0f, 0.82f, 0.20f, 0.85f)  // warm yellow
+                                   : new Color(0.55f, 1.0f, 0.55f, 0.65f);
+            for (int i = 0; i < _veh.Count; i++)
+            {
+                Transform t = _veh[i];
+                if (t == null) continue;
+                Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
+                float dist; Vector2 g;
+                if (!Project(cam, mid, out g, out dist)) continue;
+                if (dist > 800f) continue;
+
+                // On-screen size from the vehicle's world radius: project a point
+                // one radius to the side and measure the pixel gap, so the glow
+                // tracks the vehicle's apparent size at any distance.
+                float r = i < _vehR.Count ? _vehR[i] : 3f;
+                float edgeDist; Vector2 ge;
+                float px = 40f;
+                if (Project(cam, mid + cam.transform.right * r, out ge, out edgeDist))
+                    px = Mathf.Abs(ge.x - g.x);
+                px = Mathf.Clamp(px, 16f, 320f);
+                VehicleGlow(g, px, vehHot);
+            }
+
+            // People: crew and players, a bright warm blob each.
+            Color hot = thermal ? new Color(1.0f, 0.90f, 0.30f, 0.92f)  // bright yellow
+                                : new Color(0.50f, 1.0f, 0.50f, 0.78f);
             for (int i = 0; i < _warm.Count; i++)
             {
                 Transform t = _warm[i];
                 if (t == null) continue;
                 Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
-                float dist;
-                Vector2 g;
+                float dist; Vector2 g;
                 if (!Project(cam, chest, out g, out dist)) continue;
                 if (dist > 450f) continue;
 
                 float size = Mathf.Clamp(1400f / dist, 6f, 42f);
-                Color hot = mode == VisionMode.Thermal
-                    ? new Color(1.0f, 0.55f, 0.15f, 0.90f)
-                    : new Color(0.50f, 1.0f, 0.50f, 0.75f);
                 Blob(g, size, hot);
             }
         }
 
+        static void VehicleGlow(Vector2 c, float px, Color col)
+        {
+            // Wider than tall - a vehicle silhouette reads horizontal. Soft halo
+            // plus a brighter core, both from the round Disc texture.
+            float w = px * 1.5f, h = px * 0.95f;
+            Glow(new Rect(c.x - w, c.y - h, w * 2f, h * 2f),
+                 new Color(col.r, col.g, col.b, col.a * 0.5f));
+            float wc = w * 0.55f, hc = h * 0.55f;
+            Glow(new Rect(c.x - wc, c.y - hc, wc * 2f, hc * 2f),
+                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.10f)));
+        }
+
         static void Blob(Vector2 c, float s, Color col)
         {
-            // A cheap glow: a few concentric translucent squares, brightest in
-            // the middle. Not a disc, but at these sizes it reads as a hot blob.
-            for (int k = 3; k >= 1; k--)
-            {
-                float f = s * k * 0.5f;
-                Color cc = new Color(col.r, col.g, col.b, col.a * (0.10f + 0.10f / k));
-                Fill(new Rect(c.x - f, c.y - f, f * 2f, f * 2f), cc);
-            }
-            float core = s * 0.28f;
-            Fill(new Rect(c.x - core, c.y - core, core * 2f, core * 2f),
-                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.2f)));
+            // A round heat glow: a wide soft halo with a brighter core, both from
+            // the radial Disc texture, so a warm target reads as a blob and never
+            // as a square (the old version stacked translucent rectangles).
+            float halo = s * 1.6f;
+            Glow(new Rect(c.x - halo, c.y - halo, halo * 2f, halo * 2f),
+                 new Color(col.r, col.g, col.b, col.a * 0.45f));
+            float core = s * 0.7f;
+            Glow(new Rect(c.x - core, c.y - core, core * 2f, core * 2f),
+                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.15f)));
         }
 
         static bool Project(Camera cam, Vector3 world, out Vector2 gui, out float dist)
@@ -144,9 +219,12 @@ namespace NextDayRevival
             VehicleModules.Sweep();
 
             _warm.Clear();
+            _veh.Clear();
+            _vehR.Clear();
             ResolveTypes();
             AddAll(_npcType);
             AddAll(_playerType);
+            AddVehicles(_vehType);
         }
 
         static void AddAll(Type t)
@@ -160,12 +238,44 @@ namespace NextDayRevival
             }
         }
 
+        static void AddVehicles(Type t)
+        {
+            if (t == null) return;
+            Transform mine = Turret.MannedVehicle;   // do not glow our own vehicle
+            UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(t);
+            for (int i = 0; i < objs.Length; i++)
+            {
+                Component c = objs[i] as Component;
+                if (c == null || c.transform == null) continue;
+                if (c.transform == mine) continue;
+                _veh.Add(c.transform);
+                _vehR.Add(VehicleRadius(c.transform));
+            }
+        }
+
+        /// <summary>Horizontal world radius of a vehicle from its child renderers,
+        /// used to size its heat glow on screen. Clamped and never throwing.</summary>
+        static float VehicleRadius(Transform t)
+        {
+            try
+            {
+                Renderer[] rs = t.GetComponentsInChildren<Renderer>();
+                if (rs == null || rs.Length == 0) return 3f;
+                Bounds b = rs[0].bounds;
+                for (int i = 1; i < rs.Length; i++) b.Encapsulate(rs[i].bounds);
+                float rad = new Vector2(b.extents.x, b.extents.z).magnitude;
+                return Mathf.Clamp(rad, 1.5f, 14f);
+            }
+            catch { return 3f; }
+        }
+
         static void ResolveTypes()
         {
             if (_typesResolved) return;
             _typesResolved = true;
             _npcType = AccessTools.TypeByName("NPC_AI2");
             _playerType = AccessTools.TypeByName("PlayerNetworkController");
+            _vehType = AccessTools.TypeByName("VehicleGameSystem");
         }
 
         // ---------------------------------------------------------- framing
