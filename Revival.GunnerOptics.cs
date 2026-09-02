@@ -1,0 +1,280 @@
+// Next Day: Survival - Revival Toolkit
+// The gunner periscope: draws the modern, wide-field optic that replaces the
+// old round scope, plus the thermal and night-vision overlays unlocked by the
+// installed modules (Revival.Modules.cs).
+//
+// Rendering is pure IMGUI (this is called from Turret.DrawScope, inside OnGUI):
+//   - the scene tint (thermal cools the picture, night greens it) is a
+//     full-screen translucent quad drawn OVER the 3D view;
+//   - warm bodies are drawn as glowing blobs at the screen position of every
+//     nearby NPC and player, so the modes are genuinely useful (spot crews
+//     through smoke and darkness) without a camera post-process, which an old
+//     Unity + BepInEx build cannot do reliably;
+//   - the frame, reticle and status text are drawn on top.
+// A real camera post-effect (image inversion for true white-hot, light gain for
+// night) would be nicer and is a possible later enhancement; this version is
+// robust and asset-free.
+//
+// ASCII-only code and comments; on-screen text is bilingual through Loc.T.
+
+using System;
+using System.Collections.Generic;
+using HarmonyLib;
+using UnityEngine;
+
+namespace NextDayRevival
+{
+    internal static class GunnerOptics
+    {
+        static Texture2D _px;
+
+        // Warm-target cache. FindObjectsOfType per frame is exactly the cost
+        // that never shows in a log and always shows in the frame time, so the
+        // list is rebuilt a few times a second and only projected each frame.
+        static readonly List<Transform> _warm = new List<Transform>();
+        static float _warmUntil;
+        static Type _npcType, _playerType;
+        static bool _typesResolved;
+
+        static Texture2D Px()
+        {
+            if (_px == null)
+            {
+                _px = new Texture2D(1, 1, TextureFormat.ARGB32, false);
+                _px.SetPixel(0, 0, Color.white);
+                _px.Apply();
+                _px.hideFlags = HideFlags.HideAndDontSave;
+            }
+            return _px;
+        }
+
+        static void Fill(Rect r, Color c)
+        {
+            Color old = GUI.color;
+            GUI.color = c;
+            GUI.DrawTexture(r, Px());
+            GUI.color = old;
+        }
+
+        /// <summary>
+        /// Draws the whole gunner optic. Returns true when it has taken over the
+        /// view, so Turret skips its legacy scope. Called from Turret.DrawScope
+        /// only while the player is manning a seat.
+        /// </summary>
+        internal static bool Draw(bool tank, Transform veh)
+        {
+            if (!VehicleModules.Enabled) return false;
+            if (VehicleModules.CfgPeriscope == null || !VehicleModules.CfgPeriscope.Value) return false;
+
+            VisionMode mode = VehicleModules.CurrentMode(veh);
+            try
+            {
+                DrawVision(mode, veh);
+                DrawFrame(mode);
+                DrawReticle(mode);
+                DrawStatus(veh, mode);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogError("GunnerOptics: " + ex); }
+            return true;
+        }
+
+        // ------------------------------------------------------ scene tint
+
+        static void DrawVision(VisionMode mode, Transform veh)
+        {
+            if (mode == VisionMode.Normal) return;
+
+            Rect full = new Rect(0f, 0f, Screen.width, Screen.height);
+            if (mode == VisionMode.Thermal)
+                Fill(full, new Color(0.02f, 0.05f, 0.09f, 0.62f)); // cool the scene
+            else
+                Fill(full, new Color(0.00f, 0.22f, 0.03f, 0.38f)); // green it
+
+            RefreshTargets();
+            Camera cam = Camera.main;
+            if (cam == null) return;
+
+            for (int i = 0; i < _warm.Count; i++)
+            {
+                Transform t = _warm[i];
+                if (t == null) continue;
+                Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
+                float dist;
+                Vector2 g;
+                if (!Project(cam, chest, out g, out dist)) continue;
+                if (dist > 450f) continue;
+
+                float size = Mathf.Clamp(1400f / dist, 6f, 42f);
+                Color hot = mode == VisionMode.Thermal
+                    ? new Color(1.0f, 0.55f, 0.15f, 0.90f)
+                    : new Color(0.50f, 1.0f, 0.50f, 0.75f);
+                Blob(g, size, hot);
+            }
+        }
+
+        static void Blob(Vector2 c, float s, Color col)
+        {
+            // A cheap glow: a few concentric translucent squares, brightest in
+            // the middle. Not a disc, but at these sizes it reads as a hot blob.
+            for (int k = 3; k >= 1; k--)
+            {
+                float f = s * k * 0.5f;
+                Color cc = new Color(col.r, col.g, col.b, col.a * (0.10f + 0.10f / k));
+                Fill(new Rect(c.x - f, c.y - f, f * 2f, f * 2f), cc);
+            }
+            float core = s * 0.28f;
+            Fill(new Rect(c.x - core, c.y - core, core * 2f, core * 2f),
+                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.2f)));
+        }
+
+        static bool Project(Camera cam, Vector3 world, out Vector2 gui, out float dist)
+        {
+            gui = Vector2.zero;
+            Vector3 sp = cam.WorldToScreenPoint(world);
+            dist = sp.z;
+            if (sp.z <= 0.5f) return false;            // behind the camera
+            gui = new Vector2(sp.x, Screen.height - sp.y); // GUI y is top-down
+            return true;
+        }
+
+        static void RefreshTargets()
+        {
+            if (Time.time < _warmUntil) return;
+            _warmUntil = Time.time + 0.35f;
+            VehicleModules.Sweep();
+
+            _warm.Clear();
+            ResolveTypes();
+            AddAll(_npcType);
+            AddAll(_playerType);
+        }
+
+        static void AddAll(Type t)
+        {
+            if (t == null) return;
+            UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(t);
+            for (int i = 0; i < objs.Length; i++)
+            {
+                Component c = objs[i] as Component;
+                if (c != null && c.transform != null) _warm.Add(c.transform);
+            }
+        }
+
+        static void ResolveTypes()
+        {
+            if (_typesResolved) return;
+            _typesResolved = true;
+            _npcType = AccessTools.TypeByName("NPC_AI2");
+            _playerType = AccessTools.TypeByName("PlayerNetworkController");
+        }
+
+        // ---------------------------------------------------------- framing
+
+        static void DrawFrame(VisionMode mode)
+        {
+            float w = Screen.width, h = Screen.height;
+            // Thin margins = a wide field of view, the point of the periscope.
+            float mx = w * 0.055f, my = h * 0.095f;
+
+            Color bar = new Color(0f, 0f, 0f, 0.66f);
+            Fill(new Rect(0f, 0f, w, my), bar);
+            Fill(new Rect(0f, h - my, w, my), bar);
+            Fill(new Rect(0f, my, mx, h - 2f * my), bar);
+            Fill(new Rect(w - mx, my, mx, h - 2f * my), bar);
+
+            Color edge = EdgeColor(mode);
+            float t = 2f;
+            Fill(new Rect(mx, my, w - 2f * mx, t), edge);
+            Fill(new Rect(mx, h - my - t, w - 2f * mx, t), edge);
+            Fill(new Rect(mx, my, t, h - 2f * my), edge);
+            Fill(new Rect(w - mx - t, my, t, h - 2f * my), edge);
+
+            // Corner ticks - a technical, modern read.
+            float ct = 22f, th = 2f;
+            Color e = edge;
+            // top-left
+            Fill(new Rect(mx, my, ct, th), e); Fill(new Rect(mx, my, th, ct), e);
+            // top-right
+            Fill(new Rect(w - mx - ct, my, ct, th), e); Fill(new Rect(w - mx - th, my, th, ct), e);
+            // bottom-left
+            Fill(new Rect(mx, h - my - th, ct, th), e); Fill(new Rect(mx, h - my - ct, th, ct), e);
+            // bottom-right
+            Fill(new Rect(w - mx - ct, h - my - th, ct, th), e); Fill(new Rect(w - mx - th, h - my - ct, th, ct), e);
+        }
+
+        static Color EdgeColor(VisionMode mode)
+        {
+            if (mode == VisionMode.Thermal) return new Color(1f, 0.6f, 0.2f, 0.5f);
+            if (mode == VisionMode.Night) return new Color(0.4f, 1f, 0.4f, 0.5f);
+            return new Color(0.72f, 0.85f, 0.72f, 0.42f);
+        }
+
+        // ---------------------------------------------------------- reticle
+
+        static void DrawReticle(VisionMode mode)
+        {
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
+            Color col = mode == VisionMode.Thermal ? new Color(1f, 0.65f, 0.2f, 0.95f)
+                      : mode == VisionMode.Night ? new Color(0.5f, 1f, 0.5f, 0.9f)
+                      : new Color(0.85f, 1f, 0.85f, 0.9f);
+            Color sh = new Color(0f, 0f, 0f, 0.55f);
+            float gap = 8f, arm = 22f, th = 2f;
+
+            Cross(cx + 1f, cy + 1f, gap, arm, th, sh);
+            Cross(cx, cy, gap, arm, th, col);
+            Fill(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), new Color(1f, 0.35f, 0.2f, 0.95f));
+
+            Color lad = new Color(col.r, col.g, col.b, 0.55f);
+            float step = Mathf.Max(12f, Screen.height * 0.025f);
+            for (int i = 1; i <= 4; i++)
+            {
+                float y = cy + arm + gap + i * step;
+                float len = 18f - i * 2f;
+                Fill(new Rect(cx - len, y - 0.75f, len * 2f, 1.5f), lad);
+            }
+        }
+
+        static void Cross(float cx, float cy, float gap, float arm, float th, Color c)
+        {
+            Fill(new Rect(cx - gap - arm, cy - th * 0.5f, arm, th), c);
+            Fill(new Rect(cx + gap, cy - th * 0.5f, arm, th), c);
+            Fill(new Rect(cx - th * 0.5f, cy - gap - arm, th, arm), c);
+            Fill(new Rect(cx - th * 0.5f, cy + gap, th, arm), c);
+        }
+
+        // ----------------------------------------------------------- status
+
+        static void DrawStatus(Transform veh, VisionMode mode)
+        {
+            float w = Screen.width, h = Screen.height;
+            float mx = w * 0.055f, my = h * 0.095f;
+
+            string modeTxt = mode == VisionMode.Thermal ? Loc.T("ТЕПЛО", "THERMAL")
+                           : mode == VisionMode.Night ? Loc.T("НОЧЬ", "NIGHT")
+                           : Loc.T("ОБЫЧНЫЙ", "NORMAL");
+
+            VehicleModules.Slot s = VehicleModules.Get(veh);
+            string mods = "";
+            if (s != null)
+            {
+                if (s.Thermal) mods += Loc.T(" ТЕПЛО", " THERMAL");
+                if (s.Night) mods += Loc.T(" НОЧЬ", " NIGHT");
+                if (s.Jammer) mods += Loc.T(" РЭБ", " ECM");
+            }
+            if (mods.Length == 0) mods = Loc.T(" нет", " none");
+
+            Color oldc = GUI.contentColor;
+            GUI.contentColor = EdgeColor(mode);
+            GUI.contentColor = new Color(GUI.contentColor.r, GUI.contentColor.g, GUI.contentColor.b, 0.95f);
+            GUI.Label(new Rect(mx + 8f, my - 22f, w * 0.6f, 20f),
+                      Loc.T("ОПТИКА: ", "OPTICS: ") + modeTxt
+                      + Loc.T("   МОДУЛИ:", "   MODULES:") + mods);
+
+            GUI.contentColor = new Color(0.82f, 0.86f, 0.82f, 0.72f);
+            GUI.Label(new Rect(mx + 8f, h - my + 3f, w - 2f * mx - 16f, 20f),
+                      Loc.T("N: режим   I: установить модуль   Shift+I: снять модуль",
+                            "N: mode   I: install module   Shift+I: remove module"));
+            GUI.contentColor = oldc;
+        }
+    }
+}

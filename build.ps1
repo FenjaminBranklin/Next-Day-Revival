@@ -42,7 +42,21 @@ $managed = Join-Path $game "nextday_game_Data\Managed"
 $core    = Join-Path $game "BepInEx\core"
 $plugins = Join-Path $game "BepInEx\plugins"
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$src     = Join-Path $root "RevivalPlugin.cs"
+# Compile every top-level .cs beside build.ps1, not RevivalPlugin.cs alone.
+# Large new systems (RevivalDroneGear.cs, Revival.Modules.cs,
+# Revival.GunnerOptics.cs) live in their own files to keep them out of the
+# 19k-line main file; this is what let several agents work in parallel and the
+# integration agent merge with few conflicts (AGENTS.md, Ausnahme). csc compiles
+# them into one DLL. RevivalPlugin.cs comes first, the rest sorted - order is
+# irrelevant to csc but a stable build is easier to read.
+$mainSrc = Join-Path $root "RevivalPlugin.cs"
+$src     = @($mainSrc) + (
+    Get-ChildItem -Path $root -Filter *.cs -File |
+        Where-Object { $_.FullName -ne $mainSrc } |
+        Sort-Object Name |
+        ForEach-Object { $_.FullName }
+)
+if ($src.Count -eq 0) { throw "no .cs sources found in $root" }
 $stage   = Join-Path $root "build"
 $staged  = Join-Path $stage "NextDayRevivalToolkit.dll"
 $out     = Join-Path $plugins "NextDayRevivalToolkit.dll"
@@ -77,9 +91,9 @@ $refs = @(
 $cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2",
              "/codepage:65001", "/out:$staged")
 foreach ($r in $refs) { $cscArgs += "/reference:$r" }
-$cscArgs += $src
+foreach ($s in $src) { $cscArgs += $s }
 
-Write-Host ("uebersetze -> {0}" -f $staged)
+Write-Host ("uebersetze {0} Datei(en) -> {1}" -f $src.Count, $staged)
 & $csc $cscArgs
 if ($LASTEXITCODE -ne 0) { throw "compile failed with exit code $LASTEXITCODE" }
 Write-Host ("OK  {0} bytes" -f (Get-Item $staged).Length)

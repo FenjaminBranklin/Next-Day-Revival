@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "0.5.17";
+        public const string VERSION = "6.0.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -312,6 +312,10 @@ namespace NextDayRevival
         internal static ConfigEntry<int> CfgPatrolCrewMax;
         internal static ConfigEntry<float> CfgPatrolCrewHealth;
         internal static ConfigEntry<int> CfgPatrolCrewLevel;
+        internal static ConfigEntry<int> CfgPatrolCrewLawCount;
+        internal static ConfigEntry<float> CfgPatrolCrewMgShotDelay;
+        internal static ConfigEntry<float> CfgPatrolCrewLawDamage;
+        internal static ConfigEntry<float> CfgPatrolCrewLawRadius;
         internal static ConfigEntry<float> CfgPatrolWreck;
         internal static ConfigEntry<float> CfgPatrolSpeed;
         internal static ConfigEntry<float> CfgPatrolRecordSeconds;
@@ -399,6 +403,12 @@ namespace NextDayRevival
         internal static ConfigEntry<string> CfgArenaKey;
         internal static ConfigEntry<float> CfgArenaSize;
         internal static ConfigEntry<float> CfgArenaDistance;
+        // DroneAlert (self-contained proximity warning, see class DroneAlert)
+        internal static ConfigEntry<bool> CfgDroneAlert;
+        internal static ConfigEntry<float> CfgDroneAlertRange;
+        internal static ConfigEntry<bool> CfgDroneAlertSound;
+        internal static ConfigEntry<float> CfgDroneAlertVolume;
+        internal static ConfigEntry<bool> CfgDroneAlertHud;
 
         internal static List<ItemDef> Items = new List<ItemDef>();
 
@@ -425,7 +435,10 @@ namespace NextDayRevival
             L.LogInfo("Asset-Verzeichnis: " + AssetDir);
 
             BindConfig();
+            DroneGear.BindConfig(Config);
+            VehicleModules.BindConfig(Config);   // NDR vehicle modules
             BuildItemTable();
+            VehicleModules.RegisterItems();      // NDR vehicle modules
 
             _harmony = new Harmony(GUID);
             PatchCursor();
@@ -440,6 +453,7 @@ namespace NextDayRevival
             PatchDroneShot();
             PatchCustomDrop();
             PatchFire();
+            VehicleWreck.Install(_harmony);
             Turret.Install(_harmony);
             ColdHook.Install(_harmony);
             DroneInputHook.Install(_harmony);
@@ -954,6 +968,24 @@ namespace NextDayRevival
                 + "shoot at it, so this is a ceiling against a whole camp "
                 + "firing at once, not a squad size.");
 
+            // ----------------------------------------------------- DroneAlert
+            // Leichter Warnmelder: schlaegt an, wenn eine feindliche Crew-FPV in
+            // der Luft naeher als AlertRange steht. Rein lokal, kein Netz.
+            CfgDroneAlert = Config.Bind("DroneAlert", "Enabled", true,
+                "Warnt den Spieler, wenn eine feindliche Drohne in der Luft naeher "
+                + "als AlertRange kommt. Rein lokal, verschickt nichts.");
+            CfgDroneAlertRange = Config.Bind("DroneAlert", "AlertRange", 500f,
+                "Reichweite des Melders in Metern. Ab hier zaehlt eine Drohne als "
+                + "nah und der Alarm geht an.");
+            CfgDroneAlertSound = Config.Bind("DroneAlert", "Sound", true,
+                "Akustisches Warnsignal. Piept schneller, je naeher die Drohne ist "
+                + "- wie ein Einparkhilfe- oder Radarwarner.");
+            CfgDroneAlertVolume = Config.Bind("DroneAlert", "Volume", 0.7f,
+                "Lautstaerke des Warntons, 0 bis 1.");
+            CfgDroneAlertHud = Config.Bind("DroneAlert", "Hud", true,
+                "Blinkender Texthinweis unten links, solange eine Drohne in "
+                + "Reichweite ist. Unabhaengig vom Ton nutzbar.");
+
             // ------------------------------------------------------- Effects
             CfgFire = Config.Bind("Effects", "Fire", true,
                 "Fire on top of every explosion: fireball, tongues, sparks, smoke "
@@ -1200,6 +1232,27 @@ namespace NextDayRevival
                 "Hit points of one crewman.");
             CfgPatrolCrewLevel = Config.Bind("Patrol", "CrewLevel", 2,
                 "NPC level of the crew. Feeds the game's own level table.");
+            CfgPatrolCrewLawCount = Config.Bind("Patrol", "CrewLawCount", 1,
+                "How many of a crew carry an M72 LAW instead of the MG42. A LAW "
+                + "man fires a real rocket - a networked explosion on impact - "
+                + "and re-arms in about three seconds, so one rocketeer keeps the "
+                + "pressure on a vehicle or on a man behind thin cover. The rest "
+                + "carry the MG42. 0 gives the whole crew the machine gun; a "
+                + "number at or above the crew size gives them all the LAW.");
+            CfgPatrolCrewMgShotDelay = Config.Bind("Patrol", "CrewMgShotDelay", 0.06f,
+                "Seconds between two MG42 rounds for a crewman. The game paces "
+                + "every NPC at a fixed ~0.25 s whatever the weapon, which is why "
+                + "the belt-fed gun used to sound no faster than a rifle. 0.06 "
+                + "lets it rattle at roughly the weapon's own rate; larger is "
+                + "slower, 0.25 is the vanilla pace. The LAW is untouched - it "
+                + "reloads between every rocket regardless.");
+            CfgPatrolCrewLawDamage = Config.Bind("Patrol", "CrewLawDamage", 600f,
+                "Blast damage of a crew LAW rocket on impact. The player LAW does "
+                + "900; the crew's is deliberately a little softer so a near miss "
+                + "is survivable and a rocket every few seconds is not an instant "
+                + "death sentence.");
+            CfgPatrolCrewLawRadius = Config.Bind("Patrol", "CrewLawRadius", 8f,
+                "Blast radius in metres of a crew LAW rocket. The player LAW is 12.");
             CfgPatrolWreck = Config.Bind("Patrol", "WreckSeconds", 240f,
                 "Seconds a destroyed patrol vehicle stays on the road before "
                 + "it is removed. 0 leaves the wreck where it is.");
@@ -1460,6 +1513,9 @@ namespace NextDayRevival
                 "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
                 "jammer_icon.png", null,
                 1, 0, 26.0f));
+
+            // The antenna, drone battery and surveillance drone (own file).
+            DroneGear.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -1829,6 +1885,7 @@ namespace NextDayRevival
             }
 
             Registry.RegisterAll();
+            Registry.RegisterMarketplace();
             if (CfgLootTables.Value) Registry.AddToLootTables();
             Research.ReportRegions();
             L.LogInfo("--- Selbsttest Ende ---");
@@ -1838,6 +1895,7 @@ namespace NextDayRevival
             // geladen haben, etwa beim Wechsel ins Spiel.
             yield return new WaitForSeconds(12f);
             Registry.RegisterAll();
+            Registry.RegisterMarketplace();
             if (CfgLootTables.Value) Registry.AddToLootTables();
             StartCoroutine(WaitForWeaponDb());
         }
@@ -1880,11 +1938,14 @@ namespace NextDayRevival
             Regions.Tick();
             Research.Tick();
             Turret.Tick();
+            VehicleModules.Tick();   // NDR vehicle modules: install/vision keys
             Drone.Tick();
+            DroneGear.Tick();
             Arena.Tick();
             CarSpawn.Tick();
             Patrol.Tick();
             CrewDrone.Tick();
+            DroneAlert.Tick();
         }
 
         void FixedUpdate()
@@ -1901,10 +1962,12 @@ namespace NextDayRevival
         {
             Turret.DrawScope();
             Drone.Draw();
+            DroneGear.Draw();
             Patrol.DrawMap();
             MapTeleport.Draw();
             Admin.Draw();
             Patrol.Draw();
+            DroneAlert.Draw();
         }
 
         void OnApplicationFocus(bool hasFocus)
@@ -3766,6 +3829,22 @@ namespace NextDayRevival
 
     public static class Registry
     {
+        // MarketplaceObject.RecalculateMarketItemsCategory selects exactly the
+        // A-D lists named below from each category, based on the current
+        // trader's MarketItemRanksSelling. Putting a custom item in every list
+        // makes it universal without changing any trader or vanilla rank.
+        static readonly string[] MarketRankFields = new string[] {
+            "MarketItemsA", "MarketItemsB", "MarketItemsC", "MarketItemsD" };
+
+        // Kept separate from ItemDef on purpose. The antenna rework owns the
+        // definitions for 2055-2057; once those definitions are integrated,
+        // this table registers them without either side recreating the other.
+        static readonly int[] ShopItemIds = new int[] {
+            1160, 1161, 1162, 1163, 2050, 2051, 2053, 2054, 2055, 2056, 2057 };
+        static readonly int[] ShopBuyPrices = new int[] {
+            18000, 30000, 25000, 10000, 4000, 4500,
+            5000, 100000, 50000, 2500, 25000 };
+
         public static void RegisterAll()
         {
             try
@@ -3826,6 +3905,299 @@ namespace NextDayRevival
                                         + " Woerterbuechern vollstaendig.");
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Item-DB-Registrierung: " + ex); }
+        }
+
+        /// <summary>
+        /// Extends the game's MarketplaceDB rather than introducing another
+        /// shop path. MarketItem.Price is what buying reads; the parallel price
+        /// dictionary is what GenerateSellItemPrice reads before multiplying by
+        /// this trader's BuyPlayerItemsPercent and converting the positive float
+        /// to int (therefore truncating/flooring it).
+        /// </summary>
+        public static void RegisterMarketplace()
+        {
+            try
+            {
+                Type marketType = RevivalPlugin.TypeByName("MarketplaceDB");
+                MethodInfo current = marketType == null ? null
+                    : AccessTools.PropertyGetter(marketType, "current");
+                object market = current == null ? null : current.Invoke(null, null);
+                if (market == null)
+                {
+                    RevivalPlugin.L.LogWarning("Marketplace: MarketplaceDB.current fehlt.");
+                    return;
+                }
+
+                FieldInfo categoryField = AccessTools.Field(market.GetType(),
+                    "MarketItemsCategoriesDictionary");
+                FieldInfo priceField = AccessTools.Field(market.GetType(),
+                    "MarketItemsPriceDictionary");
+                IDictionary categories = categoryField == null
+                    ? null : GetDic(market, categoryField);
+                IDictionary prices = priceField == null
+                    ? null : GetDic(market, priceField);
+                if (categories == null || prices == null)
+                {
+                    RevivalPlugin.L.LogWarning("Marketplace: Kategorien oder Preistabelle fehlen.");
+                    return;
+                }
+
+                // 2052 is a display/unused round. Remove stale registrations as
+                // well as declining to add it, so it cannot be bought or sold.
+                ItemDef display = FindUniqueDefinition(2052);
+                if (display != null)
+                    SetSpawnMarketData(display.Factory.MySpawned, false, 0);
+                int excluded = RemoveMarketItem(categories, 2052, null);
+                if (prices.Contains(2052))
+                {
+                    prices.Remove(2052);
+                    excluded++;
+                }
+                if (excluded > 0)
+                    RevivalPlugin.L.LogWarning("Marketplace: " + excluded
+                        + " alte Registrierung(en) fuer ausgeschlossene 2052 entfernt.");
+
+                int registered = 0;
+                int pending = 0;
+                for (int i = 0; i < ShopItemIds.Length; i++)
+                {
+                    int id = ShopItemIds[i];
+                    int buyPrice = ShopBuyPrices[i];
+                    ItemDef def = FindUniqueDefinition(id);
+                    if (def == null)
+                    {
+                        pending++;
+                        RevivalPlugin.L.LogWarning("Marketplace: ItemDef " + id
+                            + " fehlt; Shop-Metadaten warten auf die Definition.");
+                        continue;
+                    }
+
+                    object categoryKey;
+                    object template;
+                    bool existing = FindMarketItem(categories, id,
+                        out categoryKey, out template);
+                    if (!existing && !FindMarketItem(categories, def.DonorId,
+                                                     out categoryKey, out template))
+                    {
+                        RevivalPlugin.L.LogWarning("Marketplace: weder " + id
+                            + " noch Spende " + def.DonorId
+                            + " in einer Haendlerkategorie gefunden.");
+                        continue;
+                    }
+
+                    Texture2D icon = Assets.Texture(def.Icon, false, false);
+                    int covered = PutInEveryMarketRank(categories, categoryKey,
+                        template, id, buyPrice, icon);
+                    if (covered != MarketRankFields.Length)
+                    {
+                        RevivalPlugin.L.LogWarning("Marketplace: " + id + " nur in "
+                            + covered + "/" + MarketRankFields.Length
+                            + " Ranglisten eingetragen.");
+                        continue;
+                    }
+
+                    prices[id] = buyPrice;
+                    SetSpawnMarketData(def.Factory.MySpawned, true, buyPrice);
+                    registered++;
+                    RevivalPlugin.L.LogInfo("Marketplace: " + id + " fuer "
+                        + buyPrice + " in A-D registriert"
+                        + (existing ? " (vorhandenen Eintrag vereinheitlicht)."
+                                    : " (Kategorie der Spende " + def.DonorId + ")."));
+                }
+
+                RevivalPlugin.L.LogInfo("Marketplace: " + registered + "/"
+                    + ShopItemIds.Length + " Shop-Items registriert, " + pending
+                    + " Definition(en) noch nicht integriert; 2052 ausgeschlossen.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Marketplace-Registrierung: " + ex);
+            }
+        }
+
+        static ItemDef FindUniqueDefinition(int id)
+        {
+            ItemDef found = null;
+            int count = 0;
+            List<ItemDef> items = RevivalPlugin.Items;
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i].Id != id) continue;
+                if (found == null) found = items[i];
+                count++;
+            }
+            if (count > 1)
+            {
+                RevivalPlugin.L.LogError("Marketplace: doppelte ItemDef fuer " + id
+                    + " (" + count + "); nicht registriert.");
+                return null;
+            }
+            return found;
+        }
+
+        static bool FindMarketItem(IDictionary categories, int id,
+                                   out object categoryKey, out object entry)
+        {
+            categoryKey = null;
+            entry = null;
+            foreach (DictionaryEntry category in categories)
+            {
+                object holder = category.Value;
+                if (holder == null) continue;
+                for (int rank = 0; rank < MarketRankFields.Length; rank++)
+                {
+                    IList list = MarketRankList(holder, MarketRankFields[rank]);
+                    if (list == null) continue;
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        if (EntryId(list[i]) != id) continue;
+                        categoryKey = category.Key;
+                        entry = list[i];
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        static int PutInEveryMarketRank(IDictionary categories, object categoryKey,
+                                        object template, int id, int price,
+                                        Texture2D icon)
+        {
+            int covered = 0;
+            foreach (DictionaryEntry category in categories)
+            {
+                object holder = category.Value;
+                if (holder == null) continue;
+                bool canonical = object.Equals(category.Key, categoryKey);
+                for (int rank = 0; rank < MarketRankFields.Length; rank++)
+                {
+                    IList list = MarketRankList(holder, MarketRankFields[rank]);
+                    if (list == null) continue;
+
+                    object keep = null;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        if (EntryId(list[i]) != id) continue;
+                        if (canonical && keep == null) keep = list[i];
+                        else list.RemoveAt(i);
+                    }
+                    if (!canonical) continue;
+
+                    if (keep == null)
+                    {
+                        keep = CloneEntry(template, id);
+                        if (keep == null) continue;
+                        list.Add(keep);
+                    }
+                    bool idSet = SetMarketField(keep, "ItemID", id);
+                    bool priceSet = SetMarketField(keep, "Price", price);
+                    SetMarketField(keep, "Rank", rank);
+                    SetMarketField(keep, "Category", categoryKey);
+                    if (icon != null) SetMarketField(keep, "Icon", icon);
+                    if (idSet && priceSet) covered++;
+                }
+            }
+            return covered;
+        }
+
+        /// <summary>
+        /// Removes an item from every market rank except, optionally, one
+        /// category. Used both to consolidate duplicate mod registrations and
+        /// to keep 2052 out of the marketplace completely.
+        /// </summary>
+        static int RemoveMarketItem(IDictionary categories, int id, object keepCategory)
+        {
+            int removed = 0;
+            foreach (DictionaryEntry category in categories)
+            {
+                if (keepCategory != null && object.Equals(category.Key, keepCategory))
+                    continue;
+                object holder = category.Value;
+                if (holder == null) continue;
+                for (int rank = 0; rank < MarketRankFields.Length; rank++)
+                {
+                    IList list = MarketRankList(holder, MarketRankFields[rank]);
+                    if (list == null) continue;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        if (EntryId(list[i]) != id) continue;
+                        list.RemoveAt(i);
+                        removed++;
+                    }
+                }
+            }
+            return removed;
+        }
+
+        static IList MarketRankList(object holder, string fieldName)
+        {
+            FieldInfo field = FindField(holder.GetType(), fieldName);
+            if (field == null) return null;
+            try { return field.GetValue(holder) as IList; }
+            catch { return null; }
+        }
+
+        static void SetSpawnMarketData(Component spawned, bool visible, int price)
+        {
+            if (spawned == null) return;
+            SetMarketField(spawned, "ShowInMarket", visible);
+            SetMarketField(spawned, "Price", price);
+        }
+
+        /// <summary>
+        /// MarketItem.Price and ItemSpawned.ShowInMarket use CodeStage's
+        /// ObscuredInt/ObscuredBool, while IDs and dictionary prices are plain
+        /// integers. Their public implicit operators are the one safe common
+        /// conversion path.
+        /// </summary>
+        static bool SetMarketField(object target, string fieldName, object value)
+        {
+            if (target == null) return false;
+            try
+            {
+                FieldInfo field = FindField(target.GetType(), fieldName);
+                if (field == null) return false;
+                object converted = value;
+                if (value != null && !field.FieldType.IsInstanceOfType(value))
+                {
+                    if (field.FieldType.IsEnum)
+                    {
+                        converted = Enum.ToObject(field.FieldType, value);
+                    }
+                    else
+                    {
+                        MethodInfo op = field.FieldType.GetMethod("op_Implicit",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            new Type[] { value.GetType() }, null);
+                        converted = op == null
+                            ? Convert.ChangeType(value, field.FieldType)
+                            : op.Invoke(null, new object[] { value });
+                    }
+                }
+                field.SetValue(target, converted);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Marketplace-Feld " + fieldName + ": "
+                        + ex.Message);
+                return false;
+            }
+        }
+
+        static FieldInfo FindField(Type type, string fieldName)
+        {
+            while (type != null && type != typeof(object))
+            {
+                FieldInfo field = type.GetField(fieldName, BindingFlags.Instance
+                    | BindingFlags.Public | BindingFlags.NonPublic
+                    | BindingFlags.DeclaredOnly);
+                if (field != null) return field;
+                type = type.BaseType;
+            }
+            return null;
         }
 
         /// <summary>
@@ -3913,8 +4285,10 @@ namespace NextDayRevival
                 }
                 // Der Pfad zeigt weiter auf das Spende-Prefab. Unser
                 // Resources.Load-Prefix matcht aber auf die Endung <id>_Spawn,
-                // also muss die ID auch im Pfad stehen.
-                FieldInfo fp = AccessTools.Field(t, "Path");
+                // also muss die ID auch im Pfad stehen. FindField statt
+                // AccessTools.Field: MarketItem-Klone haben kein Path-Feld, und
+                // AccessTools.Field wuerde das pro Eintrag als Warnung loggen.
+                FieldInfo fp = FindField(t, "Path");
                 if (fp != null && fp.FieldType == typeof(string))
                 {
                     string p = fp.GetValue(src) as string;
@@ -5274,6 +5648,7 @@ namespace NextDayRevival
         public const int None = 0;
         public const int Turm = 1;
         public const int Drohne = 2;
+        public const int Aufklaerer = 3;   // the reusable surveillance drone
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -5453,6 +5828,7 @@ namespace NextDayRevival
         {
             if (_owner == Turm) Turret.LateTick();
             else if (_owner == Drohne) Drone.LateTick();
+            else if (_owner == Aufklaerer) SurvDrone.LateTick();
         }
 
         /// <summary>
@@ -6703,6 +7079,109 @@ namespace NextDayRevival
             return false;
         }
 
+        // ----------------------------------------------- NDR vehicle modules
+        // Small internal seam for Revival.Modules.cs / Revival.GunnerOptics.cs,
+        // kept here so that feature's own files never touch Turret's private
+        // state. Three additions, nothing existing changed.
+
+        /// <summary>The vehicle whose gunner seat the local player is manning,
+        /// or null. Revival.Modules keys installed modules on it.</summary>
+        internal static Transform MannedVehicle
+        {
+            get { return _manning ? _vehicleRoot : null; }
+        }
+
+        /// <summary>True while the manned vehicle is the T-72, false for the APC.</summary>
+        internal static bool IsTankManned { get { return _tank; } }
+
+        /// <summary>
+        /// Puts `count` of item `itemId` back into the player's backpack through
+        /// the game's own AddBackpackItemFromValues - the inverse of TakeItem,
+        /// used when a vehicle module is uninstalled. Returns true on success.
+        /// </summary>
+        internal static bool GiveItem(int itemId, int count)
+        {
+            List<object> invs = PlayerInventories();
+            for (int i = 0; i < invs.Count; i++)
+            {
+                object inv = invs[i];
+                MethodInfo add = null;
+                MethodInfo[] all = inv.GetType().GetMethods(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                for (int k = 0; k < all.Length; k++)
+                    if (all[k].Name == "AddBackpackItemFromValues") { add = all[k]; break; }
+                if (add == null) continue;
+
+                ParameterInfo[] ps = add.GetParameters();
+                object[] args = new object[ps.Length];
+                for (int k = 0; k < ps.Length; k++)
+                    args[k] = ps[k].ParameterType.IsValueType
+                        ? Activator.CreateInstance(ps[k].ParameterType) : null;
+                args[0] = itemId;                                 // ItemID
+                if (ps.Length >= 7) args[6] = count;              // Bullets/Menge
+                if (ps.Length >= 1 && ps[ps.Length - 1].ParameterType == typeof(bool))
+                    args[ps.Length - 1] = true;                   // onChangeInventory
+                try { add.Invoke(inv, args); return true; }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("GiveItem(" + itemId + "): " + ex);
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// The trunk ContainerData of an ARBITRARY vehicle (not only the manned
+        /// one) - the generalisation of TrunkContainer, used by Revival.Modules
+        /// to stock a patrol trunk with loot and to read it back for the wreck
+        /// despawn bonus. Returns the ContainerData or null.
+        /// </summary>
+        internal static object TrunkDataOf(Transform veh)
+        {
+            if (veh == null) return null;
+            Type ic = RevivalPlugin.TypeByName("ItemsContainer");
+            if (ic == null) return null;
+            Component[] all = veh.GetComponentsInChildren(ic, true);
+            if (all.Length == 0) return null;
+            return Field(all[0], "_containerData");
+        }
+
+        /// <summary>How often item `itemId` lies in a container's data.</summary>
+        internal static int CountInContainer(object data, int itemId)
+        {
+            return CountIn(data, itemId);
+        }
+
+        /// <summary>
+        /// Writes `count` of item `itemId` into the first free slot of a
+        /// container's parallel ObscuredInt arrays (ItemID/ItemBullets/SlotID),
+        /// the same arrays TakeFrom reads. One call fills one slot; call it again
+        /// for more items. Returns false when the container is full or unreadable.
+        /// </summary>
+        internal static bool AddToContainer(object data, int itemId, int count)
+        {
+            if (data == null) return false;
+            Array ids = Field(data, "ItemID") as Array;
+            Array bullets = Field(data, "ItemBullets") as Array;
+            Array slots = Field(data, "SlotID") as Array;
+            if (ids == null || bullets == null) return false;
+
+            for (int i = 0; i < ids.Length && i < bullets.Length; i++)
+            {
+                object idBox = ids.GetValue(i);
+                int cur = idBox == null ? 0 : Obscured(idBox);
+                if (cur > 0) continue;                 // slot occupied
+
+                ids.SetValue(MakeObscured(ids.GetType().GetElementType(), itemId), i);
+                bullets.SetValue(MakeObscured(bullets.GetType().GetElementType(), count), i);
+                if (slots != null && i < slots.Length)
+                    slots.SetValue(MakeObscured(slots.GetType().GetElementType(), i), i);
+                return true;
+            }
+            return false;
+        }
+
         /// <summary>
         /// How often item `wanted` lies in one PlayerInventoryManager -
         /// backpack, vest and weapon slots, the same three containers
@@ -7207,6 +7686,16 @@ namespace NextDayRevival
                 // BTR ein offenes Kreuz mit Vorhaltemarken fuer einen flachen
                 // Schuss auf ein bewegliches Ziel. Beide bringen ihr Fadenkreuz
                 // selbst mit - deshalb bleibt daneben keines stehen.
+                // NDR vehicle modules: a modern wide periscope replaces the old
+                // round scope, with toggleable thermal / night vision when the
+                // matching module is installed. When it takes over the optic we
+                // skip the legacy scope entirely and only add the load bar.
+                if (GunnerOptics.Draw(_tank, _vehicleRoot))
+                {
+                    DrawLadeanzeige();
+                    return;
+                }
+
                 Texture2D glas = Blende();
                 if (glas != null) Vollbild(glas);
                 else if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
@@ -8430,6 +8919,14 @@ namespace NextDayRevival
         static int _targetActor = -1;
         static float _nextPlayers;
 
+        // Server-defined items can be granted before their full client-side
+        // ItemDef is integrated. Registered definitions take precedence below,
+        // so parallel item work cannot create duplicate rows in this menu.
+        static readonly int[] ExtraItemIds = new int[] { 2055, 2056, 2057 };
+        static readonly string[] ExtraItemNames = new string[] {
+            "Mast Antenna", "Drone Battery", "Surveillance Drone"
+        };
+
         class PlayerRow
         {
             public int Actor;
@@ -8739,6 +9236,17 @@ namespace NextDayRevival
                     Geben(d);
                 GUILayout.EndHorizontal();
             }
+            for (int i = 0; i < ExtraItemIds.Length; i++)
+            {
+                int itemId = ExtraItemIds[i];
+                if (RevivalPlugin.FindItem(itemId) != null) continue;
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(itemId + "  " + ExtraItemNames[i],
+                                GUILayout.Width(250f));
+                if (GUILayout.Button(Loc.T("выдать", "give"), GUILayout.Width(90f)))
+                    GebenExtra(itemId);
+                GUILayout.EndHorizontal();
+            }
             GUILayout.EndScrollView();
 
             GUILayout.Space(6f);
@@ -8779,6 +9287,20 @@ namespace NextDayRevival
             }
             string meldung;
             Net.Item(_targetActor, d.Id, menge, out meldung);
+            Melde(meldung);
+        }
+
+        static void GebenExtra(int itemId)
+        {
+            int menge = 1;
+            if (_menge.Length > 0)
+            {
+                int gewuenscht;
+                if (int.TryParse(_menge, out gewuenscht) && gewuenscht > 0)
+                    menge = gewuenscht;
+            }
+            string meldung;
+            Net.Item(_targetActor, itemId, menge, out meldung);
             Melde(meldung);
         }
 
@@ -11571,6 +12093,7 @@ namespace NextDayRevival
             u.CrewSize = Besatzung(u);
 
             u.Armed = true;
+            VehicleModules.StockTrunk(u.Car.transform, u.Tank);   // NDR vehicle modules: trunk loot
             RevivalPlugin.L.LogInfo("Patrol: vehicle armed on " + u.Route.Name
                 + " - AIController set, physics on, engine running, "
                 + u.Turrets.Length + " turret object(s), " + u.CrewSize
@@ -11648,7 +12171,10 @@ namespace NextDayRevival
                 Verloren();
             }
 
-            float bleibt = RevivalPlugin.CfgPatrolWreck.Value;
+            // NDR vehicle modules: a wreck whose trunk still holds module loot
+            // lingers longer so the loot can be recovered (additive bonus).
+            float bleibt = RevivalPlugin.CfgPatrolWreck.Value
+                         + VehicleModules.WreckBonus(u.Car.transform);
             if (bleibt > 0f && Time.time - u.Died >= bleibt)
             {
                 RevivalPlugin.L.LogInfo("Patrol: wreck on " + u.Route.Name
@@ -14676,7 +15202,41 @@ namespace NextDayRevival
         /// template search tells the map's settlements from our own.</summary>
         internal const string Name = "NDR_PatrolCrew";
 
+        /// <summary>The two custom weapons a crew carries. Most men get the
+        /// MG42; a few carry the M72 LAW - see <see cref="CrewLaw"/>.</summary>
+        internal const int MG42_ID = 1160;
+        internal const int LAW_ID = 1162;
+
         static List<GameObject> _settlements = new List<GameObject>();
+
+        static FieldInfo _shotDelayCached;
+
+        /// <summary>
+        /// Make one MG42 crewman rattle. `NPC_AI2::Start` writes
+        /// `_shootingTimerDelayCached = Random.Range(0.2, 0.3)` and
+        /// `ShootToTarget` resets `_shootingTimerDelay` to that cache after every
+        /// round, so the game fires EVERY NPC at that fixed pace no matter what
+        /// the weapon's own `rateOfFire` is - which is exactly why the belt-fed
+        /// gun sounded no faster than a bolt rifle. Overwriting the cache with a
+        /// small value lets the MG42 fire at close to its own rate. It matters
+        /// on the owner, where the AI runs; setting it on a remote puppet is
+        /// harmless. CONFIRMED from the IL of Start/ShootToTarget/ShootingActions
+        /// and NPC_FirearmWeaponController::FireTo (RE 21.9).
+        /// </summary>
+        static void SetShotCadence(Component ai)
+        {
+            try
+            {
+                if (RevivalPlugin.CfgPatrolCrewMgShotDelay == null) return;
+                if (_shotDelayCached == null)
+                    _shotDelayCached = AccessTools.Field(ai.GetType(),
+                        "_shootingTimerDelayCached");
+                if (_shotDelayCached != null)
+                    _shotDelayCached.SetValue(ai,
+                        Mathf.Max(0f, RevivalPlugin.CfgPatrolCrewMgShotDelay.Value));
+            }
+            catch { }
+        }
 
         /// <summary>Wreck crews are permanent combatants, not settlements
         /// waiting for a nearby player. The vanilla distance shutdown calls
@@ -14779,6 +15339,8 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogError("Crew: remote NPC hooks failed - " + ex);
             }
+
+            CrewLaw.Install(harmony);
         }
 
         public static void NpcStartPostfix(object __instance)
@@ -14788,9 +15350,16 @@ namespace NextDayRevival
                 Component ai = __instance as Component;
                 object[] data;
                 bool isMine;
-                if (ai == null || !SpawnData(ai, out data, out isMine) || isMine) return;
+                if (ai == null || !SpawnData(ai, out data, out isMine)) return;
                 int[] appearance = data[1] as int[];
                 int weapon = Convert.ToInt32(data[2]);
+
+                // Fire rate first, and on the owner too: this is the machine
+                // that runs the AI, and the reason an MG42 crewman rattles
+                // instead of plinking. The LAW keeps the vanilla pace.
+                if (weapon == MG42_ID) SetShotCadence(ai);
+
+                if (isMine) return;            // the rest only repairs a remote puppet
                 if (appearance == null) return;
                 CrewRemoteFix fix = ai.gameObject.GetComponent<CrewRemoteFix>();
                 if (fix == null) fix = ai.gameObject.AddComponent<CrewRemoteFix>();
@@ -14963,6 +15532,13 @@ namespace NextDayRevival
                     SetEnum(tacticalPoint, "Type", "Tactical");
                 }
 
+                // How many of this crew carry the LAW instead of the MG42. The
+                // rocketeers are the first men out; the rest rattle with the
+                // machine gun. Clamped so the config can never ask for more LAWs
+                // than there are men.
+                int lawCount = RevivalPlugin.CfgPatrolCrewLawCount == null ? 0
+                    : Mathf.Clamp(RevivalPlugin.CfgPatrolCrewLawCount.Value, 0, count);
+
                 // The spawn points, one per man. They must exist BEFORE the
                 // settlement component: StartMainInit collects them with
                 // GetComponentsInChildren when _npcSpawnPoints is null.
@@ -14976,7 +15552,7 @@ namespace NextDayRevival
                     Abschreiben(punkt, VorlagePunkt(pType));
                     Component military = VorlageMilitaer(pType);
                     Abschreiben(punkt, military);
-                    Punkt(punkt, military != null);
+                    Punkt(punkt, military != null, i < lawCount ? LAW_ID : MG42_ID);
                 }
 
                 // An unregistered PhotonView - see the class comment.
@@ -15420,7 +15996,7 @@ namespace NextDayRevival
         /// rather than a random collection. GrantWeaponType 1 is the confirmed
         /// fixed-id path in `NPC_Settlement::GetWeaponId`.
         /// </summary>
-        static void Punkt(Component sp, bool militaryPreset)
+        static void Punkt(Component sp, bool militaryPreset, int weaponId)
         {
             Set(sp, "Active", true);
             SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value);
@@ -15428,7 +16004,7 @@ namespace NextDayRevival
             SetEnum(sp, "BehaviorPattern", "Aggressive");
             SetNumber(sp, "NPCType", 0);              // -> prefab Marauder_NPC_01
             SetNumber(sp, "GrantWeaponType", 1);      // fixed WeaponId below
-            SetNumber(sp, "WeaponId", 1160);          // NDR MG42
+            SetNumber(sp, "WeaponId", weaponId);      // NDR MG42 or NDR M72 LAW
             if (!militaryPreset)
                 SetNumber(sp, "AppearanceType", 0);   // safe vanilla fallback
             Set(sp, "UseCustomAppearance", militaryPreset);
@@ -15746,6 +16322,170 @@ namespace NextDayRevival
             if (mi == null)
                 throw new MissingMethodException(o.GetType().Name + "." + name);
             mi.Invoke(o, null);
+        }
+    }
+
+    /// <summary>
+    /// A crew M72 LAW that actually goes off. The player LAW gets its impact
+    /// explosion from <see cref="RocketHook"/>, which reads the player camera -
+    /// a field an NPC does not have, so that hook is a no-op for a crewman. This
+    /// is the NPC half: a postfix on `NPC_FirearmWeaponController::FireOneShot`
+    /// that, when the weapon is the LAW, raycasts from the muzzle toward the
+    /// AI's aim point and lights a networked explosion at the impact.
+    ///
+    /// Only the master client detonates - the crew AI, and therefore every crew
+    /// FireOneShot, runs there - so the rocket goes off once and is networked
+    /// out to everyone. The shot's own hitscan damage is left untouched; the
+    /// blast is simply added on top, which turns the LAW's puny bullet into a
+    /// real rocket. The postfix returns immediately for every weapon that is not
+    /// the LAW, so it costs a field read per NPC round and nothing more.
+    /// </summary>
+    public static class CrewLaw
+    {
+        static FieldInfo _weaponData;
+        static FieldInfo _itemId;
+        static MethodInfo _muzzlePos;
+        static MethodInfo _idImplicit;
+        static MethodInfo _masterGetter;
+        static bool _masterLookedUp;
+        static bool _detonateLogged;
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("NPC_FirearmWeaponController");
+                if (t == null)
+                {
+                    RevivalPlugin.L.LogWarning("Crew LAW: NPC_FirearmWeaponController "
+                        + "not found - crew rockets would be duds, so the hook is off.");
+                    return;
+                }
+                MethodInfo fire = AccessTools.Method(t, "FireOneShot", null, null);
+                if (fire == null)
+                {
+                    RevivalPlugin.L.LogWarning("Crew LAW: FireOneShot not found - "
+                        + "crew rockets would be duds, so the hook is off.");
+                    return;
+                }
+                _weaponData = AccessTools.Field(t, "_weaponFirearmData");
+                _muzzlePos = AccessTools.Method(t, "GetMuzzlePos", null, null);
+                harmony.Patch(fire, null,
+                    new HarmonyMethod(typeof(CrewLaw).GetMethod("FirePostfix")),
+                    null, null, null);
+                RevivalPlugin.L.LogInfo("Crew LAW: rocket impact explosion active.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Crew LAW install: " + ex);
+            }
+        }
+
+        public static void FirePostfix(object __instance, Vector3 __0)
+        {
+            try
+            {
+                if (__instance == null || _weaponData == null) return;
+                // The crew AI runs on the master; detonating anywhere else would
+                // double the blast on that machine's networked copy.
+                if (!IsMaster()) return;
+
+                object data = _weaponData.GetValue(__instance);
+                if (data == null) return;
+                if (_itemId == null)
+                {
+                    _itemId = AccessTools.Field(data.GetType(), "ItemID");
+                    if (_itemId == null) return;
+                }
+                if (ItemId(_itemId.GetValue(data)) != Crew.LAW_ID) return;
+
+                Vector3 muzzle = _muzzlePos == null ? Vector3.zero
+                    : (Vector3)_muzzlePos.Invoke(__instance, null);
+                Vector3 boom;
+                if (muzzle == Vector3.zero)
+                {
+                    // No muzzle transform ready - detonate where the AI aimed.
+                    boom = __0;
+                }
+                else
+                {
+                    Vector3 to = __0 - muzzle;
+                    float dist = to.magnitude;
+                    if (dist < 0.5f) { boom = __0; }
+                    else
+                    {
+                        Vector3 hit;
+                        GameObject struck = Turret.RaycastObject(
+                            muzzle, to / dist, dist + 1f, out hit);
+                        boom = struck != null ? hit : __0;
+                        RocketHook.SpawnTracer(new List<Vector3> { muzzle, boom });
+                    }
+                }
+
+                float dmg = RevivalPlugin.CfgPatrolCrewLawDamage == null
+                    ? 600f : RevivalPlugin.CfgPatrolCrewLawDamage.Value;
+                float radius = RevivalPlugin.CfgPatrolCrewLawRadius == null
+                    ? 8f : RevivalPlugin.CfgPatrolCrewLawRadius.Value;
+                RocketHook.Detonate(boom, dmg, radius, 3f);
+
+                if (!_detonateLogged && RevivalPlugin.L != null)
+                {
+                    _detonateLogged = true;
+                    RevivalPlugin.L.LogInfo("Crew LAW: first rocket detonation ("
+                        + dmg + " in " + radius + " m).");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Crew LAW fire: " + ex.Message);
+            }
+        }
+
+        /// <summary>Master-client check by reflection - PhotonNetwork is a game
+        /// type this assembly does not reference. Resolved once. A missing
+        /// property means Photon is not up, so nothing detonates.</summary>
+        static bool IsMaster()
+        {
+            if (!_masterLookedUp)
+            {
+                _masterLookedUp = true;
+                Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+                if (photon != null)
+                {
+                    _masterGetter = AccessTools.PropertyGetter(photon, "isMasterClient");
+                    if (_masterGetter == null)
+                        _masterGetter = AccessTools.PropertyGetter(photon, "IsMasterClient");
+                }
+            }
+            if (_masterGetter == null) return false;
+            return (bool)_masterGetter.Invoke(null, null);
+        }
+
+        /// <summary>The weapon `ItemID` is an ObscuredInt; unwrap it through its
+        /// implicit int conversion, caching the method after the first look.</summary>
+        static int ItemId(object value)
+        {
+            if (value == null) return -1;
+            if (value is int) return (int)value;
+            if (_idImplicit == null)
+            {
+                MethodInfo[] ms = value.GetType().GetMethods(
+                    BindingFlags.Public | BindingFlags.Static);
+                for (int i = 0; i < ms.Length; i++)
+                {
+                    if (ms[i].Name != "op_Implicit"
+                        || ms[i].ReturnType != typeof(int)) continue;
+                    ParameterInfo[] ps = ms[i].GetParameters();
+                    if (ps.Length == 1 && ps[0].ParameterType == value.GetType())
+                    {
+                        _idImplicit = ms[i];
+                        break;
+                    }
+                }
+                if (_idImplicit == null) return -1;
+            }
+            return (int)_idImplicit.Invoke(null, new object[] { value });
         }
     }
 
@@ -16274,6 +17014,28 @@ namespace NextDayRevival
                 _remote.Remove(key);
             }
         }
+
+        /// <summary>
+        /// Read-only source for the proximity monitor: the world positions of
+        /// every crew FPV drone currently in the air on this client, own
+        /// (`_local`) and mirrored from other clients (`_remote`). Appends to the
+        /// caller's list so the monitor allocates nothing per scan. Deliberately
+        /// isolated so `DroneAlert` never reaches into the private lists.
+        /// </summary>
+        public static void CollectThreats(List<Vector3> into)
+        {
+            if (into == null) return;
+            for (int i = 0; i < _local.Count; i++)
+            {
+                Local d = _local[i];
+                if (d != null && d.Go != null) into.Add(d.Go.transform.position);
+            }
+            foreach (KeyValuePair<string, Remote> pair in _remote)
+            {
+                Remote d = pair.Value;
+                if (d != null && d.Go != null) into.Add(d.Go.transform.position);
+            }
+        }
     }
 
     // ------------------------------------------------------------ FPV-Drohne
@@ -16400,10 +17162,16 @@ namespace NextDayRevival
                 Net.EnsureHooked();
                 Net.TickRemotes();
 
-                if (Input.GetKeyDown(Key()))
+                if (_flying)
                 {
-                    if (_flying) TasteImFlug();
-                    else Launch();
+                    if (Input.GetKeyDown(Key())) TasteImFlug();
+                }
+                // Not a tap any more: the antenna must be up and the key held
+                // through the launch bar. WantFpvLaunch returns true on the one
+                // frame the hold completes.
+                else if (DroneGear.WantFpvLaunch(Key()))
+                {
+                    Launch();
                 }
                 if (_flying)
                 {
@@ -16463,6 +17231,10 @@ namespace NextDayRevival
 
         static void Launch()
         {
+            // Insurance behind the launch-hold gate: no drone lifts without a
+            // raised antenna (unless the whole antenna gate is switched off).
+            if (!Antenna.LaunchAllowed()) { Antenna.LaunchDeniedHint(); return; }
+
             Camera cam = CameraOwner.ViewCamera();
             if (cam == null)
             {
@@ -17461,14 +18233,30 @@ namespace NextDayRevival
             /// </summary>
             static void Melden()
             {
-                if (!_traegt)
+                // NDR vehicle modules: a jamming module in the manned vehicle
+                // broadcasts from the vehicle with the larger vehicle radius and
+                // takes precedence over a carried jammer.
+                float vr;
+                bool vehicle = VehicleModules.LocalVehicleJammer(out vr);
+                if (!_traegt && !vehicle)
                 {
                     _gemeldet = false;
                     return;
                 }
-                float r = Mathf.Max(1f, RevivalPlugin.CfgJammerRadius.Value);
+                float r;
                 Vector3 p;
-                if (!EigenePosition(out p)) return;
+                if (vehicle)
+                {
+                    r = vr;
+                    Transform veh = Turret.MannedVehicle;
+                    if (veh == null) { _gemeldet = false; return; }
+                    p = veh.position;
+                }
+                else
+                {
+                    r = Mathf.Max(1f, RevivalPlugin.CfgJammerRadius.Value);
+                    if (!EigenePosition(out p)) return;
+                }
                 if (!Net.RemoteNear(p, Reichweite(r) + 40f))
                 {
                     _gemeldet = false;
@@ -18503,7 +19291,14 @@ namespace NextDayRevival
 
         public static void Postfix(ref bool __result)
         {
-            if (Drone.Flying) __result = true;
+            // Frozen while the FPV drone flies, while the antenna is raising,
+            // while any launch hold charges, and while the surveillance drone
+            // is being viewed. Stepping OUT of the surveillance view frees the
+            // body again (SurvDrone.Viewing is false then), which is the whole
+            // point of the two-view drone.
+            if (Drone.Flying || Antenna.Deploying || DroneGear.LaunchBusy
+                || SurvDrone.Viewing)
+                __result = true;
         }
 
         public static void Install(Harmony harmony)
@@ -18673,6 +19468,142 @@ namespace NextDayRevival
     }
 
     /// <summary>
+    /// Gives every destroyed driveable vehicle the patrol wreck presentation
+    /// and makes remaining passengers take five health points per second.
+    ///
+    /// The damage is sent only by the vehicle owner. Every client runs the
+    /// VehicleGameSystem update for its local copy, so omitting that gate would
+    /// multiply the damage by the number of connected clients.
+    /// </summary>
+    public static class VehicleWreck
+    {
+        const float DamagePerSecond = 5f;
+
+        static FieldInfo _durability;
+        static FieldInfo _passengers;
+        static MethodInfo _sameOwner;
+        static MethodInfo _damagePassengers;
+        static bool _damageLogged;
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type vehicle = RevivalPlugin.TypeByName("VehicleGameSystem");
+                if (vehicle == null)
+                {
+                    RevivalPlugin.L.LogWarning("Vehicle wreck: VehicleGameSystem not found.");
+                    return;
+                }
+
+                MethodInfo update = AccessTools.Method(vehicle, "Update", null, null);
+                _durability = AccessTools.Field(vehicle, "Durability");
+                _passengers = AccessTools.Field(vehicle, "Passengers");
+                _sameOwner = AccessTools.Method(vehicle, "IsSameOwnerId", null, null);
+                _damagePassengers = AccessTools.Method(vehicle,
+                    "SetDamageToAllPassengers", new Type[] { typeof(float) }, null);
+                if (update == null || _durability == null || _passengers == null)
+                {
+                    RevivalPlugin.L.LogWarning("Vehicle wreck: update, durability or "
+                        + "passenger data not found.");
+                    return;
+                }
+
+                harmony.Patch(update, null,
+                    new HarmonyMethod(typeof(VehicleWreck).GetMethod("UpdatePostfix")),
+                    null, null, null);
+                RevivalPlugin.L.LogInfo("Vehicle wreck: patrol fire and 5 percent per "
+                    + "second passenger damage active.");
+                if (_sameOwner == null || _damagePassengers == null)
+                    RevivalPlugin.L.LogWarning("Vehicle wreck: passenger damage path "
+                        + "is incomplete; fire remains active.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Vehicle wreck install: " + ex);
+            }
+        }
+
+        public static void UpdatePostfix(object __instance)
+        {
+            Component vehicle = __instance as Component;
+            if (vehicle == null) return;
+            try
+            {
+                if ((float)_durability.GetValue(__instance) > 0f)
+                {
+                    WreckBurnState oldState = vehicle.GetComponent<WreckBurnState>();
+                    if (oldState != null)
+                    {
+                        Transform oldFire = vehicle.transform.Find(FireEffect.WreckName);
+                        if (oldFire != null) UnityEngine.Object.Destroy(oldFire.gameObject);
+                        UnityEngine.Object.Destroy(oldState);
+                    }
+                    return;
+                }
+
+                FireEffect.SpawnWreck(vehicle.gameObject,
+                                     Tank.IstPanzer(vehicle.transform));
+
+                WreckBurnState state = vehicle.GetComponent<WreckBurnState>();
+                if (state == null) state = vehicle.gameObject.AddComponent<WreckBurnState>();
+
+                Array passengers = _passengers.GetValue(__instance) as Array;
+                if (!HasPassengers(passengers))
+                {
+                    state.NextDamage = 0f;
+                    return;
+                }
+
+                if (state.NextDamage <= 0f)
+                {
+                    state.NextDamage = Time.time + 1f;
+                    return;
+                }
+                if (Time.time < state.NextDamage) return;
+                state.NextDamage = Time.time + 1f;
+
+                if (_sameOwner == null || _damagePassengers == null) return;
+                if (!(bool)_sameOwner.Invoke(__instance, null)) return;
+
+                _damagePassengers.Invoke(__instance,
+                    new object[] { DamagePerSecond });
+                if (!_damageLogged && RevivalPlugin.L != null)
+                {
+                    _damageLogged = true;
+                    RevivalPlugin.L.LogInfo("Vehicle wreck: first passenger burn tick "
+                        + "sent (5 health).");
+                }
+            }
+            catch (Exception ex)
+            {
+                WreckBurnState state = vehicle.GetComponent<WreckBurnState>();
+                if (state != null && state.ErrorLogged) return;
+                if (state != null) state.ErrorLogged = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Vehicle wreck update: " + ex.Message);
+            }
+        }
+
+        static bool HasPassengers(Array passengers)
+        {
+            if (passengers == null) return false;
+            for (int i = 0; i < passengers.Length; i++)
+            {
+                GameObject passenger = passengers.GetValue(i) as GameObject;
+                if (passenger != null) return true;
+            }
+            return false;
+        }
+    }
+
+    public sealed class WreckBurnState : MonoBehaviour
+    {
+        public float NextDamage;
+        public bool ErrorLogged;
+    }
+
+    /// <summary>
     /// The fire itself: four particle systems and one light, all built at
     /// runtime. No asset and no Blender - a flame is a bright blob that grows,
     /// turns red and then goes transparent, and that is a texture of 64 by 64
@@ -18688,6 +19619,8 @@ namespace NextDayRevival
     /// </summary>
     public static class FireEffect
     {
+        internal const string WreckName = "NDR Wrackfeuer";
+
         static Material _additive;
         static Material _blended;
         static Texture2D _blob;
@@ -18726,16 +19659,16 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Long-lived fire for a destroyed patrol vehicle. The game's own
+        /// Long-lived fire for a destroyed vehicle. The game's own
         /// DamageSmoke remains untouched near the hull; this adds the missing
         /// flames and the high column above it. The root is parented to the
-        /// vehicle and has no timer, so the patrol's normal wreck cleanup is
-        /// also the only cleanup this effect needs.
+        /// vehicle and has no timer. Patrol cleanup removes it with the wreck;
+        /// the vehicle hook removes it when an ordinary vehicle respawns.
         /// </summary>
         public static void SpawnWreck(GameObject vehicle, bool tank)
         {
             if (vehicle == null || _noShader) return;
-            if (vehicle.transform.Find("NDR Wrackfeuer") != null) return;
+            if (vehicle.transform.Find(WreckName) != null) return;
 
             Material add = Additive();
             Material blend = Blended();
@@ -18748,7 +19681,7 @@ namespace NextDayRevival
                 return;
             }
 
-            GameObject root = new GameObject("NDR Wrackfeuer");
+            GameObject root = new GameObject(WreckName);
             root.transform.position = vehicle.transform.position
                                     + Vector3.up * (tank ? 1.9f : 2.1f);
             root.transform.rotation = Quaternion.identity;
@@ -18761,8 +19694,8 @@ namespace NextDayRevival
             WrackLicht(root, tank ? 34f : 38f);
 
             if (RevivalPlugin.L != null)
-                RevivalPlugin.L.LogInfo("Patrol: tall smoke and fire attached to "
-                    + (tank ? "tank" : "BTR") + " wreck.");
+                RevivalPlugin.L.LogInfo("Vehicle: tall smoke and fire attached to "
+                    + (tank ? "tank" : "vehicle") + " wreck.");
         }
 
         /// <summary>One of two continuously burning patches on the deck.</summary>
@@ -19225,6 +20158,234 @@ namespace NextDayRevival
             if (_t >= Life) { UnityEngine.Object.Destroy(gameObject); return; }
             float k = 1f - _t / Life;
             _light.intensity = _start * k * k * (0.78f + 0.22f * Mathf.Sin(_t * 70f));
+        }
+    }
+
+    // ------------------------------------------------------------ DroneAlert
+
+    /// <summary>
+    /// A lightweight proximity warning for incoming FPV drones. When a hostile
+    /// crew drone is in the air closer than `DroneAlert/AlertRange` metres, it
+    /// pips - faster the nearer it is, like a parking sensor - and blinks a
+    /// hint in the lower-left corner, where the game shows its own event notes.
+    ///
+    /// DELIBERATELY SELF-CONTAINED so several agents can work the same file at
+    /// once and merge cleanly: everything the feature needs lives in this one
+    /// class. Its only reach into the rest of the plugin is read-only -
+    /// `CrewDrone.CollectThreats` for the drone positions, `Admin.LocalPlayer`
+    /// for the body, `Drone.Flying` to fall silent while the player is piloting.
+    /// It is driven by one `Tick()` in Update and one `Draw()` in OnGUI, sends
+    /// nothing over the wire, and needs no Harmony patch of its own.
+    /// </summary>
+    public static class DroneAlert
+    {
+        static readonly List<Vector3> _threats = new List<Vector3>();
+        static float _nextScan;
+        static float _nextBeep;
+        static float _shownUntil;
+        static bool _active;
+        static float _closest;
+        static int _count;
+        static bool _warned;
+
+        static AudioSource _beeper;
+        static AudioClip _tone;
+        static Texture2D _dot;
+        static GUIStyle _style;
+
+        const float ScanInterval = 0.33f;
+
+        static float Range()
+        {
+            return RevivalPlugin.CfgDroneAlertRange == null
+                ? 500f : Mathf.Max(1f, RevivalPlugin.CfgDroneAlertRange.Value);
+        }
+
+        public static void Tick()
+        {
+            if (RevivalPlugin.CfgDroneAlert == null
+                || !RevivalPlugin.CfgDroneAlert.Value) { _active = false; return; }
+            try
+            {
+                // The pilot is already looking through his own drone; warning him
+                // about the craft he is flying would only nag. Fall silent.
+                if (Drone.Flying) { _active = false; return; }
+
+                if (Time.time >= _nextScan)
+                {
+                    _nextScan = Time.time + ScanInterval;
+                    Scan();
+                }
+                if (_active) Beep();
+            }
+            catch (Exception ex)
+            {
+                if (!_warned)
+                {
+                    _warned = true;
+                    if (RevivalPlugin.L != null)
+                        RevivalPlugin.L.LogWarning("Drohnenwarner: " + ex.Message);
+                }
+            }
+        }
+
+        static void Scan()
+        {
+            _threats.Clear();
+            CrewDrone.CollectThreats(_threats);
+
+            GameObject player = MapTools.LocalPlayer();
+            if (player == null) { _active = false; _count = 0; return; }
+            Vector3 me = player.transform.position;
+
+            float range = Range();
+            float r2 = range * range;
+            float best = float.MaxValue;
+            int n = 0;
+            for (int i = 0; i < _threats.Count; i++)
+            {
+                float d2 = (_threats[i] - me).sqrMagnitude;
+                if (d2 > r2) continue;
+                n++;
+                if (d2 < best) best = d2;
+            }
+
+            bool was = _active;
+            _active = n > 0;
+            _count = n;
+            _closest = _active ? Mathf.Sqrt(best) : 0f;
+            if (_active)
+            {
+                // Hold the hint a little past the next scan so it does not
+                // flicker in the gap between scans.
+                _shownUntil = Time.time + ScanInterval + 0.3f;
+                if (!was)
+                {
+                    _nextBeep = 0f;   // sound the first pip at once
+                    if (RevivalPlugin.L != null)
+                        RevivalPlugin.L.LogInfo("Drone alert: " + n
+                            + " hostile drone(s) within "
+                            + Mathf.RoundToInt(_closest) + " m.");
+                }
+            }
+        }
+
+        static void Beep()
+        {
+            if (RevivalPlugin.CfgDroneAlertSound == null
+                || !RevivalPlugin.CfgDroneAlertSound.Value) return;
+            if (Time.time < _nextBeep) return;
+
+            float frac = Mathf.Clamp01(_closest / Range());
+            // Near -> fast pips and a higher pitch; far -> slow and lower.
+            _nextBeep = Time.time + Mathf.Lerp(0.16f, 1.1f, frac);
+
+            EnsureBeeper();
+            if (_beeper == null || _tone == null) return;
+            float vol = RevivalPlugin.CfgDroneAlertVolume == null
+                ? 0.7f : Mathf.Clamp01(RevivalPlugin.CfgDroneAlertVolume.Value);
+            _beeper.pitch = Mathf.Lerp(1.3f, 0.92f, frac);
+            _beeper.PlayOneShot(_tone, vol);
+        }
+
+        static void EnsureBeeper()
+        {
+            if (_beeper != null) return;
+            try
+            {
+                GameObject go = new GameObject("NDR_DroneAlertBeeper");
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                _beeper = go.AddComponent<AudioSource>();
+                _beeper.loop = false;
+                _beeper.playOnAwake = false;
+                _beeper.spatialBlend = 0f;   // a 2D warning, not a world sound
+                _beeper.volume = 1f;
+                _tone = Tone();
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Drohnenwarner-Ton: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// The warning pip, computed rather than loaded - same reasoning as the
+        /// drone hum. A single 80 ms sine at 1760 Hz under a raised-cosine
+        /// envelope, so it opens and closes without a click.
+        /// </summary>
+        static AudioClip Tone()
+        {
+            const int rate = 22050;
+            int len = rate * 8 / 100;   // 80 ms
+            if (len < 2) len = 2;
+            float[] d = new float[len];
+            const float freq = 1760f;
+            for (int i = 0; i < len; i++)
+            {
+                float t = (float)i / rate;
+                float env = Mathf.Sin(Mathf.PI * i / (len - 1));
+                d[i] = Mathf.Sin(2f * Mathf.PI * freq * t) * env * 0.9f;
+            }
+            AudioClip clip = AudioClip.Create("NDR_DroneAlertTone", len, 1,
+                                              rate, false);
+            clip.SetData(d, 0);
+            return clip;
+        }
+
+        public static void Draw()
+        {
+            if (RevivalPlugin.CfgDroneAlert == null
+                || !RevivalPlugin.CfgDroneAlert.Value) return;
+            if (RevivalPlugin.CfgDroneAlertHud == null
+                || !RevivalPlugin.CfgDroneAlertHud.Value) return;
+            if (Drone.Flying) return;
+            if (!_active && Time.time > _shownUntil) return;
+            try
+            {
+                if (_style == null)
+                {
+                    // Note: GUIStyle.fontStyle is avoided on purpose - the
+                    // FontStyle enum lives in UnityEngine.TextRenderingModule,
+                    // which build.ps1 does not reference. A larger fontSize plus
+                    // the blink, colour and shadow make the hint prominent enough.
+                    _style = new GUIStyle(GUI.skin.label);
+                    _style.fontSize = 16;
+                }
+
+                bool blink = ((int)(Time.time * 3f) & 1) == 0;
+                string msg = Loc.T("! ДРОН РЯДОМ", "! DRONE NEARBY")
+                    + "  " + Mathf.RoundToInt(_closest) + " m"
+                    + (_count > 1 ? "  x" + _count : "");
+
+                // Lower-left, where the game shows its own event hints.
+                float w = 360f;
+                float h = 26f;
+                float x = 20f;
+                float y = Screen.height - 96f;
+
+                Color old = GUI.color;
+                GUI.color = new Color(0f, 0f, 0f, 0.55f);
+                GUI.DrawTexture(new Rect(x - 8f, y - 4f, w, h + 8f), Dot());
+                // Shadow, so the text stays readable over a bright sky.
+                GUI.color = new Color(0f, 0f, 0f, 0.7f);
+                GUI.Label(new Rect(x + 1f, y + 1f, w, h), msg, _style);
+                GUI.color = blink
+                    ? new Color(1f, 0.28f, 0.22f, 0.98f)
+                    : new Color(1f, 0.62f, 0.28f, 0.85f);
+                GUI.Label(new Rect(x, y, w, h), msg, _style);
+                GUI.color = old;
+            }
+            catch { }
+        }
+
+        static Texture2D Dot()
+        {
+            if (_dot != null) return _dot;
+            _dot = new Texture2D(1, 1);
+            _dot.SetPixel(0, 0, Color.white);
+            _dot.Apply();
+            return _dot;
         }
     }
 }
