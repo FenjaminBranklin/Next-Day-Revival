@@ -1220,15 +1220,6 @@ namespace NextDayRevival
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Набор снаряжения SWAT", "SWAT gear set"));
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("выдать набор SWAT", "give SWAT kit"), GUILayout.Width(190f)))
-                GebenSwat();
-            GUILayout.Label(Loc.T("шлем, бронежилет, штаны, рюкзак",
-                                  "helmet, armour, trousers, backpack"));
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Конвой", "Convoy"));
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(Loc.T("отправить конвой сейчас", "spawn convoy now"),
@@ -1322,26 +1313,6 @@ namespace NextDayRevival
             string meldung;
             Net.Item(_targetActor, itemId, menge, out meldung);
             Melde(meldung);
-        }
-
-        // Grant the four SWAT pieces at once (one each), regardless of the
-        // amount field. Registered ItemDefs only - a piece the item table does
-        // not carry is skipped rather than served as its donor.
-        static void GebenSwat()
-        {
-            int[] set = new int[] {
-                SwatGear.HelmetId, SwatGear.ArmourId,
-                SwatGear.TrousersId, SwatGear.BackpackId };
-            int ok = 0;
-            string meldung;
-            for (int i = 0; i < set.Length; i++)
-            {
-                if (RevivalPlugin.FindItem(set[i]) == null) continue;
-                Net.Item(_targetActor, set[i], 1, out meldung);
-                ok++;
-            }
-            Melde(Loc.T("Набор SWAT выдан (" + ok + " предм.)",
-                        "SWAT kit granted (" + ok + " items)"));
         }
 
         /// <summary>

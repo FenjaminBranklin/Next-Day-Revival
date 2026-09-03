@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.5.1";
+        public const string VERSION = "6.6.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -446,6 +446,7 @@ namespace NextDayRevival
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
+            PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -473,7 +474,6 @@ namespace NextDayRevival
             Patrol.Install(_harmony);
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
-            SwatGear.Install(_harmony);          // NDR SWAT gear worn-mesh (donor mesh)
 
             StartCoroutine(Tank.Prewarm());
             StartCoroutine(LateSetup());
@@ -1572,9 +1572,6 @@ namespace NextDayRevival
 
             // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
             M7Rifle.AddItems(Items);
-            // The SWAT uniform gear: helmet, body armour, trousers, backpack
-            // (own file).
-            SwatGear.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -2012,6 +2009,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
+            PeerCheck.Tick();                    // NDR peer version compare (own slow clock)
         }
 
         void FixedUpdate()
@@ -2036,6 +2034,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
+            PeerCheck.Draw();                    // NDR version badge + mismatch banner
             FrameProf.DrawOverlay();
         }
 

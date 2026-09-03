@@ -222,6 +222,8 @@ namespace NextDayRevival
                 MethodInfo start = AccessTools.Method(npc, "Start", null, null);
                 MethodInfo visualization = AccessTools.Method(npc,
                     "SetPlayVisualizationValue", null, null);
+                MethodInfo setActive = AccessTools.Method(npc, "SetActiveAI",
+                    null, null);
                 if (start != null)
                     harmony.Patch(start, null,
                         new HarmonyMethod(typeof(Crew).GetMethod("NpcStartPostfix")),
@@ -230,6 +232,10 @@ namespace NextDayRevival
                     harmony.Patch(visualization,
                         new HarmonyMethod(typeof(Crew).GetMethod(
                             "NpcVisualizationPrefix")), null, null, null, null);
+                if (setActive != null)
+                    harmony.Patch(setActive,
+                        new HarmonyMethod(typeof(Crew).GetMethod(
+                            "NpcActiveAiPrefix")), null, null, null, null);
                 RevivalPlugin.L.LogInfo("Crew: remote NPC appearance and animation "
                     + "repair hooks installed.");
             }
@@ -271,6 +277,37 @@ namespace NextDayRevival
         }
 
         public static bool NpcVisualizationPrefix(object __instance, bool __0)
+        {
+            if (__0) return true;
+            Component ai = __instance as Component;
+            object[] data;
+            bool isMine;
+            return ai == null || !SpawnData(ai, out data, out isMine);
+        }
+
+        /// <summary>
+        /// The second animation-stop path, and the one a remote puppet has no
+        /// settlement to guard. `NPC_AI2::SetActiveAI(false)` calls the legacy
+        /// `Animation.Stop()` directly, dropping the skinned mesh into its bind
+        /// pose - the T-pose - independently of `SetPlayVisualizationValue`.
+        ///
+        /// On the owner the generated `NDR_PatrolCrew` settlement is exempted
+        /// from `AutoDisableControl`, so it never reaches this call. A Photon
+        /// puppet on another player's machine carries no such settlement: it is
+        /// reached by `NPC_Settlement::NetworkReInitAllNpc -> TryReInit ->
+        /// SetActiveAI` and by any distance shutdown its own scene runs, and
+        /// nothing keeps it animated after the one-shot `CrewRemoteFix` has
+        /// played the animation once and destroyed itself. That is why the crew
+        /// still froze on the colleague's machine.
+        ///
+        /// `NpcVisualizationPrefix` already keeps a marked crew NPC hittable by
+        /// blocking the collider and ragdoll shutdown; this blocks the matching
+        /// animation shutdown so the same NPC also stays animated. Enabling
+        /// (`__0 == true`) is never refused. Keyed on the replicated
+        /// instantiation marker, so it acts on every client and touches only
+        /// our own crew NPCs. HYPOTHESIS until confirmed on the remote machine.
+        /// </summary>
+        public static bool NpcActiveAiPrefix(object __instance, bool __0)
         {
             if (__0) return true;
             Component ai = __instance as Component;

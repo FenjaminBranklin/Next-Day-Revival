@@ -967,18 +967,14 @@ namespace NextDayRevival
             bool inv = false;
             try
             {
-                Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
-                if (t != null)
+                Component[] all = VehicleScan.All();   // shared cached scan
+                for (int i = 0; i < all.Length; i++)
                 {
-                    UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
-                    for (int i = 0; i < all.Length; i++)
-                    {
-                        FieldInfo f = AccessTools.Field(all[i].GetType(),
-                                                        "_localPlayerPassengerId");
-                        if (f == null) continue;
-                        object v = f.GetValue(all[i]);
-                        if (v is int && (int)v >= 0) { inv = true; break; }
-                    }
+                    FieldInfo f = AccessTools.Field(all[i].GetType(),
+                                                    "_localPlayerPassengerId");
+                    if (f == null) continue;
+                    object v = f.GetValue(all[i]);
+                    if (v is int && (int)v >= 0) { inv = true; break; }
                 }
             }
             catch (Exception ex)

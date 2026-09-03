@@ -569,15 +569,15 @@ namespace NextDayRevival
             Camera cam = Camera.main;
             Vector3 look = cam != null ? cam.transform.forward : player.transform.forward;
 
-            Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
-            if (t == null) return false;
-
             float range = Mathf.Max(1f, CfgRange.Value);
             float aim = Mathf.Clamp(CfgAim.Value, -1f, 1f);
             float best = float.MaxValue;
             Component bestVgs = null;
 
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+            // Shared, TTL-cached vehicle scan (VehicleScan) instead of a private
+            // whole-scene FindObjectsOfType - this per-frame path was one of the
+            // red modules in the F6 overlay.
+            Component[] all = VehicleScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 Component c = all[i] as Component;
@@ -611,17 +611,13 @@ namespace NextDayRevival
             bool inv = false;
             try
             {
-                Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
-                if (t != null)
+                Component[] all = VehicleScan.All();   // shared cached scan
+                for (int i = 0; i < all.Length; i++)
                 {
-                    UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
-                    for (int i = 0; i < all.Length; i++)
-                    {
-                        FieldInfo f = AccessTools.Field(all[i].GetType(), "_localPlayerPassengerId");
-                        if (f == null) continue;
-                        object v = f.GetValue(all[i]);
-                        if (v is int && (int)v >= 0) { inv = true; break; }
-                    }
+                    FieldInfo f = AccessTools.Field(all[i].GetType(), "_localPlayerPassengerId");
+                    if (f == null) continue;
+                    object v = f.GetValue(all[i]);
+                    if (v is int && (int)v >= 0) { inv = true; break; }
                 }
             }
             catch (Exception ex)

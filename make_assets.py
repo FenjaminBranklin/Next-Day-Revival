@@ -46,8 +46,6 @@ GROUPS = [
     ("t72", ["t72_import.py", "t72_track_texture.py", "t72_scope.py",
              "shell125_mesh.py", "shell125_texture.py", "shell125_icon.py",
              "mesh_preview.py t72"]),
-    # SWAT uniform gear (helmet + carved top/bottom/backpack) from swat.glb.
-    ("swat", ["swat_build.py"]),
     ("scope", ["scope50.py", "apc_scope.py"]),
     ("preview", ["mesh_preview.py"]),
 ]

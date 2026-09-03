@@ -2908,6 +2908,15 @@ namespace NextDayRevival
                         // than drawn broken.
                         List<Vector3> wring = WorldRing(route);
                         if (wring == null || wring.Count < 3) continue;
+
+                        // SCENE GATE. The map shows the CURRENT scene, and its
+                        // WORLD_SIZE is that scene's terrain size. A route lives
+                        // on one terrain (the overworld), so on any smaller map -
+                        // a bunker or other interior - its coordinates fall many
+                        // terrain-widths outside and the ring smears across the
+                        // wrong map. Draw the route only where it can fit.
+                        if (!FitsScene(wring, world)) continue;
+
                         List<Vector2> ring = new List<Vector2>(wring.Count);
                         bool ringOk = true;
                         for (int i = 0; i < wring.Count; i++)
@@ -2965,6 +2974,10 @@ namespace NextDayRevival
                     Route route;
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 1) continue;
+                    // Same scene gate as the rings: a label for a route that
+                    // belongs to another scene must not sit on this map.
+                    if (route.P.Count >= 2 && !FitsScene(WorldRing(route), world))
+                        continue;
                     Vector2 label;
                     if (!MapTools.WorldToGui(route.P[0].Pos, texture, camera,
                                              world, map, out label)
@@ -3076,6 +3089,45 @@ namespace NextDayRevival
         // this radius of the earlier line, reopening a clean gap instead of
         // letting the two sets of dashes pile into a blob at the crossing.
         const float RouteClearance = 14f;
+
+        // How far a route's world extent may exceed the shown scene's terrain
+        // before the route is treated as belonging to a DIFFERENT scene and
+        // dropped. WORLD_SIZE is the current scene's terrain size (see
+        // MapUIManager.InitWorldSize, which reads MainTerrain) and the map is a
+        // pure scale of it, so a route recorded on one terrain never exceeds
+        // that terrain: on the overworld the ring already sits inside the map,
+        // ratio well under 1. An interior map (a bunker terrain is tens of
+        // metres) is many times smaller, so the overworld coordinates land many
+        // terrain-widths off and smear across the window - the reported "patrol
+        // area covers half the map and shows in other regions" bug. The slack
+        // above 1 also absorbs a tiled overworld whose MainTerrain is one tile
+        // smaller than the driven area; interiors are culled with wide margin.
+        const float RouteSceneFit = 2.5f;
+
+        /// <summary>
+        /// True when the route's world XZ extent can plausibly sit on the
+        /// currently shown scene's terrain. The map is a pure scale of
+        /// WORLD_SIZE (that scene's terrain size), so a route far wider than the
+        /// terrain belongs to another scene and must not be projected onto this
+        /// one - otherwise it stretches across the wrong map. Fails OPEN (true)
+        /// when the size is unknown, so a working overlay is never blanked by a
+        /// missing value.
+        /// </summary>
+        static bool FitsScene(List<Vector3> ring, Vector2 world)
+        {
+            if (world.x <= 0f || world.y <= 0f || ring == null || ring.Count == 0)
+                return true;
+            float minX = ring[0].x, maxX = ring[0].x;
+            float minZ = ring[0].z, maxZ = ring[0].z;
+            for (int i = 1; i < ring.Count; i++)
+            {
+                float x = ring[i].x, z = ring[i].z;
+                if (x < minX) minX = x; else if (x > maxX) maxX = x;
+                if (z < minZ) minZ = z; else if (z > maxZ) maxZ = z;
+            }
+            return (maxX - minX) <= world.x * RouteSceneFit
+                && (maxZ - minZ) <= world.y * RouteSceneFit;
+        }
 
         /// <summary>The measured screen-pixels-per-metre of the map, from the
         /// total projected pixel length of the run over its total world (XZ)

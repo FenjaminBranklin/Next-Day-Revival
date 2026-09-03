@@ -49,30 +49,6 @@ namespace NextDayRevival
         {
             ManualLogSource L = RevivalPlugin.L;
 
-            // Legacy save migration - runs for EVERY item, so it sits above the
-            // diagnostic cap below. The SWAT gear shipped its first cut on ids
-            // 2065-2068 (the ammo band - the "equips as ammo" bug); the equip fix
-            // moved it into the donor clothing bands (4090/4390/4590/6090). A
-            // character saved before that still carries the old ids, which the
-            // game cannot resolve ("ItemSpawned is null") and drops. Rewrite the
-            // argument to the new id so the original spawns the real piece; the
-            // server save heals itself the next time the inventory is written.
-            try
-            {
-                if (__args.Length > 0 && __args[0] is int)
-                {
-                    int had = (int)__args[0];
-                    int now = SwatGear.MoveLegacyId(had);
-                    if (now != had)
-                    {
-                        __args[0] = now;
-                        L.LogInfo("SWAT-Migration: altes Item " + had
-                            + " -> " + now + " umgeschrieben.");
-                    }
-                }
-            }
-            catch (Exception ex) { L.LogWarning("SWAT-Migration: " + ex.Message); }
-
             if (_backpack >= 12) return;
             try
             {

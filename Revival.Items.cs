@@ -279,16 +279,16 @@ namespace NextDayRevival
             "LootSpawn/Weapons/ASR/", "LootSpawn/Weapons/Rifles/",
             "LootSpawn/Weapons/Handguns/", "LootSpawn/Weapons/Usable/",
             "LootSpawn/Weapons/OneHandMelees/", "LootSpawn/Weapons/TwoHandMelees/",
-            // Clothing and backpacks. The SWAT gear (4090/4390/4590/6090) clones
-            // clothing donors (helmet 4017, body armour 4316, trousers 4509,
-            // backpack 6019), whose inventory prefabs live under these folders, not under
+            // Clothing and backpacks. A clone of a clothing/backpack donor
+            // (helmet 4017, body armour 4316, trousers 4509, backpack 6019, ...)
+            // has its inventory prefab under these folders, not under
             // Weapons/Ammunation - so without them GetSpawnPrefab(null) could not
             // find the donor at prewarm or at RepairIfDead time, the inventory
             // template failed to build ("Spende-Inventarprefab in keinem
             // Kandidatenpfad gefunden"), and the given item fell back to the bare
             // donor look. Folders confirmed from research/resource_paths.tsv; the
-            // full clothing subfolder set is listed so future clothing clones
-            // resolve too. Resources.Load is case-insensitive (weapons load via
+            // full clothing subfolder set is listed so any clothing clone
+            // resolves. Resources.Load is case-insensitive (weapons load via
             // the PascalCase paths above though the asset index is lowercase).
             "LootSpawn/Backpacks/",
             "LootSpawn/Clothes/Head/Special/", "LootSpawn/Clothes/Head/Hats/",

@@ -322,6 +322,18 @@ namespace NextDayRevival
             if (!VehicleModules.Enabled) return false;
             if (VehicleModules.CfgPeriscope == null || !VehicleModules.CfgPeriscope.Value) return false;
 
+            // The optic is purely visual: fixed-Rect GUI draws, no layout and no
+            // hit-testing. OnGUI runs once per input event as well as on Repaint,
+            // so while the gunner AIMS - a flood of mouse-move/drag events - this
+            // whole method, including the per-target projection loops in DrawVision
+            // (a WorldToScreenPoint over every NPC, vehicle and player), would run
+            // many times per frame for zero visible gain. That is the thermal
+            // "lag while aiming": the paint is cheap, the repeated CPU sweep is
+            // not. Do the work only on the Repaint pass - the one event that
+            // actually paints - exactly as Patrol.DrawMap already does. Still
+            // return true on every event so Turret keeps skipping its legacy scope.
+            if (Event.current == null || Event.current.type != EventType.Repaint) return true;
+
             VisionMode mode = VehicleModules.CurrentMode(veh);
             try
             {
