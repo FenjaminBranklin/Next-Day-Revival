@@ -32,6 +32,9 @@ GROUPS = [
     ("m7", ["m7_build.py"]),
     # 6.8x51 box + drum magazines for the M7 - procedural, FDE-tan polymer.
     ("mag68", ["mag68_build.py"]),
+    # Convoy-repair items: own art for the fire extinguisher (2063) and the
+    # heavy tool kit (2064), replacing the ammo50/jammer placeholders.
+    ("repairitems", ["repair_items_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),

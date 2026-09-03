@@ -91,6 +91,8 @@ ASSET_FILES = [
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
     "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
+    "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
+    "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
     "t72_track_left.ndmesh", "t72_track_right.ndmesh", "t72_track.png",
     "t72_diffuse.png", "t72_normal.png", "t72_metal.png", "t72_scope.png",
@@ -102,7 +104,8 @@ ASSET_FILES = [
 
 MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
-          "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "t72_hull.ndmesh",
+          "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh",
+          "fireext.ndmesh", "toolkit.ndmesh", "t72_hull.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
           "shell125.ndmesh"]
 
@@ -114,6 +117,7 @@ ICON_SIZES = {
     "mgbelt_icon.png": (300, 300), "ammo50_icon.png": (300, 300),
     "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
     "drone_icon.png": (300, 300), "jammer_icon.png": (300, 300),
+    "fireext_icon.png": (300, 300), "toolkit_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),

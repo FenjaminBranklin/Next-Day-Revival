@@ -168,14 +168,14 @@ namespace NextDayRevival
 
         /// <summary>
         /// Appends the two new items to the shared item table. Called once from
-        /// BuildItemTable after DroneGear.AddItems. Placeholder art: both reuse
-        /// the ammo50 (extinguisher-bottle-ish tin) and jammer meshes/icons so
-        /// the build and the runtime self-test are green; a Codex asset job can
-        /// give them dedicated meshes/icons later without touching this table.
+        /// BuildItemTable after DroneGear.AddItems. Each item carries its OWN art
+        /// (repair_items_build.py): fireext.* is a red CO2 bottle, toolkit.* is a
+        /// steel carry case with a yellow handle - no longer the ammo50/jammer
+        /// placeholders. Both clone donor 2030 and are fit to its magaz_l box.
         /// </summary>
         public static void AddItems(List<ItemDef> items)
         {
-            // Fire extinguisher (2063) - placeholder art: the .50 tin box.
+            // Fire extinguisher (2063) - own art: red CO2 bottle (fireext.*).
             items.Add(new ItemDef(
                 ExtId, DEF_DONOR, false,
                 "Огнетушитель", "Fire extinguisher",
@@ -188,11 +188,11 @@ namespace NextDayRevival
                 + "knocked-out APC or tank: walk up to the burning wreck, aim, and "
                 + "hold the key for a few seconds until the fire dies. The vehicle "
                 + "stays wrecked; a heavy tool kit repairs it afterwards.",
-                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
-                "ammo50_icon.png", null,
+                "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png",
+                "fireext_icon.png", null,
                 1, 0, 6.0f));
 
-            // Heavy tool kit (2064) - placeholder art: the jammer crate.
+            // Heavy tool kit (2064) - own art: steel case, yellow handle (toolkit.*).
             items.Add(new ItemDef(
                 KitId, DEF_DONOR, false,
                 "Тяжёлый набор инструментов", "Heavy tool kit",
@@ -208,8 +208,8 @@ namespace NextDayRevival
                 + "an extinguisher. Aim at the extinguished wreck and hold the key; "
                 + "when the bar fills the vehicle runs again. With fuel in the tank "
                 + "you can drive off.",
-                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
-                "jammer_icon.png", null,
+                "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png",
+                "toolkit_icon.png", null,
                 1, 0, 12.0f));
         }
 
@@ -269,15 +269,30 @@ namespace NextDayRevival
         {
             _prompt = null;
 
+            bool key = Input.GetKeyDown(CfgKey.Value);
+
             // Only on foot, never while seated in a vehicle.
-            if (InVehicle()) return;
+            if (InVehicle())
+            {
+                if (key) RevivalPlugin.L.LogInfo("ConvoyRepair diag: key pressed but "
+                    + "InVehicle() is true - stand up / leave the seat first.");
+                return;
+            }
 
             Component vgs; GameObject car; bool burning;
-            if (!FindWreck(out vgs, out car, out burning)) return;
+            if (!FindWreck(out vgs, out car, out burning))
+            {
+                // "F does nothing" is almost always no wreck MATCHED, not a
+                // broken action. On a deliberate key press, log exactly why the
+                // nearest destroyed vehicle did not qualify so one in-game press
+                // pinpoints it (range, aim, durability, fire child).
+                if (key) Diagnose();
+                return;
+            }
 
             bool haveExt = Turret.HasItem(ExtId);
             bool haveKit = Turret.HasItem(KitId);
-            bool pressed = Input.GetKeyDown(CfgKey.Value);
+            bool pressed = key;
             string keyName = CfgKey.Value.ToString();
 
             if (burning)
@@ -303,6 +318,65 @@ namespace NextDayRevival
                 {
                     _prompt = Loc.T("Нужен тяжёлый набор инструментов", "Heavy tool kit needed");
                 }
+            }
+        }
+
+        /// <summary>
+        /// One-shot diagnosis logged when the repair key is pressed on foot but
+        /// no wreck matched - the "F does nothing on a broken vehicle" report.
+        /// Finds the nearest VehicleGameSystem and logs the four things FindWreck
+        /// gates on (distance vs Range, aim dot vs AimDot, Durability, and
+        /// whether the NDR fire child is present on the SAME object), plus the
+        /// item counts. That tells the next in-game run whether the block is
+        /// aim/range, a not-destroyed vehicle, or a fire parented to a different
+        /// object than the VehicleGameSystem. No behaviour change - log only.
+        /// </summary>
+        static void Diagnose()
+        {
+            try
+            {
+                GameObject player = MapTools.LocalPlayer();
+                if (player == null)
+                { RevivalPlugin.L.LogInfo("ConvoyRepair diag: no local player."); return; }
+                Vector3 me = player.transform.position;
+                Camera cam = Camera.main;
+                Vector3 look = cam != null ? cam.transform.forward : player.transform.forward;
+
+                Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
+                if (t == null)
+                { RevivalPlugin.L.LogInfo("ConvoyRepair diag: VehicleGameSystem type not found."); return; }
+
+                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                Component near = null; float nearDist = float.MaxValue;
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Component c = all[i] as Component;
+                    if (c == null) continue;
+                    float d = (c.transform.position - me).magnitude;
+                    if (d < nearDist) { nearDist = d; near = c; }
+                }
+
+                RevivalPlugin.L.LogInfo("ConvoyRepair diag: " + all.Length
+                    + " VehicleGameSystem(s) in scene, Range=" + CfgRange.Value
+                    + " AimDot=" + CfgAim.Value
+                    + " haveExt=" + Turret.HasItem(ExtId) + " haveKit=" + Turret.HasItem(KitId) + ".");
+                if (near == null) { RevivalPlugin.L.LogInfo("ConvoyRepair diag: none in scene."); return; }
+
+                Vector3 to = near.transform.position - me;
+                float dist = to.magnitude;
+                float dot = dist > 1e-3f ? Vector3.Dot(to.normalized, look) : 1f;
+                float dur = GetFloat(near, "Durability", 999f);
+                bool fireHere = near.transform.Find(FireEffect.WreckName) != null;
+                bool ext = near.GetComponent<NdrExtinguished>() != null;
+                RevivalPlugin.L.LogInfo("ConvoyRepair diag: nearest '" + near.gameObject.name
+                    + "' dist=" + dist.ToString("0.0") + " (need <=" + CfgRange.Value + ")"
+                    + " aimDot=" + dot.ToString("0.00") + " (need >=" + CfgAim.Value + " or dist<3)"
+                    + " Durability=" + dur.ToString("0") + " (need <=0)"
+                    + " fireChildOnThisObject=" + fireHere + " extinguishedMark=" + ext + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ConvoyRepair diag: " + ex.Message);
             }
         }
 

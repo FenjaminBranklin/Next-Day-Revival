@@ -13,12 +13,13 @@
 //   - warm things then BLAZE on top of that cold field. Because we cannot give
 //     every world object a per-pixel heat value (no camera post-process on this
 //     old Unity + BepInEx build), the things we DO know are warm - patrol/convoy
-//     vehicles and their LIVING crew, and players - are lit up COMPLETELY in
-//     bright yellow: the whole target shape reads as one solid, uniformly hot
-//     yellow blob (a flat-topped heat disc, not a bright point in the middle),
-//     with a soft yellow bloom bleeding into the cold field around it. DEAD crew
-//     no longer radiate - a corpse cools, so an NPC that fails IsAlive() is
-//     dropped from the warm set;
+//     vehicles and their LIVING crew, and players - are drawn with an IRONBOW
+//     heat ramp (HeatRamp): a red-hot core (a tank's body/engine reads red in the
+//     middle, the way a real thermal sight shows it), an amber body and a bright
+//     yellow contour edge, plus a small bloom bleeding into the cold field. So a
+//     target reads as a heat GRADIENT with a visible outline, not one flat,
+//     uniform yellow disc. DEAD crew no longer radiate - a corpse cools, so an
+//     NPC that fails IsAlive() is dropped from the warm set;
 //   - the frame, reticle and status text are drawn on top.
 // A true per-pixel camera post-effect (scene desaturation + heat ramp) would be
 // nicer still and is a possible later enhancement; it needs a runtime shader,
@@ -32,6 +33,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace NextDayRevival
 {
@@ -40,6 +42,7 @@ namespace NextDayRevival
         static Texture2D _px;
         static Texture2D _disc;    // soft round glow, used for the outer bloom
         static Texture2D _hot;     // flat-topped hot disc: solid to the rim, soft edge
+        static Texture2D _ramp;    // radial ironbow ramp, colours baked in: white/red core -> yellow rim
         static Texture2D _vig;    // radial vignette: clear centre, dark rim
         static Texture2D _grain;  // static sensor noise, tiled
 
@@ -49,10 +52,35 @@ namespace NextDayRevival
         static readonly List<Transform> _warm = new List<Transform>();   // people: crew + players
         static readonly List<Transform> _veh = new List<Transform>();     // vehicles
         static readonly List<float> _vehR = new List<float>();            // vehicle world radius (m)
+        // Per-target mesh silhouettes, parallel to _veh / _warm. A target with a
+        // usable mesh is FILLED in its real shape (GL triangles); one without falls
+        // back to the old ramp ellipse. Vehicles are rigid (mesh + live transform);
+        // people are skinned, baked to world verts at the refresh tick.
+        static readonly List<Silh> _vehSilh = new List<Silh>();
+        static readonly List<Silh> _warmSilh = new List<Silh>();
         static float _warmUntil;
         static Type _npcType, _playerType, _vehType;
         static MethodInfo _npcAlive;   // NPC_AI2.IsAlive() - dead crew do not radiate
         static bool _typesResolved;
+
+        // GL immediate-mode fill (Unity 2018.1). Silhouettes are drawn as coloured
+        // triangles over the cold field, so warm targets read in their real shape.
+        static Material _glMat;
+        static Mesh _bakeScratch;   // reused snapshot target for skinned bakes
+        // mesh id -> (verts, tris). mesh.vertices/.triangles each allocate, so the
+        // rigid meshes are copied once and only re-projected per frame; skinned tris
+        // (pose-independent) are cached here too, keyed by the shared mesh.
+        static readonly Dictionary<int, MeshData> _meshCache = new Dictionary<int, MeshData>();
+
+        sealed class MeshData { public Vector3[] v; public int[] t; }
+        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; }
+        sealed class BakedPart { public Vector3[] wv; public int[] t; }   // world verts, baked at refresh
+        sealed class Silh
+        {
+            public readonly List<RigidPart> rigid = new List<RigidPart>();
+            public readonly List<BakedPart> skinned = new List<BakedPart>();
+            public bool Any { get { return rigid.Count > 0 || skinned.Count > 0; } }
+        }
 
         static Texture2D Px()
         {
@@ -139,6 +167,88 @@ namespace NextDayRevival
             GUI.color = c;
             GUI.DrawTexture(r, HotDisc());
             GUI.color = old;
+        }
+
+        /// <summary>
+        /// One position along the ironbow heat ramp, keyed by radius t (0 = the
+        /// hottest core, 1 = the coolest rim). A tiny white-hot pinpoint gives way
+        /// to a deep RED core - the way a real thermal sight shows the engine block
+        /// / body core as the hottest spot - then bleeds out through orange to a
+        /// yellow edge. So a target is NOT one flat colour: it reads as a heat
+        /// gradient with a red centre, exactly what the user asked for.
+        /// </summary>
+        static Color Ironbow(float t)
+        {
+            // Stops: (radius, colour). Kept short; linear between neighbours.
+            // t:   0.00      0.08      0.20      0.42      0.68      1.00
+            float[] ts = { 0.00f, 0.08f, 0.20f, 0.42f, 0.68f, 1.00f };
+            Color[] cs = {
+                new Color(1.00f, 0.94f, 0.80f),  // white-hot pinpoint
+                new Color(1.00f, 0.52f, 0.20f),  // hot amber shoulder
+                new Color(1.00f, 0.16f, 0.05f),  // deep RED core
+                new Color(1.00f, 0.42f, 0.05f),  // orange body
+                new Color(1.00f, 0.72f, 0.10f),  // amber
+                new Color(1.00f, 0.86f, 0.24f),  // yellow rim
+            };
+            if (t <= ts[0]) return cs[0];
+            for (int i = 1; i < ts.Length; i++)
+            {
+                if (t <= ts[i])
+                {
+                    float f = (t - ts[i - 1]) / (ts[i] - ts[i - 1]);
+                    return Color.Lerp(cs[i - 1], cs[i], f);
+                }
+            }
+            return cs[cs.Length - 1];
+        }
+
+        /// <summary>
+        /// The colored heat body: an ironbow ramp baked into the texture (red core,
+        /// yellow rim) with a DEFINED edge so the target reads as a hot shape with a
+        /// visible outline, not a formless yellow ball. Alpha is solid out to ~0.82
+        /// of the radius, then a short ramp to zero; a thin brighter ring just
+        /// inside the edge draws the contour so the silhouette stays legible against
+        /// the cold field. A true per-pixel scene silhouette still needs the
+        /// deferred camera shader; this is the closest asset-free read.
+        /// </summary>
+        static Texture2D HeatRamp()
+        {
+            if (_ramp != null) return _ramp;
+            const int N = 128;
+            _ramp = new Texture2D(N, N, TextureFormat.ARGB32, false);
+            _ramp.hideFlags = HideFlags.HideAndDontSave;
+            float c = (N - 1) * 0.5f;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float dx = (x - c) / c, dy = (y - c) / c;
+                    float d = Mathf.Sqrt(dx * dx + dy * dy);   // 0 centre .. 1 rim, >1 corners
+                    if (d >= 1f) { _ramp.SetPixel(x, y, new Color(0f, 0f, 0f, 0f)); continue; }
+                    Color col = Ironbow(d);
+                    // A brighter contour ring just inside the rim so the edge reads.
+                    if (d >= 0.80f && d <= 0.93f)
+                        col = Color.Lerp(col, new Color(1.00f, 0.95f, 0.62f), 0.55f);
+                    // Solid body, short soft edge -> a defined outline, not a fuzz.
+                    float a = d <= 0.82f ? 1f : Mathf.Clamp01((1f - d) / 0.18f);
+                    _ramp.SetPixel(x, y, new Color(col.r, col.g, col.b, a));
+                }
+            _ramp.Apply();
+            return _ramp;
+        }
+
+        /// <summary>Draw the colored heat ramp into a rect. GUI.color stays white so
+        /// the ramp's baked ironbow colours show; alpha scales the whole body.</summary>
+        static void RampGlow(Rect r, float alpha)
+        {
+            Color old = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, alpha);
+            GUI.DrawTexture(r, HeatRamp());
+            GUI.color = old;
+        }
+
+        static void RampRect(Vector2 c, float halfW, float halfH, float alpha)
+        {
+            RampGlow(new Rect(c.x - halfW, c.y - halfH, halfW * 2f, halfH * 2f), alpha);
         }
 
         /// <summary>Radial vignette texture, built once: fully transparent at the
@@ -255,8 +365,14 @@ namespace NextDayRevival
             Camera cam = Camera.main;
             if (cam == null) return;
 
-            // Vehicles first: an ironbow heat shape sized to the machine itself -
-            // no marker, no rectangle. People draw brighter over it.
+            // THERMAL: fill each target in its REAL shape (its own mesh triangles),
+            // coloured by the ironbow ramp - red-hot in the middle, yellow at the
+            // silhouette edge. No ovals. Targets without a usable mesh fall back to
+            // the ramp ellipse inside this call.
+            if (thermal) { DrawThermalSilhouettes(cam); return; }
+
+            // NIGHT keeps the softer green light-gain look: warm targets as soft
+            // green ramp ellipses (unchanged intent, no per-mesh silhouette).
             for (int i = 0; i < _veh.Count; i++)
             {
                 Transform t = _veh[i];
@@ -266,20 +382,14 @@ namespace NextDayRevival
                 if (!Project(cam, mid, out g, out dist)) continue;
                 if (dist > 800f) continue;
 
-                // On-screen size from the vehicle's world radius: project a point
-                // one radius to the side and measure the pixel gap, so the glow
-                // tracks the vehicle's apparent size at any distance.
                 float r = i < _vehR.Count ? _vehR[i] : 3f;
                 float edgeDist; Vector2 ge;
                 float px = 40f;
                 if (Project(cam, mid + cam.transform.right * r, out ge, out edgeDist))
                     px = Mathf.Abs(ge.x - g.x);
                 px = Mathf.Clamp(px, 16f, 320f);
-                VehicleGlow(g, px, thermal);
+                VehicleGlow(g, px, false);
             }
-
-            // People: crew and players. They radiate hottest, so they blaze the
-            // brightest - a white-hot core against the cold field.
             for (int i = 0; i < _warm.Count; i++)
             {
                 Transform t = _warm[i];
@@ -290,17 +400,208 @@ namespace NextDayRevival
                 if (dist > 450f) continue;
 
                 float size = Mathf.Clamp(1500f / dist, 8f, 46f);
-                Blob(g, size, thermal);
+                Blob(g, size, false);
             }
         }
 
-        // A warm target is lit COMPLETELY in one bright yellow: a solid,
-        // uniformly hot body (the flat-topped HotDisc) with a soft yellow bloom
-        // around it. No red/orange ramp, no white point - the whole shape is
-        // yellow so it reads as one blazing heat source against the cold blue
-        // field. Night falls back to the same idea in green.
-        static readonly Color HotYellow = new Color(1.00f, 0.83f, 0.06f, 1f);  // blazing thermal yellow
-        static readonly Color HotYellowBloom = new Color(1.00f, 0.72f, 0.02f, 1f);
+        // ------------------------------------------------ thermal silhouettes
+
+        static Material GLMat()
+        {
+            if (_glMat != null) return _glMat;
+            Shader s = Shader.Find("Hidden/Internal-Colored");
+            if (s == null) return null;
+            _glMat = new Material(s);
+            _glMat.hideFlags = HideFlags.HideAndDontSave;
+            _glMat.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+            _glMat.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+            _glMat.SetInt("_Cull", (int)CullMode.Off);
+            _glMat.SetInt("_ZWrite", 0);
+            _glMat.SetInt("_ZTest", (int)CompareFunction.Always);   // no occlusion, as before
+            return _glMat;
+        }
+
+        // Draw every warm target as filled mesh triangles in its true shape. The
+        // GL fill only runs on the Repaint pass; targets with no mesh are collected
+        // and drawn afterwards as the ramp ellipse, so nothing ever goes unlit.
+        static readonly List<int> _fbVeh = new List<int>();
+        static readonly List<int> _fbWarm = new List<int>();
+
+        static void DrawThermalSilhouettes(Camera cam)
+        {
+            _fbVeh.Clear();
+            _fbWarm.Clear();
+
+            bool repaint = Event.current == null || Event.current.type == EventType.Repaint;
+            Material m = repaint ? GLMat() : null;
+            if (m != null)
+            {
+                Matrix4x4 VP = cam.projectionMatrix * cam.worldToCameraMatrix;
+                int budget = 120000;   // triangle ceiling per frame (only while aiming)
+                m.SetPass(0);
+                GL.PushMatrix();
+                GL.LoadPixelMatrix();          // screen pixels, origin bottom-left, y up
+                GL.Begin(GL.TRIANGLES);
+
+                // Vehicles (rigid): fill the hull/turret/tracks in their real shape.
+                for (int i = 0; i < _veh.Count && budget > 0; i++)
+                {
+                    Transform t = _veh[i];
+                    Silh s = i < _vehSilh.Count ? _vehSilh[i] : null;
+                    if (t == null) continue;
+                    Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
+                    float dist; Vector2 g;
+                    if (!Project(cam, mid, out g, out dist)) continue;
+                    if (dist > 800f) continue;
+                    if (s == null || !s.Any) { _fbVeh.Add(i); continue; }
+
+                    float r = i < _vehR.Count ? _vehR[i] : 3f;
+                    Vector2 ge; float ed;
+                    float px = 40f;
+                    if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
+                        px = Mathf.Abs(ge.x - g.x);
+                    px = Mathf.Clamp(px, 16f, 320f);
+                    Vector2 centre = ScreenGL(g);        // GL y-up centre
+
+                    for (int p = 0; p < s.rigid.Count && budget > 0; p++)
+                    {
+                        RigidPart rp = s.rigid[p];
+                        if (rp.tr == null) continue;
+                        Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
+                        budget -= EmitMesh(rp.v, rp.t, mvp, centre, px, budget);
+                    }
+                }
+
+                // People (skinned): fill the baked body in its real shape, hotter.
+                for (int i = 0; i < _warm.Count && budget > 0; i++)
+                {
+                    Transform t = _warm[i];
+                    Silh s = i < _warmSilh.Count ? _warmSilh[i] : null;
+                    if (t == null) continue;
+                    Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
+                    float dist; Vector2 g;
+                    if (!Project(cam, chest, out g, out dist)) continue;
+                    if (dist > 450f) continue;
+                    if (s == null || !s.Any) { _fbWarm.Add(i); continue; }
+
+                    float px = Mathf.Clamp(1500f / dist, 8f, 46f);
+                    Vector2 centre = ScreenGL(g);
+                    for (int p = 0; p < s.skinned.Count && budget > 0; p++)
+                    {
+                        BakedPart bp = s.skinned[p];
+                        budget -= EmitMesh(bp.wv, bp.t, VP, centre, px, budget);
+                    }
+                    for (int p = 0; p < s.rigid.Count && budget > 0; p++)
+                    {
+                        RigidPart rp = s.rigid[p];
+                        if (rp.tr == null) continue;
+                        Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
+                        budget -= EmitMesh(rp.v, rp.t, mvp, centre, px, budget);
+                    }
+                }
+
+                GL.End();
+                GL.PopMatrix();
+            }
+            else
+            {
+                // Not a repaint (or no GL material): everything falls back.
+                for (int i = 0; i < _veh.Count; i++) _fbVeh.Add(i);
+                for (int i = 0; i < _warm.Count; i++) _fbWarm.Add(i);
+            }
+
+            // Fallback ellipses for any target without a mesh (drawn via GUI).
+            for (int k = 0; k < _fbVeh.Count; k++)
+            {
+                int i = _fbVeh[k];
+                Transform t = _veh[i];
+                if (t == null) continue;
+                Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
+                float dist; Vector2 g;
+                if (!Project(cam, mid, out g, out dist)) continue;
+                if (dist > 800f) continue;
+                float r = i < _vehR.Count ? _vehR[i] : 3f;
+                Vector2 ge; float ed; float px = 40f;
+                if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
+                    px = Mathf.Abs(ge.x - g.x);
+                px = Mathf.Clamp(px, 16f, 320f);
+                VehicleGlow(g, px, true);
+            }
+            for (int k = 0; k < _fbWarm.Count; k++)
+            {
+                int i = _fbWarm[k];
+                Transform t = _warm[i];
+                if (t == null) continue;
+                Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
+                float dist; Vector2 g;
+                if (!Project(cam, chest, out g, out dist)) continue;
+                if (dist > 450f) continue;
+                float size = Mathf.Clamp(1500f / dist, 8f, 46f);
+                Blob(g, size, true);
+            }
+        }
+
+        // GUI space is y-down (top-left); the GL pixel matrix is y-up (bottom-left).
+        // Project() returns a GUI point, so flip y once for the GL centre.
+        static Vector2 ScreenGL(Vector2 gui) { return new Vector2(gui.x, Screen.height - gui.y); }
+
+        // Fill one mesh's triangles, each vertex coloured by the ironbow ramp keyed
+        // by its distance from the target's screen centre over the target radius, so
+        // the middle runs red and the silhouette edge runs yellow. Vertices are
+        // taken to clip space by mvp and divided by w by hand (fast, and correct on
+        // 2018.1 without GL.GetGPUProjectionMatrix because we feed pixels, not a
+        // matrix, to GL). Returns the number of triangles emitted (for the budget).
+        static int EmitMesh(Vector3[] verts, int[] tris, Matrix4x4 mvp, Vector2 centre, float pxR, int budget)
+        {
+            if (verts == null || tris == null || verts.Length == 0) return 0;
+            float invR = pxR > 1f ? 1f / pxR : 1f;
+            float w = Screen.width, h = Screen.height;
+            int drawn = 0;
+            for (int k = 0; k + 2 < tris.Length; k += 3)
+            {
+                if (drawn >= budget) break;
+                int a = tris[k], b = tris[k + 1], c = tris[k + 2];
+                float ax, ay, bx, by, cx, cy;
+                if (!ProjV(mvp, verts[a], w, h, out ax, out ay)) continue;
+                if (!ProjV(mvp, verts[b], w, h, out bx, out by)) continue;
+                if (!ProjV(mvp, verts[c], w, h, out cx, out cy)) continue;
+
+                Emit(ax, ay, centre, invR);
+                Emit(bx, by, centre, invR);
+                Emit(cx, cy, centre, invR);
+                drawn++;
+            }
+            return drawn;
+        }
+
+        static bool ProjV(Matrix4x4 mvp, Vector3 v, float w, float h, out float sx, out float sy)
+        {
+            // clip = mvp * (v,1); reject anything at or behind the near plane.
+            float cx = mvp.m00 * v.x + mvp.m01 * v.y + mvp.m02 * v.z + mvp.m03;
+            float cy = mvp.m10 * v.x + mvp.m11 * v.y + mvp.m12 * v.z + mvp.m13;
+            float cw = mvp.m30 * v.x + mvp.m31 * v.y + mvp.m32 * v.z + mvp.m33;
+            sx = sy = 0f;
+            if (cw <= 0.0001f) return false;
+            float inv = 1f / cw;
+            sx = (cx * inv * 0.5f + 0.5f) * w;
+            sy = (cy * inv * 0.5f + 0.5f) * h;   // GL pixel matrix is y-up
+            return true;
+        }
+
+        static void Emit(float sx, float sy, Vector2 centre, float invR)
+        {
+            float dx = sx - centre.x, dy = sy - centre.y;
+            float t = Mathf.Sqrt(dx * dx + dy * dy) * invR;
+            if (t > 1f) t = 1f;
+            Color col = Ironbow(t);
+            GL.Color(new Color(col.r, col.g, col.b, 0.92f));
+            GL.Vertex3(sx, sy, 0f);
+        }
+
+        // THERMAL warm targets are drawn with the ironbow HeatRamp (RampRect):
+        // a red-hot core, an amber body and a bright yellow contour edge, so a
+        // target reads as a heat gradient with a visible outline, not a flat
+        // uniform yellow disc. NIGHT keeps the old solid-green body/bloom look.
         static readonly Color NightBody = new Color(0.45f, 1.00f, 0.30f, 1f);
         static readonly Color NightBloom = new Color(0.30f, 1.00f, 0.20f, 1f);
 
@@ -316,25 +617,42 @@ namespace NextDayRevival
 
         static void VehicleGlow(Vector2 c, float px, bool thermal)
         {
-            // Wider than tall - a vehicle silhouette reads horizontal. A soft
-            // bloom bleeds heat into the cold field, then the whole hull shape is
-            // filled solid: the entire vehicle glows yellow, not just its centre.
-            Color body = thermal ? HotYellow : NightBody;
-            Color bloom = thermal ? HotYellowBloom : NightBloom;
+            // Wider than tall - a vehicle silhouette reads horizontal. A modest
+            // bloom bleeds heat into the cold field (kept small so the target does
+            // not swell into one big ball), then the hull is filled with the ironbow
+            // ramp: a RED-hot core, an amber body and a bright yellow contour edge -
+            // a heat gradient with a visible outline, not a flat yellow disc.
             float w = px * 1.5f, h = px * 0.95f;
-            SoftRect(c, w * 1.35f, h * 1.45f, new Color(bloom.r, bloom.g, bloom.b, 0.45f));
-            HotRect (c, w,         h,         new Color(body.r,  body.g,  body.b,  0.96f));
+            if (thermal)
+            {
+                Glow(new Rect(c.x - w * 1.20f, c.y - h * 1.28f, w * 2.40f, h * 2.56f),
+                     new Color(1.00f, 0.55f, 0.06f, 0.28f));  // small orange bloom
+                RampRect(c, w, h, 0.96f);                     // ironbow hull, red core
+            }
+            else
+            {
+                SoftRect(c, w * 1.30f, h * 1.40f, new Color(NightBloom.r, NightBloom.g, NightBloom.b, 0.42f));
+                HotRect (c, w,         h,          new Color(NightBody.r,  NightBody.g,  NightBody.b,  0.96f));
+            }
         }
 
         static void Blob(Vector2 c, float s, bool thermal)
         {
-            // A person: a soft bloom, then a solid uniformly-lit yellow body so
-            // the whole figure blazes. Crew and players are the hottest thing on
-            // screen. Round discs only, never a square, never a bright point.
-            Color body = thermal ? HotYellow : NightBody;
-            Color bloom = thermal ? HotYellowBloom : NightBloom;
-            SoftRect(c, s * 2.1f, s * 2.1f, new Color(bloom.r, bloom.g, bloom.b, 0.42f));
-            HotRect (c, s * 1.15f, s * 1.15f, new Color(body.r, body.g, body.b, 0.98f));
+            // A person: crew and players run hotter than the hull, so the ramp is
+            // pushed toward its core - a person reads as a small blazing red/white
+            // heat source with a yellow edge, still a shape with an outline, never a
+            // flat coin. Round only, never a square, never a bright single point.
+            if (thermal)
+            {
+                Glow(new Rect(c.x - s * 1.7f, c.y - s * 1.7f, s * 3.4f, s * 3.4f),
+                     new Color(1.00f, 0.50f, 0.08f, 0.30f));  // small hot bloom
+                RampRect(c, s * 1.15f, s * 1.15f, 0.98f);     // ironbow body, red core
+            }
+            else
+            {
+                SoftRect(c, s * 2.0f, s * 2.0f, new Color(NightBloom.r, NightBloom.g, NightBloom.b, 0.42f));
+                HotRect (c, s * 1.15f, s * 1.15f, new Color(NightBody.r, NightBody.g, NightBody.b, 0.98f));
+            }
         }
 
         static bool Project(Camera cam, Vector3 world, out Vector2 gui, out float dist)
@@ -356,6 +674,8 @@ namespace NextDayRevival
             _warm.Clear();
             _veh.Clear();
             _vehR.Clear();
+            _vehSilh.Clear();
+            _warmSilh.Clear();
             ResolveTypes();
             AddAll(_npcType, true);    // crew: skip the dead
             AddAll(_playerType, false);
@@ -382,6 +702,7 @@ namespace NextDayRevival
                     catch { }
                 }
                 _warm.Add(c.transform);
+                _warmSilh.Add(BuildPerson(c.transform));
             }
         }
 
@@ -397,7 +718,98 @@ namespace NextDayRevival
                 if (c.transform == mine) continue;
                 _veh.Add(c.transform);
                 _vehR.Add(VehicleRadius(c.transform));
+                _vehSilh.Add(BuildRigid(c.transform));
             }
+        }
+
+        // Cached (verts, tris) for a mesh - mesh.vertices/.triangles each allocate
+        // a fresh copy, so pull them once and reuse the arrays every frame.
+        static MeshData Cache(Mesh mesh)
+        {
+            if (mesh == null) return null;
+            int id = mesh.GetInstanceID();
+            MeshData d;
+            if (_meshCache.TryGetValue(id, out d)) return d;
+            d = new MeshData();
+            try { d.v = mesh.vertices; d.t = mesh.triangles; }
+            catch { d = null; }
+            _meshCache[id] = d;
+            return d;
+        }
+
+        // A rigid target (vehicle): each child MeshFilter becomes a RigidPart with
+        // the shared mesh (cached) and its live transform, so the hull/turret/tracks
+        // are filled in their real shape and follow the vehicle every frame.
+        static Silh BuildRigid(Transform root)
+        {
+            Silh s = new Silh();
+            try
+            {
+                MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>();
+                for (int i = 0; i < mfs.Length; i++)
+                {
+                    MeshFilter mf = mfs[i];
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    Renderer r = mf.GetComponent<Renderer>();
+                    if (r != null && !r.enabled) continue;
+                    MeshData d = Cache(mf.sharedMesh);
+                    if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
+                    RigidPart rp = new RigidPart();
+                    rp.v = d.v; rp.t = d.t; rp.tr = mf.transform;
+                    s.rigid.Add(rp);
+                }
+            }
+            catch { }
+            return s;
+        }
+
+        // A person: bake each SkinnedMeshRenderer to a world-space snapshot at the
+        // refresh tick (baking every frame is too costly), plus any rigid child
+        // meshes (helmet, weapon). The baked pose lags at most one refresh - fine
+        // for a heat silhouette. Triangles are pose-independent, so they are cached.
+        static Silh BuildPerson(Transform root)
+        {
+            Silh s = new Silh();
+            try
+            {
+                SkinnedMeshRenderer[] sk = root.GetComponentsInChildren<SkinnedMeshRenderer>();
+                for (int i = 0; i < sk.Length; i++)
+                {
+                    SkinnedMeshRenderer smr = sk[i];
+                    if (smr == null || smr.sharedMesh == null || !smr.enabled) continue;
+                    if (_bakeScratch == null) _bakeScratch = new Mesh();
+                    _bakeScratch.hideFlags = HideFlags.HideAndDontSave;
+                    smr.BakeMesh(_bakeScratch);
+                    Vector3[] lv = _bakeScratch.vertices;
+                    if (lv == null || lv.Length == 0) continue;
+                    // BakeMesh yields verts in the renderer transform's local space;
+                    // take them to world with its full localToWorld (scale 1 for
+                    // these characters, so no double-scale).
+                    Matrix4x4 mtx = smr.transform.localToWorldMatrix;
+                    Vector3[] wv = new Vector3[lv.Length];
+                    for (int k = 0; k < lv.Length; k++) wv[k] = mtx.MultiplyPoint3x4(lv[k]);
+                    MeshData td = Cache(smr.sharedMesh);   // triangles only (pose-independent)
+                    if (td == null || td.t == null) continue;
+                    BakedPart bp = new BakedPart();
+                    bp.wv = wv; bp.t = td.t;
+                    s.skinned.Add(bp);
+                }
+                MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>();
+                for (int i = 0; i < mfs.Length; i++)
+                {
+                    MeshFilter mf = mfs[i];
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    Renderer r = mf.GetComponent<Renderer>();
+                    if (r != null && !r.enabled) continue;
+                    MeshData d = Cache(mf.sharedMesh);
+                    if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
+                    RigidPart rp = new RigidPart();
+                    rp.v = d.v; rp.t = d.t; rp.tr = mf.transform;
+                    s.rigid.Add(rp);
+                }
+            }
+            catch { }
+            return s;
         }
 
         /// <summary>Horizontal world radius of a vehicle from its child renderers,

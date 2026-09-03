@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.3.0";
+        public const string VERSION = "6.4.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -3078,9 +3078,9 @@ namespace NextDayRevival
             "LootSpawn/Weapons/ASR/", "LootSpawn/Weapons/Rifles/",
             "LootSpawn/Weapons/Handguns/", "LootSpawn/Weapons/Usable/",
             "LootSpawn/Weapons/OneHandMelees/", "LootSpawn/Weapons/TwoHandMelees/",
-            // Clothing and backpacks. The SWAT gear (2065-2068) clones clothing
-            // donors (helmet 4017, body armour 4316, trousers 4509, backpack
-            // 6019), whose inventory prefabs live under these folders, not under
+            // Clothing and backpacks. The SWAT gear (4090/4390/4590/6090) clones
+            // clothing donors (helmet 4017, body armour 4316, trousers 4509,
+            // backpack 6019), whose inventory prefabs live under these folders, not under
             // Weapons/Ammunation - so without them GetSpawnPrefab(null) could not
             // find the donor at prewarm or at RepairIfDead time, the inventory
             // template failed to build ("Spende-Inventarprefab in keinem

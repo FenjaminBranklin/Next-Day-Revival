@@ -46,18 +46,30 @@ using System.Collections.Generic;
 namespace NextDayRevival
 {
     /// <summary>
-    /// The four SWAT gear items. Ids 2065-2068 are fresh: they follow the M7
-    /// magazines (2058/2059) and the vehicle modules (2060-2062), and items.tsv
-    /// and the plugin id space have nothing on them. Each clones a known-good
-    /// clothing donor so it behaves as real, equippable gear.
+    /// The four SWAT gear items. The ids MUST lie in the same numeric band as
+    /// their clothing donor, because the game derives an item's equip category
+    /// from its id ALONE - not from any per-item data.
+    /// `ItemSlotUI.LoadSlotItemCategoryData` calls
+    /// `ItemDataManager.GetItemCatData(ItemID)`, which is a hard-coded id-RANGE
+    /// switch (CONFIRMED from IL, research/ilq.py): 4000-4100 -> Clothes/Head/
+    /// Special, 4300-4400 -> Clothes/Body/Jackets, 4500-4600 -> Clothes/Legs/
+    /// Pants, 6000-7000 -> Backpacks; and, fatally, 2000-3000 -> Ammunation.
+    /// The first cut of these items used 2065-2068, so the inventory UI read
+    /// them as AMMO and `ItemSlotUI.OnDragZoneEquipment` refused to wear them -
+    /// the "in the inventory but nothing equips" bug. The one-click admin loadout
+    /// still worked because it FORCES the slot via AddGearItemFromValues(slot,..)
+    /// instead of asking the category. Fresh ids in the donor's own band make the
+    /// clone equip exactly like the donor. All four verified free against
+    /// items.tsv and the plugin id space.
     /// </summary>
     public static class SwatGear
     {
-        // Fresh ids. Verified free against items.tsv and every top-level *.cs.
-        public const int HelmetId   = 2065;   // SWAT helmet    (donor 4017, slot 0)
-        public const int ArmourId   = 2066;   // SWAT body armour (donor 4316, slot 2)
-        public const int TrousersId = 2067;   // SWAT trousers  (donor 4509, slot 6)
-        public const int BackpackId = 2068;   // SWAT backpack  (donor 6019)
+        // Ids in the donor's clothing band so GetItemCatData returns the right
+        // equip category (see the class summary - this is the equip fix).
+        public const int HelmetId   = 4090;   // SWAT helmet    (donor 4017, Head/Special 4000-4100, slot 0)
+        public const int ArmourId   = 4390;   // SWAT body armour (donor 4316, Body/Jackets 4300-4400, slot 2)
+        public const int TrousersId = 4590;   // SWAT trousers  (donor 4509, Legs/Pants 4500-4600, slot 6)
+        public const int BackpackId = 6090;   // SWAT backpack  (donor 6019, Backpacks 6000-7000)
 
         /// <summary>
         /// Add the four item definitions to the shared table. Called from
@@ -65,7 +77,7 @@ namespace NextDayRevival
         /// </summary>
         public static void AddItems(List<ItemDef> items)
         {
-            // SWAT helmet (2065). The model's own detailed headgear: hard black
+            // SWAT helmet (4090). The model's own detailed headgear: hard black
             // tactical shell with an NVG monocle mount, a flip visor and straps.
             items.Add(new ItemDef(
                 HelmetId, 4017, false,
@@ -80,7 +92,7 @@ namespace NextDayRevival
                 "swat_helmet_normal.png", "swat_helmet_icon.png", null,
                 0, 0, 1.6f));
 
-            // SWAT body armour (2066). The carved torso: a black plate carrier /
+            // SWAT body armour (4390). The carved torso: a black plate carrier /
             // tactical vest over the operator's uniform.
             items.Add(new ItemDef(
                 ArmourId, 4316, false,
@@ -93,7 +105,7 @@ namespace NextDayRevival
                 "swat_top_normal.png", "swat_top_icon.png", null,
                 0, 0, 6.0f));
 
-            // SWAT trousers (2067). The carved lower body: black tactical
+            // SWAT trousers (4590). The carved lower body: black tactical
             // trousers and boots.
             items.Add(new ItemDef(
                 TrousersId, 4509, false,
@@ -105,7 +117,7 @@ namespace NextDayRevival
                 "swat_bottom_normal.png", "swat_bottom_icon.png", null,
                 0, 0, 2.0f));
 
-            // SWAT backpack (2068). The carved back load: a black assault pack.
+            // SWAT backpack (6090). The carved back load: a black assault pack.
             items.Add(new ItemDef(
                 BackpackId, 6019, false,
                 "Рюкзак SWAT", "SWAT backpack",

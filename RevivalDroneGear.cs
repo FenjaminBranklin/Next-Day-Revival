@@ -81,15 +81,19 @@ namespace NextDayRevival
             CfgDeploySeconds = cfg.Bind("DroneGear", "DeploySeconds", 20f,
                 "Sekunden, die das Ausfahren der Antenne dauert. Waehrenddessen "
                 + "steht der Spieler still (Ladebalken, wie beim Beerenpfluecken).");
-            CfgAntennaHeight = cfg.Bind("DroneGear", "AntennaHeight", 2.5f,
-                "Hoehe der ausgefahrenen Antenne in Metern - so weit ragt sie aus "
-                + "dem Rucksack.");
-            CfgAntennaBack = cfg.Bind("DroneGear", "AntennaBack", 0.22f,
+            CfgAntennaHeight = cfg.Bind("DroneGear", "AntennaHeight", 3.0f,
+                "Wie viele Meter die MastSPITZE ueber den KOPF des Spielers "
+                + "hinausragt. 3 = die Antenne steht drei Meter ueber dem Kopf. "
+                + "Der Mastfuss wird automatisch an der echten Kopfhoehe des "
+                + "Spielermodells (Renderer-Bounds) verankert, damit der Mast nie "
+                + "mehr im Koerper verschwindet.");
+            CfgAntennaBack = cfg.Bind("DroneGear", "AntennaBack", 0.25f,
                 "Wie weit hinter dem Spieler (Rucksackseite) der Mastfuss sitzt, in "
                 + "Metern. Groesser = weiter hinten. Nur zum Feinjustieren der Optik.");
-            CfgAntennaUp = cfg.Bind("DroneGear", "AntennaUp", 1.1f,
-                "Hoehe des Mastfusses ueber dem Spielerursprung (Fuesse), in Metern - "
-                + "auf Rucksack-/Schulterhoehe. Nur zum Feinjustieren der Optik.");
+            CfgAntennaUp = cfg.Bind("DroneGear", "AntennaUp", 0.55f,
+                "Wie viele Meter UNTER dem Kopf der Mastfuss ansetzt (Rucksack-/"
+                + "Oberkoerperhoehe). 0.55 = knapp unter den Schultern. Nur zum "
+                + "Feinjustieren, wo der Mast aus dem Rucksack tritt.");
             CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
                 "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
                 + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
@@ -497,9 +501,17 @@ namespace NextDayRevival
     /// .ndmesh is a later Codex asset job. It is PARENTED to the live player
     /// body (re-anchored every frame, so a respawn or a stale transform can
     /// never strand it at world origin - the cause of the "completely invisible"
-    /// report) and forced upright in world space, so it always rises clearly out
-    /// of the backpack instead of sitting inside the body or being left behind.
-    /// Back/up offsets are tunable in-game (DroneGear/AntennaBack, /AntennaUp).
+    /// report) and forced upright in world space.
+    ///
+    /// PLACEMENT (fixes "the mast sits inside the body"): the foot is anchored
+    /// off the player's REAL head height, read from the model's renderer bounds
+    /// each frame (<see cref="PlayerHeadTop"/>), NOT from a fixed offset above an
+    /// unknown transform origin - the earlier 1.1 m-above-origin guess left the
+    /// short mast buried in the character silhouette. The foot sits AntennaUp
+    /// metres below that head, on the backpack side (AntennaBack behind), and the
+    /// telescope extends so the TIP clears the head by AntennaHeight metres - so
+    /// the antenna always rises several metres clear above the head regardless of
+    /// where the player transform's origin actually is.
     /// </summary>
     public static class Antenna
     {
@@ -657,10 +669,17 @@ namespace NextDayRevival
             Grow(1f);
             Turret.Hinweis(Loc.T("Антенна поднята - дрон готов к пуску",
                                  "Antenna up - drone ready to launch"), 3f);
-            Vector3 at = _root == null ? Vector3.zero : _root.transform.position;
-            RevivalPlugin.L.LogInfo("Antenna: up at world " + at.ToString("F1")
-                + " (segments=" + (_seg == null ? 0 : _seg.Length)
-                + ", height=" + DroneGear.CfgAntennaHeight.Value + " m).");
+            Vector3 foot = _root == null ? Vector3.zero : _root.transform.position;
+            float head; bool haveHead = PlayerHeadTop(out head);
+            float tipY = foot.y + Mathf.Max(0.3f,
+                (DroneGear.CfgAntennaUp == null ? 0.55f : DroneGear.CfgAntennaUp.Value)
+                + (DroneGear.CfgAntennaHeight == null ? 3.0f : DroneGear.CfgAntennaHeight.Value));
+            RevivalPlugin.L.LogInfo("Antenna: up - foot world " + foot.ToString("F1")
+                + ", tip Y=" + tipY.ToString("F1")
+                + ", head Y=" + (haveHead ? head.ToString("F1") : "n/a")
+                + " (tip clears head by ~"
+                + (haveHead ? (tipY - head).ToString("F1") : "?") + " m, segments="
+                + (_seg == null ? 0 : _seg.Length) + ").");
         }
 
         static void Retract(string why)
@@ -677,7 +696,7 @@ namespace NextDayRevival
 
         // Segment radii, fat base to thin tip. A real telescopic whip tapers,
         // so thinner tubes appear to slide out of thicker ones.
-        static readonly float[] SegRadius = new float[] { 0.050f, 0.037f, 0.027f, 0.020f };
+        static readonly float[] SegRadius = new float[] { 0.060f, 0.046f, 0.034f, 0.024f };
 
         static void BuildMast()
         {
@@ -744,21 +763,39 @@ namespace NextDayRevival
         {
             if (_root == null) return;
 
-            // Anchor: behind the player (backpack side) and up at pack height,
-            // always vertical no matter how the body leans or animates. Re-fetch
-            // the body every frame; if there is no local player right now, hide
-            // the mast rather than leave a stray one floating at world origin.
+            // Anchor: behind the player (backpack side) and forced upright, no
+            // matter how the body leans or animates. Re-fetch the body every
+            // frame; if there is no local player right now, hide the mast rather
+            // than leave a stray one floating at world origin.
             EnsurePilot();
             if (_pilot == null) { DestroyMast(); return; }
 
-            float back = DroneGear.CfgAntennaBack == null ? 0.22f : DroneGear.CfgAntennaBack.Value;
-            float up = DroneGear.CfgAntennaUp == null ? 1.1f : DroneGear.CfgAntennaUp.Value;
+            float back = DroneGear.CfgAntennaBack == null ? 0.25f : DroneGear.CfgAntennaBack.Value;
+            float drop = DroneGear.CfgAntennaUp == null ? 0.55f : DroneGear.CfgAntennaUp.Value;
+            float above = DroneGear.CfgAntennaHeight == null ? 3.0f : DroneGear.CfgAntennaHeight.Value;
+
+            Vector3 root = _pilot.position;
             Vector3 fwd = _pilot.forward; fwd.y = 0f;
             if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward; else fwd.Normalize();
-            _root.transform.position = _pilot.position - fwd * back + Vector3.up * up;
+
+            // Real head height from the player's rendered bounds, so the mast is
+            // placed relative to the head instead of a fixed guess above an
+            // unknown origin (which buried it in the body). Clamp to a sane band
+            // above the root so a raised weapon or an animation spike in the
+            // bounds cannot fling the anchor.
+            float headTop;
+            if (!PlayerHeadTop(out headTop)) headTop = root.y + 1.75f;
+            headTop = Mathf.Clamp(headTop, root.y + 1.2f, root.y + 2.2f);
+
+            // Foot sits `drop` below the head on the backpack side; the fully
+            // extended tip reaches `above` metres over the head.
+            float footY = headTop - Mathf.Max(0f, drop);
+            _root.transform.position = new Vector3(root.x, footY, root.z) - fwd * back;
             _root.transform.rotation = Quaternion.identity;
 
-            float total = Mathf.Max(0.3f, DroneGear.CfgAntennaHeight.Value);
+            // Physical mast length foot->tip: the drop below the head plus the
+            // clearance above it, so at t=1 the tip is at headTop + above.
+            float total = Mathf.Max(0.3f, Mathf.Max(0f, drop) + Mathf.Max(0.3f, above));
             float segMax = total / Segments;
             float h = Mathf.Clamp01(t) * total;
 
@@ -787,6 +824,41 @@ namespace NextDayRevival
         }
 
         static void Grow(float t) { Layout(t); }
+
+        /// <summary>
+        /// World-space Y of the top of the player model, from the union of its
+        /// renderer bounds - i.e. the real head height, whatever the transform
+        /// origin is. Our own mast segments (named "NDR_...") are skipped so the
+        /// growing antenna cannot feed its own tip back into the anchor. Returns
+        /// false if the body has no usable renderer yet (caller falls back).
+        /// </summary>
+        static bool PlayerHeadTop(out float y)
+        {
+            y = 0f;
+            if (_pilot == null) return false;
+            try
+            {
+                Renderer[] rs = _pilot.GetComponentsInChildren<Renderer>();
+                if (rs == null) return false;
+                bool any = false;
+                float top = float.NegativeInfinity;
+                for (int i = 0; i < rs.Length; i++)
+                {
+                    Renderer r = rs[i];
+                    if (r == null || !r.enabled) continue;
+                    if (r.gameObject != null && r.gameObject.name != null
+                        && r.gameObject.name.StartsWith("NDR_")) continue;
+                    Bounds b = r.bounds;
+                    if (b.size.y <= 0.001f) continue;
+                    if (b.max.y > top) top = b.max.y;
+                    any = true;
+                }
+                if (!any) return false;
+                y = top;
+                return true;
+            }
+            catch { return false; }
+        }
 
         static void Hold()
         {
@@ -979,6 +1051,7 @@ namespace NextDayRevival
         static float _armed;
         static Transform _pilotRoot;
         static GameObject _model;
+        static Renderer[] _modelRenderers;  // cached so visibility toggles allocate nothing
         static GameObject _wreck;
         static Vector3 _wreckAt;
         static float _nextHeight;
@@ -1402,7 +1475,12 @@ namespace NextDayRevival
             GameObject g = Shape(scale);
             g.name = wreck ? "NDR_SurvDroneWreck" : "NDR_SurvDrone";
             if (wreck) { _wreck = g; g.transform.position = _wreckAt; }
-            else { _model = g; PlaceModel(); }
+            else
+            {
+                _model = g;
+                _modelRenderers = g.GetComponentsInChildren<Renderer>(true);
+                PlaceModel();
+            }
         }
 
         static void BuildWreck() { BuildModel(true); }
@@ -1410,7 +1488,7 @@ namespace NextDayRevival
         static void DestroyModel(bool wreck)
         {
             if (wreck) { if (_wreck != null) { UnityEngine.Object.Destroy(_wreck); _wreck = null; } }
-            else { if (_model != null) { UnityEngine.Object.Destroy(_model); _model = null; } }
+            else { if (_model != null) { UnityEngine.Object.Destroy(_model); _model = null; } _modelRenderers = null; }
         }
 
         static void PlaceModel()
@@ -1418,6 +1496,27 @@ namespace NextDayRevival
             if (_model == null) return;
             _model.transform.position = _pos;
             _model.transform.rotation = Quaternion.LookRotation(Forward(), Vector3.up);
+            ApplyModelVisibility();
+        }
+
+        /// <summary>
+        /// The recon camera sits at the drone's own centre (`_pos`), so while the
+        /// pilot looks THROUGH the drone its large airframe (the FPV mesh scaled
+        /// ~12x) fills the screen - a dark body straight ahead and the rotor frame
+        /// across the top, with no way to see where it flies. So hide the model's
+        /// renderers while viewing, and show them again the moment the pilot steps
+        /// back to his body, where seeing the drone hover is the whole point of a
+        /// reusable recon drone (the FPV drone dodges this by building no local
+        /// model at all - only remote players see it). Runs every flight frame
+        /// off cached renderers, so it costs nothing and cannot miss a transition.
+        /// The wreck is a separate object and is never touched here.
+        /// </summary>
+        static void ApplyModelVisibility()
+        {
+            if (_modelRenderers == null) return;
+            bool show = !_viewing;
+            for (int i = 0; i < _modelRenderers.Length; i++)
+                if (_modelRenderers[i] != null) _modelRenderers[i].enabled = show;
         }
 
         /// <summary>
