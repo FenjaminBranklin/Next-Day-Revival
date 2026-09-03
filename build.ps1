@@ -42,13 +42,10 @@ $managed = Join-Path $game "nextday_game_Data\Managed"
 $core    = Join-Path $game "BepInEx\core"
 $plugins = Join-Path $game "BepInEx\plugins"
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
-# Compile every top-level .cs beside build.ps1, not RevivalPlugin.cs alone.
-# Large new systems (RevivalDroneGear.cs, Revival.Modules.cs,
-# Revival.GunnerOptics.cs) live in their own files to keep them out of the
-# 19k-line main file; this is what let several agents work in parallel and the
-# integration agent merge with few conflicts (AGENTS.md, Ausnahme). csc compiles
-# them into one DLL. RevivalPlugin.cs comes first, the rest sorted - order is
-# irrelevant to csc but a stable build is easier to read.
+# Compile every top-level .cs beside build.ps1. Core and feature systems live in
+# separate source files so agents can load and own only the relevant module.
+# csc compiles them into one DLL. RevivalPlugin.cs comes first, the rest sorted;
+# order is irrelevant to csc but a stable build is easier to read.
 $mainSrc = Join-Path $root "RevivalPlugin.cs"
 $src     = @($mainSrc) + (
     Get-ChildItem -Path $root -Filter *.cs -File |
@@ -83,11 +80,10 @@ $refs = @(
     (Join-Path $managed "UnityEngine.ParticleSystemModule.dll")
 ) | Where-Object { Test-Path $_ }
 
-# /codepage:65001 - RevivalPlugin.cs is UTF-8 (no BOM) and now carries Russian
-# string literals for the in-game text. Without this flag csc reads the source
-# under the system ANSI code page and the Cyrillic turns into mojibake in the
-# compiled strings. The file stays BOM-less so the Python tools that read it as
-# plain UTF-8 (verify.py) see no leading marker.
+# /codepage:65001 - plugin sources are UTF-8 (no BOM) and may carry Russian
+# string literals for in-game text. Without this flag csc reads them under the
+# system ANSI code page and the Cyrillic turns into mojibake in the compiled
+# strings. Files stay BOM-less so Python tools see no leading marker.
 $cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2",
              "/codepage:65001", "/out:$staged")
 foreach ($r in $refs) { $cscArgs += "/reference:$r" }
