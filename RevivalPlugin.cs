@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.4.1";
+        public const string VERSION = "6.5.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -473,6 +473,7 @@ namespace NextDayRevival
             Patrol.Install(_harmony);
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
+            SwatGear.Install(_harmony);          // NDR SWAT gear worn-mesh (donor mesh)
 
             StartCoroutine(Tank.Prewarm());
             StartCoroutine(LateSetup());
@@ -6168,6 +6169,51 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>
+        /// Prefix on PlayerVehicleManager::GetOutFromVehicle. Hands the camera
+        /// back to the game BEFORE the game switches it back on foot.
+        ///
+        /// BELEGT (IL von GetOutFromVehicle, 2026-09-03): fuer den lokalen
+        /// Spieler (isMine) ruft das Aussteigen
+        ///     _camSwitch.ChangeCameraToVehicleMode(false, CameraOptions)
+        /// und schaltet danach den Fuss-Kameracontroller wieder ein. Genau
+        /// dieser `_camSwitch` (CameraSwitch) ist aber das Skript, das die
+        /// Geschuetz-Uebernahme ueber CameraOwner STILLGELEGT hat. Ein
+        /// deaktiviertes Behaviour fuehrt einen direkten Methodenaufruf zwar
+        /// aus, aber der Umschaltvorgang setzt sich nicht durch: HUD, Karte,
+        /// Inventar und Menue des Spiels bleiben dunkel, bis das Spiel neu
+        /// startet. Die alte Aufraeumung (Rescan -> Clear -> SetManning(false))
+        /// laeuft erst ~0.4 s SPAETER, lange nachdem das Spiel schon umgeschaltet
+        /// hat. Deshalb hier: erst die Kamera zurueckgeben (CameraSwitch wieder
+        /// an), dann laesst das Original ChangeCameraToVehicleMode auf einem
+        /// aktiven CameraSwitch laufen, und das HUD kommt zurueck.
+        ///
+        /// Feldbericht (2026-09-03), der den Fix ausgeloest hat: Geschuetz per G
+        /// bedient, ausgestiegen, danach "gar nichts mehr angezeigt" - Karte,
+        /// Inventar, Menue tot, waehrend die IMGUI-Overlays des Mods
+        /// (Patrouillenrand, Admin/Teleport) weiter zeichneten.
+        ///
+        /// Nur fuer das EIGENE Fahrzeug: `_manning` ist ohnehin lokal, und der
+        /// Instanzvergleich haelt das Aussteigen eines fremden Spielers heraus.
+        /// </summary>
+        public static void GetOutPrefix(object __instance)
+        {
+            try
+            {
+                if (!_manning) return;
+                object myPvm = _vgs == null ? null : Field(_vgs, "_playerVehicleManager");
+                if (myPvm == null || !ReferenceEquals(__instance, myPvm)) return;
+                RevivalPlugin.L.LogInfo("Geschuetz: Fahrzeug wird verlassen - Kamera "
+                    + "vor dem Umschalten zurueckgegeben (HUD-Fix).");
+                SetManning(false);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Geschuetz GetOutPrefix: " + ex);
+                SetManning(false);
+            }
+        }
+
         // --------------------------------------------------------- Einhaengen
 
         public static void Install(Harmony harmony)
@@ -6195,6 +6241,29 @@ namespace NextDayRevival
                 harmony.Patch(freeSeat, null,
                     new HarmonyMethod(typeof(Turret).GetMethod("FreeSeatPostfix")),
                     null, null, null);
+
+                // HUD-Fix: die Kamera zurueckgeben, BEVOR das Spiel beim
+                // Aussteigen ueber den (vom Mod stillgelegten) CameraSwitch auf
+                // die Fuss-Kamera umschaltet. Ohne das bleibt nach dem Bedienen
+                // des Geschuetzes das gesamte Spiel-UI dunkel. Siehe GetOutPrefix.
+                Type pvm = RevivalPlugin.TypeByName("PlayerVehicleManager");
+                MethodInfo getOut = pvm == null ? null
+                    : AccessTools.Method(pvm, "GetOutFromVehicle",
+                                         new Type[] { typeof(int) }, null);
+                if (getOut != null)
+                {
+                    harmony.Patch(getOut,
+                        new HarmonyMethod(typeof(Turret).GetMethod("GetOutPrefix")),
+                        null, null, null, null);
+                    RevivalPlugin.L.LogInfo("Geschuetz: GetOutFromVehicle gepatcht "
+                        + "(HUD-Fix beim Aussteigen).");
+                }
+                else
+                {
+                    RevivalPlugin.L.LogWarning("Geschuetz: PlayerVehicleManager."
+                        + "GetOutFromVehicle(int) nicht gefunden - der HUD-Fix beim "
+                        + "direkten Aussteigen ist inaktiv.");
+                }
 
                 RevivalPlugin.L.LogInfo("Geschuetz: InitCar und GetFreePassengerPlaceId gepatcht.");
                 CameraHook.Install(harmony);
@@ -9448,6 +9517,16 @@ namespace NextDayRevival
                 GebenSwat();
             GUILayout.Label(Loc.T("шлем, бронежилет, штаны, рюкзак",
                                   "helmet, armour, trousers, backpack"));
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(6f);
+            GUILayout.Label(Loc.T("Конвой", "Convoy"));
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(Loc.T("отправить конвой сейчас", "spawn convoy now"),
+                                 GUILayout.Width(190f)))
+                Melde(RevivalConvoy.SpawnNow());
+            GUILayout.Label(Loc.T("тест: нужен маршрут с меткой \"конвой\" (F4)",
+                                  "test: needs a route marked \"convoy\" (F4)"));
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);

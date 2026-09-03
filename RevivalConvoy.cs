@@ -256,6 +256,31 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>The F8 admin "spawn convoy now" button: pick a random
+        /// convoy-marked route and force one out immediately, like the F10 key.
+        /// Returns a short player-facing status; never throws.</summary>
+        internal static string SpawnNow()
+        {
+            try
+            {
+                List<string> routes = Patrol.ConvoyRouteNames();
+                if (routes == null || routes.Count == 0)
+                    return Loc.T("нет маршрута конвоя (F4 -> маршрут -> \"конвой\")",
+                                 "no convoy route marked (F4 -> a route -> \"convoy\")");
+                string pick = routes[UnityEngine.Random.Range(0, routes.Count)];
+                return DoSpawn(pick)
+                    ? Loc.T("конвой выехал на ", "convoy sent out on ") + pick
+                    : Loc.T("конвой не удалось запустить (см. лог)",
+                            "convoy could not start (see log)");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Convoy SpawnNow: " + ex);
+                return Loc.T("конвой не удалось запустить (см. лог)",
+                             "convoy could not start (see log)");
+            }
+        }
+
         static void SpawnConvoy()
         {
             List<string> routes = Patrol.ConvoyRouteNames();

@@ -28,20 +28,37 @@
 // swat_build.py is the generator (make_assets.py GROUPS carries a "swat" entry);
 // each piece ships diffuse/normal/metal/rough + a 300px icon.
 //
-// KNOWN LIMITATION, for in-game acceptance and documented on purpose: these
-// items carry the SWAT look in the INVENTORY and on the GROUND (our mesh + our
-// icon). The WORN appearance on the player's body is still the donor clothing's
-// own skinned, bone-rigged mesh - replacing the on-body look means re-skinning
-// our carved mesh to the character skeleton, which is a separate, larger piece
-// of work (the same shape of caveat as "the surveillance drone is local-visual
-// only"). Nothing here touches the worn model.
+// WORN-ON-BODY MODEL. A clothing item's worn mesh is NOT loaded from Resources
+// by id; it is a pre-authored child GameObject baked into the character prefab,
+// tagged with a `CheckItemID` (ItemID + ItemIDs[]) or `ItemCustomMaterialsManager`
+// list of the item ids it covers. `PlayerInventoryManager.ShowCharacterMesh`
+// (the single sink for head/body/legs/backpack, local and remote-RPC alike -
+// CONFIRMED from IL, research/ilq.py) walks those children and SetActive()s the
+// one whose list contains the equipped id. Our fresh clone ids (4090/4390/4590/
+// 6090) are in NO such list, so before the fix equipping a piece activated
+// nothing and the body part went COMPLETELY INVISIBLE (the equip-fix that moved
+// the ids into the clothing band let the piece equip, but the id still matched no
+// worn mesh). SwatWornMeshHook is a Harmony prefix on ShowCharacterMesh that
+// remaps our clone id to its DONOR id (WornDonorId) for the itemId argument, so
+// the donor's REAL, skeleton-skinned worn mesh (helmet 4017, vest 4316, trousers
+// 4509, backpack 6019) activates. Visible, correctly rigged, not cropped.
+//
+// KNOWN LIMITATION, documented on purpose: the worn body look is therefore the
+// donor clothing's model, NOT a black-SWAT skin - the carved swat_*.ndmesh has no
+// bone weights and cannot be worn-rendered. A true SWAT worn skin means rigging
+// our mesh to the character skeleton, which is separate, larger work. The SWAT
+// identity stays on the INVENTORY icon, the ground drop and the item name.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree lambdas.
 // ASCII-only comments and logs. Player-facing strings go through Loc.T, whose
 // Russian half is real Cyrillic - this file is therefore UTF-8 (no BOM) and is
 // compiled with /codepage:65001 like the main file.
 
+using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using UnityEngine;
 
 namespace NextDayRevival
 {
@@ -96,6 +113,80 @@ namespace NextDayRevival
                 case OldTrousersId: return TrousersId;  // 2067 -> 4590
                 case OldBackpackId: return BackpackId;  // 2068 -> 6090
                 default:            return id;
+            }
+        }
+
+        // The clothing donor each clone borrows. These are the same second
+        // argument passed to ItemDef below (the "Spende"), pulled out as named
+        // constants so the worn-mesh hook can reach them without re-deriving.
+        public const int HelmetDonor   = 4017;   // UKB helmet    (Head/Special)
+        public const int ArmourDonor   = 4316;   // UKB body armour (Body/Jackets)
+        public const int TrousersDonor = 4509;   // UKB trousers  (Legs/Pants)
+        public const int BackpackDonor = 6019;   // UKB backpack  (Backpacks)
+
+        /// <summary>
+        /// Map a SWAT clone id to the DONOR clothing id whose worn character mesh
+        /// should show on the body. Everything else passes through unchanged, so
+        /// this is safe to call on every id ShowCharacterMesh sees.
+        ///
+        /// WHY: a clothing item's worn mesh is a pre-authored child of the
+        /// character prefab, tagged (CheckItemID / ItemCustomMaterialsManager)
+        /// with the ids it covers. Our fresh clone ids are in no such list, so
+        /// without this remap the equipped piece activates NO worn mesh and the
+        /// body part is invisible. Remapping to the donor id activates the donor's
+        /// real, skeleton-skinned worn mesh. See SwatWornMeshHook.
+        /// </summary>
+        public static int WornDonorId(int id)
+        {
+            switch (id)
+            {
+                case HelmetId:   return HelmetDonor;    // 4090 -> 4017
+                case ArmourId:   return ArmourDonor;    // 4390 -> 4316
+                case TrousersId: return TrousersDonor;  // 4590 -> 4509
+                case BackpackId: return BackpackDonor;  // 6090 -> 6019
+                default:         return id;
+            }
+        }
+
+        /// <summary>
+        /// Patch PlayerInventoryManager.ShowCharacterMesh so an equipped SWAT
+        /// piece shows its donor's worn model instead of nothing. Called once
+        /// from RevivalPlugin.Awake beside the other *.Install(_harmony) hooks.
+        /// Fails soft: a missing method only means the worn look is unfixed, the
+        /// items still equip and carry their inventory art.
+        /// </summary>
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
+                if (t == null)
+                {
+                    RevivalPlugin.L.LogWarning("SWAT worn mesh: PlayerInventoryManager "
+                        + "not found - SWAT gear will be invisible when worn.");
+                    return;
+                }
+                // ShowCharacterMesh(Transform meshesParent, bool show, int itemId,
+                //                   int defaultId, bool setDefault) - static. Pin
+                // the exact overload by its argument types.
+                MethodInfo m = AccessTools.Method(t, "ShowCharacterMesh",
+                    new Type[] { typeof(Transform), typeof(bool), typeof(int),
+                                 typeof(int), typeof(bool) }, null);
+                if (m == null)
+                {
+                    RevivalPlugin.L.LogWarning("SWAT worn mesh: ShowCharacterMesh "
+                        + "not found - SWAT gear will be invisible when worn.");
+                    return;
+                }
+                harmony.Patch(m,
+                    new HarmonyMethod(typeof(SwatWornMeshHook).GetMethod("Prefix")),
+                    null, null, null, null);
+                RevivalPlugin.L.LogInfo("SWAT worn mesh: ShowCharacterMesh patched "
+                    + "(clone ids -> donor worn mesh).");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("SWAT worn mesh not hooked: " + ex);
             }
         }
 
@@ -155,6 +246,31 @@ namespace NextDayRevival
                 "swat_backpack.ndmesh", "swat_backpack_diffuse.png",
                 "swat_backpack_normal.png", "swat_backpack_icon.png", null,
                 0, 0, 2.5f));
+        }
+    }
+
+    /// <summary>
+    /// Makes the SWAT gear visible on the body. Harmony prefix on the game's
+    /// `PlayerInventoryManager.ShowCharacterMesh(Transform, bool, int itemId,
+    /// int defaultId, bool)` - the one method that toggles every worn clothing
+    /// child (head, body, legs, feet, backpack; the local path and the one the
+    /// NetworkBodyGear/HeadGear/Legs/BackpackMeshChange RPC drives on remote
+    /// clients). It resolves the mesh from `itemId` by walking the character's
+    /// pre-authored gear children and SetActive()ing the one whose CheckItemID /
+    /// ItemCustomMaterialsManager list contains that id.
+    ///
+    /// Our four clone ids are in no such list, so unpatched they light up nothing
+    /// and the piece is invisible. Rewriting `itemId` to the donor id (WornDonorId)
+    /// before the original runs makes the donor's real worn mesh activate - and,
+    /// for the material-manager meshes, ChangeMeshMaterialFromItemID then gets the
+    /// donor id and applies the donor material, so no null material either. Only
+    /// the four clone ids are touched; every other id passes straight through.
+    /// </summary>
+    public static class SwatWornMeshHook
+    {
+        public static void Prefix(ref int itemId)
+        {
+            itemId = SwatGear.WornDonorId(itemId);
         }
     }
 }
