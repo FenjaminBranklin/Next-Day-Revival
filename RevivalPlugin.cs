@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.2.0";
+        public const string VERSION = "6.3.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -443,6 +443,7 @@ namespace NextDayRevival
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
+            FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -1961,29 +1962,34 @@ namespace NextDayRevival
 
         void Update()
         {
-            // First in the frame: it measures the gap to the previous frame,
-            // and everything below is part of that gap.
-            NetWatch.Tick();
-            Admin.Tick();
-            MapTeleport.Tick();
+            // First in the frame: FrameProf.NewFrame folds the previous frame's
+            // measured spans into the overlay averages and tracks the frame rate;
+            // then everything below is measured against this frame's gap. The S/E
+            // pairs are no-ops unless the F6 diagnostics overlay is toggled on.
+            FrameProf.NewFrame();
+            FrameProf.S(FrameProf.NetWatch);    NetWatch.Tick();          FrameProf.E(FrameProf.NetWatch);
+            FrameProf.S(FrameProf.AdminTick);   Admin.Tick();            FrameProf.E(FrameProf.AdminTick);
+            FrameProf.S(FrameProf.MapTeleTick); MapTeleport.Tick();      FrameProf.E(FrameProf.MapTeleTick);
             // Solange das Menue offen ist, gehoert der Zeiger dem Menue -
             // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
             // man kann keinen Knopf treffen.
+            FrameProf.S(FrameProf.Cursor);
             if (Admin.IsOpen || Patrol.EditorOpen) CursorGuard.Release();
             else CursorGuard.Tick();
-            Regions.Tick();
-            Research.Tick();
-            Turret.Tick();
-            VehicleModules.Tick();   // NDR vehicle modules: install/vision keys
-            Drone.Tick();
-            DroneGear.Tick();
-            Arena.Tick();
-            CarSpawn.Tick();
-            Patrol.Tick();
-            ConvoyRepair.Tick();     // NDR convoy vehicle repair
-            RevivalConvoy.Tick();    // NDR convoy event
-            CrewDrone.Tick();
-            DroneAlert.Tick();
+            FrameProf.E(FrameProf.Cursor);
+            FrameProf.S(FrameProf.Regions);     Regions.Tick();          FrameProf.E(FrameProf.Regions);
+            FrameProf.S(FrameProf.Research);    Research.Tick();         FrameProf.E(FrameProf.Research);
+            FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);
+            FrameProf.S(FrameProf.VehModTick);  VehicleModules.Tick();   FrameProf.E(FrameProf.VehModTick);   // NDR vehicle modules
+            FrameProf.S(FrameProf.DroneTick);   Drone.Tick();            FrameProf.E(FrameProf.DroneTick);
+            FrameProf.S(FrameProf.DroneGearT);  DroneGear.Tick();        FrameProf.E(FrameProf.DroneGearT);
+            FrameProf.S(FrameProf.Arena);       Arena.Tick();            FrameProf.E(FrameProf.Arena);
+            FrameProf.S(FrameProf.CarSpawn);    CarSpawn.Tick();         FrameProf.E(FrameProf.CarSpawn);
+            FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
+            FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
+            FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
+            FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
+            FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
         }
 
         void FixedUpdate()
@@ -1998,16 +2004,17 @@ namespace NextDayRevival
 
         void OnGUI()
         {
-            Turret.DrawScope();
-            Drone.Draw();
-            DroneGear.Draw();
-            Patrol.DrawMap();
-            MapTeleport.Draw();
-            Admin.Draw();
-            Patrol.Draw();
-            ConvoyRepair.Draw();     // NDR convoy vehicle repair
-            RevivalConvoy.Draw();    // NDR convoy event
-            DroneAlert.Draw();
+            FrameProf.S(FrameProf.TurretScope); Turret.DrawScope();      FrameProf.E(FrameProf.TurretScope);
+            FrameProf.S(FrameProf.DroneDraw);   Drone.Draw();            FrameProf.E(FrameProf.DroneDraw);
+            FrameProf.S(FrameProf.DroneGearD);  DroneGear.Draw();        FrameProf.E(FrameProf.DroneGearD);
+            FrameProf.S(FrameProf.PatrolMap);   Patrol.DrawMap();        FrameProf.E(FrameProf.PatrolMap);
+            FrameProf.S(FrameProf.MapTeleDraw); MapTeleport.Draw();      FrameProf.E(FrameProf.MapTeleDraw);
+            FrameProf.S(FrameProf.AdminDraw);   Admin.Draw();            FrameProf.E(FrameProf.AdminDraw);
+            FrameProf.S(FrameProf.PatrolDraw);  Patrol.Draw();           FrameProf.E(FrameProf.PatrolDraw);
+            FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
+            FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
+            FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
+            FrameProf.DrawOverlay();
         }
 
         void OnApplicationFocus(bool hasFocus)
@@ -3071,6 +3078,23 @@ namespace NextDayRevival
             "LootSpawn/Weapons/ASR/", "LootSpawn/Weapons/Rifles/",
             "LootSpawn/Weapons/Handguns/", "LootSpawn/Weapons/Usable/",
             "LootSpawn/Weapons/OneHandMelees/", "LootSpawn/Weapons/TwoHandMelees/",
+            // Clothing and backpacks. The SWAT gear (2065-2068) clones clothing
+            // donors (helmet 4017, body armour 4316, trousers 4509, backpack
+            // 6019), whose inventory prefabs live under these folders, not under
+            // Weapons/Ammunation - so without them GetSpawnPrefab(null) could not
+            // find the donor at prewarm or at RepairIfDead time, the inventory
+            // template failed to build ("Spende-Inventarprefab in keinem
+            // Kandidatenpfad gefunden"), and the given item fell back to the bare
+            // donor look. Folders confirmed from research/resource_paths.tsv; the
+            // full clothing subfolder set is listed so future clothing clones
+            // resolve too. Resources.Load is case-insensitive (weapons load via
+            // the PascalCase paths above though the asset index is lowercase).
+            "LootSpawn/Backpacks/",
+            "LootSpawn/Clothes/Head/Special/", "LootSpawn/Clothes/Head/Hats/",
+            "LootSpawn/Clothes/Head/Masks/",
+            "LootSpawn/Clothes/Body/Jackets/", "LootSpawn/Clothes/Body/Special/",
+            "LootSpawn/Clothes/Body/Hands/",
+            "LootSpawn/Clothes/Legs/Pants/",
         };
 
         // ------------------------------------------------------------ Modell

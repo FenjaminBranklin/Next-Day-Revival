@@ -24,6 +24,7 @@
 // compiled with /codepage:65001 like the main file.
 
 using System;
+using System.Globalization;
 using System.Reflection;
 using System.Collections.Generic;
 using BepInEx.Configuration;
@@ -54,6 +55,8 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgRequireAntenna;
         public static ConfigEntry<float> CfgDeploySeconds;
         public static ConfigEntry<float> CfgAntennaHeight;
+        public static ConfigEntry<float> CfgAntennaBack;
+        public static ConfigEntry<float> CfgAntennaUp;
         public static ConfigEntry<string> CfgAntennaKey;
         // --- Launch hold: the seconds a drone key is held before it lifts
         public static ConfigEntry<float> CfgLaunchHoldSeconds;
@@ -81,6 +84,12 @@ namespace NextDayRevival
             CfgAntennaHeight = cfg.Bind("DroneGear", "AntennaHeight", 2.5f,
                 "Hoehe der ausgefahrenen Antenne in Metern - so weit ragt sie aus "
                 + "dem Rucksack.");
+            CfgAntennaBack = cfg.Bind("DroneGear", "AntennaBack", 0.22f,
+                "Wie weit hinter dem Spieler (Rucksackseite) der Mastfuss sitzt, in "
+                + "Metern. Groesser = weiter hinten. Nur zum Feinjustieren der Optik.");
+            CfgAntennaUp = cfg.Bind("DroneGear", "AntennaUp", 1.1f,
+                "Hoehe des Mastfusses ueber dem Spielerursprung (Fuesse), in Metern - "
+                + "auf Rucksack-/Schulterhoehe. Nur zum Feinjustieren der Optik.");
             CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
                 "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
                 + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
@@ -485,9 +494,12 @@ namespace NextDayRevival
     ///
     /// The mast is built from primitives at runtime (a telescopic stack of grey
     /// cylinders that slide up as it deploys), not a mesh asset - a dedicated
-    /// .ndmesh is a later Codex asset job. It is placed in WORLD space at the
-    /// player's back each frame and forced upright, so it always rises clearly
-    /// out of the backpack instead of sitting inside the body.
+    /// .ndmesh is a later Codex asset job. It is PARENTED to the live player
+    /// body (re-anchored every frame, so a respawn or a stale transform can
+    /// never strand it at world origin - the cause of the "completely invisible"
+    /// report) and forced upright in world space, so it always rises clearly out
+    /// of the backpack instead of sitting inside the body or being left behind.
+    /// Back/up offsets are tunable in-game (DroneGear/AntennaBack, /AntennaUp).
     /// </summary>
     public static class Antenna
     {
@@ -645,7 +657,10 @@ namespace NextDayRevival
             Grow(1f);
             Turret.Hinweis(Loc.T("Антенна поднята - дрон готов к пуску",
                                  "Antenna up - drone ready to launch"), 3f);
-            RevivalPlugin.L.LogInfo("Antenna: up.");
+            Vector3 at = _root == null ? Vector3.zero : _root.transform.position;
+            RevivalPlugin.L.LogInfo("Antenna: up at world " + at.ToString("F1")
+                + " (segments=" + (_seg == null ? 0 : _seg.Length)
+                + ", height=" + DroneGear.CfgAntennaHeight.Value + " m).");
         }
 
         static void Retract(string why)
@@ -669,11 +684,16 @@ namespace NextDayRevival
             DestroyMast();
             try
             {
-                GameObject body = MapTools.LocalPlayer();
-                _pilot = body == null ? null : body.transform;
+                EnsurePilot();
 
                 _root = new GameObject("NDR_Antenna");
                 _seg = new GameObject[Segments];
+                // Parent to the player body so the mast is guaranteed to sit
+                // exactly where the body is - the way the old (visible) cylinder
+                // did. A world-space object that only follows a cached transform
+                // gets stranded the moment that transform goes stale (respawn),
+                // which is how the mast ended up "completely invisible".
+                if (_pilot != null) _root.transform.SetParent(_pilot, true);
                 Material g = Grey();
                 for (int i = 0; i < Segments; i++)
                 {
@@ -689,11 +709,29 @@ namespace NextDayRevival
                     _seg[i] = c;
                 }
                 Layout(0f);
+                RevivalPlugin.L.LogInfo("Antenna: mast built (pilot="
+                    + (_pilot == null ? "NONE" : _pilot.name) + ").");
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("Antenna: mast build failed: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Refreshes <see cref="_pilot"/> to the LIVE local-player transform. A
+        /// destroyed Unity object compares == null, so a respawn (or a late
+        /// first frame where the player is not spawned yet) is caught here and
+        /// the mast re-anchors instead of being left behind at its last spot.
+        /// </summary>
+        static void EnsurePilot()
+        {
+            if (_pilot != null) return;
+            GameObject body = MapTools.LocalPlayer();
+            _pilot = body == null ? null : body.transform;
+            // Re-adopt an orphaned mast onto the fresh body.
+            if (_pilot != null && _root != null && _root.transform.parent != _pilot)
+                _root.transform.SetParent(_pilot, true);
         }
 
         /// <summary>
@@ -707,14 +745,18 @@ namespace NextDayRevival
             if (_root == null) return;
 
             // Anchor: behind the player (backpack side) and up at pack height,
-            // always vertical no matter how the body leans or animates.
-            if (_pilot != null)
-            {
-                Vector3 fwd = _pilot.forward; fwd.y = 0f;
-                if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward; else fwd.Normalize();
-                _root.transform.position = _pilot.position - fwd * 0.22f + Vector3.up * 1.25f;
-                _root.transform.rotation = Quaternion.identity;
-            }
+            // always vertical no matter how the body leans or animates. Re-fetch
+            // the body every frame; if there is no local player right now, hide
+            // the mast rather than leave a stray one floating at world origin.
+            EnsurePilot();
+            if (_pilot == null) { DestroyMast(); return; }
+
+            float back = DroneGear.CfgAntennaBack == null ? 0.22f : DroneGear.CfgAntennaBack.Value;
+            float up = DroneGear.CfgAntennaUp == null ? 1.1f : DroneGear.CfgAntennaUp.Value;
+            Vector3 fwd = _pilot.forward; fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward; else fwd.Normalize();
+            _root.transform.position = _pilot.position - fwd * back + Vector3.up * up;
+            _root.transform.rotation = Quaternion.identity;
 
             float total = Mathf.Max(0.3f, DroneGear.CfgAntennaHeight.Value);
             float segMax = total / Segments;
@@ -942,6 +984,7 @@ namespace NextDayRevival
         static float _nextHeight;
         static float _height = -1f;
         static float _holdKeyDown = -1f;    // realtime the key went down in flight
+        static float _markFlash;            // Time.time until the "marked" flash fades
         static KeyCode _key = KeyCode.B;
         static bool _keyParsed;
         static Texture2D _px;
@@ -1094,8 +1137,98 @@ namespace NextDayRevival
                 else EnterView();
             }
 
+            // Left-click while looking through the drone drops a marker on the
+            // player's own map at the spot the drone is over. The recon drone
+            // never fires, so the left button is free for this.
+            if (_viewing && Input.GetMouseButtonDown(0)) MarkHere();
+
             if (_viewing) Steer();
             Move();
+        }
+
+        // ------------------------------------------------------------ map mark
+
+        /// <summary>
+        /// Mark the ground under the drone on the LOCAL player's map. Reuses the
+        /// game's own single "player custom marker" (MapUIManager.PlayerCustomMarker,
+        /// a MapMarkerObject): we set its transform to the terrain point below the
+        /// drone and call ShowMarker(), exactly what MapUIManager.PlacePlayerCustomMarker
+        /// does after converting a map click - only the world point comes from the
+        /// drone instead of the mouse. The game's UpdateMapMarkers loop then keeps
+        /// the map icon on that spot. A second click moves the same marker.
+        /// </summary>
+        static void MarkHere()
+        {
+            string msg;
+            if (MarkOnMap(_pos, out msg))
+            {
+                _markFlash = Time.time + 1.6f;
+                Turret.Hinweis(Loc.T("Место отмечено на карте",
+                                     "Location marked on the map"), 2f);
+            }
+            else
+            {
+                RevivalPlugin.L.LogWarning("SurvDrone mark failed: " + msg);
+                Turret.Hinweis(Loc.T("Не удалось отметить место",
+                                     "Could not mark the location"), 2.5f);
+            }
+        }
+
+        static bool MarkOnMap(Vector3 world, out string msg)
+        {
+            msg = "";
+            try
+            {
+                Type mapType = RevivalPlugin.TypeByName("MapUIManager");
+                if (mapType == null) { msg = "MapUIManager missing"; return false; }
+
+                MethodInfo get = AccessTools.PropertyGetter(mapType, "Inst");
+                object raw = get == null ? null : get.Invoke(null, null);
+                if (raw == null)
+                {
+                    FieldInfo inst = AccessTools.Field(mapType, "_instance");
+                    if (inst != null) raw = inst.GetValue(null);
+                }
+                Component mgr = raw as Component;
+                if (mgr == null) { msg = "no MapUIManager instance"; return false; }
+
+                FieldInfo pcmF = AccessTools.Field(mapType, "PlayerCustomMarker");
+                Component pcm = pcmF == null ? null : pcmF.GetValue(mgr) as Component;
+                if (pcm == null) { msg = "no PlayerCustomMarker"; return false; }
+
+                MethodInfo show = AccessTools.Method(pcm.GetType(), "ShowMarker", null, null);
+                if (show == null) { msg = "no ShowMarker"; return false; }
+
+                // Drop the mark on the terrain under the drone, as the native
+                // click path does (raycast down, offset up 1 m).
+                Vector3 point = world;
+                Vector3 hit;
+                if (Turret.RaycastObject(world + Vector3.up * 2f, Vector3.down,
+                                         3000f, out hit) != null)
+                    point = hit;
+
+                pcm.gameObject.SetActive(true);
+                pcm.transform.position = point + Vector3.up * 1f;
+                SetMarkerText(pcm, "_markerCustomName",
+                    Loc.T("Метка разведдрона", "Recon mark"));
+                SetMarkerText(pcm, "_markerCustomDescription",
+                    Loc.T("Отмечено с разведдрона",
+                          "Marked from the surveillance drone"));
+                show.Invoke(pcm, null);
+                return true;
+            }
+            catch (Exception ex) { msg = ex.Message; return false; }
+        }
+
+        static void SetMarkerText(Component marker, string field, string value)
+        {
+            try
+            {
+                FieldInfo f = AccessTools.Field(marker.GetType(), field);
+                if (f != null && f.FieldType == typeof(string))
+                    f.SetValue(marker, value);
+            }
+            catch { }
         }
 
         static void Steer()
@@ -1288,34 +1421,27 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// A plain quadrotor from primitives: a flat body and four rotor discs.
-        /// Colliderless - our own raycast does the flying, and a big collider in
-        /// the sky would shove the world around. Scaled bodily by ModelScale, so
-        /// it reads huge next to the FPV drone in the air and on the ground.
+        /// The recon drone is the SAME airframe as the FPV drone, only bigger:
+        /// the detailed quadrotor from `drone.ndmesh` + `drone_diffuse.png` that
+        /// `Drone.Modell.Bauen()` already builds for the FPV drone (real body,
+        /// arms, four guard-ringed rotors, camera), scaled up by the recon
+        /// SurveillanceModelScale (~12 vs the FPV's ModelScale ~4), so it reads
+        /// as a large surveillance version of the same machine. The old
+        /// primitive cube-and-four-discs placeholder is gone.
+        ///
+        /// Bauen() centres the mesh on its transform (child offset by
+        /// -bounds.center) and applies the FPV ModelScale; we override the root
+        /// localScale to the recon scale, which scales that offset with it, so
+        /// the drone stays centred on the point it actually flies at. It builds
+        /// a MeshFilter/MeshRenderer only - no collider - which is exactly what
+        /// this reusable, non-detonating drone needs (our raycast does the
+        /// flying; a big sky collider would shove the world around).
         /// </summary>
         static GameObject Shape(float scale)
         {
-            GameObject root = new GameObject("NDR_SurvDroneShape");
-            float s = scale;
-
-            GameObject body = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            DroneGear.StripCollider(body);
-            body.transform.SetParent(root.transform, false);
-            body.transform.localScale = new Vector3(0.34f * s, 0.10f * s, 0.34f * s);
-
-            float arm = 0.30f * s;
-            Vector3[] rotors = {
-                new Vector3(arm, 0.06f * s, arm), new Vector3(-arm, 0.06f * s, arm),
-                new Vector3(arm, 0.06f * s, -arm), new Vector3(-arm, 0.06f * s, -arm),
-            };
-            for (int i = 0; i < rotors.Length; i++)
-            {
-                GameObject r = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                DroneGear.StripCollider(r);
-                r.transform.SetParent(root.transform, false);
-                r.transform.localPosition = rotors[i];
-                r.transform.localScale = new Vector3(0.22f * s, 0.02f * s, 0.22f * s);
-            }
+            GameObject root = Drone.Modell.Bauen();
+            root.name = "NDR_SurvDroneShape";
+            root.transform.localScale = new Vector3(scale, scale, scale);
             return root;
         }
 
@@ -1429,36 +1555,226 @@ namespace NextDayRevival
             if (!_flying || !_viewing) return;
             try
             {
+                // The SAME video-feed HUD the FPV drone draws: noise on a weak
+                // link, the camera corner brackets, the [REC] pilot line with
+                // timer/voltage/RSSI/speeds, the heading tape and pitch ladder,
+                // the crosshair and the battery bar - all driven by this drone's
+                // own flight state instead of the FPV drone's.
                 float w = Screen.width, h = Screen.height;
                 Color old = GUI.color;
+                float sig = Signal();
 
-                // A calm recon frame, distinct from the FPV combat OSD.
-                Color ink = new Color(0.55f, 0.9f, 0.6f, 0.9f);
-                GUI.color = ink;
-                float d = _pilotRoot != null
-                    ? Vector3.Distance(_pos, HomePlanar()) : 0f;
-                float alt = Hoehe();
-                GUI.Label(new Rect(24f, 20f, 480f, 22f),
-                    "REC  " + Loc.T("БАТ", "BAT") + " " + Mathf.RoundToInt(Battery() * 100f) + "%"
-                    + "   " + Loc.T("ДИСТ", "DIST") + " " + Mathf.RoundToInt(d) + " m"
-                    + "   " + Loc.T("ВЫС", "ALT") + " "
-                    + (alt < 0f ? "--" : Mathf.RoundToInt(alt).ToString()) + " m"
-                    + "   " + Loc.T("РАДИУС", "RANGE") + " " + Mathf.RoundToInt(Range()) + " m");
+                if (sig < 1f) Rauschen(w, h, sig);
+                Rahmen(w, h, sig);
+                Technik(w, h, sig);
+                Fadenkreuz(w, h);
+                Zahlen(w, h, sig);
+                MarkOverlay(w, h);
 
-                // A thin static crosshair.
-                float cx = w * 0.5f, cy = h * 0.5f;
-                GUI.DrawTexture(new Rect(cx - 12f, cy - 1f, 24f, 2f), Px());
-                GUI.DrawTexture(new Rect(cx - 1f, cy - 12f, 2f, 24f), Px());
-
-                if (Battery() < 0.15f)
-                {
-                    GUI.color = new Color(0.95f, 0.4f, 0.25f, 0.95f);
-                    GUI.Label(new Rect(cx - 120f, cy + 30f, 240f, 22f),
-                        Loc.T("АККУМУЛЯТОР ПОЧТИ СЕЛ", "BATTERY NEARLY EMPTY"));
-                }
                 GUI.color = old;
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("SurvDrone draw: " + ex); }
+        }
+
+        // ------------------------------------------------------- HUD (FPV look)
+
+        /// <summary>Signal 1 (clean) .. 0 (break-up), from distance vs range -
+        /// the same falloff the FPV drone uses, so the noise reads identically.</summary>
+        static float Signal()
+        {
+            float weit = Range();
+            float ruhig = weit * 0.7f;
+            float d = _pilotRoot != null ? Vector3.Distance(_pos, HomePlanar()) : 0f;
+            return d <= ruhig ? 1f
+                : Mathf.Clamp01(1f - (d - ruhig) / Mathf.Max(1f, weit - ruhig));
+        }
+
+        static bool Motorless() { return Time.time >= _end; }
+
+        static void Rauschen(float w, float h, float sig)
+        {
+            float staerke = 1f - sig;
+            int streifen = (int)(staerke * 26f);
+            int seed = (int)(Time.time * 37f) * 40503 + 12345;
+            for (int i = 0; i < streifen; i++)
+            {
+                seed = seed * 1103515245 + 12345;
+                float y = (((seed >> 16) & 0x7fff) / 32767f) * h;
+                seed = seed * 1103515245 + 12345;
+                float hh = 1f + (((seed >> 16) & 0x7fff) / 32767f) * 9f;
+                GUI.color = new Color(0.75f, 0.85f, 0.8f, 0.05f + staerke * 0.16f);
+                GUI.DrawTexture(new Rect(0f, y, w, hh), Px());
+            }
+        }
+
+        static void Rahmen(float w, float h, float sig)
+        {
+            float m = Mathf.Max(18f, h * 0.045f);
+            float l = Mathf.Max(24f, h * 0.055f);
+            float t = 2f;
+            GUI.color = sig > 0.35f
+                ? new Color(0.6f, 1f, 0.7f, 0.55f)
+                : new Color(1f, 0.35f, 0.25f, 0.75f);
+            float[] xs = new float[] { m, w - m - l };
+            float[] ys = new float[] { m, h - m - t };
+            for (int i = 0; i < 2; i++)
+                for (int k = 0; k < 2; k++)
+                {
+                    GUI.DrawTexture(new Rect(xs[i], ys[k], l, t), Px());
+                    float yv = k == 0 ? m : h - m - l;
+                    float xv = i == 0 ? m : w - m - t;
+                    GUI.DrawTexture(new Rect(xv, yv, t, l), Px());
+                }
+        }
+
+        static void Technik(float w, float h, float sig)
+        {
+            Color ink = sig > 0.35f
+                ? new Color(0.82f, 1f, 0.86f, 0.92f)
+                : new Color(1f, 0.48f, 0.34f, 0.95f);
+            float m = Mathf.Max(18f, h * 0.045f);
+            int seconds = Mathf.Max(0, Mathf.FloorToInt(Time.time - _start));
+            string timer = (seconds / 60).ToString("00") + ":"
+                + (seconds % 60).ToString("00");
+            string state = Time.time >= _armed ? "ARM" : "SAFE";
+            OsdLabel(new Rect(m + 2f, m + 4f, 260f, 22f),
+                "[REC]  " + state + "  " + timer + "  CH8", ink);
+
+            float battery = Battery();
+            float volts = 14.0f + 2.8f * battery;
+            float ground = new Vector2(_vel.x, _vel.z).magnitude;
+            OsdLabel(new Rect(w - m - 310f, m + 4f, 310f, 22f),
+                "6S " + volts.ToString("0.0", CultureInfo.InvariantCulture)
+                + "V   RSSI " + Mathf.RoundToInt(sig * 100f) + "%", ink);
+            OsdLabel(new Rect(w - m - 310f, h - m - 28f, 310f, 22f),
+                "GS " + ground.ToString("0.0", CultureInfo.InvariantCulture)
+                + "m/s   VS " + _vel.y.ToString("+0.0;-0.0;0.0",
+                    CultureInfo.InvariantCulture) + "m/s", ink);
+
+            float tapeY = m + 31f;
+            float cx = w * 0.5f;
+            for (int off = -40; off <= 40; off += 10)
+            {
+                float x = cx + off * 3.0f;
+                float tick = off % 20 == 0 ? 9f : 5f;
+                GUI.color = ink;
+                GUI.DrawTexture(new Rect(x - 0.75f, tapeY, 1.5f, tick), Px());
+                if (off % 20 == 0)
+                {
+                    int heading = Mathf.RoundToInt(_yaw + off);
+                    while (heading < 0) heading += 360;
+                    while (heading >= 360) heading -= 360;
+                    OsdLabel(new Rect(x - 18f, tapeY + 9f, 40f, 20f),
+                        heading.ToString("000"), ink);
+                }
+            }
+            GUI.color = new Color(1f, 0.42f, 0.24f, 0.95f);
+            GUI.DrawTexture(new Rect(cx - 4f, tapeY - 4f, 8f, 3f), Px());
+
+            float baseY = h * 0.5f + _pitch * h / 85f;
+            for (int pitch = -20; pitch <= 20; pitch += 10)
+            {
+                float y = baseY - pitch * h / 85f;
+                if (y < h * 0.25f || y > h * 0.75f) continue;
+                float arm = pitch == 0 ? 58f : 34f;
+                GUI.color = new Color(0f, 0f, 0f, 0.45f);
+                GUI.DrawTexture(new Rect(cx - arm - 23f + 1f, y + 1f, arm, 1.5f), Px());
+                GUI.DrawTexture(new Rect(cx + 23f + 1f, y + 1f, arm, 1.5f), Px());
+                GUI.color = ink;
+                GUI.DrawTexture(new Rect(cx - arm - 23f, y, arm, 1.5f), Px());
+                GUI.DrawTexture(new Rect(cx + 23f, y, arm, 1.5f), Px());
+                if (pitch != 0)
+                {
+                    OsdLabel(new Rect(cx - arm - 50f, y - 9f, 26f, 18f),
+                        Mathf.Abs(pitch).ToString(), ink);
+                    OsdLabel(new Rect(cx + arm + 26f, y - 9f, 26f, 18f),
+                        Mathf.Abs(pitch).ToString(), ink);
+                }
+            }
+        }
+
+        static void OsdLabel(Rect rect, string text, Color ink)
+        {
+            GUI.color = new Color(0f, 0f, 0f, 0.86f);
+            GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), text);
+            GUI.color = ink;
+            GUI.Label(rect, text);
+        }
+
+        static void Fadenkreuz(float w, float h)
+        {
+            float cx = w * 0.5f, cy = h * 0.5f;
+            float gap = Mathf.Max(5f, h * 0.010f);
+            float arm = Mathf.Max(10f, h * 0.022f);
+            GUI.color = new Color(0f, 0f, 0f, 0.5f);
+            Kreuz(cx + 1f, cy + 1f, gap, arm);
+            GUI.color = new Color(0.7f, 1f, 0.75f, 0.9f);
+            Kreuz(cx, cy, gap, arm);
+            GUI.color = new Color(1f, 0.4f, 0.25f, 0.9f);
+            GUI.DrawTexture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), Px());
+        }
+
+        static void Kreuz(float cx, float cy, float gap, float arm)
+        {
+            GUI.DrawTexture(new Rect(cx - gap - arm, cy - 1f, arm, 2f), Px());
+            GUI.DrawTexture(new Rect(cx + gap, cy - 1f, arm, 2f), Px());
+            GUI.DrawTexture(new Rect(cx - 1f, cy - gap - arm, 2f, arm), Px());
+            GUI.DrawTexture(new Rect(cx - 1f, cy + gap, 2f, arm), Px());
+        }
+
+        static void Zahlen(float w, float h, float sig)
+        {
+            float m = Mathf.Max(18f, h * 0.045f);
+            float akku = Battery();
+            float bw = Mathf.Max(90f, w * 0.10f);
+            float bh = Mathf.Max(9f, h * 0.014f);
+            float bx = m + 4f, by = h - m - bh - 24f;
+
+            GUI.color = new Color(0f, 0f, 0f, 0.45f);
+            GUI.DrawTexture(new Rect(bx - 1f, by - 1f, bw + 2f, bh + 2f), Px());
+            GUI.color = akku > 0.2f
+                ? new Color(0.55f, 1f, 0.6f, 0.85f)
+                : new Color(1f, 0.35f, 0.25f, 0.9f);
+            GUI.DrawTexture(new Rect(bx, by, bw * akku, bh), Px());
+
+            float d = _pilotRoot != null ? Vector3.Distance(_pos, HomePlanar()) : 0f;
+            float hoehe = Hoehe();
+            string zeile = Loc.T("БАТ ", "BAT ") + Mathf.RoundToInt(akku * 100f) + "%"
+                + Loc.T("   ДИСТ ", "   DIST ") + Mathf.RoundToInt(d) + " m"
+                + Loc.T("   ВЫС ", "   ALT ") + (hoehe < 0f ? "--" : Mathf.RoundToInt(hoehe).ToString()) + " m"
+                + "   SIG " + Mathf.RoundToInt(sig * 100f) + "%";
+            if (Motorless()) zeile = Loc.T("БАТ РАЗРЯЖЕНА - ПАДЕНИЕ", "BATTERY EMPTY - FALLING") + "   " + zeile;
+            else if (sig < 0.35f) zeile = Loc.T("СЛАБЫЙ СИГНАЛ", "WEAK SIGNAL") + "   " + zeile;
+
+            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.Label(new Rect(bx + 1f, by + bh + 5f, w, 22f), zeile);
+            GUI.color = sig > 0.35f && !Motorless()
+                ? new Color(0.75f, 1f, 0.8f, 0.95f)
+                : new Color(1f, 0.45f, 0.3f, 0.95f);
+            GUI.Label(new Rect(bx, by + bh + 4f, w, 22f), zeile);
+        }
+
+        /// <summary>The always-on "left-click to mark" hint, and a brief flash
+        /// at the crosshair right after a mark is placed.</summary>
+        static void MarkOverlay(float w, float h)
+        {
+            float cx = w * 0.5f, cy = h * 0.5f;
+            Color ink = new Color(0.7f, 1f, 0.75f, 0.85f);
+            OsdLabel(new Rect(cx - 170f, h - Mathf.Max(18f, h * 0.045f) - 52f, 340f, 20f),
+                Loc.T("[ЛКМ] отметить это место на карте",
+                      "[LMB] mark this spot on the map"), ink);
+
+            if (Time.time < _markFlash)
+            {
+                GUI.color = new Color(1f, 0.9f, 0.3f, 0.95f);
+                GUI.DrawTexture(new Rect(cx - 22f, cy - 22f, 44f, 2f), Px());
+                GUI.DrawTexture(new Rect(cx - 22f, cy + 20f, 44f, 2f), Px());
+                GUI.DrawTexture(new Rect(cx - 22f, cy - 22f, 2f, 44f), Px());
+                GUI.DrawTexture(new Rect(cx + 20f, cy - 22f, 2f, 44f), Px());
+                OsdLabel(new Rect(cx - 90f, cy + 28f, 180f, 20f),
+                    Loc.T("ОТМЕЧЕНО", "MARKED"),
+                    new Color(1f, 0.9f, 0.3f, 0.95f));
+            }
         }
 
         static void Prompt(string text)
