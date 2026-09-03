@@ -71,6 +71,34 @@ namespace NextDayRevival
         public const int TrousersId = 4590;   // SWAT trousers  (donor 4509, Legs/Pants 4500-4600, slot 6)
         public const int BackpackId = 6090;   // SWAT backpack  (donor 6019, Backpacks 6000-7000)
 
+        // The vacated first-cut ids. The gear shipped here (2065-2068, the ammo
+        // band) before the equip fix moved it into the donor bands above. Kept
+        // only so an old save can be migrated - see MoveLegacyId.
+        public const int OldHelmetId   = 2065;
+        public const int OldArmourId   = 2066;
+        public const int OldTrousersId = 2067;
+        public const int OldBackpackId = 2068;
+
+        /// <summary>
+        /// Map a pre-equip-fix inventory id to its current donor-band id. A
+        /// character saved while the gear still lived at 2065-2068 carries those
+        /// ids; the game can no longer resolve them (they spawn null and the
+        /// piece is dropped), so the backpack-load prefix rewrites them through
+        /// this. Returns everything else unchanged. The ids are provably dead
+        /// (they resolve to nothing now), so nothing else is caught.
+        /// </summary>
+        public static int MoveLegacyId(int id)
+        {
+            switch (id)
+            {
+                case OldHelmetId:   return HelmetId;    // 2065 -> 4090
+                case OldArmourId:   return ArmourId;    // 2066 -> 4390
+                case OldTrousersId: return TrousersId;  // 2067 -> 4590
+                case OldBackpackId: return BackpackId;  // 2068 -> 6090
+                default:            return id;
+            }
+        }
+
         /// <summary>
         /// Add the four item definitions to the shared table. Called from
         /// RevivalPlugin.BuildItemTable - the one seam this feature needs.

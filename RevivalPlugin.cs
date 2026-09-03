@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.4.0";
+        public const string VERSION = "6.4.1";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -226,6 +226,8 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgNetWatchHitch;
         internal static ConfigEntry<float> CfgNetWatchEvery;
         internal static ConfigEntry<int> CfgPhotonTimeout;
+        internal static ConfigEntry<int> CfgPhotonResendLimit;
+        internal static ConfigEntry<int> CfgPhotonQuickResend;
         internal static ConfigEntry<bool> CfgSceneJump;
         internal static ConfigEntry<int> CfgJumpScene;
         internal static ConfigEntry<int> CfgJumpRegion;
@@ -1400,6 +1402,19 @@ namespace NextDayRevival
                 + "declared dead. The game's 15000 ms default drops both clients "
                 + "during a short shared UDP interruption; 60000 lets reliable "
                 + "commands recover when the link returns.");
+            CfgPhotonResendLimit = Config.Bind("Diagnostics", "PhotonResendLimit", 30,
+                "Photon SentCountAllowance: how many times one reliable command "
+                + "may be resent without an ACK before the client declares the "
+                + "link dead (DisconnectByClientTimeout). The game's low default "
+                + "is blown by a multi-second loading stall - the Photon service "
+                + "loop starves, ACKs go unread, and the resends pile up until "
+                + "the count trips. PhotonTimeoutMs governs a silent link; this "
+                + "governs a stalled-but-alive one. 0 leaves the default.");
+            CfgPhotonQuickResend = Config.Bind("Diagnostics", "PhotonQuickResend", 2,
+                "Photon QuickResendAttempts: how many fast resends a reliable "
+                + "command gets before falling back to RTT-timed resends. A small "
+                + "value recovers quicker right after a loading stall. -1 leaves "
+                + "the default.");
             CfgNetWatch = Config.Bind("Diagnostics", "NetWatch", true,
                 "Write a wall clock time, every long frame and the Photon "
                 + "peer's own counters into the log. It is the only thing that "
@@ -4666,8 +4681,33 @@ namespace NextDayRevival
         // __args faengt ALLE Parameter ab, unabhaengig von Position und Namen.
         public static void BackpackPrefix(object[] __args)
         {
-            if (_backpack >= 12) return;
             ManualLogSource L = RevivalPlugin.L;
+
+            // Legacy save migration - runs for EVERY item, so it sits above the
+            // diagnostic cap below. The SWAT gear shipped its first cut on ids
+            // 2065-2068 (the ammo band - the "equips as ammo" bug); the equip fix
+            // moved it into the donor clothing bands (4090/4390/4590/6090). A
+            // character saved before that still carries the old ids, which the
+            // game cannot resolve ("ItemSpawned is null") and drops. Rewrite the
+            // argument to the new id so the original spawns the real piece; the
+            // server save heals itself the next time the inventory is written.
+            try
+            {
+                if (__args.Length > 0 && __args[0] is int)
+                {
+                    int had = (int)__args[0];
+                    int now = SwatGear.MoveLegacyId(had);
+                    if (now != had)
+                    {
+                        __args[0] = now;
+                        L.LogInfo("SWAT-Migration: altes Item " + had
+                            + " -> " + now + " umgeschrieben.");
+                    }
+                }
+            }
+            catch (Exception ex) { L.LogWarning("SWAT-Migration: " + ex.Message); }
+
+            if (_backpack >= 12) return;
             try
             {
                 int itemId = -1;
@@ -4844,15 +4884,47 @@ namespace NextDayRevival
             _nextTimeoutCheck = now + 1f;
 
             object peer = Peer();
-            if (peer == null || RevivalPlugin.CfgPhotonTimeout == null) return;
-            int wanted = Mathf.Clamp(RevivalPlugin.CfgPhotonTimeout.Value,
-                                     15000, 120000);
+            if (peer == null) return;
+
+            // The silence timer: how long without any Photon response before the
+            // link is declared dead. Raised so a short shared UDP interruption
+            // does not drop both clients.
+            if (RevivalPlugin.CfgPhotonTimeout != null)
+                RaisePeerInt(peer, "DisconnectTimeout",
+                    Mathf.Clamp(RevivalPlugin.CfgPhotonTimeout.Value, 15000, 120000),
+                    "timeout", " ms");
+
+            // The resend count: a multi-second loading stall starves the Photon
+            // service loop, so incoming ACKs go unread and every reliable command
+            // is resent. The 2026-09-03 kill (resent past 5000 with a small
+            // outgoing queue, only ~19 s after Joined - well inside the raised
+            // 60 s DisconnectTimeout) was the resend COUNT tripping, not the
+            // silence timer. So the timeout guard alone never covered this case.
+            // SentCountAllowance lets the resends ride out the stall;
+            // QuickResendAttempts recovers faster once the frame returns.
+            if (RevivalPlugin.CfgPhotonResendLimit != null
+                && RevivalPlugin.CfgPhotonResendLimit.Value > 0)
+                RaisePeerInt(peer, "SentCountAllowance",
+                    RevivalPlugin.CfgPhotonResendLimit.Value, "resend limit", "");
+            if (RevivalPlugin.CfgPhotonQuickResend != null
+                && RevivalPlugin.CfgPhotonQuickResend.Value >= 0)
+                RaisePeerInt(peer, "QuickResendAttempts",
+                    RevivalPlugin.CfgPhotonQuickResend.Value, "quick resend", "");
+        }
+
+        /// <summary>Raise one integer knob on the current Photon peer to at least
+        /// `wanted`, once. Photon replaces the peer on every reconnect, so a lower
+        /// value on a fresh peer is raised again while a higher value is left
+        /// alone. Property or field, climbing the base types - the same lookup
+        /// the DisconnectTimeout guard first needed.</summary>
+        static void RaisePeerInt(object peer, string name, int wanted,
+                                 string label, string unit)
+        {
             try
             {
                 Type type = peer.GetType();
-                PropertyInfo property = FindProperty(type, "DisconnectTimeout");
-                FieldInfo field = property == null
-                    ? FindField(type, "DisconnectTimeout") : null;
+                PropertyInfo property = FindProperty(type, name);
+                FieldInfo field = property == null ? FindField(type, name) : null;
                 object old = property != null ? property.GetValue(peer, null)
                     : field != null ? field.GetValue(peer) : null;
                 if (old == null) return;
@@ -4866,13 +4938,13 @@ namespace NextDayRevival
                 else
                     return;
 
-                RevivalPlugin.L.LogInfo("Photon guard: timeout " + previous
-                    + " -> " + wanted + " ms on the current room peer.");
+                RevivalPlugin.L.LogInfo("Photon guard: " + label + " " + previous
+                    + unit + " -> " + wanted + unit + " on the current room peer.");
             }
             catch (Exception ex)
             {
-                RevivalPlugin.L.LogWarning("Photon guard: timeout could not be set - "
-                    + ex.Message);
+                RevivalPlugin.L.LogWarning("Photon guard: " + label
+                    + " could not be set - " + ex.Message);
             }
         }
 
