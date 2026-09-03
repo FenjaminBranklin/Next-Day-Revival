@@ -21,8 +21,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 GROUPS = [
-    ("mg42", ["mg42_mesh.py", "mg42_texture.py", "mg42_icon.py"]),
-    ("sniper50", ["sniper50_mesh.py", "sniper50_texture.py", "sniper50_icon.py"]),
+    # mg42/sniper50 now come from REAL imported models via textured_import.py
+    # (barrett_build.py -> the TAC-50's .50 cal look, mg42real_build.py -> a real
+    # MG42), replacing the procedural *_mesh/_texture/_icon generators, which
+    # stay on disk (like t72_mesh/_texture) but no longer run.
+    ("mg42", ["mg42real_build.py"]),
+    ("sniper50", ["barrett_build.py"]),
+    # m7_build.py imports a real CC-BY SIG XM7 model (assets/src/sig_xm7.glb)
+    # and bakes mesh + palette texture + icons in one pass - see CREDITS.md.
+    ("m7", ["m7_build.py"]),
+    # 6.8x51 box + drum magazines for the M7 - procedural, FDE-tan polymer.
+    ("mag68", ["mag68_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),
@@ -31,9 +40,11 @@ GROUPS = [
     # t72_import.py hat t72_mesh.py und t72_texture.py abgeloest: der Panzer
     # kommt seit 0.5.3 als Modell UND Textur aus dem Spiel selbst. Die beiden
     # Generatoren bleiben liegen, laufen aber nicht mehr mit.
-    ("t72", ["t72_import.py", "t72_scope.py",
+    ("t72", ["t72_import.py", "t72_track_texture.py", "t72_scope.py",
              "shell125_mesh.py", "shell125_texture.py", "shell125_icon.py",
              "mesh_preview.py t72"]),
+    # SWAT uniform gear (helmet + carved top/bottom/backpack) from swat.glb.
+    ("swat", ["swat_build.py"]),
     ("scope", ["scope50.py", "apc_scope.py"]),
     ("preview", ["mesh_preview.py"]),
 ]

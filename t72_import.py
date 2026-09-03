@@ -352,12 +352,15 @@ def aufrichten(teile):
         if n == "hull":
             gerichtet.append((n, t["mesh"], np.zeros(3, np.float32), E, "body"))
         elif n in ("tracks_left", "tracks_right"):
-            gerichtet.append((n, t["mesh"], pos, E, "body"))
+            # Own group so the track leaves the static hull mesh and becomes a
+            # separately animated piece (lengthwise UV + scrolling material).
+            gerichtet.append((n, t["mesh"], pos, E, "track"))
         elif ist_rad(n):
             # Alle Rollen senkrecht und auf die Sollspur. Die Kippungen im
             # Wrack sind Zufallswerte des Szenenbauers, keine Konstruktion.
+            # Own group so each wheel becomes a separate child that spins.
             pos[0] = math.copysign(X_RAD, pos[0])
-            gerichtet.append((n, t["mesh"], pos, E, "body"))
+            gerichtet.append((n, t["mesh"], pos, E, "wheel"))
         elif n == "turret":
             gerichtet.append((n, t["mesh"], pos, E, "turm"))
         elif n in ("cannon", "gun_turret"):
@@ -375,7 +378,7 @@ def aufrichten(teile):
         # Gegenseite: dieselbe Laengs- und Hoehenlage, x gespiegelt. Das "-"
         # der Entspiegelung faellt weg, weil hier ohnehin die Seite wechselt.
         pos[0] = math.copysign(X_RAD, v["pos"][0])
-        gerichtet.append((fehlt, v["mesh"], pos, E, "body"))
+        gerichtet.append((fehlt, v["mesh"], pos, E, "wheel"))
 
     return gerichtet
 
@@ -405,6 +408,129 @@ def bauen(gerichtet, welche, y_versatz, ursprung):
         off += len(v)
     return (np.concatenate(V), np.concatenate(N),
             np.concatenate(T), np.concatenate(F))
+
+
+# ------------------------------------------------------- Laufwerk (animiert)
+#
+# The static hull mesh no longer carries the tracks or the road wheels. They
+# are written here as separate meshes so the plugin can spin the wheels and
+# scroll the tracks with the vehicle's speed, the way the APC's wheels turn.
+#
+#   t72_wheel_<k>.ndmesh   one file per DISTINCT wheel mesh, centred on its own
+#                          axle (the game submesh already is), body-half atlas
+#                          UVs - so it shares t72_diffuse.png with the hull.
+#   t72_wheels.txt         manifest: one line per wheel with its mesh file, the
+#                          axle position in hull-mesh coordinates, and radius.
+#   t72_track_<side>.ndmesh the two track bands, baked into hull coordinates,
+#                          with FRESH lengthwise UVs (U around the loop, V
+#                          across the width) for a scrolling track texture.
+
+# How many times the track-link texture repeats around one loop. The mesh UV
+# runs 0..1 around the loop; this count is applied as the track material's
+# texture scale in the plugin (Tank.Trackmaterial / T72RunningGear), and MUST
+# match the value there. It only sets link DENSITY - the scroll speed is tuned
+# with Tank/TrackScroll. ~46 tiles over a ~20-unit (~7 m) loop is ~2 links each.
+TRACK_REPEATS = 46
+
+
+def export_wheels(gerichtet, versatz):
+    """Write each distinct wheel mesh centred on its axle, plus a manifest."""
+    written = {}          # mesh key -> file name
+    manifest = []
+    for (name, key, pos, mat, gruppe) in gerichtet:
+        if gruppe != "wheel":
+            continue
+        if key not in written:
+            v, n, t, f = MESHES[key]
+            v = v @ mat.T                      # mat is identity; stays centred
+            n = n @ mat.T
+            t = np.clip(t, 0.0, 1.0).copy()
+            t[:, 0] = t[:, 0] * 0.5            # body half of the atlas
+            f2, _ = richten(v, n, f)
+            fname = "t72_wheel_%d.ndmesh" % len(written)
+            schreiben(os.path.join(ASSETS, fname), v, n, t, f2)
+            written[key] = fname
+        v = MESHES[key][0]
+        r = float(np.sqrt(v[:, 1] ** 2 + v[:, 2] ** 2).max())   # rim radius, yz
+        p = pos.copy(); p[1] += versatz
+        manifest.append((name, written[key], p[0], p[1], p[2], r))
+
+    manifest.sort()
+    path = os.path.join(ASSETS, "t72_wheels.txt")
+    with open(path, "w") as fh:
+        fh.write("# T-72 running gear for the plugin. One line per wheel.\n")
+        fh.write("# name meshfile x y z radius  (hull mesh space, 3 units/m)\n")
+        for m in manifest:
+            fh.write("%s %s %.4f %.4f %.4f %.4f\n" % m)
+    print("%d wheels -> %d distinct meshes, manifest %s"
+          % (len(manifest), len(written), os.path.basename(path)))
+    return len(manifest), len(written)
+
+
+def track_uv(w):
+    """Lengthwise UV for a track band that lies in the y-z plane.
+
+    U runs around the loop by ARC LENGTH (so a scrolling texture moves the links
+    at a constant rate, not bunched at the rounded ends), V runs across the band
+    width (x). The branch cut of atan2 sits at the front of the loop, the least
+    visible spot. Returns Nx2 float32.
+    """
+    cy = float((w[:, 1].min() + w[:, 1].max()) / 2.0)
+    cz = float((w[:, 2].min() + w[:, 2].max()) / 2.0)
+    ang = np.arctan2(w[:, 2] - cz, w[:, 1] - cy)      # -pi .. pi
+
+    # Angle -> arc length: bin the vertices, take the mean radius per bin, and
+    # integrate r*dtheta around the loop. Empty bins are filled by interpolation
+    # so a sparse angle still gets a length.
+    bins = 720
+    edges = np.linspace(-math.pi, math.pi, bins + 1)
+    r = np.sqrt((w[:, 1] - cy) ** 2 + (w[:, 2] - cz) ** 2)
+    idx = np.clip(np.digitize(ang, edges) - 1, 0, bins - 1)
+    meanr = np.zeros(bins, np.float64)
+    cnt = np.zeros(bins, np.float64)
+    np.add.at(meanr, idx, r)
+    np.add.at(cnt, idx, 1.0)
+    have = cnt > 0
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    meanr[have] /= cnt[have]
+    if not have.all():                                 # fill gaps
+        meanr[~have] = np.interp(centres[~have], centres[have], meanr[have])
+    dtheta = 2.0 * math.pi / bins
+    ds = meanr * dtheta
+    cum = np.concatenate([[0.0], np.cumsum(ds)])       # length at each edge
+    total = float(cum[-1])
+    # Per-vertex arc length: length at the bin's left edge plus the fraction of
+    # the bin the vertex has advanced into.
+    frac = (ang - edges[idx]) / dtheta
+    s = cum[idx] + frac * ds[idx]
+    # U stays in [0, 1] (one trip round the loop). The link REPEAT count lives
+    # in the material's texture scale in the plugin (TRACK_REPEATS), so verify.py
+    # sees valid UVs and the plugin can still tile and scroll the links.
+    u = np.clip(s / total, 0.0, 1.0)
+
+    x = w[:, 0]
+    v = np.clip((x - x.min()) / max(1e-6, (x.max() - x.min())), 0.0, 1.0)
+    return np.stack([u, v], axis=1).astype(np.float32), total
+
+
+def export_tracks(gerichtet, versatz):
+    """Write the two track bands in hull coordinates with lengthwise UVs."""
+    n_written = 0
+    for (name, key, pos, mat, gruppe) in gerichtet:
+        if gruppe != "track":
+            continue
+        v, n, f = MESHES[key][0], MESHES[key][1], MESHES[key][3]
+        w = (v @ mat.T) + pos + np.array([0.0, versatz, 0.0], np.float32)
+        nn = n @ mat.T
+        uv, perim = track_uv(w)
+        f2, _ = richten(w, nn, f)
+        side = "left" if name == "tracks_left" else "right"
+        out = os.path.join(ASSETS, "t72_track_%s.ndmesh" % side)
+        schreiben(out, w, nn, uv, f2)
+        n_written += 1
+        print("%s  %d Vert  perim %.2f units  %d link tiles"
+              % (os.path.basename(out), len(w), perim, TRACK_REPEATS))
+    return n_written
 
 
 def luke_schliessen(V, N, T, F):
@@ -845,6 +971,11 @@ if __name__ == "__main__":
           % (os.path.basename(OUT_HULL), len(V), len(F),
              V[:, 0].min(), V[:, 0].max(), V[:, 1].min(), V[:, 1].max(),
              V[:, 2].min(), V[:, 2].max()))
+
+    # The running gear leaves the hull mesh and is written as its own animated
+    # pieces (wheels spin, tracks scroll). See the "Laufwerk" section above.
+    export_wheels(gerichtet, versatz)
+    export_tracks(gerichtet, versatz)
 
     # Der Turm wird um seinen Ring gebaut: seine eigene Stellung wird
     # abgezogen, die Kinder behalten ihre turmlokale Lage.

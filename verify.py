@@ -78,6 +78,12 @@ ASSET_FILES = [
     "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
     "sniper50_icon.png", "sniper50_weapon_icon.png",
+    "m7.ndmesh", "m7_diffuse.png", "m7_normal.png",
+    "m7_icon.png", "m7_weapon_icon.png",
+    "mag68box.ndmesh", "mag68box_diffuse.png", "mag68box_normal.png",
+    "mag68box_icon.png",
+    "mag68drum.ndmesh", "mag68drum_diffuse.png", "mag68drum_normal.png",
+    "mag68drum_icon.png",
     "mgbelt.ndmesh", "mgbelt_diffuse.png", "mgbelt_normal.png", "mgbelt_icon.png",
     "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png",
     "law.ndmesh", "law_diffuse.png", "law_normal.png",
@@ -86,6 +92,7 @@ ASSET_FILES = [
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
     "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
+    "t72_track_left.ndmesh", "t72_track_right.ndmesh", "t72_track.png",
     "t72_diffuse.png", "t72_normal.png", "t72_metal.png", "t72_scope.png",
     "apc_scope.png",
     "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
@@ -93,18 +100,23 @@ ASSET_FILES = [
     "scope50.png",
 ]
 
-MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh",
-          "law.ndmesh", "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh",
-          "t72_hull.ndmesh", "t72_turret.ndmesh", "shell125.ndmesh"]
+MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
+          "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
+          "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "t72_hull.ndmesh",
+          "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
+          "shell125.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
     "mg42_icon.png": (300, 300), "sniper50_icon.png": (300, 300),
+    "m7_icon.png": (300, 300),
+    "mag68box_icon.png": (300, 300), "mag68drum_icon.png": (300, 300),
     "mgbelt_icon.png": (300, 300), "ammo50_icon.png": (300, 300),
     "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
     "drone_icon.png": (300, 300), "jammer_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
+    "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
     "scope50.png": (1920, 1920),
     "t72_scope.png": (1920, 1920),
@@ -206,7 +218,11 @@ def check_version():
 def check_item_table():
     """Jede Assetdatei aus der Tabelle muss auch wirklich dort liegen."""
     print("[3] Item-Tabelle gegen das assets-Verzeichnis")
-    src = io.open(SRC, encoding="utf-8").read()
+    # Scan every top-level .cs build.ps1 compiles, not just RevivalPlugin.cs:
+    # items in RevivalM7Rifle.cs / Revival.Modules.cs etc. name their own art.
+    import glob
+    src = "".join(io.open(p, encoding="utf-8").read()
+                  for p in glob.glob(os.path.join(ROOT, "*.cs")))
     import re
     # Der Name muss mit Buchstabe oder Ziffer anfangen. Was mit Unterstrich
     # beginnt, ist im Quelltext kein Dateiname, sondern eine ENDUNG: das

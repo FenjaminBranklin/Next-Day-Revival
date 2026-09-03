@@ -61,9 +61,10 @@ namespace NextDayRevival
         /// </summary>
         public static void AddItems(List<ItemDef> items)
         {
-            // The M7 (XM7) rifle (1164). Placeholder art: the TAC-50 mesh.
-            // The default loaded magazine is the drum (2059); the standard box
-            // (2058) also fits - both are listed in the weapons_db Clips.
+            // The M7 (XM7) rifle (1164). Real art: an imported SIG XM7 model
+            // (m7.*, built by m7_build.py from a CC BY 4.0 model - see
+            // CREDITS.md). The default loaded magazine is the drum (2059); the
+            // standard box (2058) also fits - both are listed in the Clips.
             items.Add(new ItemDef(
                 RifleId, 1010, true,
                 "M7 (XM7)", "M7 (XM7)",
@@ -78,21 +79,23 @@ namespace NextDayRevival
                 + "Medium stopping power - clearly harder-hitting than an assault "
                 + "rifle round, but no anti-materiel calibre. Feeds from a "
                 + "standard box magazine or a 100-round drum.",
-                "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
-                "sniper50_icon.png", "sniper50_weapon_icon.png",
+                "m7.ndmesh", "m7_diffuse.png", "m7_normal.png",
+                "m7_icon.png", "m7_weapon_icon.png",
                 100, DrumId, 5.0f));
 
-            // 6.8x51 standard box magazine (2058). Placeholder art: .50 box.
+            // 6.8x51 standard box magazine (2058). Own art (mag68_build.py):
+            // an FDE-tan polymer box magazine matching the XM7.
             items.Add(new ItemDef(
                 MagId, 2030, false,
                 "Магазин 6,8x51 (20)", "6.8x51 magazine (20)",
                 "Коробчатый магазин на 20 патронов 6,8x51 мм для винтовки M7.",
                 "A 20-round box magazine of 6.8x51mm for the M7 rifle.",
-                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
-                "ammo50_icon.png", null,
+                "mag68box.ndmesh", "mag68box_diffuse.png", "mag68box_normal.png",
+                "mag68box_icon.png", null,
                 20, 0, 0.7f));
 
-            // 6.8x51 drum magazine (2059). Placeholder art: .50 box.
+            // 6.8x51 drum magazine (2059). Own art (mag68_build.py): a round
+            // FDE-tan drum matching the XM7.
             items.Add(new ItemDef(
                 DrumId, 2030, false,
                 "Барабан 6,8x51 (100)", "6.8x51 drum (100)",
@@ -100,8 +103,8 @@ namespace NextDayRevival
                 + "Вчетверо больше стандартного - и заметно тяжелее.",
                 "A 100-round drum magazine of 6.8x51mm for the M7 rifle. Four "
                 + "times a standard magazine - and noticeably heavier.",
-                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
-                "ammo50_icon.png", null,
+                "mag68drum.ndmesh", "mag68drum_diffuse.png", "mag68drum_normal.png",
+                "mag68drum_icon.png", null,
                 100, 0, 2.8f));
         }
     }

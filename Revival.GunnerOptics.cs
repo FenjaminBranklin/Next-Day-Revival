@@ -4,17 +4,23 @@
 // installed modules (Revival.Modules.cs).
 //
 // Rendering is pure IMGUI (this is called from Turret.DrawScope, inside OnGUI):
-//   - the scene tint (thermal cools the picture blue, night greens it) is a
-//     full-screen translucent quad drawn OVER the 3D view;
-//   - warm things glow ON TOP of that cold scene: vehicles light up as a soft
-//     glow sized to the machine (no marker shape), and crew and players as a
-//     bright warm blob each, so the modes are genuinely useful (spot vehicles
-//     and crews through smoke and darkness) without a camera post-process,
-//     which an old Unity + BepInEx build cannot do reliably;
+//   - THERMAL crushes the whole picture to a flat, cold, low-contrast field: a
+//     NEAR-OPAQUE deep-indigo quad kills the "normal view + shadows" read, a
+//     radial vignette darkens the optic edges, and a faint sensor grain sells
+//     the detector. Nothing in the cold scene carries usable detail - exactly
+//     as a real thermal image where nothing is radiating heat. NIGHT keeps the
+//     softer green light-gain look;
+//   - warm things then BLAZE on top of that cold field. Because we cannot give
+//     every world object a per-pixel heat value (no camera post-process on this
+//     old Unity + BepInEx build), the things we DO know are warm - patrol/convoy
+//     vehicles and their crew, and players - are drawn through an ironbow ramp:
+//     a wide deep-red halo, an orange body, and a white-hot core, so a target
+//     reads as genuine radiated heat, not a marker;
 //   - the frame, reticle and status text are drawn on top.
-// A real camera post-effect (image inversion for true white-hot, light gain for
-// night) would be nicer and is a possible later enhancement; this version is
-// robust and asset-free.
+// A true per-pixel camera post-effect (scene desaturation + heat ramp) would be
+// nicer still and is a possible later enhancement; it needs a runtime shader,
+// which this build cannot load reliably, so this version stays robust and
+// asset-free while reading far more like real thermal than a plain blue tint.
 //
 // ASCII-only code and comments; on-screen text is bilingual through Loc.T.
 
@@ -29,6 +35,8 @@ namespace NextDayRevival
     {
         static Texture2D _px;
         static Texture2D _disc;
+        static Texture2D _vig;    // radial vignette: clear centre, dark rim
+        static Texture2D _grain;  // static sensor noise, tiled
 
         // Warm-target cache. FindObjectsOfType per frame is exactly the cost
         // that never shows in a log and always shows in the frame time, so the
@@ -93,6 +101,67 @@ namespace NextDayRevival
             GUI.color = old;
         }
 
+        /// <summary>Radial vignette texture, built once: fully transparent at the
+        /// centre, opaque toward the corners. Stretched over the whole screen it
+        /// darkens the optic edges the way a real periscope/thermal tube does.</summary>
+        static Texture2D Vig()
+        {
+            if (_vig != null) return _vig;
+            const int N = 64;
+            _vig = new Texture2D(N, N, TextureFormat.ARGB32, false);
+            _vig.hideFlags = HideFlags.HideAndDontSave;
+            float c = (N - 1) * 0.5f;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float dx = (x - c) / c, dy = (y - c) / c;
+                    float d = Mathf.Sqrt(dx * dx + dy * dy);      // 0 centre .. ~1.41 corner
+                    float a = Mathf.Clamp01((d - 0.55f) / 0.85f); // clear until 0.55, then ramp
+                    a = a * a;                                    // ease in
+                    _vig.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+                }
+            _vig.Apply();
+            return _vig;
+        }
+
+        /// <summary>Fine static noise, built once, tiled across the picture at low
+        /// alpha so the cold field reads as a live detector rather than flat paint.</summary>
+        static Texture2D Grain()
+        {
+            if (_grain != null) return _grain;
+            const int N = 128;
+            _grain = new Texture2D(N, N, TextureFormat.ARGB32, false);
+            _grain.hideFlags = HideFlags.HideAndDontSave;
+            _grain.wrapMode = TextureWrapMode.Repeat;
+            System.Random rnd = new System.Random(1337);
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float v = (float)rnd.NextDouble();
+                    _grain.SetPixel(x, y, new Color(v, v, v, 1f));
+                }
+            _grain.Apply();
+            return _grain;
+        }
+
+        static void Vignette(Rect full, Color c)
+        {
+            Color old = GUI.color;
+            GUI.color = c;
+            GUI.DrawTexture(full, Vig());
+            GUI.color = old;
+        }
+
+        static void ThermalGrain(Rect full, Color c)
+        {
+            Color old = GUI.color;
+            GUI.color = c;
+            // Tile the 128px noise; the tile count is screen/128 so pixels stay 1:1.
+            Rect uv = new Rect(0f, 0f, full.width / 128f, full.height / 128f);
+            GUI.DrawTextureWithTexCoords(full, Grain(), uv);
+            GUI.color = old;
+        }
+
         /// <summary>
         /// Draws the whole gunner optic. Returns true when it has taken over the
         /// view, so Turret skips its legacy scope. Called from Turret.DrawScope
@@ -121,24 +190,33 @@ namespace NextDayRevival
         {
             if (mode == VisionMode.Normal) return;
 
-            // The whole scene goes cold: deep blue for thermal, green for night.
-            // Warm things (vehicles, crew, players) then glow ON TOP of it.
             Rect full = new Rect(0f, 0f, Screen.width, Screen.height);
-            if (mode == VisionMode.Thermal)
-                Fill(full, new Color(0.02f, 0.05f, 0.11f, 0.66f)); // cool the scene blue
+            bool thermal = mode == VisionMode.Thermal;
+
+            if (thermal)
+            {
+                // Crush the picture to a flat, cold, low-contrast field. This is
+                // the whole point of the rework: a NEAR-OPAQUE cold quad removes
+                // the "normal view + shadows" read (a plain 0.66 tint left the lit
+                // scene showing through), so cold objects carry almost no detail.
+                Fill(full, new Color(0.03f, 0.045f, 0.11f, 0.88f));   // deep cold indigo
+                Vignette(full, new Color(0.00f, 0.00f, 0.015f, 1f));  // edges go colder/black
+                ThermalGrain(full, new Color(0.55f, 0.62f, 0.85f, 0.05f)); // faint detector noise
+            }
             else
-                Fill(full, new Color(0.00f, 0.22f, 0.03f, 0.38f)); // green it
+            {
+                // Night: a softer green light-gain wash (unchanged intent).
+                Fill(full, new Color(0.00f, 0.22f, 0.03f, 0.42f));
+                Vignette(full, new Color(0.00f, 0.02f, 0.00f, 0.95f));
+                ThermalGrain(full, new Color(0.60f, 0.90f, 0.60f, 0.04f));
+            }
 
             RefreshTargets();
             Camera cam = Camera.main;
             if (cam == null) return;
 
-            bool thermal = mode == VisionMode.Thermal;
-
-            // Vehicles first: a soft glow sized to the machine itself lights it
-            // up as a warm shape - no marker, no rectangle. People draw over it.
-            Color vehHot = thermal ? new Color(1.0f, 0.82f, 0.20f, 0.85f)  // warm yellow
-                                   : new Color(0.55f, 1.0f, 0.55f, 0.65f);
+            // Vehicles first: an ironbow heat shape sized to the machine itself -
+            // no marker, no rectangle. People draw brighter over it.
             for (int i = 0; i < _veh.Count; i++)
             {
                 Transform t = _veh[i];
@@ -157,12 +235,11 @@ namespace NextDayRevival
                 if (Project(cam, mid + cam.transform.right * r, out ge, out edgeDist))
                     px = Mathf.Abs(ge.x - g.x);
                 px = Mathf.Clamp(px, 16f, 320f);
-                VehicleGlow(g, px, vehHot);
+                VehicleGlow(g, px, thermal);
             }
 
-            // People: crew and players, a bright warm blob each.
-            Color hot = thermal ? new Color(1.0f, 0.90f, 0.30f, 0.92f)  // bright yellow
-                                : new Color(0.50f, 1.0f, 0.50f, 0.78f);
+            // People: crew and players. They radiate hottest, so they blaze the
+            // brightest - a white-hot core against the cold field.
             for (int i = 0; i < _warm.Count; i++)
             {
                 Transform t = _warm[i];
@@ -172,34 +249,52 @@ namespace NextDayRevival
                 if (!Project(cam, chest, out g, out dist)) continue;
                 if (dist > 450f) continue;
 
-                float size = Mathf.Clamp(1400f / dist, 6f, 42f);
-                Blob(g, size, hot);
+                float size = Mathf.Clamp(1500f / dist, 8f, 46f);
+                Blob(g, size, thermal);
             }
         }
 
-        static void VehicleGlow(Vector2 c, float px, Color col)
+        // Ironbow ramp, coolest to hottest. Warm targets are stacked discs in
+        // these colours: a wide deep-red halo, an orange body, then a near-white
+        // core - the classic thermal look, unmistakable against the cold field.
+        // Night falls back to a green ramp.
+        static readonly Color IronHalo = new Color(0.85f, 0.06f, 0.14f, 1f);  // deep red
+        static readonly Color IronBody = new Color(1.00f, 0.42f, 0.05f, 1f);  // orange
+        static readonly Color IronCore = new Color(1.00f, 0.96f, 0.80f, 1f);  // white-hot
+        static readonly Color NightHalo = new Color(0.10f, 0.75f, 0.20f, 1f);
+        static readonly Color NightBody = new Color(0.35f, 1.00f, 0.40f, 1f);
+        static readonly Color NightCore = new Color(0.85f, 1.00f, 0.85f, 1f);
+
+        static void GlowRect(Vector2 c, float halfW, float halfH, Color col)
         {
-            // Wider than tall - a vehicle silhouette reads horizontal. Soft halo
-            // plus a brighter core, both from the round Disc texture.
-            float w = px * 1.5f, h = px * 0.95f;
-            Glow(new Rect(c.x - w, c.y - h, w * 2f, h * 2f),
-                 new Color(col.r, col.g, col.b, col.a * 0.5f));
-            float wc = w * 0.55f, hc = h * 0.55f;
-            Glow(new Rect(c.x - wc, c.y - hc, wc * 2f, hc * 2f),
-                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.10f)));
+            Glow(new Rect(c.x - halfW, c.y - halfH, halfW * 2f, halfH * 2f), col);
         }
 
-        static void Blob(Vector2 c, float s, Color col)
+        static void VehicleGlow(Vector2 c, float px, bool thermal)
         {
-            // A round heat glow: a wide soft halo with a brighter core, both from
-            // the radial Disc texture, so a warm target reads as a blob and never
-            // as a square (the old version stacked translucent rectangles).
-            float halo = s * 1.6f;
-            Glow(new Rect(c.x - halo, c.y - halo, halo * 2f, halo * 2f),
-                 new Color(col.r, col.g, col.b, col.a * 0.45f));
-            float core = s * 0.7f;
-            Glow(new Rect(c.x - core, c.y - core, core * 2f, core * 2f),
-                 new Color(col.r, col.g, col.b, Mathf.Min(1f, col.a + 0.15f)));
+            // Wider than tall - a vehicle silhouette reads horizontal. Three
+            // ironbow layers give a hot centre (engine/crew) bleeding out to a
+            // cooler red hull edge.
+            Color halo = thermal ? IronHalo : NightHalo;
+            Color body = thermal ? IronBody : NightBody;
+            Color core = thermal ? IronCore : NightCore;
+            float w = px * 1.5f, h = px * 0.95f;
+            GlowRect(c, w * 1.15f, h * 1.15f, new Color(halo.r, halo.g, halo.b, 0.50f));
+            GlowRect(c, w,         h,         new Color(body.r, body.g, body.b, 0.72f));
+            GlowRect(c, w * 0.5f,  h * 0.5f,  new Color(core.r, core.g, core.b, 0.90f));
+        }
+
+        static void Blob(Vector2 c, float s, bool thermal)
+        {
+            // A person: the same ironbow ramp, tighter and brighter, so crew and
+            // players are the hottest thing on screen. Round discs only, never a
+            // square.
+            Color halo = thermal ? IronHalo : NightHalo;
+            Color body = thermal ? IronBody : NightBody;
+            Color core = thermal ? IronCore : NightCore;
+            GlowRect(c, s * 1.9f, s * 1.9f, new Color(halo.r, halo.g, halo.b, 0.50f));
+            GlowRect(c, s * 1.0f, s * 1.0f, new Color(body.r, body.g, body.b, 0.80f));
+            GlowRect(c, s * 0.5f, s * 0.5f, new Color(core.r, core.g, core.b, 0.98f));
         }
 
         static bool Project(Camera cam, Vector3 world, out Vector2 gui, out float dist)

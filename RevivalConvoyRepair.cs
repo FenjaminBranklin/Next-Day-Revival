@@ -115,6 +115,15 @@ namespace NextDayRevival
         static GameObject _scanCar;
         static bool _scanBurning;
 
+        // Same throttle for the "am I seated?" check: InVehicle runs a full
+        // FindObjectsOfType(VehicleGameSystem) and TickIdle calls it EVERY frame
+        // on foot, before the (already cached) wreck scan. Without this cache it
+        // was one whole-scene scan per frame while walking around - the 6.1 frame
+        // drop, the same class of bug the 6.0 HasItem cache fixed. Cached like
+        // DroneGear.InVehicle (0.5 s); seating changes are never that fast.
+        static float _inVehUntil;
+        static bool _inVehResult;
+
         /// <summary>True while a spray/repair action runs; the body is frozen
         /// then (see <see cref="ConvoyFreezeHook"/>).</summary>
         public static bool Busy { get { return _phase != Phase.Idle; } }
@@ -524,24 +533,30 @@ namespace NextDayRevival
 
         static bool InVehicle()
         {
+            if (Time.time < _inVehUntil) return _inVehResult;
+            bool inv = false;
             try
             {
                 Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
-                if (t == null) return false;
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
-                for (int i = 0; i < all.Length; i++)
+                if (t != null)
                 {
-                    FieldInfo f = AccessTools.Field(all[i].GetType(), "_localPlayerPassengerId");
-                    if (f == null) continue;
-                    object v = f.GetValue(all[i]);
-                    if (v is int && (int)v >= 0) return true;
+                    UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        FieldInfo f = AccessTools.Field(all[i].GetType(), "_localPlayerPassengerId");
+                        if (f == null) continue;
+                        object v = f.GetValue(all[i]);
+                        if (v is int && (int)v >= 0) { inv = true; break; }
+                    }
                 }
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("ConvoyRepair: vehicle check: " + ex.Message);
             }
-            return false;
+            _inVehResult = inv;
+            _inVehUntil = Time.time + 0.5f;
+            return inv;
         }
 
         // ------------------------------------------------------------- Reflection

@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.1.0";
+        public const string VERSION = "6.2.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -270,6 +270,9 @@ namespace NextDayRevival
         internal static ConfigEntry<bool> CfgTank;
         internal static ConfigEntry<string> CfgTankKey;
         internal static ConfigEntry<bool> CfgTankSwapMesh;
+        internal static ConfigEntry<bool> CfgTankAnimate;
+        internal static ConfigEntry<float> CfgTankTrackScroll;
+        internal static ConfigEntry<bool> CfgTankSpinInvert;
         internal static ConfigEntry<int> CfgTankSeats;
         internal static ConfigEntry<float> CfgTankDamage;
         internal static ConfigEntry<float> CfgTankExplosionDamage;
@@ -757,8 +760,17 @@ namespace NextDayRevival
                 + "beim ersten Treffer detoniert sie. Der Koerper bleibt stehen "
                 + "und ist waehrenddessen angreifbar. Notausgang bei Problemen: "
                 + "hier false eintragen.");
-            CfgDroneKey = Config.Bind("Drone", "Key", "V",
-                "Taste zum Starten und Abbrechen, Name aus UnityEngine.KeyCode.");
+            // KEY MOVED OFF V (2026-09-03, user). V is the game's own "sit down"
+            // bind, so holding V to launch only made the player sit - the drone
+            // never lifted ("V startet nichts"). G is free on foot; the vehicle
+            // module InstallKey is also G but only acts in the gunner seat, and a
+            // drone only launches on foot (the antenna retracts on boarding), so
+            // the two contexts never overlap. Changing this default alone does not
+            // reach an installed config (CLAUDE.md point 4) - retune.py carries
+            // Drone/Key = G so existing machines get it too.
+            CfgDroneKey = Config.Bind("Drone", "Key", "G",
+                "Taste zum Starten (gedrueckt halten) und Abbrechen, Name aus "
+                + "UnityEngine.KeyCode. NICHT V - das ist im Spiel 'Hinsetzen'.");
             // WARUM 30 UND NICHT 16 (2026-08-30). Die Endgeschwindigkeit einer
             // Drohne ist Thrust/Drag, nicht MaxSpeed - MaxSpeed ist nur eine
             // Kappe darueber. Mit 16/1.4 waren das 11,4 m/s = 41 km/h, und die
@@ -1034,6 +1046,17 @@ namespace NextDayRevival
                 "Das sichtbare Mesh gegen das Panzermodell tauschen. Auf false "
                 + "bleibt ein BTR stehen, der sich wie ein Panzer verhaelt - "
                 + "zum Trennen der Fehlersuche.");
+            CfgTankAnimate = Config.Bind("Tank", "Animate", true,
+                "Laufwerk beleben: die Laufraeder, das Leit- und das Triebrad "
+                + "drehen sich mit der Fahrt, und die Kette laeuft mit - wie die "
+                + "Raeder des BTR. false laesst das Laufwerk starr stehen.");
+            CfgTankTrackScroll = Config.Bind("Tank", "TrackScroll", 1.0f,
+                "Feinjustage, wie schnell die Kettenglieder relativ zur "
+                + "Fahrgeschwindigkeit wandern. 1 = an der Radgeschwindigkeit "
+                + "ausgerichtet; groesser laesst die Kette schneller laufen.");
+            CfgTankSpinInvert = Config.Bind("Tank", "SpinInvert", false,
+                "Drehrichtung von Raedern und Kette umkehren, falls sie im Spiel "
+                + "verkehrt herum laufen. Reine Sichtkorrektur.");
             CfgTankSeats = Config.Bind("Tank", "Seats", 3,
                 "Mitfahrplaetze ohne den Geschuetzsitz. 3 ergibt zusammen mit "
                 + "dem Geschuetz die geforderten vier Sitze.");
@@ -1526,6 +1549,9 @@ namespace NextDayRevival
 
             // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
             M7Rifle.AddItems(Items);
+            // The SWAT uniform gear: helmet, body armour, trousers, backpack
+            // (own file).
+            SwatGear.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
@@ -3843,10 +3869,16 @@ namespace NextDayRevival
 
     public static class Registry
     {
-        // MarketplaceObject.RecalculateMarketItemsCategory selects exactly the
-        // A-D lists named below from each category, based on the current
-        // trader's MarketItemRanksSelling. Putting a custom item in every list
-        // makes it universal without changing any trader or vanilla rank.
+        // MarketplaceObject.RecalculateMarketItemsCategory APPENDS every rank
+        // list (A-D) the current trader sells (its MarketItemRanksSelling) into
+        // ONE un-deduplicated result list, sorts by ItemID and shows it (RE 30).
+        // A custom item that sits in several of A-D therefore appears once PER
+        // rank the trader sells - the doubled/tripled entries the player saw. A
+        // vanilla item lives in exactly one list; a custom item must too. It is
+        // placed only in rank 0 / list A, the base tier a trader with an empty
+        // rank list is normalized to, so it shows up once and stays as widely
+        // available as a common vanilla good. The full A-D name set is still
+        // used to STRIP an id from every list when cleaning stale registrations.
         static readonly string[] MarketRankFields = new string[] {
             "MarketItemsA", "MarketItemsB", "MarketItemsC", "MarketItemsD" };
 
@@ -4000,13 +4032,12 @@ namespace NextDayRevival
                     }
 
                     Texture2D icon = Assets.Texture(def.Icon, false, false);
-                    int covered = PutInEveryMarketRank(categories, categoryKey,
+                    bool placed = PutInMarket(categories, categoryKey,
                         template, id, buyPrice, icon);
-                    if (covered != MarketRankFields.Length)
+                    if (!placed)
                     {
-                        RevivalPlugin.L.LogWarning("Marketplace: " + id + " nur in "
-                            + covered + "/" + MarketRankFields.Length
-                            + " Ranglisten eingetragen.");
+                        RevivalPlugin.L.LogWarning("Marketplace: " + id
+                            + " konnte nicht in Rang A eingetragen werden.");
                         continue;
                     }
 
@@ -4014,8 +4045,8 @@ namespace NextDayRevival
                     SetSpawnMarketData(def.Factory.MySpawned, true, buyPrice);
                     registered++;
                     RevivalPlugin.L.LogInfo("Marketplace: " + id + " fuer "
-                        + buyPrice + " in A-D registriert"
-                        + (existing ? " (vorhandenen Eintrag vereinheitlicht)."
+                        + buyPrice + " in Rang A (Rang 0) registriert"
+                        + (existing ? " (Mehrfacheintraege bereinigt)."
                                     : " (Kategorie der Spende " + def.DonorId + ")."));
                 }
 
@@ -4074,45 +4105,57 @@ namespace NextDayRevival
             return false;
         }
 
-        static int PutInEveryMarketRank(IDictionary categories, object categoryKey,
-                                        object template, int id, int price,
-                                        Texture2D icon)
+        /// <summary>
+        /// Registers `id` in rank 0 (list A) of its canonical category and
+        /// NOWHERE else. First strips the id from every category and every A-D
+        /// rank list - so any stale multi-list registration from an earlier run
+        /// that made the item show up two- or threefold at multi-rank traders is
+        /// cleaned up - keeping at most the single entry already in list A, then
+        /// ensures exactly that one entry exists and is filled in. Returns true
+        /// when the one entry carries the id and price.
+        /// </summary>
+        static bool PutInMarket(IDictionary categories, object categoryKey,
+                                object template, int id, int price,
+                                Texture2D icon)
         {
-            int covered = 0;
+            object keep = null;
+            object canonHolder = null;
             foreach (DictionaryEntry category in categories)
             {
                 object holder = category.Value;
                 if (holder == null) continue;
                 bool canonical = object.Equals(category.Key, categoryKey);
+                if (canonical) canonHolder = holder;
                 for (int rank = 0; rank < MarketRankFields.Length; rank++)
                 {
                     IList list = MarketRankList(holder, MarketRankFields[rank]);
                     if (list == null) continue;
-
-                    object keep = null;
                     for (int i = list.Count - 1; i >= 0; i--)
                     {
                         if (EntryId(list[i]) != id) continue;
-                        if (canonical && keep == null) keep = list[i];
+                        // Keep exactly one: the entry already in list A of the
+                        // canonical category. Drop every other occurrence.
+                        if (canonical && rank == 0 && keep == null) keep = list[i];
                         else list.RemoveAt(i);
                     }
-                    if (!canonical) continue;
-
-                    if (keep == null)
-                    {
-                        keep = CloneEntry(template, id);
-                        if (keep == null) continue;
-                        list.Add(keep);
-                    }
-                    bool idSet = SetMarketField(keep, "ItemID", id);
-                    bool priceSet = SetMarketField(keep, "Price", price);
-                    SetMarketField(keep, "Rank", rank);
-                    SetMarketField(keep, "Category", categoryKey);
-                    if (icon != null) SetMarketField(keep, "Icon", icon);
-                    if (idSet && priceSet) covered++;
                 }
             }
-            return covered;
+
+            IList target = canonHolder == null
+                ? null : MarketRankList(canonHolder, MarketRankFields[0]);
+            if (target == null) return false;
+            if (keep == null)
+            {
+                keep = CloneEntry(template, id);
+                if (keep == null) return false;
+                target.Add(keep);
+            }
+            bool idSet = SetMarketField(keep, "ItemID", id);
+            bool priceSet = SetMarketField(keep, "Price", price);
+            SetMarketField(keep, "Rank", 0);
+            SetMarketField(keep, "Category", categoryKey);
+            if (icon != null) SetMarketField(keep, "Icon", icon);
+            return idSet && priceSet;
         }
 
         /// <summary>
@@ -9303,6 +9346,15 @@ namespace NextDayRevival
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
+            GUILayout.Label(Loc.T("Набор снаряжения SWAT", "SWAT gear set"));
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(Loc.T("выдать набор SWAT", "give SWAT kit"), GUILayout.Width(190f)))
+                GebenSwat();
+            GUILayout.Label(Loc.T("шлем, бронежилет, штаны, рюкзак",
+                                  "helmet, armour, trousers, backpack"));
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));
             GUILayout.BeginHorizontal();
             GUILayout.Label(Loc.T("Кол-во (пусто = станд.):", "Amount (empty = default):"), GUILayout.Width(170f));
@@ -9386,6 +9438,26 @@ namespace NextDayRevival
             string meldung;
             Net.Item(_targetActor, itemId, menge, out meldung);
             Melde(meldung);
+        }
+
+        // Grant the four SWAT pieces at once (one each), regardless of the
+        // amount field. Registered ItemDefs only - a piece the item table does
+        // not carry is skipped rather than served as its donor.
+        static void GebenSwat()
+        {
+            int[] set = new int[] {
+                SwatGear.HelmetId, SwatGear.ArmourId,
+                SwatGear.TrousersId, SwatGear.BackpackId };
+            int ok = 0;
+            string meldung;
+            for (int i = 0; i < set.Length; i++)
+            {
+                if (RevivalPlugin.FindItem(set[i]) == null) continue;
+                Net.Item(_targetActor, set[i], 1, out meldung);
+                ok++;
+            }
+            Melde(Loc.T("Набор SWAT выдан (" + ok + " предм.)",
+                        "SWAT kit granted (" + ok + " items)"));
         }
 
         /// <summary>
@@ -10480,6 +10552,24 @@ namespace NextDayRevival
             yield return null;
             Assets.Texture("t72_normal.png", true, true);
             yield return null;
+            // Running gear: the two scrolling tracks, their link texture, and
+            // the road/idler/drive wheels named in the manifest. Warmed here so
+            // the F9 spawn does no disk work (see summary above).
+            if (RevivalPlugin.CfgTankAnimate == null || RevivalPlugin.CfgTankAnimate.Value)
+            {
+                Assets.Texture("t72_track.png", false, true);
+                yield return null;
+                Assets.Load("t72_track_left.ndmesh");
+                yield return null;
+                Assets.Load("t72_track_right.ndmesh");
+                yield return null;
+                string[] files = RunningGear.ManifestMeshFiles();
+                for (int i = 0; i < files.Length; i++)
+                {
+                    Assets.Load(files[i]);
+                    yield return null;
+                }
+            }
             RevivalPlugin.L.LogInfo("Panzer: resources prewarmed for F9.");
         }
 
@@ -10629,6 +10719,72 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Panzer: " + wannen + " Wannen, " + tuerme
                 + " Tuerme getauscht, " + glas + " Scheiben und " + raeder
                 + " Raeder ausgeblendet.");
+
+            // The running gear (road wheels, idler, drive sprocket, and the two
+            // tracks) is NOT baked into the hull mesh any more - it is built and
+            // animated as separate children so it turns and scrolls with the
+            // vehicle. Attach to the first hull transform found; its local frame
+            // IS the mesh frame the wheel positions were measured in.
+            if (RevivalPlugin.CfgTankAnimate == null || RevivalPlugin.CfgTankAnimate.Value)
+            {
+                Transform hull = null;
+                for (int i = 0; i < all.Length; i++)
+                    if (all[i] != null && all[i].name == "hull") { hull = all[i]; break; }
+                if (hull != null)
+                {
+                    try { RunningGear.Build(car, hull, _mat != null ? _mat : Panzermaterial(null), Trackmaterial()); }
+                    catch (Exception ex) { RevivalPlugin.L.LogError("Panzer, Laufwerk: " + ex); }
+                }
+                else RevivalPlugin.L.LogWarning("Panzer: kein hull-Transform fuer das Laufwerk gefunden.");
+            }
+        }
+
+        /// <summary>
+        /// Material for the two scrolling tracks: the hull shader with the
+        /// tileable link texture (t72_track.png), set to REPEAT so a moving UV
+        /// offset makes the links travel. A FRESH instance PER tank, because the
+        /// plugin slides its texture offset every frame - one shared material
+        /// would make every tank's tracks scroll at the last tank's speed, and
+        /// it must never touch the hull material.
+        /// </summary>
+        static Material Trackmaterial()
+        {
+            Material vorlage = _mat != null ? _mat : Panzermaterial(null);
+            Shader shader = vorlage != null && vorlage.shader != null
+                ? vorlage.shader : Shader.Find("Standard");
+            Material m = new Material(shader);
+            m.name = "T72_Track_Material";
+            Texture2D tex = Assets.Texture("t72_track.png", false, true);
+            if (tex != null) tex.wrapMode = TextureWrapMode.Repeat;
+            m.mainTexture = tex;
+            // The mesh UV runs 0..1 round the loop; tile the link texture
+            // T72RunningGear.TrackRepeats times across it (must match
+            // t72_import.TRACK_REPEATS).
+            Vector2 tile = new Vector2(T72RunningGear.TrackRepeats, 1f);
+            m.mainTextureScale = tile;
+            if (m.HasProperty("_MainTex"))
+            {
+                m.SetTexture("_MainTex", tex);
+                m.SetTextureScale("_MainTex", tile);
+            }
+            if (m.HasProperty("_Color")) m.SetColor("_Color", Color.white);
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.25f);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.35f);
+            // No metallic/normal map on the track - keep it a plain lit surface.
+            if (m.HasProperty("_MetallicGlossMap")) m.SetTexture("_MetallicGlossMap", null);
+            m.DisableKeyword("_METALLICGLOSSMAP");
+            if (m.HasProperty("_BumpMap")) m.SetTexture("_BumpMap", null);
+            m.DisableKeyword("_NORMALMAP");
+            if (m.HasProperty("_Mode")) m.SetFloat("_Mode", 0f);
+            if (m.HasProperty("_SrcBlend")) m.SetFloat("_SrcBlend", 1f);
+            if (m.HasProperty("_DstBlend")) m.SetFloat("_DstBlend", 0f);
+            if (m.HasProperty("_ZWrite")) m.SetFloat("_ZWrite", 1f);
+            m.DisableKeyword("_ALPHATEST_ON");
+            m.DisableKeyword("_ALPHABLEND_ON");
+            m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            if (m.HasProperty("_EmissionColor")) m.SetColor("_EmissionColor", Color.black);
+            m.DisableKeyword("_EMISSION");
+            return m;
         }
 
         static bool Setzen(Transform t, Mesh mesh)
@@ -10739,6 +10895,209 @@ namespace NextDayRevival
                 + ", Metallic Map " + (metal != null) + ".");
             _mat = m;
             return m;
+        }
+    }
+
+    /// <summary>
+    /// Builds the T-72 running gear (road wheels, idler, drive sprocket, the two
+    /// tracks) as separate children of the hull and hangs the animator on the
+    /// vehicle. The wheels and their axle positions come from t72_wheels.txt,
+    /// written by t72_import.py; the two track bands carry lengthwise UVs.
+    /// </summary>
+    public static class RunningGear
+    {
+        class Entry
+        {
+            public string Name;
+            public string Mesh;
+            public float X, Y, Z, Radius;
+        }
+
+        static List<Entry> _manifest;
+
+        static void ParseManifest()
+        {
+            if (_manifest != null) return;
+            _manifest = new List<Entry>();
+            string path = Path.Combine(RevivalPlugin.AssetDir, "t72_wheels.txt");
+            if (!File.Exists(path))
+            {
+                RevivalPlugin.L.LogWarning("Laufwerk: t72_wheels.txt fehlt neben der DLL.");
+                return;
+            }
+            string[] lines = File.ReadAllLines(path);
+            System.Globalization.CultureInfo inv =
+                System.Globalization.CultureInfo.InvariantCulture;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string s = lines[i].Trim();
+                if (s.Length == 0 || s[0] == '#') continue;
+                string[] p = s.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                if (p.Length < 6) continue;
+                try
+                {
+                    Entry e = new Entry();
+                    e.Name = p[0]; e.Mesh = p[1];
+                    e.X = float.Parse(p[2], inv);
+                    e.Y = float.Parse(p[3], inv);
+                    e.Z = float.Parse(p[4], inv);
+                    e.Radius = float.Parse(p[5], inv);
+                    _manifest.Add(e);
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Laufwerk: Zeile unlesbar: " + s + " (" + ex.Message + ")");
+                }
+            }
+        }
+
+        /// <summary>Distinct wheel mesh files, for prewarming.</summary>
+        public static string[] ManifestMeshFiles()
+        {
+            ParseManifest();
+            List<string> files = new List<string>();
+            for (int i = 0; i < _manifest.Count; i++)
+                if (!files.Contains(_manifest[i].Mesh)) files.Add(_manifest[i].Mesh);
+            return files.ToArray();
+        }
+
+        public static void Build(GameObject car, Transform hull, Material wheelMat, Material trackMat)
+        {
+            ParseManifest();
+            if (_manifest.Count == 0)
+            {
+                RevivalPlugin.L.LogWarning("Laufwerk: kein Manifest, Raeder bleiben aus.");
+                return;
+            }
+
+            List<Transform> wheels = new List<Transform>();
+            List<float> radien = new List<float>();
+            int gebaut = 0;
+            for (int i = 0; i < _manifest.Count; i++)
+            {
+                Entry e = _manifest[i];
+                Mesh mesh = Assets.Load(e.Mesh);
+                if (mesh == null) continue;
+                GameObject go = new GameObject("ndr_wheel_" + e.Name);
+                go.transform.SetParent(hull, false);
+                go.transform.localPosition = new Vector3(e.X, e.Y, e.Z);
+                go.transform.localRotation = Quaternion.identity;
+                go.transform.localScale = Vector3.one;
+                MeshFilter mf = go.AddComponent<MeshFilter>();
+                mf.sharedMesh = mesh;
+                MeshRenderer mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = wheelMat;
+                wheels.Add(go.transform);
+                radien.Add(e.Radius);
+                gebaut++;
+            }
+
+            int gleise = 0;
+            string[] seiten = new string[] { "left", "right" };
+            for (int s = 0; s < seiten.Length; s++)
+            {
+                Mesh mesh = Assets.Load("t72_track_" + seiten[s] + ".ndmesh");
+                if (mesh == null) continue;
+                GameObject go = new GameObject("ndr_track_" + seiten[s]);
+                go.transform.SetParent(hull, false);
+                go.transform.localPosition = Vector3.zero;   // verts already in hull coords
+                go.transform.localRotation = Quaternion.identity;
+                go.transform.localScale = Vector3.one;
+                MeshFilter mf = go.AddComponent<MeshFilter>();
+                mf.sharedMesh = mesh;
+                MeshRenderer mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = trackMat;
+                gleise++;
+            }
+
+            T72RunningGear anim = car.GetComponent<T72RunningGear>();
+            if (anim == null) anim = car.AddComponent<T72RunningGear>();
+            anim.Init(hull, wheels.ToArray(), radien.ToArray(), trackMat);
+
+            RevivalPlugin.L.LogInfo("Panzer: Laufwerk gebaut - " + gebaut
+                + " Raeder, " + gleise + " Ketten, animiert.");
+        }
+    }
+
+    /// <summary>
+    /// Turns the road wheels and scrolls the tracks from the vehicle's own
+    /// motion, so the running gear moves with the tank the way the APC's wheels
+    /// turn. Purely visual: it reads the transform's world velocity, not the
+    /// physics, so it works the same on the driver's client and on remote
+    /// (Photon-synced) tanks.
+    /// </summary>
+    public class T72RunningGear : MonoBehaviour
+    {
+        // The track loop perimeter in mesh units (t72_import.py prints ~20-21).
+        const float TrackPerimeterUnits = 20.5f;
+        // Link-texture tiles round the loop. MUST match t72_import.TRACK_REPEATS;
+        // the track material scales its UV by this, so one link spans
+        // perimeter/TrackRepeats metres and the offset must advance that fast.
+        public const float TrackRepeats = 46f;
+
+        Transform _hull;
+        Transform[] _wheels;
+        float[] _radius;
+        float[] _angle;
+        Material _track;
+        float _trackOffset;
+        Vector3 _lastPos;
+        bool _have;
+
+        public void Init(Transform hull, Transform[] wheels, float[] radius, Material track)
+        {
+            _hull = hull;
+            _wheels = wheels;
+            _radius = radius;
+            _track = track;
+            _angle = new float[wheels != null ? wheels.Length : 0];
+            _lastPos = transform.position;
+            _have = _hull != null && _wheels != null;
+        }
+
+        void LateUpdate()
+        {
+            if (!_have) return;
+            float dt = Time.deltaTime;
+            if (dt <= 1e-5f) return;
+
+            Vector3 pos = transform.position;
+            Vector3 vel = (pos - _lastPos) / dt;
+            _lastPos = pos;
+            if (_hull == null) return;
+
+            // World velocity into the hull's own axes. The mesh frame has +z up,
+            // -y forward, x across - so forward speed is -y.
+            Vector3 vl = _hull.InverseTransformDirection(vel);
+            float fwd = -vl.y;
+
+            float scale = Mathf.Abs(_hull.lossyScale.x);
+            if (scale < 1e-4f) scale = 1f;
+            float dir = (RevivalPlugin.CfgTankSpinInvert != null
+                         && RevivalPlugin.CfgTankSpinInvert.Value) ? -1f : 1f;
+
+            for (int i = 0; i < _wheels.Length; i++)
+            {
+                if (_wheels[i] == null) continue;
+                float rW = Mathf.Max(0.01f, _radius[i]) * scale;      // world metres
+                float dDeg = (fwd / rW) * Mathf.Rad2Deg * dt * dir;
+                _angle[i] += dDeg;
+                _wheels[i].localRotation = Quaternion.AngleAxis(_angle[i], Vector3.right);
+            }
+
+            if (_track != null)
+            {
+                float scroll = RevivalPlugin.CfgTankTrackScroll != null
+                    ? RevivalPlugin.CfgTankTrackScroll.Value : 1f;
+                float perim = TrackPerimeterUnits * scale;             // world metres
+                if (perim < 1e-4f) perim = 1f;
+                // One link spans perim/TrackRepeats metres; advance the tiled
+                // offset so the links travel at ground speed.
+                _trackOffset += (fwd * dt * TrackRepeats / perim) * scroll * dir;
+                Vector2 o = _track.mainTextureOffset;
+                o.x = _trackOffset;
+                _track.mainTextureOffset = o;
+            }
         }
     }
 

@@ -1,0 +1,18 @@
+# T-72 running gear for the plugin. One line per wheel.
+# name meshfile x y z radius  (hull mesh space, 3 units/m)
+wheel_l_01 t72_wheel_0.ndmesh 4.1920 -9.8698 2.4749 0.7888
+wheel_l_02 t72_wheel_1.ndmesh 4.1920 -7.9055 1.3001 1.1445
+wheel_l_03 t72_wheel_2.ndmesh 4.1920 -5.3820 1.3001 1.1445
+wheel_l_04 t72_wheel_10.ndmesh 4.1920 -2.8357 1.3001 1.1445
+wheel_l_05 t72_wheel_3.ndmesh 4.1920 -0.3268 1.3198 1.1445
+wheel_l_06 t72_wheel_4.ndmesh 4.1920 2.1873 1.3001 1.1445
+wheel_l_07 t72_wheel_5.ndmesh 4.1920 4.7243 1.3001 1.1445
+wheel_l_08 t72_wheel_6.ndmesh 4.1920 7.0974 2.3784 1.0733
+wheel_r_01 t72_wheel_7.ndmesh -4.1920 -9.8698 2.4749 0.7888
+wheel_r_02 t72_wheel_8.ndmesh -4.1920 -7.9055 1.3001 1.1445
+wheel_r_03 t72_wheel_9.ndmesh -4.1920 -5.3820 1.3001 1.1445
+wheel_r_04 t72_wheel_10.ndmesh -4.1920 -2.8357 1.3001 1.1445
+wheel_r_05 t72_wheel_11.ndmesh -4.1920 -0.3268 1.3001 1.1445
+wheel_r_06 t72_wheel_4.ndmesh -4.1920 2.1873 1.3001 1.1445
+wheel_r_07 t72_wheel_12.ndmesh -4.1920 4.7243 1.3001 1.1445
+wheel_r_08 t72_wheel_13.ndmesh -4.1920 7.0974 2.3784 1.0733
