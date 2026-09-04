@@ -2271,8 +2271,11 @@ namespace NextDayRevival
             // while any launch hold charges, and while the surveillance drone
             // is being viewed. Stepping OUT of the surveillance view frees the
             // body again (SurvDrone.Viewing is false then), which is the whole
-            // point of the two-view drone.
-            if (Drone.Flying || Antenna.Deploying || DroneGear.LaunchBusy
+            // point of the two-view drone. Antenna.Frozen (not the raw Deploying
+            // flag) self-heals: a deploy whose per-frame tick stopped past its
+            // deadline no longer freezes the body, so a death/scene-change/downed
+            // event mid-deploy cannot leave the player stuck and unable to walk.
+            if (Drone.Flying || Antenna.Frozen || DroneGear.LaunchBusy
                 || SurvDrone.Viewing)
                 __result = true;
         }

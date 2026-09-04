@@ -215,6 +215,15 @@ namespace NextDayRevival
 
                 Mesh mesh = new Mesh();
                 mesh.name = name;
+                // A Unity Mesh defaults to a 16-bit index buffer, which can only
+                // address 65535 vertices. An imported model with more (the real
+                // Barrett .50 has 133308 unshared corners) silently loses every
+                // triangle past that line: only the first chunk renders and the
+                // rest of the gun is invisible - in the hand it looked like just
+                // the grip was there. Unity 2018.1 supports a 32-bit index buffer;
+                // switch to it before the triangles go in when the mesh needs it.
+                if (n > 65535)
+                    mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
                 mesh.vertices = verts;
                 mesh.normals = norms;
                 mesh.uv = uvs;
@@ -223,6 +232,7 @@ namespace NextDayRevival
                 mesh.RecalculateTangents();
                 RevivalPlugin.L.LogInfo("Mesh geladen: " + name + "  " + n + " Vertices, "
                                         + (m / 3) + " Dreiecke, bounds=" + mesh.bounds.size
+                                        + " index=" + mesh.indexFormat
                                         + (bad > 0 ? ("  ACHTUNG " + bad + " Null-Normalen ersetzt") : ""));
                 if (bad > 0)
                     RevivalPlugin.L.LogWarning("Null-Normalen in " + name

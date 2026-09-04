@@ -1,0 +1,7 @@
+# ndr_composition.tsv - written by the map/road/composition editor.
+# route	vindex	vtype	role	weapon	headwear	mask	body	legs	hands	fpv
+# weapon is the main weapon id; 0 leaves a uniform slot at the game default; fpv is mandatory and always 1 in a valid file.
+Convoy	0	btr	crew	1160	4007	4705	4301	4505	4602	1
+Convoy	1	btr	crew	1170	4006	4705	4201	4504	4603	1
+Convoy	2	tank	crew	1170	4003	4701	4205	4504	4603	1
+Convoy	3	tank	crew	1162	4003	4704	4301	4503	4602	1

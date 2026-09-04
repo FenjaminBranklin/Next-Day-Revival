@@ -106,6 +106,11 @@ namespace NextDayRevival
         internal const int LAW_ID = 1162;
 
         static List<GameObject> _settlements = new List<GameObject>();
+        // Spawn-point instance id -> seven-value NPC customization overlay.
+        // -1 preserves the game's generated face/backpack; positive ids replace
+        // body, hands, legs, headwear or mask before Photon instantiation data is
+        // created, so owner and remote clients receive the same uniform.
+        static Dictionary<int, int[]> _appearance = new Dictionary<int, int[]>();
 
         static FieldInfo _shotDelayCached;
 
@@ -208,6 +213,15 @@ namespace NextDayRevival
                     typeof(Crew).GetMethod("PlayVisualizationPrefix"),
                     "Crew: wreck crews keep animation, collision and ragdoll at any distance.",
                     "a wreck crew reached by drone stays frozen and cannot be hit");
+                MethodInfo appearance = AccessTools.Method(type,
+                    "GetRandomAppearance", null, null);
+                if (appearance != null)
+                    harmony.Patch(appearance, null,
+                        new HarmonyMethod(typeof(Crew).GetMethod(
+                            "CustomAppearancePostfix")), null, null, null);
+                else
+                    RevivalPlugin.L.LogWarning("Crew: GetRandomAppearance not found - "
+                        + "editor uniforms cannot be applied.");
             }
 
             Type npc = RevivalPlugin.TypeByName("NPC_AI2");
@@ -245,6 +259,34 @@ namespace NextDayRevival
             }
 
             CrewLaw.Install(harmony);
+        }
+
+        /// <summary>Overlay the editor's real equipment-slot ids onto the
+        /// game's own seven-value appearance result. This runs before the result
+        /// is placed in Photon instantiation data, so the existing remote repair
+        /// path receives the same complete uniform.</summary>
+        public static void CustomAppearancePostfix(object __0, ref int[] __result)
+        {
+            Component spawn = __0 as Component;
+            if (spawn == null || __result == null || __result.Length < 7) return;
+            int[] selected;
+            int id = spawn.GetInstanceID();
+            if (!_appearance.TryGetValue(id, out selected)) return;
+            _appearance.Remove(id);
+            for (int i = 0; i < 7; i++)
+                if (selected[i] > 0) __result[i] = selected[i];
+        }
+
+        static void RegisterAppearance(Component spawn,
+                                       RevivalComposition.CrewMan spec)
+        {
+            if (spawn == null || spec == null) return;
+            // CustomizationData order, confirmed in
+            // NPC_Settlement.GenerateCustomizationDefault:
+            // head/face, body, hands, legs, headwear, mask, backpack.
+            _appearance[spawn.GetInstanceID()] = new int[] {
+                -1, spec.Body, spec.Hands, spec.Legs,
+                spec.Headwear, spec.Mask, -1 };
         }
 
         public static void NpcStartPostfix(object __instance)
@@ -409,6 +451,17 @@ namespace NextDayRevival
         public static void Aussteigen(GameObject car, Component vgs, int count,
                                       bool tank, string fraktion)
         {
+            Aussteigen(car, vgs, count, tank, fraktion, null);
+        }
+
+        /// <summary>Composition-aware wreck crew. The list order is the editor's
+        /// role order for this vehicle; each spawn point receives that role's
+        /// validated main weapon and uniform ids. A null list keeps the legacy
+        /// config-driven MG42/LAW crew unchanged.</summary>
+        internal static void Aussteigen(GameObject car, Component vgs, int count,
+                                      bool tank, string fraktion,
+                                      List<RevivalComposition.CrewMan> composition)
+        {
             if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
             if (car == null) return;
 
@@ -479,7 +532,11 @@ namespace NextDayRevival
                 // GetComponentsInChildren when _npcSpawnPoints is null.
                 for (int i = 0; i < count; i++)
                 {
-                    GameObject sp = new GameObject("Crew" + i);
+                    RevivalComposition.CrewMan spec = composition != null
+                        && i < composition.Count ? composition[i] : null;
+                    string role = spec == null || spec.Role.Length == 0
+                        ? "crew" : spec.Role;
+                    GameObject sp = new GameObject("Crew" + i + "_" + role);
                     sp.transform.SetParent(settlement.transform, true);
                     sp.transform.position = wo[i];
                     Component punkt = sp.AddComponent(pType);
@@ -487,7 +544,10 @@ namespace NextDayRevival
                     Abschreiben(punkt, VorlagePunkt(pType));
                     Component military = VorlageMilitaer(pType);
                     Abschreiben(punkt, military);
-                    Punkt(punkt, military != null, i < lawCount ? LAW_ID : MG42_ID);
+                    int weapon = spec != null && spec.MainWeapon > 0
+                        ? spec.MainWeapon : (i < lawCount ? LAW_ID : MG42_ID);
+                    Punkt(punkt, military != null, weapon, spec);
+                    RegisterAppearance(punkt, spec);
                 }
 
                 // An unregistered PhotonView - see the class comment.
@@ -502,6 +562,7 @@ namespace NextDayRevival
                 // The game's own entry point. On the master client it runs
                 // InitSpawnNpc and InitSetupNpc, and those two build the men.
                 Invoke(sied, "StartMainInit");
+                _appearance.Clear();
                 Set(sied, "AllInitializationDone", true);
                 Absichern(sied);
 
@@ -511,12 +572,14 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Crew: " + count + " " + wer
                     + " out of the "
                     + (tank ? "tank" : "BTR") + " at " + car.transform.position
+                    + (composition == null ? "" : " with editor loadouts")
                     + " - " + _settlements.Count + " crew(s) on the ground.");
                 Turret.Hinweis(count + " " + wer + Loc.T(" выбрались из обломков",
                                                          " out of the wreck"), 4f);
             }
             catch (Exception ex)
             {
+                _appearance.Clear();
                 RevivalPlugin.L.LogError("Crew: nobody climbed out - " + ex);
                 if (settlement != null) UnityEngine.Object.Destroy(settlement);
             }
@@ -926,12 +989,13 @@ namespace NextDayRevival
         /// <summary>
         /// One spawn point. Only the fields whose meaning is CONFIRMED are
         /// written; everything else keeps the value the component ships with.
-        /// The appearance comes from the shipped military_1_heavy preset. All
-        /// spawn points receive the same seven item ids, so a group is a unit
-        /// rather than a random collection. GrantWeaponType 1 is the confirmed
+        /// The shipped military_1_heavy preset remains the fallback. An editor
+        /// composition overlays its selected equipment slots on the game's
+        /// generated face and backpack. GrantWeaponType 1 is the confirmed
         /// fixed-id path in `NPC_Settlement::GetWeaponId`.
         /// </summary>
-        static void Punkt(Component sp, bool militaryPreset, int weaponId)
+        static void Punkt(Component sp, bool militaryPreset, int weaponId,
+                          RevivalComposition.CrewMan spec)
         {
             Set(sp, "Active", true);
             SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value);
@@ -957,7 +1021,9 @@ namespace NextDayRevival
             // separately from MainOptions.MyFraction.
             FieldInfo qf = AccessTools.Field(sp.GetType(), "Quests");
             object quests = qf == null ? null : qf.GetValue(sp);
-            if (quests != null) Set(quests, "NameKey", "Patrol Crew");
+            if (quests != null)
+                Set(quests, "NameKey", spec == null || spec.Role.Length == 0
+                    ? "Patrol Crew" : "Patrol Crew - " + spec.Role);
 
             // Loot on the body is phase 5 and needs SpawnCategories, which is
             // a list this class has no business inventing. At 0 the game's own

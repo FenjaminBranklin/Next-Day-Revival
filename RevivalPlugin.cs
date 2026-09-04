@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.6.0";
+        public const string VERSION = "6.7.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -445,6 +445,7 @@ namespace NextDayRevival
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
+            RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
             BuildItemTable();

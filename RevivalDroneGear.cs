@@ -57,6 +57,7 @@ namespace NextDayRevival
         public static ConfigEntry<float> CfgAntennaHeight;
         public static ConfigEntry<float> CfgAntennaBack;
         public static ConfigEntry<float> CfgAntennaUp;
+        public static ConfigEntry<float> CfgAntennaEmerge;
         public static ConfigEntry<string> CfgAntennaKey;
         // --- Launch hold: the seconds a drone key is held before it lifts
         public static ConfigEntry<float> CfgLaunchHoldSeconds;
@@ -94,6 +95,12 @@ namespace NextDayRevival
                 "Wie viele Meter UNTER dem Kopf der Mastfuss ansetzt (Rucksack-/"
                 + "Oberkoerperhoehe). 0.55 = knapp unter den Schultern. Nur zum "
                 + "Feinjustieren, wo der Mast aus dem Rucksack tritt.");
+            CfgAntennaEmerge = cfg.Bind("DroneGear", "AntennaEmerge", 0.20f,
+                "Wie viele Meter UNTER der Kopfoberkante die Antenne sichtbar aus "
+                + "dem Rucksack tritt. Alles UNTERHALB dieser Linie wird nicht "
+                + "gezeichnet, damit der Unterkoerper des Masts im Ruecken "
+                + "verborgen bleibt - nur der herausragende Teil ist sichtbar. "
+                + "Klein halten (0.1-0.3); nur zum Feinjustieren der Austrittslinie.");
             CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
                 "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
                 + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
@@ -135,7 +142,17 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (CfgEnabled != null && !CfgEnabled.Value) return;
+            if (CfgEnabled != null && !CfgEnabled.Value)
+            {
+                // The whole drone/antenna system is off. If it was switched off
+                // DURING a deploy, Antenna.Tick would never run again to reach
+                // Finish/Retract, so Antenna.Deploying would stay true and
+                // DroneInputHook would keep the player frozen for good. Clear a
+                // stale lock here, mirroring the "gate off" retract inside
+                // Antenna.TickCore that this early return would otherwise skip.
+                if (Antenna.Deploying || Antenna.Up) Antenna.ForceRetract("drone system disabled");
+                return;
+            }
             Antenna.Tick();
             SurvDrone.Tick();
         }
@@ -518,6 +535,20 @@ namespace NextDayRevival
         public static bool Up;         // antenna raised, drones may launch
         public static bool Deploying;  // raise in progress; freezes the player
 
+        /// <summary>Whether the antenna deploy should freeze the player right now.
+        /// The freeze decision reads THIS, not the raw Deploying flag. A deploy is
+        /// time-bounded and is always cleared by Finish at <see cref="_end"/>, so
+        /// if we are STILL "deploying" past that deadline the per-frame
+        /// Antenna.Tick that would have called Finish/Retract has stopped (death,
+        /// downed, a scene change, or the drone system disabled mid-deploy). In
+        /// that case do NOT keep the body frozen for good - report not-frozen so
+        /// movement returns. This never frees a legitimate deploy, which has
+        /// already cleared Deploying by the deadline.</summary>
+        public static bool Frozen
+        {
+            get { return Deploying && Time.time <= _end + 3f; }
+        }
+
         static float _start;
         static float _len;
         static float _end;
@@ -528,6 +559,7 @@ namespace NextDayRevival
         const int Segments = 4;
         static GameObject _root;
         static GameObject[] _seg;
+        static Renderer[] _rend;   // one per segment, toggled by the emergence clip
         static Transform _pilot;
         static Material _grey;
 
@@ -692,6 +724,12 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Antenna: retracted (" + why + ").");
         }
 
+        /// <summary>Clear a stale deploy/up state and its movement lock from
+        /// outside Antenna.Tick - used when the drone system is disabled mid-deploy
+        /// and Tick would otherwise never run again to clear Deploying. Safe no-op
+        /// when nothing is deployed.</summary>
+        internal static void ForceRetract(string why) { Retract(why); }
+
         // ------------------------------------------------------------- visual
 
         // Segment radii, fat base to thin tip. A real telescopic whip tapers,
@@ -707,6 +745,7 @@ namespace NextDayRevival
 
                 _root = new GameObject("NDR_Antenna");
                 _seg = new GameObject[Segments];
+                _rend = new Renderer[Segments];
                 // Parent to the player body so the mast is guaranteed to sit
                 // exactly where the body is - the way the old (visible) cylinder
                 // did. A world-space object that only follows a cached transform
@@ -720,11 +759,9 @@ namespace NextDayRevival
                     c.name = "NDR_AntennaSeg" + i;
                     DroneGear.StripCollider(c);
                     c.transform.SetParent(_root.transform, false);
-                    if (g != null)
-                    {
-                        Renderer r = c.GetComponent<Renderer>();
-                        if (r != null) r.sharedMaterial = g;
-                    }
+                    Renderer r = c.GetComponent<Renderer>();
+                    if (r != null && g != null) r.sharedMaterial = g;
+                    _rend[i] = r;
                     _seg[i] = c;
                 }
                 Layout(0f);
@@ -799,11 +836,21 @@ namespace NextDayRevival
             float segMax = total / Segments;
             float h = Mathf.Clamp01(t) * total;
 
+            // Emergence line: the antenna is only DRAWN above a point just below
+            // the head top, so the mast's lower body - the part that runs down
+            // the back inside/behind the body - is never rendered. The player
+            // only ever sees the piece that sticks out of the pack. Expressed as
+            // a local Y over the root foot (foot is at headTop - drop, so the
+            // line sits (drop - emerge) above the foot).
+            float emerge = DroneGear.CfgAntennaEmerge == null ? 0.20f : DroneGear.CfgAntennaEmerge.Value;
+            float emergeLocal = Mathf.Max(0f, drop) - Mathf.Max(0f, emerge);
+
             float bottom = 0f;
             for (int i = 0; i < Segments; i++)
             {
                 GameObject c = _seg == null ? null : _seg[i];
                 if (c == null) continue;
+                Renderer rend = _rend == null ? null : _rend[i];
 
                 // How much of THIS segment is out: it starts extending only once
                 // everything below it is fully out.
@@ -813,11 +860,27 @@ namespace NextDayRevival
                 // the nested tubes read as a stowed telescope, not a gap.
                 if (!shown) len = 0.02f;
 
-                float r = SegRadius[Mathf.Min(i, SegRadius.Length - 1)];
-                // Unity cylinder: 2 m tall, 1 m across at scale 1, pivot centre.
-                c.transform.localRotation = Quaternion.identity;
-                c.transform.localScale = new Vector3(r * 2f, len * 0.5f, r * 2f);
-                c.transform.localPosition = new Vector3(0f, bottom + len * 0.5f, 0f);
+                // Clip the segment to the part above the emergence line. Below it
+                // the tube is not drawn at all - the buried lower body stays
+                // hidden regardless of camera angle or body occlusion.
+                float segLo = bottom;
+                float segHi = bottom + len;
+                float visLo = Mathf.Max(segLo, emergeLocal);
+                float visLen = segHi - visLo;
+
+                if (visLen <= 0.001f)
+                {
+                    if (rend != null) rend.enabled = false;
+                }
+                else
+                {
+                    if (rend != null) rend.enabled = true;
+                    float r = SegRadius[Mathf.Min(i, SegRadius.Length - 1)];
+                    // Unity cylinder: 2 m tall, 1 m across at scale 1, pivot centre.
+                    c.transform.localRotation = Quaternion.identity;
+                    c.transform.localScale = new Vector3(r * 2f, visLen * 0.5f, r * 2f);
+                    c.transform.localPosition = new Vector3(0f, visLo + visLen * 0.5f, 0f);
+                }
 
                 bottom += shown ? len : 0f;
             }
@@ -872,6 +935,7 @@ namespace NextDayRevival
         {
             if (_root != null) { UnityEngine.Object.Destroy(_root); _root = null; }
             _seg = null;
+            _rend = null;
             _pilot = null;
         }
 

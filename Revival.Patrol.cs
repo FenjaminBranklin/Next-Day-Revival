@@ -198,6 +198,7 @@ namespace NextDayRevival
             public float Lost;           // seconds since it was last seen
             public float NextShot;       // Time.time the gun may fire again
             public float NextLook;       // Time.time of the next target scan
+            public float NextNet;        // Time.time of the next turret-angle network readout
             public int Burst;            // shots fired in the running burst
             public int Shots, Hits;
 
@@ -206,6 +207,8 @@ namespace NextDayRevival
             public int CrewSize;         // men aboard, one per seat
             public bool CrewOut;         // they have climbed out
             public float Died;           // Time.time the vehicle was killed
+            public int CompositionVehicle = -1; // editor vehicle index, or legacy
+            public int PatrolGroupId;    // one configured mini-convoy formation
 
             // NDR convoy (RevivalConvoy.cs). ConvoyId 0 = ordinary patrol; a
             // non-zero id groups the vehicles of one convoy. Hold stops the
@@ -215,9 +218,26 @@ namespace NextDayRevival
             public int ConvoyId;
             public bool Hold;
             public bool Stocked;
+
+            // NDR convoy one-way drive (feature/convoy-oneway-drive). A convoy
+            // vehicle does NOT loop or drive out-and-back: it starts lined up at
+            // the route's beginning, drives the recorded route ONCE, and vanishes
+            // at the last waypoint (Arrived). OneWay marks that; Arrived is set by
+            // Advance when the end is reached and consumed by FixedTick.
+            public bool OneWay;
+            public bool Arrived;
+            // Colliders of this convoy car, cached for "ghost through": convoy
+            // vehicles pass through world props and each other via
+            // Physics.IgnoreCollision, so they never crash, snag, or shove one
+            // another off the road. Their own body collider stays live, so
+            // bullets still hit and kill them. Ghosted holds the ids already made
+            // non-colliding, so each obstacle is handled at most once.
+            public Component[] Cols;
+            public Dictionary<int, bool> Ghosted;
         }
 
         static List<Unit> _units = new List<Unit>();
+        static int _nextPatrolGroupId = 1;
 
         // --------------------------------------------------- the automatic
 
@@ -413,6 +433,9 @@ namespace NextDayRevival
                     }
                     if (!u.Armed) { Arm(u); continue; }
                     if (Gefallen(u)) continue;
+                    // NDR convoy one-way: a convoy that has driven its whole
+                    // recorded route to the last waypoint vanishes there.
+                    if (u.Arrived) { ArriveEnd(u, i); continue; }
                     Keep(u);
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
@@ -606,11 +629,12 @@ namespace NextDayRevival
         /// until `RespawnSeconds` says otherwise.</summary>
         static int Fahren(string name)
         {
-            int n = 0;
+            Dictionary<int, bool> groups = new Dictionary<int, bool>();
             for (int i = 0; i < _units.Count; i++)
                 if (_units[i].Car != null && _units[i].Route != null
-                    && _units[i].Route.Name == name) n++;
-            return n;
+                    && _units[i].Route.Name == name && _units[i].ConvoyId == 0)
+                    groups[_units[i].PatrolGroupId] = true;
+            return groups.Count;
         }
 
         /// <summary>Units the auto-patrol accounting owns - convoy vehicles
@@ -676,33 +700,36 @@ namespace NextDayRevival
         //  handle over Unit; the convoy never sees the Unit type itself.
         // =====================================================================
 
-        /// <summary>Spawn one convoy vehicle of a forced kind at a forced start
-        /// waypoint on a route, tagged with a convoy id. Returns an opaque handle
-        /// (the Unit) or null if the route is unusable or the spawn was refused
-        /// (e.g. this client is not the master). Uses the same out-and-back route
-        /// and ground raycast the ordinary spawn does.</summary>
+        /// <summary>
+        /// Spawn one convoy vehicle of a forced kind on a route, lined up
+        /// <paramref name="backMetres"/> behind the route's FIRST waypoint along
+        /// the wp0 -> wp1 heading, tagged with a convoy id. Returns an opaque
+        /// handle (the Unit) or null if the route is unusable or the spawn was
+        /// refused (e.g. this client is not the master).
+        ///
+        /// Unlike a patrol, a convoy vehicle drives the recorded route ONE WAY:
+        /// no OutAndBack u-turn, no lap loop. It rolls from the start line to the
+        /// last waypoint and then vanishes (Unit.Arrived). The whole column is
+        /// laid out on the straight start line - front vehicle on wp0, the rest
+        /// queued behind it, all facing wp1 - and every member is set to ghost
+        /// through world props and its line-mates so a tight column at full gas
+        /// never crashes or shoves itself off the road.
+        /// </summary>
         internal static object SpawnConvoyUnit(string routeName, bool tank,
-                                               int startIndex, int convoyId)
+                                               float backMetres, int convoyId,
+                                               int compositionVehicle)
         {
             Load(false);
             Route src;
             if (!_routes.TryGetValue(routeName, out src) || src == null
                 || src.P.Count < 3) return null;
 
-            Route r = OutAndBack(src);
+            Route r = CopyRoute(src);          // one-way private copy, no u-turn
             int n = r.P.Count;
-            int start = ((startIndex % n) + n) % n;
 
-            Vector3 pos = r.P[start].Pos + Vector3.up * 1.6f;
-            Vector3 ground;
-            GameObject under = Turret.RaycastObject(r.P[start].Pos + Vector3.up * 30f,
-                                                    Vector3.down, 200f, out ground);
-            if (under != null) pos = ground + Vector3.up * 1.6f;
-
-            Vector3 ahead = r.P[(start + 1) % n].Pos - r.P[start].Pos;
-            ahead.y = 0f;
-            if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
-            ahead.Normalize();
+            Vector3 ahead = FirstLegDir(r);    // wp0 -> wp1, the start-line axis
+            Vector3 spot = r.P[0].Pos - ahead * Mathf.Max(0f, backMetres);
+            Vector3 pos = Grounded(spot, 1.6f);
 
             GameObject car = CarSpawn.SpawnAt(pos,
                 Quaternion.LookRotation(ahead, Vector3.up), tank);
@@ -713,14 +740,71 @@ namespace NextDayRevival
             u.Route = r;
             u.Tank = tank;
             u.Seite = r.Seite;
-            u.Next = (start + 1) % n;
+            u.Next = 0;                        // roll onto wp0, then the route
             u.ConvoyId = convoyId;
+            u.CompositionVehicle = compositionVehicle;
+            u.OneWay = true;
+            u.Cols = CollectCols(car);
+
+            // Line-mates pass right through each other: a tight start line does
+            // not explode and a faster follower does not knock the one ahead off
+            // the road.
+            for (int i = 0; i < _units.Count; i++)
+                if (_units[i].ConvoyId == convoyId)
+                    GhostPair(u.Cols, _units[i].Cols);
+
             _units.Add(u);
             _spawned++;
             RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + (tank ? "tank" : "APC")
-                + " (" + u.Seite + ") on " + r.Name + " at waypoint " + start
-                + " of " + n + ".");
+                + " (" + u.Seite + ") lined up " + backMetres.ToString("0")
+                + " m behind the start of " + r.Name + " (" + n
+                + " waypoints, one-way).");
             return u;
+        }
+
+        /// <summary>A plain forward copy of a route: same points, same flags, no
+        /// out-and-back tail. A convoy drives this once and stops.</summary>
+        static Route CopyRoute(Route r)
+        {
+            Route c = new Route();
+            c.Name = r.Name;
+            c.Fraction = r.Fraction;
+            c.Vehicle = r.Vehicle;
+            c.Count = r.Count;
+            c.Enabled = r.Enabled;
+            for (int i = 0; i < r.P.Count; i++) c.P.Add(r.P[i]);
+            return c;
+        }
+
+        /// <summary>The flat direction of the first non-degenerate leg (wp0
+        /// onward). The convoy start line runs along this, and every vehicle
+        /// faces it.</summary>
+        static Vector3 FirstLegDir(Route r)
+        {
+            int n = r.P.Count;
+            for (int i = 1; i < n; i++)
+            {
+                Vector3 d = r.P[i].Pos - r.P[0].Pos;
+                d.y = 0f;
+                if (d.sqrMagnitude > 0.0001f) return d.normalized;
+            }
+            return Vector3.forward;
+        }
+
+        /// <summary>A convoy vehicle that has driven its whole route to the last
+        /// waypoint is taken out of the world there - it simply vanishes, as the
+        /// user wants, rather than looping or lingering. Called from FixedTick,
+        /// which iterates the unit list top-down, so removing by index is safe.</summary>
+        static void ArriveEnd(Unit u, int index)
+        {
+            RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": " + (u.Tank ? "tank" : "APC")
+                + " reached the end of " + u.Route.Name + " - removed.");
+            Forget(u);
+            Weg(u.Car);
+            if (index >= 0 && index < _units.Count && _units[index] == u)
+                _units.RemoveAt(index);
+            else
+                _units.Remove(u);
         }
 
         /// <summary>The convoy vehicle is on the road and not yet a wreck.</summary>
@@ -966,48 +1050,76 @@ namespace NextDayRevival
                         + ", where the recording began.");
             }
 
-            // The waypoints come from the CAMERA, which sits above the driver
-            // and, in a vehicle, well above the road. Dropping the patrol from
-            // that height is survivable but ugly - the ground under the
-            // waypoint is the honest place, found the same way the F7 spawn
-            // finds it.
-            Vector3 pos = r.P[start].Pos + Vector3.up * 1.6f;
-            Vector3 ground;
-            GameObject under = Turret.RaycastObject(r.P[start].Pos + Vector3.up * 30f,
-                                                    Vector3.down, 200f, out ground);
-            if (under != null) pos = ground + Vector3.up * 1.6f;
-
             Vector3 ahead = r.P[(start + 1) % r.P.Count].Pos - r.P[start].Pos;
             ahead.y = 0f;
             if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
             ahead.Normalize();
 
-            bool tank = TankThisTime(r);
-            GameObject car = CarSpawn.SpawnAt(pos, Quaternion.LookRotation(ahead, Vector3.up),
-                                              tank);
-            if (car == null) return;      // CarSpawn has already said why
+            RevivalComposition.Composition composition = RevivalComposition.Of(r.Name);
+            int vehicleCount = composition == null || composition.Vehicles.Count == 0
+                ? 1 : composition.Vehicles.Count;
+            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+            if (PatrolUnitCount() + vehicleCount > max)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: editor composition on " + r.Name
+                    + " needs " + vehicleCount + " vehicle slots, but only "
+                    + (max - PatrolUnitCount()) + " remain under MaxVehicles.");
+                return;
+            }
 
-            Unit u = new Unit();
-            u.Car = car;
-            u.Route = r;
-            u.Tank = tank;
-            u.Seite = r.Seite;
-            u.Next = (start + 1) % r.P.Count;
-            _units.Add(u);
-            _spawned++;
+            int groupId = _nextPatrolGroupId++;
+            List<Unit> made = new List<Unit>();
+            for (int k = 0; k < vehicleCount; k++)
+            {
+                bool tank = composition == null
+                    ? TankThisTime(r) : composition.Vehicles[k].IsTank;
+                // A configured patrol is a small road column. It keeps the
+                // ordinary patrol route behavior, but starts front-to-tail on
+                // the first-leg centreline instead of stacking vehicles.
+                Vector3 spot = r.P[start].Pos - ahead * (RevivalConvoy.LineupGap * k);
+                Vector3 pos = Grounded(spot, 1.6f);
+                GameObject car = CarSpawn.SpawnAt(pos,
+                    Quaternion.LookRotation(ahead, Vector3.up), tank);
+                if (car == null)
+                {
+                    for (int q = made.Count - 1; q >= 0; q--)
+                    {
+                        Forget(made[q]);
+                        Weg(made[q].Car);
+                        _units.Remove(made[q]);
+                    }
+                    RevivalPlugin.L.LogWarning("Patrol: rolled back partial editor "
+                        + "composition on " + r.Name + ".");
+                    return;
+                }
 
-            RevivalPlugin.L.LogInfo("Patrol: "
-                + (auto ? "automatic " : "")
-                + (tank ? "tank" : "BTR")
-                + " (" + u.Seite + ") put down on " + r.Name
-                + " at waypoint " + start
-                + " " + pos + ", driving to " + u.Next
+                Unit u = new Unit();
+                u.Car = car;
+                u.Route = r;
+                u.Tank = tank;
+                u.Seite = r.Seite;
+                u.Next = (start + 1) % r.P.Count;
+                u.CompositionVehicle = composition == null ? -1 : k;
+                u.PatrolGroupId = groupId;
+                u.Cols = CollectCols(car);
+                for (int q = 0; q < made.Count; q++) GhostPair(u.Cols, made[q].Cols);
+                _units.Add(u);
+                made.Add(u);
+                _spawned++;
+            }
+
+            RevivalPlugin.L.LogInfo("Patrol: " + (auto ? "automatic " : "")
+                + vehicleCount + "-vehicle "
+                + (composition == null ? "patrol" : "editor mini-convoy")
+                + " (" + r.Seite + ") put down on " + r.Name
+                + " at waypoint " + start + ", driving to "
+                + ((start + 1) % r.P.Count)
                 + (away >= 0f ? ", " + away.ToString("0") + " m from the player" : "")
                 + ".");
             Turret.Hinweis(away >= 0f
-                ? Loc.T("Патруль ", "Patrol ") + r.Name + " (" + u.Seite + "), "
+                ? Loc.T("Патруль ", "Patrol ") + r.Name + " (" + r.Seite + "), "
                   + away.ToString("0") + Loc.T(" м от игрока", " m away")
-                : Loc.T("Патруль ", "Patrol ") + r.Name + " (" + u.Seite + ")"
+                : Loc.T("Патруль ", "Patrol ") + r.Name + " (" + r.Seite + ")"
                   + Loc.T(" запущен", " started"), 4f);
         }
 
@@ -1123,6 +1235,26 @@ namespace NextDayRevival
             return v.magnitude;
         }
 
+        /// <summary>Put an authored X/Z point on the world surface. Roadnet v2
+        /// carries terrain y, so its short local ray is precise. Manual and
+        /// migrated routes may still have y=0; for those, start above the full
+        /// terrain height range instead of spawning below the map.</summary>
+        static Vector3 Grounded(Vector3 point, float lift)
+        {
+            Vector3 origin = point + Vector3.up * 30f;
+            float range = 200f;
+            if (point.y < 10f)
+            {
+                origin.y = 2500f;
+                range = 3000f;
+            }
+            Vector3 ground;
+            GameObject under = Turret.RaycastObject(origin, Vector3.down,
+                                                    range, out ground);
+            return under == null ? point + Vector3.up * lift
+                                 : ground + Vector3.up * lift;
+        }
+
         // =====================================================================
         //  Arming: the four settings that make an empty vehicle drivable
         // =====================================================================
@@ -1175,6 +1307,10 @@ namespace NextDayRevival
 
             Gun.Collect(u);
             u.CrewSize = Besatzung(u);
+            List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
+                ? null : RevivalComposition.CrewOf(u.Route.Name,
+                                                    u.CompositionVehicle);
+            if (crew != null) u.CrewSize = Mathf.Min(u.CrewSize, crew.Count);
 
             u.Armed = true;
             VehicleModules.StockTrunk(u.Car.transform, u.Tank);   // NDR vehicle modules: trunk loot
@@ -1254,7 +1390,11 @@ namespace NextDayRevival
                 if (!u.CrewOut && u.CrewSize > 0)
                 {
                     u.CrewOut = true;
-                    Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite);
+                    List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
+                        ? null : RevivalComposition.CrewOf(u.Route.Name,
+                                                          u.CompositionVehicle);
+                    Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite,
+                                    crew);
                 }
 
                 if (u.ConvoyId == 0) Verloren();   // NDR convoy: convoy losses are not auto-refilled
@@ -1341,29 +1481,50 @@ namespace NextDayRevival
             float angle = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
 
             // --- how fast ----------------------------------------------------
-            float want = r.P[u.Next].Speed;
-            if (want <= 0f) want = RevivalPlugin.CfgPatrolSpeed.Value;
-            want *= CornerFactor(r, u.Next);
-            want = Mathf.Max(want, 12f);
+            float want;
+            if (u.ConvoyId != 0)
+            {
+                // A convoy runs at full gas. It still eases for a hard corner so
+                // pure pursuit can hold the recorded line, but it never crawls.
+                want = RevivalConvoy.CruiseSpeed * CornerFactor(r, u.Next);
+                want = Mathf.Max(want, 20f);
+            }
+            else
+            {
+                want = r.P[u.Next].Speed;
+                if (want <= 0f) want = RevivalPlugin.CfgPatrolSpeed.Value;
+                want *= CornerFactor(r, u.Next);
+                want = Mathf.Max(want, 12f);
+            }
 
             float steer = Mathf.Clamp(angle / FullLockAt, -1f, 1f);
             float gas, brake;
             Throttle(want, kmh, out gas, out brake);
 
             // --- what is in the way ------------------------------------------
-            float dodge = Avoid(u, t, vel.magnitude);
-            if (dodge != 0f)
+            if (u.ConvoyId != 0)
             {
-                steer = Mathf.Clamp(steer + dodge, -1f, 1f);
-                if (want > 25f) { gas *= 0.5f; }
+                // A convoy does not steer around anything and never counts as
+                // stuck: it ghosts straight through props and its line-mates and
+                // drives its waypoints bluntly. No Avoid, no Escalate/Free.
+                GhostAhead(u, t, vel.magnitude);
             }
+            else
+            {
+                float dodge = Avoid(u, t, vel.magnitude);
+                if (dodge != 0f)
+                {
+                    steer = Mathf.Clamp(steer + dodge, -1f, 1f);
+                    if (want > 25f) { gas *= 0.5f; }
+                }
 
-            // --- stuck? -------------------------------------------------------
-            // A patrol is stuck because it is not moving, regardless of what
-            // the throttle happens to say. The old throttle condition let the
-            // obstacle avoidance reset this timer indefinitely.
-            if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
-            if (Escalate(u, pos)) return;
+                // --- stuck? ---------------------------------------------------
+                // A patrol is stuck because it is not moving, regardless of what
+                // the throttle happens to say. The old throttle condition let the
+                // obstacle avoidance reset this timer indefinitely.
+                if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+                if (Escalate(u, pos)) return;
+            }
 
             // Braking under walking pace is a gear change, not a brake
             // (see the class comment). Coast instead.
@@ -1398,19 +1559,33 @@ namespace NextDayRevival
                 bool close = to.sqrMagnitude < pass * pass;
 
                 bool past = false;
-                Vector3 prev = r.P[(u.Next - 1 + n) % n].Pos;
-                Vector3 leg = w - prev; leg.y = 0f;
-                if (leg.sqrMagnitude > 0.01f)
+                // One-way convoy at the very start: the "previous" of waypoint 0
+                // is the wrap-around leg from the LAST waypoint, which is
+                // meaningless here and could falsely read as "already past". A
+                // vehicle queued behind the start line advances by proximity
+                // only until it has rolled onto the route.
+                if (!(u.OneWay && u.Next == 0 && u.Lap == 0))
                 {
-                    Vector3 back = pos - w; back.y = 0f;
-                    past = Vector3.Dot(back, leg.normalized) > 0f;
+                    Vector3 prev = r.P[(u.Next - 1 + n) % n].Pos;
+                    Vector3 leg = w - prev; leg.y = 0f;
+                    if (leg.sqrMagnitude > 0.01f)
+                    {
+                        Vector3 back = pos - w; back.y = 0f;
+                        past = Vector3.Dot(back, leg.normalized) > 0f;
+                    }
                 }
 
                 if (!close && !past) break;
 
                 u.Next++;
                 moved++;
-                if (u.Next >= n) { u.Next = 0; u.Lap++; }
+                if (u.Next >= n)
+                {
+                    // One-way convoy: the recorded route is driven ONCE. Reaching
+                    // the end means "arrive and vanish", not loop back to wp0.
+                    if (u.OneWay) { u.Arrived = true; u.Next = n - 1; break; }
+                    u.Next = 0; u.Lap++;
+                }
             }
 
             if (moved >= n)
@@ -1427,12 +1602,16 @@ namespace NextDayRevival
             int n = r.P.Count;
             Vector3 cur = pos;
             Vector3 target = r.P[next].Pos;
+            target.y = pos.y;
             float rest = dist;
             int i = next;
 
             for (int step = 0; step < n; step++)
             {
                 Vector3 w = r.P[i].Pos;
+                // Steering is a ground-plane problem. This also keeps migrated
+                // manual routes with y=0 from becoming vertical lookahead legs.
+                w.y = pos.y;
                 Vector3 seg = w - cur;
                 float len = seg.magnitude;
                 if (len > 0.001f)
@@ -1732,6 +1911,117 @@ namespace NextDayRevival
         }
 
         // =====================================================================
+        //  NDR convoy "ghost through" (feature/convoy-oneway-drive)
+        //
+        //  A convoy vehicle passes through the world instead of steering around
+        //  it or getting stuck on it. Not by disabling the prop's collider (that
+        //  is global and would drop other props and NPCs through a building), but
+        //  by Physics.IgnoreCollision between THIS car's colliders and the one
+        //  obstacle it is about to touch: local, reversible, and the obstacle
+        //  stays fully solid for everyone and everything else. The car's own body
+        //  collider is never touched, so bullets still hit it and it still dies.
+        //  Terrain and anything alive (player, NPC, animal, vehicle) are left
+        //  solid - a convoy runs on the ground and can run a man over.
+        // =====================================================================
+
+        static MethodInfo _ignoreColl;
+        static bool _ignoreLookedUp;
+        static Type _terrainType;
+        static bool _terrainLookedUp;
+
+        static bool IgnoreLookUp()
+        {
+            if (_ignoreLookedUp) return _ignoreColl != null;
+            _ignoreLookedUp = true;
+            Type phys = RevivalPlugin.TypeByName("UnityEngine.Physics");
+            Type col = PhysLookUp() ? _colliderType : null;
+            if (phys != null && col != null)
+                _ignoreColl = AccessTools.Method(phys, "IgnoreCollision",
+                    new Type[] { col, col, typeof(bool) }, null);
+            if (_ignoreColl == null)
+                RevivalPlugin.L.LogWarning("Patrol: Physics.IgnoreCollision(Collider,"
+                    + "Collider,bool) not found - convoy vehicles cannot ghost "
+                    + "through obstacles and may snag on the map.");
+            return _ignoreColl != null;
+        }
+
+        /// <summary>The colliders of a spawned car, for ghosting. Null when the
+        /// Collider type could not be resolved.</summary>
+        static Component[] CollectCols(GameObject car)
+        {
+            if (car == null || !PhysLookUp()) return null;
+            return car.GetComponentsInChildren(_colliderType, true);
+        }
+
+        /// <summary>Make every collider in <paramref name="a"/> ignore every
+        /// collider in <paramref name="b"/> and vice versa. Silent no-op if the
+        /// reflection seam is missing.</summary>
+        static void GhostPair(Component[] a, Component[] b)
+        {
+            if (a == null || b == null || !IgnoreLookUp()) return;
+            object[] args = new object[3];
+            args[2] = true;
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] == null) continue;
+                for (int j = 0; j < b.Length; j++)
+                {
+                    if (b[j] == null) continue;
+                    args[0] = a[i];
+                    args[1] = b[j];
+                    try { _ignoreColl.Invoke(null, args); }
+                    catch { /* one bad collider pair must not stop the rest */ }
+                }
+            }
+        }
+
+        static bool IsTerrain(GameObject go)
+        {
+            if (!_terrainLookedUp)
+            {
+                _terrainLookedUp = true;
+                _terrainType = RevivalPlugin.TypeByName("UnityEngine.Terrain");
+            }
+            return _terrainType != null && go.GetComponent(_terrainType) != null;
+        }
+
+        /// <summary>Cast the same three feeler rays the avoider uses, but instead
+        /// of steering, make the convoy car pass through whatever solid, dead,
+        /// non-terrain prop each ray finds. Every obstacle is handled once
+        /// (Unit.Ghosted), so the per-step cost is a few short raycasts.</summary>
+        static void GhostAhead(Unit u, Transform t, float speed)
+        {
+            if (u.Cols == null) return;
+            float range = Mathf.Clamp(speed * 1.5f, 10f, 30f);
+            Vector3 nose = t.position + t.forward * NoseOffset + Vector3.up * 1.2f;
+            GhostRay(u, nose, t.forward, range);
+            GhostRay(u, nose, Quaternion.AngleAxis(-25f, t.up) * t.forward, range * 0.7f);
+            GhostRay(u, nose, Quaternion.AngleAxis(25f, t.up) * t.forward, range * 0.7f);
+        }
+
+        static void GhostRay(Unit u, Vector3 origin, Vector3 dir, float range)
+        {
+            Vector3 point;
+            GameObject go = Turret.RaycastObject(origin, dir, range, out point);
+            if (go == null) return;
+            if (u.Car != null && go.transform.IsChildOf(u.Car.transform)) return;
+
+            int id = go.GetInstanceID();
+            if (u.Ghosted == null) u.Ghosted = new Dictionary<int, bool>();
+            if (u.Ghosted.ContainsKey(id)) return;
+            u.Ghosted[id] = true;                 // decided once, either way
+
+            if (Lebendig(go.transform)) return;   // player, NPC, animal, vehicle: solid
+            if (IsTerrain(go)) return;            // never ghost the ground
+            if (!PhysLookUp()) return;
+
+            Component[] cols = go.GetComponentsInChildren(_colliderType, true);
+            GhostPair(u.Cols, cols);
+            RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": ghosting through \""
+                + go.name + "\" on " + u.Route.Name + ".");
+        }
+
+        // =====================================================================
         //  Fail-fast recovery
         // =====================================================================
 
@@ -1765,7 +2055,7 @@ namespace NextDayRevival
                 steps++;
             }
 
-            Vector3 target = r.P[to].Pos + Vector3.up * 1.5f;
+            Vector3 target = Grounded(r.P[to].Pos, 1.5f);
             Vector3 ahead = RouteDirection(r, to);
 
             Stop(u.Body);
@@ -1878,6 +2168,14 @@ namespace NextDayRevival
 
             static List<Spieler> _players = new List<Spieler>();
             static float _nextRefresh;
+
+            // Rolling phase so the per-vehicle target scans (the half that can
+            // cast a ray) do not all fall on the same frame. Each vehicle gets
+            // its first scan at a different point inside the ScanEvery window;
+            // the constant ScanEvery cadence then keeps them spread. Without
+            // this a group filled in the same second raycasts in lockstep and
+            // the frame overlay shows Patrol.Tick as a spike every half second.
+            static float _scanPhase;
 
             static Type _ngs, _statesType;
             static PropertyInfo _instance;
@@ -2012,6 +2310,14 @@ namespace NextDayRevival
                     Renderer r = u.Turrets[i].GetComponent<Renderer>();
                     if (r != null) { u.TurretRend = r; break; }
                 }
+
+                // Spread this vehicle's first target scan across the window so
+                // a group armed together does not scan in lockstep. The step is
+                // an irrational fraction of the window, so successive vehicles
+                // land far apart rather than folding back onto each other.
+                _scanPhase += ScanEvery * 0.618034f;
+                if (_scanPhase >= ScanEvery) _scanPhase -= ScanEvery;
+                u.NextLook = Time.time + _scanPhase;
             }
 
             static void Einer(Unit u)
@@ -2200,6 +2506,18 @@ namespace NextDayRevival
                     u.Turrets[i].localRotation =
                         Quaternion.RotateTowards(u.Turrets[i].localRotation, want, step);
                 }
+
+                // The barrel above turns every frame; the NETWORK readout does
+                // not need to. Turret.Net.Publish already drops sends between
+                // its own 0.08 s slots, but reading the angles back
+                // (Turret.AnglesFor) and the view-id lookup inside Publish ran
+                // every frame per engaged vehicle regardless. Gate the whole
+                // readout to the same 0.08 s so a firefight with several
+                // vehicles no longer does that trig and lookup 120 times a
+                // second. Remote clients interpolate between sends, so the
+                // picture on the other machines is unchanged.
+                if (Time.time < u.NextNet) return;
+                u.NextNet = Time.time + 0.08f;
                 float actualYaw, actualPitch;
                 if (Turret.AnglesFor(u.Turrets[0], out actualYaw, out actualPitch))
                     Turret.Net.Publish(u.Car.transform, actualYaw, actualPitch);
@@ -2629,6 +2947,7 @@ namespace NextDayRevival
         public static void Load(bool force)
         {
             if (_loaded && !force) return;
+            if (force) RevivalComposition.Load(true);
             _loaded = true;
             _routes.Clear();
             _order.Clear();

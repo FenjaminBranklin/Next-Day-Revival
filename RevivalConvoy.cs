@@ -79,6 +79,8 @@ namespace NextDayRevival
         internal static ConfigEntry<bool>    CfgGridTopIsNorth;
         internal static ConfigEntry<KeyCode> CfgSpawnKey;
         internal static ConfigEntry<float>   CfgBannerSeconds;
+        internal static ConfigEntry<float>   CfgLineupGap;
+        internal static ConfigEntry<float>   CfgCruiseSpeed;
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
 
@@ -143,6 +145,27 @@ namespace NextDayRevival
                 + "Abschalten. Auch der F4-Knopf \"Konvoi sofort\" tut das.");
             CfgBannerSeconds = cfg.Bind("Convoy", "BannerSeconds", 12f,
                 "Wie lange die Meldung unten links stehen bleibt.");
+            CfgLineupGap = cfg.Bind("Convoy", "LineupGapMetres", 14f,
+                "Abstand in Metern zwischen den Fahrzeugen in der Startaufstellung. "
+                + "Alle spawnen aufgereiht auf einer Linie ab Wegpunkt 0 in "
+                + "Fahrtrichtung, das vorderste auf Wegpunkt 0, die anderen "
+                + "dahinter - wie am Startgatter.");
+            CfgCruiseSpeed = cfg.Bind("Convoy", "CruiseSpeedKmh", 42f,
+                "Marschgeschwindigkeit eines Konvois in km/h. Der Konvoi faehrt "
+                + "Vollgas und bremst nur fuer harte Kurven ab.");
+        }
+
+        /// <summary>Full-gas cruise speed a convoy vehicle drives at, read by the
+        /// patrol driver for convoy units.</summary>
+        internal static float CruiseSpeed
+        {
+            get { return CfgCruiseSpeed == null ? 42f : Mathf.Max(12f, CfgCruiseSpeed.Value); }
+        }
+
+        /// <summary>Metres between vehicles in the start line-up.</summary>
+        internal static float LineupGap
+        {
+            get { return CfgLineupGap == null ? 14f : Mathf.Max(6f, CfgLineupGap.Value); }
         }
 
         // ============================================================== state
@@ -201,8 +224,11 @@ namespace NextDayRevival
 
                 if (!WorldUp()) { _nextSpawn = -1f; return; }
 
-                Spacing();
-                Despawn();
+                // While every vehicle of a convoy still drives, NOTHING holds
+                // them: they roll their route bluntly at full gas (the gun still
+                // fires in range). Only once a convoy has lost a vehicle does the
+                // reaction below stop survivors and pick one escapee.
+                Behaviour();
 
                 if (_nextSpawn < 0f) ScheduleNext();
                 else if (Time.time >= _nextSpawn)
@@ -320,17 +346,14 @@ namespace NextDayRevival
             }
 
             int n = pts.Count;
-            bool[] kinds = Composition();          // front -> tail, true = tank
-            int gapWp = GapWaypoints(pts);
-            int span = gapWp * (kinds.Length - 1);
-            Vector3 me = PlayerPos();
-            int front = ChooseFront(pts, me, span);
-            if (front < 0)
-            {
-                RevivalPlugin.L.LogWarning("Convoy: no spawn waypoint found on "
-                    + routeName + ".");
-                return false;
-            }
+            // The map/road/composition editor (RevivalComposition) may define the
+            // exact tank/APC order for THIS route; when it does, it wins over the
+            // Convoy/Tanks + Convoy/Apcs config. Otherwise the config composition
+            // is used, exactly as before. The one-way drive, line-up, spacing and
+            // loss reaction are unchanged either way - only WHICH kinds spawn.
+            bool[] kinds = RevivalComposition.VehicleKinds(routeName);
+            if (kinds == null || kinds.Length == 0)
+                kinds = Composition();             // front -> tail, true = tank
 
             int id = _nextId++;
             Convoy c = new Convoy();
@@ -338,12 +361,28 @@ namespace NextDayRevival
             c.Route = routeName;
             c.Born = Time.time;
 
+            // The whole column starts lined up on the route's start line: the
+            // FRONT vehicle on waypoint 0, each following vehicle one LineupGap
+            // further back along the wp0 -> wp1 heading, all facing forward - like
+            // a column waiting at the start gate. They drive off together at full
+            // gas and run the recorded route once. Members are added front first,
+            // so index 0 is the front and the last is the tail (the route order
+            // the behaviour reaction relies on).
+            float gap = LineupGap;
             for (int k = 0; k < kinds.Length; k++)
             {
-                int idx = front - gapWp * k;       // each next vehicle further back
-                if (idx < 0) idx = 0;
-                object h = Patrol.SpawnConvoyUnit(routeName, kinds[k], idx, id);
-                if (h == null) continue;
+                float back = gap * k;              // 0 = front, on waypoint 0
+                object h = Patrol.SpawnConvoyUnit(routeName, kinds[k], back, id, k);
+                if (h == null)
+                {
+                    // A column is useful only when it is complete. Keep the
+                    // existing all-or-nothing gameplay rule: remove every
+                    // member already made during this attempt and report fail.
+                    Patrol.ConvoyClearAll(id);
+                    RevivalPlugin.L.LogWarning("Convoy " + id + ": vehicle " + k
+                        + " failed to spawn; partial column rolled back.");
+                    return false;
+                }
                 Member m = new Member();
                 m.Handle = h;
                 m.Tank = kinds[k];
@@ -358,10 +397,10 @@ namespace NextDayRevival
             }
 
             _convoys.Add(c);
-            Announce(pts[Mathf.Clamp(front, 0, n - 1)]);
+            Announce(pts[0]);
             RevivalPlugin.L.LogInfo("Convoy " + id + ": " + c.Members.Count
-                + " vehicle(s) out on " + routeName + " (front waypoint " + front
-                + " of " + n + ", " + gapWp + " wp spacing).");
+                + " vehicle(s) lined up at the start of " + routeName + " ("
+                + n + " waypoints, one-way, " + gap.ToString("0") + " m apart).");
             return true;
         }
 
@@ -422,6 +461,68 @@ namespace NextDayRevival
         }
 
         // =========================================================== upkeep
+
+        /// <summary>
+        /// The convoy's reaction to losing a vehicle (feature/convoy-oneway-drive,
+        /// the minimal form of docs/ai/tasks/convoy-behaviour.md). It does NOTHING
+        /// while a convoy is intact - every vehicle just drives. The first time a
+        /// convoy loses one (Convoy.LostOne, set in Prune), the survivors stop and
+        /// search near the wreck and exactly ONE vehicle drives off, UNLESS both
+        /// ends of the column are wrecked, in which case the middle is boxed in
+        /// and nobody escapes.
+        ///
+        ///   live == 1        the lone survivor drives off (nothing to search with)
+        ///   both ends wreck  every survivor holds and fights - the rewarded trap
+        ///   otherwise        one escapee (an APC by preference, front-most; a tank
+        ///                    only if no APC survives) drives on, the rest hold
+        ///
+        /// Re-run every tick, so if the escapee is killed or reaches the end, a new
+        /// one is chosen from what remains until the convoy is boxed or down to one.
+        /// The gun keeps scanning and firing underneath, held or not.
+        /// </summary>
+        static void Behaviour()
+        {
+            for (int ci = 0; ci < _convoys.Count; ci++)
+            {
+                Convoy c = _convoys[ci];
+                if (!c.LostOne) continue;          // intact: never held
+
+                List<Member> live = new List<Member>();
+                for (int k = 0; k < c.Members.Count; k++)
+                    if (c.Members[k].IsAlive) live.Add(c.Members[k]);
+
+                if (live.Count == 0) continue;
+                if (live.Count == 1) { CommandContinue(live[0]); continue; }
+
+                // "First and last": a wreck on either END blocks the road that
+                // way. Both ends wrecked means the survivors are boxed between two
+                // wrecks and cannot continue the route in either direction.
+                bool boxed = Wreck(c.Members[0])
+                          && Wreck(c.Members[c.Members.Count - 1]);
+                if (boxed)
+                {
+                    for (int k = 0; k < live.Count; k++) CommandHold(live[k]);
+                    continue;
+                }
+
+                // Not boxed: exactly one escapee continues, the rest hold. Prefer
+                // the front-most APC; a tank leaves only if no APC survives.
+                Member escapee = null;
+                for (int k = 0; k < live.Count; k++)
+                    if (!live[k].Tank) { escapee = live[k]; break; }
+                if (escapee == null) escapee = live[0];
+
+                for (int k = 0; k < live.Count; k++)
+                {
+                    if (live[k] == escapee) CommandContinue(live[k]);
+                    else CommandHold(live[k]);
+                }
+            }
+        }
+
+        /// <summary>A member that is a wreck sitting on the road (still in the
+        /// world, no longer alive) - the thing that blocks a route end.</summary>
+        static bool Wreck(Member m) { return m != null && m.Exists && !m.IsAlive; }
 
         /// <summary>Hold a follower that has closed to less than SpacingMetres,
         /// release it once the gap opens. The front vehicle is never held here.
