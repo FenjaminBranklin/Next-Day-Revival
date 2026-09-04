@@ -213,15 +213,31 @@ namespace NextDayRevival
                     typeof(Crew).GetMethod("PlayVisualizationPrefix"),
                     "Crew: wreck crews keep animation, collision and ragdoll at any distance.",
                     "a wreck crew reached by drone stays frozen and cannot be hit");
-                MethodInfo appearance = AccessTools.Method(type,
-                    "GetRandomAppearance", null, null);
-                if (appearance != null)
-                    harmony.Patch(appearance, null,
-                        new HarmonyMethod(typeof(Crew).GetMethod(
-                            "CustomAppearancePostfix")), null, null, null);
+                // BOTH appearance paths, because InitSpawnNpc picks ONE of
+                // them per spawn point and it is not the one this hook used to
+                // assume. Confirmed in IL (NPC_Settlement::InitSpawnNpc):
+                //
+                //     if (sp.UseCustomAppearance)
+                //         items = GetCustomAppearanceItems(sp, template);
+                //     else
+                //         items = GetRandomAppearance(sp, db);
+                //
+                // Punkt() sets UseCustomAppearance from the military template it
+                // found on the map, so on every map that HAS one the editor
+                // uniform went down the GetCustomAppearanceItems branch, which
+                // was not patched - the crew wore the preset and the admin's
+                // choice was silently dropped. Both are overlaid now; whichever
+                // branch runs, the editor slots win.
+                int hooked = 0;
+                if (Anziehen(harmony, type, "GetRandomAppearance")) hooked++;
+                if (Anziehen(harmony, type, "GetCustomAppearanceItems")) hooked++;
+                if (hooked == 0)
+                    RevivalPlugin.L.LogWarning("Crew: neither GetRandomAppearance "
+                        + "nor GetCustomAppearanceItems found - editor uniforms "
+                        + "cannot be applied.");
                 else
-                    RevivalPlugin.L.LogWarning("Crew: GetRandomAppearance not found - "
-                        + "editor uniforms cannot be applied.");
+                    RevivalPlugin.L.LogInfo("Crew: editor uniforms overlay "
+                        + hooked + " of 2 appearance path(s).");
             }
 
             Type npc = RevivalPlugin.TypeByName("NPC_AI2");
@@ -259,6 +275,26 @@ namespace NextDayRevival
             }
 
             CrewLaw.Install(harmony);
+        }
+
+        /// <summary>Hang the uniform overlay on one of the game's two
+        /// appearance builders. Returns whether the method was there.</summary>
+        static bool Anziehen(Harmony harmony, Type type, string method)
+        {
+            MethodInfo mi = AccessTools.Method(type, method, null, null);
+            if (mi == null) return false;
+            try
+            {
+                harmony.Patch(mi, null, new HarmonyMethod(typeof(Crew).GetMethod(
+                    "CustomAppearancePostfix")), null, null, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew: " + method
+                    + " could not be patched - " + ex.Message);
+                return false;
+            }
         }
 
         /// <summary>Overlay the editor's real equipment-slot ids onto the
@@ -530,10 +566,16 @@ namespace NextDayRevival
                 // The spawn points, one per man. They must exist BEFORE the
                 // settlement component: StartMainInit collects them with
                 // GetComponentsInChildren when _npcSpawnPoints is null.
+                // The editor's roles are the LOADOUT of this vehicle's men,
+                // not a head count. A vehicle with more seats than listed roles
+                // repeats them around the crew, so a single "crew" line dresses
+                // and arms everybody instead of leaving one man in uniform and
+                // the rest in the map's preset.
                 for (int i = 0; i < count; i++)
                 {
-                    RevivalComposition.CrewMan spec = composition != null
-                        && i < composition.Count ? composition[i] : null;
+                    RevivalComposition.CrewMan spec =
+                        composition != null && composition.Count > 0
+                        ? composition[i % composition.Count] : null;
                     string role = spec == null || spec.Role.Length == 0
                         ? "crew" : spec.Role;
                     GameObject sp = new GameObject("Crew" + i + "_" + role);
@@ -805,6 +847,16 @@ namespace NextDayRevival
                 if (points != null && points.childCount > 0)
                 {
                     wo[i] = points.GetChild(i % points.childCount).position;
+                    // A vehicle with fewer exit points than men would put two of
+                    // them in the same spot. The second man round the list steps
+                    // a metre aside instead of standing inside the first.
+                    int round = i / points.childCount;
+                    if (round > 0)
+                    {
+                        float turn = i * 2.3999632f;      // golden angle
+                        wo[i] += new Vector3(Mathf.Cos(turn), 0f, Mathf.Sin(turn))
+                               * (1.2f * round);
+                    }
                 }
                 else
                 {

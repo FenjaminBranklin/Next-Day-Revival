@@ -14,6 +14,15 @@
 // despawn on the usual timer - the whole column stays on the road until the
 // NEXT convoy event spawns, which clears it.
 //
+// IN FORMATION UNTIL THE FIRST LOSS (6.8.4). An intact convoy is not five
+// vehicles chasing the same waypoints - that never held an order and never held
+// a gap. It is ONE body: Patrol carries the whole column along the recorded line
+// at one speed, each vehicle exactly LineupGapMetres behind the one ahead, in
+// the editor's order, and nothing about the terrain can change that. The moment
+// a vehicle is destroyed the formation is over for good and the survivors drive
+// themselves again, which is what the behaviour block below expects. Switchable
+// with Convoy/ColumnLock.
+//
 // HOW IT REUSES THE PATROL. A convoy vehicle is an ordinary patrol Unit tagged
 // with a non-zero ConvoyId, so it is driven, gunned, crewed and wrecked by the
 // existing Patrol code. This file only decides WHICH vehicles spawn WHERE,
@@ -81,6 +90,7 @@ namespace NextDayRevival
         internal static ConfigEntry<float>   CfgBannerSeconds;
         internal static ConfigEntry<float>   CfgLineupGap;
         internal static ConfigEntry<float>   CfgCruiseSpeed;
+        internal static ConfigEntry<bool>    CfgColumnLock;
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
 
@@ -153,6 +163,14 @@ namespace NextDayRevival
             CfgCruiseSpeed = cfg.Bind("Convoy", "CruiseSpeedKmh", 42f,
                 "Marschgeschwindigkeit eines Konvois in km/h. Der Konvoi faehrt "
                 + "Vollgas und bremst nur fuer harte Kurven ab.");
+            CfgColumnLock = cfg.Bind("Convoy", "ColumnLock", true,
+                "Ein unbeschaedigter Konvoi faehrt IM VERBAND: die Kolonne wird "
+                + "als ein Koerper auf der aufgezeichneten Linie gefuehrt, jedes "
+                + "Fahrzeug genau LineupGapMetres hinter dem vorderen, in der "
+                + "Reihenfolge aus dem Editor. Sobald das erste Fahrzeug "
+                + "zerstoert wird, loest sich der Verband auf und die "
+                + "Ueberlebenden fahren wieder selbst. Aus: jedes Fahrzeug faehrt "
+                + "von Anfang an allein - das alte Verhalten bis 6.8.3.");
         }
 
         /// <summary>Full-gas cruise speed a convoy vehicle drives at, read by the
@@ -162,10 +180,18 @@ namespace NextDayRevival
             get { return CfgCruiseSpeed == null ? 42f : Mathf.Max(12f, CfgCruiseSpeed.Value); }
         }
 
-        /// <summary>Metres between vehicles in the start line-up.</summary>
+        /// <summary>Metres between two vehicles of the column - in the start
+        /// line-up and, while the column is locked, for the whole drive.</summary>
         internal static float LineupGap
         {
             get { return CfgLineupGap == null ? 24f : Mathf.Max(6f, CfgLineupGap.Value); }
+        }
+
+        /// <summary>Does an intact convoy drive as one body (exact order, exact
+        /// spacing) instead of five vehicles chasing the same waypoints?</summary>
+        internal static bool ColumnLock
+        {
+            get { return CfgColumnLock == null || CfgColumnLock.Value; }
         }
 
         // ============================================================== state
@@ -367,24 +393,34 @@ namespace NextDayRevival
             c.Route = routeName;
             c.Born = Time.time;
 
-            // The whole column starts lined up on the route's start line: the
-            // FRONT vehicle on waypoint 0, each following vehicle one LineupGap
-            // further back along the wp0 -> wp1 heading, all facing forward - like
-            // a column waiting at the start gate. They drive off together at full
-            // gas and run the recorded route once. Members are added front first,
-            // so index 0 is the front and the last is the tail (the route order
-            // the behaviour reaction relies on).
+            // The whole column starts lined up ON THE RECORDED ROAD: the head
+            // stands headArc metres into the route and each following vehicle one
+            // LineupGap further back along that same line, all facing the way the
+            // road runs - a column waiting at the start gate, but on the tarmac
+            // rather than on a straight line extrapolated backwards off the map.
+            // Members are added front first, so index 0 is the front and the last
+            // is the tail (the route order the behaviour reaction relies on), and
+            // that index IS the column slot for the formation lock.
             // A route flagged vehicle=ural forces a truck convoy: every member is
             // a 15-seat Ural regardless of the composition. The one-way behaviour
             // is unchanged (it lives in the Unit, not the prefab).
             string forced = Patrol.RouteVehicle(routeName);
             bool ural = forced == "ural";
             float gap = LineupGap;
+            // A short route must not push the head past its own end: the whole
+            // line-up gets at most half the route, so even a 200 m road still
+            // spawns a proper column with everything on it.
+            float routeLength = Patrol.ConvoyRouteLength(routeName);
+            int spans = Mathf.Max(1, kinds.Length - 1);
+            if (routeLength > 1f && gap * spans > routeLength * 0.5f)
+                gap = Mathf.Max(6f, routeLength * 0.5f / spans);
+            float headArc = gap * spans;
             for (int k = 0; k < kinds.Length; k++)
             {
-                float back = gap * k;              // 0 = front, on waypoint 0
+                float back = gap * k;              // 0 = front of the column
                 string kind = ural ? "ural" : kinds[k];
-                object h = Patrol.SpawnConvoyUnit(routeName, kind, back, id, k);
+                object h = Patrol.SpawnConvoyUnit(routeName, kind, headArc, back,
+                                                  id, k);
                 if (h == null)
                 {
                     // A column is useful only when it is complete. Keep the
@@ -411,8 +447,11 @@ namespace NextDayRevival
             _convoys.Add(c);
             Announce(pts[0]);
             RevivalPlugin.L.LogInfo("Convoy " + id + ": " + c.Members.Count
-                + " vehicle(s) lined up at the start of " + routeName + " ("
-                + n + " waypoints, one-way, " + gap.ToString("0") + " m apart).");
+                + " vehicle(s) lined up on " + routeName + " (" + n
+                + " waypoints, one-way, " + gap.ToString("0") + " m apart, head at "
+                + headArc.ToString("0") + " m, "
+                + (ColumnLock ? "column locked until the first loss"
+                              : "free driving") + ").");
             return true;
         }
 
@@ -554,6 +593,9 @@ namespace NextDayRevival
                     Member self = c.Members[k];
                     Member ahead = c.Members[k - 1];
                     if (!self.IsAlive) continue;
+                    // A locked column already holds an exact gap by construction.
+                    // Braking it here would only fight the formation.
+                    if (Patrol.ConvoyInColumn(self.Handle)) continue;
                     if (!ahead.Exists) { Patrol.ConvoyHold(self.Handle, false); continue; }
                     float d = Flat(self.Pos - ahead.Pos);
                     if (d < tight) Patrol.ConvoyHold(self.Handle, true);

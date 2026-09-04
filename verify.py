@@ -605,6 +605,76 @@ def check_convoy_ground_and_exit():
         bad("Vehicle exit check: cleanup is still limited to turret vehicles")
 
 
+def check_convoy_column():
+    """Regression guards for the convoy column (6.8.4).
+
+    The three mistakes these keep from coming back are the ones the user hit:
+    a convoy that loses its formation and its editor order within seconds of
+    the spawn, a single crewman climbing out of every vehicle, and an editor
+    uniform that is dropped because only one of the game's two appearance
+    builders was hooked. Movement itself still needs an in-game acceptance.
+    """
+    print("[13] Convoy column, crew size and uniform (static)")
+    patrol_p = os.path.join(ROOT, "Revival.Patrol.cs")
+    convoy_p = os.path.join(ROOT, "RevivalConvoy.cs")
+    crew_p = os.path.join(ROOT, "Revival.Crew.cs")
+    for path in (patrol_p, convoy_p, crew_p):
+        if not os.path.exists(path):
+            bad("Convoy column check: source file missing: "
+                + os.path.basename(path))
+            return
+    patrol = io.open(patrol_p, encoding="utf-8").read()
+    convoy = io.open(convoy_p, encoding="utf-8").read()
+    crew = io.open(crew_p, encoding="utf-8").read()
+
+    # 1. The formation lock itself: an intact convoy is carried on the recorded
+    #    line and the per-vehicle driver does not touch it.
+    if ("static void Columns()" in patrol
+            and "static void ColumnStep(" in patrol
+            and "static void PlaceInColumn(" in patrol
+            and "if (u.Column) continue;" in patrol
+            and "try { Columns(); }" in patrol):
+        ok("an intact convoy is carried as one column, not driven per vehicle")
+    else:
+        bad("Convoy column check: the formation lock is not wired into the driver")
+
+    # 2. The column ends at the first loss and never re-forms - that is what
+    #    hands the survivors to the behaviour layer.
+    if ('ColumnBreak(u.ConvoyId, "vehicle destroyed")' in patrol
+            and "internal static void ColumnBreak(" in patrol):
+        ok("the first loss breaks the column and frees the survivors")
+    else:
+        bad("Convoy column check: a destroyed vehicle no longer breaks the column")
+
+    # 3. The start line-up runs ALONG the recorded road. The old version
+    #    extrapolated backwards off waypoint 0 and put the tail in a hillside.
+    if ("float headArc" in convoy
+            and "SpawnConvoyUnit(routeName, kind, headArc, back," in convoy
+            and "PointOnRoute(r, arc, out seg)" in patrol):
+        ok("the convoy lines up on the recorded road, not off its start")
+    else:
+        bad("Convoy column check: the start line-up is not on the route")
+
+    # 4. Crew size comes from the seats; the editor list is the loadout.
+    if "u.CrewSize = Mathf.Min(u.CrewSize, crew.Count)" in patrol:
+        bad("Crew size check: the editor crew list still clamps the crew to one man")
+    elif ("Mathf.Max(u.CrewSize, crew.Count)" in patrol
+            and "composition[i % composition.Count]" in crew):
+        ok("editor roles are a loadout template, the seats set the crew size")
+    else:
+        bad("Crew size check: the crew template path is missing")
+
+    # 5. BOTH appearance builders carry the editor uniform. InitSpawnNpc calls
+    #    GetCustomAppearanceItems when UseCustomAppearance is set and
+    #    GetRandomAppearance otherwise; hooking one of them drops the uniform
+    #    on every map that has a military template spawn point.
+    if ('Anziehen(harmony, type, "GetRandomAppearance")' in crew
+            and 'Anziehen(harmony, type, "GetCustomAppearanceItems")' in crew):
+        ok("the editor uniform overlays both appearance paths")
+    else:
+        bad("Uniform check: only one appearance path carries the editor uniform")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -621,6 +691,7 @@ if __name__ == "__main__":
     check_winding()
     check_mine()
     check_convoy_ground_and_exit()
+    check_convoy_column()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

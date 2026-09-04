@@ -165,6 +165,16 @@ namespace NextDayRevival
             // routes so a convoy road never also spawns lone patrols.
             internal string Kind = "";
             internal bool IsConvoy { get { return Kind == "convoy"; } }
+
+            // NDR convoy column (RevivalConvoy.cs). Arc length of the recorded
+            // line: Cum[i] is the flat distance from waypoint 0 to waypoint i,
+            // Length the whole line. A convoy column is positioned in METRES
+            // along this, not in waypoint indices, so the spacing between two
+            // vehicles is exact no matter how the waypoints are distributed.
+            // Built once per route object by Metrics(), invalidated by setting
+            // Cum to null after an edit.
+            internal float[] Cum;
+            internal float Length;
         }
 
         static Dictionary<string, Route> _routes = new Dictionary<string, Route>();
@@ -234,6 +244,21 @@ namespace NextDayRevival
             // non-colliding, so each obstacle is handled at most once.
             public Component[] Cols;
             public Dictionary<int, bool> Ghosted;
+
+            // NDR convoy column (Columns(), ColumnLock). While Column is true
+            // this vehicle is NOT driven by RCC at all: it is placed on the
+            // route line every physics step at its own slot behind the column
+            // head, so the editor order and the spacing hold exactly and no
+            // amount of terrain, props or physics can break the formation.
+            // Index is the slot (0 = front). Lift is the metres from the hull
+            // origin down to the lowest point of the model, measured once, so
+            // the vehicle stands ON the road instead of hovering or sinking.
+            // Placed marks that the first exact placement has happened; after
+            // that the heading is eased instead of snapped.
+            public bool Column;
+            public int ColumnIndex = -1;
+            public float ColumnLift;
+            public bool Placed;
         }
 
         static List<Unit> _units = new List<Unit>();
@@ -417,6 +442,14 @@ namespace NextDayRevival
         {
             if (!RevivalPlugin.CfgPatrol.Value) return;
             if (_units.Count == 0) return;
+
+            // NDR convoy column: an intact convoy is carried, not driven. This
+            // puts every member of every intact column on its exact slot before
+            // the driver below runs, and the driver then leaves those vehicles
+            // alone. See the column block above ConvoyInColumn.
+            try { Columns(); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol column: " + ex); }
+
             try
             {
                 for (int i = _units.Count - 1; i >= 0; i--)
@@ -437,6 +470,9 @@ namespace NextDayRevival
                     // recorded route to the last waypoint vanishes there.
                     if (u.Arrived) { ArriveEnd(u, i); continue; }
                     Keep(u);
+                    // NDR convoy column: Columns() has already put this vehicle
+                    // where it belongs. It is not driven and it is not held.
+                    if (u.Column) continue;
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
                 }
@@ -701,25 +737,31 @@ namespace NextDayRevival
         // =====================================================================
 
         /// <summary>
-        /// Spawn one convoy vehicle of a forced kind on a route, lined up
-        /// <paramref name="backMetres"/> behind the route's FIRST waypoint along
-        /// the wp0 -> wp1 heading, tagged with a convoy id. Returns an opaque
-        /// handle (the Unit) or null if the route is unusable or the spawn was
-        /// refused (e.g. this client is not the master).
+        /// Spawn one convoy vehicle of a forced kind, lined up
+        /// <paramref name="backMetres"/> behind the column head ON THE RECORDED
+        /// LINE, tagged with a convoy id. Returns an opaque handle (the Unit) or
+        /// null if the route is unusable or the spawn was refused (e.g. this
+        /// client is not the master).
         ///
         /// Unlike a patrol, a convoy vehicle drives the recorded route ONE WAY:
         /// no OutAndBack u-turn, no lap loop. It rolls from the start line to the
-        /// last waypoint and then vanishes (Unit.Arrived). The whole column is
-        /// laid out on the straight start line - front vehicle on wp0, the rest
-        /// queued behind it, all facing wp1 - and every member is set to ghost
-        /// through world props and its line-mates so a tight column at full gas
-        /// never crashes or shoves itself off the road.
+        /// last waypoint and then vanishes (Unit.Arrived).
+        ///
+        /// THE START LINE RUNS ALONG THE ROAD, NOT OFF IT. Up to 6.8.3 the column
+        /// was laid out on a straight line extrapolated BACKWARDS from waypoint 0,
+        /// which on the user's Convoy route walked 96 m up a hillside: the tail
+        /// vehicles spawned about 23 m above the road surface, wedged in terrain,
+        /// and spent minutes freeing themselves 30 m at a time. The head now
+        /// starts <paramref name="headArc"/> metres INTO the route and every
+        /// follower sits on the same recorded line behind it, so every vehicle
+        /// starts on the road the admin drew, in the editor's order.
         /// </summary>
         internal static object SpawnConvoyUnit(string routeName, bool tank,
-                                               float backMetres, int convoyId,
+                                               float headArc, float backMetres,
+                                               int convoyId,
                                                int compositionVehicle)
         {
-            return SpawnConvoyUnit(routeName, tank ? "tank" : "btr",
+            return SpawnConvoyUnit(routeName, tank ? "tank" : "btr", headArc,
                                    backMetres, convoyId, compositionVehicle);
         }
 
@@ -727,12 +769,13 @@ namespace NextDayRevival
         /// Kind-aware convoy spawn: the vehicle kind ("btr"/"tank"/"ural") flows
         /// through the authoritative <see cref="VehicleRegistry"/>, so a convoy
         /// of 15-seat Urals drives the recorded one-way route with the SAME Unit
-        /// flags (OneWay, ghosting, arrive-and-vanish) as a tank/APC convoy - the
-        /// one-way behaviour is set here, not by the prefab, and is therefore not
-        /// bypassed by choosing a different vehicle.
+        /// flags (OneWay, column slot, arrive-and-vanish) as a tank/APC convoy -
+        /// the one-way behaviour is set here, not by the prefab, and is therefore
+        /// not bypassed by choosing a different vehicle.
         /// </summary>
         internal static object SpawnConvoyUnit(string routeName, string kind,
-                                               float backMetres, int convoyId,
+                                               float headArc, float backMetres,
+                                               int convoyId,
                                                int compositionVehicle)
         {
             Load(false);
@@ -742,10 +785,21 @@ namespace NextDayRevival
 
             Route r = CopyRoute(src);          // one-way private copy, no u-turn
             int n = r.P.Count;
+            Metrics(r);
 
-            Vector3 ahead = FirstLegDir(r);    // wp0 -> wp1, the start-line axis
-            Vector3 spot = r.P[0].Pos - ahead * Mathf.Max(0f, backMetres);
-            Vector3 pos = Grounded(spot, 1.6f);
+            float arc = Mathf.Clamp(headArc - Mathf.Max(0f, backMetres),
+                                    0f, Mathf.Max(0f, r.Length - 1f));
+            int seg;
+            Vector3 line = PointOnRoute(r, arc, out seg);
+            Vector3 ahead = HeadingOnRoute(r, arc);
+
+            // Same surface rule as the column placement, so a vehicle in a road
+            // tunnel is put on the tunnel floor and not on the hill above it.
+            float roadY;
+            Vector3 roadNormal;
+            Vector3 pos = RoadUnder(line, null, out roadY, out roadNormal)
+                        ? new Vector3(line.x, roadY + 1.6f, line.z)
+                        : Grounded(line, 1.6f);
 
             bool tank;
             GameObject car = VehicleRegistry.Spawn(kind, pos,
@@ -757,25 +811,30 @@ namespace NextDayRevival
             u.Route = r;
             u.Tank = tank;
             u.Seite = r.Seite;
-            u.Next = 0;                        // roll onto wp0, then the route
+            u.Next = seg;                      // the waypoint ahead of the slot
             u.ConvoyId = convoyId;
             u.CompositionVehicle = compositionVehicle;
+            u.ColumnIndex = compositionVehicle < 0 ? 0 : compositionVehicle;
+            u.Column = RevivalConvoy.ColumnLock;
             u.OneWay = true;
             u.Cols = CollectCols(car);
 
-            // Line-mates pass right through each other: a tight start line does
-            // not explode and a faster follower does not knock the one ahead off
-            // the road.
+            // Line-mates pass right through each other: a tight column does not
+            // explode, and after the column breaks a faster survivor does not
+            // knock the one ahead off the road.
             for (int i = 0; i < _units.Count; i++)
                 if (_units[i].ConvoyId == convoyId)
                     GhostPair(u.Cols, _units[i].Cols);
 
+            if (u.Column) ColumnStart(convoyId, headArc);
+
             _units.Add(u);
             _spawned++;
             RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + kind
-                + " (" + u.Seite + ") lined up " + backMetres.ToString("0")
-                + " m behind the start of " + r.Name + " (" + n
-                + " waypoints, one-way).");
+                + " (" + u.Seite + ") on slot " + u.ColumnIndex + " at "
+                + arc.ToString("0") + " m of " + r.Name + " (" + n
+                + " waypoints, " + r.Length.ToString("0") + " m, one-way, "
+                + (u.Column ? "column locked" : "free driving") + ").");
             return u;
         }
 
@@ -876,6 +935,7 @@ namespace NextDayRevival
         /// off as escaped/despawned.</summary>
         internal static void ConvoyClearAll(int convoyId)
         {
+            _columns.Remove(convoyId);     // NDR convoy column: state goes with it
             int removed = 0;
             for (int i = _units.Count - 1; i >= 0; i--)
             {
@@ -921,6 +981,493 @@ namespace NextDayRevival
             List<Vector3> pts = new List<Vector3>(r.P.Count);
             for (int i = 0; i < r.P.Count; i++) pts.Add(r.P[i].Pos);
             return pts;
+        }
+
+        /// <summary>The driven length of a route in metres. The convoy event
+        /// needs it to keep a start line-up from running off the end of a short
+        /// road. 0 when the route is unknown.</summary>
+        internal static float ConvoyRouteLength(string name)
+        {
+            Load(false);
+            Route r;
+            if (!_routes.TryGetValue(name, out r) || r == null || r.P.Count < 2)
+                return 0f;
+            Metrics(r);
+            return r.Length;
+        }
+
+        // =====================================================================
+        //  NDR convoy COLUMN (the formation lock)
+        //
+        //  WHY THIS EXISTS. Up to 6.8.3 every convoy vehicle was an independent
+        //  RCC car chasing the same waypoints. Five independent cars on one road
+        //  never stay a column: one wedges on a kerb, the recovery teleport moves
+        //  it 30 m at a time, and the others drive on. The recorded evidence is
+        //  in the 6.8.3 log - five vehicles at waypoints 0, 2, 5 and 7 at the
+        //  same moment, each freeing itself on its own clock. The editor order
+        //  was gone within seconds of the spawn.
+        //
+        //  WHAT IT DOES INSTEAD. An intact convoy is not driven, it is CARRIED.
+        //  The column has one number: Arc, the distance in metres its head has
+        //  travelled along the recorded line. Vehicle k sits at Arc - k * gap on
+        //  that same line, every physics step, put there by hand. That makes the
+        //  three things the user asked for true by construction and not by luck:
+        //
+        //    - the column drives as one body, at one speed,
+        //    - the editor order can not change, because a slot IS the order,
+        //    - the spacing is exact, because it is a subtraction.
+        //
+        //  Nothing about the vehicles themselves changes: they are still shot,
+        //  still burn, still carry their crew and their loot, and their turrets
+        //  still track and fire while the column rolls (the gun runs on its own
+        //  frame-rate tick and does not care how the hull is moved).
+        //
+        //  WHEN IT STOPS. The moment a convoy vehicle is destroyed the column is
+        //  broken for good (ColumnBreak) and every survivor goes back to driving
+        //  itself under the ordinary patrol driver, which is what the behaviour
+        //  layer in RevivalConvoy expects - hold and search around the wreck, one
+        //  escapee driving on. That is exactly the line the user drew: in
+        //  formation until the first loss, free after it.
+        // =====================================================================
+
+        /// <summary>The shared state of one convoy column.</summary>
+        class Column
+        {
+            public int Id;           // the convoy id this column belongs to
+            public float Arc;        // metres the head has travelled
+            public float Speed;      // current column speed in m/s
+            public bool Broken;      // a vehicle was lost - never re-forms
+            public float Ready;      // Time.time the last member finished arming
+            public float NextLog;    // Time.time of the next formation report
+        }
+
+        static readonly Dictionary<int, Column> _columns = new Dictionary<int, Column>();
+        static readonly Dictionary<int, List<Unit>> _columnGroups =
+            new Dictionary<int, List<Unit>>();
+        static readonly List<int> _columnDrop = new List<int>();
+
+        /// <summary>Front to tail. The unit list is in spawn order, which is the
+        /// same thing today, but the slot is the authority on who drives where -
+        /// the editor's order must not depend on a list happening to agree.</summary>
+        static readonly Comparison<Unit> _bySlot = new Comparison<Unit>(CompareSlot);
+
+        static int CompareSlot(Unit a, Unit b)
+        {
+            return a.ColumnIndex.CompareTo(b.ColumnIndex);
+        }
+
+        /// <summary>Metres per second squared the column works up to its cruise
+        /// speed with. A column that jumped to full speed in one step would tear
+        /// its own tail off the start line on the first frame.</summary>
+        const float ColumnAccel = 5f;
+
+        /// <summary>Seconds the formed-up column waits on the start line after
+        /// the last vehicle is armed, so the whole column rolls off together.</summary>
+        const float ColumnSettle = 1.5f;
+
+        /// <summary>Degrees per second the hull heading is eased towards the
+        /// direction of the road. Turning it instantly would snap the vehicle
+        /// sideways at every waypoint of a dense recording.</summary>
+        const float ColumnTurnRate = 150f;
+
+        /// <summary>Arc length of a route, built once. Cum[i] is the flat
+        /// distance from waypoint 0 to waypoint i.</summary>
+        static void Metrics(Route r)
+        {
+            if (r == null) return;
+            int n = r.P.Count;
+            if (n == 0) return;
+            if (r.Cum != null && r.Cum.Length == n) return;
+            float[] cum = new float[n];
+            float sum = 0f;
+            cum[0] = 0f;
+            for (int i = 1; i < n; i++)
+            {
+                sum += FlatDistance(r.P[i - 1].Pos, r.P[i].Pos);
+                cum[i] = sum;
+            }
+            r.Cum = cum;
+            r.Length = sum;
+        }
+
+        /// <summary>The point <paramref name="arc"/> metres along the recorded
+        /// line, and the index of the waypoint it is driving towards. Clamped to
+        /// both ends, so a caller never has to range-check first.</summary>
+        static Vector3 PointOnRoute(Route r, float arc, out int seg)
+        {
+            Metrics(r);
+            int n = r.P.Count;
+            seg = n > 1 ? 1 : 0;
+            if (n == 0) return Vector3.zero;
+            if (n == 1) return r.P[0].Pos;
+            if (arc <= 0f) return r.P[0].Pos;
+            if (arc >= r.Length) { seg = n - 1; return r.P[n - 1].Pos; }
+
+            int i = 1;
+            while (i < n - 1 && r.Cum[i] < arc) i++;
+            seg = i;
+            float len = r.Cum[i] - r.Cum[i - 1];
+            float t = len > 0.001f ? (arc - r.Cum[i - 1]) / len : 0f;
+            return Vector3.Lerp(r.P[i - 1].Pos, r.P[i].Pos, Mathf.Clamp01(t));
+        }
+
+        /// <summary>The direction of travel at <paramref name="arc"/>, measured
+        /// over a span of the line instead of over one leg. A dense recording has
+        /// legs of a few metres, and a heading taken from one of those turns the
+        /// hull with every waypoint.</summary>
+        static Vector3 HeadingOnRoute(Route r, float arc)
+        {
+            int ignore;
+            Vector3 back = PointOnRoute(r, arc - 7f, out ignore);
+            Vector3 fwd = PointOnRoute(r, arc + 7f, out ignore);
+            Vector3 d = fwd - back;
+            d.y = 0f;
+            if (d.sqrMagnitude > 0.0001f) return d.normalized;
+            d = PointOnRoute(r, arc + 25f, out ignore)
+              - PointOnRoute(r, arc, out ignore);
+            d.y = 0f;
+            return d.sqrMagnitude > 0.0001f ? d.normalized : Vector3.forward;
+        }
+
+        /// <summary>Metres from the hull origin down to the lowest point of the
+        /// model - what has to be added to a road surface so the vehicle stands
+        /// on it. Measured from the renderers, because the prefabs disagree about
+        /// where their origin sits (the Ural has it near the wheel bottoms, the
+        /// tank does not).</summary>
+        static float HullDrop(GameObject car)
+        {
+            if (car == null) return 1f;
+            Renderer[] rs = car.GetComponentsInChildren<Renderer>(true);
+            float lowest = float.MaxValue;
+            for (int i = 0; i < rs.Length; i++)
+            {
+                if (rs[i] == null) continue;
+                Bounds b = rs[i].bounds;
+                if (b.size.sqrMagnitude < 0.0001f) continue;
+                if (b.min.y < lowest) lowest = b.min.y;
+            }
+            if (lowest == float.MaxValue) return 1f;
+            return Mathf.Clamp(car.transform.position.y - lowest, 0.05f, 3f);
+        }
+
+        /// <summary>
+        /// The road surface under a route point.
+        ///
+        /// The ray is SHORT and starts three metres above the recorded line, for
+        /// two reasons: a tunnel roof or a bridge deck above the road can not be
+        /// mistaken for the ground, and the terrain far below a viaduct can not
+        /// either. Hits on the convoy's own hull (it is standing on that very
+        /// spot from the last step) and on anything that happens to be lying on
+        /// the road are skipped, so a man walking in front of the column does not
+        /// lift a tank onto his head.
+        ///
+        /// A route recorded before the editor carried heights has y near zero.
+        /// There is no local surface to find, so the long cast of
+        /// <see cref="Grounded"/> answers instead - the same convention the
+        /// spawn code has always used.
+        ///
+        /// False means nothing usable was found; the recorded y is then the best
+        /// answer there is.
+        /// </summary>
+        static bool RoadUnder(Vector3 point, Transform own, out float y,
+                              out Vector3 normal)
+        {
+            y = point.y;
+            normal = Vector3.up;
+
+            if (point.y < 10f)
+            {
+                y = Grounded(point, 0f).y;
+                return true;
+            }
+
+            Vector3 from = point + Vector3.up * 3f;
+            float rest = 12f;
+            for (int step = 0; step < 4 && rest > 0.1f; step++)
+            {
+                Vector3 hit, hitNormal;
+                GameObject go = Turret.RaycastObject(from, Vector3.down, rest,
+                                                     out hit, out hitNormal);
+                if (go == null) return false;
+
+                // Skipped: the convoy's own hull, and anything standing well
+                // ABOVE the recorded line - a man on the road, a crate, a fence
+                // rail. A hit BELOW the line is accepted whatever the drop is,
+                // because that is what a route whose recorded height is a little
+                // optimistic looks like from up here.
+                bool mine = own != null && go.transform.IsChildOf(own);
+                if (!mine && hit.y <= point.y + 1.5f)
+                {
+                    y = hit.y;
+                    normal = hitNormal.sqrMagnitude > 0.01f ? hitNormal : Vector3.up;
+                    return true;
+                }
+                rest -= (from.y - hit.y) + 0.2f;
+                from = hit + Vector3.down * 0.2f;
+            }
+            return false;
+        }
+
+        /// <summary>Put one column vehicle on its slot: exact position on the
+        /// recorded line, standing on the road, facing the way the road runs.
+        /// The vehicle is not asked to drive there - it is put there.</summary>
+        static void PlaceInColumn(Unit u, Route r, float arc, float speed)
+        {
+            int seg;
+            Vector3 line = PointOnRoute(r, arc, out seg);
+            Vector3 dir = HeadingOnRoute(r, arc);
+
+            // Measured exactly once, on the FIRST placement, while the hull
+            // still carries the level spawn rotation. A later measurement on a
+            // slope would read a tilted bounding box and lift the vehicle off
+            // the road by the tilt. The wheel MESHES exist from instantiation -
+            // EnablePhys switches wheel COLLIDERS on, not the models - so there
+            // is nothing to wait for.
+            if (u.ColumnLift <= 0f) u.ColumnLift = HullDrop(u.Car);
+
+            float y;
+            Vector3 normal;
+            if (!RoadUnder(line, u.Car.transform, out y, out normal))
+            {
+                y = line.y;
+                normal = Vector3.up;
+            }
+            if (normal.y < 0.35f) normal = Vector3.up;
+
+            Vector3 target = new Vector3(line.x, y + u.ColumnLift, line.z);
+
+            Vector3 flat = dir - normal * Vector3.Dot(dir, normal);
+            if (flat.sqrMagnitude < 0.0001f) { flat = dir; normal = Vector3.up; }
+            Quaternion want = Quaternion.LookRotation(flat.normalized, normal);
+
+            Transform t = u.Car.transform;
+            t.position = target;
+            if (!u.Placed)
+            {
+                t.rotation = want;
+                u.Placed = true;
+            }
+            else
+            {
+                t.rotation = Quaternion.RotateTowards(t.rotation, want,
+                    ColumnTurnRate * Time.fixedDeltaTime);
+            }
+
+            // The hull is moved by hand, so no throttle and no steering lock
+            // may still act on it. The velocity is not zeroed but SET to what the
+            // column is doing, so the wheels turn and the tank tracks scroll at
+            // road speed instead of the whole column sliding on locked wheels.
+            Roll(u.Body, flat.normalized * speed);
+            if (u.Rcc != null)
+            {
+                SetFloat(u.Rcc, "gasInput", 0f);
+                SetFloat(u.Rcc, "brakeInput", 0f);
+                SetFloat(u.Rcc, "steerInput", 0f);
+                SetFloat(u.Rcc, "handbrakeInput", 0f);
+            }
+
+            u.Stuck = 0f;
+            u.Next = seg;
+        }
+
+        /// <summary>How much the column eases off for the corner it is in.
+        ///
+        /// <see cref="CornerFactor"/> reads the leg BEFORE and the leg AFTER the
+        /// waypoint and wraps both indices around the route, which is right for a
+        /// patrol driving laps and wrong for a one-way column: at the last
+        /// waypoint the "next" leg is the jump back to waypoint 0, an angle of
+        /// almost 180 degrees, and the column would crawl the last stretch of
+        /// every route at the 3 m/s floor. The two end waypoints are simply
+        /// straight here.</summary>
+        static float ColumnCorner(Route r, float arc)
+        {
+            int n = r.P.Count;
+            if (n < 3) return 1f;
+            int seg;
+            PointOnRoute(r, arc, out seg);
+            if (seg <= 0 || seg >= n - 1) return 1f;
+            return CornerFactor(r, seg);
+        }
+
+        /// <summary>Register a new column and its start arc. Called once per
+        /// convoy, by the first vehicle that spawns on it.</summary>
+        static void ColumnStart(int convoyId, float headArc)
+        {
+            if (convoyId == 0) return;
+            Column col;
+            if (!_columns.TryGetValue(convoyId, out col))
+            {
+                col = new Column();
+                _columns[convoyId] = col;
+            }
+            col.Id = convoyId;
+            col.Arc = headArc;
+            col.Speed = 0f;
+            col.Broken = false;
+            col.Ready = 0f;
+            col.NextLog = 0f;
+        }
+
+        /// <summary>The column is over. Every survivor goes back to driving
+        /// itself from where it stands; the behaviour layer owns them from here.
+        /// Idempotent, so the loss of the second and third vehicle costs
+        /// nothing.</summary>
+        internal static void ColumnBreak(int convoyId, string why)
+        {
+            if (convoyId == 0) return;
+            Column col;
+            if (_columns.TryGetValue(convoyId, out col))
+            {
+                if (col.Broken) return;
+                col.Broken = true;
+            }
+            int freed = 0;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.ConvoyId != convoyId || !u.Column) continue;
+                u.Column = false;
+                u.Stuck = 0f;
+                freed++;
+            }
+            if (freed > 0)
+                RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": column broken ("
+                    + why + ") - " + freed + " vehicle(s) drive on by themselves.");
+        }
+
+        /// <summary>Is this convoy vehicle currently carried by its column? The
+        /// convoy layer asks before it applies its own spacing holds, which a
+        /// locked column does not need and must not receive.</summary>
+        internal static bool ConvoyInColumn(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Column;
+        }
+
+        /// <summary>
+        /// Move every intact column one physics step. Runs BEFORE the per-unit
+        /// driver, so a vehicle that belongs to a column is already standing on
+        /// its slot by the time the driver would have touched it - and the driver
+        /// then skips it.
+        /// </summary>
+        static void Columns()
+        {
+            if (_columns.Count == 0) return;
+            float dt = Time.fixedDeltaTime;
+
+            _columnGroups.Clear();
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.ConvoyId == 0 || !u.Column) continue;
+                if (u.Car == null) continue;
+                List<Unit> g;
+                if (!_columnGroups.TryGetValue(u.ConvoyId, out g))
+                {
+                    g = new List<Unit>();
+                    _columnGroups[u.ConvoyId] = g;
+                }
+                g.Add(u);
+            }
+
+            _columnDrop.Clear();
+            foreach (KeyValuePair<int, Column> kv in _columns)
+            {
+                List<Unit> mem;
+                if (!_columnGroups.TryGetValue(kv.Key, out mem) || mem.Count == 0)
+                {
+                    _columnDrop.Add(kv.Key);
+                    continue;
+                }
+                if (kv.Value.Broken) continue;
+                ColumnStep(kv.Value, mem, dt);
+            }
+            for (int i = 0; i < _columnDrop.Count; i++)
+                _columns.Remove(_columnDrop[i]);
+        }
+
+        /// <summary>One step of one column: wait until everybody is armed, then
+        /// roll, and put every member on its slot.</summary>
+        static void ColumnStep(Column col, List<Unit> mem, float dt)
+        {
+            mem.Sort(_bySlot);                 // front to tail, by editor slot
+            Route r = mem[0].Route;
+            if (r == null || r.P.Count < 2) return;
+            Metrics(r);
+
+            bool ready = true;
+            for (int k = 0; k < mem.Count; k++)
+            {
+                if (mem[k].Died > 0f)
+                {
+                    ColumnBreak(mem[k].ConvoyId, "vehicle lost");
+                    return;
+                }
+                if (!mem[k].Armed) ready = false;
+            }
+
+            if (!ready) col.Ready = 0f;
+            else if (col.Ready <= 0f) col.Ready = Time.time;
+
+            bool rolling = ready && Time.time - col.Ready >= ColumnSettle;
+            if (rolling)
+            {
+                float want = RevivalConvoy.CruiseSpeed / 3.6f;
+                want *= ColumnCorner(r, col.Arc);
+                if (want < 3f) want = 3f;
+                col.Speed = Mathf.MoveTowards(col.Speed, want, ColumnAccel * dt);
+                col.Arc += col.Speed * dt;
+            }
+            else col.Speed = 0f;
+
+            float gap = RevivalConvoy.LineupGap;
+            for (int k = 0; k < mem.Count; k++)
+            {
+                Unit u = mem[k];
+                int slot = u.ColumnIndex < 0 ? k : u.ColumnIndex;
+                float arc = col.Arc - gap * slot;
+
+                // The head reaches the last waypoint first; the tail keeps
+                // rolling until its own slot gets there. Arrive-and-vanish stays
+                // in route order, exactly like the drive.
+                if (arc >= r.Length) { u.Arrived = true; continue; }
+                if (arc < 0f) arc = 0f;
+                PlaceInColumn(u, r, arc, col.Speed);
+            }
+
+            if (rolling && Time.time >= col.NextLog)
+            {
+                col.NextLog = Time.time + 10f;
+                ColumnReport(col, mem, r);
+            }
+        }
+
+        /// <summary>
+        /// What the column looks like in the WORLD, written to the log every ten
+        /// seconds while it rolls: the order the vehicles are actually standing
+        /// in and the real distance between each pair. This is the evidence that
+        /// closes this feature without a pair of eyes in the game - if the line
+        /// reads "slots 0 1 2 3 4" with even gaps for the whole drive, the convoy
+        /// held its formation and its editor order.
+        /// </summary>
+        static void ColumnReport(Column col, List<Unit> mem, Route r)
+        {
+            string order = "";
+            string gaps = "";
+            for (int k = 0; k < mem.Count; k++)
+            {
+                Unit u = mem[k];
+                order += (k == 0 ? "" : " ") + u.ColumnIndex
+                       + (u.Tank ? "T" : "V");
+                if (k > 0 && mem[k - 1].Car != null && u.Car != null)
+                    gaps += (gaps.Length == 0 ? "" : " ")
+                          + FlatDistance(mem[k - 1].Car.transform.position,
+                                         u.Car.transform.position).ToString("0.0");
+            }
+            RevivalPlugin.L.LogInfo("Convoy " + col.Id + ": column at "
+                + col.Arc.ToString("0") + " / " + r.Length.ToString("0") + " m, "
+                + (col.Speed * 3.6f).ToString("0") + " km/h, slots " + order
+                + ", gaps " + gaps + " m.");
         }
 
         /// <summary>
@@ -1359,7 +1906,16 @@ namespace NextDayRevival
             List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
                 ? null : RevivalComposition.CrewOf(u.Route.Name,
                                                     u.CompositionVehicle);
-            if (crew != null) u.CrewSize = Mathf.Min(u.CrewSize, crew.Count);
+            // The editor's crew list is the LOADOUT of this vehicle's men, not
+            // its head count: one role line used to clamp the whole crew to a
+            // single man, so every convoy vehicle in the user's five-vehicle
+            // column put exactly one crewman on the ground. The vehicle is
+            // manned by its seats (Besatzung, already capped by CrewMax) and the
+            // listed roles repeat around that number; a list LONGER than the
+            // seats still gets every role out, up to CrewMax.
+            if (crew != null && crew.Count > 0)
+                u.CrewSize = Mathf.Min(Mathf.Max(u.CrewSize, crew.Count),
+                                       Mathf.Max(1, RevivalPlugin.CfgPatrolCrewMax.Value));
 
             u.Armed = true;
             VehicleModules.StockTrunk(u.Car.transform, u.Tank);   // NDR vehicle modules: trunk loot
@@ -1444,6 +2000,15 @@ namespace NextDayRevival
                                                           u.CompositionVehicle);
                     Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite,
                                     crew);
+                }
+
+                // NDR convoy column: the first loss ends the formation for
+                // good. From here the survivors drive themselves again and the
+                // behaviour layer in RevivalConvoy owns their holds.
+                if (u.ConvoyId != 0)
+                {
+                    u.Column = false;
+                    ColumnBreak(u.ConvoyId, "vehicle destroyed");
                 }
 
                 if (u.ConvoyId == 0) Verloren();   // NDR convoy: convoy losses are not auto-refilled
@@ -2058,7 +2623,16 @@ namespace NextDayRevival
             {
                 string name = t.name == null ? "" : t.name.ToLowerInvariant();
                 if (name.IndexOf("road") >= 0 || name.IndexOf("ground") >= 0
-                    || name.IndexOf("terrain") >= 0 || name.IndexOf("asphalt") >= 0)
+                    || name.IndexOf("terrain") >= 0 || name.IndexOf("asphalt") >= 0
+                    // Drive surfaces the map names in Russian transliteration, and
+                    // the structures a road runs THROUGH or OVER. The 6.8.3 log
+                    // has a convoy ghosting "tonel_avto_LOD0" - the road tunnel it
+                    // was driving in - and then dropping out of the world through
+                    // its own floor.
+                    || name.IndexOf("doroga") >= 0 || name.IndexOf("asfalt") >= 0
+                    || name.IndexOf("tonel") >= 0 || name.IndexOf("tunnel") >= 0
+                    || name.IndexOf("bridge") >= 0 || name.IndexOf("estakada") >= 0
+                    || name.IndexOf("trotuar") >= 0)
                     return true;
             }
             return false;
@@ -4556,6 +5130,18 @@ namespace NextDayRevival
             LookUpBody();
             if (body == null) return;
             if (_velocity != null) _velocity.SetValue(body, Vector3.zero, null);
+            if (_angular != null) _angular.SetValue(body, Vector3.zero, null);
+        }
+
+        /// <summary>Tell the body how fast it is going without letting it decide
+        /// where it goes. The column moves the hull by hand, but the wheels and
+        /// the tank tracks are animated from motion - a carried vehicle with a
+        /// zeroed velocity would slide down the road on locked wheels.</summary>
+        static void Roll(object body, Vector3 velocity)
+        {
+            LookUpBody();
+            if (body == null) return;
+            if (_velocity != null) _velocity.SetValue(body, velocity, null);
             if (_angular != null) _angular.SetValue(body, Vector3.zero, null);
         }
 
