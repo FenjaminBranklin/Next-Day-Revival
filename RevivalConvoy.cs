@@ -145,7 +145,7 @@ namespace NextDayRevival
                 + "Abschalten. Auch der F4-Knopf \"Konvoi sofort\" tut das.");
             CfgBannerSeconds = cfg.Bind("Convoy", "BannerSeconds", 12f,
                 "Wie lange die Meldung unten links stehen bleibt.");
-            CfgLineupGap = cfg.Bind("Convoy", "LineupGapMetres", 14f,
+            CfgLineupGap = cfg.Bind("Convoy", "LineupGapMetres", 24f,
                 "Abstand in Metern zwischen den Fahrzeugen in der Startaufstellung. "
                 + "Alle spawnen aufgereiht auf einer Linie ab Wegpunkt 0 in "
                 + "Fahrtrichtung, das vorderste auf Wegpunkt 0, die anderen "
@@ -165,7 +165,7 @@ namespace NextDayRevival
         /// <summary>Metres between vehicles in the start line-up.</summary>
         internal static float LineupGap
         {
-            get { return CfgLineupGap == null ? 14f : Mathf.Max(6f, CfgLineupGap.Value); }
+            get { return CfgLineupGap == null ? 24f : Mathf.Max(6f, CfgLineupGap.Value); }
         }
 
         // ============================================================== state
@@ -347,13 +347,19 @@ namespace NextDayRevival
 
             int n = pts.Count;
             // The map/road/composition editor (RevivalComposition) may define the
-            // exact tank/APC order for THIS route; when it does, it wins over the
-            // Convoy/Tanks + Convoy/Apcs config. Otherwise the config composition
-            // is used, exactly as before. The one-way drive, line-up, spacing and
-            // loss reaction are unchanged either way - only WHICH kinds spawn.
-            bool[] kinds = RevivalComposition.VehicleKinds(routeName);
+            // exact per-vehicle kind order for THIS route (tank/BTR/Ural); when it
+            // does, it wins over the Convoy/Tanks + Convoy/Apcs config. Otherwise
+            // the config composition is used, exactly as before. The one-way drive,
+            // line-up, spacing and loss reaction are unchanged either way - only
+            // WHICH kinds spawn.
+            string[] kinds = RevivalComposition.VehicleKindStrings(routeName);
             if (kinds == null || kinds.Length == 0)
-                kinds = Composition();             // front -> tail, true = tank
+            {
+                bool[] cfg = Composition();        // front -> tail, true = tank
+                kinds = new string[cfg.Length];
+                for (int i = 0; i < cfg.Length; i++)
+                    kinds[i] = cfg[i] ? "tank" : "btr";
+            }
 
             int id = _nextId++;
             Convoy c = new Convoy();
@@ -368,11 +374,17 @@ namespace NextDayRevival
             // gas and run the recorded route once. Members are added front first,
             // so index 0 is the front and the last is the tail (the route order
             // the behaviour reaction relies on).
+            // A route flagged vehicle=ural forces a truck convoy: every member is
+            // a 15-seat Ural regardless of the composition. The one-way behaviour
+            // is unchanged (it lives in the Unit, not the prefab).
+            string forced = Patrol.RouteVehicle(routeName);
+            bool ural = forced == "ural";
             float gap = LineupGap;
             for (int k = 0; k < kinds.Length; k++)
             {
                 float back = gap * k;              // 0 = front, on waypoint 0
-                object h = Patrol.SpawnConvoyUnit(routeName, kinds[k], back, id, k);
+                string kind = ural ? "ural" : kinds[k];
+                object h = Patrol.SpawnConvoyUnit(routeName, kind, back, id, k);
                 if (h == null)
                 {
                     // A column is useful only when it is complete. Keep the
@@ -385,7 +397,7 @@ namespace NextDayRevival
                 }
                 Member m = new Member();
                 m.Handle = h;
-                m.Tank = kinds[k];
+                m.Tank = kind == "tank";
                 c.Members.Add(m);
             }
 

@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.7.0";
+        public const string VERSION = "6.8.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -443,6 +443,8 @@ namespace NextDayRevival
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
+            UralTruck.BindConfig(Config);        // NDR 15-seat Ural cargo truck
+            AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
@@ -469,11 +471,14 @@ namespace NextDayRevival
             ColdHook.Install(_harmony);
             DroneInputHook.Install(_harmony);
             DroneNpcHook.Install(_harmony);
+            SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
             Admin.Install(_harmony);
             TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
+            UralTruck.Install(_harmony);         // NDR 15-seat Ural cargo truck
+            AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
 
             StartCoroutine(Tank.Prewarm());
@@ -1570,6 +1575,8 @@ namespace NextDayRevival
             DroneGear.AddItems(Items);
             // Fire extinguisher and heavy tool kit for convoy repair (own file).
             ConvoyRepair.AddItems(Items);
+            // Anti-tank mine (own file).
+            AntiTankMine.AddItems(Items);
 
             // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
             M7Rifle.AddItems(Items);
@@ -2005,6 +2012,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.DroneGearT);  DroneGear.Tick();        FrameProf.E(FrameProf.DroneGearT);
             FrameProf.S(FrameProf.Arena);       Arena.Tick();            FrameProf.E(FrameProf.Arena);
             FrameProf.S(FrameProf.CarSpawn);    CarSpawn.Tick();         FrameProf.E(FrameProf.CarSpawn);
+            UralTruck.Tick();                    // NDR 15-seat Ural cargo truck (own spawn key)
+            AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
             FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
@@ -2033,6 +2042,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.AdminDraw);   Admin.Draw();            FrameProf.E(FrameProf.AdminDraw);
             FrameProf.S(FrameProf.PatrolDraw);  Patrol.Draw();           FrameProf.E(FrameProf.PatrolDraw);
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
+            AntiTankMine.Draw();                 // NDR anti-tank mine (placement bar)
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner

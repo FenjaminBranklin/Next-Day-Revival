@@ -139,11 +139,11 @@ namespace NextDayRevival
                 get
                 {
                     string v = Vehicle == null ? "" : Vehicle.Trim().ToLowerInvariant();
-                    if (v == "btr" || v == "tank" || v == "mixed") return v;
+                    if (v == "btr" || v == "tank" || v == "mixed" || v == "ural") return v;
                     v = RevivalPlugin.CfgPatrolVehicle.Value;
                     if (v == null) return "mixed";
                     v = v.Trim().ToLowerInvariant();
-                    return (v == "btr" || v == "tank") ? v : "mixed";
+                    return (v == "btr" || v == "tank" || v == "ural") ? v : "mixed";
                 }
             }
 
@@ -719,6 +719,22 @@ namespace NextDayRevival
                                                float backMetres, int convoyId,
                                                int compositionVehicle)
         {
+            return SpawnConvoyUnit(routeName, tank ? "tank" : "btr",
+                                   backMetres, convoyId, compositionVehicle);
+        }
+
+        /// <summary>
+        /// Kind-aware convoy spawn: the vehicle kind ("btr"/"tank"/"ural") flows
+        /// through the authoritative <see cref="VehicleRegistry"/>, so a convoy
+        /// of 15-seat Urals drives the recorded one-way route with the SAME Unit
+        /// flags (OneWay, ghosting, arrive-and-vanish) as a tank/APC convoy - the
+        /// one-way behaviour is set here, not by the prefab, and is therefore not
+        /// bypassed by choosing a different vehicle.
+        /// </summary>
+        internal static object SpawnConvoyUnit(string routeName, string kind,
+                                               float backMetres, int convoyId,
+                                               int compositionVehicle)
+        {
             Load(false);
             Route src;
             if (!_routes.TryGetValue(routeName, out src) || src == null
@@ -731,8 +747,9 @@ namespace NextDayRevival
             Vector3 spot = r.P[0].Pos - ahead * Mathf.Max(0f, backMetres);
             Vector3 pos = Grounded(spot, 1.6f);
 
-            GameObject car = CarSpawn.SpawnAt(pos,
-                Quaternion.LookRotation(ahead, Vector3.up), tank);
+            bool tank;
+            GameObject car = VehicleRegistry.Spawn(kind, pos,
+                Quaternion.LookRotation(ahead, Vector3.up), out tank);
             if (car == null) return null;
 
             Unit u = new Unit();
@@ -755,7 +772,7 @@ namespace NextDayRevival
 
             _units.Add(u);
             _spawned++;
-            RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + (tank ? "tank" : "APC")
+            RevivalPlugin.L.LogInfo("Convoy " + convoyId + ": " + kind
                 + " (" + u.Seite + ") lined up " + backMetres.ToString("0")
                 + " m behind the start of " + r.Name + " (" + n
                 + " waypoints, one-way).");
@@ -1071,15 +1088,21 @@ namespace NextDayRevival
             List<Unit> made = new List<Unit>();
             for (int k = 0; k < vehicleCount; k++)
             {
-                bool tank = composition == null
-                    ? TankThisTime(r) : composition.Vehicles[k].IsTank;
+                // Per-vehicle kind: the editor composition names each vehicle
+                // (tank/BTR/Ural); without a composition the route's own kind
+                // (WagenKind, Ural-aware, "mixed" still alternates) applies.
+                // VehicleRegistry.Spawn reports whether the result counts as a
+                // tank so Unit.Tank stays correct without hard-coding the mapping.
+                string kind = composition == null
+                    ? WagenKind(r) : composition.Vehicles[k].Kind;
                 // A configured patrol is a small road column. It keeps the
                 // ordinary patrol route behavior, but starts front-to-tail on
                 // the first-leg centreline instead of stacking vehicles.
                 Vector3 spot = r.P[start].Pos - ahead * (RevivalConvoy.LineupGap * k);
                 Vector3 pos = Grounded(spot, 1.6f);
-                GameObject car = CarSpawn.SpawnAt(pos,
-                    Quaternion.LookRotation(ahead, Vector3.up), tank);
+                bool tank;
+                GameObject car = VehicleRegistry.Spawn(kind,
+                    pos, Quaternion.LookRotation(ahead, Vector3.up), out tank);
                 if (car == null)
                 {
                     for (int q = made.Count - 1; q >= 0; q--)
@@ -1180,7 +1203,33 @@ namespace NextDayRevival
             string want = r.Wagen;
             if (want == "tank") return true;
             if (want == "btr") return false;
+            if (want == "ural") return false;
             return (_spawned % 2) == 1;
+        }
+
+        /// <summary>The registry kind a route spawns: "ural" for a truck route,
+        /// otherwise "tank"/"btr" resolved through <see cref="TankThisTime"/>
+        /// (so "mixed" still alternates). This is the single place patrol maps a
+        /// route's Vehicle flag to a registry kind.</summary>
+        static string WagenKind(Route r)
+        {
+            if (r != null && r.Wagen == "ural") return "ural";
+            return TankThisTime(r) ? "tank" : "btr";
+        }
+
+        /// <summary>The vehicle kind a NAMED route requests, for the convoy event
+        /// to honour (a "ural" route becomes a truck convoy). Empty when the
+        /// route is unknown or uses the default composition.</summary>
+        internal static string RouteVehicle(string routeName)
+        {
+            Load(false);
+            Route r;
+            if (routeName != null && _routes.TryGetValue(routeName, out r) && r != null)
+            {
+                string w = r.Wagen;
+                if (w == "ural") return "ural";
+            }
+            return "";
         }
 
         /// <summary>

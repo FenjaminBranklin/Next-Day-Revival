@@ -91,8 +91,10 @@ ASSET_FILES = [
     "rocket.ndmesh", "rocket_diffuse.png", "rocket_normal.png", "rocket_icon.png",
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
     "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
+    "antenna_head.ndmesh",
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
+    "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
     "t72_track_left.ndmesh", "t72_track_right.ndmesh", "t72_track.png",
     "t72_diffuse.png", "t72_normal.png", "t72_metal.png", "t72_scope.png",
@@ -104,8 +106,8 @@ ASSET_FILES = [
 
 MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
-          "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh",
-          "fireext.ndmesh", "toolkit.ndmesh", "t72_hull.ndmesh",
+          "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
+          "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
           "shell125.ndmesh"]
 
@@ -118,6 +120,7 @@ ICON_SIZES = {
     "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
     "drone_icon.png": (300, 300), "jammer_icon.png": (300, 300),
     "fireext_icon.png": (300, 300), "toolkit_icon.png": (300, 300),
+    "mine_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),
@@ -503,6 +506,67 @@ def check_winding():
             ok(line + "  Vorderseiten stimmen")
 
 
+def check_mine():
+    """[11] Anti-tank mine: the structural invariants that can be checked
+    without the game - id/donor/category, the no-throw guard, the placement
+    lock, the single-fire guard, the vehicle-only filter, the unconditional
+    kill, consume-exactly-one, and the RevivalPlugin seams. Runtime behaviour
+    (a real vehicle actually triggering it in a networked session) stays an
+    in-game acceptance item.
+    """
+    print("[11] Panzerabwehrmine (statisch)")
+    mine_p = os.path.join(ROOT, "RevivalAntiTankMine.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    if not os.path.exists(mine_p):
+        bad("RevivalAntiTankMine.cs fehlt")
+        return
+    s = io.open(mine_p, encoding="utf-8").read()
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Mine: " + why)
+
+    need("DEF_MINE = 2065" in s, "Id 2065", "Item-Id 2065 nicht gesetzt")
+    need("DEF_DONOR = 1403" in s,
+         "Spende 1403 (Granatenkategorie)",
+         "Spender ist nicht die Granate 1403 - dann keine Granatenkategorie")
+    # No-throw: the CantThrowGrenade postfix forces __result true for the mine.
+    need("CantThrowGrenade" in s and "__result = true" in s,
+         "Linksklick-Wurfsperre (CantThrowGrenade -> true)",
+         "keine CantThrowGrenade-Sperre gefunden")
+    # Placement lock reads the Placing flag and patches the PlayerCant* set.
+    need("AntiTankMine.Placing" in s and "PlayerCantMovement" in s,
+         "Bewegungssperre an Placing gebunden",
+         "Bewegungssperre nicht an Placing gebunden")
+    # Single-fire guard.
+    need("_fired" in s and "if (_fired) return;" in s and "_fired = true;" in s,
+         "Einmalausloesung (_fired-Wache)",
+         "keine _fired-Einmalwache")
+    # Vehicle-only: only the VehicleGameSystem scan is tested.
+    need("VehicleScan.All()" in s,
+         "nur Fahrzeuge (VehicleScan.All)",
+         "Ausloeser prueft nicht ausschliesslich Fahrzeuge")
+    # Unconditional kill: ApplyDamage with the explosion part and the huge,
+    # non-weapon KillDamage; plus the networked explosion visual.
+    need("ApplyDamage" in s and ", 14 }" in s and "CfgKillDamage" in s,
+         "garantierter Abschuss (ApplyDamage part 14, KillDamage)",
+         "kein gezielter ApplyDamage-Abschuss")
+    need("RocketHook.Detonate" in s,
+         "vernetzte Explosion (RocketHook.Detonate)",
+         "keine vernetzte Explosion")
+    # Consume exactly one, only in Finish (after a successful placement).
+    need("TakeItem(MineId" in s,
+         "verbraucht genau eine Mine bei Erfolg",
+         "kein TakeItem(MineId) beim Platzieren")
+    # RevivalPlugin seams.
+    for seam in ("AntiTankMine.AddItems", "AntiTankMine.BindConfig",
+                 "AntiTankMine.Install", "AntiTankMine.Tick", "AntiTankMine.Draw"):
+        need(seam in plug, "Seam " + seam, "Seam fehlt in RevivalPlugin.cs: " + seam)
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -517,6 +581,7 @@ if __name__ == "__main__":
     check_installed()
     check_eac()
     check_winding()
+    check_mine()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

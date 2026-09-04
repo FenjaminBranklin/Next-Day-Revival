@@ -946,6 +946,52 @@ namespace NextDayRevival
             return car;
         }
 
+        /// <summary>
+        /// Spawn an ARBITRARY vehicle prefab (not the configured BTR donor) and
+        /// rebuild it on every client. This is the generic seam the vehicle
+        /// registry uses for the 15-seat Ural: it Photon-instantiates
+        /// "VehicleSpawn\\&lt;prefabName&gt;" with a caller-supplied network marker
+        /// (so late joiners and remote clients run the same <paramref name="rebuild"/>
+        /// through the DoInstantiate postfix), applies the same fuel/parts
+        /// Prepare the BTR/tank use, and then runs the rebuild locally. Master
+        /// client only, exactly like SpawnAt - Photon rejects scene-object
+        /// instantiation otherwise. Returns null on refusal so the caller
+        /// (patrol/convoy/admin) can react without a half-built vehicle.
+        /// </summary>
+        internal static GameObject SpawnPrefab(string prefabName, Vector3 pos,
+                                               Quaternion rot, object[] netData,
+                                               Action<GameObject> rebuild)
+        {
+            if (string.IsNullOrEmpty(prefabName)) return null;
+            if (!IsMasterClient())
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: dieser Client ist nicht "
+                    + "Masterclient. InstantiateSceneObject wird von Photon abgewiesen.");
+                return null;
+            }
+
+            GameObject car = InstantiateSceneObjectData("VehicleSpawn\\" + prefabName,
+                                                        pos, rot, netData);
+            if (car == null)
+            {
+                RevivalPlugin.L.LogWarning("Fahrzeugspawn: Photon lieferte null fuer \""
+                    + prefabName + "\". Ist der Prefabname richtig?");
+                return null;
+            }
+
+            Prepare(car);
+            if (rebuild != null)
+            {
+                try { rebuild(car); }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogError("Fahrzeugspawn: Umbau von \""
+                        + prefabName + "\" fehlgeschlagen: " + ex);
+                }
+            }
+            return car;
+        }
+
         static void Spawn(bool panzer)
         {
             float started = Time.realtimeSinceStartup;
@@ -1222,6 +1268,19 @@ namespace NextDayRevival
         static GameObject InstantiateSceneObject(string path, Vector3 position,
                                                  Quaternion rotation, bool panzer)
         {
+            return InstantiateSceneObjectData(path, position, rotation,
+                                              TankNetwork.SpawnData(panzer));
+        }
+
+        /// <summary>
+        /// The shared PhotonNetwork.InstantiateSceneObject call. The data block
+        /// travels in Photon's cached scene-instantiation event (event key 5) to
+        /// every client and late joiner, where a DoInstantiate postfix reads its
+        /// marker and rebuilds the vehicle - the same mechanism the T-72 uses.
+        /// </summary>
+        static GameObject InstantiateSceneObjectData(string path, Vector3 position,
+                                                     Quaternion rotation, object[] data)
+        {
             Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (photon == null) throw new MissingMemberException("PhotonNetwork nicht gefunden.");
 
@@ -1246,7 +1305,7 @@ namespace NextDayRevival
                     "PhotonNetwork.InstantiateSceneObject(string,Vector3,Quaternion,byte,object[])");
 
             return chosen.Invoke(null, new object[] {
-                path, position, rotation, (byte)0, TankNetwork.SpawnData(panzer) })
+                path, position, rotation, (byte)0, data })
                 as GameObject;
         }
 

@@ -69,6 +69,16 @@ namespace NextDayRevival
         public static ConfigEntry<int> CfgSurvHitpoints;
         public static ConfigEntry<bool> CfgSurvRequireBattery;
         public static ConfigEntry<string> CfgSurvKey;
+        // --- Surveillance drone: relevance bubble, NPC combat, networking
+        public static ConfigEntry<bool> CfgSurvRelevance;
+        public static ConfigEntry<float> CfgSurvRelevanceRadius;
+        public static ConfigEntry<bool> CfgSurvNpcFire;
+        public static ConfigEntry<float> CfgSurvNpcFireRange;
+        public static ConfigEntry<int> CfgSurvNpcShooters;
+        public static ConfigEntry<float> CfgSurvNpcShotSeconds;
+        public static ConfigEntry<float> CfgSurvNpcAccuracy;
+        public static ConfigEntry<int> CfgSurvEventCode;
+        public static ConfigEntry<bool> CfgSurvDiag;
 
         public static void BindConfig(ConfigFile cfg)
         {
@@ -128,6 +138,41 @@ namespace NextDayRevival
                 + "(Ladebalken); im Flug wechselt ein Tastendruck zwischen Drohnen- "
                 + "und Koerpersicht, langes Halten holt sie zurueck; am Boden hebt "
                 + "sie ein Tastendruck in der Naehe wieder auf.");
+
+            CfgSurvRelevance = cfg.Bind("DroneGear", "SurveillanceKeepNpcAwake", true,
+                "NPCs im Umkreis der fliegenden Aufklaerungsdrohne wachhalten "
+                + "(sonst stehen sie fern vom Piloten in T-Pose und sind nicht "
+                + "bekaempfbar). Nur eine begrenzte Blase um die Drohne wird "
+                + "geweckt, nicht die ganze Karte.");
+            CfgSurvRelevanceRadius = cfg.Bind("DroneGear", "SurveillanceRelevanceRadius", 160f,
+                "Obergrenze in Metern, wie weit eine Siedlung von der Drohne "
+                + "entfernt noch geweckt wird. Begrenzt die Weckblase, damit die "
+                + "Bildrate nicht durch ferne aktivierte NPCs leidet. Sollte "
+                + "mindestens so gross wie SurveillanceNpcFireRange sein, sonst "
+                + "koennen NPCs am Rand die Drohne beschiessen, ohne wach zu sein.");
+            CfgSurvNpcFire = cfg.Bind("DroneGear", "SurveillanceNpcFire", true,
+                "Feindliche NPCs in Reichweite beschiessen die Aufklaerungsdrohne "
+                + "mit ihrer echten Waffe.");
+            CfgSurvNpcFireRange = cfg.Bind("DroneGear", "SurveillanceNpcFireRange", 140f,
+                "Bis zu wie vielen Metern ein NPC auf die Aufklaerungsdrohne "
+                + "schiesst.");
+            CfgSurvNpcShooters = cfg.Bind("DroneGear", "SurveillanceNpcShooters", 3,
+                "Wie viele NPCs pro Salve gleichzeitig auf die Drohne feuern "
+                + "duerfen (die naechsten). Klein halten fuer die Bildrate.");
+            CfgSurvNpcShotSeconds = cfg.Bind("DroneGear", "SurveillanceNpcShotSeconds", 1.1f,
+                "Sekunden zwischen zwei Salven auf die Aufklaerungsdrohne.");
+            CfgSurvNpcAccuracy = cfg.Bind("DroneGear", "SurveillanceNpcAccuracy", 0.22f,
+                "Trefferwahrscheinlichkeit eines NPC-Schusses auf die "
+                + "Aufklaerungsdrohne aus naechster Naehe (0..1). Faellt mit der "
+                + "Entfernung. Die Drohne ist gross und langsam, aber hoch.");
+            CfgSurvEventCode = cfg.Bind("DroneGear", "SurveillanceEventCode", 182,
+                "Photon-Ereigniscode-Basis der Aufklaerungsdrohne (Start, Lauf, "
+                + "Ende, Treffer belegen vier Codes ab hier). Muss sich von der "
+                + "FPV-Drohne (Drone/EventCode) unterscheiden. 0..199 sind frei.");
+            CfgSurvDiag = cfg.Bind("DroneGear", "SurveillanceDiagnostics", true,
+                "Ausfuehrliche Diagnose der Aufklaerungsdrohne ins Log: wach "
+                + "gehaltene Siedlungen, gewaehlte Schuetzen, Treffer und "
+                + "Zerstoerung getrennt ausweisen.");
         }
 
         // --------------------------------------------------------- coordination
@@ -556,10 +601,14 @@ namespace NextDayRevival
         // The telescopic mast: a root placed at the player's back and a stack of
         // grey cylinder segments (thinner towards the top) that slide up out of
         // one another as the antenna deploys. Segment 0 is the fat base tube.
-        const int Segments = 4;
+        // Five deliberately tapered sections read as a real sectioned mast; the
+        // emergence clip below hides whatever sits below the pack line.
+        const int Segments = 5;
         static GameObject _root;
         static GameObject[] _seg;
         static Renderer[] _rend;   // one per segment, toggled by the emergence clip
+        static GameObject _head;   // the generated recon head at the extended tip
+        static Renderer _headRend;
         static Transform _pilot;
         static Material _grey;
 
@@ -733,8 +782,12 @@ namespace NextDayRevival
         // ------------------------------------------------------------- visual
 
         // Segment radii, fat base to thin tip. A real telescopic whip tapers,
-        // so thinner tubes appear to slide out of thicker ones.
-        static readonly float[] SegRadius = new float[] { 0.060f, 0.046f, 0.034f, 0.024f };
+        // so thinner tubes appear to slide out of thicker ones. Five sections,
+        // a fatter base than before (0.072 vs 0.060) tapering to a thin tip, so
+        // the deployed mast reads as a deliberate sectioned pole rather than a
+        // uniform rod.
+        static readonly float[] SegRadius =
+            new float[] { 0.072f, 0.058f, 0.045f, 0.033f, 0.022f };
 
         static void BuildMast()
         {
@@ -764,13 +817,66 @@ namespace NextDayRevival
                     _rend[i] = r;
                     _seg[i] = c;
                 }
+                BuildHead(g);
                 Layout(0f);
                 RevivalPlugin.L.LogInfo("Antenna: mast built (pilot="
-                    + (_pilot == null ? "NONE" : _pilot.name) + ").");
+                    + (_pilot == null ? "NONE" : _pilot.name) + ", head="
+                    + (_head == null ? "primitive" : "mesh") + ").");
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("Antenna: mast build failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// The deliberate antenna HEAD that sits on the extended mast tip: the
+        /// generated antenna_head.ndmesh (a radio box, a whip, a short yagi
+        /// element stack), built at real metres and parented under the mast root
+        /// so it rides the mast up during deploy. If the mesh is missing it
+        /// falls back to a small primitive cross so the tip is never bare. Named
+        /// "NDR_..." so PlayerHeadTop skips it and the growing head can never
+        /// feed its own height back into the anchor. Positioned each frame in
+        /// <see cref="Layout"/>; hidden until the tip clears the emergence line.
+        /// </summary>
+        static void BuildHead(Material mat)
+        {
+            _head = null;
+            _headRend = null;
+            try
+            {
+                Mesh mesh = Assets.Load("antenna_head.ndmesh");
+                if (mesh != null)
+                {
+                    _head = new GameObject("NDR_AntennaHead");
+                    MeshFilter mf = _head.AddComponent<MeshFilter>();
+                    MeshRenderer mr = _head.AddComponent<MeshRenderer>();
+                    mf.sharedMesh = mesh;
+                    if (mat != null) mr.sharedMaterial = mat;
+                    _headRend = mr;
+                }
+                else
+                {
+                    // Fallback: a small primitive cross so the tip is not bare.
+                    _head = new GameObject("NDR_AntennaHead");
+                    GameObject whip = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                    whip.name = "NDR_AntennaHeadWhip";
+                    DroneGear.StripCollider(whip);
+                    whip.transform.SetParent(_head.transform, false);
+                    whip.transform.localScale = new Vector3(0.03f, 0.30f, 0.03f);
+                    whip.transform.localPosition = new Vector3(0f, 0.30f, 0f);
+                    Renderer wr = whip.GetComponent<Renderer>();
+                    if (wr != null && mat != null) wr.sharedMaterial = mat;
+                    _headRend = wr;
+                }
+                if (_head != null && _root != null)
+                    _head.transform.SetParent(_root.transform, false);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Antenna: head build failed: " + ex.Message);
+                _head = null;
+                _headRend = null;
             }
         }
 
@@ -884,6 +990,24 @@ namespace NextDayRevival
 
                 bottom += shown ? len : 0f;
             }
+
+            // The head rides the extended tip. `bottom` is now the local Y the
+            // topmost visible section reached (the tip). Show the head only once
+            // the tip has climbed past the emergence line, so it grows out of
+            // the pack with the mast instead of poking out while stowed. Sit its
+            // base a touch below the tip so it reads as clamped on, not floating.
+            if (_head != null)
+            {
+                float tip = bottom;
+                bool showHead = tip > emergeLocal + 0.05f;
+                if (_headRend != null) _headRend.enabled = showHead;
+                if (showHead)
+                {
+                    _head.transform.localRotation = Quaternion.identity;
+                    _head.transform.localScale = Vector3.one;
+                    _head.transform.localPosition = new Vector3(0f, tip - 0.08f, 0f);
+                }
+            }
         }
 
         static void Grow(float t) { Layout(t); }
@@ -933,9 +1057,13 @@ namespace NextDayRevival
 
         static void DestroyMast()
         {
+            // The head is parented under _root, so destroying the root takes it
+            // too; clear the references so a rebuilt mast makes a fresh head.
             if (_root != null) { UnityEngine.Object.Destroy(_root); _root = null; }
             _seg = null;
             _rend = null;
+            _head = null;
+            _headRend = null;
             _pilot = null;
         }
 
@@ -1122,11 +1250,60 @@ namespace NextDayRevival
         static bool _keyParsed;
         static Texture2D _px;
 
+        // Authoritative damage state, kept on the OWNER's client only - like the
+        // FPV drone's hit points. _hp is what is left; _armed guards the first
+        // moments so the launch cannot register a hit. _nextNet throttles the
+        // position broadcast; _startSent/_endSent make sure exactly one Start and
+        // one End go out per flight, so a remote never sees a duplicate drone or
+        // a duplicate destruction.
+        static float _hp;
+        static float _nextNet;
+        static bool _startSent;
+        static bool _endSent;
+
         public static readonly LaunchHold Hold = new LaunchHold();
 
         public static bool Flying { get { return _flying; } }
         public static bool Viewing { get { return _flying && _viewing; } }
         public static bool LaunchBusy { get { return Hold.Active; } }
+
+        /// <summary>World position of the drone while it flies - read by the NPC
+        /// relevance bubble and the NPC fire ticker to centre on the drone.</summary>
+        public static Vector3 Position { get { return _pos; } }
+
+        /// <summary>How wide the drone is as a target: the airframe, scaled. The
+        /// drone mesh is ~0.36 m across before scale, so half of it is 0.18 m
+        /// times the recon ModelScale. One number for size and hitbox both, the
+        /// same rule the FPV drone uses.</summary>
+        public static float HitRadius
+        {
+            get
+            {
+                float s = DroneGear.CfgSurvModelScale == null
+                    ? 12f : DroneGear.CfgSurvModelScale.Value;
+                return Mathf.Max(0.5f, 0.18f * s);
+            }
+        }
+
+        /// <summary>
+        /// The LIVE pilot body position. Unlike the FPV drone, the surveillance
+        /// pilot may WALK while the drone hovers, so a cached launch position is
+        /// wrong: the relevance hook must match the pilot's current row in the
+        /// game's player list. Falls back to the local player object when the
+        /// launch-time root is gone (respawn). False when nothing flies or no
+        /// local body exists yet.
+        /// </summary>
+        public static bool PilotPos(out Vector3 p)
+        {
+            p = Vector3.zero;
+            if (!_flying) return false;
+            if (_pilotRoot != null) { p = _pilotRoot.position; return true; }
+            GameObject body = MapTools.LocalPlayer();
+            if (body == null) return false;
+            _pilotRoot = body.transform;
+            p = _pilotRoot.position;
+            return true;
+        }
 
         static bool Enabled
         {
@@ -1152,9 +1329,21 @@ namespace NextDayRevival
         {
             KeyCode k = Key();
 
+            // Keep the Photon receiver live and push foreign drones along even
+            // when nothing of ours flies - a remote drone must still show while
+            // we stand on the ground. Both are cheap no-ops with no traffic.
+            SurvNet.EnsureHooked();
+            SurvNet.TickRemotes();
+
             if (_flying)
             {
                 Fly(k);
+                // After the flight step: hostile NPCs answer the drone, and the
+                // position goes out to the other clients. Both read _pos as it is
+                // this frame, so they must run after Fly/Move.
+                SurvNpcFire.Tick();
+                Broadcast();
+                SurvDiag.Flush();
                 return;
             }
 
@@ -1242,11 +1431,22 @@ namespace NextDayRevival
             _end = _start + charge;
             _armed = _start + ArmSeconds;
             _holdKeyDown = -1f;
+            _hp = Mathf.Max(1, DroneGear.CfgSurvHitpoints == null
+                ? 4 : DroneGear.CfgSurvHitpoints.Value);
+            _endSent = false;
+            _startSent = false;
+            _nextNet = 0f;
             BuildModel(false);
 
-            int hp = DroneGear.CfgSurvHitpoints == null ? 4 : DroneGear.CfgSurvHitpoints.Value;
+            SurvNet.EnsureHooked();
+            SurvNet.Send(SurvNet.Start, _pos, Forward(), 0f, true);
+            _startSent = true;
+            SurvNpcFire.Reset();
+            SurvDiag.Reset();
+
             RevivalPlugin.L.LogInfo("SurvDrone launched, charge " + charge + " s, range "
-                + Range() + " m, hitpoints " + hp + " (reserved for a networked version).");
+                + Range() + " m, hitpoints " + _hp.ToString("0")
+                + ", hit radius " + HitRadius.ToString("0.0") + " m.");
             Turret.Hinweis(Loc.T("Разведдрон в воздухе", "Surveillance drone airborne"), 2.5f);
         }
 
@@ -1471,14 +1671,102 @@ namespace NextDayRevival
 
         // ------------------------------------------------------- ground / pickup
 
+        /// <summary>Why a flight ended, sent as a number over the net so a remote
+        /// client can tell an ordinary crash from a shoot-down if it ever wants
+        /// to; today every remote simply drops its ghost model on End.</summary>
+        static class Reason
+        {
+            public const int Ended = 0;
+            public const int Crash = 1;
+            public const int Destroyed = 2;
+        }
+
         /// <summary>Puts the drone on the ground as a recoverable item.</summary>
         static void Ground(Vector3 at, string why)
         {
             _wreckAt = at + Vector3.up * 0.25f;
-            End(why, true);
+            End(why, true, Reason.Crash);
             RevivalPlugin.L.LogInfo("SurvDrone grounded (" + why + ") at " + _wreckAt + ".");
             Turret.Hinweis(Loc.T("Разведдрон на земле - подойди и подбери",
                                  "Surveillance drone is down - walk up and pick it up"), 4f);
+        }
+
+        // ------------------------------------------------------ damage / destroy
+
+        /// <summary>
+        /// A real NPC firearm shot the OWNER's client resolved as a hit. The
+        /// owner is authoritative for its own drone's hit points, exactly like
+        /// the FPV drone's NpcTreffer - NPCs are not Photon players, so this never
+        /// leaves this machine except as the eventual End broadcast. Ignored
+        /// during the arm window and once the drone is already down, so a burst
+        /// that lands in the same frame as a destruction cannot double-count.
+        /// </summary>
+        internal static void NpcHit(Vector3 shooterPos)
+        {
+            if (!_flying) return;
+            if (Time.time < _armed) return;
+            _hp -= 1f;
+            float dist = Vector3.Distance(shooterPos, _pos);
+            SurvDiag.Damage(dist, _hp);
+            RevivalPlugin.L.LogInfo("SurvDrone hit by NPC at " + dist.ToString("0")
+                + " m - " + _hp.ToString("0.#") + " hp left.");
+            if (_hp > 0f) return;
+            Downed("shot down by an NPC");
+        }
+
+        /// <summary>
+        /// A player on another client shot THIS client's drone. The shooter sees
+        /// only a ghost model, so the shot travels to the owner (SurvNet.Treffer)
+        /// and is applied here where the hit points live. Matched to this drone by
+        /// the owner's Photon actor number, with an 8 m distance fallback when the
+        /// number is unavailable - the same rule the FPV drone uses.
+        /// </summary>
+        internal static void RemoteHit(int shooter, Vector3 point, int target, float damage)
+        {
+            if (!_flying) return;
+            int me = SurvNet.MyActor();
+            if (me >= 0) { if (target != me) return; }
+            else if (Vector3.Distance(point, _pos) > 8f) return;
+            if (Time.time < _armed) return;
+            _hp -= Mathf.Max(0.1f, damage);
+            SurvDiag.Damage(Vector3.Distance(point, _pos), _hp);
+            RevivalPlugin.L.LogInfo("SurvDrone hit by player " + shooter + " - "
+                + _hp.ToString("0.#") + " hp left.");
+            if (_hp > 0f) return;
+            Downed("shot down by player " + shooter);
+        }
+
+        /// <summary>
+        /// Authoritative destruction: the drone runs out of hit points. It does
+        /// not detonate - it drops to the ground below as a recoverable item, the
+        /// same terminal state as any other crash, and broadcasts a single End so
+        /// every remote drops its ghost consistently. Because it routes through
+        /// End (guarded by _endSent) exactly once, there is no duplicate drop,
+        /// wreck, or cleanup.
+        /// </summary>
+        static void Downed(string why)
+        {
+            Vector3 ground;
+            GameObject go = Turret.RaycastObject(_pos + Vector3.up * 0.2f,
+                                                 Vector3.down, 400f, out ground);
+            Vector3 at = go == null ? _pos : ground;
+            _wreckAt = at + Vector3.up * 0.25f;
+            SurvDiag.Destroyed(why);
+            End(why, true, Reason.Destroyed);
+            RevivalPlugin.L.LogInfo("SurvDrone destroyed (" + why + ") at " + _wreckAt + ".");
+            Turret.Hinweis(Loc.T("Разведдрон сбит - упал на землю",
+                                 "Surveillance drone shot down - it fell to the ground"), 4f);
+        }
+
+        /// <summary>Throttled position broadcast so the other clients see the
+        /// drone move smoothly. Unreliable on purpose: a dropped frame is
+        /// interpolated over, and Start/End are the reliable events.</summary>
+        static void Broadcast()
+        {
+            if (!_flying || !_startSent) return;
+            if (Time.time < _nextNet) return;
+            _nextNet = Time.time + 0.1f;
+            SurvNet.Send(SurvNet.Lauf, _pos, Forward(), 0f, false);
         }
 
         static void PickUp()
@@ -1504,20 +1792,42 @@ namespace NextDayRevival
             return Vector3.Distance(body.transform.position, _wreckAt) <= PickupRange;
         }
 
+        /// <summary>Backwards-compatible entry: an ordinary end/crash.</summary>
+        static void End(string why, bool drop)
+        {
+            End(why, drop, drop ? Reason.Crash : Reason.Ended);
+        }
+
         /// <summary>
         /// Ends the flight and gives the view back. If <paramref name="drop"/>
         /// the grounded item model is left standing at <see cref="_wreckAt"/>.
+        ///
+        /// This is the ONE teardown every ending routes through - crash, recall,
+        /// battery empty, shoot-down, error. It broadcasts exactly one End
+        /// (guarded by _endSent) so remotes remove their ghost once, and builds
+        /// the wreck only on the transition out of flight (guarded by `was`), so
+        /// a second call - e.g. an error right after a shoot-down - can never
+        /// drop a second wreck or release the camera twice.
         /// </summary>
-        static void End(string why, bool drop)
+        static void End(string why, bool drop, int reason)
         {
             bool was = _flying;
+
+            // Tell the other clients once, before we tear down, while _pos is
+            // still the drone's last position.
+            if (_startSent && !_endSent)
+            {
+                _endSent = true;
+                SurvNet.Send(SurvNet.Ende, _pos, Forward(), (float)reason, true);
+            }
+
             _flying = false;
             bool wasViewing = _viewing;
             _viewing = false;
             if (_model != null) { UnityEngine.Object.Destroy(_model); _model = null; }
             if (wasViewing) CameraOwner.Release(CameraOwner.Aufklaerer);
 
-            if (drop)
+            if (drop && was)
             {
                 BuildWreck();
             }

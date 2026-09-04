@@ -35,11 +35,17 @@ GROUPS = [
     # Convoy-repair items: own art for the fire extinguisher (2063) and the
     # heavy tool kit (2064), replacing the ammo50/jammer placeholders.
     ("repairitems", ["repair_items_build.py"]),
+    # Anti-tank mine (2065): own mesh + textures + icon in one pass.
+    ("mine", ["antitank_mine_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),
     ("drone", ["drone_mesh.py", "drone_texture.py", "drone_icon.py"]),
     ("jammer", ["jammer_mesh.py", "jammer_texture.py", "jammer_icon.py"]),
+    # Deployed head of the mast antenna (item 2055). Mesh only: the mast body
+    # is a runtime telescope in RevivalDroneGear.cs, and the inventory item
+    # keeps the jammer whip art - only the deployed tip gets its own head mesh.
+    ("antenna", ["antenna_head.py", "mesh_preview.py antenna_head"]),
     # t72_import.py hat t72_mesh.py und t72_texture.py abgeloest: der Panzer
     # kommt seit 0.5.3 als Modell UND Textur aus dem Spiel selbst. Die beiden
     # Generatoren bleiben liegen, laufen aber nicht mehr mit.
