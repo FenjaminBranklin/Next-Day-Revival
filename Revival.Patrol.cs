@@ -2044,6 +2044,26 @@ namespace NextDayRevival
             return _terrainType != null && go.GetComponent(_terrainType) != null;
         }
 
+        /// <summary>Mesh roads are not Unity Terrain components. They are still
+        /// drive surfaces and must remain solid for the convoy. The hit normal
+        /// covers slopes; the ancestor-name check also covers a road edge hit
+        /// whose normal points sideways.</summary>
+        static bool IsDriveSurface(GameObject go, Vector3 normal)
+        {
+            if (go == null) return false;
+            if (IsTerrain(go) || normal.y >= 0.45f) return true;
+
+            Transform t = go.transform;
+            for (int depth = 0; t != null && depth < 6; depth++, t = t.parent)
+            {
+                string name = t.name == null ? "" : t.name.ToLowerInvariant();
+                if (name.IndexOf("road") >= 0 || name.IndexOf("ground") >= 0
+                    || name.IndexOf("terrain") >= 0 || name.IndexOf("asphalt") >= 0)
+                    return true;
+            }
+            return false;
+        }
+
         /// <summary>Cast the same three feeler rays the avoider uses, but instead
         /// of steering, make the convoy car pass through whatever solid, dead,
         /// non-terrain prop each ray finds. Every obstacle is handled once
@@ -2061,7 +2081,9 @@ namespace NextDayRevival
         static void GhostRay(Unit u, Vector3 origin, Vector3 dir, float range)
         {
             Vector3 point;
-            GameObject go = Turret.RaycastObject(origin, dir, range, out point);
+            Vector3 normal;
+            GameObject go = Turret.RaycastObject(origin, dir, range, out point,
+                                                  out normal);
             if (go == null) return;
             if (u.Car != null && go.transform.IsChildOf(u.Car.transform)) return;
 
@@ -2071,7 +2093,7 @@ namespace NextDayRevival
             u.Ghosted[id] = true;                 // decided once, either way
 
             if (Lebendig(go.transform)) return;   // player, NPC, animal, vehicle: solid
-            if (IsTerrain(go)) return;            // never ghost the ground
+            if (IsDriveSurface(go, normal)) return; // never ghost terrain or mesh roads
             if (!PhysLookUp()) return;
 
             Component[] cols = go.GetComponentsInChildren(_colliderType, true);

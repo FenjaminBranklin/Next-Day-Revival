@@ -441,15 +441,13 @@ namespace NextDayRevival
         {
             try
             {
-                // Only the local player's OWN vehicle exit is ours to touch. _vgs
-                // is the vehicle the local player currently sits in (Rescan keeps
-                // it while _localPlayerPassengerId >= 0), so its
-                // PlayerVehicleManager is the one that fires GetOutFromVehicle for
-                // us. A remote player's exit is left alone. The F9 T-72 is a
-                // BTR-80A-derived spawn, so Rescan tracks it here too - this path
-                // therefore also covers a plain ride-and-exit, not just gunning.
-                object myPvm = _vgs == null ? null : Field(_vgs, "_playerVehicleManager");
-                bool mine = myPvm != null && ReferenceEquals(__instance, myPvm);
+                // Turret.Rescan deliberately tracks only BTR/T-72 vehicles. Exit
+                // cleanup must cover every vehicle, however: the 15-seat Ural has
+                // the same PlayerVehicleManager and can otherwise leave a held
+                // plugin camera active while the game switches back to foot mode.
+                // Resolve ownership from every local VehicleGameSystem instead of
+                // treating the turret target as the complete vehicle list.
+                bool mine = IsLocalVehicleManager(__instance);
 
                 if (_manning && mine)
                 {
@@ -491,6 +489,25 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogError("Geschuetz GetOutPrefix: " + ex);
                 SetManning(false);
             }
+        }
+
+        static bool IsLocalVehicleManager(object instance)
+        {
+            if (instance == null) return false;
+
+            object tracked = _vgs == null ? null : Field(_vgs, "_playerVehicleManager");
+            if (tracked != null && ReferenceEquals(instance, tracked)) return true;
+
+            Component[] all = VehicleScan.All();
+            for (int i = 0; i < all.Length; i++)
+            {
+                Component vgs = all[i];
+                if (vgs == null || IntField(vgs, "_localPlayerPassengerId") < 0)
+                    continue;
+                object pvm = Field(vgs, "_playerVehicleManager");
+                if (pvm != null && ReferenceEquals(instance, pvm)) return true;
+            }
+            return false;
         }
 
         // --------------------------------------------------------- Einhaengen
@@ -1330,7 +1347,18 @@ namespace NextDayRevival
         internal static GameObject RaycastObject(Vector3 origin, Vector3 direction,
                                                  float range, out Vector3 point)
         {
+            Vector3 normal;
+            return RaycastObject(origin, direction, range, out point, out normal);
+        }
+
+        /// <summary>Raycast variant that also exposes the hit normal. Patrol
+        /// ghosting needs it to distinguish a drive surface from a wall.</summary>
+        internal static GameObject RaycastObject(Vector3 origin, Vector3 direction,
+                                                 float range, out Vector3 point,
+                                                 out Vector3 normal)
+        {
             point = Vector3.zero;
+            normal = Vector3.zero;
             if (!LookUpRaycast()) return null;
 
             object[] args = new object[] {
@@ -1338,6 +1366,7 @@ namespace NextDayRevival
             if (!(bool)_raycast.Invoke(null, args)) return null;
 
             if (_hitPoint != null) point = (Vector3)_hitPoint.GetValue(args[2], null);
+            if (_hitNormal != null) normal = (Vector3)_hitNormal.GetValue(args[2], null);
 
             Component hitCollider = _hitCollider.GetValue(args[2], null) as Component;
             return hitCollider == null ? null : hitCollider.gameObject;
@@ -1345,7 +1374,7 @@ namespace NextDayRevival
 
         static Type _hitType;
         static MethodInfo _raycast;
-        static PropertyInfo _hitPoint, _hitCollider;
+        static PropertyInfo _hitPoint, _hitNormal, _hitCollider;
         static bool _raycastLookedUp;
 
         /// <summary>
@@ -1401,6 +1430,8 @@ namespace NextDayRevival
             }
 
             _hitPoint = _hitType.GetProperty("point",
+                BindingFlags.Public | BindingFlags.Instance);
+            _hitNormal = _hitType.GetProperty("normal",
                 BindingFlags.Public | BindingFlags.Instance);
             _hitCollider = _hitType.GetProperty("collider",
                 BindingFlags.Public | BindingFlags.Instance);

@@ -567,6 +567,44 @@ def check_mine():
         need(seam in plug, "Seam " + seam, "Seam fehlt in RevivalPlugin.cs: " + seam)
 
 
+def check_convoy_ground_and_exit():
+    """Regression guards for the convoy road collision and all-vehicle exit.
+
+    Runtime movement still needs an in-game acceptance pass. These checks keep
+    the two exact structural mistakes from returning: treating only a Unity
+    Terrain component as ground, and deriving local exit ownership only from
+    the BTR/T-72 turret scan.
+    """
+    print("[12] Convoy ground and vehicle exit (static)")
+    patrol_p = os.path.join(ROOT, "Revival.Patrol.cs")
+    camera_p = os.path.join(ROOT, "Revival.CameraTurret.cs")
+    if not os.path.exists(patrol_p) or not os.path.exists(camera_p):
+        bad("Convoy ground check: source file missing")
+        return
+    patrol = io.open(patrol_p, encoding="utf-8").read()
+    camera = io.open(camera_p, encoding="utf-8").read()
+
+    if ("IsDriveSurface(go, normal)" in patrol
+            and 'name.IndexOf("road")' in patrol
+            and 'name.IndexOf("ground")' in patrol):
+        ok("mesh roads remain solid during convoy ghosting")
+    else:
+        bad("Convoy ground check: mesh-road collision guard missing")
+
+    if ("out Vector3 normal" in camera
+            and '_hitType.GetProperty("normal"' in camera):
+        ok("raycast hit normal is available to ground classification")
+    else:
+        bad("Convoy ground check: RaycastHit.normal seam missing")
+
+    if ("IsLocalVehicleManager(__instance)" in camera
+            and "VehicleScan.All()" in camera
+            and 'IntField(vgs, "_localPlayerPassengerId")' in camera):
+        ok("exit cleanup covers the local Ural and other vehicle types")
+    else:
+        bad("Vehicle exit check: cleanup is still limited to turret vehicles")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -582,6 +620,7 @@ if __name__ == "__main__":
     check_eac()
     check_winding()
     check_mine()
+    check_convoy_ground_and_exit()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))
