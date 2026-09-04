@@ -1553,10 +1553,20 @@ namespace NextDayRevival
             // --- what is in the way ------------------------------------------
             if (u.ConvoyId != 0)
             {
-                // A convoy does not steer around anything and never counts as
-                // stuck: it ghosts straight through props and its line-mates and
-                // drives its waypoints bluntly. No Avoid, no Escalate/Free.
+                // A convoy does not steer around anything: it ghosts straight
+                // through props and its line-mates and drives its waypoints
+                // bluntly (no Avoid). But ghosting covers only world props -
+                // terrain and things it may not ghost can still wedge a vehicle,
+                // and one stuck column member (very often the front, at the spawn
+                // line) blocks the whole convoy. So, exactly like a patrol, a
+                // convoy vehicle that has stopped moving is teleported a few
+                // metres forward onto the next waypoint (Escalate/Free), which
+                // also spreads out a column that spawned piled up on the start
+                // line. Hold is handled before Drive, so a legitimately held
+                // vehicle never reaches this.
                 GhostAhead(u, t, vel.magnitude);
+                if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+                if (Escalate(u, pos)) return;
             }
             else
             {
@@ -2098,14 +2108,19 @@ namespace NextDayRevival
             int steps = 0;
             while (advanced < 5f && steps < n - 1)
             {
-                int next = (to + 1) % n;
+                // A one-way convoy never wraps back to waypoint 0: if it is stuck
+                // near the end there is nothing farther along, so it clamps to the
+                // last waypoint and Advance turns that into arrive-and-vanish next
+                // tick. A looping patrol wraps as before.
+                int next = u.OneWay ? Mathf.Min(to + 1, n - 1) : (to + 1) % n;
+                if (next == to) break;
                 advanced += FlatDistance(r.P[to].Pos, r.P[next].Pos);
                 to = next;
                 steps++;
             }
 
             Vector3 target = Grounded(r.P[to].Pos, 1.5f);
-            Vector3 ahead = RouteDirection(r, to);
+            Vector3 ahead = RouteDirection(r, to, u.OneWay);
 
             Stop(u.Body);
             SetFloat(u.Rcc, "gasInput", 0f);
@@ -2132,14 +2147,28 @@ namespace NextDayRevival
             return d.magnitude;
         }
 
-        static Vector3 RouteDirection(Route r, int at)
+        static Vector3 RouteDirection(Route r, int at, bool oneWay)
         {
             int n = r.P.Count;
-            for (int step = 1; step < n; step++)
+            // Forward: the next non-degenerate leg from 'at'. A one-way convoy
+            // does not wrap past the last waypoint (that would face it back down
+            // the route towards wp0), so at the end it falls back to the leg it
+            // arrived on - the direction it was already travelling.
+            int limit = oneWay ? (n - at) : n;
+            for (int step = 1; step < limit; step++)
             {
                 Vector3 ahead = r.P[(at + step) % n].Pos - r.P[at].Pos;
                 ahead.y = 0f;
                 if (ahead.sqrMagnitude >= 0.0001f) return ahead;
+            }
+            if (oneWay)
+            {
+                for (int step = 1; step <= at; step++)
+                {
+                    Vector3 ahead = r.P[at].Pos - r.P[at - step].Pos;
+                    ahead.y = 0f;
+                    if (ahead.sqrMagnitude >= 0.0001f) return ahead;
+                }
             }
             return Vector3.forward;
         }

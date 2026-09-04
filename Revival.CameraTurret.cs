@@ -441,12 +441,50 @@ namespace NextDayRevival
         {
             try
             {
-                if (!_manning) return;
+                // Only the local player's OWN vehicle exit is ours to touch. _vgs
+                // is the vehicle the local player currently sits in (Rescan keeps
+                // it while _localPlayerPassengerId >= 0), so its
+                // PlayerVehicleManager is the one that fires GetOutFromVehicle for
+                // us. A remote player's exit is left alone. The F9 T-72 is a
+                // BTR-80A-derived spawn, so Rescan tracks it here too - this path
+                // therefore also covers a plain ride-and-exit, not just gunning.
                 object myPvm = _vgs == null ? null : Field(_vgs, "_playerVehicleManager");
-                if (myPvm == null || !ReferenceEquals(__instance, myPvm)) return;
-                RevivalPlugin.L.LogInfo("Geschuetz: Fahrzeug wird verlassen - Kamera "
-                    + "vor dem Umschalten zurueckgegeben (HUD-Fix).");
-                SetManning(false);
+                bool mine = myPvm != null && ReferenceEquals(__instance, myPvm);
+
+                if (_manning && mine)
+                {
+                    RevivalPlugin.L.LogInfo("Geschuetz: Fahrzeug wird verlassen - Kamera "
+                        + "vor dem Umschalten zurueckgegeben (HUD-Fix).");
+                    SetManning(false);
+                    return;
+                }
+
+                // Not manning the gun, but the plugin can still HOLD the camera
+                // through another system (drone, antenna, recon drone). A held
+                // camera at the instant the game switches back to the foot camera
+                // leaves HUD, map, inventory and menu dark - the exact failure the
+                // gunner path had. Give the camera back BEFORE the game switches,
+                // whoever holds it, so a plain ride-and-exit cannot strand the UI.
+                if (mine && !CameraOwner.Free)
+                {
+                    RevivalPlugin.L.LogWarning("Fahrzeug verlassen: das Plugin hielt "
+                        + "noch die Kamera (Halter " + CameraOwner.Owner + ") - vor dem "
+                        + "Umschalten zurueckgegeben, sonst bliebe das UI dunkel.");
+                    CameraOwner.Release(CameraOwner.Owner);
+                }
+
+                // Diagnostic for the "inventory gone after merely riding the tank"
+                // report (2026-09-04): the plugin's own HUD-blanking path (gunner
+                // camera takeover) was NOT active in the failing session's log, so
+                // if the UI still dies on a plain ride-and-exit, this line records
+                // the camera state at the exact exit - so the cause is read from
+                // the log next time, not guessed. Cheap, no behaviour change, local
+                // player only.
+                if (mine)
+                    RevivalPlugin.L.LogInfo("Fahrzeug verlassen (Geschuetz nicht "
+                        + "besetzt): CameraOwner frei=" + CameraOwner.Free
+                        + ", Halter=" + CameraOwner.Owner + ", aktive Kameras "
+                        + CameraOwner.Kameraliste() + ".");
             }
             catch (Exception ex)
             {
