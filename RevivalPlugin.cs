@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.8.1";
+        public const string VERSION = "6.8.2";
 
         internal static ManualLogSource L;
         internal static string AssetDir;

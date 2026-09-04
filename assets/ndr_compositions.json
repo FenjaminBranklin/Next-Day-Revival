@@ -2125,19 +2125,19 @@
    ],
    "vehicles": [
     {
-     "type": "btr",
+     "type": "tank",
      "crew": [
       {
        "role": "crew",
        "fpv": true,
        "weapons": [
-        1160
+        1003
        ],
        "uniform": {
-        "headwear": 4007,
-        "mask": 4705,
-        "body": 4301,
-        "legs": 4505,
+        "headwear": 4012,
+        "mask": 4709,
+        "body": 4310,
+        "legs": 4504,
         "hands": 4602
        }
       }
@@ -2153,17 +2153,36 @@
         1170
        ],
        "uniform": {
-        "headwear": 4006,
-        "mask": 4705,
-        "body": 4201,
+        "headwear": 4016,
+        "mask": 4709,
+        "body": 4308,
         "legs": 4504,
+        "hands": 4602
+       }
+      }
+     ]
+    },
+    {
+     "type": "ural",
+     "crew": [
+      {
+       "role": "crew",
+       "fpv": true,
+       "weapons": [
+        1017
+       ],
+       "uniform": {
+        "headwear": 4022,
+        "mask": 4709,
+        "body": 4323,
+        "legs": 4514,
         "hands": 4603
        }
       }
      ]
     },
     {
-     "type": "tank",
+     "type": "btr",
      "crew": [
       {
        "role": "crew",
@@ -2172,11 +2191,11 @@
         1170
        ],
        "uniform": {
-        "headwear": 4003,
-        "mask": 4701,
-        "body": 4205,
+        "headwear": 4015,
+        "mask": 4709,
+        "body": 4308,
         "legs": 4504,
-        "hands": 4603
+        "hands": 4602
        }
       }
      ]
@@ -2188,13 +2207,13 @@
        "role": "crew",
        "fpv": true,
        "weapons": [
-        1162
+        1160
        ],
        "uniform": {
-        "headwear": 4003,
-        "mask": 4704,
-        "body": 4301,
-        "legs": 4503,
+        "headwear": 4013,
+        "mask": 4709,
+        "body": 4310,
+        "legs": 4514,
         "hands": 4602
        }
       }
