@@ -258,6 +258,8 @@ namespace NextDayRevival
             public bool Column;
             public int ColumnIndex = -1;
             public float ColumnLift;
+            public float ColumnHalfLength, ColumnHalfWidth;
+            public float ColumnGroundLog;
             public bool Placed;
         }
 
@@ -826,7 +828,11 @@ namespace NextDayRevival
                 if (_units[i].ConvoyId == convoyId)
                     GhostPair(u.Cols, _units[i].Cols);
 
-            if (u.Column) ColumnStart(convoyId, headArc);
+            if (u.Column)
+            {
+                PlaceInColumn(u, r, arc, 0f);
+                ColumnStart(convoyId, headArc);
+            }
 
             _units.Add(u);
             _spawned++;
@@ -1141,7 +1147,7 @@ namespace NextDayRevival
             float lowest = float.MaxValue;
             for (int i = 0; i < rs.Length; i++)
             {
-                if (rs[i] == null) continue;
+                if (!(rs[i] is MeshRenderer) && !(rs[i] is SkinnedMeshRenderer)) continue;
                 Bounds b = rs[i].bounds;
                 if (b.size.sqrMagnitude < 0.0001f) continue;
                 if (b.min.y < lowest) lowest = b.min.y;
@@ -1150,62 +1156,79 @@ namespace NextDayRevival
             return Mathf.Clamp(car.transform.position.y - lowest, 0.05f, 3f);
         }
 
-        /// <summary>
-        /// The road surface under a route point.
-        ///
-        /// The ray is SHORT and starts three metres above the recorded line, for
-        /// two reasons: a tunnel roof or a bridge deck above the road can not be
-        /// mistaken for the ground, and the terrain far below a viaduct can not
-        /// either. Hits on the convoy's own hull (it is standing on that very
-        /// spot from the last step) and on anything that happens to be lying on
-        /// the road are skipped, so a man walking in front of the column does not
-        /// lift a tank onto his head.
-        ///
-        /// A route recorded before the editor carried heights has y near zero.
-        /// There is no local surface to find, so the long cast of
-        /// <see cref="Grounded"/> answers instead - the same convention the
-        /// spawn code has always used.
-        ///
-        /// False means nothing usable was found; the recorded y is then the best
-        /// answer there is.
-        /// </summary>
+        /// <summary>Prefer the local road deck, including a tunnel floor. If
+        /// the recorded line is buried, retry from progressively higher origins.
+        /// A failed ray must not permanently pin the column under the terrain.
+        /// Never use another vehicle or a character as ground.</summary>
         static bool RoadUnder(Vector3 point, Transform own, out float y,
                               out Vector3 normal)
         {
             y = point.y;
             normal = Vector3.up;
-
-            if (point.y < 10f)
+            bool legacy = point.y < 10f;
+            for (int pass = 0; pass < (legacy ? 1 : 5); pass++)
             {
-                y = Grounded(point, 0f).y;
-                return true;
-            }
-
-            Vector3 from = point + Vector3.up * 3f;
-            float rest = 12f;
-            for (int step = 0; step < 4 && rest > 0.1f; step++)
-            {
-                Vector3 hit, hitNormal;
-                GameObject go = Turret.RaycastObject(from, Vector3.down, rest,
-                                                     out hit, out hitNormal);
-                if (go == null) return false;
-
-                // Skipped: the convoy's own hull, and anything standing well
-                // ABOVE the recorded line - a man on the road, a crate, a fence
-                // rail. A hit BELOW the line is accepted whatever the drop is,
-                // because that is what a route whose recorded height is a little
-                // optimistic looks like from up here.
-                bool mine = own != null && go.transform.IsChildOf(own);
-                if (!mine && hit.y <= point.y + 1.5f)
+                float rise = 3f * (1 << pass);
+                Vector3 from = point + Vector3.up * rise;
+                if (legacy) from.y = 2500f;
+                float rest = legacy ? 3000f : rise * 4f;
+                for (int step = 0; step < 16 && rest > 0.1f; step++)
                 {
-                    y = hit.y;
-                    normal = hitNormal.sqrMagnitude > 0.01f ? hitNormal : Vector3.up;
-                    return true;
+                    Vector3 hit, hitNormal;
+                    GameObject go = Turret.RaycastObject(from, Vector3.down, rest,
+                                                         out hit, out hitNormal);
+                    if (go == null) break;
+                    bool mine = own != null && go.transform.IsChildOf(own);
+                    bool nearRoad = legacy || pass > 0 || hit.y <= point.y + 1.5f;
+                    if (!mine && nearRoad && !Lebendig(go.transform) && hitNormal.y >= 0.35f
+                        && IsDriveSurface(go, hitNormal))
+                    {
+                        y = hit.y;
+                        normal = hitNormal.normalized;
+                        return true;
+                    }
+                    float used = Mathf.Max(0.2f, from.y - hit.y + 0.2f);
+                    rest -= used;
+                    from = hit + Vector3.down * 0.2f;
                 }
-                rest -= (from.y - hit.y) + 0.2f;
-                from = hit + Vector3.down * 0.2f;
             }
             return false;
+        }
+
+        /// <summary>Measure the support footprint once in the level spawn pose.
+        /// Use mesh-local bounds so world-axis boxes do not grow with yaw.
+        /// Only geometry reaching the lower hull contributes: turret, barrel
+        /// and particle effects must not widen the ground contact rectangle.</summary>
+        static void ColumnFootprint(Unit u)
+        {
+            u.ColumnLift = HullDrop(u.Car);
+            float halfLength = 1f, halfWidth = 0.5f;
+            Renderer[] rs = u.Car.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < rs.Length; i++)
+            {
+                Renderer renderer = rs[i];
+                if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer))
+                    continue;
+                if (renderer.bounds.min.y > u.Car.transform.position.y - u.ColumnLift + 0.5f)
+                    continue;
+                SkinnedMeshRenderer skinned = renderer as SkinnedMeshRenderer;
+                MeshFilter mesh = renderer.GetComponent<MeshFilter>();
+                if (skinned == null && (mesh == null || mesh.sharedMesh == null)) continue;
+                Bounds b = skinned != null ? skinned.localBounds : mesh.sharedMesh.bounds;
+                for (int corner = 0; corner < 8; corner++)
+                {
+                    Vector3 vertex = b.center + new Vector3(
+                        (corner & 1) == 0 ? -b.extents.x : b.extents.x,
+                        (corner & 2) == 0 ? -b.extents.y : b.extents.y,
+                        (corner & 4) == 0 ? -b.extents.z : b.extents.z);
+                    Vector3 local = u.Car.transform.InverseTransformPoint(
+                        renderer.transform.TransformPoint(vertex));
+                    halfLength = Mathf.Max(halfLength, Mathf.Abs(local.z));
+                    halfWidth = Mathf.Max(halfWidth, Mathf.Abs(local.x));
+                }
+            }
+            u.ColumnHalfLength = halfLength;
+            u.ColumnHalfWidth = halfWidth;
         }
 
         /// <summary>Put one column vehicle on its slot: exact position on the
@@ -1217,41 +1240,55 @@ namespace NextDayRevival
             Vector3 line = PointOnRoute(r, arc, out seg);
             Vector3 dir = HeadingOnRoute(r, arc);
 
-            // Measured exactly once, on the FIRST placement, while the hull
-            // still carries the level spawn rotation. A later measurement on a
-            // slope would read a tilted bounding box and lift the vehicle off
-            // the road by the tilt. The wheel MESHES exist from instantiation -
-            // EnablePhys switches wheel COLLIDERS on, not the models - so there
-            // is nothing to wait for.
-            if (u.ColumnLift <= 0f) u.ColumnLift = HullDrop(u.Car);
+            if (u.ColumnLift <= 0f) ColumnFootprint(u);
 
             float y;
             Vector3 normal;
-            if (!RoadUnder(line, u.Car.transform, out y, out normal))
-            {
-                y = line.y;
-                normal = Vector3.up;
-            }
-            if (normal.y < 0.35f) normal = Vector3.up;
-
-            Vector3 target = new Vector3(line.x, y + u.ColumnLift, line.z);
-
+            bool found = RoadUnder(line, u.Car.transform, out y, out normal);
+            if (!found) { y = line.y; normal = Vector3.up; }
             Vector3 flat = dir - normal * Vector3.Dot(dir, normal);
             if (flat.sqrMagnitude < 0.0001f) { flat = dir; normal = Vector3.up; }
             Quaternion want = Quaternion.LookRotation(flat.normalized, normal);
-
             Transform t = u.Car.transform;
+            Quaternion rotation = !u.Placed ? want : Quaternion.RotateTowards(
+                t.rotation, want, ColumnTurnRate * Time.fixedDeltaTime);
+
+            // Compute clearance for the ACTUAL eased rotation. Raising only the
+            // origin by a fixed lift leaves the nose/tail buried on a slope.
+            Vector3 bottom = rotation * new Vector3(0f, -u.ColumnLift, 0f);
+            float targetY = y - bottom.y + 0.15f;
+            for (int corner = 0; corner < 4; corner++)
+            {
+                Vector3 offset = rotation * new Vector3(
+                    (corner & 1) == 0 ? -u.ColumnHalfWidth : u.ColumnHalfWidth,
+                    -u.ColumnLift,
+                    (corner & 2) == 0 ? -u.ColumnHalfLength : u.ColumnHalfLength);
+                Vector3 probe = new Vector3(line.x + offset.x, line.y, line.z + offset.z);
+                float supportY;
+                Vector3 supportNormal;
+                if (RoadUnder(probe, t, out supportY, out supportNormal))
+                {
+                    targetY = Mathf.Max(targetY, supportY - offset.y + 0.15f);
+                    found = true;
+                }
+            }
+            // Missing collision data must not pull a previously grounded hull
+            // down into an untrusted route. Keep moving; retry at the next slot.
+            if (!found && u.Placed) targetY = Mathf.Max(targetY, t.position.y);
+            Vector3 target = new Vector3(line.x, targetY, line.z);
+            if (Time.time >= u.ColumnGroundLog
+                && (!found || Mathf.Abs(y - line.y) > 3f
+                    || (u.Placed && Mathf.Abs(t.position.y - targetY) > 2f)))
+            {
+                u.ColumnGroundLog = Time.time + 10f;
+                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": ground slot "
+                    + u.ColumnIndex + " routeY=" + line.y.ToString("0.0")
+                    + " surfaceY=" + y.ToString("0.0") + " hullY="
+                    + targetY.ToString("0.0") + " found=" + found);
+            }
+            t.rotation = rotation;
             t.position = target;
-            if (!u.Placed)
-            {
-                t.rotation = want;
-                u.Placed = true;
-            }
-            else
-            {
-                t.rotation = Quaternion.RotateTowards(t.rotation, want,
-                    ColumnTurnRate * Time.fixedDeltaTime);
-            }
+            u.Placed = true;
 
             // The hull is moved by hand, so no throttle and no steering lock
             // may still act on it. The velocity is not zeroed but SET to what the
