@@ -685,7 +685,7 @@ namespace NextDayRevival
                 Clear();
             }
 
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(vgsType);
+            Component[] all = VehicleScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 MonoBehaviour mb = all[i] as MonoBehaviour;
@@ -1560,6 +1560,8 @@ namespace NextDayRevival
         // rate, no matter how many callers interleave.
         static readonly Dictionary<int, float> _hasUntil = new Dictionary<int, float>();
         static readonly Dictionary<int, bool> _hasResult = new Dictionary<int, bool>();
+        static List<object> _hasInventories;
+        static int _hasInventoryFrame = -1;
 
         /// <summary>
         /// Does item `wanted` lie in one of the local player's inventories?
@@ -1577,7 +1579,14 @@ namespace NextDayRevival
             if (_hasUntil.TryGetValue(wanted, out until) && Time.time < until)
                 return _hasResult[wanted];
             bool found = false;
-            List<object> invs = PlayerInventories();
+            // Several item caches expire together. Share discovery within this
+            // frame only; item consumption still uses a fresh authoritative scan.
+            if (_hasInventoryFrame != Time.frameCount)
+            {
+                _hasInventories = PlayerInventories();
+                _hasInventoryFrame = Time.frameCount;
+            }
+            List<object> invs = _hasInventories;
             for (int i = 0; i < invs.Count && !found; i++)
                 if (CountItem(invs[i], wanted) > 0) found = true;
             _hasResult[wanted] = found;

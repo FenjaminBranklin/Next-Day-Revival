@@ -382,6 +382,7 @@ namespace NextDayRevival
             if (CfgEnabled != null && !CfgEnabled.Value)
                 return Input.GetKeyDown(key);
 
+            if (!Input.GetKey(key)) { FpvHold.Cancel(); return false; }
             bool allowed = Antenna.LaunchAllowed();
             if (!allowed && Input.GetKeyDown(key))
             {
@@ -1357,6 +1358,7 @@ namespace NextDayRevival
             // Idle: hold the key to launch. The antenna must be up and the drone
             // (and a battery) must be in the pack - checked before the bar even
             // starts, so a 20 s hold cannot end in a bare "nothing happened".
+            if (!Input.GetKey(k)) { Hold.Cancel(); return; }
             bool antenna = Antenna.LaunchAllowed();
             bool needBat = DroneGear.CfgSurvRequireBattery == null
                         || DroneGear.CfgSurvRequireBattery.Value;

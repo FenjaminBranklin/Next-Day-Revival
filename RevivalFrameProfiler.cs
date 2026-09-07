@@ -72,7 +72,11 @@ namespace NextDayRevival
         public const int ConvoyDraw   = 25;
         public const int DroneAlrtD   = 26;
 
-        public const int Count = 27;
+        public const int PatrolFixed = 27;
+        public const int CameraLate = 28;
+        public const int PeerTick = 29;
+        public const int OtherDraw = 30;
+        public const int Count = 31;
         // The first OnGUI slot; slots below it are Update-side, at and above are
         // OnGUI-side. Used only to sum the two groups for the overlay.
         const int FirstDrawSlot = 17;
@@ -87,6 +91,7 @@ namespace NextDayRevival
             "Turret.DrawScope", "Drone.Draw", "DroneGear.Draw", "Patrol.DrawMap",
             "MapTeleport.Draw", "Admin.Draw", "Patrol.Draw", "ConvoyRepair.Draw",
             "Convoy.Draw", "DroneAlert.Draw",
+            "Patrol.FixedTick", "Camera.LateTick", "PeerCheck.Tick", "Other.Draw",
         };
 
         // Per-slot: start stamp (this frame) and accumulated ticks (this frame).
@@ -94,6 +99,8 @@ namespace NextDayRevival
         static readonly long[] _acc  = new long[Count];
         // Smoothed per-slot milliseconds, shown in the overlay.
         static readonly double[] _ms = new double[Count];
+        static readonly double[] _peak = new double[Count];
+        static readonly int[] _order = new int[Count];
 
         // Stopwatch ticks -> milliseconds. Stopwatch, not DateTime: it is the
         // high-resolution timer and cheap to sample.
@@ -104,6 +111,11 @@ namespace NextDayRevival
         // ---- overall frame rate, tracked always (one subtraction per frame).
         const int Ring = 240;                       // ~4 s at 60 fps
         static readonly float[] _dt = new float[Ring];
+        static readonly float[] _sortedDt = new float[Ring];
+        static float _worstMs;
+        static int _slowFrames;
+        static float _nextLog;
+        static int _gcStart = GC.CollectionCount(0);
         static int _dtN;
         static int _dtCount;
         static double _fpsAvg;
@@ -169,14 +181,17 @@ namespace NextDayRevival
                     {
                         // Entering: clear stale spans so the first shown frame is
                         // real, not a span measured across the paused interval.
-                        for (int i = 0; i < Count; i++) { _acc[i] = 0; _ms[i] = 0; }
+                        for (int i = 0; i < Count; i++)
+                        { _acc[i] = 0; _ms[i] = 0; _peak[i] = 0; }
+                        _gcStart = GC.CollectionCount(0);
+                        _nextLog = Time.unscaledTime + 5f;
                     }
                 }
 
                 // Overall frame rate - tracked even while the per-slot overlay is
                 // off, so toggling on shows a settled number immediately.
                 float dt = Time.unscaledDeltaTime;
-                if (dt > 0f && dt < 1f)
+                if (dt > 0f)
                 {
                     _dt[_dtN] = dt;
                     _dtN = (_dtN + 1) % Ring;
@@ -191,6 +206,7 @@ namespace NextDayRevival
                 for (int i = 0; i < Count; i++)
                 {
                     double ms = _acc[i] * TickMs;
+                    if (ms > _peak[i]) _peak[i] = ms;
                     _ms[i] = _ms[i] + (ms - _ms[i]) * Smooth;
                     _acc[i] = 0;
                 }
@@ -201,6 +217,24 @@ namespace NextDayRevival
                     _lowThrottle = Time.unscaledTime;
                     _low1 = OnePercentLow();
                 }
+                if (Time.unscaledTime >= _nextLog)
+                {
+                    _nextLog = Time.unscaledTime + 5f;
+                    double measured = 0;
+                    int top = 0;
+                    for (int i = 0; i < Count; i++)
+                    {
+                        measured += _ms[i];
+                        if (_ms[i] > _ms[top]) top = i;
+                    }
+                    RevivalPlugin.L.LogInfo(string.Format(
+                        "FramePerf: fps={0:0.0} p99fps={1:0.0} worstMs={2:0.0} "
+                        + "over50ms={3}/{4} measuredMs={5:0.000} "
+                        + "top={6}:{7:0.000} peakSinceEnableMs={8:0.000} gc0={9}",
+                        _fpsAvg, _low1, _worstMs, _slowFrames, _dtCount,
+                        measured, Names[top], _ms[top], _peak[top],
+                        GC.CollectionCount(0) - _gcStart));
+                }
             }
             catch { /* diagnostics must never throw into the frame loop */ }
         }
@@ -210,11 +244,14 @@ namespace NextDayRevival
         {
             int n = _dtCount;
             if (n < 20) return 0f;
-            float[] copy = new float[n];
-            Array.Copy(_dt, copy, n);
-            Array.Sort(copy);                        // ascending frame time
+            Array.Copy(_dt, _sortedDt, n);
+            Array.Sort(_sortedDt, 0, n);              // ascending frame time
             int idx = Mathf.Clamp((int)(n * 0.99f), 0, n - 1);
-            float worst = copy[idx];
+            float worst = _sortedDt[idx];
+            _worstMs = _sortedDt[n - 1] * 1000f;
+            _slowFrames = 0;
+            for (int i = 0; i < n; i++)
+                if (_sortedDt[i] > 0.05f) _slowFrames++;
             return worst > 0f ? 1f / worst : 0f;
         }
 
@@ -241,25 +278,29 @@ namespace NextDayRevival
             {
                 // Group sums.
                 double updMs = 0, drawMs = 0;
-                for (int i = 0; i < FirstDrawSlot; i++) updMs += _ms[i];
-                for (int i = FirstDrawSlot; i < Count; i++) drawMs += _ms[i];
+                for (int i = 0; i < Count; i++)
+                {
+                    if ((i >= FirstDrawSlot && i <= DroneAlrtD) || i == OtherDraw)
+                        drawMs += _ms[i];
+                    else updMs += _ms[i];
+                }
                 double ourMs = updMs + drawMs;
                 float frameMs = Time.unscaledDeltaTime > 0f
                     ? Time.unscaledDeltaTime * 1000f : 0f;
                 float pct = frameMs > 0.01f ? (float)(ourMs / frameMs * 100.0) : 0f;
 
                 // Rank the slots for a "top consumers" list.
-                int[] order = new int[Count];
+                int[] order = _order;
                 for (int i = 0; i < Count; i++) order[i] = i;
                 for (int a = 0; a < Count - 1; a++)
                     for (int b = a + 1; b < Count; b++)
                         if (_ms[order[b]] > _ms[order[a]])
                         { int t = order[a]; order[a] = order[b]; order[b] = t; }
 
-                float x = 12f, y = 12f, w = 340f;
+                float x = 12f, y = 12f, w = 440f;
                 int shown = 10;
                 float lh = 16f;
-                float h = lh * (shown + 6) + 16f;
+                float h = lh * (shown + 8) + 16f;
 
                 Color old = GUI.color;
                 GUI.color = new Color(0f, 0f, 0f, 0.72f);
@@ -278,18 +319,23 @@ namespace NextDayRevival
                 Color acc = pct > 25f ? new Color(1f, 0.55f, 0.4f, 1f)
                                       : new Color(0.6f, 0.95f, 0.6f, 1f);
                 Line(tx, ref ty, w, lh, acc, string.Format(
-                    Loc.T("Toolkit gesamt {0:0.00} ms ({1:0}% vom Bild)",
-                          "Toolkit total {0:0.00} ms ({1:0}% of frame)"),
+                    Loc.T("Gemessene Aufrufe {0:0.00} ms ({1:0}% vom Bild)",
+                          "Measured calls {0:0.00} ms ({1:0}% of frame)"),
                     ourMs, pct));
                 Line(tx, ref ty, w, lh, new Color(0.8f, 0.85f, 0.9f, 1f), string.Format(
-                    Loc.T("  Update {0:0.00} ms    OnGUI {1:0.00} ms",
-                          "  Update {0:0.00} ms    OnGUI {1:0.00} ms"),
+                    Loc.T("  Update/Fixed/Late {0:0.00} ms    GUI {1:0.00} ms",
+                          "  Update/Fixed/Late {0:0.00} ms    GUI {1:0.00} ms"),
                     updMs, drawMs));
+                Line(tx, ref ty, w, lh, Color.white, string.Format(
+                    "Last {0} frames: max {1:0.0} ms, >50 ms: {2}, GC0: {3}",
+                    _dtCount, _worstMs, _slowFrames, GC.CollectionCount(0) - _gcStart));
+                Line(tx, ref ty, w, lh, Color.white,
+                    "Engine/GPU excluded. Peak = since F6 enabled.");
 
                 ty += 4f;
                 Line(tx, ref ty, w, lh, new Color(0.7f, 0.9f, 1f, 1f),
-                    Loc.T("Groesste Posten (ms/Bild):",
-                          "Top consumers (ms/frame):"));
+                    Loc.T("Groesste Posten (ms/Bild): Mittel / Spitze",
+                          "Top consumers (ms/frame): Average / Peak"));
                 for (int i = 0; i < shown && i < Count; i++)
                 {
                     int s = order[i];
@@ -298,7 +344,7 @@ namespace NextDayRevival
                             : v > 0.3 ? new Color(1f, 0.9f, 0.55f, 1f)
                                       : new Color(0.72f, 0.75f, 0.8f, 1f);
                     Line(tx, ref ty, w, lh, c, string.Format(
-                        "  {0,-20} {1,6:0.000}", Names[s], v));
+                        "  {0,-20} {1,6:0.000} / {2,6:0.000}", Names[s], v, _peak[s]));
                 }
             }
             catch { /* never throw into OnGUI */ }

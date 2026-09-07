@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.8.8";
+        public const string VERSION = "6.8.9";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -2021,17 +2021,21 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
-            PeerCheck.Tick();                    // NDR peer version compare (own slow clock)
+            FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
         }
 
         void FixedUpdate()
         {
-            Patrol.FixedTick();
+            FrameProf.S(FrameProf.PatrolFixed);
+            try { Patrol.FixedTick(); }
+            finally { FrameProf.E(FrameProf.PatrolFixed); }
         }
 
         void LateUpdate()
         {
-            CameraOwner.LateTick();
+            FrameProf.S(FrameProf.CameraLate);
+            try { CameraOwner.LateTick(); }
+            finally { FrameProf.E(FrameProf.CameraLate); }
         }
 
         void OnGUI()
@@ -2044,11 +2048,13 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.AdminDraw);   Admin.Draw();            FrameProf.E(FrameProf.AdminDraw);
             FrameProf.S(FrameProf.PatrolDraw);  Patrol.Draw();           FrameProf.E(FrameProf.PatrolDraw);
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
-            AntiTankMine.Draw();                 // NDR anti-tank mine (placement bar)
+            FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
+            FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
             ClientIntegrity.Draw();              // Required verified-launch recovery message
+            FrameProf.E(FrameProf.OtherDraw);
             FrameProf.DrawOverlay();
         }
 

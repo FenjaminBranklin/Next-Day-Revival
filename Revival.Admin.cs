@@ -664,16 +664,36 @@ namespace NextDayRevival
             }
         }
 
+        static MethodInfo _localServerGetter;
+        static FieldInfo _localPlayerField;
+        static int _localPlayerFrame = -1;
+        static GameObject _framePlayer;
+
         public static GameObject LocalPlayer()
+        {
+            // Share read-only discovery across the many frame consumers. Do not
+            // keep a player across frames: respawn and reconnect must be seen.
+            if (_localPlayerFrame == Time.frameCount && _framePlayer != null)
+                return _framePlayer;
+            _framePlayer = FindLocalPlayer();
+            _localPlayerFrame = Time.frameCount;
+            return _framePlayer;
+        }
+
+        static GameObject FindLocalPlayer()
         {
             try
             {
                 Type ngsType = RevivalPlugin.TypeByName("NetworkGameServer");
                 if (ngsType != null)
                 {
-                    MethodInfo get = AccessTools.PropertyGetter(ngsType, "Instance");
+                    if (_localServerGetter == null)
+                        _localServerGetter = AccessTools.PropertyGetter(ngsType, "Instance");
+                    if (_localPlayerField == null)
+                        _localPlayerField = AccessTools.Field(ngsType, "localPlayer");
+                    MethodInfo get = _localServerGetter;
                     object ngs = get == null ? null : get.Invoke(null, null);
-                    FieldInfo local = AccessTools.Field(ngsType, "localPlayer");
+                    FieldInfo local = _localPlayerField;
                     GameObject go = ngs == null || local == null ? null
                         : local.GetValue(ngs) as GameObject;
                     if (go != null) return go;
@@ -1077,7 +1097,8 @@ namespace NextDayRevival
         public static void Tick()
         {
             Net.EnsureHooked();
-            if (Time.time >= _nextPlayers)
+            // The roster serves the menu and an armed map teleport only.
+            if ((_offen || _teleportArmed) && Time.time >= _nextPlayers)
             {
                 _nextPlayers = Time.time + 1f;
                 RefreshPlayers();
@@ -1087,6 +1108,11 @@ namespace NextDayRevival
             {
                 if (!Input.GetKeyDown(Key())) return;
                 _offen = !_offen;
+                if (_offen)
+                {
+                    RefreshPlayers();
+                    _nextPlayers = Time.time + 1f;
+                }
                 if (!_offen)
                 {
                     _fokusLoesen = true;
@@ -1595,11 +1621,16 @@ namespace NextDayRevival
                 string[] names = new string[] { "NickName", "name", "Name" };
                 for (int i = 0; i < names.Length; i++)
                 {
-                    MethodInfo get = AccessTools.PropertyGetter(player.GetType(), names[i]);
-                    if (get == null) continue;
+                    // Missing version-dependent aliases are normal, not a
+                    // Harmony warning to write once per player per refresh.
+                    PropertyInfo property = null;
+                    for (Type t = player.GetType(); t != null && property == null; t = t.BaseType)
+                        property = t.GetProperty(names[i], BindingFlags.Instance
+                            | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                    if (property == null) continue;
                     try
                     {
-                        object value = get.Invoke(player, null);
+                        object value = property.GetValue(player, null);
                         if (value != null && value.ToString().Length > 0)
                             return value.ToString();
                     }

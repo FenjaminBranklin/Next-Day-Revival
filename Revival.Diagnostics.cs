@@ -490,11 +490,11 @@ namespace NextDayRevival
             try
             {
                 object v = null;
-                PropertyInfo p = AccessTools.Property(o.GetType(), name);
+                PropertyInfo p = FindProperty(o.GetType(), name);
                 if (p != null) v = p.GetValue(o, null);
                 else
                 {
-                    FieldInfo f = AccessTools.Field(o.GetType(), name);
+                    FieldInfo f = FindField(o.GetType(), name);
                     if (f != null) v = f.GetValue(o);
                 }
                 if (v == null) return "?";
