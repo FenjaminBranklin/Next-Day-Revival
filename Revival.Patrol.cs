@@ -202,6 +202,8 @@ namespace NextDayRevival
             public bool Tank;            // which of the two value profiles
             public Transform[] Turrets = new Transform[0];
             public Renderer TurretRend;  // for the muzzle, see Muendung
+            public Quaternion GunWorldRotation;
+            public bool GunStabilized;
             public float Yaw, Pitch;     // where the barrel is being sent
             public Transform Target;     // the player being engaged
             public float Held;           // seconds this target has been held
@@ -1032,14 +1034,15 @@ namespace NextDayRevival
             // survivors cannot choose the same firing position.
             for (int attempt = 0; attempt < 4; attempt++)
             {
-                float side = ((u.ColumnIndex + attempt) % 2 == 0) ? 1f : -1f;
+                float side = u.ColumnIndex % 2 == 0 ? 1f : -1f;
                 Vector3 target = t.position + t.right * (side * (18f + attempt * 6f))
-                    + t.forward * 16f;
+                    + t.forward * 8f;
                 float y;
                 Vector3 normal;
                 if (!RoadUnder(target, t, out y, out normal) || normal.y < 0.85f
                     || Mathf.Abs(y - t.position.y) > 5f) continue;
                 if (!DeployRoom(u, target)) continue;
+                if (!DeployLane(u, target)) continue;
                 target.y = y;
                 u.DeployTarget = target;
                 break;
@@ -1062,6 +1065,33 @@ namespace NextDayRevival
             return true;
         }
 
+        // Reserve the approach as well as the endpoint. A clear shoulder is
+        // useless if reaching it cuts through another defender's hull/path.
+        static bool DeployLane(Unit self, Vector3 target)
+        {
+            Vector3 start = self.Car.transform.position;
+            Vector3 leg = target - start; leg.y = 0f;
+            if (leg.sqrMagnitude < 0.01f) return false;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.ConvoyId != self.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                Vector3 offset = other.Car.transform.position - start; offset.y = 0f;
+                float along = Mathf.Clamp01(Vector3.Dot(offset, leg) / leg.sqrMagnitude);
+                if ((offset - leg * along).sqrMagnitude < 144f) return false;
+                if (!other.Deploy) continue;
+                // Conservative path bounding discs prevent crossing approaches.
+                Vector3 otherStart = other.Car.transform.position;
+                Vector3 otherLeg = other.DeployTarget - otherStart; otherLeg.y = 0f;
+                Vector3 centers = (start + target - otherStart - other.DeployTarget) * 0.5f;
+                centers.y = 0f;
+                float radius = (leg.magnitude + otherLeg.magnitude) * 0.5f + 12f;
+                if (centers.sqrMagnitude < radius * radius) return false;
+            }
+            return true;
+        }
+
         // Braking applies to free drivers AND deploying defenders, including
         // wrecks. Ghosted collision pairs must never mean overlapping hulls.
         static bool ConvoyBlocked(Unit self, Vector3 direction)
@@ -1080,6 +1110,23 @@ namespace NextDayRevival
                 Vector3 delta = other.Car.transform.position - pos;
                 delta.y = 0f;
                 float ahead = Vector3.Dot(delta, direction);
+                // Predict crossing traffic too, not just hulls already inside
+                // the forward corridor. Only the later slot yields at a future
+                // crossing; both stop for an immediate collision.
+                Vector3 relative = Velocity(other.Body) - direction * Mathf.Max(speed, 3f);
+                relative.y = 0f;
+                float closing = Vector3.Dot(delta, relative);
+                float when = relative.sqrMagnitude < 0.01f ? 0f
+                    : Mathf.Clamp(-closing / relative.sqrMagnitude, 0f, 2f);
+                Vector3 nearest = delta + relative * when;
+                if (closing < 0f && nearest.sqrMagnitude < 144f
+                    && (delta.sqrMagnitude < 324f || other.Died > 0f
+                        || Velocity(other.Body).sqrMagnitude < 1f
+                        || self.ColumnIndex > other.ColumnIndex))
+                {
+                    Roll(self.Body, Vector3.zero);
+                    return true;
+                }
                 if (ahead <= 0f || ahead >= stop) continue;
                 Vector3 lateral = delta - direction * ahead;
                 if (lateral.sqrMagnitude < 144f)
@@ -2307,6 +2354,7 @@ namespace NextDayRevival
             SetFloat(u.Rcc, "gasInput", 0f);
             SetFloat(u.Rcc, "brakeInput", 1f);
             SetFloat(u.Rcc, "steerInput", 0f);
+            SetFloat(u.Rcc, "handbrakeInput", 1f);
         }
 
         // =====================================================================
@@ -2368,19 +2416,12 @@ namespace NextDayRevival
             // --- what is in the way ------------------------------------------
             if (u.ConvoyId != 0)
             {
-                // A convoy does not steer around anything: it ghosts straight
-                // through props and its line-mates and drives its waypoints
-                // bluntly (no Avoid). But ghosting covers only world props -
-                // terrain and things it may not ghost can still wedge a vehicle,
-                // and one stuck column member (very often the front, at the spawn
-                // line) blocks the whole convoy. So, exactly like a patrol, a
-                // convoy vehicle that has stopped moving is teleported a few
-                // metres forward onto the next waypoint (Escalate/Free), which
-                // also spreads out a column that spawned piled up on the start
-                // line. Hold is handled before Drive, so a legitimately held
-                // vehicle never reaches this.
+                // World props may be ghosted, but convoy hulls still need the
+                // spacing checks above. Waypoint recovery must not warp a free
+                // driver through a defender or into another APC.
                 GhostAhead(u, t, vel.magnitude);
                 if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+                // Free checks the destination and intervening convoy lanes.
                 if (Escalate(u, pos)) return;
             }
             else
@@ -2969,6 +3010,14 @@ namespace NextDayRevival
             Vector3 target = Grounded(r.P[to].Pos, 1.5f);
             Vector3 ahead = RouteDirection(r, to, u.OneWay);
 
+            if (u.ConvoyId != 0 && (!DeployRoom(u, target) || !DeployLane(u, target)))
+            {
+                HoldStill(u);
+                Roll(u.Body, Vector3.zero);
+                u.Stuck = 0f;
+                return;
+            }
+
             Stop(u.Body);
             SetFloat(u.Rcc, "gasInput", 0f);
             SetFloat(u.Rcc, "brakeInput", 0f);
@@ -3257,6 +3306,7 @@ namespace NextDayRevival
 
                 if (u.Target == null)
                 {
+                    u.GunStabilized = false;
                     Ruhen(u, dt);
                     return;
                 }
@@ -3351,11 +3401,11 @@ namespace NextDayRevival
                     if (d > range) continue;
                     if (!Lebt(s)) continue;
                     if (best != null && d >= bestDist) continue;
+                    if (!Sicht(u, s.Tr)) continue;
                     best = s.Tr;
                     bestDist = d;
                 }
                 if (best == null) return;
-                if (!Sicht(u, best)) return;
 
                 u.Target = best;
                 u.Held = 0f;
@@ -3425,12 +3475,24 @@ namespace NextDayRevival
             {
                 Quaternion want = Turret.LocalRotationFor(u.Yaw, u.Pitch);
                 float step = Drehgeschwindigkeit(u) * dt;
+                // Keep the engaged convoy gun's world bearing through hull
+                // turns. Traverse still has its normal speed and pitch limits.
+                bool stabilize = u.ConvoyId != 0 && u.Target != null;
+                Transform primary = u.Turrets[0];
+                if (stabilize && u.GunStabilized && primary != null && primary.parent != null)
+                {
+                    Quaternion local = Quaternion.Inverse(primary.parent.rotation) * u.GunWorldRotation;
+                    for (int i = 0; i < u.Turrets.Length; i++)
+                        if (u.Turrets[i] != null) u.Turrets[i].localRotation = local;
+                }
                 for (int i = 0; i < u.Turrets.Length; i++)
                 {
                     if (u.Turrets[i] == null) continue;
                     u.Turrets[i].localRotation =
                         Quaternion.RotateTowards(u.Turrets[i].localRotation, want, step);
                 }
+                u.GunStabilized = stabilize && primary != null;
+                if (u.GunStabilized) u.GunWorldRotation = primary.rotation;
 
                 // The barrel above turns every frame; the NETWORK readout does
                 // not need to. Turret.Net.Publish already drops sends between
@@ -4250,7 +4312,7 @@ namespace NextDayRevival
                     if (route.P.Count >= 2 && !FitsScene(WorldLine(route), world))
                         continue;
                     Vector2 label;
-                    if (!MapTools.WorldToGui(route.P[0].Pos, texture, camera,
+                    if (!MapTools.WorldToGui(PatrolMapRoads.Correct(route.P[0].Pos), texture, camera,
                                              world, map, out label)) continue;
                     label = MapArt(label, full, mapRect);
                     if (!clip.Contains(label)) continue;
@@ -4336,7 +4398,7 @@ namespace NextDayRevival
         // at the next - the eye draws one continuous line through them - and a
         // dash only curves where the road actually bends; on a straight run it
         // stays straight.
-        const float RouteCurveStep = 5f;
+        const float RouteCurveStep = 2.5f;
         const float RouteSegOverlap = 1.2f;
 
         // World-space spacing (metres) the cached line is resampled to before it
@@ -4411,10 +4473,11 @@ namespace NextDayRevival
         /// around it. A centripetal Catmull-Rom runs THROUGH every waypoint -
         /// it interpolates instead of cutting corners, so the line stays on the
         /// road the waypoints were recorded on - and the result is resampled to
-        /// an even spacing. Measured offline against the terrain's own asphalt
-        /// splat (research/roadmask.py -layer 14): 688/693 and 1431/1450
-        /// samples of the two shipped routes land on the road surface, median
-        /// 0.2 m from its centre, 90 percent within 5 m. Built once and cached
+        /// an even spacing. PatrolMapRoads then applies the measured LOCAL
+        /// artwork correction, before MapArt's global registration. These are
+        /// display coordinates only; the original driving points stay intact.
+        /// See research/map_art_check.py for the original-artwork preview.
+        /// Built once and cached
         /// on the route, rebuilt only when the waypoint count changes; DrawMap
         /// only PROJECTS it, which is what stops the line jittering as the map
         /// or camera micro-moves.
@@ -4442,7 +4505,7 @@ namespace NextDayRevival
 
             List<Vector3> worldLine = new List<Vector3>(line.Count);
             for (int i = 0; i < line.Count; i++)
-                worldLine.Add(new Vector3(line[i].x, 0f, line[i].y));
+                worldLine.Add(PatrolMapRoads.Correct(new Vector3(line[i].x, 0f, line[i].y)));
             r.MapLine = worldLine;
             r.MapLineLoop = loop;
             return worldLine;

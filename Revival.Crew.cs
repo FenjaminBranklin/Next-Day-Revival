@@ -13,6 +13,11 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
+    // Owned by its NPC, so destruction needs no global registry cleanup.
+    public sealed class CrewSector : MonoBehaviour
+    {
+        internal object TacticalPoints;
+    }
 
     // ------------------------------------------------- the crew of a patrol
 
@@ -266,6 +271,10 @@ namespace NextDayRevival
                     harmony.Patch(setActive,
                         new HarmonyMethod(typeof(Crew).GetMethod(
                             "NpcActiveAiPrefix")), null, null, null, null);
+                MethodInfo walkPoints = AccessTools.Method(npc, "SetTemporaryWalkPoints", null, null);
+                if (walkPoints == null) throw new MissingMethodException("NPC_AI2.SetTemporaryWalkPoints");
+                harmony.Patch(walkPoints, new HarmonyMethod(typeof(Crew).GetMethod(
+                    "SectorWalkPointsPrefix")), null, null, null, null);
                 RevivalPlugin.L.LogInfo("Crew: remote NPC appearance and animation "
                     + "repair hooks installed.");
             }
@@ -275,6 +284,20 @@ namespace NextDayRevival
             }
 
             CrewLaw.Install(harmony);
+        }
+
+        // Keep each transport rifleman in his own firing sector when an alarm
+        // or task transition reloads the settlement's shared tactical list.
+        public static void SectorWalkPointsPrefix(object __instance, object[] __args)
+        {
+            Component ai = __instance as Component;
+            if (ai == null || __args == null || __args.Length == 0) return;
+            CrewSector sector = ai.GetComponent<CrewSector>();
+            if (sector == null || sector.TacticalPoints == null) return;
+            IList incoming = __args[0] as IList;
+            if (incoming == null || incoming.Count == 0) return;
+            if (GetNumber(incoming[0], "Type") == 5f)
+                __args[0] = sector.TacticalPoints;
         }
 
         /// <summary>Hang the uniform overlay on one of the game's two
@@ -606,6 +629,7 @@ namespace NextDayRevival
                 Invoke(sied, "StartMainInit");
                 _appearance.Clear();
                 Set(sied, "AllInitializationDone", true);
+                if (count > 8) AssignSectors(sied, wege.transform, car.transform, count, wType);
                 Absichern(sied);
 
                 string wer = Fraktion.Sauber(fraktion);
@@ -625,6 +649,82 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogError("Crew: nobody climbed out - " + ex);
                 if (settlement != null) UnityEngine.Object.Destroy(settlement);
             }
+        }
+
+        static Vector3 SquadOffset(int index, int count, bool tactical)
+        {
+            float side = index % 2 == 0 ? -1f : 1f;
+            int rows = (count + 1) / 2;
+            float along = (index / 2 - (rows - 1) * 0.5f) * (tactical ? 8f : 4f);
+            float across = tactical ? 20f + (index / 2 % 3) * 8f : 8f;
+            return new Vector3(side * across, 0f, along);
+        }
+
+        static Vector3 CrewGround(Vector3 position)
+        {
+            Vector3 ground;
+            GameObject hit = Turret.RaycastObject(position + Vector3.up * 10f,
+                Vector3.down, 40f, out ground);
+            return hit == null ? position : ground + Vector3.up * 0.1f;
+        }
+
+        static void AssignSectors(Component settlement, Transform root, Transform car,
+                                  int count, Type pointType)
+        {
+            Array npcs = GetNpcArray(settlement);
+            if (npcs == null) throw new InvalidOperationException("Crew sector NPC array missing");
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai == null) continue;
+                FieldInfo field = AccessTools.Field(ai.GetType(), "_temporaryWalkPoints");
+                if (field == null) throw new MissingFieldException("NPC_AI2._temporaryWalkPoints");
+                IList points = Activator.CreateInstance(field.FieldType) as IList;
+                if (points == null) throw new InvalidOperationException("Crew sector list unavailable");
+                for (int k = 0; k < 2; k++)
+                {
+                    GameObject point = new GameObject("Sector" + i + "_" + k);
+                    point.transform.SetParent(root, false);
+                    Vector3 offset = SquadOffset(i, count, true);
+                    offset.z += k == 0 ? -1.5f : 1.5f;
+                    point.transform.position = CrewGround(car.TransformPoint(offset));
+                    Component wp = point.AddComponent(pointType);
+                    SetEnum(wp, "Type", "Tactical");
+                    points.Add(wp);
+                }
+                CrewSector sector = ai.gameObject.AddComponent<CrewSector>();
+                sector.TacticalPoints = points;
+            }
+            RevivalPlugin.L.LogInfo("Crew: assigned " + npcs.Length
+                + " separate transport firing sectors on both shoulders.");
+        }
+
+        static Array GetNpcArray(Component settlement)
+        {
+            FieldInfo field = AccessTools.Field(settlement.GetType(), "NpcAI");
+            return field == null ? null : field.GetValue(settlement) as Array;
+        }
+
+        static void StartSectorMove(Component ai)
+        {
+            CrewSector sector = ai.GetComponent<CrewSector>();
+            if (sector == null) return;
+            IList points = sector.TacticalPoints as IList;
+            if (points == null || points.Count == 0) return;
+            Type type = ai.GetType();
+            MethodInfo task = AccessTools.Method(type, "SetTemporaryTask", null, null);
+            MethodInfo target = AccessTools.Method(type, "SetTargetWalkPoint", null, null);
+            MethodInfo move = AccessTools.Method(type, "SetStateWithAnimAndSync", null, null);
+            if (task == null || target == null || move == null)
+                throw new MissingMethodException("Crew tactical movement entry points");
+            task.Invoke(ai, new object[] { 2 });
+            Set(ai, "_temporaryWalkPoints", points);
+            SetNumber(ai, "_temporaryWalkPointIndex", 0);
+            target.Invoke(ai, new object[] { points[0] });
+            // Native running state: it drives the NavMeshAgent, animation and
+            // Photon sync. No transform warp and no permanent combat override.
+            move.Invoke(ai, new object[] { ai.transform.position, 2, 0, 0,
+                0, true, 2, ai.transform.eulerAngles.y });
         }
 
         /// <summary>
@@ -753,7 +853,11 @@ namespace NextDayRevival
                     Set(settlement, "AlarmEnabled", false);
                     return false;
                 }
-                try { alarm.Invoke(ai, new object[] { true }); }
+                try
+                {
+                    alarm.Invoke(ai, new object[] { true });
+                    StartSectorMove(ai);
+                }
                 catch (Exception ex)
                 {
                     Exception cause = ex.InnerException == null ? ex : ex.InnerException;
@@ -848,10 +952,10 @@ namespace NextDayRevival
                 {
                     // A transport squad exits into two staggered files outside
                     // the hull, with room for each NPC to acquire its path.
-                    float side = i % 2 == 0 ? -1f : 1f;
+                    Vector3 offset = SquadOffset(i, count, false);
                     wo[i] = car.transform.position
-                        + car.transform.right * (side * (6f + (i / 8) * 2f))
-                        + car.transform.forward * (-7.5f + (i / 2) * 2.5f);
+                        + car.transform.right * offset.x
+                        + car.transform.forward * offset.z;
                 }
                 else if (points != null && points.childCount > 0)
                 {
@@ -1062,6 +1166,9 @@ namespace NextDayRevival
             SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value);
             SetNumber(sp, "Level", RevivalPlugin.CfgPatrolCrewLevel.Value);
             SetEnum(sp, "BehaviorPattern", "Aggressive");
+            // Do not inherit a template guard's fixed position or task.
+            SetNumber(sp, "MainTask", 0);
+            Set(sp, "GuardPoint", null);
             SetNumber(sp, "NPCType", 0);              // -> prefab Marauder_NPC_01
             SetNumber(sp, "GrantWeaponType", 1);      // fixed WeaponId below
             SetNumber(sp, "WeaponId", weaponId);      // NDR MG42 or NDR M72 LAW
