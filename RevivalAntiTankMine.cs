@@ -2,18 +2,11 @@
 //
 // Equippable one-hit anti-tank mine - the whole feature in one file.
 //
-// WHAT IT IS. A grenade-category inventory item (id 2065, cloned from the frag
-// grenade 1403 so the game files it in the grenade slot and equips a
-// PlayerGrenadeWeaponController). LEFT click never throws or consumes it -
-// PlayerGrenadeWeaponController::CantThrowGrenade is postfixed to return "can't"
-// for this item (IL-confirmed: CantThrowGrenade is called only from
-// ThrowGrenade, i.e. the left-click throw, so blocking it there stops the throw
-// and the consume before either happens). RIGHT click (hold) runs a 20 s
-// placement action with a progress bar and a movement/input lock, exactly the
-// proven mechanism the FPV drone / antenna / convoy-repair use (their own
-// postfix on the PlayerCant* set, gated on a state flag). On completion exactly
-// one mine is consumed and a mine object is placed on the ground in front of the
-// player, aligned to the surface.
+// Equip in the grenade slot (slot 3), then left click once to place on the
+// ground. CantThrowGrenade preserves the game's UI/state restrictions and
+// replaces an allowed mine throw with placement before any throw coroutine.
+// The mine supplies its own grenade data and hand model through existing item
+// seams. No server weapons_db entry is required for client-side equipment.
 //
 // THE TRIGGER (MineObject). The placed mine watches the shared vehicle scan
 // (VehicleScan.All() returns only VehicleGameSystem roots, so characters on foot
@@ -30,20 +23,14 @@
 // - the explosion is a normal, mine-sized boom, not an indiscriminate nuke that
 // would kill the placer. The mine removes itself exactly once after it fires.
 //
-// CLEANUP DISCIPLINE. The placement lock is cleared on every exit path: success,
-// cancel, released input, item switch, damage/death/downed, disconnect, vehicle
-// entry, invalid ground and any exception - the same audit the antenna
-// movement-lock fix needed, so this must not reintroduce that stuck-body bug.
-//
-// C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree lambdas.
-// ASCII-only comments/logs; player-facing strings via Loc.T (real Cyrillic), so
-// this file is UTF-8 (no BOM) and build.ps1 compiles it with /codepage:65001.
+// C# 3.0; ASCII source, localized strings use Unicode escapes.
 //
 // SEAMS OUTSIDE THIS FILE (all one-liners, marked "NDR anti-tank mine"):
 //   RevivalPlugin.cs BuildItemTable -> AntiTankMine.AddItems(Items)
 //   RevivalPlugin.cs BindConfig / Install / Update(Tick) / OnGUI(Draw)
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx.Configuration;
@@ -53,8 +40,7 @@ using UnityEngine;
 namespace NextDayRevival
 {
     /// <summary>
-    /// Config, the item, the placement state machine, the on-screen progress
-    /// bar, and the reflection to read the equipped grenade. The placed mine
+    /// Config, the item, click placement and equipped-grenade lookup. The placed mine
     /// itself is <see cref="MineObject"/>; the two hooks are below.
     /// </summary>
     public static class AntiTankMine
@@ -68,7 +54,6 @@ namespace NextDayRevival
 
         public static ConfigEntry<bool> CfgEnabled;
         public static ConfigEntry<int> CfgMineId;
-        public static ConfigEntry<float> CfgPlaceSeconds;
         public static ConfigEntry<float> CfgFrontOffset;
         public static ConfigEntry<float> CfgScale;
         public static ConfigEntry<float> CfgTriggerRadius;
@@ -80,11 +65,10 @@ namespace NextDayRevival
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
         public static int MineId { get { return CfgMineId != null ? CfgMineId.Value : DEF_MINE; } }
-        static float PlaceLen { get { return CfgPlaceSeconds == null ? 20f : Mathf.Max(0.5f, CfgPlaceSeconds.Value); } }
 
         // ------------------------------------------------------------- state
         static bool _placing;
-        static float _placeStart;
+        static int _lastPlaceFrame = -1;
         public static bool Placing { get { return _placing; } }
 
         static KeyCode _key = KeyCode.None;
@@ -95,26 +79,17 @@ namespace NextDayRevival
         static float _grenUntil;
         static FieldInfo _fGrenData;
         static Material _mineMat;
-        static Texture2D _px;
 
         // ------------------------------------------------------------- item
         public static void AddItems(List<ItemDef> items)
         {
             items.Add(new ItemDef(
-                DEF_MINE, DEF_DONOR, false,
-                "Противотанковая мина ТМ-62", "Anti-tank mine TM-62",
-                "Нажимная противотанковая мина. Левая кнопка её НЕ бросает. "
-                + "Правую кнопку держать 20 секунд - мина встаёт на землю перед "
-                + "вами, и вы в это время стоите неподвижно. Пехота, включая вас "
-                + "самого, её не задевает; любая техника - от машины до танка и "
-                + "нового Урала - подрывается с одного раза, сколько бы брони на "
-                + "ней ни было.",
-                "Pressure-fuzed anti-tank mine. Left click does NOT throw it. "
-                + "Hold right click for 20 seconds to place it on the ground in "
-                + "front of you - you stand still while it arms. Infantry, "
-                + "including you, never set it off; any vehicle - a car, an APC, "
-                + "a tank, the new Ural - is destroyed in a single hit no matter "
-                + "how much armour it carries.",
+                DEF_MINE, DEF_DONOR, true,
+                "\u041f\u0440\u043e\u0442\u0438\u0432\u043e\u0442\u0430\u043d\u043a\u043e\u0432\u0430\u044f \u043c\u0438\u043d\u0430 \u0422\u041c-62", "Anti-tank mine TM-62",
+                "Equip in grenade slot 3. Left click once to place on the ground. "
+                + "Infantry cannot trigger it; vehicles trigger a lethal blast.",
+                "Equip in grenade slot 3. Left click once to place on the ground. "
+                + "Infantry cannot trigger it; vehicles trigger a lethal blast.",
                 "mine.ndmesh", "mine_diffuse.png", "mine_normal.png",
                 "mine_icon.png", null,
                 1, 0, 9.0f));
@@ -128,9 +103,6 @@ namespace NextDayRevival
             CfgMineId = cfg.Bind("AntiTankMine", "MineId", DEF_MINE,
                 "Item-Id der Mine. Nur aendern, wenn 2065 mit etwas anderem "
                 + "kollidiert.");
-            CfgPlaceSeconds = cfg.Bind("AntiTankMine", "PlaceSeconds", 20f,
-                "Sekunden, die die rechte Maustaste fuer eine Platzierung "
-                + "gehalten werden muss. Loslassen bricht ab.");
             CfgFrontOffset = cfg.Bind("AntiTankMine", "FrontOffset", 2.2f,
                 "Abstand vor dem Spieler, in dem die Mine abgelegt wird (m).");
             CfgScale = cfg.Bind("AntiTankMine", "Scale", 0.45f,
@@ -152,7 +124,7 @@ namespace NextDayRevival
             CfgConsume = cfg.Bind("AntiTankMine", "Consume", true,
                 "Genau eine Mine bei erfolgreicher Platzierung verbrauchen.");
             CfgKey = cfg.Bind("AntiTankMine", "Key", "None",
-                "Optionale Ersatztaste fuer die Platzierung, falls die rechte "
+                "Optionale Ersatztaste fuer die Platzierung, falls die linke "
                 + "Maustaste im Spiel nicht durchkommt. Standard None (aus).");
         }
 
@@ -161,105 +133,98 @@ namespace NextDayRevival
         {
             if (!Enabled) { RevivalPlugin.L.LogInfo("Mine: abgeschaltet (AntiTankMine/Enabled)."); return; }
             MineGrenadeHook.Install(harmony);
+            MineGrenadeDataHook.Install(harmony);
             MineLockHook.Install(harmony);
             RevivalPlugin.L.LogInfo("Mine: Panzerabwehrmine aktiv (Id " + MineId
-                + ", " + PlaceLen.ToString("0") + " s Platzierung).");
+                + ", slot 3, left click to place).");
         }
 
         // ------------------------------------------------------------- tick
         public static void Tick()
         {
-            try
-            {
-                if (!Enabled) { if (_placing) Cancel("disabled"); return; }
-
-                if (_placing)
-                {
-                    string stop = WhyStop();
-                    if (stop != null) { Cancel(stop); return; }
-                    if (Time.time - _placeStart >= PlaceLen) Finish();
-                    return;
-                }
-
-                if (!MineEquipped()) return;
-                if (StartPressed()) Begin();
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogError("Mine-Tick: " + ex);
-                Cancel("exception");   // never leave the body locked
-            }
+            // Optional key uses the same game action and all of its guards.
+            if (!Enabled) return;
+            KeyCode k = Key();
+            if (k == KeyCode.None || !Input.GetKeyDown(k) || !MineEquipped()) return;
+            Component ctrl = GrenadeController();
+            MethodInfo use = AccessTools.Method(ctrl.GetType(), "ThrowGrenade", null, null);
+            if (use != null) use.Invoke(ctrl, null);
         }
 
-        static void Begin()
+        internal static void PlaceFromController(Component ctrl)
         {
-            // Refuse to start where a placement could not finish cleanly.
-            if (InVehicle() || MapTools.LocalPlayer() == null) return;
+            if (!Enabled || _placing || _lastPlaceFrame == Time.frameCount
+                || ctrl == null || !IsMine(ctrl) || EquippedGrenadeId(ctrl) != MineId
+                || InVehicle() || MapTools.LocalPlayer() == null) return;
+            _lastPlaceFrame = Time.frameCount;
             _placing = true;
-            _placeStart = Time.time;
-            RevivalPlugin.L.LogInfo("Mine: Platzierung gestartet.");
-            Turret.Hinweis(Loc.T("Установка мины...", "Placing mine..."), 1.5f);
+            try { Finish(ctrl); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Mine placement: " + ex); }
+            finally { _placing = false; }
         }
 
-        /// <summary>Reason to abort the running placement, or null to continue.
-        /// One place lists every exit path so none is forgotten.</summary>
-        static string WhyStop()
+        static void Finish(Component ctrl)
         {
-            if (!Enabled) return "disabled";
-            if (!Held()) return "released";              // released input
-            if (!MineEquipped()) return "item switched"; // item switch
-            if (MapTools.LocalPlayer() == null) return "no player (death/disconnect)";
-            if (InVehicle()) return "entered vehicle";
-            return null;
-        }
-
-        static void Cancel(string reason)
-        {
-            if (!_placing) return;
-            _placing = false;
-            RevivalPlugin.L.LogInfo("Mine: Platzierung abgebrochen (" + reason + ").");
-            Turret.Hinweis(Loc.T("Установка прервана", "Placement cancelled"), 1.5f);
-        }
-
-        static void Finish()
-        {
-            _placing = false;
             Vector3 pos, normal;
             if (!GroundInFront(out pos, out normal))
             {
                 RevivalPlugin.L.LogWarning("Mine: kein gueltiger Boden vor dem Spieler.");
-                Turret.Hinweis(Loc.T("Нет ровной земли", "No valid ground"), 2f);
+                Turret.Hinweis(Loc.T("\u041d\u0435\u0442 \u0440\u043e\u0432\u043d\u043e\u0439 \u0437\u0435\u043c\u043b\u0438", "No valid ground"), 2f);
                 return;
             }
 
             GameObject mine = MineObject.Place(pos, normal);
             if (mine == null)
             {
-                Turret.Hinweis(Loc.T("Не удалось поставить мину", "Could not place the mine"), 2f);
+                Turret.Hinweis(Loc.T("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u043c\u0438\u043d\u0443", "Could not place the mine"), 2f);
                 return;
             }
 
             // Consume exactly one - and only now, on success.
-            if (CfgConsume == null || CfgConsume.Value)
-                Turret.TakeItem(MineId, "anti-tank mine");
+            bool consumed = false;
+            try
+            {
+                consumed = (CfgConsume != null && !CfgConsume.Value) || ConsumeEquipped(ctrl);
+            }
+            finally
+            {
+                if (!consumed)
+                {
+                    // This also runs if inventory reflection or its callback throws.
+                    mine.SetActive(false);
+                    UnityEngine.Object.Destroy(mine);
+                }
+            }
+            if (!consumed)
+            {
+                Turret.Hinweis("Could not consume the equipped mine", 2f);
+                return;
+            }
 
             RevivalPlugin.L.LogInfo("Mine: scharf bei " + pos + ".");
-            Turret.Hinweis(Loc.T("Мина установлена", "Mine armed"), 2.5f);
+            Turret.Hinweis(Loc.T("\u041c\u0438\u043d\u0430 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0430", "Mine armed"), 2.5f);
         }
 
-        // ------------------------------------------------------------- input
-        static bool StartPressed()
+        // Clear slot 2 (third UI slot), exactly where vanilla consumes a grenade.
+        // Do not use TakeItem: it removes backpack copies before equipped items.
+        static bool ConsumeEquipped(Component ctrl)
         {
-            if (Input.GetMouseButtonDown(1)) return true;
-            KeyCode k = Key();
-            return k != KeyCode.None && Input.GetKeyDown(k);
-        }
-
-        static bool Held()
-        {
-            if (Input.GetMouseButton(1)) return true;
-            KeyCode k = Key();
-            return k != KeyCode.None && Input.GetKey(k);
+            FieldInfo f = AccessTools.Field(ctrl.GetType(), "_plrInventoryManager");
+            object inv = f == null ? null : f.GetValue(ctrl);
+            if (inv == null) return false;
+            FieldInfo fw = AccessTools.Field(inv.GetType(), "_weaponsData");
+            object data = fw == null ? null : fw.GetValue(inv);
+            if (data == null) return false;
+            FieldInfo ids = AccessTools.Field(data.GetType(), "ItemID");
+            Array items = ids == null ? null : ids.GetValue(data) as Array;
+            if (items == null || items.Length < 3
+                || MineGrenadeHook.ToInt(items.GetValue(2)) != MineId) return false;
+            MethodInfo clear = AccessTools.Method(inv.GetType(), "ClearWeaponSlot",
+                new Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool) }, null);
+            if (clear == null) return false;
+            clear.Invoke(inv, new object[] { 2, MineId, true, false });
+            items = ids.GetValue(data) as Array;
+            return items != null && MineGrenadeHook.ToInt(items.GetValue(2)) != MineId;
         }
 
         static KeyCode Key()
@@ -291,15 +256,12 @@ namespace NextDayRevival
                 Type t = RevivalPlugin.TypeByName("PlayerGrenadeWeaponController");
                 if (t == null) return null;
                 UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
-                Component fallback = null;
                 for (int i = 0; i < all.Length; i++)
                 {
                     Component c = all[i] as Component;
                     if (c == null) continue;
-                    if (fallback == null) fallback = c;
                     if (IsMine(c)) { _gren = c; break; }
                 }
-                if (_gren == null) _gren = fallback;
             }
             catch (Exception ex)
             {
@@ -427,40 +389,7 @@ namespace NextDayRevival
         // ------------------------------------------------------------- draw
         public static void Draw()
         {
-            if (!_placing) return;
-            try
-            {
-                float len = PlaceLen;
-                float t = Mathf.Clamp01((Time.time - _placeStart) / len);
-                float rest = Mathf.Max(0f, len - (Time.time - _placeStart));
-                float w = 300f, h = 22f;
-                float x = (Screen.width - w) * 0.5f;
-                float y = Screen.height * 0.66f;
-
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(x - 2f, y - 2f, w + 4f, h + 4f), Px());
-                GUI.color = new Color(0.12f, 0.12f, 0.12f, 0.9f);
-                GUI.DrawTexture(new Rect(x, y, w, h), Px());
-                GUI.color = new Color(0.85f, 0.55f, 0.20f, 0.95f);
-                GUI.DrawTexture(new Rect(x, y, w * t, h), Px());
-                GUI.color = Color.white;
-                GUI.Label(new Rect(x, y - 22f, w, 20f),
-                    Loc.T("Установка мины", "Placing mine") + "  " + Mathf.CeilToInt(rest) + " s");
-                GUI.color = old;
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogError("Mine-Bar: " + ex); }
-        }
-
-        static Texture2D Px()
-        {
-            if (_px == null)
-            {
-                _px = new Texture2D(1, 1);
-                _px.SetPixel(0, 0, Color.white);
-                _px.Apply();
-            }
-            return _px;
+            // Keep the existing OnGUI seam; placement no longer has a hold timer.
         }
 
         // ------------------------------------------------------------ raycast
@@ -684,10 +613,9 @@ namespace NextDayRevival
 
     /// <summary>
     /// Postfix on PlayerGrenadeWeaponController::CantThrowGrenade. Returns "can't"
-    /// whenever the equipped grenade is the mine, so a LEFT click never throws or
-    /// consumes it. CantThrowGrenade is called only from ThrowGrenade (the
-    /// left-click path, IL-confirmed), so this blocks the throw before the item
-    /// is spent, and does nothing to any other grenade.
+    /// for the mine, placing it instead of starting the throw coroutine.
+    /// CantThrowGrenade is called only from ThrowGrenade (IL-confirmed).
+    /// Original UI/state restrictions and ordinary grenades are preserved.
     /// </summary>
     public static class MineGrenadeHook
     {
@@ -732,12 +660,17 @@ namespace NextDayRevival
                 if (fId == null) return;
                 object raw = fId.GetValue(data);
                 int id = ToInt(raw);
-                if (id == AntiTankMine.MineId) __result = true;   // the mine never throws
+                if (id == AntiTankMine.MineId)
+                {
+                    // Set the block before placement: even failure must never throw.
+                    __result = true;
+                    AntiTankMine.PlaceFromController(__instance as Component);
+                }
             }
             catch { }
         }
 
-        static int ToInt(object raw)
+        internal static int ToInt(object raw)
         {
             if (raw == null) return -1;
             if (raw is int) return (int)raw;
@@ -757,13 +690,55 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>
-    /// The movement/input lock for the 20 s placement. Its own postfix on the
-    /// same PlayerCant* set the FPV drone / antenna / convoy-repair patch, gated
-    /// on <see cref="AntiTankMine.Placing"/> - so it is self-contained and does
-    /// not touch those features. When Placing is false the body is free, which is
-    /// why every placement exit path clears the flag.
-    /// </summary>
+    // Ensure the grenade lookup always has a distinct mine record, including
+    // after a server XML reload. Never relabel or mutate the donor entry.
+    public static class MineGrenadeDataHook
+    {
+        public static void Install(Harmony harmony)
+        {
+            Type t = RevivalPlugin.TypeByName("xmlItemsDataManager");
+            MethodInfo get = t == null ? null : AccessTools.Method(t,
+                "GetGrenadeWeaponData", new Type[] { typeof(int) }, null);
+            if (get == null) throw new MissingMethodException("GetGrenadeWeaponData(int)");
+            harmony.Patch(get, new HarmonyMethod(typeof(MineGrenadeDataHook)
+                .GetMethod("Prefix")), null, null, null, null);
+        }
+
+        public static void Prefix(object __instance, int __0)
+        {
+            if (__0 != AntiTankMine.MineId) return;
+            FieldInfo f = AccessTools.Field(__instance.GetType(), "WeaponsGrenadeData");
+            IDictionary entries = f == null ? null : f.GetValue(__instance) as IDictionary;
+            if (entries == null) return;
+            object existing = entries.Contains(__0) ? entries[__0] : null;
+            if (existing != null)
+            {
+                FieldInfo id = AccessTools.Field(existing.GetType(), "ItemID");
+                if (id != null && MineGrenadeHook.ToInt(id.GetValue(existing)) == __0) return;
+            }
+            object donor = entries.Contains(1403) ? entries[1403] : null;
+            if (donor == null) return;
+            object copy = Activator.CreateInstance(donor.GetType());
+            foreach (FieldInfo field in donor.GetType().GetFields(BindingFlags.Instance
+                | BindingFlags.Public | BindingFlags.NonPublic))
+                field.SetValue(copy, field.GetValue(donor));
+            FieldInfo mineId = AccessTools.Field(copy.GetType(), "ItemID");
+            object value = __0;
+            if (mineId.FieldType != typeof(int))
+            {
+                MethodInfo convert = mineId.FieldType.GetMethod("op_Implicit",
+                    BindingFlags.Public | BindingFlags.Static, null,
+                    new Type[] { typeof(int) }, null);
+                if (convert == null) throw new InvalidOperationException("Mine ItemID conversion missing");
+                value = convert.Invoke(null, new object[] { __0 });
+            }
+            mineId.SetValue(copy, value);
+            entries[__0] = copy;
+            RevivalPlugin.L.LogInfo("Mine: grenade equipment data registered for " + __0);
+        }
+    }
+
+    // Input lock covers the synchronous placement/consumption transaction only.
     public static class MineLockHook
     {
         static readonly string[] Sperren = {

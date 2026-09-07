@@ -558,9 +558,26 @@ def check_mine():
          "vernetzte Explosion (RocketHook.Detonate)",
          "keine vernetzte Explosion")
     # Consume exactly one, only in Finish (after a successful placement).
-    need("TakeItem(MineId" in s,
+    equipped_consume = ("|| ConsumeEquipped(ctrl)" in s
+                        and "new object[] { 2, MineId, true, false }" in s
+                        and "items.GetValue(2)) != MineId" in s
+                        and "mine.SetActive(false)" in s
+                        and "UnityEngine.Object.Destroy(mine)" in s)
+    need("TakeItem(MineId" in s or equipped_consume,
          "verbraucht genau eine Mine bei Erfolg",
-         "kein TakeItem(MineId) beim Platzieren")
+         "neither inventory nor verified equipped-slot consumption found")
+    # Slot-3 equipment requires BOTH a hand prefab and grenade weapon data.
+    need("DEF_MINE, DEF_DONOR, true," in s
+         and "MineGrenadeDataHook.Install(harmony)" in s
+         and '"GetGrenadeWeaponData"' in s,
+         "mine hand model and grenade data enabled",
+         "missing mine equipment model or grenade data hook")
+    need("AntiTankMine.PlaceFromController(__instance as Component)" in s
+         and "if (__result) return;" in s
+         and "_lastPlaceFrame == Time.frameCount" in s
+         and "finally { _placing = false; }" in s,
+         "left-click placement preserves game guards and releases its lock",
+         "left-click placement guard or cleanup missing")
     # RevivalPlugin seams.
     for seam in ("AntiTankMine.AddItems", "AntiTankMine.BindConfig",
                  "AntiTankMine.Install", "AntiTankMine.Tick", "AntiTankMine.Draw"):
