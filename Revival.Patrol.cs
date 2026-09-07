@@ -147,16 +147,16 @@ namespace NextDayRevival
                 }
             }
 
-            // Cached map ring in WORLD space (XZ; y is 0 and ignored by
-            // WorldToGui). Built once from the waypoints and only PROJECTED each
-            // frame, so the encircling ring no longer jitters as the map or
-            // camera micro-moves - the convex hull is computed in one fixed
-            // world frame, not per frame in screen space where a waypoint
-            // flipping on or off the hull made the whole ring pop. Rebuilt only
-            // when the waypoint count or the padding changes.
-            internal List<Vector3> MapRing;
-            internal int MapRingN = -1;
-            internal float MapRingPad = -1f;
+            // Cached map LINE in WORLD space (XZ; y is 0 and ignored by
+            // WorldToGui): the smoothed centreline of the road this route
+            // drives. Built once from the waypoints and only PROJECTED each
+            // frame, so it does not jitter as the map or camera micro-moves.
+            // Rebuilt only when the waypoint count changes. MapLineLoop
+            // remembers whether the route returns to its start, so the dasher
+            // can tile it as a closed ring instead of an open line.
+            internal List<Vector3> MapLine;
+            internal int MapLineN = -1;
+            internal bool MapLineLoop;
 
             // NDR convoy (RevivalConvoy.cs): "convoy" marks a route the convoy
             // event drives as a column of tanks and APCs. Empty/"patrol" is an
@@ -299,6 +299,10 @@ namespace NextDayRevival
         /// <summary>Was the world up on the last tick? The change from false
         /// to true is what starts the first patrol.</summary>
         static bool _welt;
+
+        /// <summary>Has the teardown below already run for the current outage?
+        /// One empty player list must cost the units at most once.</summary>
+        static bool _abgeraeumt;
 
         /// <summary>`Time.time` the automatic may put the next vehicle down.</summary>
         static float _nextAuto;
@@ -591,16 +595,16 @@ namespace NextDayRevival
                 }
                 else
                 {
-                    // The scene is gone and so is everything that stood in it.
-                    // The units would be a list of destroyed GameObjects, and
-                    // the next world would inherit them.
-                    _units.Clear();
-                    _owned.Clear();
-                    _refill = true;
+                    // The player list just went empty. That is NOT proof that
+                    // the scene is gone - see WeltWeg below, which decides.
+                    _abgeraeumt = false;
+                    RevivalPlugin.L.LogInfo("Patrol: no player in the game's list "
+                        + "- checking whether the scene is gone or the player is "
+                        + "only dead.");
                 }
                 return;
             }
-            if (!welt) return;
+            if (!welt) { WeltWeg(); return; }
 
             int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
             if (PatrolUnitCount() >= max) return;   // NDR convoy: convoy vehicles do not count
@@ -633,6 +637,63 @@ namespace NextDayRevival
                 return;
             }
             _nextAuto = Time.time + FillEvery;
+        }
+
+        /// <summary>
+        /// The player list is empty. Decide whether the scene really went away
+        /// or whether the local player is merely dead, and only tear the unit
+        /// list down in the first case.
+        ///
+        /// CONFIRMED from IL (NetworkGameServer::RespawnPlayer, its
+        /// &lt;RespawnPlayer&gt;c__Iterator3): dying destroys the local player
+        /// object (PlayerNetworkController::NetworkPlayerDestroy, whose
+        /// OnDestroy calls NetworkGameServer::RemoveNetworkObject), sets
+        /// localPlayer to null, shows the respawn loading screen and only then
+        /// calls SpawnPlayer for a NEW object. Alone on a server the game's
+        /// NetworkPlayers list is therefore EMPTY for the whole death screen,
+        /// and Gun.WeltLaeuft says false.
+        ///
+        /// The old code read that as "the scene is gone" and cleared _units.
+        /// The vehicles were not destroyed by it - they were only forgotten, so
+        /// FixedTick stopped driving them and Gun.Tick stopped aiming and
+        /// firing them. A convoy that was shooting at the player before he died
+        /// stood silent for the rest of the session. That is the bug this
+        /// method fixes.
+        ///
+        /// The honest test for "the scene is gone" is the one the old comment
+        /// already named: are the tracked GameObjects destroyed? A scene change
+        /// destroys every patrol vehicle, a respawn destroys none. So the
+        /// teardown waits until no tracked vehicle is left - which is still
+        /// immediate on a real scene change and on an empty list.
+        /// </summary>
+        static void WeltWeg()
+        {
+            if (_abgeraeumt) return;
+            if (NochFahrzeugeDa()) return;   // player dead, vehicles still standing
+
+            _abgeraeumt = true;
+            bool etwasDa = _units.Count > 0 || _owned.Count > 0;
+            // The scene is gone and so is everything that stood in it. The units
+            // would be a list of destroyed GameObjects, and the next world would
+            // inherit them.
+            _units.Clear();
+            _owned.Clear();
+            _refill = true;
+            // Said only when there was something to clear. Before the world
+            // comes up for the first time both lists are empty, and "the scene
+            // is gone" would be a confusing thing to read at startup.
+            if (etwasDa)
+                RevivalPlugin.L.LogInfo("Patrol: the scene is gone - the unit list "
+                    + "is cleared for the next world.");
+        }
+
+        /// <summary>Is at least one tracked vehicle still a live GameObject?
+        /// False after a scene change, true while the player is only dead.</summary>
+        static bool NochFahrzeugeDa()
+        {
+            for (int i = 0; i < _units.Count; i++)
+                if (_units[i].Car != null) return true;
+            return false;
         }
 
         /// <summary>
@@ -4009,9 +4070,11 @@ namespace NextDayRevival
         // =====================================================================
 
         /// <summary>
-        /// Draws every recorded route as one faction-coloured dashed line along
-        /// its waypoints. Editing and deletion stay in the existing F4 route
-        /// editor, whose confirmation protects the file.
+        /// Draws every recorded route as one faction-coloured dashed line ALONG
+        /// the road it drives, running down the middle of that road. A convoy
+        /// route is drawn only while a convoy is actually out on it. Editing and
+        /// deletion stay in the existing F4 route editor, whose confirmation
+        /// protects the file.
         /// </summary>
         public static void DrawMap()
         {
@@ -4033,8 +4096,15 @@ namespace NextDayRevival
             // are unavailable, fall back to the whole screen rather than draw
             // nothing.
             Rect clip;
-            if (!MapTools.MapScreenRect(texture, camera, out clip))
+            bool mapRect = MapTools.MapScreenRect(texture, camera, out clip);
+            if (!mapRect)
                 clip = new Rect(0f, 0f, Screen.width, Screen.height);
+
+            // The WHOLE map texture, before the visible window trims it below.
+            // The picture covers the whole world, so the registration
+            // correction in MapArt measures against this rectangle and not
+            // against the scrolled window.
+            Rect full = clip;
 
             // The map texture SCROLLS inside a clipping NGUI UIPanel (a
             // UIScrollView). MapScreenRect is the WHOLE texture, which when the
@@ -4075,22 +4145,35 @@ namespace NextDayRevival
                     // drawn in file order; the earlier ring keeps its line.
                     ClearGrid grid = new ClearGrid(RouteClearance);
 
+                    // TWO passes: every ACTIVE convoy road first, the standing
+                    // patrol roads after it. A convoy often shares tarmac with a
+                    // patrol, and the clearance grid drops whichever line comes
+                    // second at a crossing - so the rare, time-limited convoy
+                    // gets the road and the patrol is the one that opens a gap,
+                    // never the other way round. NDR convoy.
+                    for (int pass = 0; pass < 2; pass++)
                     for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                     {
                         Route route;
                         if (!_routes.TryGetValue(_order[routeIndex], out route)
                             || route == null || route.P.Count < 2) continue;
 
-                        // ENCIRCLE the run with ONE smooth closed boundary. The
-                        // ring is built ONCE in world space (WorldRing, cached on
-                        // the route) and only PROJECTED here, so it no longer
-                        // jitters as the map/camera micro-moves - the convex hull
-                        // lives in a fixed world frame, not per frame in screen
-                        // space. Project every ring point; if any falls behind
-                        // the UI camera the ring is skipped this frame rather
-                        // than drawn broken.
-                        List<Vector3> wring = WorldRing(route);
-                        if (wring == null || wring.Count < 3) continue;
+                        // A convoy route is an EVENT, not a standing road on
+                        // the map: it is drawn only while a convoy is actually
+                        // driving it. NDR convoy.
+                        bool convoy = route.IsConvoy && ConvoyRouteActive(route.Name);
+                        if (route.IsConvoy && !convoy) continue;
+                        if (convoy != (pass == 0)) continue;
+
+                        // FOLLOW the driven road instead of encircling the run.
+                        // The line is built ONCE in world space (WorldLine,
+                        // cached on the route) and only PROJECTED here, so it
+                        // does not jitter as the map/camera micro-moves.
+                        // Project every point; if any falls behind the UI
+                        // camera the line is skipped this frame rather than
+                        // drawn broken.
+                        List<Vector3> wline = WorldLine(route);
+                        if (wline == null || wline.Count < 2) continue;
 
                         // SCENE GATE. The map shows the CURRENT scene, and its
                         // WORLD_SIZE is that scene's terrain size. A route lives
@@ -4098,19 +4181,19 @@ namespace NextDayRevival
                         // a bunker or other interior - its coordinates fall many
                         // terrain-widths outside and the ring smears across the
                         // wrong map. Draw the route only where it can fit.
-                        if (!FitsScene(wring, world)) continue;
+                        if (!FitsScene(wline, world)) continue;
 
-                        List<Vector2> ring = new List<Vector2>(wring.Count);
-                        bool ringOk = true;
-                        for (int i = 0; i < wring.Count; i++)
+                        List<Vector2> line = new List<Vector2>(wline.Count);
+                        bool lineOk = true;
+                        for (int i = 0; i < wline.Count; i++)
                         {
                             Vector2 g;
-                            if (!MapTools.WorldToGui(wring[i], texture, camera,
+                            if (!MapTools.WorldToGui(wline[i], texture, camera,
                                                      world, map, out g))
-                            { ringOk = false; break; }
-                            ring.Add(g - clip.position);
+                            { lineOk = false; break; }
+                            line.Add(MapArt(g, full, mapRect) - clip.position);
                         }
-                        if (!ringOk || ring.Count < 3) continue;
+                        if (!lineOk || line.Count < 2) continue;
 
                         // Colour is the patrol's faction: looter and traitor
                         // red, civilian green, neutral white. A convoy route is
@@ -4119,23 +4202,25 @@ namespace NextDayRevival
                                                    : RouteColor(route.Seite, route.Enabled);
                         GUI.color = col;
 
-                        // This ring's own dash points, added to the grid only
+                        // This line's own dash points, added to the grid only
                         // after it is fully drawn so it never clears itself.
                         List<Vector2> ink = new List<Vector2>();
-                        DashClosed(ring, localClip, grid, ink);
+                        if (route.MapLineLoop) DashClosed(line, localClip, grid, ink);
+                        else                   DashOpen(line, localClip, grid, ink);
                         grid.Add(ink);
 
-                        // First ring under the cursor wins the note.
-                        if (hoverText == null && PointInPolygon(ring, mouseLocal))
+                        // First line under the cursor wins the note.
+                        if (hoverText == null
+                            && NearPolyline(line, mouseLocal, RouteHoverPx))
                         {
                             hoverText = route.IsConvoy
                                 ? Loc.T(
-                                    "Маршрут военного конвоя: 2 танка и 2 БТР с "
-                                    + "ценным грузом. Появляется время от времени - "
-                                    + "следите за оповещением о квадрате.",
-                                    "Military convoy route: 2 tanks and 2 APCs "
-                                    + "carrying valuable cargo. Appears from time to "
-                                    + "time - watch for the square alert.")
+                                    "По этой дороге сейчас идёт военный конвой: "
+                                    + "2 танка и 2 БТР с ценным грузом. "
+                                    + "Они опасны и хорошо вооружены.",
+                                    "A military convoy is on this road RIGHT NOW: "
+                                    + "2 tanks and 2 APCs carrying valuable cargo. "
+                                    + "They are dangerous and heavily armed.")
                                 : Loc.T(
                                     "Здесь регулярно проходят патрули. Возможно, "
                                     + "они везут ценный груз, но они опасны, хорошо "
@@ -4157,15 +4242,20 @@ namespace NextDayRevival
                     Route route;
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 1) continue;
-                    // Same scene gate as the rings: a label for a route that
+                    // A convoy route only exists on the map while a convoy is
+                    // driving it - the label goes with the line. NDR convoy.
+                    if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
+                    // Same scene gate as the lines: a label for a route that
                     // belongs to another scene must not sit on this map.
-                    if (route.P.Count >= 2 && !FitsScene(WorldRing(route), world))
+                    if (route.P.Count >= 2 && !FitsScene(WorldLine(route), world))
                         continue;
                     Vector2 label;
                     if (!MapTools.WorldToGui(route.P[0].Pos, texture, camera,
-                                             world, map, out label)
-                        || !clip.Contains(label)) continue;
-                    GUI.color = RouteColor(route.Seite, route.Enabled);
+                                             world, map, out label)) continue;
+                    label = MapArt(label, full, mapRect);
+                    if (!clip.Contains(label)) continue;
+                    GUI.color = route.IsConvoy ? ConvoyColor(route.Enabled)
+                                               : RouteColor(route.Seite, route.Enabled);
                     GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
                               route.Name + (route.Enabled ? "" : Loc.T(" (выкл)", " (disabled)")));
                 }
@@ -4226,14 +4316,15 @@ namespace NextDayRevival
         }
 
         // Dash cadence in SCREEN pixels. Dash and gap are the on/off run
-        // lengths walked along the enclosing RING's arc length; stroke is the
-        // line thickness. Each dash is a short chain of ANTIALIASED feathered
-        // bars (see <see cref="Bar"/>) that FOLLOWS the ring's arc, so the dash
-        // itself curves smoothly with the boundary; the long SIDES are feathered
+        // lengths walked along the LINE's arc length; stroke is the line
+        // thickness. Each dash is a short chain of ANTIALIASED feathered bars
+        // (see <see cref="Bar"/>) that FOLLOWS the line's arc, so the dash
+        // itself curves smoothly with the road; the long SIDES are feathered
         // (smooth, not pixelated) and constant in thickness, while the two ENDS
         // stay hard and FLAT (kantig) - no round caps. RouteDash/RouteGap are
-        // nominal: the ring is tiled with a whole number of them so the gaps are
-        // even the whole way round with no seam (see <see cref="DashClosed"/>).
+        // nominal: the line is tiled with a whole number of them so the gaps
+        // are even from end to end and no stub is left over (see <see
+        // cref="DashOpen"/> and <see cref="DashClosed"/>).
         const float RouteDash = 40f;
         const float RouteGap = 28f;
         const float RouteStroke = 4.5f;
@@ -4241,34 +4332,36 @@ namespace NextDayRevival
         // The length of each straight bar inside a curved dash, and the small
         // overlap that keeps consecutive bars meeting without a notch on the
         // outside of a bend. Shorter step -> smoother curve. A dash FOLLOWS the
-        // ring's arc, so its ends are tangent to the ring and each dash points
+        // line's arc, so its ends are tangent to the road and each dash points
         // at the next - the eye draws one continuous line through them - and a
-        // dash only curves where the ring actually bends; on a straight run it
+        // dash only curves where the road actually bends; on a straight run it
         // stays straight.
         const float RouteCurveStep = 5f;
         const float RouteSegOverlap = 1.2f;
 
-        // The enclosing ring is resampled to this even spacing before dashing,
-        // and corner-cut this many times, so the hull reads as a smooth loop
-        // rather than a polygon and the bars have a clean arc to follow.
-        const float RouteResample = 6f;
-        const int RouteRingSmooth = 4;
-
-        // World-space spacing (metres) the cached ring is resampled to before it
-        // is projected each frame. Dense enough that the projected polygon reads
-        // as a smooth loop at the fixed map scale; built once, so the count is
-        // cheap.
+        // World-space spacing (metres) the cached line is resampled to before it
+        // is projected each frame. Dense enough that the projected polyline
+        // reads as a smooth road at the fixed map scale; built once, so the
+        // count is cheap.
         const float RouteResampleWorld = 4f;
 
-        // Half-width, in metres, of the ring around a route when the config is
-        // unavailable, and the pixel range the metre padding is clamped to so a
-        // near-collinear route still gets a visible ring and a sprawling one
-        // does not balloon off the map.
-        const float RoutePadMetres = 45f;
-        const float RoutePadMinPx = 22f;
-        const float RoutePadMaxPx = 140f;
+        // The line runs through the waypoints as a centripetal Catmull-Rom
+        // sampled this many times per leg. Eight is enough for the ~30 m legs
+        // the route editor records: the curve reads as a road rather than as a
+        // chain of straight hops, and the spline INTERPOLATES, so it never
+        // leaves the road the way corner-cutting would.
+        const int RouteSplineSteps = 8;
 
-        // A route ring that crosses one drawn earlier is trimmed back within
+        // A route whose last waypoint comes back within this many metres of its
+        // first is a loop, and is dashed as a closed ring so the seam where it
+        // closes carries a proper gap.
+        const float RouteLoopClose = 45f;
+
+        // How near the cursor has to come to the line, in screen pixels, before
+        // the route's note pops.
+        const float RouteHoverPx = 12f;
+
+        // A route line that crosses one drawn earlier is trimmed back within
         // this radius of the earlier line, reopening a clean gap instead of
         // letting the two sets of dashes pile into a blob at the crossing.
         const float RouteClearance = 14f;
@@ -4312,99 +4405,165 @@ namespace NextDayRevival
                 && (maxZ - minZ) <= world.y * RouteSceneFit;
         }
 
-        /// <summary>The measured screen-pixels-per-metre of the map, from the
-        /// total projected pixel length of the run over its total world (XZ)
-        /// length. The map does not zoom, so one number holds for the whole
-        /// overlay; averaging the whole run shrugs off any single bad pair. A
-        /// safe fallback is returned when the run has no measurable length.
-        /// </summary>
-        static float PixelsPerMetre(List<Vector2> proj, List<Vector3> wpos)
-        {
-            double pix = 0.0, met = 0.0;
-            int n = Mathf.Min(proj.Count, wpos.Count);
-            for (int i = 1; i < n; i++)
-            {
-                pix += (proj[i] - proj[i - 1]).magnitude;
-                float dx = wpos[i].x - wpos[i - 1].x;
-                float dz = wpos[i].z - wpos[i - 1].z;
-                met += Mathf.Sqrt(dx * dx + dz * dz);
-            }
-            if (met < 1e-3) return 0.35f;
-            return (float)(pix / met);
-        }
-
-        /// <summary>The outward padding of the ring in PIXELS: the configured
-        /// half-width in metres (falling back to a default) turned into pixels
-        /// by the measured scale, then clamped so a near-straight route still
-        /// gets a visible ring and a sprawling one does not balloon.</summary>
-        static float RouteMapPad(float ppm)
-        {
-            float metres = RoutePadMetres;
-            if (RevivalPlugin.CfgPatrolRouteMapWidth != null)
-                metres = RevivalPlugin.CfgPatrolRouteMapWidth.Value;
-            return Mathf.Clamp(metres * ppm, RoutePadMinPx, RoutePadMaxPx);
-        }
-
         /// <summary>
-        /// Builds ONE smooth closed boundary around a projected run: the convex
-        /// hull of the waypoints (a rectangle capsule when they are collinear),
-        /// pushed outward by <paramref name="pad"/>, corner-cut into a rounded
-        /// loop and resampled to an even spacing. The returned list is CLOSED
-        /// (its last point repeats the first) so the dasher can walk it as a
-        /// ring. Coordinates are LOCAL to the map clip.
+        /// The route's map line in WORLD space (XZ; the stored y is 0 and
+        /// WorldToGui ignores it): the driven road itself, not a boundary
+        /// around it. A centripetal Catmull-Rom runs THROUGH every waypoint -
+        /// it interpolates instead of cutting corners, so the line stays on the
+        /// road the waypoints were recorded on - and the result is resampled to
+        /// an even spacing. Measured offline against the terrain's own asphalt
+        /// splat (research/roadmask.py -layer 14): 688/693 and 1431/1450
+        /// samples of the two shipped routes land on the road surface, median
+        /// 0.2 m from its centre, 90 percent within 5 m. Built once and cached
+        /// on the route, rebuilt only when the waypoint count changes; DrawMap
+        /// only PROJECTS it, which is what stops the line jittering as the map
+        /// or camera micro-moves.
         /// </summary>
-        static List<Vector2> EncircleRun(List<Vector2> pts, float pad)
+        static List<Vector3> WorldLine(Route r)
         {
-            List<Vector2> hull = ConvexHull(pts);
-            List<Vector2> ring = hull.Count < 3 ? CapsuleRing(pts, pad)
-                                                : ExpandHull(hull, pad);
-            if (ring == null || ring.Count < 3) return null;
-            ring = ChaikinClosed(ring, RouteRingSmooth);
-            ring.Add(ring[0]);                       // close the loop
-            ring = Resample(ring, RouteResample);
-            return ring;
-        }
+            if (r.MapLine != null && r.MapLineN == r.P.Count) return r.MapLine;
 
-        /// <summary>
-        /// The route's encircling ring in WORLD space (XZ; the stored y is 0 and
-        /// WorldToGui ignores it). Built once - convex hull of the waypoints,
-        /// pushed outward by the configured half-width in METRES, corner-cut and
-        /// resampled - and cached on the route, rebuilt only when the waypoint
-        /// count or the padding changes. DrawMap projects this each frame; doing
-        /// the hull in one fixed world frame instead of per frame in screen space
-        /// is what stops the ring jittering as the map or camera micro-moves.
-        /// </summary>
-        static List<Vector3> WorldRing(Route r)
-        {
-            float pad = RoutePadMetres;
-            if (RevivalPlugin.CfgPatrolRouteMapWidth != null)
-                pad = RevivalPlugin.CfgPatrolRouteMapWidth.Value;
-            if (r.MapRing != null && r.MapRingN == r.P.Count
-                && Mathf.Abs(r.MapRingPad - pad) < 0.01f)
-                return r.MapRing;
-
-            r.MapRingN = r.P.Count;
-            r.MapRingPad = pad;
-            r.MapRing = null;
+            r.MapLineN = r.P.Count;
+            r.MapLine = null;
+            r.MapLineLoop = false;
             if (r.P.Count < 2) return null;
 
             List<Vector2> xz = new List<Vector2>(r.P.Count);
             for (int i = 0; i < r.P.Count; i++)
                 xz.Add(new Vector2(r.P[i].Pos.x, r.P[i].Pos.z));
 
-            List<Vector2> hull = ConvexHull(xz);
-            List<Vector2> ring = hull.Count < 3 ? CapsuleRing(xz, pad)
-                                                : ExpandHull(hull, pad);
-            if (ring == null || ring.Count < 3) return null;
-            ring = ChaikinClosed(ring, RouteRingSmooth);
-            ring.Add(ring[0]);                       // close the loop
-            ring = Resample(ring, RouteResampleWorld);
+            bool loop = xz.Count > 2
+                && (xz[xz.Count - 1] - xz[0]).magnitude < RouteLoopClose;
 
-            List<Vector3> worldRing = new List<Vector3>(ring.Count);
-            for (int i = 0; i < ring.Count; i++)
-                worldRing.Add(new Vector3(ring[i].x, 0f, ring[i].y));
-            r.MapRing = worldRing;
-            return worldRing;
+            List<Vector2> line = CatmullRom(xz, loop, RouteSplineSteps);
+            if (line == null || line.Count < 2) return null;
+            line = Resample(line, RouteResampleWorld);
+            if (line.Count < 2) return null;
+
+            List<Vector3> worldLine = new List<Vector3>(line.Count);
+            for (int i = 0; i < line.Count; i++)
+                worldLine.Add(new Vector3(line[i].x, 0f, line[i].y));
+            r.MapLine = worldLine;
+            r.MapLineLoop = loop;
+            return worldLine;
+        }
+
+        /// <summary>A centripetal Catmull-Rom spline through EVERY point. It
+        /// INTERPOLATES, so the curve passes exactly through each waypoint and
+        /// cannot drift off the road the way corner-cutting (the ring's old
+        /// Chaikin pass) does; the centripetal knot spacing is what keeps it
+        /// from overshooting into a loop at a sharp turn. A closed input wraps
+        /// its end tangents so the seam bends like every other corner.
+        /// </summary>
+        static List<Vector2> CatmullRom(List<Vector2> pts, bool closed, int steps)
+        {
+            int n = pts.Count;
+            if (n < 3 || steps < 1) return new List<Vector2>(pts);
+            List<Vector2> outp = new List<Vector2>(n * steps + 1);
+            int last = closed ? n : n - 1;
+            for (int i = 0; i < last; i++)
+            {
+                Vector2 p0 = closed ? pts[(i - 1 + n) % n] : pts[Mathf.Max(i - 1, 0)];
+                Vector2 p1 = pts[i % n];
+                Vector2 p2 = pts[(i + 1) % n];
+                Vector2 p3 = closed ? pts[(i + 2) % n] : pts[Mathf.Min(i + 2, n - 1)];
+                for (int st = 0; st < steps; st++)
+                    outp.Add(Spline(p0, p1, p2, p3, st / (float)steps));
+            }
+            outp.Add(closed ? pts[0] : pts[n - 1]);
+            return outp;
+        }
+
+        /// <summary>One point of the centripetal Catmull-Rom segment p1..p2, at
+        /// <paramref name="t"/> in 0..1. Barry-Goldman pyramid form, so the
+        /// knot spacing is honoured without solving for coefficients.</summary>
+        static Vector2 Spline(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3,
+                              float t)
+        {
+            float t0 = 0f;
+            float t1 = Knot(t0, p0, p1);
+            float t2 = Knot(t1, p1, p2);
+            float t3 = Knot(t2, p2, p3);
+            float tt = t1 + (t2 - t1) * t;
+            Vector2 a1 = Mix(p0, p1, t0, t1, tt);
+            Vector2 a2 = Mix(p1, p2, t1, t2, tt);
+            Vector2 a3 = Mix(p2, p3, t2, t3, tt);
+            Vector2 b1 = Mix(a1, a2, t0, t2, tt);
+            Vector2 b2 = Mix(a2, a3, t1, t3, tt);
+            return Mix(b1, b2, t1, t2, tt);
+        }
+
+        /// <summary>The next centripetal knot: the previous one plus the square
+        /// root of the chord length. Coincident points get a tiny step instead
+        /// of a zero one, so the pyramid never divides by zero.</summary>
+        static float Knot(float t, Vector2 a, Vector2 b)
+        {
+            float d = (b - a).magnitude;
+            return d > 1e-6f ? t + Mathf.Sqrt(d) : t + 1e-4f;
+        }
+
+        /// <summary>Linear blend of two points over a knot interval.</summary>
+        static Vector2 Mix(Vector2 a, Vector2 b, float ta, float tb, float t)
+        {
+            if (Mathf.Abs(tb - ta) < 1e-9f) return a;
+            float w = (tb - t) / (tb - ta);
+            return a * w + b * (1f - w);
+        }
+
+        // The hand-painted map PICTURE is not drawn at the terrain's scale: it
+        // is about 0.5 percent larger than the terrain and sits roughly 10 m
+        // east and 20 m north of it. That is measured, not guessed - fitting the
+        // terrain's splat road centrelines onto the picture's own road ridges at
+        // 1024 px locks in at this scale and shift (docs/ai/
+        // REVERSE_ENGINEERING.md 33.1). MapTools.WorldToGui projects as if
+        // picture and terrain were the same thing, so a world-true line lands
+        // BESIDE the road the picture draws - which is exactly the "the marker
+        // has to sit in the middle of the road" complaint. The correction below
+        // is DISPLAY ONLY; no route waypoint is touched. Set RouteMapRegister to
+        // false to draw world-true again.
+        const bool RouteMapRegister = true;
+        const float MapArtFit = 1024f;      // the fit was measured at this size
+        const float MapArtScale = 1.005f;
+        const float MapArtShiftX = 2f;      // picture roads sit +2 px east ...
+        const float MapArtShiftY = -4f;     // ... and 4 px north (GUI y is down)
+
+        /// <summary>Moves a world-true projected point onto the map picture's
+        /// own road, undoing the picture's registration error (see the MapArt*
+        /// constants). <paramref name="full"/> is the whole map texture's screen
+        /// rectangle - the picture covers the whole world, so the shift measured
+        /// at 1024 px scales with it. Returns the point unchanged when the
+        /// texture rectangle is unknown, so a missing bound never moves the
+        /// overlay somewhere arbitrary.</summary>
+        static Vector2 MapArt(Vector2 g, Rect full, bool known)
+        {
+            if (!known || !RouteMapRegister || full.width < 1f) return g;
+            float factor = full.width / MapArtFit;
+            float cx = full.x + full.width * 0.5f;
+            float cy = full.y + full.height * 0.5f;
+            return new Vector2(
+                (g.x - cx) * MapArtScale + cx + MapArtShiftX * factor,
+                (g.y - cy) * MapArtScale + cy + MapArtShiftY * factor);
+        }
+
+        /// <summary>Is a convoy actually driving this route right now? A convoy
+        /// route is an event, not a standing road on the map, so it is only
+        /// drawn while one is out. The convoy list is kept by the MASTER CLIENT
+        /// that spawns and drives them (RevivalConvoy.DoSpawn returns early on
+        /// anything else), so on a joined client this is always false and the
+        /// route stays hidden - the same scope the rest of the convoy feature
+        /// already has. NDR convoy.</summary>
+        static bool ConvoyRouteActive(string name)
+        {
+            if (name == null) return false;
+            try
+            {
+                List<RevivalConvoy.Convoy> live = RevivalConvoy.ActiveConvoys();
+                if (live == null) return false;
+                for (int i = 0; i < live.Count; i++)
+                    if (live[i] != null && live[i].Route == name) return true;
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>The overlap of two GUI rectangles. An empty overlap returns a
@@ -4420,123 +4579,6 @@ namespace NextDayRevival
             if (x1 < x0) x1 = x0;
             if (y1 < y0) y1 = y0;
             return new Rect(x0, y0, x1 - x0, y1 - y0);
-        }
-
-        /// <summary>Andrew's monotone-chain convex hull. Returns the hull
-        /// vertices in order without the closing repeat; fewer than three means
-        /// the input was collinear.</summary>
-        static List<Vector2> ConvexHull(List<Vector2> points)
-        {
-            int n = points.Count;
-            if (n < 3) return new List<Vector2>(points);
-            List<Vector2> pts = new List<Vector2>(points);
-            pts.Sort(CompareVec);
-            Vector2[] h = new Vector2[2 * n];
-            int k = 0;
-            for (int i = 0; i < n; i++)                 // lower hull
-            {
-                while (k >= 2 && Cross(h[k - 2], h[k - 1], pts[i]) <= 0f) k--;
-                h[k++] = pts[i];
-            }
-            for (int i = n - 2, t = k + 1; i >= 0; i--) // upper hull
-            {
-                while (k >= t && Cross(h[k - 2], h[k - 1], pts[i]) <= 0f) k--;
-                h[k++] = pts[i];
-            }
-            List<Vector2> res = new List<Vector2>(k - 1);
-            for (int i = 0; i < k - 1; i++) res.Add(h[i]);
-            return res;
-        }
-
-        static int CompareVec(Vector2 a, Vector2 b)
-        {
-            if (a.x < b.x) return -1;
-            if (a.x > b.x) return 1;
-            if (a.y < b.y) return -1;
-            if (a.y > b.y) return 1;
-            return 0;
-        }
-
-        static float Cross(Vector2 o, Vector2 a, Vector2 b)
-        {
-            return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-        }
-
-        /// <summary>Pushes every hull vertex outward along the average of its
-        /// two edge normals by <paramref name="pad"/> pixels, expanding the
-        /// convex polygon. The centroid disambiguates which way is out, so the
-        /// result never collapses inward. Chaikin later rounds the corners.
-        /// </summary>
-        static List<Vector2> ExpandHull(List<Vector2> hull, float pad)
-        {
-            int n = hull.Count;
-            Vector2 c = Vector2.zero;
-            for (int i = 0; i < n; i++) c += hull[i];
-            c /= n;
-            List<Vector2> outp = new List<Vector2>(n);
-            for (int i = 0; i < n; i++)
-            {
-                Vector2 prev = hull[(i - 1 + n) % n];
-                Vector2 cur = hull[i];
-                Vector2 next = hull[(i + 1) % n];
-                Vector2 n0 = Outward(new Vector2((cur - prev).y, -(cur - prev).x), cur, c);
-                Vector2 n1 = Outward(new Vector2((next - cur).y, -(next - cur).x), cur, c);
-                Vector2 nrm = n0 + n1;
-                if (nrm.sqrMagnitude < 1e-6f) nrm = cur - c;
-                if (nrm.sqrMagnitude < 1e-6f) nrm = new Vector2(0f, -1f);
-                nrm.Normalize();
-                outp.Add(cur + nrm * pad);
-            }
-            return outp;
-        }
-
-        static Vector2 Outward(Vector2 nrm, Vector2 at, Vector2 centre)
-        {
-            if (nrm.sqrMagnitude < 1e-9f) return nrm;
-            nrm.Normalize();
-            return Vector2.Dot(nrm, at - centre) < 0f ? -nrm : nrm;
-        }
-
-        /// <summary>A four-corner rectangle around a collinear run: the two end
-        /// waypoints extended by <paramref name="pad"/> and offset to both
-        /// sides by the same, so a dead-straight route still encloses an area.
-        /// </summary>
-        static List<Vector2> CapsuleRing(List<Vector2> pts, float pad)
-        {
-            Vector2 a = pts[0], b = pts[pts.Count - 1];
-            Vector2 d = b - a;
-            if (d.sqrMagnitude < 1f) { b = a + new Vector2(1f, 0f); d = b - a; }
-            Vector2 dir = d.normalized;
-            Vector2 nrm = new Vector2(-dir.y, dir.x);
-            List<Vector2> r = new List<Vector2>(4);
-            r.Add(a - dir * pad + nrm * pad);
-            r.Add(b + dir * pad + nrm * pad);
-            r.Add(b + dir * pad - nrm * pad);
-            r.Add(a - dir * pad - nrm * pad);
-            return r;
-        }
-
-        /// <summary>Chaikin corner-cutting over a CLOSED polygon: every edge,
-        /// including the wrap from last vertex to first, is cut a quarter in
-        /// from each end. No endpoint is special, so the whole loop rounds
-        /// evenly with no seam.</summary>
-        static List<Vector2> ChaikinClosed(List<Vector2> pts, int iters)
-        {
-            List<Vector2> cur = new List<Vector2>(pts);
-            for (int it = 0; it < iters; it++)
-            {
-                int n = cur.Count;
-                if (n < 3) break;
-                List<Vector2> next = new List<Vector2>(n * 2);
-                for (int i = 0; i < n; i++)
-                {
-                    Vector2 a = cur[i], b = cur[(i + 1) % n];
-                    next.Add(a * 0.75f + b * 0.25f);
-                    next.Add(a * 0.25f + b * 0.75f);
-                }
-                cur = next;
-            }
-            return cur;
         }
 
         /// <summary>Walks the closed ring's arc length and lays down evenly
@@ -4569,6 +4611,35 @@ namespace NextDayRevival
                 float start = k * step;
                 DrawCurvedDash(pts, cum, start, start + dash, clip, grid, ink);
             }
+        }
+
+        /// <summary>Walks an OPEN line's arc length and lays down evenly spaced
+        /// curved dashes. The line is tiled with a WHOLE number of dashes at the
+        /// nominal dash/gap ratio, so it STARTS and ENDS with a full dash and no
+        /// stub is left at either end - the two ends of a patrolled road are
+        /// exactly where the eye goes. Dashes within an earlier route's
+        /// clearance are dropped, and the survivors feed <paramref name="ink"/>
+        /// for later routes. Coordinates are LOCAL to the map clip.</summary>
+        static void DashOpen(List<Vector2> pts, Rect clip,
+                             ClearGrid grid, List<Vector2> ink)
+        {
+            int n = pts.Count;
+            if (n < 2) return;
+            float[] cum = new float[n];
+            for (int i = 1; i < n; i++)
+                cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).magnitude;
+            float total = cum[n - 1];
+            if (total < 1f) return;
+
+            float period = RouteDash + RouteGap;
+            int count = Mathf.Max(1,
+                Mathf.RoundToInt((total + RouteGap) / period));
+            float ratio = RouteGap / RouteDash;
+            float dash = total / (count + (count - 1) * ratio);
+            float step = dash * (1f + ratio);
+            for (int k = 0; k < count; k++)
+                DrawCurvedDash(pts, cum, k * step, k * step + dash,
+                               clip, grid, ink);
         }
 
         /// <summary>Resamples a polyline to a uniform arc-length spacing, so the
@@ -4696,21 +4767,24 @@ namespace NextDayRevival
             return t;
         }
 
-        /// <summary>Even-odd ray cast: is the point inside the polygon? The ring
-        /// may carry a closing repeat of its first vertex; the degenerate edge
-        /// that makes is harmless here.</summary>
-        static bool PointInPolygon(List<Vector2> poly, Vector2 p)
+        /// <summary>Is the cursor within <paramref name="px"/> pixels of the
+        /// line? This replaces the enclosed-area test the ring needed: the
+        /// marker is a road now, so the note belongs to the road under the
+        /// cursor and not to a whole region of the map.</summary>
+        static bool NearPolyline(List<Vector2> pts, Vector2 p, float px)
         {
-            int n = poly.Count;
-            bool inside = false;
-            for (int i = 0, j = n - 1; i < n; j = i++)
+            float best = px * px;
+            for (int i = 1; i < pts.Count; i++)
             {
-                Vector2 a = poly[i], b = poly[j];
-                if (((a.y > p.y) != (b.y > p.y)) &&
-                    (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x))
-                    inside = !inside;
+                Vector2 a = pts[i - 1];
+                Vector2 ab = pts[i] - a;
+                float len2 = ab.sqrMagnitude;
+                float t = len2 < 1e-6f ? 0f
+                    : Mathf.Clamp01(Vector2.Dot(p - a, ab) / len2);
+                Vector2 d = p - (a + ab * t);
+                if (d.sqrMagnitude <= best) return true;
             }
-            return inside;
+            return false;
         }
 
         /// <summary>The hover note beside the cursor: a dark panel with a

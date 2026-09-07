@@ -18,17 +18,47 @@ namespace NextDayRevival
 
     public static class LocalizationHook
     {
+        // The game asks for EVERY localized string through this method, so the
+        // postfix must not allocate. The old loop built "$<id>_Name" and
+        // "$<id>_Descr" for every registered item on every call - two throwaway
+        // strings per item per lookup - and compared them one at a time. Both
+        // keys are fixed once the item table is filled, so they are built once
+        // and answered from a dictionary. The comparison is the same as before:
+        // ordinal, case sensitive; the first registered item wins a duplicate
+        // id. Name and Descr stay properties, read at call time, so a language
+        // change still shows up immediately.
+        static Dictionary<string, ItemDef> _names;
+        static Dictionary<string, ItemDef> _descrs;
+        static int _built = -1;
+
+        static void Build(List<ItemDef> items)
+        {
+            Dictionary<string, ItemDef> names =
+                new Dictionary<string, ItemDef>(StringComparer.Ordinal);
+            Dictionary<string, ItemDef> descrs =
+                new Dictionary<string, ItemDef>(StringComparer.Ordinal);
+            for (int i = 0; i < items.Count; i++)
+            {
+                ItemDef d = items[i];
+                string nameKey = "$" + d.Id + "_Name";
+                string descrKey = "$" + d.Id + "_Descr";
+                if (!names.ContainsKey(nameKey)) names[nameKey] = d;
+                if (!descrs.ContainsKey(descrKey)) descrs[descrKey] = d;
+            }
+            _names = names;
+            _descrs = descrs;
+            _built = items.Count;
+        }
+
         public static void Postfix(string __0, ref string __result)
         {
             if (__0 == null || __0.Length < 3 || __0[0] != '$') return;
             if (Regions.Label(__0, ref __result)) return;
             List<ItemDef> items = RevivalPlugin.Items;
-            for (int i = 0; i < items.Count; i++)
-            {
-                ItemDef d = items[i];
-                if (__0 == "$" + d.Id + "_Name") { __result = d.Name; return; }
-                if (__0 == "$" + d.Id + "_Descr") { __result = d.Descr; return; }
-            }
+            if (_built != items.Count) Build(items);
+            ItemDef hit;
+            if (_names.TryGetValue(__0, out hit)) { __result = hit.Name; return; }
+            if (_descrs.TryGetValue(__0, out hit)) { __result = hit.Descr; return; }
         }
     }
 
@@ -52,6 +82,33 @@ namespace NextDayRevival
         const string WEAPON_PREFIX = "PlayerDataPrefabs/Weapons/";
         internal static bool Reentry;
         static int _served;
+        // Resources.Load is a hot game API and this prefix sits in front of
+        // every single call. The old loop built the full model path and the
+        // "<id>_Spawn" tail for every registered item on every load, so a load
+        // this hook does not answer at all - which is nearly all of them -
+        // still allocated a string per item. Both forms are fixed once the item
+        // table is filled, so they are built once here.
+        static Dictionary<string, ItemDef> _weapon;   // full model path -> item
+        static string[] _spawnTail;                   // "<id>_Spawn", parallel to Items
+        static int _built = -1;
+
+        static void Build(List<ItemDef> items)
+        {
+            Dictionary<string, ItemDef> weapon =
+                new Dictionary<string, ItemDef>(StringComparer.OrdinalIgnoreCase);
+            string[] tails = new string[items.Count];
+            for (int i = 0; i < items.Count; i++)
+            {
+                ItemDef d = items[i];
+                tails[i] = d.Id + "_Spawn";
+                if (!d.IsWeapon) continue;
+                string model = WEAPON_PREFIX + d.Id + "_Weapon";
+                if (!weapon.ContainsKey(model)) weapon[model] = d;
+            }
+            _weapon = weapon;
+            _spawnTail = tails;
+            _built = items.Count;
+        }
 
         public static bool Prefix(string path, ref UnityEngine.Object __result)
         {
@@ -69,29 +126,33 @@ namespace NextDayRevival
             }
 
             List<ItemDef> items = RevivalPlugin.Items;
+            if (_built != items.Count) Build(items);
+
+            // Every path this hook can answer ends in "_Weapon" or "_Spawn".
+            // Everything else leaves here without looking at the item table.
+            if (path.EndsWith("_Weapon", StringComparison.OrdinalIgnoreCase))
+            {
+                ItemDef d;
+                if (!_weapon.TryGetValue(path, out d)) return true;
+                GameObject model = d.Factory.GetModelPrefab();
+                if (model == null) return true;
+                Log(path, "Modell");
+                __result = model;
+                return false;
+            }
+            if (!path.EndsWith("_Spawn", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Auf die Endung matchen, weil der Praefix aus der Kategorie kommt
+            // und fuer eine neue ID nicht stimmen muss. Das Zeichen davor muss
+            // aber ein Trennzeichen sein - sonst wuerde "2050_Spawn" auch auf
+            // "12050_Spawn" passen.
             for (int i = 0; i < items.Count; i++)
             {
-                ItemDef d = items[i];
-
-                if (d.IsWeapon
-                    && path.Equals(WEAPON_PREFIX + d.Id + "_Weapon", StringComparison.OrdinalIgnoreCase))
-                {
-                    GameObject go = d.Factory.GetModelPrefab();
-                    if (go == null) return true;
-                    Log(path, "Modell");
-                    __result = go;
-                    return false;
-                }
-
-                // Auf die Endung matchen, weil der Praefix aus der Kategorie kommt
-                // und fuer eine neue ID nicht stimmen muss. Das Zeichen davor muss
-                // aber ein Trennzeichen sein - sonst wuerde "2050_Spawn" auch auf
-                // "12050_Spawn" passen.
-                string tail = d.Id + "_Spawn";
+                string tail = _spawnTail[i];
                 if (path.EndsWith(tail, StringComparison.OrdinalIgnoreCase)
                     && (path.Length == tail.Length || path[path.Length - tail.Length - 1] == '/'))
                 {
-                    GameObject go = d.Factory.GetSpawnPrefab(
+                    GameObject go = items[i].Factory.GetSpawnPrefab(
                         path.Substring(0, path.Length - tail.Length));
                     if (go == null) return true;
                     Log(path, "Inventareintrag");

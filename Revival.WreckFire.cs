@@ -84,6 +84,16 @@ namespace NextDayRevival
     public static class VehicleWreck
     {
         const float DamagePerSecond = 5f;
+        // VehicleGameSystem.Update runs once per vehicle per frame, so this
+        // postfix runs as often as there are vehicles in the scene. Every one
+        // of those calls read Durability through reflection, which boxes a
+        // float, and then asked the vehicle for a component. Nothing here has
+        // to react within a frame: the fire appears when a vehicle is already
+        // destroyed and the burn damage is timed against Time.time once a
+        // second. So each vehicle is looked at every sixth frame - a tenth of a
+        // second at 60 fps - staggered by instance id so they never all land on
+        // the same frame.
+        const int LookEveryFrames = 6;
 
         static FieldInfo _durability;
         static FieldInfo _passengers;
@@ -134,6 +144,7 @@ namespace NextDayRevival
         {
             Component vehicle = __instance as Component;
             if (vehicle == null) return;
+            if (((Time.frameCount + vehicle.GetInstanceID()) % LookEveryFrames) != 0) return;
             try
             {
                 if ((float)_durability.GetValue(__instance) > 0f)

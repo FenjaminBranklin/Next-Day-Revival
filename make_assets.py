@@ -35,7 +35,7 @@ GROUPS = [
     # Convoy-repair items: own art for the fire extinguisher (2063) and the
     # heavy tool kit (2064), replacing the ammo50/jammer placeholders.
     ("repairitems", ["repair_items_build.py"]),
-    # Anti-tank mine (2065): own mesh + textures + icon in one pass.
+    # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),

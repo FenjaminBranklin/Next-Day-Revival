@@ -867,10 +867,15 @@ namespace NextDayRevival
         {
             if (t == null) return;
             Transform mine = Turret.MannedVehicle;   // do not glow our own vehicle
-            UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(t);
+            // The vehicle type here IS VehicleGameSystem, so this takes the
+            // shared scan instead of walking the whole scene again. The cache is
+            // at most 0,25 s old and this list is rebuilt every 0,35 s, so the
+            // targets are no staler than before - but while the optic is up, the
+            // turret and this view now pay for one whole-scene scan, not two.
+            Component[] objs = VehicleScan.All();
             for (int i = 0; i < objs.Length; i++)
             {
-                Component c = objs[i] as Component;
+                Component c = objs[i];
                 if (c == null || c.transform == null) continue;
                 if (c.transform == mine) continue;
                 _veh.Add(c.transform);

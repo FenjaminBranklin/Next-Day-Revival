@@ -8,6 +8,11 @@
 // The mine supplies its own grenade data and hand model through existing item
 // seams. No server weapons_db entry is required for client-side equipment.
 //
+// THE ITEM ID IS THE EQUIP CATEGORY - see DEF_MINE below. The game reads an
+// item's inventory category from its id range alone, so the mine must carry an
+// id in its donor's band (1401..1500) or no weapon slot will accept it. That is
+// why it is 1490 and why there is no MineId config key any more.
+//
 // THE TRIGGER (MineObject). The placed mine watches the shared vehicle scan
 // (VehicleScan.All() returns only VehicleGameSystem roots, so characters on foot
 // - the placer included - are never in it and can never set it off). When any
@@ -45,15 +50,33 @@ namespace NextDayRevival
     /// </summary>
     public static class AntiTankMine
     {
-        // Fresh id. The plugin's own items occupy 1160-1164, 2050-2064; 2065 is
-        // free (verified by verify.py). Donor 1403 is the frag grenade, so the
-        // clone inherits the grenade inventory category and equips through the
-        // grenade path.
-        public const int DEF_MINE = 2065;
+        // THE ID IS THE EQUIP CATEGORY. It is not a free choice and it is not a
+        // setting. CONFIRMED from IL (research/ilq.py):
+        // `ItemDataManager::GetItemCatData(itemId)` is a hard-coded id-RANGE
+        // switch with no per-item data, and everything that decides where an
+        // item may go reads its result - `ItemSlotUI::LoadSlotItemCategoryData`
+        // fills `ItemCategoryData` from it, `ItemSlotUI::SlotDetecting` turns
+        // `GeneralCategory` into the list of weapon slots it highlights, and
+        // `PlayerInventoryUISystem::GetOnWeaponSlotDrag` accepts a drop only on
+        // a highlighted slot. The bands are:
+        //     1401..1500  "LootSpawn/Weapons/Usable/"  Exact 6, General 2
+        //                 -> the grenade slot; this is where donor 1403 lives
+        //     2001..3000  "LootSpawn/Ammunation/"      Exact 8, General 3
+        //                 -> ammunition; NO weapon slot is ever highlighted
+        // The mine shipped as 2065 and was therefore read as AMMUNITION: no
+        // slot lit up, no drop was accepted, and it could not be equipped -
+        // exactly the SWAT-gear bug of 2026-09-03 (docs/ai/TASKS.md), whose
+        // accepted fix was the same one used here. 1490 puts the mine in its
+        // donor's own band, so `SetWeaponInHands` files it under
+        // `_WeaponCategoryEquiped` 9 (Exact 6, id != 1401) - the grenade path,
+        // byte for byte what the frag grenade 1403 gets.
+        // 1490 is free: nothing in research/items.tsv, in the plugin's id space
+        // (1160-1164, 2050-2064) or in the master server's weapons_db.xml uses
+        // it - the band holds only 1401-1406.
+        public const int DEF_MINE = 1490;
         const int DEF_DONOR = 1403;
 
         public static ConfigEntry<bool> CfgEnabled;
-        public static ConfigEntry<int> CfgMineId;
         public static ConfigEntry<float> CfgFrontOffset;
         public static ConfigEntry<float> CfgScale;
         public static ConfigEntry<float> CfgTriggerRadius;
@@ -64,7 +87,12 @@ namespace NextDayRevival
         public static ConfigEntry<string> CfgKey;
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
-        public static int MineId { get { return CfgMineId != null ? CfgMineId.Value : DEF_MINE; } }
+        /// <summary>The mine's item id. NOT configurable: the game derives the
+        /// equip category from the id band alone (see DEF_MINE), so any other
+        /// value outside 1401..1500 makes the mine unequippable again. The
+        /// former "AntiTankMine/MineId" key is gone for that reason; an
+        /// existing config file keeps the orphan line, which BepInEx ignores.</summary>
+        public static int MineId { get { return DEF_MINE; } }
 
         // ------------------------------------------------------------- state
         static bool _placing;
@@ -99,10 +127,11 @@ namespace NextDayRevival
         public static void BindConfig(ConfigFile cfg)
         {
             CfgEnabled = cfg.Bind("AntiTankMine", "Enabled", true,
-                "Die Panzerabwehrmine (Item 2065) aktivieren.");
-            CfgMineId = cfg.Bind("AntiTankMine", "MineId", DEF_MINE,
-                "Item-Id der Mine. Nur aendern, wenn 2065 mit etwas anderem "
-                + "kollidiert.");
+                "Die Panzerabwehrmine (Item 1490) aktivieren.");
+            // Kein MineId-Schluessel mehr. Die Id bestimmt beim Spiel die
+            // Ausruestungskategorie (ItemDataManager::GetItemCatData ist eine
+            // fest verdrahtete Id-Bereichsliste); ein frei gesetzter Wert
+            // ausserhalb 1401..1500 macht die Mine wieder unausruestbar.
             CfgFrontOffset = cfg.Bind("AntiTankMine", "FrontOffset", 2.2f,
                 "Abstand vor dem Spieler, in dem die Mine abgelegt wird (m).");
             CfgScale = cfg.Bind("AntiTankMine", "Scale", 0.45f,

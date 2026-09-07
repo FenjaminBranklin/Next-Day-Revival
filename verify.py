@@ -529,10 +529,32 @@ def check_mine():
         else:
             bad("Mine: " + why)
 
-    need("DEF_MINE = 2065" in s, "Id 2065", "Item-Id 2065 nicht gesetzt")
+    need("DEF_MINE = 1490" in s, "Id 1490", "Item-Id 1490 nicht gesetzt")
     need("DEF_DONOR = 1403" in s,
          "Spende 1403 (Granatenkategorie)",
          "Spender ist nicht die Granate 1403 - dann keine Granatenkategorie")
+    # The id IS the equip category: ItemDataManager::GetItemCatData is a
+    # hard-coded id-range switch, and only 1401..1500 lights up the grenade
+    # slot. An id outside the donor's band cannot be equipped at all.
+    # (No regex here on purpose - verify.py does not import re.)
+    mine_id = -1
+    marker = "DEF_MINE = "
+    if marker in s:
+        digits = ""
+        for ch in s[s.index(marker) + len(marker):]:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if digits:
+            mine_id = int(digits)
+    need(1401 <= mine_id <= 1500,
+         "Id liegt im Granatenband 1401..1500",
+         "Mine-Id liegt ausserhalb 1401..1500 - dann nimmt kein Waffenslot sie an")
+    # And it must stay there: a config key would let a .cfg put it back into
+    # the ammunition band, which is exactly how 2065 became unequippable.
+    need("CfgMineId" not in s,
+         "keine frei setzbare Mine-Id (Band bleibt garantiert)",
+         "MineId ist wieder konfigurierbar - eine .cfg kann die Mine unausruestbar machen")
     # No-throw: the CantThrowGrenade postfix forces __result true for the mine.
     need("CantThrowGrenade" in s and "__result = true" in s,
          "Linksklick-Wurfsperre (CantThrowGrenade -> true)",

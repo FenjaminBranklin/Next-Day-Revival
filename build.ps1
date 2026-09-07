@@ -130,7 +130,7 @@ $assets = @(
     "apc_scope.png",
     "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
     "shell125_icon.png",
-    # Anti-tank mine (item 2065): mesh + diffuse/normal + inventory icon (the
+    # Anti-tank mine (item 1490): mesh + diffuse/normal + inventory icon (the
     # item passes null for metal, so mine_metal/rough are generated but unused).
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
     # Deployed head of the mast antenna (item 2055): mesh only.
