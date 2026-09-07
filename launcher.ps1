@@ -669,18 +669,16 @@ function Get-State {
     } elseif ($s.server.minClientVersion -and (Compare-Ver $s.installed $s.server.minClientVersion) -lt 0) {
         $s.state   = "old"
         $s.verdict = "Your client is older than the server expects."
-        $s.detail  = "Installed $($s.installed), the server asks for $($s.server.minClientVersion) or newer. Items the server knows and your build does not are simply missing for you. Install $($s.server.minClientVersion) or later below."
+        $s.detail  = "Installed $($s.installed). Press Play to automatically install and verify the server's exact release $($s.server.minClientVersion)."
     } elseif ($s.server.minClientVersion -and (Compare-Ver $s.installed $s.server.minClientVersion) -gt 0) {
-        # Deliberately not a warning. Being ahead of minClientVersion is the
-        # normal state of a development machine, and a launcher that shouts
-        # about it teaches everybody to ignore the line where it matters.
+        # Verified admission requires an exact match, even for a newer client.
         $s.state   = "ahead"
-        $s.verdict = "Newer than the server requires. Ready to play."
-        $s.detail  = "Installed $($s.installed), the server asks for $($s.server.minClientVersion) and serves content $($s.server.contentVersion). That gap is only a problem when your build registers an item id the server's weapons_db.xml does not have - then that item turns back into its donor weapon, for everybody. The weapon check in the log below is what decides it."
+        $s.verdict = "A different client version is installed. Play will update it."
+        $s.detail  = "Installed $($s.installed). Play automatically installs and verifies the server's exact release $($s.server.minClientVersion) before starting."
     } else {
         $s.state   = "sync"
-        $s.verdict = "In sync. Ready to play."
-        $s.detail  = "Client $($s.installed), server content $($s.server.contentVersion), server asks for $($s.server.minClientVersion) or newer."
+        $s.verdict = "Versions match. Play will verify the installation."
+        $s.detail  = "Client $($s.installed), server content $($s.server.contentVersion). Play checks and repairs files automatically; server admission is checked when connecting."
     }
 
     # Runs after the version verdict and overrides it on purpose: matching
@@ -1801,7 +1799,7 @@ function Update-Tiles($s) {
     if ($s.server.ok) {
         $tileServer.value.Text = $s.server.contentVersion
         $tileServer.value.ForeColor = $INK
-        $tileServer.note.Text = $s.serverHost + " - asks for " + $s.server.minClientVersion + "+"
+        $tileServer.note.Text = $s.serverHost + " - requires " + $s.server.minClientVersion
     } elseif ($s.list.ok) {
         $tileServer.value.Text = "up"
         $tileServer.value.ForeColor = $BLUE

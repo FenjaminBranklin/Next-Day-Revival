@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Security.Cryptography;
 using System.Threading;
 using HarmonyLib;
@@ -29,15 +30,12 @@ namespace NextDayRevival
             try
             {
                 Type backend = RevivalPlugin.TypeByName("BackendManager");
-                Type request = RevivalPlugin.TypeByName("MasterServerMessages.MsgAuthRequest");
-                if (request == null) request = Assembly.Load("ClientNet").GetType("MasterServerMessages.MsgAuthRequest");
                 MethodInfo auth = AccessTools.Method(backend, "MessageAuthRequest", Type.EmptyTypes, null);
-                MethodInfo version = AccessTools.PropertySetter(request, "clientVersion");
-                if (auth == null || version == null) throw new Exception("Authentication hooks were not found.");
+                if (auth == null) throw new Exception("Authentication hook was not found.");
                 _auth = auth;
                 BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-                harmony.Patch(auth, new HarmonyMethod(typeof(ClientIntegrity).GetMethod("BeforeAuth", flags)), null, null, null, null);
-                harmony.Patch(version, new HarmonyMethod(typeof(ClientIntegrity).GetMethod("VersionPrefix", flags)), null, null, null, null);
+                harmony.Patch(auth, new HarmonyMethod(typeof(ClientIntegrity).GetMethod("BeforeAuth", flags)), null,
+                    new HarmonyMethod(typeof(ClientIntegrity).GetMethod("AuthVersion", flags)), null, null);
             }
             catch (Exception ex) { Fail(ex.Message); }
         }
@@ -88,7 +86,34 @@ namespace NextDayRevival
             finally { _resumeAuth = false; _backend = null; }
         }
 
-        static void VersionPrefix(ref string __0) { __0 = _token; }
+        // Rewrite the caller: a tiny property setter can be inlined by Mono,
+        // bypassing a patch on the setter. Both the wire value and game's log
+        // now read the same verified token from this call site.
+        static string VerifiedVersion(object options) { return _token; }
+
+        static IEnumerable<CodeInstruction> AuthVersion(IEnumerable<CodeInstruction> instructions)
+        {
+            List<CodeInstruction> code = new List<CodeInstruction>(instructions);
+            MethodInfo replacement = typeof(ClientIntegrity).GetMethod("VerifiedVersion",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            int count = 0;
+            foreach (CodeInstruction instruction in code)
+            {
+                MethodInfo method = instruction.operand as MethodInfo;
+                if ((instruction.opcode == OpCodes.Call || instruction.opcode == OpCodes.Callvirt)
+                    && method != null && method.Name == "get_ClientVersion"
+                    && method.DeclaringType.Name == "ClientOptions"
+                    && !method.IsStatic && method.ReturnType == typeof(string)
+                    && method.GetParameters().Length == 0)
+                {
+                    instruction.opcode = OpCodes.Call;
+                    instruction.operand = replacement;
+                    count++;
+                }
+            }
+            if (count != 2) throw new Exception("Unexpected authentication version call sites: " + count);
+            return code;
+        }
 
         // Kept free of Unity calls so the actual validator is exercised by the
         // offline regression test, including mutations after receipt creation.
