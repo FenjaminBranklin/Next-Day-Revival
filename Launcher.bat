@@ -10,6 +10,5 @@ rem  Unblock-File                          Windows marks every file that came
 rem                                        out of a downloaded zip, and a
 rem                                        marked .ps1 will not run
 cd /d "%~dp0"
-start "" /b powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -Command ^
-  "Get-ChildItem '%~dp0*.ps1' | Unblock-File -ErrorAction SilentlyContinue; & '%~dp0launcher.ps1'"
+start "" /b powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0player_update.ps1" -OpenLauncher
 exit

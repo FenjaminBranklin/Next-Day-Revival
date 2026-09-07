@@ -844,7 +844,16 @@ namespace NextDayRevival
 
             for (int i = 0; i < count; i++)
             {
-                if (points != null && points.childCount > 0)
+                if (count > 8)
+                {
+                    // A transport squad exits into two staggered files outside
+                    // the hull, with room for each NPC to acquire its path.
+                    float side = i % 2 == 0 ? -1f : 1f;
+                    wo[i] = car.transform.position
+                        + car.transform.right * (side * (6f + (i / 8) * 2f))
+                        + car.transform.forward * (-7.5f + (i / 2) * 2.5f);
+                }
+                else if (points != null && points.childCount > 0)
                 {
                     wo[i] = points.GetChild(i % points.childCount).position;
                     // A vehicle with fewer exit points than men would put two of

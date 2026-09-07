@@ -155,11 +155,9 @@ namespace NextDayRevival
                 + "Abschalten. Auch der F4-Knopf \"Konvoi sofort\" tut das.");
             CfgBannerSeconds = cfg.Bind("Convoy", "BannerSeconds", 12f,
                 "Wie lange die Meldung unten links stehen bleibt.");
-            CfgLineupGap = cfg.Bind("Convoy", "LineupGapMetres", 24f,
-                "Abstand in Metern zwischen den Fahrzeugen in der Startaufstellung. "
-                + "Alle spawnen aufgereiht auf einer Linie ab Wegpunkt 0 in "
-                + "Fahrtrichtung, das vorderste auf Wegpunkt 0, die anderen "
-                + "dahinter - wie am Startgatter.");
+            CfgLineupGap = cfg.Bind("Convoy", "LineupGapMetres", 45f,
+                "Metres between column slots at spawn and while driving. "
+                + "Minimum 40 m, including configurations from older releases.");
             CfgCruiseSpeed = cfg.Bind("Convoy", "CruiseSpeedKmh", 42f,
                 "Marschgeschwindigkeit eines Konvois in km/h. Der Konvoi faehrt "
                 + "Vollgas und bremst nur fuer harte Kurven ab.");
@@ -184,7 +182,7 @@ namespace NextDayRevival
         /// line-up and, while the column is locked, for the whole drive.</summary>
         internal static float LineupGap
         {
-            get { return CfgLineupGap == null ? 24f : Mathf.Max(6f, CfgLineupGap.Value); }
+            get { return CfgLineupGap == null ? 45f : Mathf.Max(40f, CfgLineupGap.Value); }
         }
 
         /// <summary>Does an intact convoy drive as one body (exact order, exact
@@ -207,6 +205,7 @@ namespace NextDayRevival
             internal bool IsAlive { get { return Patrol.ConvoyAlive(Handle); } }
             /// <summary>Still in the world - alive OR a lingering wreck.</summary>
             internal bool Exists { get { return Patrol.ConvoyExists(Handle); } }
+            internal bool Arrived { get { return Patrol.ConvoyArrived(Handle); } }
             /// <summary>Progress along the route in waypoints (higher = further
             /// ahead), for "is the road ahead blocked".</summary>
             internal float Arc { get { return Patrol.ConvoyArc(Handle); } }
@@ -255,6 +254,7 @@ namespace NextDayRevival
                 // fires in range). Only once a convoy has lost a vehicle does the
                 // reaction below stop survivors and pick one escapee.
                 Behaviour();
+                Spacing();
 
                 if (_nextSpawn < 0f) ScheduleNext();
                 else if (Time.time >= _nextSpawn)
@@ -552,7 +552,7 @@ namespace NextDayRevival
                           && Wreck(c.Members[c.Members.Count - 1]);
                 if (boxed)
                 {
-                    for (int k = 0; k < live.Count; k++) CommandHold(live[k]);
+                    for (int k = 0; k < live.Count; k++) Patrol.ConvoyDeploy(live[k].Handle);
                     continue;
                 }
 
@@ -560,13 +560,14 @@ namespace NextDayRevival
                 // the front-most APC; a tank leaves only if no APC survives.
                 Member escapee = null;
                 for (int k = 0; k < live.Count; k++)
-                    if (!live[k].Tank) { escapee = live[k]; break; }
+                    if (!live[k].Tank && !Patrol.ConvoyTruck(live[k].Handle))
+                    { escapee = live[k]; break; }
                 if (escapee == null) escapee = live[0];
 
                 for (int k = 0; k < live.Count; k++)
                 {
                     if (live[k] == escapee) CommandContinue(live[k]);
-                    else CommandHold(live[k]);
+                    else Patrol.ConvoyDeploy(live[k].Handle);
                 }
             }
         }
@@ -649,7 +650,11 @@ namespace NextDayRevival
                     if (c.Members[k].Exists) any = true;
                     if (c.Members[k].IsAlive) alive++;
                 }
-                if (!c.LostOne && alive < c.Members.Count) c.LostOne = true;
+                // Normal departures must not order the surviving tail to hold.
+                if (!c.LostOne)
+                    for (int k = 0; k < c.Members.Count; k++)
+                        if (!c.Members[k].IsAlive && !c.Members[k].Arrived)
+                            c.LostOne = true;
                 if (!any) _convoys.RemoveAt(i);
             }
         }

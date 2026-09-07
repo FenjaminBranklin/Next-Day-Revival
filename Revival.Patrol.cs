@@ -216,6 +216,9 @@ namespace NextDayRevival
             public string Seite;         // which side climbs out of the wreck
             public int CrewSize;         // men aboard, one per seat
             public bool CrewOut;         // they have climbed out
+            public bool Truck;
+            public bool Deploy;
+            public Vector3 DeployTarget;
             public float Died;           // Time.time the vehicle was killed
             public int CompositionVehicle = -1; // editor vehicle index, or legacy
             public int PatrolGroupId;    // one configured mini-convoy formation
@@ -468,6 +471,8 @@ namespace NextDayRevival
                     }
                     if (!u.Armed) { Arm(u); continue; }
                     if (Gefallen(u)) continue;
+                    if (u.OneWay && !u.Column && u.Next == u.Route.P.Count - 1)
+                        Advance(u, u.Car.transform.position);
                     // NDR convoy one-way: a convoy that has driven its whole
                     // recorded route to the last waypoint vanishes there.
                     if (u.Arrived) { ArriveEnd(u, i); continue; }
@@ -475,6 +480,7 @@ namespace NextDayRevival
                     // NDR convoy column: Columns() has already put this vehicle
                     // where it belongs. It is not driven and it is not held.
                     if (u.Column) continue;
+                    if (u.Deploy) { DeployStep(u); continue; }
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
                 }
@@ -814,6 +820,7 @@ namespace NextDayRevival
             u.Tank = tank;
             u.Seite = r.Seite;
             u.Next = seg;                      // the waypoint ahead of the slot
+            u.Truck = kind == "ural" || kind == "truck";
             u.ConvoyId = convoyId;
             u.CompositionVehicle = compositionVehicle;
             u.ColumnIndex = compositionVehicle < 0 ? 0 : compositionVehicle;
@@ -893,7 +900,7 @@ namespace NextDayRevival
         internal static bool ConvoyAlive(object handle)
         {
             Unit u = handle as Unit;
-            return u != null && u.Car != null && u.Died <= 0f;
+            return u != null && u.Car != null && u.Died <= 0f && !u.Arrived;
         }
 
         /// <summary>The vehicle still exists in the world - alive OR a lingering
@@ -901,7 +908,19 @@ namespace NextDayRevival
         internal static bool ConvoyExists(object handle)
         {
             Unit u = handle as Unit;
-            return u != null && u.Car != null;
+            return u != null && u.Car != null && !u.Arrived;
+        }
+
+        internal static bool ConvoyArrived(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Arrived;
+        }
+
+        internal static bool ConvoyTruck(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Truck;
         }
 
         internal static bool ConvoyTank(object handle)
@@ -932,7 +951,132 @@ namespace NextDayRevival
         internal static void ConvoyHold(object handle, bool hold)
         {
             Unit u = handle as Unit;
-            if (u != null) u.Hold = hold;
+            if (u != null)
+            {
+                u.Hold = hold;
+                if (!hold) u.Deploy = false;
+            }
+        }
+
+        internal static void ConvoyDeploy(object handle)
+        {
+            Unit u = handle as Unit;
+            if (u == null || u.Car == null || u.Died > 0f || u.Arrived) return;
+            if (u.Deploy) return;
+            u.Deploy = true;
+            u.Hold = true;
+            Transform t = u.Car.transform;
+            u.DeployTarget = t.position;
+            // Stable, alternating shoulders. Reserve the destination so two
+            // survivors cannot choose the same firing position.
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                float side = ((u.ColumnIndex + attempt) % 2 == 0) ? 1f : -1f;
+                Vector3 target = t.position + t.right * (side * (18f + attempt * 6f))
+                    + t.forward * 16f;
+                float y;
+                Vector3 normal;
+                if (!RoadUnder(target, t, out y, out normal) || normal.y < 0.85f
+                    || Mathf.Abs(y - t.position.y) > 5f) continue;
+                if (!DeployRoom(u, target)) continue;
+                target.y = y;
+                u.DeployTarget = target;
+                break;
+            }
+            RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
+                + u.ColumnIndex + " deploying to " + u.DeployTarget + ".");
+        }
+
+        static bool DeployRoom(Unit self, Vector3 target)
+        {
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.ConvoyId != self.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                if (FlatDistance(target, other.Car.transform.position) < 22f
+                    || (other.Deploy && FlatDistance(target, other.DeployTarget) < 22f))
+                    return false;
+            }
+            return true;
+        }
+
+        // Braking applies to free drivers AND deploying defenders, including
+        // wrecks. Ghosted collision pairs must never mean overlapping hulls.
+        static bool ConvoyBlocked(Unit self, Vector3 direction)
+        {
+            if (self.ConvoyId == 0) return false;
+            direction.y = 0f;
+            direction = direction.normalized;
+            Vector3 pos = self.Car.transform.position;
+            float speed = Velocity(self.Body).magnitude;
+            float stop = Mathf.Max(18f, 12f + speed * 1.5f + speed * speed / 8f);
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.ConvoyId != self.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                Vector3 delta = other.Car.transform.position - pos;
+                delta.y = 0f;
+                float ahead = Vector3.Dot(delta, direction);
+                if (ahead <= 0f || ahead >= stop) continue;
+                Vector3 lateral = delta - direction * ahead;
+                if (lateral.sqrMagnitude < 144f)
+                {
+                    if (ahead < 18f) Roll(self.Body, Vector3.zero);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static void DeployStep(Unit u)
+        {
+            Transform t = u.Car.transform;
+            Vector3 delta = u.DeployTarget - t.position;
+            delta.y = 0f;
+            if (delta.sqrMagnitude <= 16f)
+            {
+                HoldStill(u);
+                Roll(u.Body, Vector3.zero);
+                if (u.Truck) UnloadCrew(u);
+                return;
+            }
+            if (ConvoyBlocked(u, t.forward))
+            {
+                HoldStill(u);
+                u.Stuck += Time.fixedDeltaTime;
+                if (u.Stuck > 8f) u.DeployTarget = t.position;
+                return;
+            }
+            Vector3 local = t.InverseTransformPoint(u.DeployTarget);
+            float angle = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
+            // If the vehicle overshot, stop and fight instead of circling back
+            // through the formation. No waypoint recovery can teleport it.
+            if (Mathf.Abs(angle) > 100f)
+            {
+                u.DeployTarget = t.position;
+                return;
+            }
+            float gas, brake;
+            Throttle(Mathf.Min(12f, delta.magnitude), Velocity(u.Body).magnitude * 3.6f,
+                out gas, out brake);
+            SetFloat(u.Rcc, "gasInput", gas);
+            SetFloat(u.Rcc, "brakeInput", brake);
+            SetFloat(u.Rcc, "steerInput", Mathf.Clamp(angle / FullLockAt, -1f, 1f));
+            SetFloat(u.Rcc, "handbrakeInput", 0f);
+            if (Velocity(u.Body).magnitude < 0.8f) u.Stuck += Time.fixedDeltaTime;
+            else u.Stuck = 0f;
+            if (u.Stuck > 8f) u.DeployTarget = t.position;
+        }
+
+        static void UnloadCrew(Unit u)
+        {
+            if (u.CrewOut || u.CrewSize <= 0) return;
+            u.CrewOut = true;
+            List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
+                ? null : RevivalComposition.CrewOf(u.Route.Name, u.CompositionVehicle);
+            Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew);
         }
 
         /// <summary>Remove every vehicle of one convoy - living stragglers and
@@ -1947,12 +2091,12 @@ namespace NextDayRevival
             // its head count: one role line used to clamp the whole crew to a
             // single man, so every convoy vehicle in the user's five-vehicle
             // column put exactly one crewman on the ground. The vehicle is
-            // manned by its seats (Besatzung, already capped by CrewMax) and the
+            // manned by its seats (Besatzung, capped by CrewLimit) and the
             // listed roles repeat around that number; a list LONGER than the
-            // seats still gets every role out, up to CrewMax.
+            // seats still gets every role out, up to its vehicle-specific cap.
             if (crew != null && crew.Count > 0)
                 u.CrewSize = Mathf.Min(Mathf.Max(u.CrewSize, crew.Count),
-                                       Mathf.Max(1, RevivalPlugin.CfgPatrolCrewMax.Value));
+                                       CrewLimit(u));
 
             u.Armed = true;
             VehicleModules.StockTrunk(u.Car.transform, u.Tank);   // NDR vehicle modules: trunk loot
@@ -1970,8 +2114,8 @@ namespace NextDayRevival
         /// <summary>
         /// One man per seat, minus the gunner's seat, which is not a seat the
         /// game hands out (Turret.FreeSeatPostfix) - the gunner is the turret
-        /// code itself. Capped by CrewMax, because six marauders climbing out
-        /// of one BTR is not a fight, it is a verdict.
+        /// code itself. Armor uses CrewMax; a convoy transport carries its
+        /// full squad of up to fifteen men.
         /// </summary>
         static int Besatzung(Unit u)
         {
@@ -1981,7 +2125,16 @@ namespace NextDayRevival
             int n = 0;
             for (int i = 0; i < seats.childCount; i++)
                 if (seats.GetChild(i).name != Turret.SeatName) n++;
-            return Mathf.Clamp(n, 0, Mathf.Max(0, RevivalPlugin.CfgPatrolCrewMax.Value));
+            return Mathf.Clamp(n, 0, CrewLimit(u));
+        }
+
+        static int CrewLimit(Unit u)
+        {
+            if (!RevivalPlugin.CfgPatrolCrew.Value) return 0;
+            // The convoy Ural carries a full infantry squad. Patrol caps remain
+            // unchanged; the transport's real seats determine the head count.
+            return u.ConvoyId != 0 && u.Truck ? 15
+                : Mathf.Max(0, RevivalPlugin.CfgPatrolCrewMax.Value);
         }
 
         static void Drop(Unit u, string why)
@@ -2029,15 +2182,7 @@ namespace NextDayRevival
                 FireEffect.SpawnWreck(u.Car, u.Tank);
                 Turret.Net.PublishWreck(u.Car.transform, u.Tank);
 
-                if (!u.CrewOut && u.CrewSize > 0)
-                {
-                    u.CrewOut = true;
-                    List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
-                        ? null : RevivalComposition.CrewOf(u.Route.Name,
-                                                          u.CompositionVehicle);
-                    Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite,
-                                    crew);
-                }
+                UnloadCrew(u);
 
                 // NDR convoy column: the first loss ends the formation for
                 // good. From here the survivors drive themselves again and the
@@ -2122,10 +2267,17 @@ namespace NextDayRevival
             float groundKmh = groundVel.magnitude * 3.6f;
 
             Advance(u, pos);
+            if (u.Arrived) { HoldStill(u); return; }
 
             // --- where to aim ------------------------------------------------
             float look = Mathf.Clamp(vel.magnitude * 1.1f, 10f, 35f);
-            Vector3 aim = LookAhead(r, u.Next, pos, look);
+            Vector3 aim = LookAhead(r, u.Next, pos, look, u.OneWay);
+            if (ConvoyBlocked(u, t.forward))
+            {
+                HoldStill(u);
+                u.Stuck = 0f;
+                return;
+            }
 
             Vector3 local = t.InverseTransformPoint(aim);
             local.y = 0f;
@@ -2258,7 +2410,7 @@ namespace NextDayRevival
         /// <summary>A point <paramref name="dist"/> metres along the route,
         /// measured from the vehicle. Pure pursuit aims at this, not at the
         /// waypoint: aiming straight at a waypoint makes a vehicle hunt.</summary>
-        static Vector3 LookAhead(Route r, int next, Vector3 pos, float dist)
+        static Vector3 LookAhead(Route r, int next, Vector3 pos, float dist, bool oneWay)
         {
             int n = r.P.Count;
             Vector3 cur = pos;
@@ -2282,6 +2434,7 @@ namespace NextDayRevival
                 }
                 cur = w;
                 target = w;
+                if (oneWay && i == n - 1) return target;
                 i = (i + 1) % n;
             }
             return target;

@@ -27,6 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Parse the player entry points with Windows PowerShell
+        shell: powershell
+        run: |
+          foreach ($file in @('launcher.ps1', 'player_update.ps1', 'client_patch.ps1', 'start_game.ps1')) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($file + ': ' + ($errors -join '; ')) }
+          }
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -100,10 +109,10 @@ jobs:
           NAME="NextDayRevival_Client_${GITHUB_REF_NAME#v}"
           mkdir -p "stage/$NAME"
           cp -r assets bepinex "stage/$NAME/"
-          cp NextDayRevivalToolkit.dll VERSION "stage/$NAME/"
+          cp NextDayRevivalToolkit.dll VERSION steam_base.sha1 "stage/$NAME/"
           cp extractor/t72_import.exe "stage/$NAME/"
           cp -r extractor/t72_licenses "stage/$NAME/"
-          cp client_patch.ps1 start_game.ps1 launcher.ps1 "stage/$NAME/"
+          cp client_patch.ps1 start_game.ps1 launcher.ps1 player_update.ps1 "stage/$NAME/"
           cp 1_EINRICHTEN.bat 2_SPIELEN.bat Launcher.bat "stage/$NAME/"
           cp LIESMICH.txt README_EN.txt DRITTANBIETER.txt LICENSE "stage/$NAME/"
           # Working material of the generators - useless in the game.

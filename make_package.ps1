@@ -10,24 +10,32 @@
 #   ... -Ziel D:\irgendwo  Ablageort (Vorgabe: dist\ daneben)
 
 param(
-    [string]$Version = "0.3.0",
+    [string]$Version = "",
     [string]$Ziel = ""
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$sourceVersion = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
+if (-not $Version) { $Version = $sourceVersion }
+if ($Version -notmatch '^\d+\.\d+\.\d+$' -or $Version -ne $sourceVersion) { throw 'Package version must match VERSION.' }
+$extractor = Join-Path $root 'dist/t72_import.exe'
+if (-not (Test-Path -LiteralPath $extractor)) { throw 'Build dist/t72_import.exe with the release workflow before packaging a player client.' }
 
 if (-not $Ziel) { $Ziel = Join-Path $root "dist" }
 $name  = "NextDayRevival_Client_" + $Version
 $stage = Join-Path $Ziel $name
+$safeOutput = [IO.Path]::GetFullPath($Ziel).TrimEnd('\') + '\'
+$stage = [IO.Path]::GetFullPath($stage)
+if (-not $stage.StartsWith($safeOutput, [StringComparison]::OrdinalIgnoreCase)) { throw 'Package stage is outside the output directory.' }
 $zip   = Join-Path $Ziel ($name + ".zip")
 
 # Was ein Spieler braucht. Alles andere - Plugin-Quelltext, Generatoren,
 # Bauwerkzeuge, docs\ - bleibt im Repository und nicht im Zip.
 $dateien = @(
     "1_EINRICHTEN.bat", "2_SPIELEN.bat",
-    "client_patch.ps1", "start_game.ps1",
-    "NextDayRevivalToolkit.dll",
+    "client_patch.ps1", "start_game.ps1", "launcher.ps1", "player_update.ps1", "Launcher.bat", "VERSION",
+    "NextDayRevivalToolkit.dll", "steam_base.sha1",
     "LIESMICH.txt", "README_EN.txt", "DRITTANBIETER.txt"
 )
 $ordner = @("assets", "bepinex")
@@ -45,6 +53,7 @@ foreach ($f in $dateien) {
     Copy-Item $q (Join-Path $stage $f) -Force
 }
 Write-Host ("  Dateien       {0}" -f $dateien.Count)
+Copy-Item -LiteralPath $extractor -Destination (Join-Path $stage 't72_import.exe')
 
 foreach ($o in $ordner) {
     $q = Join-Path $root $o

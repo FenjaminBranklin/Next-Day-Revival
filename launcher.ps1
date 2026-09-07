@@ -34,7 +34,7 @@
 #                         the launcher takes the one the game already points
 #                         at, out of ClientConfig.ini - see below.
 #   ... -PlayerName <n>   player name for ClientConfig.ini
-#   ... -Vanilla          start the game without the plugin and exit
+#   ... -Vanilla          report that unverified multiplayer is disabled
 #
 # The master server is picked in the window and it is passed to
 # client_patch.ps1 on every install and repair. That is not a convenience:
@@ -45,9 +45,8 @@
 #
 # Rules this file obeys (docs/LAUNCHER.md in the public repo):
 #   - client_patch.ps1 and start_game.ps1 are never modified, only called.
-#   - Nothing here blocks Play. Every check is advisory, every network call
-#     has a timeout, and a dead server costs two seconds.
-#   - No self-update. Only the payload - plugin and assets - is versioned.
+#   - Play reaches the verified updater in start_game.ps1. Unverified starts
+#     are refused. Launcher.bat refreshes the UI from the server's release.
 #   - Never ship game code: a downloaded package that carries
 #     Assembly-CSharp.dll is refused, not unpacked.
 
@@ -191,8 +190,8 @@ function Get-NextDayPath {
 }
 
 # Is EAC switched off inside the game code? Read only - the launcher never
-# patches anything itself. It asks because the answer decides whether ANY
-# start reaches the server, the vanilla one included.
+# patches anything itself. It asks because the answer decides whether a
+# verified start can reach the server.
 #
 # ClientOptions::IsDisabledEAC in its original form is eight bytes, and the
 # field token in the middle makes them unique in the file:
@@ -475,14 +474,13 @@ function Get-AssetDrift($game, $src) {
             $r.incompleteNames += $required
         }
     }
-    foreach ($f in Get-ChildItem $from -File) {
+    foreach ($f in Get-ChildItem $from -File -Recurse) {
         # The same exclusions client_patch.ps1 uses: generator previews are
-        # never shipped, and the route file belongs to the in-game recorder.
+        # never shipped. Released routes are checked like every other asset.
         if ($f.Name -like "*_preview.png")   { continue }
         if ($f.Name -eq "icon_vergleich.png") { continue }
-        if ($f.Name -eq "ndr_routes.tsv")     { continue }
         $r.total++
-        $t = Join-Path $to $f.Name
+        $t = Join-Path $to ($f.FullName.Substring($from.Length).TrimStart('\', '/'))
         if (-not (Test-Path $t))                { $r.missing++; continue }
         if ((Get-Item $t).Length -ne $f.Length) { $r.stale++;   continue }
         if ((Get-FileHash $f.FullName -Algorithm SHA256).Hash -ne
@@ -1083,8 +1081,9 @@ function Invoke-Play($state) {
 }
 
 
-# The vanilla start. Same game, same EAC patch, same ClientConfig.ini, same
-# master server - only without our plugin.
+# The old vanilla start is retained as a clear refusal for scripts that still
+# pass -Vanilla. The server requires the verified release token, so starting
+# without the plugin would only create a client that cannot log in.
 #
 # Doorstop is what injects BepInEx (winhttp.dll next to the exe), and the
 # copy in this installation is version 4: its strings carry both the
@@ -1100,6 +1099,8 @@ function Invoke-Play($state) {
 # is repeated here - the same three things it does: Steam first, then the
 # exe, never Steam's Play button.
 function Invoke-PlayVanilla($state) {
+    Say "Unmodded multiplayer is disabled. Use Play to verify and update the complete client." "bad"
+    return
     if (-not $state.game) { Say "No game folder - nothing to start." "bad"; return }
     if (Test-GameRunning) { Say "Next Day: Survival is already running." "warn"; return }
     $exe = Join-Path $state.game "nextday_game.exe"
@@ -1639,7 +1640,8 @@ $btnInstall = New-Btn "Install selected version" 200 $false
 $btnRepair  = New-Btn "Repair" 104 $false
 $btnCheck   = New-Btn "Check" 104 $false
 $btnRefresh = New-Btn "Refresh" 104 $false
-$btnVanilla = New-Btn "Play vanilla" 132 $false
+$btnVanilla = New-Btn "Vanilla disabled" 132 $false
+$btnVanilla.Enabled = $false
 $btnPlay    = New-Btn "PLAY" 140 $true
 $btnInstall.Location = New-Object System.Drawing.Point(16, 530)
 $btnRepair.Location  = New-Object System.Drawing.Point(224, 530)
@@ -1656,7 +1658,7 @@ $form.Controls.Add($btnPlay)
 
 $hint = New-Label "" 16 572 908 34 8.5 $false $DIM $BG
 $hint.Text = "Repair re-applies the EAC patch and the server address - the button to press after Steam has verified the game files." + "`r`n" +
-             "Play vanilla starts the untouched game on the same master server: no plugin for that one start, and nothing on disk changes."
+             "Vanilla multiplayer is disabled because the server accepts only a verified release and its matching mod assets."
 $form.Controls.Add($hint)
 
 # A ProgressBar is drawn by the system theme in system green and cannot be
@@ -1914,7 +1916,7 @@ function Set-Busy($busy) {
     $btnCheck.Enabled   = -not $busy
     $btnRefresh.Enabled = -not $busy
     $btnPlay.Enabled    = -not $busy
-    $btnVanilla.Enabled = -not $busy
+    $btnVanilla.Enabled = $false
     if ($busy) { $form.Cursor = [System.Windows.Forms.Cursors]::AppStarting }
     else { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
     Pump

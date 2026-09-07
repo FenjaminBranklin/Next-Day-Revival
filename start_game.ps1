@@ -57,6 +57,22 @@ if (Get-Process nextday_game -ErrorAction SilentlyContinue) {
     return
 }
 
+# Every supported entry point reaches this gate, including an old launcher's
+# Play button when it calls a newly downloaded start script.
+$lockHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash(
+    [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($Game).ToLowerInvariant()))).Replace('-', '')
+$launchLock = New-Object Threading.Mutex($false, ('Local\NextDayRevival-' + $lockHash))
+try { $locked = $launchLock.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
+if (-not $locked) { $launchLock.Dispose(); throw 'Another launcher is already preparing this game. Please wait.' }
+try {
+$updater = Join-Path $PSScriptRoot 'player_update.ps1'
+if (-not (Test-Path -LiteralPath $updater)) { throw 'Updater missing. Download the latest Launcher from GitHub.' }
+$configText = Get-Content -LiteralPath (Join-Path $Game 'nextday_game_Data/ClientConfig.ini') -Raw -ErrorAction SilentlyContinue
+$serverHost = '187.124.117.145'
+if ($configText -match '"ServersListURL"\s*:\s*"(https?://[^\"]+)"') { $serverHost = ([uri]$Matches[1]).Host }
+. $updater -Game $Game -Server $serverHost
+$receipt = Invoke-NdrPrepare $Game $serverHost
+
 if (-not (Get-Process steam -ErrorAction SilentlyContinue)) {
     $steamDir = Get-SteamPath
     $steam = if ($steamDir) { Join-Path $steamDir "steam.exe" } else { "" }
@@ -72,7 +88,10 @@ if (-not (Get-Process steam -ErrorAction SilentlyContinue)) {
 $log = Join-Path $Game "BepInEx\LogOutput.log"
 $vorher = if (Test-Path $log) { (Get-Item $log).LastWriteTime } else { $null }
 
-Start-Process -FilePath $exe -WorkingDirectory $Game
+try {
+    $env:NDR_VERIFIED_RECEIPT = $receipt
+    Start-Process -FilePath $exe -WorkingDirectory $Game
+} finally { Remove-Item Env:NDR_VERIFIED_RECEIPT -ErrorAction SilentlyContinue }
 Write-Host "nextday_game.exe gestartet (ohne EAC-Launcher)."
 
 for ($i = 0; $i -lt 40; $i++) {
@@ -87,3 +106,4 @@ for ($i = 0; $i -lt 40; $i++) {
 }
 
 Write-Host "BepInEx hat in 40s nichts geschrieben - LogOutput.log pruefen." -ForegroundColor Yellow
+} finally { $launchLock.ReleaseMutex(); $launchLock.Dispose() }

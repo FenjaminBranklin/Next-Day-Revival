@@ -451,13 +451,10 @@ Schritt 5 "BepInEx"
 # bepinex\ daneben, dessen Inhalt 1:1 in den Spielordner gehoert.
 $bepQuelle = Join-Path $root "bepinex"
 
-if (Test-Path $bepCore) {
+if ((Test-Path $bepCore) -and ($Check -or -not (Test-Path $bepQuelle))) {
     Gut "schon installiert"
 } elseif (-not (Test-Path $bepQuelle)) {
-    # Kein Abbruch: der Login am Masterserver funktioniert auch ohne Plugin.
-    Warn "BepInEx fehlt, und es liegt keins bei (bepinex\)."
-    Info "Der Login am Masterserver geht trotzdem. Fuer die Mod-Items:"
-    Info "BepInEx 5.4.x fuer Unity Mono x64 in den Spielordner entpacken."
+    Bad "BepInEx is missing from this installation and package. Download the current client release."
 } elseif ($Check) {
     Warn "BepInEx fehlt - wuerde aus bepinex\ installiert"
 } else {
@@ -536,18 +533,17 @@ if ($NoPlugin) {
         $gleich = 0
         $fehlt = @()
         $anders = @()
-        foreach ($f in Get-ChildItem $assetQuelle -File) {
+        foreach ($f in Get-ChildItem $assetQuelle -File -Recurse) {
             if ($f.Name -like "*_preview.png" -or $f.Name -eq "icon_vergleich.png") {
                 continue
             }
-            $installed = Join-Path $assetZiel $f.Name
+            $relativeAsset = $f.FullName.Substring($assetQuelle.Length).TrimStart('\', '/')
+            $installed = Join-Path $assetZiel $relativeAsset
             if (-not (Test-Path $installed)) {
                 $fehlt += $f.Name
                 continue
             }
-            # This is written by the route recorder. Presence matters; equality
-            # would incorrectly call a player's own route data stale.
-            if ($f.Name -eq "ndr_routes.tsv") { $gleich++; continue }
+            # Routes and nested world assets must match the release too.
             $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash
             $targetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash
             if ($sourceHash -eq $targetHash) { $gleich++ }
@@ -658,18 +654,23 @@ if ($NoPlugin) {
         # Ausgeschlossen sind nur die Vorschaubilder der Generatoren.
         $aus = @("*_preview.png", "icon_vergleich.png")
         $n = 0
-        foreach ($f in Get-ChildItem $assetQuelle -File) {
+        foreach ($f in Get-ChildItem $assetQuelle -File -Recurse) {
             $skip = $false
             foreach ($p in $aus) { if ($f.Name -like $p) { $skip = $true } }
             if ($skip) { continue }
 
-            $assetAusgabe = Join-Path $assetZiel $f.Name
-            # The in-game recorder writes this file. An update must never
-            # replace locally recorded routes with the package's starter file.
-            # build.ps1 follows the same rule.
+            $relativeAsset = $f.FullName.Substring($assetQuelle.Length).TrimStart('\', '/')
+            $assetAusgabe = Join-Path $assetZiel $relativeAsset
+            New-Item -ItemType Directory -Force -Path (Split-Path $assetAusgabe) | Out-Null
+            # Released routes are authoritative for players. Preserve a local
+            # recording outside the runtime asset directory before replacing it.
             if ($f.Name -eq "ndr_routes.tsv" -and (Test-Path $assetAusgabe)) {
-                Info "Route-Datei behalten: BepInEx\plugins\assets\ndr_routes.tsv"
-                continue
+                if ((Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $assetAusgabe).Hash) {
+                    $savedRoutes = Join-Path $Game ('ndr-recovery/routes-' + [guid]::NewGuid().ToString('N') + '.tsv')
+                    New-Item -ItemType Directory -Force -Path (Split-Path $savedRoutes) | Out-Null
+                    Copy-Item -LiteralPath $assetAusgabe -Destination $savedRoutes
+                    Info ('Local routes saved to ' + $savedRoutes)
+                }
             }
             Copy-Item $f.FullName $assetAusgabe -Force
             $n++
@@ -718,6 +719,33 @@ if ($NoPlugin) {
         if ($ResetConfig) {
             Info "Setze die Plugin-Konfiguration auf die Werte dieser Fassung zurueck ..."
             Reset-PluginConfig $pluginCfg
+        }
+
+        # Migration for launchers shipped before self-update existed. Their
+        # downloader invokes versions/<version>/client_patch.ps1, but their
+        # Play button still calls start_game.ps1 beside the OLD launcher.
+        # Replace that known entry point after a successful payload install.
+        # Source checkouts are excluded; personal launcher files are retained.
+        $cacheParent = Split-Path -Parent $root
+        $legacyRoot = Split-Path -Parent $cacheParent
+        if ((Split-Path -Leaf $cacheParent) -eq 'versions' -and
+            (Test-Path -LiteralPath (Join-Path $legacyRoot 'launcher.ps1')) -and
+            -not (Test-Path -LiteralPath (Join-Path $legacyRoot '.git')) -and
+            (Test-Path -LiteralPath (Join-Path $root 'player_update.ps1'))) {
+            $legacyRoot = [IO.Path]::GetFullPath($legacyRoot).TrimEnd('\')
+            $recovery = Join-Path $legacyRoot ('launcher-recovery/' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $recovery | Out-Null
+            foreach ($entry in @('launcher.ps1', 'start_game.ps1', 'player_update.ps1', 'Launcher.bat')) {
+                $destination = [IO.Path]::GetFullPath((Join-Path $legacyRoot $entry))
+                if (-not $destination.StartsWith($legacyRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Launcher migration target is outside its folder.'
+                }
+                if (Test-Path -LiteralPath $destination) {
+                    Copy-Item -LiteralPath $destination -Destination (Join-Path $recovery $entry)
+                }
+                Copy-Item -LiteralPath (Join-Path $root $entry) -Destination $destination -Force
+            }
+            Gut 'Old launcher upgraded. Its Play button now verifies the complete release.'
         }
         }
     }

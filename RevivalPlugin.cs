@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.8.5";
+        public const string VERSION = "6.8.6";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -454,6 +454,7 @@ namespace NextDayRevival
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
             _harmony = new Harmony(GUID);
+            ClientIntegrity.Install(_harmony);
             PatchCursor();
             PatchResourcesLoad();
             PatchLocalization();
@@ -1989,6 +1990,7 @@ namespace NextDayRevival
 
         void Update()
         {
+            ClientIntegrity.Tick();
             // First in the frame: FrameProf.NewFrame folds the previous frame's
             // measured spans into the overlay averages and tracks the frame rate;
             // then everything below is measured against this frame's gap. The S/E
@@ -2046,6 +2048,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
+            ClientIntegrity.Draw();              // Required verified-launch recovery message
             FrameProf.DrawOverlay();
         }
 
