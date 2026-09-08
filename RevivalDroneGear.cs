@@ -54,10 +54,7 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgEnabled;
         public static ConfigEntry<bool> CfgRequireAntenna;
         public static ConfigEntry<float> CfgDeploySeconds;
-        public static ConfigEntry<float> CfgAntennaHeight;
-        public static ConfigEntry<float> CfgAntennaBack;
-        public static ConfigEntry<float> CfgAntennaUp;
-        public static ConfigEntry<float> CfgAntennaEmerge;
+        public static ConfigEntry<float> CfgMastExtension;
         public static ConfigEntry<string> CfgAntennaKey;
         // --- Launch hold: the seconds a drone key is held before it lifts
         public static ConfigEntry<float> CfgLaunchHoldSeconds;
@@ -92,25 +89,9 @@ namespace NextDayRevival
             CfgDeploySeconds = cfg.Bind("DroneGear", "DeploySeconds", 20f,
                 "Sekunden, die das Ausfahren der Antenne dauert. Waehrenddessen "
                 + "steht der Spieler still (Ladebalken, wie beim Beerenpfluecken).");
-            CfgAntennaHeight = cfg.Bind("DroneGear", "AntennaHeight", 3.0f,
-                "Wie viele Meter die MastSPITZE ueber den KOPF des Spielers "
-                + "hinausragt. 3 = die Antenne steht drei Meter ueber dem Kopf. "
-                + "Der Mastfuss wird automatisch an der echten Kopfhoehe des "
-                + "Spielermodells (Renderer-Bounds) verankert, damit der Mast nie "
-                + "mehr im Koerper verschwindet.");
-            CfgAntennaBack = cfg.Bind("DroneGear", "AntennaBack", 0.25f,
-                "Wie weit hinter dem Spieler (Rucksackseite) der Mastfuss sitzt, in "
-                + "Metern. Groesser = weiter hinten. Nur zum Feinjustieren der Optik.");
-            CfgAntennaUp = cfg.Bind("DroneGear", "AntennaUp", 0.55f,
-                "Wie viele Meter UNTER dem Kopf der Mastfuss ansetzt (Rucksack-/"
-                + "Oberkoerperhoehe). 0.55 = knapp unter den Schultern. Nur zum "
-                + "Feinjustieren, wo der Mast aus dem Rucksack tritt.");
-            CfgAntennaEmerge = cfg.Bind("DroneGear", "AntennaEmerge", 0.20f,
-                "Wie viele Meter UNTER der Kopfoberkante die Antenne sichtbar aus "
-                + "dem Rucksack tritt. Alles UNTERHALB dieser Linie wird nicht "
-                + "gezeichnet, damit der Unterkoerper des Masts im Ruecken "
-                + "verborgen bleibt - nur der herausragende Teil ist sichtbar. "
-                + "Klein halten (0.1-0.3); nur zum Feinjustieren der Austrittslinie.");
+            CfgMastExtension = cfg.Bind("DroneGear", "BackpackMastExtension", 3.5f,
+                "Extended mast length above the backpack in metres (minimum 3.5). "
+                + "Placement follows the backpack bone and mesh; legacy head offsets are ignored.");
             CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
                 "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
                 + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
@@ -559,22 +540,9 @@ namespace NextDayRevival
     /// a deliberate deploy (no surprise freeze the moment the antenna is picked
     /// up), so raising is opt-in via the key.
     ///
-    /// The mast is built from primitives at runtime (a telescopic stack of grey
-    /// cylinders that slide up as it deploys), not a mesh asset - a dedicated
-    /// .ndmesh is a later Codex asset job. It is PARENTED to the live player
-    /// body (re-anchored every frame, so a respawn or a stale transform can
-    /// never strand it at world origin - the cause of the "completely invisible"
-    /// report) and forced upright in world space.
-    ///
-    /// PLACEMENT (fixes "the mast sits inside the body"): the foot is anchored
-    /// off the player's REAL head height, read from the model's renderer bounds
-    /// each frame (<see cref="PlayerHeadTop"/>), NOT from a fixed offset above an
-    /// unknown transform origin - the earlier 1.1 m-above-origin guess left the
-    /// short mast buried in the character silhouette. The foot sits AntennaUp
-    /// metres below that head, on the backpack side (AntennaBack behind), and the
-    /// telescope extends so the TIP clears the head by AntennaHeight metres - so
-    /// the antenna always rises several metres clear above the head regardless of
-    /// where the player transform's origin actually is.
+    /// The mast is attached to the same Backpacks_Helper bone used by the
+    /// backpack skin. Its foot comes from the equipped mesh in bind space;
+    /// local Y follows torso animation, including running and prone poses.
     /// </summary>
     public static class Antenna
     {
@@ -611,6 +579,9 @@ namespace NextDayRevival
         static GameObject _head;   // the generated recon head at the extended tip
         static Renderer _headRend;
         static Transform _pilot;
+        static Transform _packBone;
+        static SkinnedMeshRenderer _packMesh;
+        static float _nextAnchorProbe;
         static Material _grey;
 
         // Deploy key, parsed once from the config string.
@@ -751,17 +722,9 @@ namespace NextDayRevival
             Grow(1f);
             Turret.Hinweis(Loc.T("Антенна поднята - дрон готов к пуску",
                                  "Antenna up - drone ready to launch"), 3f);
-            Vector3 foot = _root == null ? Vector3.zero : _root.transform.position;
-            float head; bool haveHead = PlayerHeadTop(out head);
-            float tipY = foot.y + Mathf.Max(0.3f,
-                (DroneGear.CfgAntennaUp == null ? 0.55f : DroneGear.CfgAntennaUp.Value)
-                + (DroneGear.CfgAntennaHeight == null ? 3.0f : DroneGear.CfgAntennaHeight.Value));
-            RevivalPlugin.L.LogInfo("Antenna: up - foot world " + foot.ToString("F1")
-                + ", tip Y=" + tipY.ToString("F1")
-                + ", head Y=" + (haveHead ? head.ToString("F1") : "n/a")
-                + " (tip clears head by ~"
-                + (haveHead ? (tipY - head).ToString("F1") : "?") + " m, segments="
-                + (_seg == null ? 0 : _seg.Length) + ").");
+            RevivalPlugin.L.LogInfo("Antenna: up - backpack bone="
+                + (_packBone == null ? "pending" : _packBone.name)
+                + ", extension=" + MastLength().ToString("F1") + " m.");
         }
 
         static void Retract(string why)
@@ -800,12 +763,6 @@ namespace NextDayRevival
                 _root = new GameObject("NDR_Antenna");
                 _seg = new GameObject[Segments];
                 _rend = new Renderer[Segments];
-                // Parent to the player body so the mast is guaranteed to sit
-                // exactly where the body is - the way the old (visible) cylinder
-                // did. A world-space object that only follows a cached transform
-                // gets stranded the moment that transform goes stale (respawn),
-                // which is how the mast ended up "completely invisible".
-                if (_pilot != null) _root.transform.SetParent(_pilot, true);
                 Material g = Grey();
                 for (int i = 0; i < Segments; i++)
                 {
@@ -835,9 +792,7 @@ namespace NextDayRevival
         /// generated antenna_head.ndmesh (a radio box, a whip, a short yagi
         /// element stack), built at real metres and parented under the mast root
         /// so it rides the mast up during deploy. If the mesh is missing it
-        /// falls back to a small primitive cross so the tip is never bare. Named
-        /// "NDR_..." so PlayerHeadTop skips it and the growing head can never
-        /// feed its own height back into the anchor. Positioned each frame in
+        /// falls back to a small primitive cross so the tip is never bare. Positioned each frame in
         /// <see cref="Layout"/>; hidden until the tip clears the emergence line.
         /// </summary>
         static void BuildHead(Material mat)
@@ -892,65 +847,93 @@ namespace NextDayRevival
             if (_pilot != null) return;
             GameObject body = MapTools.LocalPlayer();
             _pilot = body == null ? null : body.transform;
-            // Re-adopt an orphaned mast onto the fresh body.
-            if (_pilot != null && _root != null && _root.transform.parent != _pilot)
-                _root.transform.SetParent(_pilot, true);
+        }
+
+        static float MastLength()
+        {
+            float length = DroneGear.CfgMastExtension == null ? 3.5f : DroneGear.CfgMastExtension.Value;
+            return float.IsNaN(length) || float.IsInfinity(length) ? 3.5f : Mathf.Clamp(length, 3.5f, 10f);
+        }
+
+        // Bind directly to the rig, never to the unanimated player origin.
+        // Probe at most twice a second for a changed backpack or rebuilt rig.
+        static bool AttachBackpack()
+        {
+            if (_packBone != null && Time.time < _nextAnchorProbe) return true;
+            _nextAnchorProbe = Time.time + 0.5f;
+            Transform bone = null;
+            Transform[] rig = _pilot.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < rig.Length; i++)
+                if (rig[i].name == "Backpacks_Helper") { bone = rig[i]; break; }
+            if (bone == null) return false;
+
+            SkinnedMeshRenderer pack = null;
+            SkinnedMeshRenderer[] skins = _pilot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            for (int i = 0; i < skins.Length; i++)
+            {
+                // Main mesh stays active when a LOD renderer is disabled.
+                // Do not use renderer.enabled or camera visibility as equip state.
+                Transform parent = skins[i].transform.parent;
+                if (skins[i].gameObject.activeInHierarchy && parent != null
+                    && parent.name == "Backpacks" && skins[i].sharedMesh != null)
+                { pack = skins[i]; break; }
+            }
+            if (_packBone == bone && _packMesh == pack && _root.transform.parent == bone) return true;
+
+            Vector3 scale = bone.lossyScale;
+            if (Mathf.Abs(scale.x) < 0.00001f || Mathf.Abs(scale.y) < 0.00001f
+                || Mathf.Abs(scale.z) < 0.00001f) return false;
+            // No worn pack: keep the rig mount usable for an antenna item carried
+            // in other inventory slots. A worn pack replaces this fallback below.
+            Vector3 foot = new Vector3(0f, 0.30f / scale.y, 0f);
+            if (pack != null)
+            {
+                Mesh mesh = pack.sharedMesh;
+                Transform[] bones = pack.bones;
+                Matrix4x4[] bind = mesh.bindposes;
+                for (int i = 0; i < bones.Length && i < bind.Length; i++)
+                {
+                    if (bones[i] != bone) continue;
+                    Vector3[] vertices = mesh.vertices;
+                    if (vertices.Length == 0) break;
+                    Bounds bounds = new Bounds(bind[i].MultiplyPoint3x4(vertices[0]), Vector3.zero);
+                    for (int v = 1; v < vertices.Length; v++)
+                        bounds.Encapsulate(bind[i].MultiplyPoint3x4(vertices[v]));
+                    // The top centre is on the pack itself, not on the spine.
+                    foot = new Vector3(bounds.center.x, bounds.max.y - 0.03f / scale.y, bounds.center.z);
+                    break;
+                }
+            }
+            _root.transform.SetParent(bone, false);
+            _root.transform.localPosition = foot;
+            _root.transform.localRotation = Quaternion.identity;
+            // The imported skeleton is scaled by 100. Keep mast dimensions metres.
+            _root.transform.localScale = new Vector3(1f / scale.x, 1f / scale.y, 1f / scale.z);
+            _packBone = bone;
+            _packMesh = pack;
+            RevivalPlugin.L.LogInfo("Antenna: attached to " + bone.name + ", pack="
+                + (pack == null ? "none (rig mount)" : pack.name) + ", local foot=" + foot.ToString("F4"));
+            return true;
         }
 
         /// <summary>
-        /// Places the mast root at the player's back, forced upright, and lays
-        /// the telescopic segments so that a fraction `t` of the configured
-        /// height is extended. Segments fill from the bottom, so the thin upper
-        /// tubes only rise once the fat lower ones are out - a telescope opening.
+        /// Extends in backpack-local space. Parenting lets animation and IK
+        /// move the whole mast after Update without any world-space correction.
         /// </summary>
         static void Layout(float t)
         {
             if (_root == null) return;
-
-            // Anchor: behind the player (backpack side) and forced upright, no
-            // matter how the body leans or animates. Re-fetch the body every
-            // frame; if there is no local player right now, hide the mast rather
-            // than leave a stray one floating at world origin.
             EnsurePilot();
             if (_pilot == null) { DestroyMast(); return; }
-
-            float back = DroneGear.CfgAntennaBack == null ? 0.25f : DroneGear.CfgAntennaBack.Value;
-            float drop = DroneGear.CfgAntennaUp == null ? 0.55f : DroneGear.CfgAntennaUp.Value;
-            float above = DroneGear.CfgAntennaHeight == null ? 3.0f : DroneGear.CfgAntennaHeight.Value;
-
-            Vector3 root = _pilot.position;
-            Vector3 fwd = _pilot.forward; fwd.y = 0f;
-            if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward; else fwd.Normalize();
-
-            // Real head height from the player's rendered bounds, so the mast is
-            // placed relative to the head instead of a fixed guess above an
-            // unknown origin (which buried it in the body). Clamp to a sane band
-            // above the root so a raised weapon or an animation spike in the
-            // bounds cannot fling the anchor.
-            float headTop;
-            if (!PlayerHeadTop(out headTop)) headTop = root.y + 1.75f;
-            headTop = Mathf.Clamp(headTop, root.y + 1.2f, root.y + 2.2f);
-
-            // Foot sits `drop` below the head on the backpack side; the fully
-            // extended tip reaches `above` metres over the head.
-            float footY = headTop - Mathf.Max(0f, drop);
-            _root.transform.position = new Vector3(root.x, footY, root.z) - fwd * back;
-            _root.transform.rotation = Quaternion.identity;
-
-            // Physical mast length foot->tip: the drop below the head plus the
-            // clearance above it, so at t=1 the tip is at headTop + above.
-            float total = Mathf.Max(0.3f, Mathf.Max(0f, drop) + Mathf.Max(0.3f, above));
+            bool attached = AttachBackpack();
+            _root.SetActive(attached);
+            if (!attached) return;
+            float total = MastLength();
             float segMax = total / Segments;
             float h = Mathf.Clamp01(t) * total;
 
-            // Emergence line: the antenna is only DRAWN above a point just below
-            // the head top, so the mast's lower body - the part that runs down
-            // the back inside/behind the body - is never rendered. The player
-            // only ever sees the piece that sticks out of the pack. Expressed as
-            // a local Y over the root foot (foot is at headTop - drop, so the
-            // line sits (drop - emerge) above the foot).
-            float emerge = DroneGear.CfgAntennaEmerge == null ? 0.20f : DroneGear.CfgAntennaEmerge.Value;
-            float emergeLocal = Mathf.Max(0f, drop) - Mathf.Max(0f, emerge);
+            // Hide only the three centimetres seated inside the pack lid.
+            float emergeLocal = 0.03f;
 
             float bottom = 0f;
             for (int i = 0; i < Segments; i++)
@@ -1013,41 +996,6 @@ namespace NextDayRevival
 
         static void Grow(float t) { Layout(t); }
 
-        /// <summary>
-        /// World-space Y of the top of the player model, from the union of its
-        /// renderer bounds - i.e. the real head height, whatever the transform
-        /// origin is. Our own mast segments (named "NDR_...") are skipped so the
-        /// growing antenna cannot feed its own tip back into the anchor. Returns
-        /// false if the body has no usable renderer yet (caller falls back).
-        /// </summary>
-        static bool PlayerHeadTop(out float y)
-        {
-            y = 0f;
-            if (_pilot == null) return false;
-            try
-            {
-                Renderer[] rs = _pilot.GetComponentsInChildren<Renderer>();
-                if (rs == null) return false;
-                bool any = false;
-                float top = float.NegativeInfinity;
-                for (int i = 0; i < rs.Length; i++)
-                {
-                    Renderer r = rs[i];
-                    if (r == null || !r.enabled) continue;
-                    if (r.gameObject != null && r.gameObject.name != null
-                        && r.gameObject.name.StartsWith("NDR_")) continue;
-                    Bounds b = r.bounds;
-                    if (b.size.y <= 0.001f) continue;
-                    if (b.max.y > top) top = b.max.y;
-                    any = true;
-                }
-                if (!any) return false;
-                y = top;
-                return true;
-            }
-            catch { return false; }
-        }
-
         static void Hold()
         {
             // Keep the mast alive and following the (moving) player each frame;
@@ -1066,6 +1014,9 @@ namespace NextDayRevival
             _head = null;
             _headRend = null;
             _pilot = null;
+            _packBone = null;
+            _packMesh = null;
+            _nextAnchorProbe = 0f;
         }
 
         /// <summary>

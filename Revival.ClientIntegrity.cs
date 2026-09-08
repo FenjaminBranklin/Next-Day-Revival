@@ -72,6 +72,13 @@ namespace NextDayRevival
         public static void Tick()
         {
             if (!_checking || !_finished) return;
+            // Receipt-covered installation files remain immutable. Live data
+            // has its own pinned-TLS and content-hash admission above them.
+            if (_checkError.Length == 0 && !LiveRoutes.Ready)
+            {
+                _error = "Waiting for verified server routes. Retrying automatically...";
+                return;
+            }
             _checking = false;
             if (_checkError.Length != 0) { Fail(_checkError); return; }
             try

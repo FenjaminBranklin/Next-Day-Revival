@@ -115,7 +115,7 @@ namespace NextDayRevival
 
             string file = CfgFile == null ? "ndr_composition.tsv" : CfgFile.Value;
             string path = Path.Combine(RevivalPlugin.AssetDir, file);
-            if (!File.Exists(path))
+            if (LiveRoutes.Current == null && !File.Exists(path))
             {
                 RevivalPlugin.L.LogInfo("Composition: " + path
                     + " not present - convoy uses the config counts.");
@@ -124,7 +124,7 @@ namespace NextDayRevival
 
             try
             {
-                string[] lines = File.ReadAllLines(path);
+                string[] lines = LiveRoutes.Current == null ? File.ReadAllLines(path) : LiveRoutes.Current.Crew;
                 // Vehicles are keyed by (route, index) so crew lines in any order
                 // still assemble the right column; the final list is sorted by
                 // index so vehicle 0 is the front.

@@ -223,6 +223,7 @@ namespace NextDayRevival
             public Vector3 DeployTarget;
             public float Died;           // Time.time the vehicle was killed
             public int CompositionVehicle = -1; // editor vehicle index, or legacy
+            public List<RevivalComposition.CrewMan> CrewSnapshot;
             public int PatrolGroupId;    // one configured mini-convoy formation
 
             // NDR convoy (RevivalConvoy.cs). ConvoyId 0 = ordinary patrol; a
@@ -886,6 +887,7 @@ namespace NextDayRevival
             u.Truck = kind == "ural" || kind == "truck";
             u.ConvoyId = convoyId;
             u.CompositionVehicle = compositionVehicle;
+            u.CrewSnapshot = compositionVehicle < 0 ? null : RevivalComposition.CrewOf(routeName, compositionVehicle);
             u.ColumnIndex = compositionVehicle < 0 ? 0 : compositionVehicle;
             u.Column = RevivalConvoy.ColumnLock;
             u.OneWay = true;
@@ -1182,8 +1184,7 @@ namespace NextDayRevival
         {
             if (u.CrewOut || u.CrewSize <= 0) return;
             u.CrewOut = true;
-            List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
-                ? null : RevivalComposition.CrewOf(u.Route.Name, u.CompositionVehicle);
+            List<RevivalComposition.CrewMan> crew = u.CrewSnapshot;
             Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew);
         }
 
@@ -1959,6 +1960,7 @@ namespace NextDayRevival
                 u.Seite = r.Seite;
                 u.Next = (start + 1) % r.P.Count;
                 u.CompositionVehicle = composition == null ? -1 : k;
+                u.CrewSnapshot = composition == null ? null : RevivalComposition.CrewOf(r.Name, k);
                 u.PatrolGroupId = groupId;
                 u.Cols = CollectCols(car);
                 for (int q = 0; q < made.Count; q++) GhostPair(u.Cols, made[q].Cols);
@@ -2192,9 +2194,7 @@ namespace NextDayRevival
 
             Gun.Collect(u);
             u.CrewSize = Besatzung(u);
-            List<RevivalComposition.CrewMan> crew = u.CompositionVehicle < 0
-                ? null : RevivalComposition.CrewOf(u.Route.Name,
-                                                    u.CompositionVehicle);
+            List<RevivalComposition.CrewMan> crew = u.CrewSnapshot;
             // The editor's crew list is the LOADOUT of this vehicle's men, not
             // its head count: one role line used to clamp the whole crew to a
             // single man, so every convoy vehicle in the user's five-vehicle
@@ -3941,7 +3941,7 @@ namespace NextDayRevival
 
             string path = Path.Combine(RevivalPlugin.AssetDir,
                                        RevivalPlugin.CfgPatrolFile.Value);
-            if (!File.Exists(path))
+            if (LiveRoutes.Current == null && !File.Exists(path))
             {
                 RevivalPlugin.L.LogWarning("Patrol: " + path + " does not exist. "
                     + "No route until one is recorded.");
@@ -3950,7 +3950,7 @@ namespace NextDayRevival
 
             try
             {
-                string[] lines = File.ReadAllLines(path);
+                string[] lines = LiveRoutes.Current == null ? File.ReadAllLines(path) : LiveRoutes.Current.Routes;
                 int bad = 0;
                 for (int i = 0; i < lines.Length; i++)
                 {
@@ -4011,6 +4011,68 @@ namespace NextDayRevival
                         + RevivalPlugin.CfgPatrolFile.Value + " were not readable.");
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Patrol: reading routes: " + ex); }
+        }
+
+        // Only replace a FUTURE suffix. The prefix, column arc and member slots
+        // remain byte-for-byte geometrically identical, so no car teleports.
+        // Removed routes and routes without a shared forward junction finish
+        // on their old snapshot. Composition is always captured at spawn.
+        internal static void ApplyLiveRoutes()
+        {
+            HashSet<int> columns = new HashSet<int>();
+            foreach (Unit u in _units)
+            {
+                if (u.Car == null || u.Route == null || u.Arrived) continue;
+                Route source;
+                if (!_routes.TryGetValue(u.Route.Name, out source) || !source.Enabled) continue;
+                int first = Math.Max(1, u.Next + 1);
+                Column column;
+                bool grouped = u.Column && _columns.TryGetValue(u.ConvoyId, out column);
+                if (grouped)
+                {
+                    if (!columns.Add(u.ConvoyId)) continue;
+                    int segment;
+                    PointOnRoute(u.Route, _columns[u.ConvoyId].Arc, out segment);
+                    first = segment + 2;
+                }
+                Route target = u.OneWay ? CopyRoute(source) : OutAndBack(source);
+                Dictionary<Vector3, List<int>> junctions = new Dictionary<Vector3, List<int>>();
+                for (int i = 1; i < target.P.Count - 1; i++)
+                {
+                    List<int> indices;
+                    if (!junctions.TryGetValue(target.P[i].Pos, out indices))
+                    {
+                        indices = new List<int>();
+                        junctions[target.P[i].Pos] = indices;
+                    }
+                    indices.Add(i);
+                }
+                Route replacement = null;
+                for (int oldIndex = first; oldIndex < u.Route.P.Count && replacement == null; oldIndex++)
+                {
+                    List<int> matches;
+                    if (!junctions.TryGetValue(u.Route.P[oldIndex].Pos, out matches)) continue;
+                    foreach (int newIndex in matches)
+                    {
+                        Vector3 incoming = u.Route.P[oldIndex].Pos - u.Route.P[oldIndex - 1].Pos;
+                        Vector3 outgoing = target.P[newIndex + 1].Pos - target.P[newIndex].Pos;
+                        if (Vector3.Dot(incoming.normalized, outgoing.normalized) < 0f) continue;
+                        replacement = CopyRoute(u.Route);
+                        replacement.P.Clear();
+                        for (int i = 0; i <= oldIndex; i++) replacement.P.Add(u.Route.P[i]);
+                        for (int i = newIndex + 1; i < target.P.Count; i++) replacement.P.Add(target.P[i]);
+                        break;
+                    }
+                }
+                if (replacement == null) continue;
+                if (grouped)
+                {
+                    foreach (Unit member in _units)
+                        if (member.Column && member.ConvoyId == u.ConvoyId) member.Route = replacement;
+                }
+                else u.Route = replacement;
+                RevivalPlugin.L.LogInfo("LiveRoutes: future junction updated on " + source.Name);
+            }
         }
 
         static void Save()
