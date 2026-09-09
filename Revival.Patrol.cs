@@ -4446,9 +4446,8 @@ namespace NextDayRevival
         // itself curves smoothly with the road; the long SIDES are feathered
         // (smooth, not pixelated) and constant in thickness, while the two ENDS
         // stay hard and FLAT (kantig) - no round caps. RouteDash/RouteGap are
-        // nominal: the line is tiled with a whole number of them so the gaps
-        // are even from end to end and no stub is left over (see <see
-        // cref="DashOpen"/> and <see cref="DashClosed"/>).
+        // fixed on every route. Leftover length stays at the route ends (or
+        // the loop seam); it never stretches the dashes or their spacing.
         const float RouteDash = 40f;
         const float RouteGap = 28f;
         const float RouteStroke = 4.5f;
@@ -4706,15 +4705,9 @@ namespace NextDayRevival
             return new Rect(x0, y0, x1 - x0, y1 - y0);
         }
 
-        /// <summary>Walks the closed ring's arc length and lays down evenly
-        /// spaced curved dashes. The whole loop is tiled with a WHOLE number of
-        /// dash+gap periods, so the gap is even the whole way round and the seam
-        /// where the loop closes carries a proper gap too, not a doubled-up dash
-        /// (the "gap not kept at the top-left" the user saw). Each dash curves
-        /// gently along the boundary (see <see cref="DrawCurvedDash"/>). Dashes
-        /// within an earlier route's clearance are dropped, and the survivors
-        /// feed <paramref name="ink"/> for later routes. Coordinates are LOCAL
-        /// to the map clip.</summary>
+        /// <summary>Fixed dash cadence on a loop. The closing gap absorbs
+        /// unused length so full dashes and ordinary gaps match open routes.
+        /// A loop too short for one dash and gap is left unmarked.</summary>
         static void DashClosed(List<Vector2> pts, Rect clip,
                                ClearGrid grid, List<Vector2> ink)
         {
@@ -4727,24 +4720,19 @@ namespace NextDayRevival
             if (total < 1f) return;
 
             float period = RouteDash + RouteGap;
-            int count = Mathf.Max(1, Mathf.RoundToInt(total / period));
-            float step = total / count;                   // even, seam-free
-            float dash = Mathf.Min(RouteDash, step - 4f);  // keep a real gap
-            if (dash < 2f) dash = step;
+            int count = Mathf.FloorToInt(total / period);
+            float offset = (total - count * period) * 0.5f;
             for (int k = 0; k < count; k++)
             {
-                float start = k * step;
-                DrawCurvedDash(pts, cum, start, start + dash, clip, grid, ink);
+                float start = offset + k * period;
+                DrawCurvedDash(pts, cum, start, start + RouteDash, clip, grid, ink);
             }
         }
 
-        /// <summary>Walks an OPEN line's arc length and lays down evenly spaced
-        /// curved dashes. The line is tiled with a WHOLE number of dashes at the
-        /// nominal dash/gap ratio, so it STARTS and ENDS with a full dash and no
-        /// stub is left at either end - the two ends of a patrolled road are
-        /// exactly where the eye goes. Dashes within an earlier route's
-        /// clearance are dropped, and the survivors feed <paramref name="ink"/>
-        /// for later routes. Coordinates are LOCAL to the map clip.</summary>
+        /// <summary>Fixed dash length and spacing, shared by every open
+        /// route. Centre the full dashes on the road; unused length stays at
+        /// the endpoints instead of changing the Locator cadence. A road
+        /// shorter than one full dash is left unmarked.</summary>
         static void DashOpen(List<Vector2> pts, Rect clip,
                              ClearGrid grid, List<Vector2> ink)
         {
@@ -4757,14 +4745,13 @@ namespace NextDayRevival
             if (total < 1f) return;
 
             float period = RouteDash + RouteGap;
-            int count = Mathf.Max(1,
-                Mathf.RoundToInt((total + RouteGap) / period));
-            float ratio = RouteGap / RouteDash;
-            float dash = total / (count + (count - 1) * ratio);
-            float step = dash * (1f + ratio);
+            int count = Mathf.FloorToInt((total + RouteGap) / period);
+            if (count < 1) return;
+            float used = count * RouteDash + (count - 1) * RouteGap;
+            float offset = (total - used) * 0.5f;
             for (int k = 0; k < count; k++)
-                DrawCurvedDash(pts, cum, k * step, k * step + dash,
-                               clip, grid, ink);
+                DrawCurvedDash(pts, cum, offset + k * period,
+                               offset + k * period + RouteDash, clip, grid, ink);
         }
 
         /// <summary>Resamples a polyline to a uniform arc-length spacing, so the

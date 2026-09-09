@@ -19,6 +19,8 @@ namespace NextDayRevival
         static string _token = "ndr1|invalid";
         static bool _checking;
         static bool _resumeAuth;
+        static bool _routeFailed;
+        static float _routeWaitStarted = -1f;
         static volatile bool _finished;
         static string _checkError;
         static object _backend;
@@ -54,6 +56,8 @@ namespace NextDayRevival
             if (_resumeAuth) { _resumeAuth = false; return true; }
             if (_checking) return false;
             _checking = true;
+            _routeFailed = false;
+            _routeWaitStarted = -1f;
             _finished = false;
             _backend = __instance;
             _checkError = "";
@@ -76,7 +80,19 @@ namespace NextDayRevival
             // has its own pinned-TLS and content-hash admission above them.
             if (_checkError.Length == 0 && !LiveRoutes.Ready)
             {
+                if (_routeWaitStarted < 0f) _routeWaitStarted = Time.realtimeSinceStartup;
                 _error = "Waiting for verified server routes. Retrying automatically...";
+                if (LiveRoutes.LastError.Length != 0) _error += "\n" + LiveRoutes.LastError;
+                if (Time.realtimeSinceStartup - _routeWaitStarted >= 30f)
+                {
+                    _checking = false;
+                    _routeFailed = true;
+                    _token = "ndr1|invalid";
+                    _error = "Could not download verified server routes. Login was stopped."
+                        + "\n" + LiveRoutes.LastError
+                        + "\nCheck the connection to the route editor, then retry.";
+                    RevivalPlugin.L.LogError("ClientIntegrity: " + _error);
+                }
                 return;
             }
             _checking = false;
@@ -178,7 +194,11 @@ namespace NextDayRevival
             if (_error.Length == 0) return;
             GUILayout.BeginArea(new Rect(30, 70, Math.Min(720, Screen.width - 60), 190), GUI.skin.box);
             GUILayout.Label(_error);
-            if (!_checking && GUILayout.Button("Open current GitHub download")) Application.OpenURL(Download);
+            if (_routeFailed)
+            {
+                if (GUILayout.Button("Retry connection")) BeforeAuth(_backend);
+            }
+            else if (!_checking && GUILayout.Button("Open current GitHub download")) Application.OpenURL(Download);
             GUILayout.EndArea();
         }
     }

@@ -1,8 +1,9 @@
 using System;
 using System.IO;
 using System.Text;
-using System.Net.Sockets;
-using System.Net.Security;
+using System.Runtime.InteropServices;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Globalization;
@@ -25,6 +26,7 @@ namespace NextDayRevival
         static string _failure = "";
         static string _lastFailure = "";
         internal static Snapshot Current;
+        internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
         {
@@ -80,58 +82,147 @@ namespace NextDayRevival
                 return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
         }
 
+        // Use Windows Schannel, not Unity Mono's legacy SslStream provider.
+        // Only public route data is requested. Pin before accepting any response,
+        // including 304; redirects, cookies and automatic credentials are disabled.
         internal static Snapshot Download(string address, string pin, string revision)
         {
             Uri uri = new Uri(address);
-            if (uri.Scheme != "https" || uri.UserInfo.Length != 0 || pin.Length != 64)
-                throw new Exception("Invalid live route endpoint or certificate pin");
-            using (TcpClient client = new TcpClient())
+            if (uri.Scheme != "https" || uri.UserInfo.Length != 0 || !HexHash(pin)
+                || (revision.Length != 0 && !HexHash(revision)))
+                throw new IOException("Invalid live route endpoint, certificate pin or revision");
+            IntPtr session = IntPtr.Zero, connection = IntPtr.Zero, request = IntPtr.Zero;
+            try
             {
-                IAsyncResult connect = client.BeginConnect(uri.Host, uri.Port, null, null);
-                try
+                session = WinHttpOpen("NextDayRevival-LiveRoutes", 1, null, null, 0);
+                NativeCheck(session != IntPtr.Zero, "open");
+                NativeCheck(WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000), "timeouts");
+                SetOption(session, 84, 0x800); // WINHTTP_OPTION_SECURE_PROTOCOLS: TLS 1.2
+                connection = WinHttpConnect(session, uri.Host, (ushort)uri.Port, 0);
+                NativeCheck(connection != IntPtr.Zero, "connect");
+                request = WinHttpOpenRequest(connection, "GET", uri.PathAndQuery, null,
+                    null, IntPtr.Zero, 0x00800000); // WINHTTP_FLAG_SECURE
+                NativeCheck(request != IntPtr.Zero, "request");
+                SetOption(request, 63, 7); // Disable cookies, redirects and authentication.
+                // The exact leaf pin replaces CA/name trust for the editor's private
+                // certificate. Date and server-usage checks remain enforced by Windows.
+                SetOption(request, 31, 0x100 | 0x1000);
+                string headers = "If-None-Match: \"" + revision + "\"\r\n";
+                NativeCheck(WinHttpSendRequest(request, headers, (uint)headers.Length,
+                    IntPtr.Zero, 0, 0, UIntPtr.Zero), "TLS/send");
+                NativeCheck(WinHttpReceiveResponse(request, IntPtr.Zero), "receive");
+                CheckCertificate(request, pin);
+                uint status, length = 4;
+                NativeCheck(WinHttpQueryHeaders(request, 19 | 0x20000000, null,
+                    out status, ref length, IntPtr.Zero), "status");
+                if (status == 304 && revision.Length != 0) return null;
+                if (status != 200) throw new IOException("Route editor HTTP " + status);
+                using (MemoryStream buffer = new MemoryStream())
                 {
-                    if (!connect.AsyncWaitHandle.WaitOne(5000, false)) throw new IOException("Connection timeout");
-                    client.EndConnect(connect);
-                }
-                finally { connect.AsyncWaitHandle.Close(); }
-                client.ReceiveTimeout = client.SendTimeout = 5000;
-                using (SslStream tls = new SslStream(client.GetStream(), false,
-                    delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
-                        if (cert == null) return false;
-                        X509Certificate2 leaf = new X509Certificate2(cert);
-                        return DateTime.Now >= leaf.NotBefore && DateTime.Now <= leaf.NotAfter
-                            && string.Equals(Hash(cert.GetRawCertData()), pin, StringComparison.OrdinalIgnoreCase);
-                    }))
-                {
-                    tls.ReadTimeout = tls.WriteTimeout = 5000;
-                    tls.AuthenticateAsClient(uri.Host, null,
-                        (System.Security.Authentication.SslProtocols)3072, false);
-                    string request = "GET " + uri.PathAndQuery + " HTTP/1.0\r\nHost: " + uri.Authority
-                        + "\r\nConnection: close\r\nIf-None-Match: \"" + revision + "\"\r\n\r\n";
-                    byte[] bytes = Encoding.ASCII.GetBytes(request);
-                    tls.Write(bytes, 0, bytes.Length);
-                    using (MemoryStream buffer = new MemoryStream())
+                    byte[] chunk = new byte[8192];
+                    Stopwatch deadline = Stopwatch.StartNew();
+                    while (true)
                     {
-                        byte[] chunk = new byte[8192];
-                        int n;
-                        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
-                        while ((n = tls.Read(chunk, 0, chunk.Length)) > 0)
-                        {
-                            if (buffer.Length + n > 4 * 1024 * 1024 || DateTime.UtcNow > deadline)
-                                throw new IOException("Snapshot exceeds transfer limit");
-                            buffer.Write(chunk, 0, n);
-                        }
-                        string response = Encoding.ASCII.GetString(buffer.ToArray());
-                        int split = response.IndexOf("\r\n\r\n", StringComparison.Ordinal);
-                        if (split < 0) throw new IOException("Incomplete HTTP response");
-                        string status = response.Substring(0, response.IndexOf("\r\n", StringComparison.Ordinal));
-                        if (status.IndexOf(" 304 ", StringComparison.Ordinal) >= 0) return null;
-                        if (status.IndexOf(" 200 ", StringComparison.Ordinal) < 0) throw new IOException(status);
-                        return Parse(response.Substring(split + 4));
+                        uint n;
+                        NativeCheck(WinHttpReadData(request, chunk, (uint)chunk.Length, out n), "read");
+                        if (buffer.Length + n > 4 * 1024 * 1024 || deadline.ElapsedMilliseconds > 10000)
+                            throw new IOException("Snapshot exceeds transfer limit");
+                        if (n == 0) break;
+                        buffer.Write(chunk, 0, (int)n);
                     }
+                    return Parse(Encoding.ASCII.GetString(buffer.ToArray()));
                 }
             }
+            finally
+            {
+                if (request != IntPtr.Zero) WinHttpCloseHandle(request);
+                if (connection != IntPtr.Zero) WinHttpCloseHandle(connection);
+                if (session != IntPtr.Zero) WinHttpCloseHandle(session);
+            }
         }
+
+        static bool HexHash(string value)
+        {
+            if (value == null || value.Length != 64) return false;
+            foreach (char c in value)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                    return false;
+            return true;
+        }
+
+        static void NativeCheck(bool success, string stage)
+        {
+            if (!success)
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new IOException("Route editor " + stage + " failed (Windows " + error
+                    + "): " + new Win32Exception(error).Message);
+            }
+        }
+
+        static void SetOption(IntPtr handle, uint option, uint value)
+        {
+            NativeCheck(WinHttpSetOption(handle, option, ref value, 4), "option " + option);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct CertificateContext
+        {
+            internal uint Encoding;
+            internal IntPtr Bytes;
+            internal uint Length;
+            internal IntPtr Info, Store;
+        }
+
+        static void CheckCertificate(IntPtr request, string pin)
+        {
+            IntPtr context = IntPtr.Zero;
+            uint size = (uint)IntPtr.Size;
+            NativeCheck(WinHttpQueryOption(request, 78, out context, ref size), "certificate");
+            if (context == IntPtr.Zero) throw new IOException("Route editor certificate missing");
+            try
+            {
+                CertificateContext cert = (CertificateContext)Marshal.PtrToStructure(context, typeof(CertificateContext));
+                if (cert.Length == 0 || cert.Length > 1024 * 1024)
+                    throw new IOException("Invalid route editor certificate");
+                byte[] raw = new byte[(int)cert.Length];
+                Marshal.Copy(cert.Bytes, raw, 0, raw.Length);
+                if (!string.Equals(Hash(raw), pin, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Route editor certificate pin mismatch");
+                X509Certificate2 leaf = new X509Certificate2(raw);
+                if (DateTime.Now < leaf.NotBefore || DateTime.Now > leaf.NotAfter)
+                    throw new IOException("Route editor certificate expired or not yet valid");
+            }
+            finally { CertFreeCertificateContext(context); }
+        }
+
+        [DllImport("winhttp.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        static extern IntPtr WinHttpOpen(string agent, uint access, string proxy, string bypass, uint flags);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpSetTimeouts(IntPtr session, int resolve, int connect, int send, int receive);
+        [DllImport("winhttp.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        static extern IntPtr WinHttpConnect(IntPtr session, string host, ushort port, uint reserved);
+        [DllImport("winhttp.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        static extern IntPtr WinHttpOpenRequest(IntPtr connection, string verb, string path,
+            string version, string referer, IntPtr accept, uint flags);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpSetOption(IntPtr handle, uint option, ref uint value, uint size);
+        [DllImport("winhttp.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        static extern bool WinHttpSendRequest(IntPtr request, string headers, uint length,
+            IntPtr data, uint dataLength, uint totalLength, UIntPtr context);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpReceiveResponse(IntPtr request, IntPtr reserved);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpQueryOption(IntPtr request, uint option, out IntPtr value, ref uint size);
+        [DllImport("winhttp.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        static extern bool WinHttpQueryHeaders(IntPtr request, uint info, string name,
+            out uint value, ref uint size, IntPtr index);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpReadData(IntPtr request, [Out] byte[] buffer, uint size, out uint read);
+        [DllImport("winhttp.dll")]
+        static extern bool WinHttpCloseHandle(IntPtr handle);
+        [DllImport("crypt32.dll")]
+        static extern bool CertFreeCertificateContext(IntPtr context);
 
         internal static Snapshot Parse(string body)
         {
