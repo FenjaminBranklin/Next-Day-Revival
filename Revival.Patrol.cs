@@ -4448,9 +4448,9 @@ namespace NextDayRevival
         // stay hard and FLAT (kantig) - no round caps. RouteDash/RouteGap are
         // fixed on every route. Leftover length stays at the route ends (or
         // the loop seam); it never stretches the dashes or their spacing.
-        const float RouteDash = 40f;
-        const float RouteGap = 28f;
-        const float RouteStroke = 4.5f;
+        const float RouteDash = 22f;
+        const float RouteGap = 12f;
+        const float RouteStroke = 3f;
 
         // The length of each straight bar inside a curved dash, and the small
         // overlap that keeps consecutive bars meeting without a notch on the
@@ -4459,7 +4459,7 @@ namespace NextDayRevival
         // at the next - the eye draws one continuous line through them - and a
         // dash only curves where the road actually bends; on a straight run it
         // stays straight.
-        const float RouteCurveStep = 2.5f;
+        const float RouteCurveStep = 1.5f;
         const float RouteSegOverlap = 1.2f;
 
         // World-space spacing (metres) the cached line is resampled to before it
@@ -4531,12 +4531,9 @@ namespace NextDayRevival
         /// <summary>
         /// The route's map line in WORLD space (XZ; the stored y is 0 and
         /// WorldToGui ignores it): the driven road itself, not a boundary
-        /// around it. A centripetal Catmull-Rom runs THROUGH every waypoint -
-        /// it interpolates instead of cutting corners, so the line stays on the
-        /// road the waypoints were recorded on - and the result is resampled to
-        /// an even spacing. PatrolMapRoads then applies the measured LOCAL
-        /// artwork correction, before MapArt's global registration. These are
-        /// display coordinates only; the original driving points stay intact.
+        /// around it. The same driving vertices and piecewise-linear display
+        /// projection as the editor are used. No extra spline or cross-road
+        /// averaging is allowed to hide a deviation of the actual drive path.
         /// See research/map_art_check.py for the original-artwork preview.
         /// Built once and cached
         /// on the route, rebuilt only when the waypoint count changes; DrawMap
@@ -4559,14 +4556,13 @@ namespace NextDayRevival
             bool loop = xz.Count > 2
                 && (xz[xz.Count - 1] - xz[0]).magnitude < RouteLoopClose;
 
-            List<Vector2> line = CatmullRom(xz, loop, RouteSplineSteps);
-            if (line == null || line.Count < 2) return null;
-            line = Resample(line, RouteResampleWorld);
-            if (line.Count < 2) return null;
-
-            List<Vector3> worldLine = new List<Vector3>(line.Count);
-            for (int i = 0; i < line.Count; i++)
-                worldLine.Add(PatrolMapRoads.Correct(new Vector3(line[i].x, 0f, line[i].y)));
+            // Match the editor: project the actual driving vertices and connect
+            // them directly. A separate spline would depict a different route.
+            List<Vector3> worldLine = new List<Vector3>(xz.Count + 1);
+            for (int i = 0; i < xz.Count; i++)
+                worldLine.Add(PatrolMapRoads.Correct(new Vector3(xz[i].x, 0f, xz[i].y)));
+            if (loop && (xz[xz.Count - 1] - xz[0]).sqrMagnitude > 0.0001f)
+                worldLine.Add(worldLine[0]);
             r.MapLine = worldLine;
             r.MapLineLoop = loop;
             return worldLine;

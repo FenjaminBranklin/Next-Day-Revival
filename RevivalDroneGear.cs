@@ -541,8 +541,9 @@ namespace NextDayRevival
     /// up), so raising is opt-in via the key.
     ///
     /// The mast is attached to the same Backpacks_Helper bone used by the
-    /// backpack skin. Its foot comes from the equipped mesh in bind space;
-    /// local Y follows torso animation, including running and prone poses.
+    /// backpack skin. Its foot sits on the TOP of the equipped pack's rendered
+    /// volume, taken along the bone's own up axis, so it stays on the lid in
+    /// running and prone poses and does not float above the pack.
     /// </summary>
     public static class Antenna
     {
@@ -582,6 +583,7 @@ namespace NextDayRevival
         static Transform _packBone;
         static SkinnedMeshRenderer _packMesh;
         static float _nextAnchorProbe;
+        static Vector3 _footLogged = new Vector3(9999f, 9999f, 9999f);
         static Material _grey;
 
         // Deploy key, parsed once from the config string.
@@ -886,23 +888,45 @@ namespace NextDayRevival
             // No worn pack: keep the rig mount usable for an antenna item carried
             // in other inventory slots. A worn pack replaces this fallback below.
             Vector3 foot = new Vector3(0f, 0.30f / scale.y, 0f);
+            bool measured = false;
             if (pack != null)
             {
-                Mesh mesh = pack.sharedMesh;
-                Transform[] bones = pack.bones;
-                Matrix4x4[] bind = mesh.bindposes;
-                for (int i = 0; i < bones.Length && i < bind.Length; i++)
+                // Measure the pack the CAMERA draws, not its bind-pose vertices.
+                // The bind bounds of these meshes reach roughly 0.95 m above the
+                // helper bone (log: "local foot=(-0.0001, 0.0095, 0.0000)" at bone
+                // scale 100), which is far above the visible lid - that is where
+                // the reported gap between mast foot and pack surface came from.
+                // The renderer bounds are the volume actually rendered, so they
+                // cannot disagree with what the player sees by more than the
+                // AABB's own slack.
+                measured = true;
+                Bounds world = pack.bounds;
+                Vector3 size = world.size;
+                bool sane = !float.IsNaN(size.x) && !float.IsInfinity(size.x)
+                    && !float.IsNaN(size.y) && !float.IsInfinity(size.y)
+                    && !float.IsNaN(size.z) && !float.IsInfinity(size.z)
+                    && size.y > 0.10f && size.y < 1.50f;
+                if (sane)
                 {
-                    if (bones[i] != bone) continue;
-                    Vector3[] vertices = mesh.vertices;
-                    if (vertices.Length == 0) break;
-                    Bounds bounds = new Bounds(bind[i].MultiplyPoint3x4(vertices[0]), Vector3.zero);
-                    for (int v = 1; v < vertices.Length; v++)
-                        bounds.Encapsulate(bind[i].MultiplyPoint3x4(vertices[v]));
-                    // The top centre is on the pack itself, not on the spine.
-                    foot = new Vector3(bounds.center.x, bounds.max.y - 0.03f / scale.y, bounds.center.z);
-                    break;
+                    // Support point of the world AABB along the BONE's up axis, so
+                    // the foot stays on the lid when the torso leans, runs, or goes
+                    // prone instead of tracking world up.
+                    Vector3 up = bone.up;
+                    Vector3 extents = world.extents;
+                    float half = Mathf.Abs(up.x) * extents.x + Mathf.Abs(up.y) * extents.y
+                        + Mathf.Abs(up.z) * extents.z;
+                    Vector3 top = bone.InverseTransformPoint(world.center + up * half);
+                    Vector3 middle = bone.InverseTransformPoint(world.center);
+                    // Sink the foot into the lid so the tube reads as seated.
+                    float y = top.y - 0.03f / scale.y;
+                    // A pack top more than 60 cm above its own mount bone is not a
+                    // pack surface; keep the rig mount rather than float the mast.
+                    if (y > 0.05f / scale.y && y < 0.60f / scale.y)
+                        foot = new Vector3(middle.x, y, middle.z);
+                    else
+                        measured = false;
                 }
+                else measured = false;
             }
             _root.transform.SetParent(bone, false);
             _root.transform.localPosition = foot;
@@ -910,9 +934,18 @@ namespace NextDayRevival
             // The imported skeleton is scaled by 100. Keep mast dimensions metres.
             _root.transform.localScale = new Vector3(1f / scale.x, 1f / scale.y, 1f / scale.z);
             _packBone = bone;
-            _packMesh = pack;
-            RevivalPlugin.L.LogInfo("Antenna: attached to " + bone.name + ", pack="
-                + (pack == null ? "none (rig mount)" : pack.name) + ", local foot=" + foot.ToString("F4"));
+            // An unmeasured pack (renderer bounds not ready yet on the first
+            // frames after equipping) is NOT cached, so the next probe retries
+            // instead of leaving the mast on the fallback mount forever.
+            _packMesh = measured ? pack : null;
+            if ((foot - _footLogged).sqrMagnitude > 0.0000001f)
+            {
+                _footLogged = foot;
+                RevivalPlugin.L.LogInfo("Antenna: attached to " + bone.name + ", pack="
+                    + (pack == null ? "none (rig mount)" : pack.name)
+                    + (measured ? " (measured)" : " (fallback)")
+                    + ", local foot=" + foot.ToString("F4"));
+            }
             return true;
         }
 
@@ -1017,6 +1050,7 @@ namespace NextDayRevival
             _packBone = null;
             _packMesh = null;
             _nextAnchorProbe = 0f;
+            _footLogged = new Vector3(9999f, 9999f, 9999f);
         }
 
         /// <summary>

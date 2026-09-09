@@ -134,7 +134,11 @@ namespace NextDayRevival
             // ausserhalb 1401..1500 macht die Mine wieder unausruestbar.
             CfgFrontOffset = cfg.Bind("AntiTankMine", "FrontOffset", 2.2f,
                 "Abstand vor dem Spieler, in dem die Mine abgelegt wird (m).");
-            CfgScale = cfg.Bind("AntiTankMine", "Scale", 0.45f,
+            // 1.1 statt der frueheren 0.45: das Modell misst 0.80 m im
+            // Durchmesser, die realistische Groesse war am Boden praktisch
+            // unsichtbar und damit nicht ausweichbar. Jetzt rund 0.88 m breit
+            // und 0.26 m hoch (mit Zuenderdom rund 0.39 m).
+            CfgScale = cfg.Bind("AntiTankMine", "Scale", 1.1f,
                 "Skalierung des platzierten Minenobjekts (1 = Modellgroesse).");
             CfgTriggerRadius = cfg.Bind("AntiTankMine", "TriggerRadius", 1.6f,
                 "Radius, in dem ein Fahrzeugkollider die Mine ausloest (m).");
@@ -495,7 +499,7 @@ namespace NextDayRevival
                     return null;
                 }
                 GameObject go = new GameObject("NDR Anti-tank mine");
-                float s = AntiTankMine.CfgScale == null ? 0.45f : Mathf.Max(0.1f, AntiTankMine.CfgScale.Value);
+                float s = AntiTankMine.CfgScale == null ? 1.1f : Mathf.Max(0.1f, AntiTankMine.CfgScale.Value);
                 go.transform.position = pos;
                 // Lay the disc flat on the surface: its local +Y (the lid normal)
                 // aligns to the ground normal, so it sits without intersecting a
