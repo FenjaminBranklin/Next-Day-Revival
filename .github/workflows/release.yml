@@ -158,6 +158,17 @@ jobs:
             grep -rl "@VERSION@" "stage/$NAME"
             exit 1
           fi
+          # Windows cannot unpack a path longer than 260 characters, and the
+          # launcher unpacks into a versions folder somewhere under the
+          # player's home directory. 6.14.0 shipped vendored license notices
+          # nested six levels deep; it downloaded, verified and then failed to
+          # unpack on the player's machine. 150 leaves room for that prefix.
+          LONG=$(cd stage && find . -type f | awk 'length($0) > 152 { print }')
+          if [ -n "$LONG" ]; then
+            echo "::error::these paths are too long for a Windows unpack:"
+            echo "$LONG"
+            exit 1
+          fi
           # The readme is the first thing a player opens. If it does not name
           # this version, something in the staging step silently did nothing.
           grep -q "${GITHUB_REF_NAME#v}" "stage/$NAME/LIESMICH.txt" || {

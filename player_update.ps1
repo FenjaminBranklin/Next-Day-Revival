@@ -43,6 +43,41 @@ function Get-NdrRelease([string]$HostName) {
               url = $expectedUrl; size = [long]$asset.size }
 }
 
+# Unpack a release the way ExtractToDirectory would, but entry by entry and
+# through the long-path form of every path. The package carries the
+# third-party notices of the T-72 extractor, and a wheel that keeps its
+# notices in a vendored tree pushed the unpacked package past the 260
+# character Windows limit - 6.14.0 downloaded, verified and then failed to
+# unpack. The notice names are flat again since 6.14.1; this is the second
+# lock, so a package that grows a long path later still installs.
+function Expand-Package($zipPath, $destination) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $full = [System.IO.Path]::GetFullPath($destination).TrimEnd('\')
+    # The long-path prefix, built from character codes so no editor or
+    # patch tool can quietly swallow one of its backslashes.
+    $bs = [string][char]92
+    $long = $bs + $bs + '?' + $bs
+    [System.IO.Directory]::CreateDirectory($long + $full) | Out-Null
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $target = [System.IO.Path]::GetFullPath(
+                (Join-Path $full ($entry.FullName -replace '/', '\')))
+            # Zip slip: an entry may not leave the folder it is unpacked into.
+            if (-not $target.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw ("The package wants to write outside its own folder: " + $entry.FullName)
+            }
+            if (-not $entry.Name) {
+                [System.IO.Directory]::CreateDirectory($long + $target) | Out-Null
+                continue
+            }
+            [System.IO.Directory]::CreateDirectory(
+                $long + [System.IO.Path]::GetDirectoryName($target)) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $long + $target, $true)
+        }
+    } finally { $archive.Dispose() }
+}
+
 function Expand-NdrRelease($Release, [string]$Cache) {
     New-Item -ItemType Directory -Force -Path $Cache | Out-Null
     $zip = Assert-NdrChild $Cache (Join-Path $Cache ($Release.hash + '.zip'))
@@ -74,7 +109,7 @@ function Expand-NdrRelease($Release, [string]$Cache) {
     } finally { $archive.Dispose() }
     $complete = $false
     try {
-    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $session)
+    Expand-Package $zip $session
     $source = Join-Path $session ('NextDayRevival_Client_' + $Release.version)
     foreach ($name in @('VERSION', 'launcher.ps1', 'player_update.ps1', 'client_patch.ps1',
                        'start_game.ps1', 'NextDayRevivalToolkit.dll', 't72_import.exe', 'steam_base.sha1',

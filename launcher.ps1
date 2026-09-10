@@ -817,6 +817,41 @@ function Show-NewLines($file, $seen) {
 # belonging to the game - and the unpacked folder only becomes versions\<v>
 # after all of that passed. Kill the launcher at any point before that last
 # move and the installation on disk is untouched.
+# Unpack a release the way ExtractToDirectory would, but entry by entry and
+# through the long-path form of every path. The package carries the
+# third-party notices of the T-72 extractor, and a wheel that keeps its
+# notices in a vendored tree pushed the unpacked package past the 260
+# character Windows limit - 6.14.0 downloaded, verified and then failed to
+# unpack. The notice names are flat again since 6.14.1; this is the second
+# lock, so a package that grows a long path later still installs.
+function Expand-Package($zipPath, $destination) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $full = [System.IO.Path]::GetFullPath($destination).TrimEnd('\')
+    # The long-path prefix, built from character codes so no editor or
+    # patch tool can quietly swallow one of its backslashes.
+    $bs = [string][char]92
+    $long = $bs + $bs + '?' + $bs
+    [System.IO.Directory]::CreateDirectory($long + $full) | Out-Null
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $target = [System.IO.Path]::GetFullPath(
+                (Join-Path $full ($entry.FullName -replace '/', '\')))
+            # Zip slip: an entry may not leave the folder it is unpacked into.
+            if (-not $target.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw ("The package wants to write outside its own folder: " + $entry.FullName)
+            }
+            if (-not $entry.Name) {
+                [System.IO.Directory]::CreateDirectory($long + $target) | Out-Null
+                continue
+            }
+            [System.IO.Directory]::CreateDirectory(
+                $long + [System.IO.Path]::GetDirectoryName($target)) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $long + $target, $true)
+        }
+    } finally { $archive.Dispose() }
+}
+
 function Get-VersionFolder($state, $version) {
     $dir = Join-Path $VersionsDir $version
     if (Test-SourceFolder $dir) { return $dir }
@@ -875,8 +910,7 @@ function Get-VersionFolder($state, $version) {
     Say ("Verified: " + $have + " bytes, and it is a zip.") "ok"
 
     try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($tmpZip, $tmpDir)
+        Expand-Package $tmpZip $tmpDir
     } catch {
         Say ("Unpacking failed: " + $_.Exception.Message) "bad"
         Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
