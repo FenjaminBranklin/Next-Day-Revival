@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.13.0";
+        public const string VERSION = "6.14.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -300,7 +300,6 @@ namespace NextDayRevival
         internal static ConfigEntry<string> CfgPatrolFile;
         internal static ConfigEntry<string> CfgPatrolRoute;
         internal static ConfigEntry<string> CfgPatrolVehicle;
-        internal static ConfigEntry<int> CfgPatrolMax;
         internal static ConfigEntry<bool> CfgPatrolAuto;
         internal static ConfigEntry<float> CfgPatrolRespawn;
         internal static ConfigEntry<bool> CfgPatrolGun;
@@ -1191,13 +1190,11 @@ namespace NextDayRevival
                 "What drives the route: btr, tank, or mixed. Mixed alternates "
                 + "- the first patrol is a BTR-80A, the second a T-72, and so "
                 + "on, so both kinds are on the road at once.");
-            CfgPatrolMax = Config.Bind("Patrol", "MaxVehicles", 4,
-                "How many patrol vehicles may be out at once. Each press of "
-                + "Key puts one more down; Shift plus Key takes them all off "
-                + "the road again.");
+            // Capacity comes from enabled routes and their vehicle compositions.
+            // Do not bind the retired MaxVehicles key: old config values are ignored.
             CfgPatrolAuto = Config.Bind("Patrol", "AutoStart", true,
-                "Patrols without a key press: MaxVehicles of them go out by "
-                + "themselves once the world is up, and a lost one is replaced "
+                "Patrols without a key press: enabled routes receive their configured "
+                + "patrol groups once the world is up, and a lost one is replaced "
                 + "after RespawnSeconds. They start on the far side of the "
                 + "route, not in front of the player. Shift plus the patrol key "
                 + "takes them all off AND switches the automatic off until the "

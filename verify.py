@@ -324,7 +324,7 @@ def check_grip_alignment():
     Hand ins Leere.
     """
     print("[5] Griff an der RPD-Handposition (y 0.555 .. 0.692, z unter 0.05)")
-    for f in ("mg42.ndmesh", "sniper50.ndmesh", "law.ndmesh"):
+    for f in ("mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "law.ndmesh"):
         p = os.path.join(ASSETS, f)
         if not os.path.exists(p):
             continue

@@ -114,8 +114,8 @@ namespace NextDayRevival
             public string Vehicle = "";
 
             /// <summary>How many patrols this route should carry. The
-            /// automatic keeps that many alive on it, inside the global
-            /// MaxVehicles.</summary>
+            /// automatic keeps that many alive on it. Its composition contributes
+            /// that many groups of vehicles to the global patrol capacity.</summary>
             public int Count = 1;
 
             /// <summary>Does the automatic use this route at all? A route
@@ -276,7 +276,7 @@ namespace NextDayRevival
 
         /// <summary>Seconds between two vehicles while the road is being
         /// FILLED. A replacement waits `RespawnSeconds` instead; this is only
-        /// so the first MaxVehicles do not all appear in the same second.</summary>
+        /// so the initial patrols do not all appear in the same second.</summary>
         const float FillEvery = 12f;
 
         /// <summary>Seconds after the world comes up before the first patrol
@@ -511,13 +511,13 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Patrol: the automatic is on again.");
             }
 
-            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+            int max = PatrolVehicleLimit();
             if (PatrolUnitCount() >= max)   // NDR convoy: convoy vehicles do not count
             {
-                RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) are "
-                    + "already out, MaxVehicles is " + max
+                RevivalPlugin.L.LogInfo("Patrol: " + PatrolUnitCount() + " vehicle(s) are "
+                    + "already out, patrol capacity is " + max
                     + ". Shift plus the key takes them off the road.");
-                Turret.Hinweis(_units.Count + Loc.T(" патрулей в рейсе - Shift+клавиша убирает",
+                Turret.Hinweis(PatrolUnitCount() + Loc.T(" патрулей в рейсе - Shift+клавиша убирает",
                                                     " patrols out - Shift+key stops them"), 3f);
                 return;
             }
@@ -556,20 +556,21 @@ namespace NextDayRevival
         /// be there when the world comes up, and come back some time after
         /// they are killed. This is that, and it is deliberately made of the
         /// pieces that were already there - `Spawn` puts one down, `Active`
-        /// finds the route, `MaxVehicles` bounds the road.
+        /// finds the route, `patrol capacity` bounds the road.
         ///
         /// EVERY ROUTE IS A PATROL. Since 2026-08-30 the automatic does not
         /// serve one route out of the config but every route in the file:
         /// each says how many patrols it wants (`count=` in its first
         /// waypoint's flags) and which side drives it, `Duenn` picks the one
-        /// furthest short of its number, and `MaxVehicles` is the ceiling over
-        /// all of them together. That is what makes a looter patrol outside
-        /// the looter base and a civilian one around the civilian base a
+        /// furthest short of its number, and `patrol capacity` is the ceiling over
+        /// all of them together, derived from their counts and compositions.
+        /// That makes a looter patrol outside the looter base and a civilian
+        /// one around the civilian base a
         /// setting rather than a rebuild.
         ///
         /// TWO CLOCKS, and they mean different things. The road is FILLED at
-        /// `FillEvery` - a short interval, so the first MaxVehicles are out
-        /// within a minute of the world coming up. A LOSS is replaced after
+        /// `FillEvery` - a short interval that fills the requested patrol groups
+        /// gradually after the world comes up. A LOSS is replaced after
         /// `RespawnSeconds`, and that clock starts when the vehicle is
         /// destroyed (see <see cref="Verloren"/>), not when its wreck is
         /// cleared away - otherwise the two waits would add up and the road
@@ -609,7 +610,7 @@ namespace NextDayRevival
             }
             if (!welt) { WeltWeg(); return; }
 
-            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
+            int max = PatrolVehicleLimit();
             if (PatrolUnitCount() >= max) return;   // NDR convoy: convoy vehicles do not count
             if (Time.time < _nextAuto) return;
 
@@ -709,7 +710,7 @@ namespace NextDayRevival
         /// base - and that means the automatic has to keep several routes
         /// stocked at once instead of one. Each route says how many it wants
         /// (`count=` in its first waypoint's flags, 1 when it does not say),
-        /// and `MaxVehicles` is the ceiling over the whole map.
+        /// and `patrol capacity` is the ceiling over the whole map.
         ///
         /// "Most in need" is the largest shortfall, so a route that wants
         /// three and has none is filled before one that wants one and has
@@ -745,9 +746,29 @@ namespace NextDayRevival
             return groups.Count;
         }
 
+        /// <summary>Capacity requested by all enabled, usable patrol routes.
+        /// Recomputed from the current snapshot so editor changes apply live.
+        /// Legacy routes without a composition use one vehicle per patrol.</summary>
+        static int PatrolVehicleLimit()
+        {
+            Load(false);
+            long total = 0;
+            for (int i = 0; i < _order.Count; i++)
+            {
+                Route r = _routes[_order[i]];
+                if (r.IsConvoy || !r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
+                RevivalComposition.Composition composition = RevivalComposition.Of(r.Name);
+                int vehicles = composition == null || composition.Vehicles.Count == 0
+                    ? 1 : composition.Vehicles.Count;
+                total += (long)r.Count * vehicles;
+                if (total >= int.MaxValue) return int.MaxValue;
+            }
+            return (int)total;
+        }
+
         /// <summary>Units the auto-patrol accounting owns - convoy vehicles
         /// (ConvoyId != 0) are managed by the convoy event and must not consume
-        /// a MaxVehicles slot from the ordinary patrols. NDR convoy.</summary>
+        /// a patrol capacity slot from the ordinary patrols. NDR convoy.</summary>
         static int PatrolUnitCount()
         {
             int n = 0;
@@ -1912,12 +1933,12 @@ namespace NextDayRevival
             RevivalComposition.Composition composition = RevivalComposition.Of(r.Name);
             int vehicleCount = composition == null || composition.Vehicles.Count == 0
                 ? 1 : composition.Vehicles.Count;
-            int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-            if (PatrolUnitCount() + vehicleCount > max)
+            int max = PatrolVehicleLimit();
+            if ((long)PatrolUnitCount() + vehicleCount > max)
             {
                 RevivalPlugin.L.LogWarning("Patrol: editor composition on " + r.Name
                     + " needs " + vehicleCount + " vehicle slots, but only "
-                    + (max - PatrolUnitCount()) + " remain under MaxVehicles.");
+                    + (max - PatrolUnitCount()) + " remain under patrol capacity.");
                 return;
             }
 
@@ -4216,13 +4237,13 @@ namespace NextDayRevival
             // The visible map rectangle. Dashes are HARD-clipped to it with
             // GUI.BeginClip so a route that runs off the shown map cannot paint
             // over the game scene around the panel - the earlier per-point test
-            // let a stroke leak past the map edge into the grass. If the bounds
-            // are unavailable, fall back to the whole screen rather than draw
-            // nothing.
+            // let a stroke leak past the map edge into the grass. The real
+            // texture bounds are also required for map-relative stroke widths.
             Rect clip;
             bool mapRect = MapTools.MapScreenRect(texture, camera, out clip);
-            if (!mapRect)
-                clip = new Rect(0f, 0f, Screen.width, Screen.height);
+            // Cached masks need the real texture bounds. Never substitute the
+            // entire screen and stretch road ink across an unrelated UI region.
+            if (!mapRect) return;
 
             // The WHOLE map texture, before the visible window trims it below.
             // The picture covers the whole world, so the registration
@@ -4261,6 +4282,7 @@ namespace NextDayRevival
                 Vector2 hoverAt = Vector2.zero;
                 Color hoverColor = Color.white;
 
+                MapInk.Begin();
                 GUI.BeginClip(clip);
                 try
                 {
@@ -4329,8 +4351,9 @@ namespace NextDayRevival
                         // This line's own dash points, added to the grid only
                         // after it is fully drawn so it never clears itself.
                         List<Vector2> ink = new List<Vector2>();
-                        if (route.MapLineLoop) DashClosed(line, localClip, grid, ink);
-                        else                   DashOpen(line, localClip, grid, ink);
+                        DrawRoadInk(route.Name, wline, route.MapLineLoop,
+                            new Rect(full.x-clip.x, full.y-clip.y, full.width, full.height),
+                            localClip, grid, ink);
                         grid.Add(ink);
 
                         // First line under the cursor wins the note.
@@ -4357,7 +4380,7 @@ namespace NextDayRevival
                         }
                     }
                 }
-                finally { GUI.EndClip(); }
+                finally { GUI.EndClip(); MapInk.End(); }
 
                 // Labels belong above the lines, including lines from routes
                 // later in the file.
@@ -4529,16 +4552,11 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// The route's map line in WORLD space (XZ; the stored y is 0 and
-        /// WorldToGui ignores it): the driven road itself, not a boundary
-        /// around it. The same driving vertices and piecewise-linear display
-        /// projection as the editor are used. No extra spline or cross-road
-        /// averaging is allowed to hide a deviation of the actual drive path.
-        /// See research/map_art_check.py for the original-artwork preview.
-        /// Built once and cached
-        /// on the route, rebuilt only when the waypoint count changes; DrawMap
-        /// only PROJECTS it, which is what stops the line jittering as the map
-        /// or camera micro-moves.
+        /// The route's cached DISPLAY line. XZ encodes the measured artwork
+        /// centre before MapArt registration; Y carries width in artwork pixels
+        /// and WorldToGui ignores it. Only explicitly tagged road routes snap
+        /// to the display guide. Driving vertices and steering remain unchanged.
+        /// The cache is rebuilt with the route object or waypoint count.
         /// </summary>
         static List<Vector3> WorldLine(Route r)
         {
@@ -4556,13 +4574,10 @@ namespace NextDayRevival
             bool loop = xz.Count > 2
                 && (xz[xz.Count - 1] - xz[0]).magnitude < RouteLoopClose;
 
-            // Match the editor: project the actual driving vertices and connect
-            // them directly. A separate spline would depict a different route.
-            List<Vector3> worldLine = new List<Vector3>(xz.Count + 1);
-            for (int i = 0; i < xz.Count; i++)
-                worldLine.Add(PatrolMapRoads.Correct(new Vector3(xz[i].x, 0f, xz[i].y)));
-            if (loop && (xz[xz.Count - 1] - xz[0]).sqrMagnitude > 0.0001f)
-                worldLine.Add(worldLine[0]);
+            // Display follows the measured artwork centre with one uniform ink width.
+            // Explicit road routes snap for display only; driving points stay intact.
+            List<Vector3> worldLine = MapInk.BuildWorld(xz, loop,
+                FlagValue(r.P[0], "road").Length > 0);
             r.MapLine = worldLine;
             r.MapLineLoop = loop;
             return worldLine;
@@ -4699,6 +4714,36 @@ namespace NextDayRevival
             if (x1 < x0) x1 = x0;
             if (y1 < y0) y1 = y0;
             return new Rect(x0, y0, x1 - x0, y1 - y0);
+        }
+
+        // Each curved dash is one cached coverage mask, with map-relative
+        // dimensions. Zoom scales the road and its ink together; pan only moves it.
+        static void DrawRoadInk(string name, List<Vector3> world, bool loop,
+                                Rect full, Rect clip, ClearGrid grid, List<Vector2> ink)
+        {
+            MapInk.Cache cache = MapInk.Get(name, world, loop);
+            Vector2 scale = new Vector2(full.width / 1024f, full.height / 1024f);
+            for (int i = 0; i < cache.Dashes.Count; i++)
+            {
+                MapInk.Dash dash = cache.Dashes[i];
+                Rect b = dash.Bounds;
+                Rect target = new Rect(full.x+b.x*scale.x, full.y+b.y*scale.y,
+                                       b.width*scale.x, b.height*scale.y);
+                // Bounds culling preserves a visible dash whose midpoint is
+                // outside the viewport; BeginClip handles the actual edge.
+                if (target.xMax < clip.xMin || target.xMin > clip.xMax
+                    || target.yMax < clip.yMin || target.yMin > clip.yMax) continue;
+                bool blocked = false;
+                for (int j = 0; j < dash.Points.Count; j += 8)
+                {
+                    Vector2 p = full.position + Vector2.Scale(dash.Points[j], scale);
+                    if (grid != null && grid.Blocked(p)) { blocked = true; break; }
+                }
+                if (blocked) continue;
+                GUI.DrawTexture(target, dash.Texture);
+                for (int j = 0; j < dash.Points.Count; j += 4)
+                    ink.Add(full.position + Vector2.Scale(dash.Points[j], scale));
+            }
         }
 
         /// <summary>Fixed dash cadence on a loop. The closing gap absorbs
@@ -5146,10 +5191,10 @@ namespace NextDayRevival
                 GUILayout.Space(6f);
 
                 // ------------------------------------------------ the road
-                int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-                GUILayout.Label(Loc.T("На дороге: ", "On the road: ") + _units.Count
+                int max = PatrolVehicleLimit();
+                GUILayout.Label(Loc.T("На дороге: ", "On the road: ") + PatrolUnitCount()
                     + Loc.T(" из ", " of ") + max
-                    + Loc.T(" (MaxVehicles). Автоматика: ", " (MaxVehicles). Automatic: ")
+                    + Loc.T(" (patrol capacity). Автоматика: ", " (patrol capacity). Automatic: ")
                     + (_auto ? Loc.T("вкл", "on") : Loc.T("ВЫКЛ", "OFF")));
                 GUILayout.BeginHorizontal();
                 if (GUILayout.Button(_auto ? Loc.T("автоматика выкл", "automatic off")
@@ -5377,12 +5422,12 @@ namespace NextDayRevival
             static void Jetzt(Route r)
             {
                 if (r.P.Count < 3) { Melde(r.Name + Loc.T(" нужно минимум три точки", " needs at least three waypoints")); return; }
-                int max = Mathf.Max(1, RevivalPlugin.CfgPatrolMax.Value);
-                if (_units.Count >= max)
+                int max = PatrolVehicleLimit();
+                if (PatrolUnitCount() >= max)
                 {
-                    Melde(Loc.T("MaxVehicles = " + max + ", в рейсе " + _units.Count
+                    Melde(Loc.T("patrol capacity = " + max + ", в рейсе " + PatrolUnitCount()
                           + " - сначала уберите с дороги",
-                            "MaxVehicles is " + max + " and " + _units.Count
+                            "patrol capacity is " + max + " and " + PatrolUnitCount()
                           + " are out - clear the road first"));
                     return;
                 }
