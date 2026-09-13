@@ -1097,6 +1097,41 @@ function Invoke-Check($state) {
 }
 
 function Invoke-Play($state) {
+    if (-not $state.game) { Say "No game folder - nothing to start." "bad"; return }
+
+    # PLAY is the complete path: select the exact release the server demands,
+    # install it when this machine is missing or on another version, then repair
+    # the address/EAC/config and verify every shipped asset before starting.
+    # This closes the old gap where the status text promised an automatic update
+    # but the button launched whatever happened to be installed.
+    $required = ""
+    if ($state.server.ok) { $required = $state.server.minClientVersion }
+    if ($required -and $state.installed -ne $required) {
+        Say ("Updating this client to the server release " + $required + " before starting.") "dim"
+        if (-not (Invoke-Install $state $required)) { return }
+        $state = Get-State
+    }
+
+    $needsRepair = ($state.eac -eq "on") -or (-not $state.configHost) -or
+        ($state.serverHost -and $state.configHost -ne $state.serverHost) -or
+        ($state.config.checked -and $state.config.drift -gt 0) -or
+        ($state.assets.checked -and ($state.assets.missing + $state.assets.stale +
+            $state.assets.incomplete) -gt 0)
+    if ($needsRepair) {
+        Say "Repairing the local client before starting." "dim"
+        Invoke-Repair $state
+        $state = Get-State
+    }
+    $drift = $state.assets
+    if (($required -and $state.installed -ne $required) -or
+        (-not $state.installed) -or (-not $drift.checked) -or
+        $drift.incomplete -gt 0 -or ($drift.missing + $drift.stale) -gt 0 -or
+        $state.eac -eq "on" -or ($state.serverHost -and
+            $state.configHost -ne $state.serverHost)) {
+        Say "The client is not complete and verified, so the game was not started. Press Install or Repair and read the result above." "bad"
+        return
+    }
+
     # Never Steam's Play button: that starts the EAC launcher, which since the
     # August 2026 module update aborts with "Untrusted system file".
     $starter = Join-Path $root "start_game.ps1"

@@ -68,6 +68,7 @@ namespace NextDayRevival
         static bool _playerResolved;
         static PropertyInfo _pProps;      // customProperties
         static PropertyInfo _pIsLocal;    // isLocal
+        static FieldInfo _fIsLocal;       // PUN classic exposes IsLocal as a field
         static PropertyInfo _pNick;       // NickName / name
         static PropertyInfo _pId;         // ID
         static MethodInfo _setProps;      // SetCustomProperties(Hashtable)
@@ -82,6 +83,7 @@ namespace NextDayRevival
         static GUIStyle _titleStyle;
         static GUIStyle _lineStyle;
         static Texture2D _bg;
+        static string _exchangeProblem = "";
 
         public static void BindConfig(ConfigFile config)
         {
@@ -107,7 +109,9 @@ namespace NextDayRevival
         /// </summary>
         public static void Tick()
         {
-            if (CfgWarn == null || !CfgWarn.Value) return;
+            // Visibility is a local preference; publishing is required even
+            // when this player hides the banner.
+            if (CfgWarn == null) return;
 
             float now = Time.realtimeSinceStartup;
             if (now < _nextTick) return;
@@ -120,6 +124,7 @@ namespace NextDayRevival
                 if (_photon == null || _inRoom == null) return;
                 object inRoom = _inRoom.GetValue(null, null);
                 if (!(inRoom is bool) || !(bool)inRoom) { _ownPublished = ""; return; }
+                _exchangeProblem = "";
 
                 // Publish ours. Read-back is optimistic in PUN, so once it has
                 // taken we stop writing; a rejoin clears the property and we
@@ -131,9 +136,15 @@ namespace NextDayRevival
                     string mine = ReadVersion(local);
                     if (mine != RevivalPlugin.VERSION)
                     {
+                        _ownPublished = "";
                         if (Publish(local)) _ownPublished = RevivalPlugin.VERSION;
                     }
                     else _ownPublished = RevivalPlugin.VERSION;
+                }
+                if (local == null || _ownPublished != RevivalPlugin.VERSION)
+                {
+                    _exchangeProblem = "Local version exchange failed; peer versions cannot be checked.";
+                    return;
                 }
 
                 // Read the others.
@@ -143,6 +154,7 @@ namespace NextDayRevival
                 foreach (object p in list)
                 {
                     if (p == null) continue;
+                    if (object.ReferenceEquals(p, local)) continue;
                     if (IsLocal(p)) continue;
                     string ver = ReadVersion(p);
                     if (ver == RevivalPlugin.VERSION) continue;   // match, nothing to say
@@ -150,7 +162,7 @@ namespace NextDayRevival
                     if (string.IsNullOrEmpty(ver))
                         _mismatch.Add(who + " - " + Loc.T(
                             "мод не подтверждён (старый или не загружен)",
-                            "mod unconfirmed (old or not loaded)"));
+                            "version not received"));
                     else
                         _mismatch.Add(who + " - " + ver);
                 }
@@ -161,6 +173,7 @@ namespace NextDayRevival
                 // cannot flood the log even if it fails every time.
                 RevivalPlugin.L.LogWarning("PeerCheck: " + ex.Message);
                 _mismatch.Clear();
+                _exchangeProblem = "Local version exchange failed; peer versions cannot be checked.";
             }
         }
 
@@ -173,7 +186,10 @@ namespace NextDayRevival
                 IDictionary dict = table as IDictionary;
                 if (dict == null) return false;
                 dict[Key] = RevivalPlugin.VERSION;
-                _setProps.Invoke(player, new object[] { table });
+                ParameterInfo[] parameters = _setProps.GetParameters();
+                object[] args = parameters.Length == 1
+                    ? new object[] { table } : new object[] { table, null, false };
+                _setProps.Invoke(player, args);
                 RevivalPlugin.L.LogInfo("PeerCheck: published version "
                     + RevivalPlugin.VERSION + " to the room.");
                 return true;
@@ -204,8 +220,8 @@ namespace NextDayRevival
         {
             try
             {
-                if (_pIsLocal == null) return false;
-                object v = _pIsLocal.GetValue(player, null);
+                object v = _pIsLocal != null ? _pIsLocal.GetValue(player, null)
+                    : (_fIsLocal == null ? null : _fIsLocal.GetValue(player));
                 return v is bool && (bool)v;
             }
             catch { return false; }
@@ -262,6 +278,7 @@ namespace NextDayRevival
             if (_pProps == null) _pProps = AccessTools.Property(t, "CustomProperties");
             _pIsLocal = AccessTools.Property(t, "isLocal");
             if (_pIsLocal == null) _pIsLocal = AccessTools.Property(t, "IsLocal");
+            if (_pIsLocal == null) _fIsLocal = AccessTools.Field(t, "IsLocal");
             _pNick = AccessTools.Property(t, "NickName");
             if (_pNick == null) _pNick = AccessTools.Property(t, "name");
             _pId = AccessTools.Property(t, "ID");
@@ -284,8 +301,14 @@ namespace NextDayRevival
                 MethodInfo[] ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public
                     | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
                 foreach (MethodInfo m in ms)
-                    if (m.Name == "SetCustomProperties" && m.GetParameters().Length == 1)
-                        return m;
+                {
+                    if (m.Name != "SetCustomProperties") continue;
+                    ParameterInfo[] ps = m.GetParameters();
+                    if (ps.Length < 1 || !typeof(IDictionary).IsAssignableFrom(ps[0].ParameterType)) continue;
+                    if (ps.Length == 1 || (ps.Length == 3
+                        && ps[1].ParameterType == ps[0].ParameterType
+                        && ps[2].ParameterType == typeof(bool))) return m;
+                }
                 t = t.BaseType;
             }
             return null;
@@ -298,7 +321,8 @@ namespace NextDayRevival
             try
             {
                 if (CfgBadge != null && CfgBadge.Value) DrawBadge();
-                if (CfgWarn != null && CfgWarn.Value && _mismatch.Count > 0) DrawBanner();
+                if (CfgWarn != null && CfgWarn.Value
+                    && (_mismatch.Count > 0 || _exchangeProblem.Length > 0)) DrawBanner();
             }
             catch { }
         }
@@ -353,6 +377,9 @@ namespace NextDayRevival
                 "У них ломается крю и техника (T-поза). Обновите через лаунчер.",
                 "They see broken crew and vehicles (T-pose). Update them via the launcher.");
             string you = Loc.T("Ты: ", "You: ") + RevivalPlugin.VERSION;
+            title = _exchangeProblem.Length > 0 ? "VERSION CHECK UNAVAILABLE" : "MOD VERSION CHECK";
+            hint = _exchangeProblem.Length > 0 ? _exchangeProblem
+                : "Compare launcher versions. A missing version does not prove missing assets.";
 
             float w = Mathf.Min(Screen.width - 20f, 760f);
             float x = (Screen.width - w) * 0.5f;

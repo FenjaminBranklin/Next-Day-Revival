@@ -19,7 +19,7 @@
 //     sight shows a body/engine, fading to a yellow contour edge), NIGHT uses the
 //     green light-gain equivalent (bright core, mid-green edge). So a target
 //     reads as a lit SILHOUETTE with an outline in either mode, never an oval.
-//     A target too small on screen or without a usable mesh falls back to a cheap
+//     A small person or a target without a usable mesh falls back to a cheap
 //     ramp blob in the same palette. DEAD crew no longer radiate - a corpse
 //     cools, so an NPC that fails IsAlive() is dropped from the warm set;
 //   - EXPLOSIONS radiate the hottest of all: each live ExplosionObject seeds a
@@ -29,7 +29,7 @@
 // PERFORMANCE: the GL fill runs once per vertex, tens of thousands of times a
 // frame. Two things keep it from stuttering - the ironbow/green ramp stops are
 // static (no per-vertex array allocation, which was the old lag), and small or
-// distant targets are drawn as blobs rather than filled, so only close targets
+// distant people are drawn as blobs rather than filled, so only close people
 // pay for their triangles. A true per-pixel camera post-effect would be nicer
 // still but needs a runtime shader this build cannot load reliably.
 //
@@ -100,7 +100,12 @@ namespace NextDayRevival
         static readonly Dictionary<int, MeshData> _meshCache = new Dictionary<int, MeshData>();
 
         sealed class MeshData { public Vector3[] v; public int[] t; }
-        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; }
+        // A rigid mesh part reprojected live every frame. Normally its verts are a
+        // shared MeshFilter mesh and it is placed with the full local-to-world
+        // matrix. When baked==true the verts are a skinned snapshot (BakeMesh) that
+        // already carries the renderer's scale, so it is placed with position and
+        // rotation only (scale 1) to avoid a double scale - see PartModel.
+        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; public bool baked; }
         sealed class BakedPart { public Vector3[] wv; public int[] t; }   // world verts, baked at refresh
         sealed class Silh
         {
@@ -462,14 +467,13 @@ namespace NextDayRevival
         static readonly List<int> _fbVeh = new List<int>();
         static readonly List<int> _fbWarm = new List<int>();
 
-        // Range caps and the on-screen size below which a target is cheaper (and
+        // Range caps and the on-screen size below which a person is cheaper (and
         // visually identical) as a ramp blob than as thousands of filled mesh
         // triangles. Routing small/distant targets to the blob path is the second
         // half of the lag fix, and it lets far enemies still show as a heat mark
         // without paying for their full mesh every frame.
         const float VehRange = 900f;
         const float PplRange = 600f;
-        const float VehMinPx = 30f;
         const float PplMinPx = 22f;
 
         // Draws every warm target for the given mode. THERMAL colours the fill
@@ -547,8 +551,9 @@ namespace NextDayRevival
                     if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
                         px = Mathf.Abs(ge.x - g.x);
                     px = Mathf.Clamp(px, 16f, 320f);
-                    // No mesh, too small on screen, or budget spent: cheap ramp blob.
-                    if (s == null || !s.Any || px < VehMinPx || budget <= 0) { _fbVeh.Add(i); continue; }
+                    // Keep the actual vehicle shape at range, including when zoomed out.
+                    // Only missing geometry or an exhausted budget needs a fallback.
+                    if (s == null || !s.Any || budget <= 0) { _fbVeh.Add(i); continue; }
                     Vector2 centre = ScreenGL(g);        // GL y-up centre
 
                     for (int p = 0; p < s.rigid.Count && budget > 0; p++)
@@ -922,7 +927,53 @@ namespace NextDayRevival
                 }
             }
             catch { }
+            // Skinned vehicle parts are not exposed through MeshFilters.
+            // Skin into the vehicle root's local space at the refresh tick. Using
+            // bone matrices explicitly avoids BakeMesh scale differences between
+            // Unity versions; the live root transform still follows vehicle motion.
+            SkinnedMeshRenderer[] skins = root.GetComponentsInChildren<SkinnedMeshRenderer>();
+            for (int i = 0; i < skins.Length; i++)
+            {
+                SkinnedMeshRenderer skin = skins[i];
+                if (skin == null || !skin.enabled || skin.sharedMesh == null) continue;
+                try
+                {
+                    Mesh mesh = skin.sharedMesh;
+                    MeshData d = Cache(mesh);
+                    if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
+                    Transform[] bones = skin.bones;
+                    Matrix4x4[] bind = mesh.bindposes;
+                    BoneWeight[] weights = mesh.boneWeights;
+                    if (weights.Length != d.v.Length || bones.Length != bind.Length) continue;
+                    Matrix4x4[] pose = new Matrix4x4[bones.Length];
+                    Matrix4x4 worldToRoot = root.worldToLocalMatrix;
+                    bool valid = bones.Length > 0;
+                    for (int b = 0; b < bones.Length; b++)
+                    {
+                        if (bones[b] == null) { valid = false; break; }
+                        pose[b] = worldToRoot * bones[b].localToWorldMatrix * bind[b];
+                    }
+                    if (!valid) continue;
+                    Vector3[] verts = new Vector3[d.v.Length];
+                    for (int v = 0; v < verts.Length; v++)
+                        verts[v] = SkinVertex(d.v[v], weights[v], pose);
+                    RigidPart part = new RigidPart();
+                    part.v = verts; part.t = d.t; part.tr = root;
+                    s.rigid.Add(part);
+                }
+                catch { } // One unreadable renderer must not hide the other parts.
+            }
             return s;
+        }
+
+        static Vector3 SkinVertex(Vector3 vertex, BoneWeight weight, Matrix4x4[] pose)
+        {
+            Vector3 result = Vector3.zero;
+            if (weight.weight0 > 0f) result += pose[weight.boneIndex0].MultiplyPoint3x4(vertex) * weight.weight0;
+            if (weight.weight1 > 0f) result += pose[weight.boneIndex1].MultiplyPoint3x4(vertex) * weight.weight1;
+            if (weight.weight2 > 0f) result += pose[weight.boneIndex2].MultiplyPoint3x4(vertex) * weight.weight2;
+            if (weight.weight3 > 0f) result += pose[weight.boneIndex3].MultiplyPoint3x4(vertex) * weight.weight3;
+            return result;
         }
 
         // A person: bake each SkinnedMeshRenderer to a world-space snapshot at the

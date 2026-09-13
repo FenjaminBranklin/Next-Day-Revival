@@ -19,6 +19,18 @@ namespace NextDayRevival
         internal object TacticalPoints;
     }
 
+    // Network messages can arrive between Awake and the completed remote setup.
+    public sealed class CrewReplica : MonoBehaviour
+    {
+        internal GameObject Root;
+        internal bool Ready;
+        internal bool Initializing;
+        internal bool QueueOverflow;
+        internal readonly List<MethodInfo> Methods = new List<MethodInfo>();
+        internal readonly List<object[]> Arguments = new List<object[]>();
+        void OnDestroy() { if (Root != null) UnityEngine.Object.Destroy(Root); }
+    }
+
     // ------------------------------------------------- the crew of a patrol
 
     /// <summary>
@@ -85,7 +97,7 @@ namespace NextDayRevival
     /// returns - after it has read the weapon id out of element 2, but BEFORE
     /// it applies element 1, the appearance. An unregistered PhotonView
     /// (viewID 0) gives a clean lookup miss and no id collision, while the
-    /// remote Start postfix below supplies the missing visual half.
+    /// remote Start postfix reconstructs the required native settlement context.
     ///
     /// UNTESTED. Every line of this is read IL. Nothing here has run.
     /// </summary>
@@ -275,6 +287,21 @@ namespace NextDayRevival
                 if (walkPoints == null) throw new MissingMethodException("NPC_AI2.SetTemporaryWalkPoints");
                 harmony.Patch(walkPoints, new HarmonyMethod(typeof(Crew).GetMethod(
                     "SectorWalkPointsPrefix")), null, null, null, null);
+                MethodInfo instantiate = AccessTools.Method(
+                    RevivalPlugin.TypeByName("PhotonNetwork"), "InstantiateSceneObject",
+                    new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion),
+                        typeof(int), typeof(object[]) }, null);
+                if (instantiate == null) throw new MissingMethodException("PhotonNetwork.InstantiateSceneObject");
+                harmony.Patch(instantiate, new HarmonyMethod(typeof(Crew).GetMethod(
+                    "CrewInstantiatePrefix")), null, null, null, null);
+                foreach (string method in new string[] { "SetStateWithAnimAndSync",
+                    "NetworkSendPointsStatesData", "SetHealthValue", "DeathAction" })
+                {
+                    MethodInfo receive = AccessTools.Method(npc, method, null, null);
+                    if (receive == null) throw new MissingMethodException("NPC_AI2." + method);
+                    harmony.Patch(receive, new HarmonyMethod(typeof(Crew).GetMethod(
+                        "RemoteMessagePrefix")), null, null, null, null);
+                }
                 RevivalPlugin.L.LogInfo("Crew: remote NPC appearance and animation "
                     + "repair hooks installed.");
             }
@@ -366,6 +393,7 @@ namespace NextDayRevival
 
                 if (isMine) return;            // the rest only repairs a remote puppet
                 if (appearance == null) return;
+                Replica(ai);
                 CrewRemoteFix fix = ai.gameObject.GetComponent<CrewRemoteFix>();
                 if (fix == null) fix = ai.gameObject.AddComponent<CrewRemoteFix>();
                 fix.Begin(ai, appearance, weapon);
@@ -438,6 +466,184 @@ namespace NextDayRevival
             catch { return false; }
         }
 
+        const string ReplicaSchema = "ndr-crew-1";
+        static Component _spawningSettlement;
+        static string _spawningFraction;
+        static Transform _spawningCar;
+        static int _spawningCount;
+
+        // Append the owner's construction data to the cached Photon spawn.
+        // The first five vanilla entries stay byte-for-byte compatible.
+        public static void CrewInstantiatePrefix(object[] __args)
+        {
+            if (_spawningSettlement == null || __args == null || __args.Length != 5) return;
+            object[] data = __args[4] as object[];
+            if (data == null || data.Length != 5 || Convert.ToInt32(data[0]) != 0) return;
+            int index = Convert.ToInt32(data[4]);
+            Array points = (Array)AccessTools.Field(_spawningSettlement.GetType(), "_npcSpawnPoints")
+                .GetValue(_spawningSettlement);
+            Component spawn = (Component)points.GetValue(index);
+            object walkObj = AccessTools.Field(_spawningSettlement.GetType(), "_walkPoints")
+                .GetValue(_spawningSettlement);
+            IEnumerable walkEnumerable = walkObj as IEnumerable;
+            if (walkEnumerable == null) return;
+            List<float> coordinates = new List<float>();
+            foreach (object entry in walkEnumerable)
+            {
+                Component wp = entry as Component;
+                if (wp == null) continue;
+                int kind = (int)GetNumber(wp, "Type");
+                if (_spawningCount > 8 && kind == 5) continue;
+                Vector3 pos = wp.transform.position;
+                coordinates.Add(kind); coordinates.Add(pos.x);
+                coordinates.Add(pos.y); coordinates.Add(pos.z);
+            }
+            if (_spawningCount > 8)
+                for (int k = 0; k < 2; k++)
+                {
+                    Vector3 offset = SquadOffset(index, _spawningCount, true);
+                    offset.z += k == 0 ? -1.5f : 1.5f;
+                    Vector3 pos = CrewGround(_spawningCar.TransformPoint(offset));
+                    coordinates.Add(5); coordinates.Add(pos.x);
+                    coordinates.Add(pos.y); coordinates.Add(pos.z);
+                }
+            object[] extended = new object[10];
+            Array.Copy(data, extended, 5);
+            extended[5] = ReplicaSchema;
+            extended[6] = (int)GetNumber(spawn, "Health");
+            extended[7] = (int)GetNumber(spawn, "Level");
+            extended[8] = _spawningFraction;
+            extended[9] = coordinates.ToArray();
+            __args[4] = extended;
+        }
+
+        static CrewReplica Replica(Component ai)
+        {
+            CrewReplica replica = ai.GetComponent<CrewReplica>();
+            return replica == null ? ai.gameObject.AddComponent<CrewReplica>() : replica;
+        }
+
+        public static bool RemoteMessagePrefix(object __instance, MethodBase __originalMethod,
+                                               object[] __args)
+        {
+            Component ai = __instance as Component;
+            object[] data; bool mine;
+            if (ai == null || !SpawnData(ai, out data, out mine) || mine) return true;
+            CrewReplica replica = Replica(ai);
+            if (replica.Ready || replica.Initializing) return true;
+            // Preserve order, including an early death after health/state.
+            // Do not silently discard gameplay state on queue overflow.
+            if (replica.Methods.Count >= 128)
+            {
+                if (!replica.QueueOverflow)
+                    RevivalPlugin.L.LogError("Crew: remote initialization message queue exceeded 128 for " + ai.name);
+                replica.QueueOverflow = true;
+                return false;
+            }
+            replica.Methods.Add((MethodInfo)__originalMethod);
+            replica.Arguments.Add((object[])__args.Clone());
+            return false;
+        }
+
+        static void SetArray(object target, string field, Component value)
+        {
+            FieldInfo f = AccessTools.Field(target.GetType(), field);
+            if (f == null) throw new MissingFieldException(target.GetType().Name, field);
+            if (f.FieldType.IsArray)
+            {
+                Array array = Array.CreateInstance(f.FieldType.GetElementType(), 1);
+                array.SetValue(value, 0);
+                f.SetValue(target, array);
+                return;
+            }
+            IList list = Activator.CreateInstance(f.FieldType) as IList;
+            if (list == null) throw new InvalidOperationException(field + " is not a collection");
+            list.Add(value);
+            f.SetValue(target, list);
+        }
+
+        static void SetCollection(object target, string field, Array values)
+        {
+            FieldInfo f = AccessTools.Field(target.GetType(), field);
+            if (f == null) throw new MissingFieldException(target.GetType().Name, field);
+            if (f.FieldType.IsArray)
+            {
+                f.SetValue(target, values);
+                return;
+            }
+            IList list = Activator.CreateInstance(f.FieldType) as IList;
+            if (list == null) throw new InvalidOperationException(field + " is not a collection");
+            for (int i = 0; i < values.Length; i++) list.Add(values.GetValue(i));
+            f.SetValue(target, list);
+        }
+
+        static void InitializeRemote(Component ai, CrewReplica replica, object[] data)
+        {
+            if (data.Length != 10 || !ReplicaSchema.Equals(data[5]))
+                throw new InvalidOperationException("Owner did not send crew initialization data; both players need the updated launcher release");
+            float[] coordinates = data[9] as float[];
+            if (coordinates == null || coordinates.Length < 8 || coordinates.Length > 512
+                || coordinates.Length % 4 != 0) throw new InvalidOperationException("Invalid crew waypoints");
+            if (replica.Root != null) UnityEngine.Object.Destroy(replica.Root);
+            // This is local context for a Photon-owned NPC, not another spawner.
+            // Inactive before AddComponent: no Start/Update or master spawning.
+            GameObject root = new GameObject("NDR_RemoteCrewContext");
+            root.SetActive(false);
+            replica.Root = root;
+            root.transform.position = ai.transform.position;
+            Type settlementType = RevivalPlugin.TypeByName("NPC_Settlement");
+            Type spawnType = RevivalPlugin.TypeByName("NPC_SpawnPoint");
+            Type pointType = RevivalPlugin.TypeByName("NPC_WP");
+            root.AddComponent(RevivalPlugin.TypeByName("PhotonView"));
+            Component settlement = root.AddComponent(settlementType);
+            Listen(settlement, 0);
+            Abschreiben(settlement, VorlageSiedlung(settlementType, root));
+            GameObject spawnGo = new GameObject("Spawn");
+            spawnGo.transform.SetParent(root.transform, false);
+            Component spawn = spawnGo.AddComponent(spawnType);
+            Listen(spawn, 0);
+            Abschreiben(spawn, VorlagePunkt(spawnType));
+            Punkt(spawn, false, Convert.ToInt32(data[2]), null);
+            SetNumber(spawn, "Health", Convert.ToInt32(data[6]));
+            SetNumber(spawn, "Level", Convert.ToInt32(data[7]));
+            Siedlung(settlement, root.transform, root.transform, (string)data[8]);
+            SetArray(settlement, "NpcAI", ai);
+            SetArray(settlement, "_npcSpawnPoints", spawn);
+            Array walks = Array.CreateInstance(pointType, coordinates.Length / 4);
+            for (int i = 0; i < walks.Length; i++)
+            {
+                GameObject wp = new GameObject("Point" + i);
+                wp.transform.SetParent(root.transform, false);
+                wp.transform.position = new Vector3(coordinates[i * 4 + 1],
+                    coordinates[i * 4 + 2], coordinates[i * 4 + 3]);
+                Component point = wp.AddComponent(pointType);
+                SetNumber(point, "Type", coordinates[i * 4]);
+                walks.SetValue(point, i);
+            }
+            SetCollection(settlement, "_walkPoints", walks);
+            // Listen created empty caches; native getters populate null caches.
+            Set(settlement, "PatrolPoints", null);
+            Set(settlement, "TacticalPoints", null);
+            Set(ai, "MySettlement", settlement);
+            SetNumber(ai, "_myIndexInSettlement", 0);
+            AccessTools.Method(settlementType, "SetNpcParams", null, null)
+                .Invoke(settlement, new object[] { true });
+            // The same native setup the owner runs: spawn point, loot,
+            // customization, level, collision and IsInitialized, in that order.
+            Invoke(settlement, "InitSetupNpc");
+            AccessTools.Method(ai.GetType(), "SetMainWeaponId", null, null)
+                .Invoke(ai, new object[] { Convert.ToInt32(data[2]), true });
+            AccessTools.Method(ai.GetType(), "SetIsSafeSettlement", null, null)
+                .Invoke(ai, new object[] { false });
+            Set(ai, "IsPlayVisualizationEnabled", false);
+            AccessTools.Method(ai.GetType(), "SetPlayVisualizationValue", null, null)
+                .Invoke(ai, new object[] { true });
+            AccessTools.Method(ai.GetType(), "SetActiveAI", null, null)
+                .Invoke(ai, new object[] { true });
+            if (!Bool(ai, "IsInitialized") || !Bool(ai, "EnabledAI"))
+                throw new InvalidOperationException("Native crew setup did not initialize the NPC");
+        }
+
         internal static bool ApplyRemoteAppearance(Component ai, int[] appearance,
                                                    int weapon, out string problem)
         {
@@ -445,34 +651,27 @@ namespace NextDayRevival
             if (ai == null) { problem = "NPC component disappeared"; return false; }
             try
             {
-                MethodInfo customize = AccessTools.Method(ai.GetType(),
-                    "SetCustomization", new Type[] { typeof(int[]) }, null);
-                MethodInfo arm = AccessTools.Method(ai.GetType(), "SetMainWeaponId",
-                    new Type[] { typeof(int), typeof(bool) }, null);
-                MethodInfo visualize = AccessTools.Method(ai.GetType(),
-                    "SetPlayVisualizationValue", new Type[] { typeof(bool) }, null);
-                if (customize == null || arm == null)
+                object[] data; bool mine;
+                if (!SpawnData(ai, out data, out mine) || mine)
+                { problem = "NPC is no longer a remote crew member"; return false; }
+                CrewReplica replica = Replica(ai);
+                if (!replica.Ready)
                 {
-                    problem = "customization or weapon method missing";
-                    return false;
+                    replica.Initializing = true;
+                    try { InitializeRemote(ai, replica, data); }
+                    finally { replica.Initializing = false; }
+                    replica.Ready = true;
                 }
-                customize.Invoke(ai, new object[] { appearance });
-                arm.Invoke(ai, new object[] { weapon, false });
-                if (visualize != null) visualize.Invoke(ai, new object[] { true });
-
-                FieldInfo animationField = AccessTools.Field(ai.GetType(), "Anim");
-                Component animation = animationField == null ? null
-                    : animationField.GetValue(ai) as Component;
-                if (animation == null)
+                while (replica.Methods.Count > 0)
                 {
-                    problem = "animation component not ready";
-                    return false;
+                    replica.Methods[0].Invoke(ai, replica.Arguments[0]);
+                    replica.Methods.RemoveAt(0); replica.Arguments.RemoveAt(0);
                 }
-                PropertyInfo enabled = AccessTools.Property(animation.GetType(), "enabled");
-                if (enabled != null) enabled.SetValue(animation, true, null);
-                MethodInfo play = AccessTools.Method(animation.GetType(), "Play",
-                                                      Type.EmptyTypes, null);
-                if (play != null) play.Invoke(animation, null);
+                if (replica.QueueOverflow)
+                    throw new InvalidOperationException("Crew state messages lost during initialization; reconnect required");
+                RevivalPlugin.L.LogInfo("Crew: remote native initialization complete for "
+                    + ai.name + "; initialized=" + Bool(ai, "IsInitialized")
+                    + ", enabled=" + Bool(ai, "EnabledAI") + ", state=" + GetNumber(ai, "MainState") + ".");
                 return true;
             }
             catch (Exception ex)
@@ -626,7 +825,12 @@ namespace NextDayRevival
 
                 // The game's own entry point. On the master client it runs
                 // InitSpawnNpc and InitSetupNpc, and those two build the men.
-                Invoke(sied, "StartMainInit");
+                _spawningSettlement = sied;
+                _spawningFraction = fraktion;
+                _spawningCar = car.transform;
+                _spawningCount = count;
+                try { Invoke(sied, "StartMainInit"); }
+                finally { _spawningSettlement = null; _spawningCar = null; }
                 _appearance.Clear();
                 Set(sied, "AllInitializationDone", true);
                 if (count > 8) AssignSectors(sied, wege.transform, car.transform, count, wType);
@@ -1690,8 +1894,7 @@ namespace NextDayRevival
             if (Crew.ApplyRemoteAppearance(_ai, _appearance, _weapon,
                                            out _problem))
             {
-                RevivalPlugin.L.LogInfo("Crew: remote uniform, MG42 and animation "
-                    + "restored.");
+                RevivalPlugin.L.LogInfo("Crew: remote native context ready.");
                 UnityEngine.Object.Destroy(this);
                 return;
             }

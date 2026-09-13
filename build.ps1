@@ -69,6 +69,8 @@ $refs = @(
     (Join-Path $core "0Harmony.dll"),
     (Join-Path $managed "UnityEngine.dll"),
     (Join-Path $managed "UnityEngine.CoreModule.dll"),
+    (Join-Path $managed "UnityEngine.PhysicsModule.dll"),
+    (Join-Path $managed "UnityEngine.AIModule.dll"),
     (Join-Path $managed "UnityEngine.ImageConversionModule.dll"),
     (Join-Path $managed "UnityEngine.IMGUIModule.dll"),
     # AudioModule: die Drohne rechnet ihr Surren zur Laufzeit aus (AudioClip.Create)

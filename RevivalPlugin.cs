@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.14.1";
+        public const string VERSION = "6.15.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -439,6 +439,7 @@ namespace NextDayRevival
             L.LogInfo("Asset-Verzeichnis: " + AssetDir);
 
             BindConfig();
+            MapUnblock.Install(gameObject, Config);
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
