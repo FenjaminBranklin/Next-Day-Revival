@@ -351,9 +351,14 @@ namespace NextDayRevival
         /// game's own seven-value appearance result. This runs before the result
         /// is placed in Photon instantiation data, so the existing remote repair
         /// path receives the same complete uniform.</summary>
-        public static void CustomAppearancePostfix(object __0, ref int[] __result)
+        public static void CustomAppearancePostfix(object __1, ref int[] __result)
         {
-            Component spawn = __0 as Component;
+            // InitSpawnNpc calls both appearance builders as
+            // (settlement, spawnPoint, customizationData). Harmony's __0 is
+            // therefore the settlement; the spawn point whose instance id was
+            // registered below is __1. Using __0 left every editor uniform
+            // overlay unmatched and let a preset with an empty HeadId win.
+            Component spawn = __1 as Component;
             if (spawn == null || __result == null || __result.Length < 7) return;
             int[] selected;
             int id = spawn.GetInstanceID();
@@ -373,7 +378,12 @@ namespace NextDayRevival
         static void RegisterAppearance(Component spawn,
                                        RevivalComposition.CrewMan spec)
         {
-            if (spawn == null || spec == null) return;
+            if (spawn == null) return;
+            // The military preset's head id is not valid on the Marauder body.
+            // Apply the known bare head even for the legacy config path where
+            // no editor composition was supplied.
+            SetNumber(spawn, "HeadId", 100);
+            if (spec == null) return;
             // CustomizationData order, confirmed in
             // NPC_Settlement.GenerateCustomizationDefault:
             // head/face, body, hands, legs, headwear, mask, backpack.
@@ -384,8 +394,13 @@ namespace NextDayRevival
             // PlayerInventoryManager.isCanCombineHeadGears(mask, headwear)
             // allows it - so a helmet like the UKB one silently vanished.
             int mask = spec.Mask > 0 ? spec.Mask : (spec.Headwear > 0 ? NoItem : 0);
+            // The headwear/mask slots still overlay the editor loadout below.
+            if (spec.Headwear > 0)
+                SetNumber(spawn, "HeadHatsAndSpecial", spec.Headwear);
+            if (spec.Headwear > 0 || spec.Mask > 0)
+                SetNumber(spawn, "HeadMasks", spec.Mask > 0 ? spec.Mask : 0);
             _appearance[spawn.GetInstanceID()] = new int[] {
-                -1, spec.Body, spec.Hands, spec.Legs,
+                100, spec.Body, spec.Hands, spec.Legs,
                 spec.Headwear, mask, -1 };
         }
 
@@ -888,6 +903,7 @@ namespace NextDayRevival
                 try { Invoke(sied, "StartMainInit"); }
                 finally { _spawningSettlement = null; _spawningCar = null; }
                 _appearance.Clear();
+                ArmNativeWeapons(sied);
                 Set(sied, "AllInitializationDone", true);
                 if (count > 8) AssignSectors(sied, wege.transform, car.transform, count, wType);
                 Absichern(sied);
@@ -912,6 +928,47 @@ namespace NextDayRevival
                 if (settlement != null) UnityEngine.Object.Destroy(settlement);
                 return null;
             }
+        }
+
+        /// <summary>InitSpawnNpc deliberately passes show=false for an
+        /// Aggressive spawn. That fills the weapon id but leaves the manager's
+        /// current slot at -1, so a later EquipWeapon call has nothing to show.
+        /// Re-enter the game's own setter after the complete settlement exists;
+        /// its true flag fills slot 0 and starts NetworkShowWeapon for the real
+        /// item prefab (including our Resources.Load hook).</summary>
+        static void ArmNativeWeapons(Component settlement)
+        {
+            Array npcs = GetNpcArray(settlement);
+            if (npcs == null) return;
+            int requested = 0;
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai == null) continue;
+                int weapon = (int)GetNumber(ai, "_mainWeaponId");
+                if (weapon <= 0) weapon = (int)GetNumber(ai, "_weaponId");
+                MethodInfo setter = AccessTools.Method(ai.GetType(),
+                    "SetMainWeaponId", new Type[] { typeof(int), typeof(bool) }, null);
+                if (setter == null || weapon <= 0)
+                {
+                    RevivalPlugin.L.LogWarning("Crew: NPC " + i
+                        + " has no native main weapon setter or id.");
+                    continue;
+                }
+                try
+                {
+                    setter.Invoke(ai, new object[] { weapon, true });
+                    requested++;
+                }
+                catch (Exception ex)
+                {
+                    Exception cause = ex.InnerException == null ? ex : ex.InnerException;
+                    RevivalPlugin.L.LogWarning("Crew: NPC " + i
+                        + " weapon draw failed - " + cause.Message);
+                }
+            }
+            RevivalPlugin.L.LogInfo("Crew: requested visible native weapons for "
+                + requested + "/" + npcs.Length + " NPC(s).");
         }
 
         static Vector3 SquadOffset(int index, int count, bool tactical)
