@@ -45,8 +45,9 @@ namespace NextDayRevival
     //   so the hit is decided by our own raycast and applied through
     //   NPC_AI2.ApplyDamage - the road the patrol guns already use
     //   (Revival.Patrol.cs, Gun.Schaden). An empty magazine starts the native
-    //   reload (NPC_AI2.OnBulletsEnded). Only when a weapon controller cannot
-    //   fire does the old tracer-and-sound shot stand in.
+    //   reload (NPC_AI2.OnBulletsEnded). EquipWeapon(true, false) draws the
+    //   weapon first. No ready native weapon means no shot, effect or damage.
+    //   LAW rounds retain CrewLaw's blast instead of an extra infantry hit.
     //
     // WHY 6.16.1 LOOKED LIKE MUZZLE FLASHES FROM STATUES IN A HUDDLE.
     //   Four causes, all read out of the installed assembly, not guessed:
@@ -59,14 +60,15 @@ namespace NextDayRevival
     //     _targetVehicleManager from it), so a squad fighting NPCs can never
     //     have one - the IK stayed off and the rifle pointed wherever the
     //     animation put it. The mod now drives the IK itself: it activates the
-    //     object, holds IKPositionWeight at 1 and moves LookAtIKTarget, which
+    //     object, ramps IKPositionWeight and moves LookAtIKTarget, which
     //     SetupLookAtIk wires as the solver target with the chest-to-hand
     //     chain. That is also what makes a man on a tower reachable at all,
     //     because the IK is the only thing that aims in ELEVATION.
     //   2 THE MEN WERE STUCK IN THE FIRING CLIP. GetAnimationNameNormalPose
-    //     maps AdditionalState 1 to "idle_aiming" / "walk_aiming" and 3 to
-    //     "shoot_auto"; the crouch table has "crouch_idle_aiming" and
-    //     "crouch_shoot". 6.16.1 held state 3 permanently, so every man played
+    //     maps AdditionalState 1 to "idle_aiming" and 3 to the weapon's
+    //     shooting overlay. The prefab lacks walk/crouch aiming clips, and
+    //     vanilla clears aiming while moving. 6.16.1 held state 3 permanently,
+    //     so every man played
     //     the shooting loop and never the aim. State 3 is now only the short
     //     window around a burst; between bursts the man holds state 1.
     //   3 THE VANILLA KEPT TAKING THEM BACK. On the tactical task with no
@@ -280,6 +282,11 @@ namespace NextDayRevival
             public Component Ik;
             public Transform Look;
             public bool IkMissing, IkDriven;
+            public Component Wm;
+            public object Anim;
+            public bool Armed, EquipWarned;
+            public float NextEquip, AimWeight;
+            public int EquipTries;
             public float AimHeight = ChestHeight;  // the part of the target he can see
             public float MoveDeadline;             // give up on an order that hangs
         }
@@ -323,6 +330,11 @@ namespace NextDayRevival
         static FieldInfo _fUseTemp, _fTempTaskField, _fWeapon, _fAimingPoint, _fRofDelay;
         static FieldInfo _fAimIk, _fLookTarget, _fSpecs, _fSolver, _fIkWeight;
         static FieldInfo _fHealth, _fHealthMax;
+        static FieldInfo _fWeaponsManager, _fWeaponCategory, _fWeaponSlot, _fWeaponItem;
+        static MethodInfo _mEquipWeapon;
+        static FieldInfo _fAnim;
+        static PropertyInfo _pAnimItem, _pAnimEnabled, _pAnimLayer, _pAnimWeight;
+        static MethodInfo _mAnimPlaying;
         static MethodInfo _mIsAlive, _mTempTask, _mTargetWp, _mStateSync, _mAlarm;
         static MethodInfo _mPhotonView, _mIsMine, _mMasterGetter, _mDestroy;
         static MethodInfo _mBulletsEnded, _mStartRotation, _mClearIntentions, _mPauseTime;
@@ -363,6 +375,32 @@ namespace NextDayRevival
             _fAimIk = AccessTools.Field(_npcType, "_aimIk");
             _fLookTarget = AccessTools.Field(_npcType, "LookAtIKTarget");
             _fSpecs = AccessTools.Field(_npcType, "Specifications");
+            _fWeaponsManager = AccessTools.Field(_npcType, "_weaponsManager");
+            Type manager = RevivalPlugin.TypeByName("NPC_WeaponsManager");
+            if (manager != null)
+            {
+                _fWeaponCategory = AccessTools.Field(manager, "WeaponCategoryEquiped");
+                _fWeaponSlot = AccessTools.Field(manager, "_currentWeaponSlotId");
+                _fWeaponItem = AccessTools.Field(manager, "_currentWeaponItemId");
+            }
+            _mEquipWeapon = AccessTools.Method(_npcType, "EquipWeapon",
+                new Type[] { typeof(bool), typeof(bool) }, null);
+            // Animation lives in a game module not referenced by this plugin.
+            _fAnim = AccessTools.Field(_npcType, "Anim");
+            if (_fAnim != null)
+            {
+                Type anim = _fAnim.FieldType;
+                _pAnimItem = anim.GetProperty("Item", new Type[] { typeof(string) });
+                _mAnimPlaying = AccessTools.Method(anim, "IsPlaying",
+                    new Type[] { typeof(string) }, null);
+                if (_pAnimItem != null)
+                {
+                    Type state = _pAnimItem.PropertyType;
+                    _pAnimEnabled = state.GetProperty("enabled");
+                    _pAnimLayer = state.GetProperty("layer");
+                    _pAnimWeight = state.GetProperty("weight");
+                }
+            }
 
             _mIsAlive = AccessTools.Method(_npcType, "IsAlive", null, null);
             _mTempTask = AccessTools.Method(_npcType, "SetTemporaryTask", null, null);
@@ -416,7 +454,9 @@ namespace NextDayRevival
             if (_mFireTo == null || _mHasBullets == null || _fRofDelay == null
                 || _fMainState == null || _fAddState == null)
                 RevivalPlugin.L.LogWarning("NpcWar: native weapon or aim members missing - "
-                    + "NPC-vs-NPC shots fall back to tracer and sound.");
+                    + "NPC-vs-NPC fire is disabled until a native weapon is ready.");
+            if (_mEquipWeapon == null || _fWeaponCategory == null)
+                RevivalPlugin.L.LogWarning("NpcWar: native equip members missing - men cannot draw weapons.");
             if (_fAimIk == null || _fLookTarget == null)
                 RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2._aimIk or LookAtIKTarget missing - "
                     + "the men will fire without pointing the weapon at the target.");
@@ -577,7 +617,11 @@ namespace NextDayRevival
                     _defenders.RemoveAt(i);
                     continue;
                 }
-                if (HasKillTarget(d)) { d.IkDriven = false; continue; }   // a player: the game's fight
+                if (HasKillTarget(d))
+                {
+                    if (d.IkDriven) ReleaseAim(d);
+                    continue;   // a player: the game's fight
+                }
                 try { RunDefender(d, now); }
                 catch (Exception ex)
                 {
@@ -659,7 +703,12 @@ namespace NextDayRevival
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
                 // A player in his sights: the game's own combat runs him.
-                if (HasKillTarget(f)) { f.HasOrder = false; f.IkDriven = false; continue; }
+                if (HasKillTarget(f))
+                {
+                    f.HasOrder = false;
+                    if (f.IkDriven) ReleaseAim(f);
+                    continue;
+                }
                 ManStep(f, s, along, now);
             }
         }
@@ -753,6 +802,7 @@ namespace NextDayRevival
         /// from where he stands or go somewhere better.</summary>
         static void ManStep(Fighter f, Squad s, Vector3 along, float now)
         {
+            EnsureArmed(f, now);
             Decay(f, now);
             if (now >= f.Jitter) DrawPlace(f);
 
@@ -893,6 +943,7 @@ namespace NextDayRevival
         /// where he was attacked and may go to ground for it.</summary>
         static void RunDefender(Fighter d, float now)
         {
+            EnsureArmed(d, now);
             Decay(d, now);
             Acquire(d, now);
             if (d.Target == null || now - d.LastSeen > 8f)
@@ -948,27 +999,26 @@ namespace NextDayRevival
             Go(f, spot, state, PoseStand, now, Stance.March);
         }
 
-        /// <summary>A bound forward with the weapon up: MainState Walk plus
-        /// AdditionalState Aiming is the game's own "walk_aiming" clip.</summary>
+        /// <summary>A bound forward. Vanilla clears aiming while moving;
+        /// this prefab has no walk_aiming clip.</summary>
         static void Advance(Fighter f, Vector3 spot, float now)
         {
             f.Stance = Stance.Advance;
             f.InCover = false;
             f.Crouched = false;
-            f.IkDriven = false;
+            ReleaseAim(f);
             float away = Flat(f.Tr.position - spot);
             int state = away > 55f ? MainRun : MainWalk;
             if (now < f.NextMove || Reloading(f))
             {
-                // Keep the weapon up between orders; a run has no aiming clip.
-                if (state == MainWalk) Drive(f, MainWalk, AddAim, PoseStand, now, false);
+                if (state == MainWalk) Drive(f, MainWalk, AddNone, PoseStand, now, false);
                 return;
             }
             f.NextMove = now + (1.1f + UnityEngine.Random.value * 0.7f) * f.Pace;
             float slack = Mathf.Max(6f, CfgSpacing.Value * 0.4f);
             if (f.HasOrder && f.Stance == Stance.Advance && Flat(spot - f.Ordered) < slack
                 && IntField(f.Ai, _fMainState, -1) == state && StillOurPoint(f)) return;
-            OrderMove(f, spot, state, state == MainWalk ? AddAim : AddNone, PoseStand);
+            OrderMove(f, spot, state, AddNone, PoseStand);
         }
 
         /// <summary>His place in the body right now.</summary>
@@ -981,6 +1031,76 @@ namespace NextDayRevival
         }
 
         // ------------------------------------------------------- fight in place
+
+        static bool ReadArmed(Fighter f)
+        {
+            try
+            {
+                if (f.Ai == null || !f.Ai.gameObject.activeInHierarchy) return false;
+                if (f.Wm == null && _fWeaponsManager != null)
+                    f.Wm = _fWeaponsManager.GetValue(f.Ai) as Component;
+                if (IntField(f.Wm, _fWeaponCategory, 0) == 0) return false;
+                Component weapon = WeaponOf(f);
+                return weapon != null && _mCantWork != null
+                    && !(bool)_mCantWork.Invoke(weapon, null);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Draw through the native RPC, then wait for its coroutine.
+        /// A slot is claimed before the model exists: never treat it as ready.
+        /// Retry a failed show after three seconds; a stale slot needs a hide
+        /// on a separate frame before showing again. No permanent give-up.</summary>
+        static void EnsureArmed(Fighter f, float now)
+        {
+            bool wasArmed = f.Armed;
+            f.Armed = ReadArmed(f);
+            if (f.Armed)
+            {
+                if (!wasArmed)
+                {
+                    f.HasOrder = false;
+                    f.NextState = 0f;
+                    if (CfgDebug.Value)
+                        RevivalPlugin.L.LogInfo("NpcWar: weapon ready on " + f.Ai.name
+                            + " item " + IntField(f.Wm, _fWeaponItem, -1));
+                }
+                f.EquipTries = 0;
+                f.NextEquip = 0f;
+                f.EquipWarned = false;
+                return;
+            }
+            ReleaseAim(f);
+            if (_mEquipWeapon == null || f.Ai == null || !Alive(f.Ai)
+                || !f.Ai.gameObject.activeInHierarchy || !IsMine(f.Ai)
+                || HasKillTarget(f) || Reloading(f) || now < f.NextEquip) return;
+            f.NextEquip = now + (f.EquipTries >= 4 ? 10f : 3f);
+            try
+            {
+                // Only repair a poisoned slot after an earlier show timed out.
+                bool hide = f.EquipTries > 0 && IntField(f.Wm, _fWeaponSlot, -1) == 0;
+                _mEquipWeapon.Invoke(f.Ai, new object[] { !hide, false });
+                f.EquipTries++;
+                if (hide) f.NextEquip = now + 0.5f;
+                f.HasOrder = false;
+                f.NextState = 0f;
+            }
+            catch (Exception ex)
+            {
+                f.EquipTries++;
+                if (CfgDebug.Value && !f.EquipWarned)
+                    RevivalPlugin.L.LogWarning("NpcWar: equip failed - "
+                        + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+            }
+            if (f.EquipTries >= 4 && !f.EquipWarned)
+            {
+                f.EquipWarned = true;
+                RevivalPlugin.L.LogWarning("NpcWar: weapon not ready on " + f.Ai.name
+                    + " (slot " + IntField(f.Wm, _fWeaponSlot, -1)
+                    + ", category " + IntField(f.Wm, _fWeaponCategory, 0)
+                    + "); holding fire and retrying.");
+            }
+        }
 
         /// <summary>Hold this position, aim, and fire when there is something to
         /// fire at. Cover and suppression decide the pose and the pauses.</summary>
@@ -1000,7 +1120,7 @@ namespace NextDayRevival
             if (Reloading(f))
             {
                 f.Stance = Stance.Down;
-                f.IkDriven = false;
+                ReleaseAim(f);
                 Face(f);
                 return;
             }
@@ -1012,14 +1132,24 @@ namespace NextDayRevival
                 && UnityEngine.Random.value < 0.35f * f.Suppression / f.Nerve)
                 f.DuckUntil = now + UnityEngine.Random.Range(0.8f, 2.4f) / f.Nerve;
             bool ducked = now < f.DuckUntil;
+            // The prefab has no crouch aiming/shooting clips. Duck while
+            // suppressed, then stand before aiming instead of bending the chest.
+            crouch = crouch && ducked;
             f.Stance = ducked ? Stance.Down : Stance.Fire;
             f.Crouched = crouch;
 
-            Aim(f, now);
+            if (!f.Armed)
+            {
+                ReleaseAim(f);
+                Face(f);
+                Drive(f, MainIdle, AddNone, PoseStand, now, true);
+                return;
+            }
             int add = now < f.BurstUntil ? AddFire : AddAim;
             Drive(f, MainIdle, add, crouch ? PoseCrouch : PoseStand, now, true);
+            Aim(f, now);
 
-            if (ducked) return;
+            if (ducked || !f.IkDriven) return;
             if (!f.Sees || now < f.ReactUntil || now < f.NextShot) return;
             if (Vector3.Distance(f.Tr.position, f.Target.position) > CfgSightRange.Value) return;
             if (Shoot(f)) ScheduleNextShot(f, now);
@@ -1219,17 +1349,40 @@ namespace NextDayRevival
         /// fire this frame (rate of fire, reload), so the burst waits for it.</summary>
         static bool Shoot(Fighter f)
         {
+            if (!ReadArmed(f)) return false;
             Vector3 aimAt = AimWorld(f);
             Component weapon = WeaponOf(f);
             Vector3 from = Muzzle(weapon, f);
+            if (from == Vector3.zero) return false;
+            // Eyes can see over cover while the barrel is still behind it.
+            if (!Clear(from, aimAt, f.Target))
+            {
+                f.Sees = false;
+                f.NextLos = Time.time + 0.5f;
+                f.NextShot = Time.time + 0.2f;
+                return false;
+            }
             float dist = Vector3.Distance(from, aimAt);
             Component targetAi = f.Target.GetComponent(_npcType);
             Fighter victim = targetAi == null ? null : FighterOf(targetAi);
             Vector3 aim = aimAt + MissOffset(f, victim, from, aimAt, dist);
+            bool rocket = IntField(f.Wm, _fWeaponItem, -1) == Crew.LAW_ID;
+            // CrewLaw already supplies the LAW blast and NPC damage. Keep it
+            // away from the shooter and nearby squad mates, and do not add a
+            // second infantry hit after its FireOneShot postfix.
+            if (rocket && !RocketClear(f, from, aim))
+            {
+                f.NextShot = Time.time + 0.5f;
+                return false;
+            }
 
             int fired = VanillaShot(f, weapon, aim);
-            if (fired == 0) return false;
-            bool native = fired > 0;
+            if (fired <= 0)
+            {
+                f.NextShot = Time.time + 0.1f;
+                return false;
+            }
+            if (rocket) return true;
             // Being shot at is felt whether or not the round connects.
             if (victim != null && CfgSuppression.Value)
                 victim.Suppression = Mathf.Min(1f,
@@ -1241,12 +1394,8 @@ namespace NextDayRevival
 
             float range = Mathf.Max(dist + 5f, CfgSightRange.Value + 20f);
             Vector3 impact;
-            // Past the muzzle, or past the shooter's own 0.75 unit capsule when
-            // the fallback shoots from eye height.
+            // Past the shooter's own 0.75 unit capsule.
             GameObject struck = Turret.RaycastObject(from + dir * 1.0f, dir, range, out impact);
-            Vector3 end = struck == null ? from + dir * range : impact;
-            ShotEffect(from, end, !native);
-            RevivalTroopInsertion.Net.SendShot(from, end, !native);
 
             if (struck == null) return true;
             Component hitAi = struck.GetComponentInParent(_npcType);
@@ -1265,9 +1414,27 @@ namespace NextDayRevival
             return true;
         }
 
+        static bool RocketClear(Fighter f, Vector3 from, Vector3 aim)
+        {
+            float radius = RevivalPlugin.CfgPatrolCrewLawRadius == null
+                ? 8f : Mathf.Max(0f, RevivalPlugin.CfgPatrolCrewLawRadius.Value);
+            Vector3 dir = aim - from;
+            float dist = dir.magnitude;
+            if (dist < radius * 2f + 10f) return false;
+            Vector3 hit;
+            GameObject obstacle = Turret.RaycastObject(from, dir / dist, dist + 1f, out hit);
+            Vector3 boom = obstacle == null ? aim : hit;
+            if (Vector3.Distance(from, boom) < radius * 2f + 10f) return false;
+            if (f.Squad != null)
+                foreach (Fighter mate in f.Squad.Men)
+                    if (mate.Tr != null && Alive(mate.Ai)
+                        && Vector3.Distance(mate.Tr.position, boom) < radius + 6f) return false;
+            return true;
+        }
+
         /// <summary>Fire the NPC's own weapon at a point. 1 = a round went out,
         /// 0 = not this frame (rate of fire, empty and reloading), -1 = no usable
-        /// native weapon, the caller shoots the mod's substitute instead.</summary>
+        /// native weapon. Failure never produces effects or damage.</summary>
         static int VanillaShot(Fighter f, Component weapon, Vector3 aim)
         {
             if (weapon == null || _mFireTo == null || _mHasBullets == null || _fRofDelay == null)
@@ -1275,6 +1442,8 @@ namespace NextDayRevival
             try
             {
                 if (_mCantWork != null && (bool)_mCantWork.Invoke(weapon, null)) return -1;
+                // FireTo advances its delay even with an empty magazine, so
+                // ammunition must be checked BEFORE using the delay as proof.
                 if (!(bool)_mHasBullets.Invoke(weapon, null))
                 {
                     StartReload(f);
@@ -1302,6 +1471,7 @@ namespace NextDayRevival
         static void StartReload(Fighter f)
         {
             if (_mBulletsEnded == null || Reloading(f)) return;
+            ReleaseAim(f);
             try
             {
                 _mBulletsEnded.Invoke(f.Ai, null);
@@ -1315,10 +1485,8 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>Tracer, and the mod's report only when the game's weapon did
-        /// not fire (its own RPC already plays flash and sound everywhere).
-        /// Identical on the master and on every client that receives the
-        /// broadcast.</summary>
+        /// <summary>Legacy event receiver for an older peer's shot packet.
+        /// New NPC shots use only native weapon effects and never call this.</summary>
         internal static void ShotEffect(Vector3 from, Vector3 end, bool sound)
         {
             try
@@ -1448,10 +1616,11 @@ namespace NextDayRevival
         /// LookAtIKTarget as the solver target with a chest-to-hand chain, so
         /// moving that transform points the weapon - in elevation as well as in
         /// azimuth. The vanilla controller lerps the weight back toward zero
-        /// every frame while _killTarget is null; holding it at one each frame
-        /// simply wins that race.</summary>
+        /// every frame while _killTarget is null. Only drive over a ready
+        /// standing aim base clip, with an independent ramp.</summary>
         static void DriveAim(Fighter f, Vector3 lookAt)
         {
+            if (!AimPoseReady(f)) { ReleaseAim(f); return; }
             if (_fAimIk == null || _fLookTarget == null || f.IkMissing) return;
             try
             {
@@ -1473,9 +1642,10 @@ namespace NextDayRevival
                 }
                 GameObject go = f.Ik.gameObject;
                 if (!go.activeSelf) go.SetActive(true);
-                // Vanilla fades by dt*5. Adding dt*4 equilibrates below one;
-                // set the intended full aim weight on each driven frame.
-                _fIkWeight.SetValue(solver, 1f);
+                // Ramp our own weight; repeatedly adding to the vanilla-faded
+                // value would equilibrate below full aim.
+                f.AimWeight = Mathf.Min(1f, f.AimWeight + Time.deltaTime * 5f);
+                _fIkWeight.SetValue(solver, f.AimWeight);
                 // Snap on the first frame of an engagement, then follow.
                 f.Look.position = f.IkDriven
                     ? Vector3.Lerp(f.Look.position, lookAt, Time.deltaTime * 8f)
@@ -1484,10 +1654,57 @@ namespace NextDayRevival
             }
             catch (Exception ex)
             {
+                ReleaseAim(f);
                 f.IkMissing = true;
                 if (CfgDebug.Value)
                     RevivalPlugin.L.LogWarning("NpcWar: aim IK - " + ex.Message);
             }
+        }
+
+        // Check animation state, not last frame's already IK-rotated hand.
+        // Require the standing aiming BASE clip to have finished crossfading;
+        // a Once shooting overlay alone is not safe when it ends.
+        static bool AimPoseReady(Fighter f)
+        {
+            if (!f.Armed || Reloading(f)
+                || IntField(f.Ai, _fMainState, -1) != MainIdle
+                || IntField(f.Ai, _fPoseState, -1) != PoseStand) return false;
+            int add = IntField(f.Ai, _fAddState, -1);
+            if (add != AddAim && add != AddFire) return false;
+            if (f.Anim == null && _fAnim != null) f.Anim = _fAnim.GetValue(f.Ai);
+            if (f.Anim == null) return false;
+            return AimClipReady(f.Anim, "asr_idle_aiming")
+                || AimClipReady(f.Anim, "rifle_idle_aiming")
+                || AimClipReady(f.Anim, "hg_idle_aiming");
+        }
+
+        static bool AimClipReady(object anim, string name)
+        {
+            try
+            {
+                if (_pAnimItem == null || _pAnimEnabled == null || _pAnimLayer == null
+                    || _pAnimWeight == null || _mAnimPlaying == null) return false;
+                object state = _pAnimItem.GetValue(anim, new object[] { name });
+                return state != null && (bool)_pAnimEnabled.GetValue(state, null)
+                    && (int)_pAnimLayer.GetValue(state, null) == 0
+                    && (float)_pAnimWeight.GetValue(state, null) >= 0.95f
+                    && (bool)_mAnimPlaying.Invoke(anim, new object[] { name });
+            }
+            catch { return false; }
+        }
+
+        static void ReleaseAim(Fighter f)
+        {
+            f.IkDriven = false;
+            f.AimWeight = 0f;
+            // A lowered hand must not inherit a second of vanilla IK fade.
+            try
+            {
+                if (f.Ik == null || _fSolver == null || _fIkWeight == null) return;
+                object solver = _fSolver.GetValue(f.Ik);
+                if (solver != null) _fIkWeight.SetValue(solver, 0f);
+            }
+            catch { }
         }
 
         /// <summary>Out of the aim pose. The vanilla controller fades the IK
@@ -1495,7 +1712,7 @@ namespace NextDayRevival
         /// is no longer Aiming or Shooting.</summary>
         static void StandDown(Fighter f)
         {
-            f.IkDriven = false;
+            ReleaseAim(f);
             f.InCover = false;
             f.BurstUntil = 0f;
             int add = IntField(f.Ai, _fAddState, -1);
@@ -1511,7 +1728,7 @@ namespace NextDayRevival
         {
             f.Stance = stance;
             f.Crouched = pose == PoseCrouch;
-            f.IkDriven = false;
+            ReleaseAim(f);
             f.BurstUntil = 0f;
             OrderMove(f, dest, state, AddNone, pose);
         }
@@ -2024,7 +2241,7 @@ namespace NextDayRevival
                 }
                 catch { }
             }
-            return f.Tr.position + Vector3.up * (f.Crouched ? CrouchEye : EyeHeight);
+            return Vector3.zero;
         }
 
         static int IntField(Component c, FieldInfo f, int fallback)

@@ -290,7 +290,7 @@ namespace NextDayRevival
                 MethodInfo instantiate = AccessTools.Method(
                     RevivalPlugin.TypeByName("PhotonNetwork"), "InstantiateSceneObject",
                     new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion),
-                        typeof(int), typeof(object[]) }, null);
+                        typeof(byte), typeof(object[]) }, null);
                 if (instantiate == null) throw new MissingMethodException("PhotonNetwork.InstantiateSceneObject");
                 harmony.Patch(instantiate, new HarmonyMethod(typeof(Crew).GetMethod(
                     "CrewInstantiatePrefix")), null, null, null, null);
