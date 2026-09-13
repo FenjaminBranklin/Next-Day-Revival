@@ -722,7 +722,49 @@ namespace NextDayRevival
         {
             if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
             if (car == null) return;
+            Absetzen(car, vgs, count, tank ? "tank" : "BTR", fraktion, composition);
+        }
 
+        /// <summary>A squad set down at a point with no vehicle: the heli troop
+        /// landing. A temporary anchor stands in for the car - it faces the way
+        /// the men should line up and is gone again once the settlement is
+        /// built, because nothing keeps a reference to the car after spawning.
+        /// Returns the settlement GameObject (its NpcAI array holds the men) or
+        /// null when nobody could be spawned.</summary>
+        internal static GameObject DropSquad(Vector3 position, float yaw, int count,
+                                             string fraktion,
+                                             List<RevivalComposition.CrewMan> loadout)
+        {
+            if (count <= 0) return null;
+            GameObject anchor = new GameObject("NDR_DropAnchor");
+            try
+            {
+                anchor.transform.position = position;
+                anchor.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+                return Absetzen(anchor, null, count, "helicopter", fraktion, loadout);
+            }
+            finally { UnityEngine.Object.Destroy(anchor); }
+        }
+
+        /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
+        internal static Array Men(GameObject settlement)
+        {
+            if (settlement == null) return null;
+            Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
+            Component sied = sType == null ? null : settlement.GetComponent(sType);
+            return sied == null ? null : GetNpcArray(sied);
+        }
+
+        /// <summary>Forget one crew settlement (the caller removes its men).</summary>
+        internal static void Forget(GameObject settlement)
+        {
+            _settlements.Remove(settlement);
+        }
+
+        static GameObject Absetzen(GameObject car, Component vgs, int count,
+                                   string carrier, string fraktion,
+                                   List<RevivalComposition.CrewMan> composition)
+        {
             GameObject settlement = null;
             try
             {
@@ -733,7 +775,7 @@ namespace NextDayRevival
                 {
                     RevivalPlugin.L.LogWarning("Crew: NPC_Settlement, NPC_SpawnPoint "
                         + "or NPC_WP not found - the wreck stays empty.");
-                    return;
+                    return null;
                 }
 
                 Vector3[] wo = Ausstiege(car, vgs, count);
@@ -841,17 +883,20 @@ namespace NextDayRevival
                 _settlements.Add(settlement);
                 RevivalPlugin.L.LogInfo("Crew: " + count + " " + wer
                     + " out of the "
-                    + (tank ? "tank" : "BTR") + " at " + car.transform.position
+                    + carrier + " at " + car.transform.position
                     + (composition == null ? "" : " with editor loadouts")
                     + " - " + _settlements.Count + " crew(s) on the ground.");
-                Turret.Hinweis(count + " " + wer + Loc.T(" выбрались из обломков",
-                                                         " out of the wreck"), 4f);
+                if (carrier != "helicopter")
+                    Turret.Hinweis(count + " " + wer + Loc.T(" выбрались из обломков",
+                                                             " out of the wreck"), 4f);
+                return settlement;
             }
             catch (Exception ex)
             {
                 _appearance.Clear();
                 RevivalPlugin.L.LogError("Crew: nobody climbed out - " + ex);
                 if (settlement != null) UnityEngine.Object.Destroy(settlement);
+                return null;
             }
         }
 

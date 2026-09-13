@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.15.0";
+        public const string VERSION = "6.16.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -448,9 +448,11 @@ namespace NextDayRevival
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
+            RevivalTroopInsertion.BindConfig(Config); // NDR heli troop insertion
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
+            NpcWar.BindConfig(Config);           // NDR NPC-vs-NPC combat for troop squads
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -475,6 +477,7 @@ namespace NextDayRevival
             DroneNpcHook.Install(_harmony);
             SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
+            RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
             Admin.Install(_harmony);
             TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);
@@ -2019,9 +2022,11 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
             FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
+            RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
             FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
+            NpcWar.Tick();                       // NDR NPC-vs-NPC combat for troop squads
         }
 
         void FixedUpdate()
@@ -2050,10 +2055,12 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
+            RevivalTroopInsertion.Draw();        // NDR heli troop insertion banner
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
             ClientIntegrity.Draw();              // Required verified-launch recovery message
+            NpcWar.Draw();                       // NDR NPC-vs-NPC combat debug status
             FrameProf.E(FrameProf.OtherDraw);
             FrameProf.DrawOverlay();
         }

@@ -26,6 +26,18 @@ namespace NextDayRevival
         static string _failure = "";
         static string _lastFailure = "";
         internal static Snapshot Current;
+        // Troop landings travel on their own endpoint beside the routes, so a
+        // client that predates them keeps validating the unchanged routes
+        // envelope. Only the Photon master spawns troops, but every client
+        // keeps the snapshot because the master can change.
+        static float _troopNext;
+        static bool _troopBusy;
+        static volatile bool _troopFinished;
+        static string[] _troopPending;
+        static string _troopPendingRevision;
+        static string _troopFailure = "", _troopLastFailure = "";
+        internal static string[] Troops;
+        internal static string TroopsRevision = "";
         internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
@@ -64,6 +76,7 @@ namespace NextDayRevival
                 }
                 _pending = null;
             }
+            TickTroops();
             if (_busy || Time.realtimeSinceStartup < _next || _url == null) return;
             _next = Time.realtimeSinceStartup + 3f;
             _busy = true;
@@ -76,6 +89,73 @@ namespace NextDayRevival
             });
         }
 
+        static void TickTroops()
+        {
+            if (_troopFinished)
+            {
+                _troopFinished = false;
+                _troopBusy = false;
+                if (_troopPending != null && _troopPendingRevision != TroopsRevision)
+                {
+                    Troops = _troopPending;
+                    TroopsRevision = _troopPendingRevision;
+                    RevivalTroopInsertion.Load(true);
+                    RevivalPlugin.L.LogInfo("LiveRoutes: applied troop landings " + TroopsRevision);
+                }
+                if (_troopFailure != _troopLastFailure)
+                {
+                    _troopLastFailure = _troopFailure;
+                    if (_troopFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes troops: "
+                        + _troopFailure + "; keeping the last verified troop landings.");
+                }
+                _troopPending = null;
+            }
+            if (_troopBusy || Time.realtimeSinceStartup < _troopNext || _url == null) return;
+            _troopNext = Time.realtimeSinceStartup + 10f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _troopBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/troops", pin = _pin.Value;
+            string revision = TroopsRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _troopPending = null;
+                    else
+                    {
+                        string rev;
+                        _troopPending = ParseTroops(body, out rev);
+                        _troopPendingRevision = rev;
+                    }
+                    _troopFailure = "";
+                }
+                catch (Exception ex) { _troopPending = null; _troopFailure = ex.Message; }
+                finally { _troopFinished = true; }
+            });
+        }
+
+        /// <summary>NDR-TROOPS-1 envelope: magic, sha256 of the TSV, the TSV
+        /// in base64, and a trailing empty line. Only structure and hash are
+        /// checked here; RevivalTroopInsertion validates every value.</summary>
+        internal static string[] ParseTroops(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-TROOPS-1" || envelope[3] != ""
+                || !HexHash(envelope[1]))
+                throw new IOException("Invalid troop envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 1000000 || Hash(tsv) != envelope[1])
+                throw new IOException("Troop snapshot hash mismatch");
+            foreach (byte b in tsv)
+                if (b > 127) throw new IOException("Troop snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            if (lines.Length > 4097) throw new IOException("Too many troop rows");
+            revision = envelope[1];
+            return lines;
+        }
+
         static string Hash(byte[] bytes)
         {
             using (SHA256 sha = SHA256.Create())
@@ -86,6 +166,13 @@ namespace NextDayRevival
         // Only public route data is requested. Pin before accepting any response,
         // including 304; redirects, cookies and automatic credentials are disabled.
         internal static Snapshot Download(string address, string pin, string revision)
+        {
+            string body = Fetch(address, pin, revision);
+            return body == null ? null : Parse(body);
+        }
+
+        /// <summary>One pinned HTTPS GET. Null for 304 (unchanged).</summary>
+        static string Fetch(string address, string pin, string revision)
         {
             Uri uri = new Uri(address);
             if (uri.Scheme != "https" || uri.UserInfo.Length != 0 || !HexHash(pin)
@@ -130,7 +217,7 @@ namespace NextDayRevival
                         if (n == 0) break;
                         buffer.Write(chunk, 0, (int)n);
                     }
-                    return Parse(Encoding.ASCII.GetString(buffer.ToArray()));
+                    return Encoding.ASCII.GetString(buffer.ToArray());
                 }
             }
             finally

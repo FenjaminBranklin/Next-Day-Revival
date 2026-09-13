@@ -1254,6 +1254,13 @@ namespace NextDayRevival
             GUILayout.Label(Loc.T("тест: нужен маршрут с меткой \"конвой\" (F4)",
                                   "test: needs a route marked \"convoy\" (F4)"));
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(Loc.T("вертолёт с десантом сейчас", "troop helicopter now"),
+                                 GUILayout.Width(190f)))
+                Melde(RevivalTroopInsertion.SpawnNow());
+            GUILayout.Label(Loc.T("случайная точка из редактора (Troop landings)",
+                                  "random landing from the editor (Troop landings)"));
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));
