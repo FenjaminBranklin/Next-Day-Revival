@@ -160,9 +160,10 @@ namespace NextDayRevival
     ///
     ///   VehicleGameSystem::InitCar setzt
     ///       Passengers = new GameObject[SeatPoints.childCount]
-    ///   Die Sitzzahl steht also NUR an SeatPoints. InitCar ist gelaufen, wenn
-    ///   dieser Umbau greift - deshalb wird das Array hier neu gesetzt. Zu
-    ///   diesem Zeitpunkt sitzt noch niemand darin.
+    ///   Die Sitzzahl steht also NUR an SeatPoints. The conversion runs in the
+    ///   DoInstantiate postfix, BEFORE InitCar (runtime log, 2026-09-13); the
+    ///   array is set here anyway and InitCar sizes it again from the same
+    ///   children. Zu diesem Zeitpunkt sitzt noch niemand darin.
     ///
     ///   Der Knoten `Meshes` dreht -90 Grad um X. Im Meshraum ist damit +Z
     ///   oben und -Y vorn, der Massstab betraegt 3 Einheiten je Meter.
@@ -202,22 +203,39 @@ namespace NextDayRevival
         static readonly Vector3 Turmring = new Vector3(0f, -0.922f, 4.144f);
 
         /// <summary>
-        /// Wo die Mitfahrer im Panzer sitzen, in Fahrzeugeinheiten relativ zu
-        /// SeatPoints. Fahrer vorn links, dahinter zwei Plaetze im Kampfraum -
-        /// alle drei tief genug, dass kein Kopf durch das Dach stoesst.
+        /// Where the three passengers sit in the tank, in vehicle units
+        /// relative to SeatPoints: the driver (seat 0) front left, the other two
+        /// right and left. All of them sit UNDER THE TURRET, because nowhere
+        /// else is there room: outside the turret ring the hull deck is at
+        /// y 4.26 and the belly at 1.44, but a seated body reaches from about
+        /// +1.85 to +5.95 above its seat root (measured on vanilla cars, see
+        /// research/tank_crew_check.py). The old places (y -1.0, driver at
+        /// z 3.60, rear seat at z -2.60) put feet through the belly and the rear
+        /// head through the engine deck.
+        ///
+        /// research/tank_crew_check.py reads these numbers from this file and
+        /// checks the measured body proxy hidden at 24 turret bearings times
+        /// -6/0/7/14 degrees of elevation. Change a value only together with
+        /// that check.
         /// </summary>
         static readonly Vector3[] Mitfahrerplaetze = new Vector3[] {
-            new Vector3(-1.10f, -1.0f, 3.60f),
-            new Vector3( 1.35f, -1.0f, 0.20f),
-            new Vector3(-1.35f, -1.0f, -2.60f),
+            new Vector3(-0.90f, -0.15f, 1.10f),
+            new Vector3( 0.90f, -0.15f, 0.30f),
+            new Vector3(-0.90f, -0.15f, -0.10f),
         };
 
         /// <summary>
-        /// The BTR gunner seat is at y 0.95. In the lower T-72 body that puts
-        /// the seated player's head through the roof. The sight camera follows
-        /// the turret independently, so only the physical body moves down.
+        /// The gunner, directly below the turret ring axis (vehicle z 0.922),
+        /// so the roof above the head is the same at every turret bearing.
+        /// Vertically centred in the only space that fits a seated body: head
+        /// top +5.95 stays under the roof (y 6.4+) and the feet +1.85 stay above
+        /// the belly (y 1.44). Checked like the passengers above.
+        ///
+        /// The BTR gunner seat is at y 0.95, z 2.6 (Turret/SeatX..Z). There the
+        /// head stood above the T-72 turret roof and the knees came through the
+        /// deck in front of it - the field screenshot of 2026-09-10.
         /// </summary>
-        static readonly Vector3 Gunnerplatz = new Vector3(0f, -1.15f, 1.10f);
+        static readonly Vector3 Gunnerplatz = new Vector3(0f, -0.15f, 0.75f);
 
         static Material _mat;
 
@@ -308,9 +326,17 @@ namespace NextDayRevival
                 return;
             }
 
-            // Der Geschuetzsitz haengt schon dran (Turret.InitCarPrefix lief
-            // beim Erzeugen) und bleibt in jedem Fall. Weggenommen werden nur
-            // Mitfahrerplaetze, und zwar von hinten.
+            // The gunner seat stays in any case. Only passenger seats are
+            // removed, from the back.
+            //
+            // CONFIRMED (runtime log, 2026-09-13): this conversion runs in the
+            // NetworkingPeer.DoInstantiate postfix (TankNetwork, and CarSpawn
+            // skips a second call), i.e. BEFORE VehicleGameSystem.InitCar. The
+            // gunner seat that Turret.InitCarPrefix adds therefore did not exist
+            // yet - the log read "Panzer: 3 Sitze (3 Mitfahrer plus Geschuetz)"
+            // followed by "Geschuetzsitz an BTR-80A_Spawn_T72 angehaengt" - and
+            // every T-72 gunner kept the BTR position. The seat is created here
+            // instead; InitCarPrefix finds it by name and leaves it alone.
             int behalten = Mathf.Max(1, RevivalPlugin.CfgTankSeats.Value);
             List<Transform> mitfahrer = new List<Transform>();
             Transform gunner = null;
@@ -341,14 +367,23 @@ namespace NextDayRevival
             // verschiebt damit den Mitfahrer, und sonst nichts. The gunner is
             // moved too: its BTR height is above the T-72 roof.
             //
-            // Hoehe -1.0 statt 0.15: das Wannendach liegt bei 4.5 Einheiten,
-            // ein sitzender Koerper ist rund 3.9 hoch. Damit bleibt gut eine
-            // Einheit Luft, und der Platz liegt trotzdem nicht so tief, dass
-            // die Kamera durch den Boden faellt.
+            // The heights and places are in Mitfahrerplaetze and Gunnerplatz
+            // above, with the measurement they come from.
             for (int i = 0; i < mitfahrer.Count && i < Mitfahrerplaetze.Length; i++)
             {
                 if (mitfahrer[i] == null) continue;
                 mitfahrer[i].localPosition = Mitfahrerplaetze[i];
+            }
+            bool angelegt = false;
+            if (gunner == null && RevivalPlugin.CfgTurret != null
+                && RevivalPlugin.CfgTurret.Value)
+            {
+                // Same object Turret.InitCarPrefix would add: a child of
+                // SeatPoints with the seat name, appended last.
+                GameObject seat = new GameObject(Turret.SeatName);
+                seat.transform.SetParent(seats, false);
+                gunner = seat.transform;
+                angelegt = true;
             }
             if (gunner != null)
             {
@@ -361,7 +396,10 @@ namespace NextDayRevival
 
             RevivalPlugin.L.LogInfo("Panzer: " + seats.childCount + " Sitze ("
                 + behalten + " Mitfahrer plus Geschuetz), Passengers neu gesetzt, "
-                + "Mitfahrer und Richtschuetze in die Wanne gesetzt.");
+                + "Mitfahrer und Richtschuetze in die Wanne gesetzt"
+                + (gunner == null ? ", KEIN Geschuetzsitz (Turret aus)."
+                   : angelegt ? ", Geschuetzsitz hier angelegt (vor InitCar)."
+                   : ", Geschuetzsitz verschoben."));
         }
 
         // ------------------------------------------------------------- Modell

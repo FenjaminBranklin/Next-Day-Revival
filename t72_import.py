@@ -180,17 +180,49 @@ KONTRAST = 0.55
 # der unbeschaedigten Rollen abgelesen.
 X_RAD = 4.192
 
-# The source wreck has the left turret hatch open. Its circular rim is a
-# disconnected group centred here in turret-local coordinates. The live tank
-# needs an armoured lid over that opening; otherwise the gunner body can be
-# seen through a black hole even after the seat itself has been lowered.
-HATCH_X = -1.765
-HATCH_Y = 0.980
-HATCH_Z = 2.535
-HATCH_RADIUS = 0.96
+# Turret hatch lids, in turret-local coordinates (x right, -y forward, z up).
+#
+# LEFT (-1.765): the 0.5.7 lid. It was meant for the open hatch, but that
+# measurement was taken with x still mirrored, so it landed on the closed
+# commander cupola, where it fills the gap between the cupola hatch and its
+# collar. It stays: removing it would open that gap.
+#
+# RIGHT (+1.765): the hatch that is actually open. Measured 2026-09-13 from the
+# written asset with research/tank_crew_check.py's border-loop scan: the only
+# open circular border of the turret is a flat rim at z 2.435..2.441, radius
+# 1.022, centred at (1.765, 0.980), on top of a collar that falls to z 2.39 at
+# radius 1.10 and 2.13 at radius 1.20. The lid overlaps the rim (radius 1.08),
+# stands 0.06 proud of it and reaches 0.08 below it, so no gap is visible from
+# any side. Until then the hole let every viewer look into the empty turret
+# and see the gunner's head in it ("Turmluke offen und transparent").
+#
+#            x       y      top z  radius
+HATCHES = ((-1.765, 0.980, 2.535, 0.96),
+           (1.765, 0.980, 2.500, 1.08))
 HATCH_THICKNESS = 0.14
 HATCH_SEGMENTS = 32
 HATCH_UV = (0.90, 0.65)  # quiet olive patch in the turret half of the atlas
+# Hinge block on the forward edge of the right lid (the T-72 gunner hatch
+# opens forward): centre and half extents in turret-local coordinates.
+HINGE_CENTRE = (1.765, 0.980 - 1.00, 2.470)
+HINGE_HALF = (0.30, 0.12, 0.11)
+
+# Turret basket: a closed cylinder wall hanging below the turret floor.
+#
+# The plugin turns the WHOLE turret for elevation (Turret.LocalRotationFor), so
+# at +14 degrees the front of the turret floor lifts about 0.8 units off the
+# hull deck and at -6 degrees the rear does. The hull under the turret is open
+# (its deck ring hole reaches radius 3.12 to 3.39 around the ring axis), so that
+# wedge was a window into the empty hull and onto the seated crew's legs. The
+# wall below closes it at every angle, the way a real turret basket does. It
+# stays inside the hull ring hole (radius 3.0 < 3.12) and, tilted, still
+# reaches well below the deck: turret floor and hull deck both lie at z 0.12
+# in turret space, the wall runs from 0.10 down to -1.50, and 14 degrees lift
+# its front by only 0.73. Checked with research/tank_crew_check.py.
+BASKET_RADIUS = 3.00
+BASKET_TOP = 0.10
+BASKET_BOTTOM = -1.50
+BASKET_SEGMENTS = 48
 
 
 # ------------------------------------------------------------------ Spiel
@@ -533,8 +565,8 @@ def export_tracks(gerichtet, versatz):
     return n_written
 
 
-def luke_schliessen(V, N, T, F):
-    """Add one closed circular armour lid above the source wreck's open hatch.
+def luke_schliessen(V, N, T, F, hx, hy, hz, radius):
+    """Add one closed circular armour lid over a hatch of the source wreck.
 
     The lid is intentionally a shallow solid, not a one-sided polygon. It is
     visible from grazing angles and has a real edge instead of looking painted
@@ -548,14 +580,13 @@ def luke_schliessen(V, N, T, F):
     faces = []
 
     # Top face: one centre and one shared circular ring.
-    verts.append((HATCH_X, HATCH_Y, HATCH_Z))
+    verts.append((hx, hy, hz))
     norms.append((0.0, 0.0, 1.0))
     uvs.append(HATCH_UV)
     for i in range(seg):
         a = 2.0 * math.pi * i / seg
         ca, sa = math.cos(a), math.sin(a)
-        verts.append((HATCH_X + HATCH_RADIUS * ca,
-                      HATCH_Y + HATCH_RADIUS * sa, HATCH_Z))
+        verts.append((hx + radius * ca, hy + radius * sa, hz))
         norms.append((0.0, 0.0, 1.0))
         uvs.append((HATCH_UV[0] + ca * 0.018,
                     HATCH_UV[1] + sa * 0.018))
@@ -564,13 +595,13 @@ def luke_schliessen(V, N, T, F):
 
     # Vertical armour edge. Separate vertices keep its normals horizontal.
     side = len(verts)
-    bottom_z = HATCH_Z - HATCH_THICKNESS
+    bottom_z = hz - HATCH_THICKNESS
     for i in range(seg):
         a = 2.0 * math.pi * i / seg
         ca, sa = math.cos(a), math.sin(a)
-        x = HATCH_X + HATCH_RADIUS * ca
-        y = HATCH_Y + HATCH_RADIUS * sa
-        verts.append((x, y, HATCH_Z))
+        x = hx + radius * ca
+        y = hy + radius * sa
+        verts.append((x, y, hz))
         verts.append((x, y, bottom_z))
         norms.append((ca, sa, 0.0))
         norms.append((ca, sa, 0.0))
@@ -587,20 +618,83 @@ def luke_schliessen(V, N, T, F):
     # Bottom closes the solid when the barrel is depressed and the roof edge
     # can be seen from below.
     lower = len(verts)
-    verts.append((HATCH_X, HATCH_Y, bottom_z))
+    verts.append((hx, hy, bottom_z))
     norms.append((0.0, 0.0, -1.0))
     uvs.append(HATCH_UV)
     for i in range(seg):
         a = 2.0 * math.pi * i / seg
         ca, sa = math.cos(a), math.sin(a)
-        verts.append((HATCH_X + HATCH_RADIUS * ca,
-                      HATCH_Y + HATCH_RADIUS * sa, bottom_z))
+        verts.append((hx + radius * ca, hy + radius * sa, bottom_z))
         norms.append((0.0, 0.0, -1.0))
         uvs.append((HATCH_UV[0] + ca * 0.018,
                     HATCH_UV[1] + sa * 0.018))
     for i in range(seg):
         faces.append((lower, lower + 1 + (i + 1) % seg, lower + 1 + i))
 
+    off = len(V)
+    return (np.concatenate((V, np.asarray(verts, np.float32))),
+            np.concatenate((N, np.asarray(norms, np.float32))),
+            np.concatenate((T, np.asarray(uvs, np.float32))),
+            np.concatenate((F, np.asarray(faces, np.int32) + off)))
+
+
+def turmkorb(V, N, T, F):
+    """Add the turret basket wall - a cylinder around the ring axis, open at
+    the top (the turret floor covers it) and at the bottom (inside the hull).
+
+    Normals point outward: the only eyes that ever see it look in from outside
+    through the gap under an elevated turret.
+    """
+    seg = BASKET_SEGMENTS
+    verts, norms, uvs, faces = [], [], [], []
+    for i in range(seg):
+        a = 2.0 * math.pi * i / seg
+        ca, sa = math.cos(a), math.sin(a)
+        x, y = BASKET_RADIUS * ca, BASKET_RADIUS * sa
+        verts.append((x, y, BASKET_TOP))
+        verts.append((x, y, BASKET_BOTTOM))
+        norms.append((ca, sa, 0.0))
+        norms.append((ca, sa, 0.0))
+        u = HATCH_UV[0] + (float(i) / seg - 0.5) * 0.036
+        uvs.append((u, HATCH_UV[1] + 0.018))
+        uvs.append((u, HATCH_UV[1] - 0.018))
+    for i in range(seg):
+        j = (i + 1) % seg
+        ti, bi, tj, bj = 2 * i, 2 * i + 1, 2 * j, 2 * j + 1
+        faces.append((ti, bi, bj))
+        faces.append((ti, bj, tj))
+    off = len(V)
+    return (np.concatenate((V, np.asarray(verts, np.float32))),
+            np.concatenate((N, np.asarray(norms, np.float32))),
+            np.concatenate((T, np.asarray(uvs, np.float32))),
+            np.concatenate((F, np.asarray(faces, np.int32) + off)))
+
+
+def scharnier(V, N, T, F, centre, half):
+    """Add a closed box - the hinge block that makes a lid read as a hatch.
+
+    Four separate corners per side keep every normal on its face axis, so
+    `richten` winds each face outward against that normal.
+    """
+    cx, cy, cz = centre
+    hx, hy, hz = half
+    verts, norms, uvs, faces = [], [], [], []
+    for axis in range(3):
+        for sign in (-1.0, 1.0):
+            normal = [0.0, 0.0, 0.0]
+            normal[axis] = sign
+            u_axis, v_axis = [a for a in range(3) if a != axis]
+            base = len(verts)
+            for su, sv in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                p = [0.0, 0.0, 0.0]
+                p[axis] = sign
+                p[u_axis] = su
+                p[v_axis] = sv
+                verts.append((cx + p[0] * hx, cy + p[1] * hy, cz + p[2] * hz))
+                norms.append(tuple(normal))
+                uvs.append((HATCH_UV[0] + su * 0.01, HATCH_UV[1] + sv * 0.01))
+            faces.append((base, base + 1, base + 2))
+            faces.append((base, base + 2, base + 3))
     off = len(V)
     return (np.concatenate((V, np.asarray(verts, np.float32))),
             np.concatenate((N, np.asarray(norms, np.float32))),
@@ -985,9 +1079,15 @@ if __name__ == "__main__":
             continue
         lokal.append((n, k, p if n != "turret" else np.zeros(3, np.float32), m, g))
     V, N, T, F = bauen(lokal, "turm", 0.0, np.zeros(3, np.float32))
-    V, N, T, F = luke_schliessen(V, N, T, F)
-    print("Turret hatch: closed lid at (%.3f, %.3f, %.3f), radius %.2f"
-          % (HATCH_X, HATCH_Y, HATCH_Z, HATCH_RADIUS))
+    for (hx, hy, hz, radius) in HATCHES:
+        V, N, T, F = luke_schliessen(V, N, T, F, hx, hy, hz, radius)
+        print("Turret hatch: closed lid at (%.3f, %.3f, %.3f), radius %.2f"
+              % (hx, hy, hz, radius))
+    V, N, T, F = scharnier(V, N, T, F, HINGE_CENTRE, HINGE_HALF)
+    print("Turret hatch: hinge block at (%.3f, %.3f, %.3f)" % HINGE_CENTRE)
+    V, N, T, F = turmkorb(V, N, T, F)
+    print("Turret basket: radius %.2f, z %.2f .. %.2f"
+          % (BASKET_RADIUS, BASKET_BOTTOM, BASKET_TOP))
     F, gedreht = richten(V, N, F)
     if gedreht:
         print("Turm: %d Dreiecke umgewickelt" % gedreht)

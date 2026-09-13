@@ -19,8 +19,13 @@
 //     sight shows a body/engine, fading to a yellow contour edge), NIGHT uses the
 //     green light-gain equivalent (bright core, mid-green edge). So a target
 //     reads as a lit SILHOUETTE with an outline in either mode, never an oval.
-//     A small person or a target without a usable mesh falls back to a cheap
-//     ramp blob in the same palette. DEAD crew no longer radiate - a corpse
+//     A vehicle whose GAME mesh cannot be read on the CPU (isReadable == false -
+//     a shipped BTR) is filled as an ORIENTED BOX per part, built from each
+//     part's bounds: hull, turret and every wheel read as a heat silhouette that
+//     turns with the vehicle, not a round oval. The custom T-72 (runtime-built,
+//     readable) fills in its true mesh. Only a very small/distant person, or a
+//     target with no geometry at all, still falls back to a cheap ramp blob in
+//     the same palette. DEAD crew no longer radiate - a corpse
 //     cools, so an NPC that fails IsAlive() is dropped from the warm set;
 //   - EXPLOSIONS radiate the hottest of all: each live ExplosionObject seeds a
 //     short white-hot flare (DrawFlashes) that fades over about a second;
@@ -33,9 +38,10 @@
 // pay for their triangles. A true per-pixel camera post-effect would be nicer
 // still but needs a runtime shader this build cannot load reliably.
 //
-// ROBUSTNESS: warm bodies (crew, players, hostiles) are filled BEFORE vehicles so
-// a big vehicle or wreck mesh can never eat the whole triangle budget and leave
-// NPCs undrawn; any target the budget can no longer afford still shows as a blob.
+// ROBUSTNESS: each target gets its OWN triangle cap (people are still filled
+// before vehicles, but neither can drain a shared pool now), so one big vehicle
+// can no longer starve every other into an oval - the bug this file last shipped.
+// A generous per-frame ceiling only bites in a pathological scene.
 // And EmitMesh skips any triangle whose on-screen box dwarfs the target - a wreck
 // or debris that ends up close to the camera produces near-plane-straddling
 // triangles that would otherwise stretch across the field and flood it yellow.
@@ -105,7 +111,7 @@ namespace NextDayRevival
         // matrix. When baked==true the verts are a skinned snapshot (BakeMesh) that
         // already carries the renderer's scale, so it is placed with position and
         // rotation only (scale 1) to avoid a double scale - see PartModel.
-        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; public bool baked; }
+        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; public bool baked; public bool box; }
         sealed class BakedPart { public Vector3[] wv; public int[] t; }   // world verts, baked at refresh
         sealed class Silh
         {
@@ -474,7 +480,15 @@ namespace NextDayRevival
         // without paying for their full mesh every frame.
         const float VehRange = 900f;
         const float PplRange = 600f;
-        const float PplMinPx = 22f;
+        const float PplMinPx = 14f;   // render more mid-range NPCs/players as real shapes, not blobs
+        // Per-target triangle caps (used in DrawSilhouettes). Each target gets its
+        // OWN cap so no target can drain a shared pool and leave the next as an
+        // oval. Sized to hold a WHOLE target so nothing is truncated into holes:
+        // the full custom T-72 (hull+turret+tracks+wheels) is ~31.6k triangles, a
+        // baked character a few thousand, and a game vehicle whose mesh cannot be
+        // read is a handful of boxes at ~12 triangles each.
+        const int PerPerson = 12000;
+        const int PerVehicle = 40000;
 
         // Draws every warm target for the given mode. THERMAL colours the fill
         // with the ironbow ramp, NIGHT with the green light-gain ramp; both fill
@@ -490,21 +504,25 @@ namespace NextDayRevival
             if (m != null)
             {
                 Matrix4x4 VP = cam.projectionMatrix * cam.worldToCameraMatrix;
-                // Triangle ceiling per frame (only while aiming). Well clear of a
-                // couple of close targets now that distant ones are blobs.
-                int budget = 45000;
+                // Per-target triangle budgets. The old design shared ONE small
+                // ceiling across every target and drew people first, so the first
+                // vehicle(s) drained it and every later vehicle fell back to the
+                // ramp oval - the "only one tank is a real shape, the rest are big
+                // ovals" bug. Now each target gets its OWN cap, so no target can
+                // starve the next; a generous FRAME ceiling only ever bites in a
+                // pathological scene (dozens of close vehicles at once), degrading
+                // to ovals for the overflow rather than for everything but one.
+                int frameBudget = 240000;   // global safety valve, rarely reached
+                int spent = 0;
                 m.SetPass(0);
                 GL.PushMatrix();
                 GL.LoadPixelMatrix();          // screen pixels, origin bottom-left, y up
                 GL.Begin(GL.TRIANGLES);
 
-                // People (skinned) FIRST. A warm body - crew, player or hostile - is
-                // the priority target and must never be starved of the shared
-                // triangle budget by a big vehicle or wreck mesh. Drawing them before
-                // vehicles, and routing any target the budget can no longer afford to
-                // the blob fallback, is the fix for "thermal shows no NPCs": a single
-                // detailed vehicle used to exhaust the 45000 ceiling before the people
-                // loop ran at all, and those NPCs were then neither filled nor blobbed.
+                // People (skinned) FIRST: a warm body - crew, player or hostile - is
+                // the priority target and gets its own cap before vehicles, so it
+                // can never be starved by a big vehicle mesh. With per-target caps
+                // both people and vehicles now fit within one frame.
                 for (int i = 0; i < _warm.Count; i++)
                 {
                     Transform t = _warm[i];
@@ -516,25 +534,34 @@ namespace NextDayRevival
                     if (dist > PplRange) continue;
 
                     float px = Mathf.Clamp(1500f / dist, 8f, 46f);
-                    // No mesh, too small to be worth its triangles, or the budget is
-                    // spent: draw a cheap blob instead so the target never vanishes.
-                    if (s == null || !s.Any || px < PplMinPx || budget <= 0) { _fbWarm.Add(i); continue; }
+                    int cap = PerPerson, left = frameBudget - spent;
+                    if (cap > left) cap = left;
+                    // No mesh, too small to be worth its triangles, or the frame
+                    // ceiling is reached: draw a cheap blob so the target never
+                    // vanishes.
+                    if (s == null || !s.Any || px < PplMinPx || cap <= 0) { _fbWarm.Add(i); continue; }
                     Vector2 centre = ScreenGL(g);
-                    for (int p = 0; p < s.skinned.Count && budget > 0; p++)
+                    int used = 0;
+                    for (int p = 0; p < s.skinned.Count && used < cap; p++)
                     {
                         BakedPart bp = s.skinned[p];
-                        budget -= EmitMesh(bp.wv, bp.t, VP, centre, px, budget);
+                        used += EmitMesh(bp.wv, bp.t, VP, centre, px, cap - used, false);
                     }
-                    for (int p = 0; p < s.rigid.Count && budget > 0; p++)
+                    for (int p = 0; p < s.rigid.Count && used < cap; p++)
                     {
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        budget -= EmitMesh(rp.v, rp.t, mvp, centre, px, budget);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, px, cap - used, rp.box);
                     }
+                    spent += used;
                 }
 
-                // Vehicles (rigid): fill the hull/turret/tracks in their real shape.
+                // Vehicles (rigid): fill the hull/turret/tracks/wheels in their real
+                // shape. A vehicle whose game mesh the CPU cannot read
+                // (isReadable == false - the shipped BTR) is built as an oriented
+                // box per part in BuildRigid, so it STILL reads as a hull-and-turret
+                // silhouette that turns with the vehicle, never a formless oval.
                 for (int i = 0; i < _veh.Count; i++)
                 {
                     Transform t = _veh[i];
@@ -551,18 +578,21 @@ namespace NextDayRevival
                     if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
                         px = Mathf.Abs(ge.x - g.x);
                     px = Mathf.Clamp(px, 16f, 320f);
-                    // Keep the actual vehicle shape at range, including when zoomed out.
-                    // Only missing geometry or an exhausted budget needs a fallback.
-                    if (s == null || !s.Any || budget <= 0) { _fbVeh.Add(i); continue; }
+                    int cap = PerVehicle, left = frameBudget - spent;
+                    if (cap > left) cap = left;
+                    // Only genuinely missing geometry or the frame ceiling needs the
+                    // oval fallback now - every readable OR boxed vehicle has a Silh.
+                    if (s == null || !s.Any || cap <= 0) { _fbVeh.Add(i); continue; }
                     Vector2 centre = ScreenGL(g);        // GL y-up centre
-
-                    for (int p = 0; p < s.rigid.Count && budget > 0; p++)
+                    int used = 0;
+                    for (int p = 0; p < s.rigid.Count && used < cap; p++)
                     {
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        budget -= EmitMesh(rp.v, rp.t, mvp, centre, px, budget);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, px, cap - used, rp.box);
                     }
+                    spent += used;
                 }
 
                 GL.End();
@@ -618,7 +648,7 @@ namespace NextDayRevival
         // taken to clip space by mvp and divided by w by hand (fast, and correct on
         // 2018.1 without GL.GetGPUProjectionMatrix because we feed pixels, not a
         // matrix, to GL). Returns the number of triangles emitted (for the budget).
-        static int EmitMesh(Vector3[] verts, int[] tris, Matrix4x4 mvp, Vector2 centre, float pxR, int budget)
+        static int EmitMesh(Vector3[] verts, int[] tris, Matrix4x4 mvp, Vector2 centre, float pxR, int budget, bool noCap)
         {
             if (verts == null || tris == null || verts.Length == 0) return 0;
             float invR = pxR > 1f ? 1f / pxR : 1f;
@@ -648,7 +678,11 @@ namespace NextDayRevival
                 float maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
                 float miny = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
                 float maxy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
-                if (!((maxx - minx) <= triCap) || !((maxy - miny) <= triCap)) continue;
+                // A box part IS deliberately the size of the whole vehicle, so it is
+                // exempt from the "triangle far bigger than the target" guard; ProjV
+                // already drops any triangle that straddles the near plane, which is
+                // the real flooding case. Real mesh parts keep the guard.
+                if (!noCap && (!((maxx - minx) <= triCap) || !((maxy - miny) <= triCap))) continue;
 
                 Emit(ax, ay, centre, invR);
                 Emit(bx, by, centre, invR);
@@ -898,10 +932,109 @@ namespace NextDayRevival
             MeshData d;
             if (_meshCache.TryGetValue(id, out d)) return d;
             d = new MeshData();
-            try { d.v = mesh.vertices; d.t = mesh.triangles; }
+            // A mesh whose CPU copy was stripped at import (isReadable == false -
+            // the shipped game vehicle meshes) throws or returns nothing here.
+            // Detect it up front so we neither spam the Unity error log nor cache a
+            // half mesh; the caller then draws that part as an oriented box built
+            // from mesh.bounds (which stays available even when the mesh is not
+            // readable), so it still reads as a real silhouette, not an oval.
+            try
+            {
+                if (!mesh.isReadable) d = null;
+                else { d.v = mesh.vertices; d.t = mesh.triangles; }
+            }
             catch { d = null; }
             _meshCache[id] = d;
             return d;
+        }
+
+        // The 12 triangles (36 indices) of a box over corners 0..7. Cull is Off in
+        // GLMat, so winding is irrelevant - every face fills. Static: a box part
+        // reuses this one index array, so only the 8 corner verts allocate.
+        static readonly int[] _boxTris = {
+            0,1,2, 0,2,3,   // -z face
+            5,4,7, 5,7,6,   // +z face
+            4,0,3, 4,3,7,   // -x face
+            1,5,6, 1,6,2,   // +x face
+            3,2,6, 3,6,7,   // +y face
+            4,5,1, 4,1,0,   // -y face
+        };
+
+        // Fill lodManaged with every renderer a LODGroup under root controls, and
+        // lodSkip with all of them EXCEPT the finest non-empty LOD. The caller then
+        // draws each LOD group exactly once, at its most detailed level, whatever
+        // the LODGroup currently has enabled for the camera. Never throws.
+        static void CollectLodRenderers(Transform root, HashSet<Renderer> lodManaged, HashSet<Renderer> lodSkip)
+        {
+            try
+            {
+                LODGroup[] groups = root.GetComponentsInChildren<LODGroup>(true);
+                for (int gi = 0; gi < groups.Length; gi++)
+                {
+                    if (groups[gi] == null) continue;
+                    LOD[] lods = groups[gi].GetLODs();
+                    if (lods == null || lods.Length == 0) continue;
+                    int keep = -1;
+                    for (int li = 0; li < lods.Length; li++)
+                        if (lods[li].renderers != null && lods[li].renderers.Length > 0) { keep = li; break; }
+                    for (int li = 0; li < lods.Length; li++)
+                    {
+                        Renderer[] rs = lods[li].renderers;
+                        if (rs == null) continue;
+                        for (int ri = 0; ri < rs.Length; ri++)
+                        {
+                            Renderer r = rs[ri];
+                            if (r == null) continue;
+                            lodManaged.Add(r);
+                            if (li != keep) lodSkip.Add(r);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Add one vehicle MeshFilter to the silhouette. A readable mesh (the custom
+        // T-72 hull/turret and the built tracks/wheels) fills in its true triangles.
+        // A mesh the CPU cannot read (a shipped game vehicle, isReadable == false)
+        // becomes an ORIENTED box from its local bounds, placed by the part's own
+        // transform, so hull, turret and each wheel still read as a heat silhouette
+        // that turns with the vehicle - never the formless ramp oval.
+        static void AddVehiclePart(Silh s, MeshFilter mf)
+        {
+            Mesh mesh = mf.sharedMesh;
+            if (mesh == null) return;
+            MeshData d = mesh.isReadable ? Cache(mesh) : null;
+            if (d != null && d.v != null && d.t != null && d.v.Length > 0 && d.t.Length > 0)
+            {
+                RigidPart rp = new RigidPart();
+                rp.v = d.v; rp.t = d.t; rp.tr = mf.transform;
+                s.rigid.Add(rp);
+                return;
+            }
+            AddBoxPart(s, mf.transform, mesh.bounds);
+        }
+
+        // Build an oriented box (8 corners + the shared _boxTris) from a mesh's local
+        // bounds and add it as a RigidPart. Placed by the part transform, so it sits
+        // and rotates exactly where the real part is. mesh.bounds stays valid even
+        // when mesh.isReadable is false, which is the whole point of this fallback.
+        static void AddBoxPart(Silh s, Transform tr, Bounds b)
+        {
+            Vector3 c = b.center, e = b.extents;
+            if (e.x <= 0f && e.y <= 0f && e.z <= 0f) return;
+            Vector3[] v = new Vector3[8];
+            v[0] = new Vector3(c.x - e.x, c.y - e.y, c.z - e.z);
+            v[1] = new Vector3(c.x + e.x, c.y - e.y, c.z - e.z);
+            v[2] = new Vector3(c.x + e.x, c.y + e.y, c.z - e.z);
+            v[3] = new Vector3(c.x - e.x, c.y + e.y, c.z - e.z);
+            v[4] = new Vector3(c.x - e.x, c.y - e.y, c.z + e.z);
+            v[5] = new Vector3(c.x + e.x, c.y - e.y, c.z + e.z);
+            v[6] = new Vector3(c.x + e.x, c.y + e.y, c.z + e.z);
+            v[7] = new Vector3(c.x - e.x, c.y + e.y, c.z + e.z);
+            RigidPart rp = new RigidPart();
+            rp.v = v; rp.t = _boxTris; rp.tr = tr; rp.box = true;
+            s.rigid.Add(rp);
         }
 
         // A rigid target (vehicle): each child MeshFilter becomes a RigidPart with
@@ -910,20 +1043,40 @@ namespace NextDayRevival
         static Silh BuildRigid(Transform root)
         {
             Silh s = new Silh();
+            HashSet<Renderer> lodManaged = new HashSet<Renderer>();
+            HashSet<Renderer> lodSkip = new HashSet<Renderer>();
             try
             {
+                // A vehicle carries the SAME hull/turret four times, LOD0..LOD3
+                // under a LODGroup that enables only one at a time. Draw exactly the
+                // finest LOD ourselves - independent of which one the LODGroup has
+                // enabled for the current camera distance - so the vehicle is drawn
+                // once (not four overlapping copies) and is never dropped because the
+                // active LOD happened to be a coarse one. Renderers a LODGroup does
+                // NOT manage (wheels, glass) are always considered.
+                CollectLodRenderers(root, lodManaged, lodSkip);
+
                 MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>();
                 for (int i = 0; i < mfs.Length; i++)
                 {
                     MeshFilter mf = mfs[i];
                     if (mf == null || mf.sharedMesh == null) continue;
                     Renderer r = mf.GetComponent<Renderer>();
-                    if (r != null && !r.enabled) continue;
-                    MeshData d = Cache(mf.sharedMesh);
-                    if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
-                    RigidPart rp = new RigidPart();
-                    rp.v = d.v; rp.t = d.t; rp.tr = mf.transform;
-                    s.rigid.Add(rp);
+                    if (r == null) continue;
+                    if (lodManaged.Contains(r))
+                    {
+                        // A LOD renderer: keep only the finest LOD, and IGNORE the
+                        // LODGroup's per-camera .enabled toggling (we chose the LOD).
+                        if (lodSkip.Contains(r)) continue;
+                        if (!r.gameObject.activeInHierarchy) continue;
+                    }
+                    else
+                    {
+                        // A normal renderer (wheel, glass): a shot-off part is
+                        // disabled, so honour .enabled here.
+                        if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
+                    }
+                    AddVehiclePart(s, mf);
                 }
             }
             catch { }
@@ -935,12 +1088,17 @@ namespace NextDayRevival
             for (int i = 0; i < skins.Length; i++)
             {
                 SkinnedMeshRenderer skin = skins[i];
-                if (skin == null || !skin.enabled || skin.sharedMesh == null) continue;
+                if (skin == null || skin.sharedMesh == null || !skin.gameObject.activeInHierarchy) continue;
+                if (lodManaged.Contains(skin) ? lodSkip.Contains(skin) : !skin.enabled) continue;
                 try
                 {
                     Mesh mesh = skin.sharedMesh;
                     MeshData d = Cache(mesh);
-                    if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
+                    if (d == null || d.v == null || d.t == null || d.v.Length == 0)
+                    {
+                        AddBoxPart(s, skin.transform, skin.localBounds);
+                        continue;
+                    }
                     Transform[] bones = skin.bones;
                     Matrix4x4[] bind = mesh.bindposes;
                     BoneWeight[] weights = mesh.boneWeights;
@@ -1001,10 +1159,12 @@ namespace NextDayRevival
                     Matrix4x4 mtx = smr.transform.localToWorldMatrix;
                     Vector3[] wv = new Vector3[lv.Length];
                     for (int k = 0; k < lv.Length; k++) wv[k] = mtx.MultiplyPoint3x4(lv[k]);
-                    MeshData td = Cache(smr.sharedMesh);   // triangles only (pose-independent)
-                    if (td == null || td.t == null) continue;
+                    // BakeMesh produces a readable snapshot even if the source
+                    // mesh has no CPU copy. Use that snapshot for indices too.
+                    int[] bakedTriangles = _bakeScratch.triangles;
+                    if (bakedTriangles == null || bakedTriangles.Length == 0) continue;
                     BakedPart bp = new BakedPart();
-                    bp.wv = wv; bp.t = td.t;
+                    bp.wv = wv; bp.t = bakedTriangles;
                     s.skinned.Add(bp);
                 }
                 MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>();
