@@ -360,8 +360,15 @@ namespace NextDayRevival
             if (!_appearance.TryGetValue(id, out selected)) return;
             _appearance.Remove(id);
             for (int i = 0; i < 7; i++)
+            {
                 if (selected[i] > 0) __result[i] = selected[i];
+                else if (selected[i] == NoItem) __result[i] = 0;
+            }
         }
+
+        /// <summary>An appearance slot the editor leaves deliberately empty,
+        /// as opposed to -1/0 "keep the map's random pick".</summary>
+        const int NoItem = -2;
 
         static void RegisterAppearance(Component spawn,
                                        RevivalComposition.CrewMan spec)
@@ -370,9 +377,16 @@ namespace NextDayRevival
             // CustomizationData order, confirmed in
             // NPC_Settlement.GenerateCustomizationDefault:
             // head/face, body, hands, legs, headwear, mask, backpack.
+            //
+            // A chosen headwear with an empty mask means NO mask. The random
+            // pick would otherwise put the faction's mask on, and
+            // NPC_AI2.SetCustomization equips the headwear only when
+            // PlayerInventoryManager.isCanCombineHeadGears(mask, headwear)
+            // allows it - so a helmet like the UKB one silently vanished.
+            int mask = spec.Mask > 0 ? spec.Mask : (spec.Headwear > 0 ? NoItem : 0);
             _appearance[spawn.GetInstanceID()] = new int[] {
                 -1, spec.Body, spec.Hands, spec.Legs,
-                spec.Headwear, spec.Mask, -1 };
+                spec.Headwear, mask, -1 };
         }
 
         public static void NpcStartPostfix(object __instance)

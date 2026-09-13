@@ -25,16 +25,20 @@
 // So the master instantiates the same prefab with instantiation data that marks
 // it as ours, never gives it movement data, and flies it itself. Every client
 // - late joiners included, since instantiation data travels with the object -
-// scales it and gives it a hull collider in the Start hook.
+// sizes it and gives it a hull collider in the Start hook.
 //
-// HYPOTHESES (not yet seen in game): the prefab is modelled at about 2.8 times
-// real size for high flight (rotor disc about 75 m, cabin about 15 m tall) -
-// HeliScale 0.36 brings it to a real Mi-8; PhotonInterpolatedTransform syncs
-// the rotation the master sets.
+// SIZE. The whole game world is modelled about 2.8 times real size: every human
+// *_NPC prefab carries a 5.0 unit CapsuleCollider, the VAZ-1111 body mesh is
+// 10.8 units long, and the Mi-8 prefab (rotor disc 75 units, 70 units long,
+// 15.5 units to the cabin roof) matches that. 6.16.0 shrank it to 0.36 as if the
+// world were metric, and in game it stood no taller than a player. HeliSize 1 is
+// the aid helicopter's own size; every flight and landing distance below scales
+// with K so the landing keeps the same look at any size.
+// HYPOTHESIS (not yet seen in game): PhotonInterpolatedTransform syncs the
+// rotation the master sets.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree lambdas.
-// build.ps1 does not reference UnityEngine.PhysicsModule or AudioModule, so
-// raycasts go through Turret.RaycastObject and colliders through reflection.
+// Raycasts go through Turret.RaycastObject and colliders through reflection.
 // Player-facing strings go through Loc.T; this file is UTF-8 without BOM.
 
 using System;
@@ -45,6 +49,7 @@ using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace NextDayRevival
 {
@@ -52,7 +57,7 @@ namespace NextDayRevival
     {
         // ============================================================= config
         internal static ConfigEntry<bool>    CfgEnabled;
-        internal static ConfigEntry<float>   CfgHeliScale;
+        internal static ConfigEntry<float>   CfgHeliSize;
         internal static ConfigEntry<float>   CfgCruiseHeight;
         internal static ConfigEntry<float>   CfgApproachDist;
         internal static ConfigEntry<float>   CfgHeliSpeed;
@@ -75,10 +80,12 @@ namespace NextDayRevival
                 + "Hubschrauber landet am markierten Punkt, ein Trupp steigt aus "
                 + "und kaempft sich den Pfeil entlang. Nur der Master-Client "
                 + "startet Landungen.");
-            CfgHeliScale = cfg.Bind("Troops", "HeliScale", 0.36f,
-                "Groesse des gelandeten Hubschraubers. Das Spielmodell ist fuer "
-                + "den Hoehenflug etwa 2,8-fach vergroessert; 0,36 entspricht einem "
-                + "echten Mi-8.");
+            // A new key on purpose: 6.16.0 wrote HeliScale = 0.36 into every
+            // installed config, and Config.Bind would keep that value forever.
+            CfgHeliSize = cfg.Bind("Troops", "HeliSize", 1f,
+                "Groesse des Truppenhubschraubers relativ zum Hilfsgueter-Mi-8 des "
+                + "Spiels (0,5..2). 1 = Originalgroesse, passend zu Spielern und "
+                + "Fahrzeugen. Der alte Schluessel HeliScale wird nicht mehr gelesen.");
             CfgCruiseHeight = cfg.Bind("Troops", "CruiseHeight", 90f,
                 "Flughoehe in Metern ueber dem hoechsten Gelaende auf dem Anflug.");
             CfgApproachDist = cfg.Bind("Troops", "ApproachDistance", 1500f,
@@ -343,50 +350,56 @@ namespace NextDayRevival
 
         // ======================================================= landing zone
 
-        /// <summary>Scaled distances in metres of the landed Mi-8. The prefab's
-        /// root sits on the gear; its forward is +Z; the cabin centre is 2.5
-        /// model units to the right. Measured with research/dump_prefab.py.</summary>
+        /// <summary>Multiplier for every helicopter distance in this file. The
+        /// gear, tail, rotor and door numbers below are prefab model units
+        /// times 0.36, the size 6.16.0 flew; K turns them into world units for
+        /// the size flown now (1 at HeliSize 0.36, 2.78 at the original size).
+        /// The prefab's root sits on the gear; its forward is +Z; the cabin
+        /// centre is 2.5 model units to the right. Measured with
+        /// research/dump_prefab.py.</summary>
         internal static float K { get { return Scale() / 0.36f; } }
 
         internal static float Scale()
         {
-            return CfgHeliScale == null ? 0.36f : Mathf.Clamp(CfgHeliScale.Value, 0.2f, 1f);
+            return CfgHeliSize == null ? 1f : Mathf.Clamp(CfgHeliSize.Value, 0.5f, 2f);
         }
 
         /// <summary>A spot the helicopter can stand on: gear on the ground with
-        /// less than 1.6 m between the highest and lowest wheel, and nothing
+        /// less than 1.6 K between the highest and lowest wheel, and nothing
         /// under the rotor disc that reaches it. Tries the marked point first,
-        /// then rings out to 60 m. lz.y is the height the gear touches.</summary>
+        /// then five rings of 12 K. lz.y is the height the gear touches.</summary>
         static bool FindLandingSpot(Vector3 mark, float yaw, out Vector3 lz)
         {
             lz = mark;
             bool any = false;
             Vector3 fallback = mark;
+            float step = 12f * K;
             for (int ring = 0; ring <= 5; ring++)
             {
                 int steps = ring == 0 ? 1 : 8;
                 for (int k = 0; k < steps; k++)
                 {
                     float a = k * Mathf.PI * 2f / steps + ring * 0.4f;
-                    Vector3 c = mark + new Vector3(Mathf.Sin(a), 0f, Mathf.Cos(a)) * (ring * 12f);
+                    Vector3 c = mark + new Vector3(Mathf.Sin(a), 0f, Mathf.Cos(a)) * (ring * step);
                     float touch, spread;
                     bool clear;
                     if (!Touchdown(c, yaw, out touch, out spread, out clear)) continue;
                     if (!any) { any = true; fallback = new Vector3(c.x, touch, c.z); }
-                    if (spread <= 1.6f && clear)
+                    if (spread <= 1.6f * K && clear)
                     {
                         lz = new Vector3(c.x, touch, c.z);
                         if (ring > 0)
                             RevivalPlugin.L.LogInfo("Troops: landing zone moved "
-                                + (ring * 12) + " m to flat, open ground.");
+                                + (ring * step).ToString("0") + " units to flat, open ground.");
                         return true;
                     }
                 }
             }
             if (!any) return false;
             lz = fallback;
-            RevivalPlugin.L.LogWarning("Troops: no flat open ground within 60 m of "
-                + mark.ToString("0") + " - landing on the marked point anyway.");
+            RevivalPlugin.L.LogWarning("Troops: no flat open ground within "
+                + (5f * step).ToString("0") + " units of " + mark.ToString("0")
+                + " - landing on the marked point anyway.");
             return true;
         }
 
@@ -420,7 +433,7 @@ namespace NextDayRevival
                 float y;
                 Vector3 p = at + q * new Vector3(0.9f * k, 0f, 0f)
                           + new Vector3(Mathf.Sin(a), 0f, Mathf.Cos(a)) * rotorRadius;
-                if (GroundY(p, out y) && y > touch + rotorHeight - 1.2f) clear = false;
+                if (GroundY(p, out y) && y > touch + rotorHeight - 1.2f * k) clear = false;
             }
             return true;
         }
@@ -509,7 +522,7 @@ namespace NextDayRevival
             return inst == null ? null : inst.Invoke(view, null) as object[];
         }
 
-        /// <summary>Same on every client: real-world size, the rotor colliders
+        /// <summary>Same on every client: the master's size, the rotor colliders
         /// off (they spin, and a ray from above would stand the crew on the
         /// rotor disc), and a box for the cabin so nobody walks through it.</summary>
         internal static void PrepareHeli(GameObject go)
@@ -521,7 +534,7 @@ namespace NextDayRevival
             Component heli = dummy == null ? null : go.GetComponent(dummy);
             object[] data = heli == null ? null : InstantiationData(heli);
             if (data != null && data.Length >= 2 && data[1] is float)
-                s = Mathf.Clamp((float)data[1], 0.2f, 1f);
+                s = Mathf.Clamp((float)data[1], 0.5f, 2f);
             go.transform.localScale = Vector3.one * s;
 
             Type colliderType = RevivalPlugin.TypeByName("Collider");
@@ -758,7 +771,7 @@ namespace NextDayRevival
         /// <summary>Photon events for what only the master computes: the banner
         /// and each NPC-vs-NPC shot, so every client sees and hears the same
         /// fight. Codes base, base+1 (banner inbound/landed, content = square),
-        /// base+2 (shot, float[6] from/to). Deaths replicate through the game's
+        /// base+2 (shot, float[7] from/to/sound). Deaths replicate through the game's
         /// own damage path and need nothing here.</summary>
         internal static class Net
         {
@@ -822,14 +835,16 @@ namespace NextDayRevival
                 Raise(kind == 0 ? 0 : 1, cell, true);
             }
 
-            /// <summary>At most 40 shot events a second across all fights.</summary>
-            internal static void SendShot(Vector3 from, Vector3 to)
+            /// <summary>At most 40 shot events a second across all fights. The
+            /// seventh value is 1 when the receiver must play the mod's report,
+            /// 0 when the NPC's own weapon RPC already plays flash and sound.</summary>
+            internal static void SendShot(Vector3 from, Vector3 to, bool sound)
             {
                 float now = Time.time;
                 if (now - _shotBudgetAt >= 1f) { _shotBudgetAt = now; _shotBudget = 40f; }
                 if (_shotBudget < 1f) return;
                 _shotBudget -= 1f;
-                Raise(2, new float[] { from.x, from.y, from.z, to.x, to.y, to.z }, false);
+                Raise(2, new float[] { from.x, from.y, from.z, to.x, to.y, to.z, sound ? 1f : 0f }, false);
             }
 
             public static void OnPhotonEvent(byte code, object content, int sender)
@@ -841,12 +856,12 @@ namespace NextDayRevival
                     if (art == 2)
                     {
                         float[] f = content as float[];
-                        if (f == null || f.Length != 6) return;
+                        if (f == null || (f.Length != 6 && f.Length != 7)) return;
                         Vector3 from = new Vector3(f[0], f[1], f[2]);
                         Vector3 to = new Vector3(f[3], f[4], f[5]);
                         GameObject me = MapTools.LocalPlayer();
                         if (me == null || (me.transform.position - from).sqrMagnitude > 600f * 600f) return;
-                        NpcWar.ShotEffect(from, to);
+                        NpcWar.ShotEffect(from, to, f.Length == 6 || f[6] > 0.5f);
                         return;
                     }
                     string cell = content as string;
@@ -883,7 +898,10 @@ namespace NextDayRevival
         bool _dropped;
         Vector3 _lastPos;
 
-        const float HoverHeight = 14f;
+        // Vertical distances scale with the helicopter (RevivalTroopInsertion.K),
+        // so a bigger machine hovers, sinks and lifts in the same proportions
+        // and in the same time as the landing 6.16.0 showed.
+        static float HoverHeight { get { return 14f * RevivalTroopInsertion.K; } }
 
         static MethodInfo _instantiate, _destroy;
         static bool _looked;
@@ -904,7 +922,7 @@ namespace NextDayRevival
                 : Mathf.Clamp(RevivalTroopInsertion.CfgCruiseHeight.Value, 30f, 400f);
             f._cruiseY = HighestGround(start, lz) + lift;
             f._exitY = f._cruiseY;
-            f._cruiseY = Mathf.Max(f._cruiseY, lz.y + HoverHeight + 20f);
+            f._cruiseY = Mathf.Max(f._cruiseY, lz.y + HoverHeight + 20f * RevivalTroopInsertion.K);
 
             try
             {
@@ -969,6 +987,7 @@ namespace NextDayRevival
             }
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float now = Time.time;
+            float k = RevivalTroopInsertion.K;
             Transform tr = Go.transform;
             Vector3 pos = tr.position;
             Vector3 flatToLz = new Vector3(_lz.x - pos.x, 0f, _lz.z - pos.z);
@@ -990,20 +1009,20 @@ namespace NextDayRevival
                     float v = Mathf.Clamp(d * 0.2f, 2.5f, _speed);
                     float step = Mathf.Min(d, v * dt);
                     if (d > 0.01f) pos += flatToLz / d * step;
-                    float glide = Mathf.InverseLerp(700f, 60f, d);
+                    float glide = Mathf.InverseLerp(700f, 60f * k, d);
                     float wantY = Mathf.Lerp(_cruiseY, _lz.y + HoverHeight, glide * glide * (3f - 2f * glide));
-                    pos.y = Mathf.MoveTowards(pos.y, wantY, 9f * dt);
+                    pos.y = Mathf.MoveTowards(pos.y, wantY, 9f * k * dt);
                     // Braking: nose up in proportion to how hard it slows.
                     targetPitch = v < _speed - 0.5f ? -Mathf.Clamp((_speed - v) * 0.35f, 0f, 12f) : 3f;
                     if (d < 3f) targetPitch = 0f;
-                    if (d < 0.3f && Mathf.Abs(pos.y - (_lz.y + HoverHeight)) < 1.5f) Next(Stage.Descend);
+                    if (d < 0.3f && Mathf.Abs(pos.y - (_lz.y + HoverHeight)) < 1.5f * k) Next(Stage.Descend);
                     break;
                 }
                 case Stage.Descend:
                 {
                     pos.x = _lz.x; pos.z = _lz.z;
                     float left = pos.y - _lz.y;
-                    float rate = Mathf.Lerp(0.6f, 3.5f, Mathf.Clamp01(left / HoverHeight));
+                    float rate = Mathf.Lerp(0.6f, 3.5f, Mathf.Clamp01(left / HoverHeight)) * k;
                     pos.y = Mathf.MoveTowards(pos.y, _lz.y, rate * dt);
                     if (pos.y - _lz.y < 0.02f) { pos.y = _lz.y; Next(Stage.Ground); }
                     break;
@@ -1020,12 +1039,12 @@ namespace NextDayRevival
                 case Stage.Lift:
                 {
                     float t = now - _stageAt;
-                    float up = Mathf.Min(1f + t * 1.2f, 5f);
-                    pos.y = Mathf.MoveTowards(pos.y, _lz.y + 20f, up * dt);
+                    float up = Mathf.Min(1f + t * 1.2f, 5f) * k;
+                    pos.y = Mathf.MoveTowards(pos.y, _lz.y + 20f * k, up * dt);
                     float turn = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((t - 2f) / 6f));
                     yaw = _yaw + 180f * turn;
                     targetRoll = Mathf.Sin(turn * Mathf.PI) * 8f;
-                    if (pos.y >= _lz.y + 19.5f && turn >= 1f) Next(Stage.Depart);
+                    if (pos.y >= _lz.y + 19.5f * k && turn >= 1f) Next(Stage.Depart);
                     break;
                 }
                 case Stage.Depart:
@@ -1033,7 +1052,7 @@ namespace NextDayRevival
                     float t = now - _stageAt;
                     float v = Mathf.Min(t * 5f, _speed);
                     pos += _out * v * dt;
-                    pos.y = Mathf.MoveTowards(pos.y, _exitY, 6f * dt);
+                    pos.y = Mathf.MoveTowards(pos.y, _exitY, 6f * k * dt);
                     yaw = _yaw + 180f;
                     targetPitch = v < _speed ? 9f : 3f;   // nose down to accelerate
                     float gone = new Vector3(pos.x - _lz.x, 0f, pos.z - _lz.z).magnitude;
@@ -1077,6 +1096,12 @@ namespace NextDayRevival
             Vector3 door = _lz + q * new Vector3(-outside, 0f, 2f * k);
             float y;
             if (RevivalTroopInsertion.GroundY(door, out y)) door.y = y;
+            // The men need the NavMesh under their feet, or their agents never
+            // start and nothing the AI orders moves them.
+            NavMeshHit nav;
+            if (NavMesh.SamplePosition(door, out nav, 12f * k, NavMesh.AllAreas)
+                && Mathf.Abs(nav.position.y - door.y) < 4f)
+                door = nav.position;
             RevivalTroopInsertion.Drop(Landing, door, _yaw - 90f);
         }
 

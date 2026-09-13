@@ -5,6 +5,7 @@ using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace NextDayRevival
 {
@@ -23,31 +24,49 @@ namespace NextDayRevival
     //   the admin drew in the editor:
     //
     //     ToStart   the squad walks from the landing zone to the arrow tail
-    //     Advance   it moves as one body along the arrow toward the head and
-    //               attacks every NPC it sees that its faction hates
+    //     Advance   it walks as one body along the arrow toward the head and
+    //               attacks everything it sees that its faction hates
     //     Patrol    the survivors walk the arrow up and down until the patrol
     //               time (at most two hours) is over
     //     removed   every man of the squad, alive or dead, leaves the map
     //
-    //   An NPC the squad fires on becomes a DEFENDER and fires back at the
-    //   squad, so a fight is two-sided. Players are left to the game: squad men
-    //   stand under their settlement's general alarm (CrewAlarm), and defenders
-    //   are alarmed as well, so the vanilla pipeline engages hostile players on
-    //   the player's own client with correct attribution.
+    //   The men stay ordinary game NPCs. Players are the game's business: a man
+    //   whose own AI has a player kill target (NPC_AI2._killTarget) gets no
+    //   order from here at all, so the vanilla aim, fire, cover and reload run
+    //   untouched. NpcWar only adds what the game cannot do - walking the arrow
+    //   and fighting other NPCs - and an NPC the squad fires on becomes a
+    //   DEFENDER that fires back, so a fight is two-sided.
     //
-    //   The shot is a real raycast with a miss model; a hit on a living hostile
-    //   NPC is applied through the game's own NPC_AI2.ApplyDamage - the damage
-    //   road the patrol guns already use (Revival.Patrol.cs, Gun.Schaden), which
-    //   keeps native health, wounds, death, ragdoll and Photon replication.
-    //   Tracer and sound are broadcast so every client sees the exchange.
+    //   An NPC-vs-NPC shot uses the game's own weapon: the man is put in the
+    //   native aim state (MainState 0, AdditionalState 3 - the state
+    //   NPC_AI2.ShootingActions fires from) and NPC_FirearmWeaponController.
+    //   FireTo(point, true) fires it, which brings the weapon's rate of fire,
+    //   magazine, muzzle flash and sound on every client (RPC
+    //   NetworkWeaponState). FireOneShot has no NPC damage branch, so the hit is
+    //   decided by our own raycast and applied through NPC_AI2.ApplyDamage - the
+    //   road the patrol guns already use (Revival.Patrol.cs, Gun.Schaden). An
+    //   empty magazine starts the native reload (NPC_AI2.OnBulletsEnded). Only
+    //   when a weapon controller cannot fire does the old tracer-and-sound shot
+    //   stand in.
+    //
+    // 6.16.0 FIELD BUG. InitSpawnNpc parents every NPC under the settlement's
+    //   AllPeopleTr (IL_015F-016A), and 6.16.0 set the settlement's position to
+    //   the men's centre every frame: each frame moved every man by the offset
+    //   between his settlement and the squad centre, so the squad shot across
+    //   the map in circles and never stood on the NavMesh long enough to walk
+    //   or fire. Only the walk-point root follows the squad now, every two
+    //   seconds, and the men move by NavMesh orders alone.
+    //
+    // SCALE. The game world is modelled about 2.8 times real size: a human NPC
+    //   capsule is 5.0 units tall (CapsuleCollider on every *_NPC prefab), so
+    //   heights and spacings below are in those units.
     //
     // AUTHORITY
     //
     //   Only the Photon master client decides anything, and only on NPCs whose
     //   photonView.isMine is true - the two conditions ApplyDamage checks.
     //   Nothing here runs without an operation, so a map without troop landings
-    //   is unchanged. Movement uses the native running state that the crew
-    //   disembark path proved (Revival.Crew.cs, StartSectorMove).
+    //   is unchanged.
     //
     public static class NpcWar
     {
@@ -99,6 +118,19 @@ namespace NextDayRevival
                 "Ausfuehrliche Log-Zeilen und eine Statuszeile oben links.");
         }
 
+        // -------------------------------------------------------- world scale
+
+        const float ChestHeight = 3.3f;     // of a 5.0 unit NPC capsule
+        const float EyeHeight = 4.2f;
+        const float FileGap = 6f;           // two files abreast
+        const float RowDepth = 7f;
+        const float Bound = 45f;            // one bound of the body
+        const float Arrive = 25f;           // the body counts as arrived
+
+        // NPC_AI2 states, from ShootingActions/OnBulletsEnded/IdleStateAction.
+        const int MainIdle = 0, MainWalk = 1, MainRun = 2;
+        const int AddNone = 0, AddAim = 3;
+
         // ------------------------------------------------------- runtime state
 
         enum Phase { ToStart, Advance, Patrol }
@@ -112,8 +144,10 @@ namespace NextDayRevival
             public object Faction;        // Fraction enum value
             public Array Hated;           // Fraction[] this NPC hates
             public Transform Target;
-            public float NextScan, NextShot, ReactUntil, NextMove;
+            public float NextScan, NextShot, ReactUntil, NextMove, NextAim, NextLos, LastSeen;
             public int Burst, Slot;
+            public bool Aiming, HasOrder, Sees;
+            public Vector3 Ordered;
             public GameObject Point;      // the walk point currently issued
         }
 
@@ -121,11 +155,12 @@ namespace NextDayRevival
         {
             public string Tag;
             public GameObject Settlement;
+            public Transform WalkRoot;       // AllWalkPointsTr: follows the body
             public readonly List<Fighter> Men = new List<Fighter>();
             public Vector3 Tail, Head;
             public Phase Phase;
             public bool TowardHead = true;   // patrol leg
-            public float PatrolSeconds, PatrolEnds, HardEnd, ContactUntil;
+            public float PatrolSeconds, PatrolEnds, HardEnd, ContactUntil, NextRing;
             public Vector3 Body;             // where the body is heading now
         }
 
@@ -141,8 +176,12 @@ namespace NextDayRevival
         static bool _looked, _ok;
         static Type _npcType, _optType, _wpType;
         static FieldInfo _fMainOptions, _fMyFraction, _fHated, _fTempPoints, _fTempIndex, _fWpType;
+        static FieldInfo _fKillTarget, _fReloading, _fMainState, _fAddState, _fPoseState;
+        static FieldInfo _fUseTemp, _fTempTaskField, _fWeapon, _fAimingPoint, _fRofDelay;
         static MethodInfo _mIsAlive, _mTempTask, _mTargetWp, _mStateSync, _mAlarm;
         static MethodInfo _mPhotonView, _mIsMine, _mMasterGetter, _mDestroy;
+        static MethodInfo _mBulletsEnded, _mStartRotation;
+        static MethodInfo _mFireTo, _mHasBullets, _mMuzzle, _mCantWork;
         static object _wpTacticalValue;
 
         static bool LookUp()
@@ -167,6 +206,15 @@ namespace NextDayRevival
             _fMyFraction = AccessTools.Field(_optType, "MyFraction");
             _fHated = AccessTools.Field(_optType, "HatedFractions");
             _fWpType = AccessTools.Field(_wpType, "Type");
+            _fKillTarget = AccessTools.Field(_npcType, "_killTarget");
+            _fReloading = AccessTools.Field(_npcType, "_reloading");
+            _fMainState = AccessTools.Field(_npcType, "MainState");
+            _fAddState = AccessTools.Field(_npcType, "AdditionalState");
+            _fPoseState = AccessTools.Field(_npcType, "PoseState");
+            _fUseTemp = AccessTools.Field(_npcType, "_useTemporaryWalkPoints");
+            _fTempTaskField = AccessTools.Field(_npcType, "TemporaryTask");
+            _fWeapon = AccessTools.Field(_npcType, "_firearmWeaponController");
+            _fAimingPoint = AccessTools.Field(_npcType, "_aimingPoint");
 
             _mIsAlive = AccessTools.Method(_npcType, "IsAlive", null, null);
             _mTempTask = AccessTools.Method(_npcType, "SetTemporaryTask", null, null);
@@ -174,6 +222,21 @@ namespace NextDayRevival
             _mStateSync = AccessTools.Method(_npcType, "SetStateWithAnimAndSync", null, null);
             _mAlarm = AccessTools.Method(_npcType, "SetGeneralAlarm", null, null);
             _mPhotonView = AccessTools.Method(_npcType, "get_photonView", null, null);
+            _mBulletsEnded = AccessTools.Method(_npcType, "OnBulletsEnded", Type.EmptyTypes, null);
+            _mStartRotation = AccessTools.Method(_npcType, "StartRotation",
+                new Type[] { typeof(Vector3) }, null);
+
+            Type weapon = _fWeapon == null ? null : _fWeapon.FieldType;
+            if (weapon != null)
+            {
+                _mFireTo = AccessTools.Method(weapon, "FireTo",
+                    new Type[] { typeof(Vector3), typeof(bool) }, null);
+                _mHasBullets = AccessTools.Method(weapon, "HasBullets", Type.EmptyTypes, null);
+                _mMuzzle = AccessTools.Method(weapon, "GetMuzzlePos", Type.EmptyTypes, null);
+                _mCantWork = AccessTools.Method(weapon, "CantWorkWeapon", Type.EmptyTypes, null);
+                _fRofDelay = AccessTools.Field(weapon, "CurrentRateOfFireDelay");
+                if (_fRofDelay != null && _fRofDelay.FieldType != typeof(float)) _fRofDelay = null;
+            }
 
             if (photon != null)
             {
@@ -198,6 +261,10 @@ namespace NextDayRevival
                 || _fTempPoints == null || _wpTacticalValue == null)
                 RevivalPlugin.L.LogWarning("NpcWar: native movement entry points missing - "
                     + "squads stay where they land.");
+            if (_mFireTo == null || _mHasBullets == null || _fRofDelay == null
+                || _fMainState == null || _fAddState == null)
+                RevivalPlugin.L.LogWarning("NpcWar: native weapon or aim members missing - "
+                    + "NPC-vs-NPC shots fall back to tracer and sound.");
             return _ok;
         }
 
@@ -221,13 +288,14 @@ namespace NextDayRevival
             Squad s = new Squad();
             s.Tag = tag;
             s.Settlement = settlement;
+            s.WalkRoot = WalkRootOf(settlement);
             s.Tail = tail;
             s.Head = head;
             s.Phase = Phase.ToStart;
             s.PatrolSeconds = Mathf.Clamp(patrolSeconds, 60f, 7200f);
             float walk = Vector3.Distance(settlement.transform.position, tail)
                        + Vector3.Distance(tail, head);
-            // One metre per second is a slow, fighting pace; plus half an hour.
+            // One unit per second is a slow, fighting pace; plus half an hour.
             s.HardEnd = Time.time + walk + 1800f + s.PatrolSeconds;
             s.Body = tail;
 
@@ -242,6 +310,7 @@ namespace NextDayRevival
                 if (sector != null) UnityEngine.Object.Destroy(sector);
                 Fighter f = NewFighter(ai, s);
                 f.Slot = s.Men.Count;
+                f.NextMove = Time.time + 0.5f + 0.15f * f.Slot;
                 s.Men.Add(f);
             }
             if (s.Men.Count == 0) return false;
@@ -249,7 +318,8 @@ namespace NextDayRevival
             EnsurePointsRoot();
             RevivalPlugin.L.LogInfo("NpcWar: operation " + tag + " - " + s.Men.Count
                 + " men, arrow " + tail.ToString("0") + " -> " + head.ToString("0")
-                + ", patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min.");
+                + ", patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min"
+                + (s.WalkRoot == null ? ", no walk-point root found" : "") + ".");
             return true;
         }
 
@@ -274,6 +344,18 @@ namespace NextDayRevival
             f.NextScan = Time.time + UnityEngine.Random.value;
             f.NextShot = Time.time + UnityEngine.Random.value * CfgFireInterval.Value;
             return f;
+        }
+
+        static Transform WalkRootOf(GameObject settlement)
+        {
+            try
+            {
+                Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
+                Component sied = sType == null ? null : settlement.GetComponent(sType);
+                FieldInfo f = sied == null ? null : AccessTools.Field(sType, "AllWalkPointsTr");
+                return f == null ? null : f.GetValue(sied) as Transform;
+            }
+            catch { return null; }
         }
 
         // ----------------------------------------------------------- per frame
@@ -307,10 +389,12 @@ namespace NextDayRevival
                 Fighter d = _defenders[i];
                 if (d.Ai == null || d.Tr == null || !Alive(d.Ai) || NearestSquadMan(d, 2f) == null)
                 {
+                    if (d.Ai != null && d.Aiming && Alive(d.Ai)) StandDown(d);
                     _defenders.RemoveAt(i);
                     continue;
                 }
-                Fight(d, now);
+                if (HasKillTarget(d)) { d.Aiming = false; continue; }   // a player: the game's fight
+                if (!Fight(d, now) && d.Aiming) StandDown(d);
             }
 
             _status = "NpcWar: " + _squads.Count + " operation(s), "
@@ -335,14 +419,19 @@ namespace NextDayRevival
             if (s.Phase == Phase.Patrol && now >= s.PatrolEnds) { Remove(s, "patrol over"); return; }
             centre /= alive;
 
-            // The settlement and its ring of walk and tactical points travel
-            // with the body. Whatever the vanilla alarm picks between two of our
-            // orders is then next to the squad, not back at the landing zone.
-            s.Settlement.transform.position = centre;
+            // The ring of walk and tactical points follows the body, so whatever
+            // the vanilla alarm picks between two orders is next to the squad,
+            // not back at the landing zone. Never the settlement itself: the
+            // men are its children (InitSpawnNpc) and would be dragged along.
+            if (s.WalkRoot != null && now >= s.NextRing)
+            {
+                s.NextRing = now + 2f;
+                s.WalkRoot.position = centre;
+            }
 
             // Phase changes are decided by the body, not by one fast runner.
             Vector3 goal = Goal(s);
-            if (Flat(centre - goal) < 14f)
+            if (Flat(centre - goal) < Arrive)
             {
                 if (s.Phase == Phase.ToStart) s.Phase = Phase.Advance;
                 else if (s.Phase == Phase.Advance)
@@ -358,18 +447,25 @@ namespace NextDayRevival
                 goal = Goal(s);
             }
 
-            // The body moves in short bounds along the line toward the goal, so
-            // the men arrive together instead of strung out over the map. A
-            // hostile seen near the arrow pulls the body toward it.
+            // The body moves in bounds along the line toward the goal, so the
+            // men arrive together instead of strung out over the map. A hostile
+            // seen near the arrow pulls the body toward it, to just inside
+            // firing range rather than on top of it.
             Transform enemy = NearestEnemyOfSquad(s, centre);
-            if (enemy != null) s.ContactUntil = now + 4f;
+            if (enemy != null) s.ContactUntil = now + 6f;
             if (enemy != null && DistanceToSegment(enemy.position, s.Tail, s.Head) <= CfgDetour.Value)
-                s.Body = enemy.position;
+            {
+                Vector3 back = centre - enemy.position;
+                back.y = 0f;
+                float keep = Mathf.Min(back.magnitude, CfgEngageRange.Value * 0.6f);
+                s.Body = back.sqrMagnitude < 0.01f ? enemy.position
+                       : enemy.position + back.normalized * keep;
+            }
             else
             {
                 Vector3 to = goal - centre;
                 to.y = 0f;
-                float bound = Mathf.Min(to.magnitude, 30f);
+                float bound = Mathf.Min(to.magnitude, Bound);
                 s.Body = to.sqrMagnitude < 0.01f ? goal : centre + to.normalized * bound;
             }
 
@@ -378,23 +474,46 @@ namespace NextDayRevival
             if (along.sqrMagnitude < 0.01f) along = Vector3.forward;
             along.Normalize();
             if (s.Phase == Phase.Patrol && !s.TowardHead) along = -along;
+            bool contact = now < s.ContactUntil;
 
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
-                Fight(f, now);
-                bool engaged = f.Target != null
-                    && Vector3.Distance(f.Tr.position, f.Target.position) <= CfgEngageRange.Value;
-                if (engaged || now < f.NextMove) continue;
-                f.NextMove = now + 2.5f + UnityEngine.Random.value * 0.5f;
+
+                // A player in his sights: the game's own combat runs him.
+                if (HasKillTarget(f)) { f.Aiming = false; f.HasOrder = false; continue; }
+
+                if (Fight(f, now)) continue;          // aiming and firing at an NPC
+                if (f.Aiming) { StandDown(f); f.NextMove = now; }
+                if (Reloading(f) || now < f.NextMove) continue;
+                f.NextMove = now + 1.2f + UnityEngine.Random.value * 0.6f;
+
                 Vector3 spot = s.Body + Formation(f.Slot, along);
-                // A man already at his spot keeps it; re-issuing a point he
-                // stands on only restarts his run animation.
-                if (Flat(f.Tr.position - spot) < 3f) continue;
-                int state = s.Phase == Phase.Patrol && now >= s.ContactUntil ? 1 : 2;
+                float away = Flat(f.Tr.position - spot);
+                if (away < 4f) { f.HasOrder = false; continue; }   // already there
+                // A straggler or a squad in contact runs; otherwise they walk.
+                int state = contact || away > 40f ? MainRun : MainWalk;
+                // Walking there already: re-issuing only restarts the animation.
+                if (f.HasOrder && Flat(spot - f.Ordered) < 6f
+                    && IntField(f.Ai, _fMainState, -1) == state && StillOurPoint(f)) continue;
                 OrderMove(f, spot, state);
             }
+        }
+
+        /// <summary>Does the man still walk to the point we gave him? The alarm's
+        /// tactical intentions replace the temporary list with the settlement's
+        /// tactical points (IntentionsActions IL_044F).</summary>
+        static bool StillOurPoint(Fighter f)
+        {
+            if (f.Point == null || _fTempPoints == null) return false;
+            try
+            {
+                IList list = _fTempPoints.GetValue(f.Ai) as IList;
+                return list != null && list.Count == 1
+                    && list[0] as Component == f.Point.GetComponent(_wpType);
+            }
+            catch { return false; }
         }
 
         static Vector3 Goal(Squad s)
@@ -407,19 +526,21 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>Two files abreast, four metres apart, rows five metres deep,
-        /// laid out in the direction of travel.</summary>
+        /// <summary>Two files abreast, rows behind each other, laid out in the
+        /// direction of travel.</summary>
         static Vector3 Formation(int slot, Vector3 along)
         {
             Vector3 side = new Vector3(along.z, 0f, -along.x);
-            float lateral = (slot % 2 == 0 ? -2f : 2f);
-            float back = (slot / 2) * 5f;
+            float lateral = (slot % 2 == 0 ? -0.5f : 0.5f) * FileGap;
+            float back = (slot / 2) * RowDepth;
             return side * lateral - along * back;
         }
 
         // ------------------------------------------------------------- combat
 
-        static void Fight(Fighter f, float now)
+        /// <summary>Scan, aim and fire at an NPC target. True while the man is
+        /// engaged - he then takes no movement order.</summary>
+        static bool Fight(Fighter f, float now)
         {
             if (now >= f.NextScan)
             {
@@ -427,16 +548,30 @@ namespace NextDayRevival
                 Transform had = f.Target;
                 f.Target = f.Squad != null ? PickTargetForMan(f) : PickTargetForDefender(f);
                 if (f.Target != null && f.Target != had)
+                {
                     f.ReactUntil = now + UnityEngine.Random.Range(0.2f, Mathf.Max(0.2f, CfgReactionMax.Value));
+                    f.LastSeen = now;
+                    f.NextLos = now;
+                }
             }
-            if (f.Target == null) return;
-            if (Vector3.Distance(f.Tr.position, f.Target.position) > CfgEngageRange.Value) return;
+            if (f.Target == null) return false;
+            if (Vector3.Distance(f.Tr.position, f.Target.position) > CfgEngageRange.Value) return false;
+            if (Reloading(f)) return true;
 
-            FaceTarget(f);
-            if (now < f.ReactUntil || now < f.NextShot) return;
-            if (!LineOfSight(f.Tr, f.Target)) { f.NextShot = now + 0.5f; return; }
-            Shoot(f);
-            ScheduleNextShot(f, now);
+            if (now >= f.NextLos)
+            {
+                f.NextLos = now + 0.5f;
+                f.Sees = LineOfSight(f.Tr, f.Target);
+                if (f.Sees) f.LastSeen = now;
+            }
+            // Three seconds without a line of fire: move up with the squad
+            // instead of aiming at a wall.
+            if (!f.Sees && now - f.LastSeen > 3f) return false;
+
+            HoldAim(f, now);
+            if (!f.Sees || now < f.ReactUntil || now < f.NextShot) return true;
+            if (Shoot(f)) ScheduleNextShot(f, now);
+            return true;
         }
 
         static void ScheduleNextShot(Fighter f, float now)
@@ -526,7 +661,7 @@ namespace NextDayRevival
                 if (c == null || FighterOf(c) != null || !Targetable(c) || !Alive(c)) continue;
                 if (c != struck)
                 {
-                    if ((c.transform.position - at).sqrMagnitude > 25f * 25f) continue;
+                    if ((c.transform.position - at).sqrMagnitude > 60f * 60f) continue;
                     object other = FactionOf(c);
                     if (other == null || !other.Equals(faction)) continue;
                 }
@@ -537,6 +672,8 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>The nearest enemy any man has: his NPC target or the player
+        /// his own AI is fighting.</summary>
         static Transform NearestEnemyOfSquad(Squad s, Vector3 centre)
         {
             Transform best = null;
@@ -544,56 +681,122 @@ namespace NextDayRevival
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
-                if (f.Target == null || f.Ai == null || !Alive(f.Ai)) continue;
-                float d = (f.Target.position - centre).sqrMagnitude;
-                if (d < bestSqr) { best = f.Target; bestSqr = d; }
+                if (f.Ai == null || !Alive(f.Ai)) continue;
+                Transform t = f.Target;
+                Component player = KillTarget(f);
+                if (player != null) t = player.transform;
+                if (t == null) continue;
+                float d = (t.position - centre).sqrMagnitude;
+                if (d < bestSqr) { best = t; bestSqr = d; }
             }
             return best;
         }
 
         // ------------------------------------------------------------- firing
 
-        static void Shoot(Fighter f)
+        /// <summary>One shot at the man's target. False when the weapon did not
+        /// fire this frame (rate of fire, reload), so the burst waits for it.</summary>
+        static bool Shoot(Fighter f)
         {
-            Vector3 from = f.Tr.position + Vector3.up * 1.45f;
-            Vector3 aimAt = f.Target.position + Vector3.up * 1.1f;
+            Vector3 aimAt = f.Target.position + Vector3.up * ChestHeight;
+            Component weapon = WeaponOf(f);
+            Vector3 from = Muzzle(weapon, f);
             float dist = Vector3.Distance(from, aimAt);
-
             Vector3 aim = aimAt + MissOffset(from, aimAt, dist);
+
+            int fired = VanillaShot(f, weapon, aim);
+            if (fired == 0) return false;
+            bool native = fired > 0;
+
             Vector3 dir = aim - from;
-            if (dir.sqrMagnitude < 0.0001f) return;
+            if (dir.sqrMagnitude < 0.0001f) return true;
             dir.Normalize();
 
             float range = Mathf.Max(dist + 5f, CfgSightRange.Value + 20f);
             Vector3 impact;
-            GameObject struck = Turret.RaycastObject(from + dir * 0.6f, dir, range, out impact);
+            // Past the muzzle, or past the shooter's own 0.75 unit capsule when
+            // the fallback shoots from eye height.
+            GameObject struck = Turret.RaycastObject(from + dir * 1.0f, dir, range, out impact);
             Vector3 end = struck == null ? from + dir * range : impact;
-            ShotEffect(from, end);
-            RevivalTroopInsertion.Net.SendShot(from, end);
+            ShotEffect(from, end, !native);
+            RevivalTroopInsertion.Net.SendShot(from, end, !native);
 
-            if (struck == null) return;
+            if (struck == null) return true;
             Component hitAi = struck.GetComponentInParent(_npcType);
-            if (hitAi == null || !Alive(hitAi)) return;
+            if (hitAi == null || !Alive(hitAi)) return true;
             Fighter victim = FighterOf(hitAi);
-            if (victim != null && victim.Squad != null && victim.Squad == f.Squad) return;
+            if (victim != null && victim.Squad != null && victim.Squad == f.Squad) return true;
             bool enemy = f.Squad == null
                 ? victim != null && victim.Squad != null
                 : Hostile(f.Hated, FactionOf(hitAi)) && (victim != null || Targetable(hitAi));
-            if (!enemy) return;
+            if (!enemy) return true;
             if (victim == null && f.Squad != null) Enlist(hitAi);
 
             if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", CfgDamage.Value)
                 && CfgDebug.Value)
-                RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " m.");
+                RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " units.");
+            return true;
         }
 
-        /// <summary>Tracer and report, identical on the master and on every
-        /// client that receives the broadcast.</summary>
-        internal static void ShotEffect(Vector3 from, Vector3 end)
+        /// <summary>Fire the NPC's own weapon at a point. 1 = a round went out,
+        /// 0 = not this frame (rate of fire, empty and reloading), -1 = no usable
+        /// native weapon, the caller shoots the mod's substitute instead.</summary>
+        static int VanillaShot(Fighter f, Component weapon, Vector3 aim)
+        {
+            if (weapon == null || _mFireTo == null || _mHasBullets == null || _fRofDelay == null)
+                return -1;
+            try
+            {
+                if (_mCantWork != null && (bool)_mCantWork.Invoke(weapon, null)) return -1;
+                if (!(bool)_mHasBullets.Invoke(weapon, null))
+                {
+                    StartReload(f);
+                    return 0;
+                }
+                float before = (float)_fRofDelay.GetValue(weapon);
+                if (before >= Time.time) return 0;
+                if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
+                    _fAimingPoint.SetValue(f.Ai, aim);
+                _mFireTo.Invoke(weapon, new object[] { aim, true });
+                float after = (float)_fRofDelay.GetValue(weapon);
+                return after != before ? 1 : 0;
+            }
+            catch (Exception ex)
+            {
+                if (CfgDebug.Value)
+                    RevivalPlugin.L.LogWarning("NpcWar: native shot failed - "
+                        + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                return -1;
+            }
+        }
+
+        /// <summary>An empty magazine: the game's own reload, exactly what
+        /// ShootingActions does on the master (reload state, animation, RPC).</summary>
+        static void StartReload(Fighter f)
+        {
+            if (_mBulletsEnded == null || Reloading(f)) return;
+            try
+            {
+                _mBulletsEnded.Invoke(f.Ai, null);
+                f.Aiming = false;
+            }
+            catch (Exception ex)
+            {
+                if (CfgDebug.Value)
+                    RevivalPlugin.L.LogWarning("NpcWar: reload failed - "
+                        + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+            }
+        }
+
+        /// <summary>Tracer, and the mod's report only when the game's weapon did
+        /// not fire (its own RPC already plays flash and sound everywhere).
+        /// Identical on the master and on every client that receives the
+        /// broadcast.</summary>
+        internal static void ShotEffect(Vector3 from, Vector3 end, bool sound)
         {
             try
             {
-                VehicleShotSound.Play(from, false);
+                if (sound) VehicleShotSound.Play(from, false);
                 List<Vector3> path = new List<Vector3>();
                 path.Add(from + (end - from).normalized * 1.2f);
                 path.Add(end);
@@ -625,36 +828,69 @@ namespace NextDayRevival
 
         static bool LineOfSight(Transform shooter, Transform target)
         {
-            Vector3 from = shooter.position + Vector3.up * 1.45f;
-            Vector3 to = target.position + Vector3.up * 1.1f;
+            Vector3 from = shooter.position + Vector3.up * EyeHeight;
+            Vector3 to = target.position + Vector3.up * ChestHeight;
             Vector3 dir = to - from;
             float dist = dir.magnitude;
-            if (dist < 0.5f) return true;
+            if (dist < 1f) return true;
             dir /= dist;
             Vector3 point;
-            // Start past the shooter's own capsule and ragdoll.
-            GameObject hit = Turret.RaycastObject(from + dir * 0.6f, dir, dist, out point);
+            // Start past the shooter's own 0.75 unit capsule and ragdoll.
+            GameObject hit = Turret.RaycastObject(from + dir * 1.2f, dir, dist, out point);
             if (hit == null) return true;
             if (hit.transform.IsChildOf(target)) return true;
-            return (to - point).sqrMagnitude < 2.25f;
+            return (to - point).sqrMagnitude < 6.25f;
+        }
+
+        // ------------------------------------------------------------- aiming
+
+        /// <summary>Stand and aim at the target in the native aim state. The
+        /// idle action generates no new intentions while AdditionalState is set
+        /// (IdleStateAction IL_060D), so the pose holds between shots.</summary>
+        static void HoldAim(Fighter f, float now)
+        {
+            Vector3 flat = f.Target.position - f.Tr.position;
+            flat.y = 0f;
+            if (flat.sqrMagnitude > 0.01f)
+                f.Tr.rotation = Quaternion.RotateTowards(f.Tr.rotation,
+                    Quaternion.LookRotation(flat), 360f * Time.deltaTime);
+
+            if (_mStateSync == null || _fMainState == null || _fAddState == null) return;
+            bool aiming = IntField(f.Ai, _fMainState, -1) == MainIdle
+                       && IntField(f.Ai, _fAddState, -1) == AddAim;
+            if (aiming) { f.Aiming = true; return; }
+            if (now < f.NextAim) return;
+            f.NextAim = now + 0.8f;
+            float rotY = flat.sqrMagnitude > 0.01f
+                ? Mathf.Atan2(flat.x, flat.z) * Mathf.Rad2Deg : f.Tr.eulerAngles.y;
+            if (SetState(f, MainIdle, AddAim, Mathf.Max(0, IntField(f.Ai, _fPoseState, 0)), -1, rotY))
+            {
+                f.Aiming = true;
+                f.HasOrder = false;
+                if (_mStartRotation != null)
+                {
+                    try { _mStartRotation.Invoke(f.Ai, new object[] { f.Target.position }); }
+                    catch { }
+                }
+            }
+        }
+
+        /// <summary>Out of the aim pose: a defender goes back to idle, a squad
+        /// man gets his next move order right after this.</summary>
+        static void StandDown(Fighter f)
+        {
+            f.Aiming = false;
+            if (IntField(f.Ai, _fAddState, -1) != AddAim) return;
+            SetState(f, MainIdle, AddNone, Mathf.Max(0, IntField(f.Ai, _fPoseState, 0)), -1,
+                f.Tr.eulerAngles.y);
         }
 
         // ----------------------------------------------------------- movement
 
-        static void FaceTarget(Fighter f)
-        {
-            Vector3 flat = f.Target.position - f.Tr.position;
-            flat.y = 0f;
-            if (flat.sqrMagnitude < 0.01f) return;
-            f.Tr.rotation = Quaternion.RotateTowards(f.Tr.rotation,
-                Quaternion.LookRotation(flat), 360f * Time.deltaTime);
-        }
-
-        /// <summary>Send one man to a world point: a tactical task, one tactical
-        /// walk point there, and SetStateWithAnimAndSync, which drives the
-        /// NavMeshAgent, the animation and the Photon sync (Crew.StartSectorMove).
-        /// State 2 runs; state 1 is the calmer patrol pace (HYPOTHESIS: the two
-        /// moving states SetStateWithAnimAndSync treats alike are walk and run).</summary>
+        /// <summary>Send one man to a world point on the NavMesh: a tactical
+        /// task, one tactical walk point there, and SetStateWithAnimAndSync,
+        /// which drives the NavMeshAgent, the animation and the Photon sync.
+        /// State 1 walks (IdleStateAction uses it for patrol points), 2 runs.</summary>
         static void OrderMove(Fighter f, Vector3 dest, int state)
         {
             if (_mTempTask == null || _mTargetWp == null || _mStateSync == null
@@ -676,12 +912,13 @@ namespace NextDayRevival
                 if (list == null) return;
                 list.Add(wp);
 
-                _mTempTask.Invoke(f.Ai, new object[] { 2 });      // TemporaryTask Tactical
+                _mTempTask.Invoke(f.Ai, new object[] { Arg(_mTempTask, 0, 2) });   // Tactical
                 _fTempPoints.SetValue(f.Ai, list);
                 if (_fTempIndex != null) _fTempIndex.SetValue(f.Ai, 0);
                 _mTargetWp.Invoke(f.Ai, new object[] { wp });
-                _mStateSync.Invoke(f.Ai, new object[] {
-                    f.Tr.position, state, 0, 0, 0, true, 2, f.Tr.eulerAngles.y });
+                if (!SetState(f, state, AddNone, 0, 0, f.Tr.eulerAngles.y)) return;
+                f.HasOrder = true;
+                f.Ordered = dest;
             }
             catch (Exception ex)
             {
@@ -691,11 +928,49 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>NPC_AI2.SetStateWithAnimAndSync(position, main, additional,
+        /// pose, walk point index, use temporary points, temporary task, rotY)
+        /// with the game's own enum types built from the numbers.</summary>
+        static bool SetState(Fighter f, int main, int additional, int pose, int index, float rotY)
+        {
+            if (_mStateSync == null) return false;
+            try
+            {
+                bool useTemp = _fUseTemp == null || !(_fUseTemp.GetValue(f.Ai) is bool)
+                    || (bool)_fUseTemp.GetValue(f.Ai);
+                int task = IntField(f.Ai, _fTempTaskField, 2);
+                if (main != MainIdle) { useTemp = true; task = 2; }
+                _mStateSync.Invoke(f.Ai, new object[] {
+                    f.Tr.position, Arg(_mStateSync, 1, main), Arg(_mStateSync, 2, additional),
+                    Arg(_mStateSync, 3, pose), Arg(_mStateSync, 4, index), useTemp,
+                    Arg(_mStateSync, 6, task), rotY });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (CfgDebug.Value)
+                    RevivalPlugin.L.LogWarning("NpcWar: state change failed - "
+                        + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                return false;
+            }
+        }
+
+        static object Arg(MethodInfo m, int index, int value)
+        {
+            ParameterInfo[] ps = m.GetParameters();
+            if (index >= ps.Length) return value;
+            Type t = ps[index].ParameterType;
+            return t.IsEnum ? Enum.ToObject(t, value) : (object)value;
+        }
+
         static Vector3 Ground(Vector3 p)
         {
             Vector3 hit;
             GameObject g = Turret.RaycastObject(p + Vector3.up * 30f, Vector3.down, 80f, out hit);
-            return g == null ? p : hit + Vector3.up * 0.1f;
+            Vector3 at = g == null ? p : hit + Vector3.up * 0.1f;
+            NavMeshHit nav;
+            if (NavMesh.SamplePosition(at, out nav, 12f, NavMesh.AllAreas)) return nav.position;
+            return at;
         }
 
         static void EnsurePointsRoot()
@@ -825,6 +1100,63 @@ namespace NextDayRevival
                 return r is bool && (bool)r;
             }
             catch { return false; }
+        }
+
+        /// <summary>The player this NPC's own AI is fighting, or null.</summary>
+        static Component KillTarget(Fighter f)
+        {
+            if (_fKillTarget == null || f.Ai == null) return null;
+            try
+            {
+                Component c = _fKillTarget.GetValue(f.Ai) as Component;
+                return c == null ? null : c;   // Unity null for a destroyed player
+            }
+            catch { return null; }
+        }
+
+        static bool HasKillTarget(Fighter f) { return KillTarget(f) != null; }
+
+        static bool Reloading(Fighter f)
+        {
+            if (_fReloading == null || f.Ai == null) return false;
+            try { object v = _fReloading.GetValue(f.Ai); return v is bool && (bool)v; }
+            catch { return false; }
+        }
+
+        static Component WeaponOf(Fighter f)
+        {
+            if (_fWeapon == null || f.Ai == null) return null;
+            try
+            {
+                Component c = _fWeapon.GetValue(f.Ai) as Component;
+                return c == null ? null : c;
+            }
+            catch { return null; }
+        }
+
+        static Vector3 Muzzle(Component weapon, Fighter f)
+        {
+            if (weapon != null && _mMuzzle != null)
+            {
+                try
+                {
+                    object v = _mMuzzle.Invoke(weapon, null);
+                    if (v is Vector3 && (Vector3)v != Vector3.zero) return (Vector3)v;
+                }
+                catch { }
+            }
+            return f.Tr.position + Vector3.up * EyeHeight;
+        }
+
+        static int IntField(Component c, FieldInfo f, int fallback)
+        {
+            if (c == null || f == null) return fallback;
+            try
+            {
+                object v = f.GetValue(c);
+                return v == null ? fallback : Convert.ToInt32(v);
+            }
+            catch { return fallback; }
         }
 
         /// <summary>May a squad shoot this scene NPC? Owned here, not god-moded,
