@@ -122,6 +122,54 @@ namespace NextDayRevival
         internal const int MG42_ID = 1160;
         internal const int LAW_ID = 1162;
 
+        /// <summary>The id the map editor catalogue gave the M7 until 6.16.5.
+        /// The plugin registers the rifle as <see cref="M7Rifle.RifleId"/>;
+        /// no item and no `PlayerDataPrefabs/Weapons/1170_Weapon` exists.</summary>
+        internal const int LegacyXm7Id = 1170;
+        const int VanillaRifleId = 1001;
+
+        static readonly Dictionary<int, int> _usableWeapon = new Dictionary<int, int>();
+
+        /// <summary>
+        /// The weapon id an NPC can really hold. `NPC_WeaponsManager` starts the
+        /// draw animation first and only then, inside `NetworkShowWeapon`,
+        /// loads `PlayerDataPrefabs/Weapons/&lt;id&gt;_Weapon`; a null prefab ends
+        /// that coroutine silently, before the slot is claimed (CONFIRMED IL,
+        /// 2026-09-14). That is exactly the 6.16.4 field report: every man
+        /// played the draw, then stood with slot -1 for the whole operation,
+        /// because the live editor loadout carried the stale id 1170. The id
+        /// is therefore checked once, through the same Resources.Load the game
+        /// uses (ResourceHook serves the plugin's own weapons), before the
+        /// spawn point receives it.
+        /// </summary>
+        internal static int UsableWeapon(int id, int fallback)
+        {
+            if (id <= 0) id = fallback;
+            int resolved;
+            if (_usableWeapon.TryGetValue(id, out resolved)) return resolved;
+            int wanted = id == LegacyXm7Id ? M7Rifle.RifleId : id;
+            resolved = HasWeaponModel(wanted) ? wanted
+                     : HasWeaponModel(fallback) ? fallback : VanillaRifleId;
+            _usableWeapon[id] = resolved;
+            if (resolved != id)
+                RevivalPlugin.L.LogWarning("Crew: weapon id " + id
+                    + (wanted != id ? " is the old editor id of " + wanted : " has no weapon model")
+                    + " - the crew carries " + resolved + " instead.");
+            return resolved;
+        }
+
+        static bool HasWeaponModel(int id)
+        {
+            if (id <= 0) return false;
+            try
+            {
+                GameObject model = Resources.Load("PlayerDataPrefabs/Weapons/"
+                    + id + "_Weapon") as GameObject;
+                return model != null;
+            }
+            catch { return false; }
+        }
+
         static List<GameObject> _settlements = new List<GameObject>();
         // Spawn-point instance id -> seven-value NPC customization overlay.
         // -1 preserves the game's generated face/backpack; positive ids replace
@@ -351,14 +399,16 @@ namespace NextDayRevival
         /// game's own seven-value appearance result. This runs before the result
         /// is placed in Photon instantiation data, so the existing remote repair
         /// path receives the same complete uniform.</summary>
-        public static void CustomAppearancePostfix(object __1, ref int[] __result)
+        public static void CustomAppearancePostfix(object __0, ref int[] __result)
         {
-            // InitSpawnNpc calls both appearance builders as
-            // (settlement, spawnPoint, customizationData). Harmony's __0 is
-            // therefore the settlement; the spawn point whose instance id was
-            // registered below is __1. Using __0 left every editor uniform
-            // overlay unmatched and let a preset with an empty HeadId win.
-            Component spawn = __1 as Component;
+            // Both builders are INSTANCE methods of NPC_Settlement with the
+            // parameters (spawnPoint, data) - CONFIRMED from the MethodDef
+            // flags and ParamList, 2026-09-14. The IL pushes the settlement as
+            // `this` (ldarg.0), which 6.16.4 misread as a first argument and
+            // moved this hook to __1: that is the template struct, never a
+            // Component, so every editor body/legs/hands overlay was silently
+            // dropped. Harmony's __0 is the spawn point.
+            Component spawn = __0 as Component;
             if (spawn == null || __result == null || __result.Length < 7) return;
             int[] selected;
             int id = spawn.GetInstanceID();
@@ -879,8 +929,8 @@ namespace NextDayRevival
                     Abschreiben(punkt, VorlagePunkt(pType));
                     Component military = VorlageMilitaer(pType);
                     Abschreiben(punkt, military);
-                    int weapon = spec != null && spec.MainWeapon > 0
-                        ? spec.MainWeapon : (i < lawCount ? LAW_ID : MG42_ID);
+                    int weapon = UsableWeapon(spec != null && spec.MainWeapon > 0
+                        ? spec.MainWeapon : (i < lawCount ? LAW_ID : MG42_ID), MG42_ID);
                     Punkt(punkt, military != null, weapon, spec);
                     RegisterAppearance(punkt, spec);
                 }

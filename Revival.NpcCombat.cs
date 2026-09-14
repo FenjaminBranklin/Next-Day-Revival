@@ -16,199 +16,143 @@ namespace NextDayRevival
     //   The vanilla AI only ever fights players: sensing reads
     //   NetworkGameServer.localPlayer, target allocation resolves Photon PLAYER
     //   ids, and NPC_FirearmWeaponController.FireOneShot has no branch that
-    //   damages NPC infantry (audit NPC_AI_COMBAT_ARCHITECTURE_AUDIT.txt,
-    //   sections 2 and 13). Two NPCs next to each other never fight.
+    //   damages NPC infantry. Two NPCs next to each other never fight.
     //
     //   NpcWar runs OPERATIONS. An operation is one squad a heli troop landing
-    //   (RevivalTroopInsertion) has put on the ground, plus the combat vector
-    //   the admin drew in the editor:
+    //   (RevivalTroopInsertion) has put on the ground, plus the combat arrow the
+    //   admin drew in the editor:
     //
-    //     ToStart   the squad walks from the landing zone to the arrow tail
-    //     Advance   it works its way along the arrow toward the head and
+    //     ToStart   only when the landing zone is well away from the arrow
+    //               tail: the squad runs there first
+    //     Advance   the squad ASSAULTS along the arrow toward the head and
     //               attacks everything it sees that its faction hates
-    //     Patrol    the survivors walk the arrow up and down until the patrol
+    //     Patrol    the survivors sweep the arrow up and down until the patrol
     //               time (at most two hours) is over
     //     removed   every man of the squad, alive or dead, leaves the map
     //
-    //   The men stay ordinary game NPCs. A player kill target still belongs to
-    //   the vanilla AI for aiming, fire, cover and reload, but the small repair
-    //   pass below is allowed to draw a missing weapon before that native path
-    //   takes over. NpcWar adds what the game cannot do - working the arrow and
-    //   fighting other NPCs - and an NPC the squad fires on becomes a DEFENDER
-    //   that fires back, so a fight is two-sided.
+    // HOW THE SQUAD FIGHTS (6.16.5, after the 6.16.4 field report)
     //
-    //   An NPC-vs-NPC shot uses the game's own weapon: the man is put in the
-    //   native shooting state (MainState 0, AdditionalState 3) and
-    //   NPC_FirearmWeaponController.FireTo(point, true) fires it, which brings
-    //   the weapon's rate of fire, magazine, muzzle flash and sound on every
-    //   client (RPC NetworkWeaponState). FireOneShot has no NPC damage branch,
-    //   so the hit is decided by our own raycast and applied through
-    //   NPC_AI2.ApplyDamage - the road the patrol guns already use
-    //   (Revival.Patrol.cs, Gun.Schaden). An empty magazine starts the native
-    //   reload (NPC_AI2.OnBulletsEnded). EquipWeapon(true, false) draws the
-    //   weapon first. No ready native weapon means no shot, effect or damage.
-    //   LAW rounds retain CrewLaw's blast instead of an extra infantry hit.
+    //   The user's order: side by side, briskly in the combat direction, fire
+    //   at once, shoot exactly like every other enemy in the game, and never
+    //   more than a few steps in a direction that is not the fight. So:
     //
-    // WHY 6.16.1 LOOKED LIKE MUZZLE FLASHES FROM STATUES IN A HUDDLE.
-    //   Four causes, all read out of the installed assembly, not guessed:
+    //   ONE LINE. Every man has a lane - a fixed lateral place in a line
+    //   abreast across the direction of advance (LineSpacing apart, a second
+    //   rank only above ten men). The whole line runs at a point Lead units
+    //   ahead of its own centre along the arrow, so nobody arrives and stops
+    //   while there is ground to take; a man who has got ahead of the line
+    //   walks until it catches up. There is no cover search, no sideways
+    //   firing position and no flanking any more: those were the "aimless
+    //   wandering" of the field report.
     //
-    //   1 THE WEAPON NEVER POINTED AT ANYTHING. NPC_AI2.LookAtIkController
-    //     (called from Update) runs the aim IK only while AdditionalState is
-    //     1 or 3 AND _killTarget is not null; otherwise it lerps
-    //     _aimIk.solver.IKPositionWeight to 0 and finally deactivates the IK
-    //     object. _killTarget is a PLAYER reference (SetKillTarget feeds
-    //     _targetVehicleManager from it), so a squad fighting NPCs can never
-    //     have one - the IK stayed off and the rifle pointed wherever the
-    //     animation put it. The mod now drives the IK itself: it activates the
-    //     object, ramps IKPositionWeight and moves LookAtIKTarget, which
-    //     SetupLookAtIk wires as the solver target with the chest-to-hand
-    //     chain. That is also what makes a man on a tower reachable at all,
-    //     because the IK is the only thing that aims in ELEVATION.
-    //   2 THE MEN WERE STUCK IN THE FIRING CLIP. GetAnimationNameNormalPose
-    //     maps AdditionalState 1 to "idle_aiming" and 3 to the weapon's
-    //     shooting overlay. The prefab lacks walk/crouch aiming clips, and
-    //     vanilla clears aiming while moving. 6.16.1 held state 3 permanently,
-    //     so every man played
-    //     the shooting loop and never the aim. State 3 is now only the short
-    //     window around a burst; between bursts the man holds state 1.
-    //   3 THE VANILLA KEPT TAKING THEM BACK. On the tactical task with no
-    //     kill target, IdleStateAction queues its own intentions every idle
-    //     pass (IL_0629-06DC) and IntentionsActions then moves and re-poses
-    //     the man. IdleStateAction returns early while GetCalculatedPauseTime
-    //     is positive, so a man we are driving gets ClearIntentions plus a
-    //     refreshed SetPauseTime and stays where he is put.
-    //   4 THEY WALKED INTO THE ENEMY AND STOOD IN THE OPEN. The body closed to
-    //     EngageRange * 0.6 - 36 units, about 13 m - and a man engaged only
-    //     inside EngageRange. Now the squad fights from Standoff, fires at
-    //     anything it can see inside SightRange, and a man who cannot see his
-    //     target moves round it instead of walking at it.
+    //   CONTACT. A man who sees a hostile NPC - or the player his own AI has
+    //   as kill target - inside AssaultRange stops where he is and fires
+    //   within a fraction of a second. The line turns toward the enemy (up to
+    //   100 degrees off the arrow) and keeps closing until CloseRange.
+    //   Between, the two halves of the squad alternate every BoundSeconds:
+    //   one half keeps firing, the other runs one bound FORWARD and fires
+    //   again from there. A man with no line of fire runs on with the line
+    //   until he has one.
     //
-    // HOW THE SQUAD FIGHTS NOW
+    //   THE SHOT IS THE GAME'S. NPC_AI2.ShootingActions fires only in
+    //   MainState Idle + AdditionalState Shooting, every
+    //   _shootingTimerDelayCached (0.2-0.3 s), without bursts, and
+    //   LookAtIkController points the weapon while the man is in Aiming or
+    //   Shooting (CONFIRMED IL, REVERSE_ENGINEERING "An NPC only aims its
+    //   weapon at a PLAYER"). A firing man is held in exactly that state:
+    //     - at a PLAYER the vanilla code does everything itself - the shot,
+    //       its hit chance and the aim - and NpcWar only keeps him standing;
+    //     - at an NPC the vanilla code has no target, so NpcWar drives the
+    //       same aim IK and calls the NPC's own
+    //       NPC_FirearmWeaponController.FireTo at the same cadence, which
+    //       brings rate of fire, magazine, muzzle flash and sound on every
+    //       client (RPC NetworkWeaponState). FireOneShot has no NPC damage
+    //       branch, so the hit is our raycast through NPC_AI2.ApplyDamage.
+    //   An empty magazine is the native reload (OnBulletsEnded). No ready
+    //   native weapon means no shot, no effect and no damage.
     //
-    //   Every man has his own numbers, drawn once when he lands: marksmanship,
-    //   nerve, pace, and a persistent place in the formation. Nothing in a
-    //   contact is computed from the slot index alone any more, so no two men
-    //   move the same way twice.
-    //
-    //   Out of contact the squad moves as a loose, staggered body along the
-    //   arrow. On contact it stops closing at Standoff and forms a base of
-    //   fire; men take cover NEARBY when they feel like it (CoverChance, and
-    //   much more readily while suppressed) rather than always or never. A man
-    //   who loses his line of fire for a few seconds - the enemy on the
-    //   Locator tower is the case that named this work - does not keep aiming
-    //   at a wall: he looks for a spot that HAS a line to the target, sideways
-    //   rather than forward, and runs to it. After FlankSeconds of fruitless
-    //   contact a third of the squad is told to work round the flank on a long
-    //   leash while the rest keeps firing. If the squad still wants ground it
-    //   takes it in bounds: half the men move while the other half watches.
-    //
-    //   Fire is not free any more. A near miss suppresses: a suppressed man
-    //   goes to ground, shoots slower and worse, and looks for cover. Cover
-    //   and a crouch cut the chance of being hit. Defenders spread their fire
-    //   instead of all emptying magazines into whoever happens to be nearest,
-    //   which is what killed a whole squad in seconds.
+    //   Defenders - NPCs the squad attacks, and comrades close to them - fire
+    //   back the same way and may still take cover; they are the enemy, not
+    //   the assault.
     //
     // 6.16.0 FIELD BUG. InitSpawnNpc parents every NPC under the settlement's
-    //   AllPeopleTr (IL_015F-016A), and 6.16.0 set the settlement's position to
-    //   the men's centre every frame: each frame moved every man by the offset
-    //   between his settlement and the squad centre, so the squad shot across
-    //   the map in circles and never stood on the NavMesh long enough to walk
-    //   or fire. Only the walk-point root follows the squad now, every two
-    //   seconds, and the men move by NavMesh orders alone.
+    //   AllPeopleTr, so the settlement object is never moved; only the
+    //   walk-point root follows the squad and the men move by NavMesh orders.
     //
     // SCALE. The game world is modelled about 2.8 times real size: a human NPC
-    //   capsule is 5.0 units tall (CapsuleCollider on every *_NPC prefab), so
-    //   heights and spacings below are in those units. 18 units of spacing is
-    //   about six and a half metres between neighbours.
+    //   capsule is 5.0 units tall, so every distance below is in those units.
     //
     // AUTHORITY
     //
     //   Only the Photon master client decides anything, and only on NPCs whose
     //   photonView.isMine is true - the two conditions ApplyDamage checks.
-    //   Nothing here runs without an operation, so a map without troop landings
-    //   is unchanged. The aim IK is visual and is driven where the fight is
-    //   computed; a remote client sees the synchronised body yaw and the
-    //   weapon's own muzzle flash, not the elevation of the master's IK.
+    //   Nothing here runs without an operation, so a map without troop
+    //   landings is unchanged. The aim IK is visual and driven where the fight
+    //   is computed; a remote client sees the synchronised state, body yaw and
+    //   the weapon's own muzzle flash.
     //
     public static class NpcWar
     {
         // -------------------------------------------------------------- config
 
-        internal static ConfigEntry<float> CfgEngageRange;
         internal static ConfigEntry<float> CfgSightRange;
-        internal static ConfigEntry<float> CfgFireInterval;
-        internal static ConfigEntry<float> CfgReactionMax;
-        internal static ConfigEntry<int>   CfgBurst;
         internal static ConfigEntry<float> CfgDamage;
         internal static ConfigEntry<float> CfgAccuracy;
         internal static ConfigEntry<float> CfgSpread;
-        internal static ConfigEntry<float> CfgDetour;
         internal static ConfigEntry<int>   CfgMaxCombatants;
         internal static ConfigEntry<bool>  CfgDebug;
-        // New in 6.17.0. New keys on purpose: Config.Bind keeps the value an
-        // installed nextday.revival.toolkit.cfg already has, so a changed
-        // DEFAULT would never reach a player (CLAUDE.md, point 4).
-        internal static ConfigEntry<float> CfgSpacing;
-        internal static ConfigEntry<float> CfgStandoff;
         internal static ConfigEntry<float> CfgCoverChance;
-        internal static ConfigEntry<float> CfgFlankSeconds;
         internal static ConfigEntry<bool>  CfgSuppression;
+        // New in 6.16.5. New keys on purpose: Config.Bind keeps the value an
+        // installed nextday.revival.toolkit.cfg already has, so a changed
+        // DEFAULT would never reach a player (CLAUDE.md, point 4). The keys
+        // of the old cover/flank squad (EngageRange, FireInterval,
+        // ReactionMax, BurstMax, MaxDetour, Spacing, Standoff, FlankSeconds)
+        // are no longer bound.
+        internal static ConfigEntry<float> CfgLineSpacing;
+        internal static ConfigEntry<float> CfgAssaultRange;
+        internal static ConfigEntry<float> CfgCloseRange;
+        internal static ConfigEntry<float> CfgBoundSeconds;
 
         internal static void BindConfig(ConfigFile cfg)
         {
-            CfgEngageRange = cfg.Bind("NpcWar", "EngageRange", 60f,
-                "Ab dieser Entfernung (Meter) hoert ein Truppmitglied auf, weiter "
-                + "auf den Gegner zuzugehen. Geschossen wird trotzdem, solange der "
-                + "Gegner innerhalb SightRange zu sehen ist.");
             CfgSightRange = cfg.Bind("NpcWar", "SightRange", 110f,
-                "Groesste Entfernung (Meter), auf die ein NPC einen feindlichen NPC "
-                + "als Ziel annimmt und beschiesst. Sichtlinie wird vor jedem "
-                + "Schuss per Strahl geprueft.");
-            CfgFireInterval = cfg.Bind("NpcWar", "FireInterval", 1.0f,
-                "Grundabstand in Sekunden zwischen zwei Feuerstoessen eines NPC. Der "
-                + "Angriff nutzt einen kuerzeren Abstand fuer anhaltenden Druck.");
-            CfgReactionMax = cfg.Bind("NpcWar", "ReactionMax", 0.8f,
-                "Groesste zufaellige Reaktionszeit in Sekunden, wenn ein NPC ein "
-                + "neues Ziel erfasst; der Angriff deckelt sie auf 0,45 Sekunden.");
-            CfgBurst = cfg.Bind("NpcWar", "BurstMax", 3,
-                "Hoechstzahl schneller Schuesse in Folge. 1 = kein Feuerstoss.");
+                "Groesste Entfernung (Meter), auf die ein angegriffener NPC einen "
+                + "Truppsoldaten als Ziel annimmt und zurueckschiesst.");
             CfgDamage = cfg.Bind("NpcWar", "DamagePerShot", 18f,
                 "Schaden je Treffer an einem NPC.");
             CfgAccuracy = cfg.Bind("NpcWar", "Accuracy", 0.6f,
                 "Trefferwahrscheinlichkeit auf kurze Entfernung (0..1); sie faellt "
-                + "zur Sichtweite hin um 40 Prozent ab. Deckung, Hinknien, "
-                + "Unterdrueckung und das persoenliche Koennen des Schuetzen "
-                + "veraendern sie zusaetzlich; der Angriff erhaelt einen kleinen Bonus.");
+                + "zur Reichweite hin um 40 Prozent ab. Deckung, Hinknien und das "
+                + "persoenliche Koennen des Schuetzen veraendern sie zusaetzlich; "
+                + "der Angriff erhaelt einen kleinen Bonus.");
             CfgSpread = cfg.Bind("NpcWar", "MissSpread", 1.6f,
                 "Wie weit (Meter) ein verfehlter Schuss neben dem Ziel einschlaegt.");
-            CfgDetour = cfg.Bind("NpcWar", "MaxDetour", 80f,
-                "Wie weit (Meter) sich der Trupp fuer einen gesehenen Gegner von "
-                + "seinem Pfeil entfernen darf. Umfassende Bewegungen duerfen das "
-                + "Anderthalbfache nutzen.");
             CfgMaxCombatants = cfg.Bind("NpcWar", "MaxDefenders", 32,
                 "Sicherheitsgrenze: so viele angegriffene NPCs duerfen gleichzeitig "
                 + "zurueckschiessen (alle Einsaetze zusammen).");
             CfgDebug = cfg.Bind("NpcWar", "Debug", false,
                 "Ausfuehrliche Log-Zeilen und eine Statuszeile oben links.");
-
-            CfgSpacing = cfg.Bind("NpcWar", "Spacing", 18f,
-                "Abstand (Meter) zwischen zwei benachbarten Maennern im Trupp. "
-                + "Groesser = weiter ausgeschwaermt. Jeder Mann streut zusaetzlich "
-                + "persoenlich um diesen Wert; im Angriff wird bei 12 gedeckelt.");
-            CfgStandoff = cfg.Bind("NpcWar", "Standoff", 75f,
-                "Entfernung (Meter), auf die der Trupp einen erkannten Gegner "
-                + "bekaempft, statt weiter auf ihn zuzulaufen; im Angriff hoechstens "
-                + "60 Prozent von EngageRange.");
             CfgCoverChance = cfg.Bind("NpcWar", "CoverChance", 0.6f,
-                "Wie bereitwillig ein Mann im Feuerkampf Deckung sucht (0 = nie, "
-                + "1 = bei jeder Gelegenheit). Unter Beschuss steigt der Wert von "
-                + "selbst.");
-            CfgFlankSeconds = cfg.Bind("NpcWar", "FlankSeconds", 14f,
-                "Nach so vielen Sekunden erfolglosem Feuerkampf geht ein Drittel "
-                + "des Trupps auf den Gegner zu umfassen. 0 = nie umfassen.");
+                "Wie bereitwillig ein ANGEGRIFFENER NPC im Feuerkampf Deckung sucht "
+                + "(0 = nie, 1 = bei jeder Gelegenheit). Der Landetrupp selbst sucht "
+                + "keine Deckung, er greift an.");
             CfgSuppression = cfg.Bind("NpcWar", "Suppression", true,
-                "Nahe Einschlaege druecken einen NPC nieder: er geht in Deckung, "
-                + "schiesst langsamer und schlechter.");
+                "Nahe Einschlaege machen einen angegriffenen NPC unsicherer: er "
+                + "schiesst schlechter und sucht eher Deckung.");
+
+            CfgLineSpacing = cfg.Bind("NpcWar", "LineSpacing", 8f,
+                "Abstand (Meter) zwischen zwei Nachbarn in der Angriffslinie des "
+                + "Landetrupps. Bis zehn Mann eine Linie, darueber zwei Reihen.");
+            CfgAssaultRange = cfg.Bind("NpcWar", "AssaultRange", 180f,
+                "Groesste Entfernung (Meter), auf die der Landetrupp einen sichtbaren "
+                + "Gegner (NPC oder Spieler) sofort beschiesst.");
+            CfgCloseRange = cfg.Bind("NpcWar", "CloseRange", 30f,
+                "Naeher als diese Entfernung (Meter) rueckt der Trupp nicht auf einen "
+                + "Gegner vor, er bleibt stehen und schiesst.");
+            CfgBoundSeconds = cfg.Bind("NpcWar", "BoundSeconds", 4f,
+                "Im Feuerkampf wechseln die zwei Haelften des Trupps nach so vielen "
+                + "Sekunden: eine schiesst, die andere springt ein Stueck vor.");
         }
 
         // -------------------------------------------------------- world scale
@@ -218,12 +162,22 @@ namespace NextDayRevival
         const float WaistHeight = 2.2f;
         const float EyeHeight = 4.2f;
         const float CrouchEye = 2.7f;
-        const float Bound = 45f;            // one bound of the body
-        const float Arrive = 25f;           // the body counts as arrived
+        const float Arrive = 25f;           // the line counts as arrived
+        const float StartDistance = 60f;    // landing zone this far from the tail: run there first
+        const float Lead = 30f;             // the line runs at a point this far ahead of itself
+        const float RankDepth = 12f;        // second rank this far behind the first
+        const int PerRank = 10;             // up to this many men in one line
+        const float BoundStep = 20f;        // one forward bound under fire
+        const float LaneSlack = 4f;         // this close to his point a man is there
+        const float AheadWalk = 12f;        // this far ahead of the line he walks ...
+        const float AheadRun = 4f;          // ... until the line is back within this
 
         // NPC_AI2 states. NPCMainState: Idle 0, Walk 1, Run 2.
         // NPCAdditionalState: Empty 0, Aiming 1, Reloading 2, Shooting 3.
-        // NPCPoseState: Normal 0, Crouch 1, Crawl 2 (Crawl has no aiming clip).
+        // NPCPoseState: Normal 0, Crouch 1, Crawl 2. SwitchAnimationByStates
+        // forces AdditionalState 0 whenever MainState is not Idle, and the
+        // Marauder prefab has no walk or crouch aiming clip: a man aims and
+        // fires standing still, exactly like every vanilla NPC.
         const int MainIdle = 0, MainWalk = 1, MainRun = 2;
         const int AddNone = 0, AddAim = 1, AddFire = 3;
         const int PoseStand = 0, PoseCrouch = 1;
@@ -232,9 +186,9 @@ namespace NextDayRevival
 
         enum Phase { ToStart, Advance, Patrol }
 
-        /// <summary>What a man is doing this second. Only for reading the
-        /// debug line and for deciding what to order once.</summary>
-        enum Stance { March, Advance, Fire, Reposition, Down }
+        /// <summary>What a man is doing this second. For the debug line and
+        /// for deciding what to order once.</summary>
+        enum Stance { Advance, Fire, Bound, Hold, Reposition }
 
         /// <summary>One NPC in a fight: a squad man or a defender.</summary>
         class Fighter
@@ -245,53 +199,46 @@ namespace NextDayRevival
             public object Faction;        // Fraction enum value
             public Array Hated;           // Fraction[] this NPC hates
             public Transform Target;
-            public float NextScan, NextShot, ReactUntil, NextMove, NextLos, LastSeen;
-            public int Burst, Slot;
-            public bool HasOrder, Sees;
+            public bool TargetIsPlayer;   // Target is his vanilla _killTarget
+            public float NextScan, NextShot, ReactUntil, NextLos, LastSeen;
+            public bool Sees;
+            public float AimHeight = ChestHeight;  // the part of the target he can see
+            public float Skill = 1f;      // marksmanship multiplier, drawn once
+
+            // His place in the assault line.
+            public float LaneOffset, RankOffset;
+            public int Team;              // 0/1: the two halves that bound in turn
+            public float FireSince, BoundUntil, NextBound, BlindUntil;
+            public Vector3 BoundDest;
+
+            // Defender posture.
+            public float Nerve = 1f, Pace = 1f;
+            public float Suppression, Hurt, NextHurt, NextCover;
+            public bool InCover, Crouched;
+            public Vector3 Cover;
+
+            // Orders. What we last told the game, so a state is only re-sent
+            // when it really changes - every SetStateWithAnimAndSync is an RPC
+            // and restarts the animation.
+            public Stance Stance = Stance.Advance;
+            public bool HasOrder;
             public Vector3 Ordered;
             public GameObject Point;      // the walk point currently issued
-
-            // What he personally is like. Drawn once, never recomputed, so the
-            // same man is always the steady one and always walks on the same
-            // side of the formation.
-            public float Skill = 1f;      // marksmanship multiplier
-            public float Nerve = 1f;      // resistance to suppression
-            public float Pace = 1f;       // how long he waits between orders
-            public float Lateral, Depth;  // his place in the body, in units
-            public float Jitter;          // when his place is drawn again
-            public int Team;              // 0/1, for bounding overwatch
-
-            // Posture this second.
-            public Stance Stance = Stance.March;
-            public float Suppression;     // 0..1, decays
-            public float BlindSince;      // when the line of fire was lost
-            public bool InCover, Crouched, Flanker;
-            public Vector3 Cover;
-            public float NextCover, NextThink, DuckUntil, FlankUntil;
-            public float Hurt;            // 0 = untouched, 1 = nearly dead
-            public float NextHurt;
-
-            // What we last told the game, so a state is only re-sent when it
-            // really changes - every SetStateWithAnimAndSync is an RPC and
-            // restarts the animation.
+            public float NextMove, MoveDeadline;
             public int WantMain = -1, WantAdd = -1, WantPose = -1;
-            public float NextState;
-            public float BurstUntil;      // hold the shooting clip this long
-            public float PauseUntil;      // when the vanilla idle pause expires
+            public float NextState, PauseUntil;
 
-            // Aim IK, resolved per man on first use.
+            // Weapon and aim IK, resolved per man on first use.
             public Component Ik;
             public Transform Look;
             public bool IkMissing, IkDriven;
+            public float NextIkRetry, AimWeight, PoseSince;
             public Component Wm;
-            public object Anim;
             public bool Armed, EquipWarned;
-            public float NextEquip, AimWeight;
+            public float NextEquip, SlotStuckSince;
             public int EquipTries;
             public int WeaponId;
-            public float AimHeight = ChestHeight;  // the part of the target he can see
-            public float MoveDeadline;             // give up on an order that hangs
-            public float MuzzleBlockedSince, FlankCooldown, NextIkRetry;
+            public float MuzzleBlockedSince, MateBlockedSince;
         }
 
         class Squad
@@ -300,18 +247,19 @@ namespace NextDayRevival
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
             public readonly List<Fighter> Men = new List<Fighter>();
-            public Vector3 Tail, Head;
+            public Vector3 Lz, Tail, Head;
             public Phase Phase;
             public bool TowardHead = true;   // patrol leg
-            public float PatrolSeconds, PatrolEnds, HardEnd, ContactUntil, NextRing;
-            public Vector3 Body;             // where the body is heading now
+            public float PatrolSeconds, PatrolEnds, HardEnd, NextRing;
+            public Vector3 Centre, Front;
 
-            // The plan, recomputed every two seconds while in contact.
+            // The contact picture, refreshed four times a second.
             public Transform Threat;
-            public float ContactSince, NextPlan, BoundUntil;
-            public int MovingTeam;
-            public bool Closing;
-            public Vector3 Centre;
+            public bool ThreatSeen;          // some man has a line of fire to it
+            public float NextThreat, ThreatUntil, NextBoundSwap, NextReport;
+            public int BoundTeam;
+            public bool Armed;               // first weapon ready was reported
+            public int Shots, Hits;
         }
 
         static readonly List<Squad> _squads = new List<Squad>();
@@ -329,16 +277,13 @@ namespace NextDayRevival
         static bool _looked, _ok;
         static Type _npcType, _optType, _wpType;
         static FieldInfo _fMainOptions, _fMyFraction, _fHated, _fTempPoints, _fTempIndex, _fWpType;
-        static FieldInfo _fMainWeaponId, _fSpawnWeaponId;
+        static FieldInfo _fMainWeaponId, _fSpawnWeaponId, _fShotDelayCached;
         static FieldInfo _fKillTarget, _fReloading, _fMainState, _fAddState, _fPoseState;
         static FieldInfo _fUseTemp, _fTempTaskField, _fWeapon, _fAimingPoint, _fRofDelay;
         static FieldInfo _fAimIk, _fLookTarget, _fSpecs, _fSolver, _fIkWeight;
         static FieldInfo _fHealth, _fHealthMax;
         static FieldInfo _fWeaponsManager, _fWeaponCategory, _fWeaponSlot, _fWeaponItem;
         static MethodInfo _mEquipWeapon, _mSetMainWeaponId;
-        static FieldInfo _fAnim;
-        static PropertyInfo _pAnimItem, _pAnimEnabled, _pAnimLayer, _pAnimWeight;
-        static MethodInfo _mAnimPlaying;
         static MethodInfo _mIsAlive, _mTempTask, _mTargetWp, _mStateSync, _mAlarm;
         static MethodInfo _mPhotonView, _mIsMine, _mMasterGetter, _mDestroy;
         static MethodInfo _mBulletsEnded, _mStartRotation, _mClearIntentions, _mPauseTime;
@@ -371,6 +316,9 @@ namespace NextDayRevival
             _fReloading = AccessTools.Field(_npcType, "_reloading");
             _fMainWeaponId = AccessTools.Field(_npcType, "_mainWeaponId");
             _fSpawnWeaponId = AccessTools.Field(_npcType, "_weaponId");
+            _fShotDelayCached = AccessTools.Field(_npcType, "_shootingTimerDelayCached");
+            if (_fShotDelayCached != null && _fShotDelayCached.FieldType != typeof(float))
+                _fShotDelayCached = null;
             _fMainState = AccessTools.Field(_npcType, "MainState");
             _fAddState = AccessTools.Field(_npcType, "AdditionalState");
             _fPoseState = AccessTools.Field(_npcType, "PoseState");
@@ -393,22 +341,6 @@ namespace NextDayRevival
                 new Type[] { typeof(bool), typeof(bool) }, null);
             _mSetMainWeaponId = AccessTools.Method(_npcType, "SetMainWeaponId",
                 new Type[] { typeof(int), typeof(bool) }, null);
-            // Animation lives in a game module not referenced by this plugin.
-            _fAnim = AccessTools.Field(_npcType, "Anim");
-            if (_fAnim != null)
-            {
-                Type anim = _fAnim.FieldType;
-                _pAnimItem = anim.GetProperty("Item", new Type[] { typeof(string) });
-                _mAnimPlaying = AccessTools.Method(anim, "IsPlaying",
-                    new Type[] { typeof(string) }, null);
-                if (_pAnimItem != null)
-                {
-                    Type state = _pAnimItem.PropertyType;
-                    _pAnimEnabled = state.GetProperty("enabled");
-                    _pAnimLayer = state.GetProperty("layer");
-                    _pAnimWeight = state.GetProperty("weight");
-                }
-            }
 
             _mIsAlive = AccessTools.Method(_npcType, "IsAlive", null, null);
             _mTempTask = AccessTools.Method(_npcType, "SetTemporaryTask", null, null);
@@ -481,10 +413,37 @@ namespace NextDayRevival
             catch { return true; }
         }
 
+        static float LineSpacing()
+        {
+            return Mathf.Clamp(CfgLineSpacing == null ? 8f : CfgLineSpacing.Value, 5f, 40f);
+        }
+
+        static float AssaultRange()
+        {
+            return Mathf.Clamp(CfgAssaultRange == null ? 180f : CfgAssaultRange.Value, 40f, 600f);
+        }
+
+        static float CloseRange()
+        {
+            return Mathf.Clamp(CfgCloseRange == null ? 30f : CfgCloseRange.Value, 8f, 150f);
+        }
+
+        static float BoundSeconds()
+        {
+            return Mathf.Clamp(CfgBoundSeconds == null ? 4f : CfgBoundSeconds.Value, 1.5f, 20f);
+        }
+
+        /// <summary>How far this man engages: the assault range for the squad,
+        /// the ordinary sight range for a defender.</summary>
+        static float RangeOf(Fighter f)
+        {
+            return f.Squad != null ? AssaultRange() : CfgSightRange.Value;
+        }
+
         // ------------------------------------------------------------ operations
 
-        /// <summary>Hand a freshly landed squad its combat vector. The patrol
-        /// clock starts when the body reaches the arrow head; a squad that never
+        /// <summary>Hand a freshly landed squad its combat arrow. The patrol
+        /// clock starts when the line reaches the arrow head; a squad that never
         /// gets there is still removed after the walking allowance plus the
         /// patrol time, so no landing can pile men up on the map.</summary>
         internal static bool StartOperation(string tag, GameObject settlement, Array npcs,
@@ -495,16 +454,15 @@ namespace NextDayRevival
             s.Tag = tag;
             s.Settlement = settlement;
             s.WalkRoot = WalkRootOf(settlement);
+            s.Lz = settlement.transform.position;
             s.Tail = tail;
             s.Head = head;
-            s.Phase = Phase.ToStart;
+            s.Phase = Flat(s.Lz - tail) > StartDistance ? Phase.ToStart : Phase.Advance;
             s.PatrolSeconds = Mathf.Clamp(patrolSeconds, 60f, 7200f);
-            float walk = Vector3.Distance(settlement.transform.position, tail)
-                       + Vector3.Distance(tail, head);
+            float walk = Vector3.Distance(s.Lz, tail) + Vector3.Distance(tail, head);
             // One unit per second is a slow, fighting pace; plus half an hour.
             s.HardEnd = Time.time + walk + 1800f + s.PatrolSeconds;
-            s.Body = tail;
-            s.Centre = settlement.transform.position;
+            s.Centre = s.Lz;
 
             for (int i = 0; i < npcs.Length; i++)
             {
@@ -516,18 +474,17 @@ namespace NextDayRevival
                 CrewSector sector = ai.GetComponent<CrewSector>();
                 if (sector != null) UnityEngine.Object.Destroy(sector);
                 Fighter f = NewFighter(ai, s);
-                f.Slot = s.Men.Count;
-                f.Team = f.Slot % 2;
-                DrawPlace(f);
-                f.NextMove = Time.time + 0.5f + 0.15f * f.Slot;
+                f.NextMove = Time.time + 0.2f + 0.05f * s.Men.Count;
                 s.Men.Add(f);
             }
             if (s.Men.Count == 0) return false;
+            AssignLanes(s);
             _squads.Add(s);
             EnsurePointsRoot();
             RevivalPlugin.L.LogInfo("NpcWar: operation " + tag + " - " + s.Men.Count
                 + " men, arrow " + tail.ToString("0") + " -> " + head.ToString("0")
-                + ", patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min"
+                + ", " + (s.Phase == Phase.ToStart ? "running to the arrow first, " : "")
+                + "patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min"
                 + (s.WalkRoot == null ? ", no walk-point root found" : "") + ".");
             return true;
         }
@@ -552,33 +509,95 @@ namespace NextDayRevival
             f.Hated = GetHated(ai);
             f.WeaponId = IntField(ai, _fMainWeaponId,
                 IntField(ai, _fSpawnWeaponId, 0));
-            f.NextScan = Time.time + UnityEngine.Random.value;
-            f.NextShot = Time.time + UnityEngine.Random.value * CfgFireInterval.Value;
-            // One draw per man, never repeated: a squad of identical soldiers
-            // that all shoot equally well is the thing that looked mechanical.
-            f.Skill = UnityEngine.Random.Range(0.72f, 1.28f);
+            f.NextScan = Time.time + UnityEngine.Random.value * 0.3f;
+            f.Skill = UnityEngine.Random.Range(0.8f, 1.2f);
             f.Nerve = UnityEngine.Random.Range(0.65f, 1.45f);
             f.Pace = UnityEngine.Random.Range(0.82f, 1.25f);
             f.NextCover = Time.time + UnityEngine.Random.value * 3f;
-            f.NextThink = Time.time + UnityEngine.Random.value * 0.5f;
             return f;
         }
 
-        /// <summary>His standing place in the body: which side, how far out,
-        /// how far back. Redrawn every twenty-odd seconds by a fifth, so a
-        /// long walk never freezes into a parade formation.</summary>
-        static void DrawPlace(Fighter f)
+        /// <summary>The direction of the leg the squad is on, from a to b.</summary>
+        static void Leg(Squad s, out Vector3 a, out Vector3 b)
         {
-            float spacing = AssaultSpacing();
-            // Five men out to each side, then a second line behind them: a big
-            // squad gets deeper, not endlessly wider.
-            int file = f.Slot / 2;
-            int rank = 1 + file % 5;
-            float side = (f.Slot % 2 == 0) ? -1f : 1f;
-            f.Lateral = side * rank * spacing * UnityEngine.Random.Range(0.72f, 1.3f);
-            f.Depth = -(file / 5) * spacing * 1.6f - (file % 5) * spacing * 0.35f
-                      - UnityEngine.Random.value * spacing * 0.8f;
-            f.Jitter = Time.time + UnityEngine.Random.Range(16f, 34f);
+            switch (s.Phase)
+            {
+                case Phase.ToStart: a = s.Lz; b = s.Tail; break;
+                case Phase.Advance: a = s.Tail; b = s.Head; break;
+                default:
+                    if (s.TowardHead) { a = s.Tail; b = s.Head; }
+                    else { a = s.Head; b = s.Tail; }
+                    break;
+            }
+        }
+
+        static Vector3 Heading(Vector3 a, Vector3 b)
+        {
+            Vector3 d = b - a;
+            d.y = 0f;
+            return d.sqrMagnitude < 0.01f ? Vector3.forward : d.normalized;
+        }
+
+        /// <summary>The right-hand side of a flat direction.</summary>
+        static Vector3 Side(Vector3 front)
+        {
+            return new Vector3(front.z, 0f, -front.x);
+        }
+
+        /// <summary>Give every living man a lane in the line across the leg he
+        /// is on, in the order the men already stand from left to right, so
+        /// forming up never makes two of them cross. Ten men or fewer stand in
+        /// one line; a bigger squad forms a second, staggered rank.</summary>
+        static void AssignLanes(Squad s)
+        {
+            Vector3 a, b;
+            Leg(s, out a, out b);
+            Vector3 side = Side(Heading(a, b));
+            List<Fighter> men = new List<Fighter>();
+            Vector3 centre = Vector3.zero;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                men.Add(f);
+                centre += f.Tr.position;
+            }
+            if (men.Count == 0) return;
+            centre /= men.Count;
+            float[] lateral = new float[men.Count];
+            for (int i = 0; i < men.Count; i++)
+                lateral[i] = Vector3.Dot(men[i].Tr.position - centre, side);
+            // Insertion sort keeps equal positions in list order (C# 3.0, and
+            // List.Sort is not stable).
+            for (int i = 1; i < men.Count; i++)
+            {
+                Fighter fm = men[i];
+                float fl = lateral[i];
+                int k = i - 1;
+                while (k >= 0 && lateral[k] > fl)
+                {
+                    men[k + 1] = men[k];
+                    lateral[k + 1] = lateral[k];
+                    k--;
+                }
+                men[k + 1] = fm;
+                lateral[k + 1] = fl;
+            }
+            LayOut(men.Count, LineSpacing(), men);
+        }
+
+        /// <summary>Lane numbers to offsets: index k of n, left to right.</summary>
+        static void LayOut(int n, float spacing, List<Fighter> men)
+        {
+            int ranks = n <= PerRank ? 1 : 2;
+            float step = spacing / ranks;
+            for (int k = 0; k < n; k++)
+            {
+                Fighter f = men[k];
+                f.LaneOffset = (k - (n - 1) * 0.5f) * step;
+                f.RankOffset = -(k % ranks) * RankDepth;
+                f.Team = k % 2;
+            }
         }
 
         static Transform WalkRootOf(GameObject settlement)
@@ -677,9 +696,12 @@ namespace NextDayRevival
                 s.WalkRoot.position = centre;
             }
 
-            // Phase changes are decided by the body, not by one fast runner.
-            Vector3 goal = Goal(s);
-            if (Flat(centre - goal) < Arrive)
+            Vector3 a, b;
+            Leg(s, out a, out b);
+            Vector3 dir = Heading(a, b);
+            float len = Flat(b - a);
+            float along = Vector3.Dot(FlatV(centre - a), dir);
+            if (along >= len - Arrive)
             {
                 if (s.Phase == Phase.ToStart) s.Phase = Phase.Advance;
                 else if (s.Phase == Phase.Advance)
@@ -692,284 +714,374 @@ namespace NextDayRevival
                         + (s.PatrolSeconds / 60f).ToString("0") + " min.");
                 }
                 else s.TowardHead = !s.TowardHead;
-                goal = Goal(s);
+                AssignLanes(s);
+                Leg(s, out a, out b);
+                dir = Heading(a, b);
+                len = Flat(b - a);
+                along = Vector3.Dot(FlatV(centre - a), dir);
             }
 
-            Plan(s, centre, goal, now);
+            // The contact picture: who is the squad fighting?
+            if (now >= s.NextThreat)
+            {
+                s.NextThreat = now + 0.25f;
+                bool seen;
+                Transform enemy = SquadThreat(s, centre, now, out seen);
+                if (enemy != null) { s.Threat = enemy; s.ThreatSeen = seen; s.ThreatUntil = now + 6f; }
+                else if (now >= s.ThreatUntil) s.Threat = null;
+                else s.ThreatSeen = false;
+            }
+            if (s.Threat != null && !s.Threat) s.Threat = null;
+            // An enemy somebody can shoot at is closed to CloseRange and fought
+            // from there. One that nobody can see is walked up to until
+            // somebody can - a line that stops at a wall wins nothing.
+            float stopAt = s.ThreatSeen ? CloseRange() : 8f;
 
-            Vector3 along = s.Head - s.Tail;
-            along.y = 0f;
-            if (along.sqrMagnitude < 0.01f) along = Vector3.forward;
-            along.Normalize();
-            if (s.Phase == Phase.Patrol && !s.TowardHead) along = -along;
-            // In contact the body faces the enemy, so the line forms across the
-            // threat instead of across the arrow.
+            // The line faces the enemy while there is one in front of it;
+            // otherwise it faces along the arrow.
+            Vector3 front = dir;
+            float threatDist = 0f;
             if (s.Threat != null)
             {
-                Vector3 toThreat = s.Threat.position - centre;
-                toThreat.y = 0f;
-                if (toThreat.sqrMagnitude > 1f) along = toThreat.normalized;
+                Vector3 to = FlatV(s.Threat.position - centre);
+                threatDist = to.magnitude;
+                if (threatDist > 1f && Vector3.Angle(to, dir) <= 100f) front = to / threatDist;
+                if (now >= s.NextBoundSwap)
+                {
+                    s.NextBoundSwap = now + BoundSeconds();
+                    s.BoundTeam = 1 - s.BoundTeam;
+                }
+            }
+            s.Front = front;
+
+            Vector3 anchor = Anchor(a, dir, len, centre, front, s.Threat != null,
+                                    threatDist, stopAt);
+
+            if (!s.Armed)
+            {
+                int armed = 0;
+                for (int i = 0; i < s.Men.Count; i++) if (s.Men[i].Armed) armed++;
+                if (armed > 0)
+                {
+                    s.Armed = true;
+                    RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " - weapons in hand ("
+                        + armed + "/" + alive + ").");
+                }
             }
 
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
-                // A native player engagement used to bypass ManStep before the
-                // weapon repair pass. Aggressive NPCs can spot a player during
-                // the first few frames after landing, so that early return
-                // left their weapon slot at -1 forever. Repair first; the
-                // vanilla player fight still owns the rest of this branch.
-                EnsureArmed(f, now);
-                // A player in his sights: the game's own combat runs him.
-                if (HasKillTarget(f))
-                {
-                    f.HasOrder = false;
-                    if (f.IkDriven) ReleaseAim(f);
-                    continue;
-                }
-                ManStep(f, s, along, now);
+                ManStep(f, s, anchor, front, centre, now);
             }
+
+            if (now >= s.NextReport) Report(s, now, alive);
         }
 
-        /// <summary>What the squad as a whole intends. Recomputed every two
-        /// seconds while something is happening, so one man's target switch
-        /// does not swing the whole body.</summary>
-        static void Plan(Squad s, Vector3 centre, Vector3 goal, float now)
+        /// <summary>The point the whole line runs at. Out of contact, and with
+        /// an enemy straight down the arrow, it lies ON the arrow Lead units
+        /// ahead of the line's centre, never past the leg's end - so a squad
+        /// that landed beside the arrow is pulled onto it while it advances.
+        /// With an enemy off the arrow it lies toward that enemy. Never closer
+        /// than stopAt to the enemy.</summary>
+        static Vector3 Anchor(Vector3 a, Vector3 dir, float len, Vector3 centre, Vector3 front,
+                             bool contact, float threatDist, float stopAt)
         {
-            if (now >= s.NextPlan)
-            {
-                s.NextPlan = now + 2f;
-                Transform enemy = NearestEnemyOfSquad(s, centre);
-                if (enemy != null)
-                {
-                    if (s.Threat == null) s.ContactSince = now;
-                    s.Threat = enemy;
-                    s.ContactUntil = now + 8f;
-                }
-                else if (now >= s.ContactUntil) { s.Threat = null; s.ContactSince = 0f; }
-            }
-            if (s.Threat == null || !s.Threat)
-            {
-                s.Threat = null;
-                s.Closing = false;
-                Vector3 to = goal - centre;
-                to.y = 0f;
-                float bound = Mathf.Min(to.magnitude, Bound);
-                s.Body = to.sqrMagnitude < 0.01f ? goal : centre + to.normalized * bound;
-                ClearFlankers(s);
-                return;
-            }
+            float room = Mathf.Max(0f, threatDist - stopAt);
+            if (contact && Vector3.Angle(front, dir) > 1f)
+                return centre + front * Mathf.Min(Lead, room);
+            float along = Vector3.Dot(FlatV(centre - a), dir);
+            float step = Mathf.Min(len, Mathf.Max(0f, along) + Lead) - along;
+            if (contact) step = Mathf.Min(step, room);
+            return a + dir * (along + Mathf.Max(0f, step));
+        }
 
-            float standoff = AssaultStandoff();
-            Vector3 back = centre - s.Threat.position;
-            back.y = 0f;
-            float have = back.magnitude;
-
-            // A landing squad is an assault, not a sentry line. Pursue a
-            // hostile NPC wherever it was found inside SightRange; the arrow
-            // still supplies the no-contact route, but it must not prevent the
-            // body from closing on a target that stepped off that route.
-            s.Closing = have > standoff * 1.10f;
-            if (s.Closing)
-            {
-                float keep = Mathf.Max(standoff, Mathf.Min(have - Bound, have));
-                s.Body = have < 0.01f ? s.Threat.position
-                       : s.Threat.position + back.normalized * keep;
-                if (now >= s.BoundUntil)
-                {
-                    s.BoundUntil = now + UnityEngine.Random.Range(4f, 7.5f);
-                    s.MovingTeam = 1 - s.MovingTeam;
-                }
-            }
-            else
-            {
-                s.Body = centre;
-                s.MovingTeam = -1;              // nobody advances, everybody fires
-            }
-
-            // Fruitless contact: send a third of the squad round the side. That
-            // is the answer to a man on a tower whom nobody can see from the
-            // front - not more men walking into the same firing lane.
-            float flankAfter = Mathf.Max(0f, CfgFlankSeconds.Value);
-            if (flankAfter <= 0f || s.ContactSince <= 0f
-                || now - s.ContactSince < flankAfter) return;
-            int want = Mathf.Max(1, s.Men.Count / 3);
-            int have2 = 0;
+        /// <summary>The enemy the squad as a whole is fighting: the nearest one
+        /// any man has seen in the last few seconds, or the player a man's own
+        /// AI is hunting. An enemy just round a corner that nobody sees yet
+        /// still counts when it is close, so the line pushes to it instead of
+        /// marching past.</summary>
+        static Transform SquadThreat(Squad s, Vector3 centre, float now, out bool seen)
+        {
+            Transform best = null;
+            seen = false;
+            float bestSqr = AssaultRange() * AssaultRange();
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
-                if (Alive(f.Ai) && (f.Flanker
-                    || (f.Stance == Stance.Reposition && f.HasOrder)
-                    || now < f.FlankCooldown)) have2++;
+                if (f.Ai == null || !Alive(f.Ai)) continue;
+                if (f.Target != null && f.Target && f.Sees && now - f.LastSeen < 1f) seen = true;
+                Transform t = null;
+                if (f.Target != null && f.Target && now - f.LastSeen < 2.5f) t = f.Target;
+                Component player = KillTarget(f);
+                if (player != null)
+                {
+                    float pd = (player.transform.position - centre).sqrMagnitude;
+                    if (pd < bestSqr) { best = player.transform; bestSqr = pd; }
+                }
+                if (t == null) continue;
+                float d = (t.position - centre).sqrMagnitude;
+                if (d < bestSqr) { best = t; bestSqr = d; }
             }
-            for (int i = 0; i < s.Men.Count && have2 < want; i++)
+            if (best != null) return best;
+
+            float near = CloseRange() * 2.5f;
+            bestSqr = near * near;
+            for (int i = 0; i < _scene.Count; i++)
+            {
+                Component c = _scene[i];
+                if (c == null || !Alive(c)) continue;
+                Fighter other = FighterOf(c);
+                if (other != null && other.Squad == s) continue;
+                if (other == null && !Targetable(c)) continue;
+                float d = (c.transform.position - centre).sqrMagnitude;
+                if (d >= bestSqr) continue;
+                if (!HatedBySquad(s, c)) continue;
+                best = c.transform; bestSqr = d;
+            }
+            return best;
+        }
+
+        static bool HatedBySquad(Squad s, Component c)
+        {
+            object faction = FactionOf(c);
+            for (int m = 0; m < s.Men.Count; m++)
+            {
+                Fighter man = s.Men[m];
+                if (man.Ai != null && Hostile(man.Hated, faction)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>A compact line in the runtime log every fifteen seconds, so
+        /// a field report can be read out of LogOutput.log without Debug.</summary>
+        static void Report(Squad s, float now, int alive)
+        {
+            s.NextReport = now + 15f;
+            int armed = 0, fire = 0, move = 0, hold = 0, reload = 0;
+            for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
-                if (f.Flanker || f.Ai == null || !Alive(f.Ai)
-                    || f.Stance == Stance.Reposition && f.HasOrder
-                    || now < f.FlankCooldown) continue;
-                f.Flanker = true;
-                f.FlankUntil = now + 45f;
-                // Do not pick the same first-slot man again while his wide
-                // move is still being planned or after he has just completed
-                // it. Previously Plan ran every frame while the assignment
-                // itself was cleared by Send, so a flank became a one-frame
-                // twitch instead of a sustained assault move.
-                f.FlankCooldown = now + 10f;
-                f.HasOrder = false;
-                have2++;
+                if (f.Ai == null || !Alive(f.Ai)) continue;
+                if (f.Armed) armed++;
+                if (Reloading(f)) reload++;
+                else if (f.Stance == Stance.Fire) fire++;
+                else if (f.Stance == Stance.Hold) hold++;
+                else move++;
             }
-        }
-
-        /// <summary>The old 75-unit standoff left a landing squad parked in
-        /// the open for most contacts. Keep a user value when it is already
-        /// close, but cap the effective assault distance at the same roughly
-        /// 36-unit distance the former EngageRange path used. This also makes
-        /// an existing 6.16 config take the new behaviour without a manual
-        /// config-file edit.</summary>
-        static float AssaultStandoff()
-        {
-            float configured = CfgStandoff == null ? 35f : CfgStandoff.Value;
-            float engage = CfgEngageRange == null ? 60f : CfgEngageRange.Value;
-            float assault = Mathf.Clamp(engage * 0.6f, 20f, 80f);
-            return Mathf.Clamp(Mathf.Min(configured, assault), 20f, 80f);
-        }
-
-        /// <summary>Keep a large helicopter squad close enough to support the
-        /// assault. The old 18-unit default made fifteen men occupy a very wide
-        /// line; 12 is still comfortably outside the NPC capsule while keeping
-        /// the formation in one firefight.</summary>
-        static float AssaultSpacing()
-        {
-            float configured = CfgSpacing == null ? 10f : CfgSpacing.Value;
-            return Mathf.Clamp(Mathf.Min(configured, 12f), 4f, 60f);
-        }
-
-        static void ClearFlankers(Squad s)
-        {
-            for (int i = 0; i < s.Men.Count; i++) s.Men[i].Flanker = false;
+            RevivalPlugin.L.LogInfo("NpcWar: " + s.Tag + " " + s.Phase + " - " + alive + " alive, "
+                + armed + " armed, " + fire + " firing, " + move + " moving, " + hold + " holding, "
+                + reload + " reloading; " + s.Shots + " shots at NPCs, " + s.Hits + " hits; "
+                + (s.Threat == null ? "no contact"
+                   : "contact " + Flat(s.Threat.position - s.Centre).ToString("0") + " units away")
+                + ", centre " + s.Centre.ToString("0") + ".");
         }
 
         // -------------------------------------------------------- one man's turn
 
-        /// <summary>One squad man: acquire, decide a stance, then either fight
-        /// from where he stands or go somewhere better.</summary>
-        static void ManStep(Fighter f, Squad s, Vector3 along, float now)
+        /// <summary>One squad man: see, then shoot, bound or run on with the
+        /// line. Nothing here moves a man sideways away from the fight.</summary>
+        static void ManStep(Fighter f, Squad s, Vector3 anchor, Vector3 front,
+                            Vector3 centre, float now)
         {
             EnsureArmed(f, now);
-            Decay(f, now);
-            if (now >= f.Jitter) DrawPlace(f);
-
             Acquire(f, now);
-            bool engaged = f.Target != null && now - f.LastSeen < 6f;
-            Vector3 threat = engaged ? f.Target.position
-                           : (s.Threat != null ? s.Threat.position : Vector3.zero);
-            bool contact = engaged || s.Threat != null;
 
-            if (!contact)
+            // A barrel behind a wall, or a comrade in the line of fire: the eyes
+            // may see, the rifle may not. Run on with the line for a moment
+            // instead of standing there - forward, never sideways.
+            if ((f.MuzzleBlockedSince > 0f && now - f.MuzzleBlockedSince > 0.8f)
+                || (f.MateBlockedSince > 0f && now - f.MateBlockedSince > 1.0f))
             {
-                f.InCover = false;
-                f.Flanker = false;
-                f.Cover = Vector3.zero;
-                March(f, s, along, now);
+                f.BlindUntil = now + 2f;
+                f.MuzzleBlockedSince = 0f;
+                f.MateBlockedSince = 0f;
+            }
+
+            // The reload is the game's own animation and state.
+            if (Reloading(f))
+            {
+                f.Stance = Stance.Hold;
+                if (!f.TargetIsPlayer && f.IkDriven) ReleaseAim(f);
+                Quiet(f, true);
+                Face(f);
                 return;
             }
 
-            // Losing the line of fire is a decision point, not a reason to keep
-            // aiming at a wall.
-            if (engaged && (!f.Sees || f.MuzzleBlockedSince > 0f))
+            // 1  A bound in progress: finish it, then fire again at once.
+            if (f.Stance == Stance.Bound && f.HasOrder)
             {
-                if (f.BlindSince <= 0f) f.BlindSince = now;
-            }
-            else f.BlindSince = 0f;
-
-            // 1  Still running to the spot he was sent to: finish the move. A
-            //    path that cannot be finished - a locked door, a ledge - must
-            //    not park him there, hence the deadline.
-            if (f.Stance == Stance.Reposition && f.HasOrder)
-            {
-                if (now < f.MoveDeadline
-                    && Flat(f.Tr.position - f.Ordered) > Mathf.Max(6f, AssaultSpacing() * 0.4f))
+                if (now < f.BoundUntil && Flat(f.Tr.position - f.BoundDest) > LaneSlack)
                 {
                     Drive(f, MainRun, AddNone, PoseStand, now, false);
                     return;
                 }
-                Arrived(f);
+                f.HasOrder = false;
+                f.Stance = Stance.Fire;
+                f.FireSince = now;
             }
 
-            bool wantsCover = false;
-            if (!f.InCover && now >= f.NextCover && CfgCoverChance.Value > 0f)
+            // 2  A visible enemy in range and a weapon in hand: shoot now.
+            bool sees = f.Target != null && f.Sees && now >= f.BlindUntil;
+            float dist = f.Target == null ? 0f : Flat(f.Target.position - f.Tr.position);
+            if (sees && f.Armed && dist <= AssaultRange())
             {
-                // Not a fixed habit: how badly he wants cover depends on how
-                // much fire is coming his way and how hurt he already is.
-                float appetite = Mathf.Clamp01(CfgCoverChance.Value)
-                               * (0.45f + 0.75f * f.Suppression + 0.8f * f.Hurt);
-                wantsCover = UnityEngine.Random.value < appetite;
-                f.NextCover = now + UnityEngine.Random.Range(3.5f, 9f) * f.Pace;
-            }
-
-            // 2  No line of fire for a few seconds: work round, not forward.
-            if (engaged && f.BlindSince > 0f && now - f.BlindSince > 3.5f
-                && now >= f.NextThink)
-            {
-                f.NextThink = now + 1.5f;
-                Vector3 spot;
-                if (Search() && FindFiringSpot(f, s, f.Target.position, out spot))
+                if (f.FireSince <= 0f) f.FireSince = now;
+                if (BoundDue(f, s, front, dist, now))
                 {
-                    f.BlindSince = now;      // give the move time before retrying
-                    Send(f, spot, now);
+                    StartBound(f, s, front, centre, now);
                     return;
                 }
+                Fire(f, now);
+                return;
             }
+            f.FireSince = 0f;
 
-            // 3  Told to go round the flank.
-            if (f.Flanker && s.Threat != null && now >= f.NextThink)
-            {
-                f.NextThink = now + 2f;
-                Vector3 spot;
-                if (now < f.FlankUntil && Search()
-                    && FindFlankSpot(f, s, s.Threat.position, out spot))
-                {
-                    // Keep the marker through the Reposition state. Plan runs
-                    // independently and must count this man as committed until
-                    // Arrived clears it and starts the cooldown.
-                    Send(f, spot, now);
-                    return;
-                }
-                if (now >= f.FlankUntil) f.Flanker = false;
-            }
-
-            // 4  Take cover near where he is.
-            if (wantsCover && threat != Vector3.zero && now >= f.NextThink)
-            {
-                f.NextThink = now + 1f;
-                Vector3 spot;
-                if (Search() && FindCover(f, s, threat, out spot))
-                {
-                    Send(f, spot, now);
-                    f.Cover = spot;          // InCover becomes true on arrival
-                    return;
-                }
-            }
-
-            // 5  The moving half of a bound that is closing on the enemy - that
-            //    one does leave its cover - and anyone with no target of his own
-            //    who has fallen behind the body.
-            bool bounding = s.Closing && s.MovingTeam == f.Team;
-            if (bounding || (!engaged && !f.InCover))
-            {
-                float slack = Mathf.Max(8f, AssaultSpacing() * (bounding ? 0.45f : 0.9f));
-                Vector3 spot = Place(f, s, along);
-                if (Flat(f.Tr.position - spot) > slack) { Advance(f, spot, now); return; }
-            }
-
-            // 6  Otherwise: fight from here.
-            HoldAndFire(f, s, now);
+            // 3  Otherwise run on with the line.
+            Vector3 dest = anchor + Side(front) * f.LaneOffset + front * f.RankOffset;
+            MoveInLine(f, s, dest, front, centre, now);
         }
 
-        /// <summary>Suppression wears off, and the man notices how badly he is
-        /// hurt about twice a second.</summary>
+        /// <summary>His half of the squad is the one that moves now, he has
+        /// already fired for a moment, and the enemy is still well beyond close
+        /// range and in front of the line.</summary>
+        static bool BoundDue(Fighter f, Squad s, Vector3 front, float dist, float now)
+        {
+            if (s.Threat == null || s.BoundTeam != f.Team || now < f.NextBound) return false;
+            if (now - f.FireSince < 1.5f || dist <= CloseRange() + BoundStep) return false;
+            Vector3 to = FlatV(f.Target.position - f.Tr.position);
+            return Vector3.Angle(to, front) <= 60f;
+        }
+
+        /// <summary>One bound forward, pulled a little toward his lane.</summary>
+        static void StartBound(Fighter f, Squad s, Vector3 front, Vector3 centre, float now)
+        {
+            Vector3 side = Side(front);
+            float drift = Vector3.Dot(FlatV(centre + side * f.LaneOffset - f.Tr.position), side);
+            Vector3 dest = f.Tr.position + front * BoundStep + side * Mathf.Clamp(drift, -6f, 6f);
+            if (f.Target != null)
+            {
+                float after = Flat(f.Target.position - dest);
+                if (after < CloseRange())
+                    dest -= front * Mathf.Min(BoundStep, CloseRange() - after);
+            }
+            f.BoundDest = dest;
+            f.BoundUntil = now + 4f;
+            f.NextBound = now + BoundSeconds() * 1.5f;
+            f.FireSince = 0f;
+            Go(f, dest, MainRun, PoseStand, now, Stance.Bound);
+        }
+
+        /// <summary>Run to his place in the line. The place is Lead units ahead
+        /// of the line, so while there is ground to take he never arrives; a
+        /// man who has got ahead of the others walks until they are with him
+        /// again.</summary>
+        static void MoveInLine(Fighter f, Squad s, Vector3 dest, Vector3 front,
+                               Vector3 centre, float now)
+        {
+            // Never back: a man who bounded past the point where the line
+            // stops, or who is ahead of it at the arrow head, only steps
+            // sideways into his lane and waits there for the others.
+            float back = Vector3.Dot(FlatV(dest - f.Tr.position), front);
+            if (back < 0f) dest -= front * back;
+            float away = Flat(dest - f.Tr.position);
+            if (away <= LaneSlack)
+            {
+                Hold(f, s, now);
+                return;
+            }
+            float ahead = Vector3.Dot(FlatV(f.Tr.position - centre), front) - f.RankOffset;
+            bool walking = f.Stance == Stance.Advance && f.WantMain == MainWalk;
+            int state = MainRun;
+            if (s.Threat == null && (ahead > AheadWalk || (walking && ahead > AheadRun)))
+                state = MainWalk;
+            if (away < 10f) state = MainWalk;
+
+            if (f.IkDriven) ReleaseAim(f);
+            f.Stance = Stance.Advance;
+            // Every order is a SetStateWithAnimAndSync RPC to every player
+            // around; the point is Lead units ahead, so re-aiming it once a
+            // second is plenty and keeps fifteen men off the network.
+            if (f.HasOrder && IntField(f.Ai, _fMainState, -1) == state
+                && Flat(dest - f.Ordered) < 12f && StillOurPoint(f) && now < f.MoveDeadline)
+                return;
+            if (now < f.NextMove) return;
+            f.NextMove = now + 1f;
+            OrderMove(f, dest, state, AddNone, PoseStand);
+        }
+
+        /// <summary>At his place (the arrow head, or close range): stand, and
+        /// keep the weapon up toward the enemy while there is one.</summary>
+        static void Hold(Fighter f, Squad s, float now)
+        {
+            f.Stance = Stance.Hold;
+            f.HasOrder = false;
+            if (f.Armed && s != null && s.Threat != null)
+            {
+                Transform keep = f.Target;
+                if (f.Target == null) f.Target = s.Threat;
+                Drive(f, MainIdle, AddAim, PoseStand, now, true);
+                Face(f);
+                if (!f.TargetIsPlayer) Aim(f, now);
+                f.Target = keep;
+                return;
+            }
+            if (f.IkDriven) ReleaseAim(f);
+            Drive(f, MainIdle, AddNone, PoseStand, now, true);
+        }
+
+        /// <summary>Stand and fire, the way every vanilla NPC does: MainState
+        /// Idle, AdditionalState Shooting, held, a round every
+        /// _shootingTimerDelayCached.</summary>
+        static void Fire(Fighter f, float now)
+        {
+            f.Stance = Stance.Fire;
+            f.HasOrder = false;
+            if (f.TargetIsPlayer)
+            {
+                // NPC_AI2.ShootingActions fires at _killTarget by itself in this
+                // state, with the vanilla hit calculation, and LookAtIkController
+                // aims. Every fourth round it checks CanTouchTarget and drops to
+                // Empty when it cannot: then the man is blind and runs on.
+                if (f.WantAdd == AddFire && IntField(f.Ai, _fAddState, -1) == AddNone
+                    && now >= f.NextState)
+                {
+                    f.WantAdd = AddNone;
+                    f.BlindUntil = now + 2f;
+                    return;
+                }
+                f.IkDriven = false;
+                Drive(f, MainIdle, AddFire, PoseStand, now, true);
+                Face(f);
+                return;
+            }
+            Drive(f, MainIdle, AddFire, PoseStand, now, true);
+            Aim(f, now);
+            if (now < f.ReactUntil || !f.IkDriven || f.AimWeight < 0.6f || now < f.NextShot) return;
+            if (Shoot(f)) f.NextShot = now + ShotDelay(f);
+        }
+
+        /// <summary>The NPC's own pause between two rounds:
+        /// NPC_AI2.Start draws _shootingTimerDelayCached from 0.2..0.3 s and
+        /// ShootToTarget waits exactly that long (Crew shortens it for an MG42
+        /// crewman). FireTo additionally keeps the weapon's rate of fire.</summary>
+        static float ShotDelay(Fighter f)
+        {
+            if (_fShotDelayCached != null && f.Ai != null)
+            {
+                try
+                {
+                    float cached = (float)_fShotDelayCached.GetValue(f.Ai);
+                    if (cached > 0.01f && cached < 2f) return cached;
+                }
+                catch { }
+            }
+            return UnityEngine.Random.Range(0.2f, 0.3f);
+        }
+
+        /// <summary>Suppression wears off, and a defender notices how badly he
+        /// is hurt about twice a second.</summary>
         static void Decay(Fighter f, float now)
         {
             if (CfgSuppression.Value)
@@ -991,19 +1103,12 @@ namespace NextDayRevival
         /// <summary>He is where he was sent. If that was cover, he is in it.</summary>
         static void Arrived(Fighter f)
         {
-            bool wasFlanking = f.Flanker;
             f.HasOrder = false;
-            f.DuckUntil = 0f;
             f.InCover = f.Cover != Vector3.zero && Flat(f.Tr.position - f.Cover) < 8f;
-            if (wasFlanking)
-            {
-                f.Flanker = false;
-                f.FlankCooldown = Time.time + 10f;
-            }
         }
 
-        /// <summary>A defender does not have an arrow or a formation; he fights
-        /// where he was attacked and may go to ground for it.</summary>
+        /// <summary>A defender has no arrow and no line; he fights where he was
+        /// attacked and may go to ground for it.</summary>
         static void RunDefender(Fighter d, float now)
         {
             EnsureArmed(d, now);
@@ -1016,20 +1121,6 @@ namespace NextDayRevival
                 d.Cover = Vector3.zero;
                 return;
             }
-            if (!d.InCover && now >= d.NextCover && CfgCoverChance.Value > 0f)
-            {
-                float appetite = Mathf.Clamp01(CfgCoverChance.Value)
-                               * (0.35f + 0.8f * d.Suppression + 0.8f * d.Hurt);
-                d.NextCover = now + UnityEngine.Random.Range(4f, 10f) * d.Pace;
-                Vector3 spot;
-                if (UnityEngine.Random.value < appetite && Search()
-                    && FindCover(d, null, d.Target.position, out spot))
-                {
-                    Send(d, spot, now);
-                    d.Cover = spot;
-                    return;
-                }
-            }
             if (d.Stance == Stance.Reposition && d.HasOrder)
             {
                 if (now < d.MoveDeadline && Flat(d.Tr.position - d.Ordered) > 6f)
@@ -1039,61 +1130,36 @@ namespace NextDayRevival
                 }
                 Arrived(d);
             }
-            HoldAndFire(d, null, now);
-        }
-
-        // -------------------------------------------------------------- moving
-
-        /// <summary>Out of contact: keep the loose body together along the
-        /// arrow. Each man has his own place and his own clock.</summary>
-        static void March(Fighter f, Squad s, Vector3 along, float now)
-        {
-            if (f.WantAdd == AddAim || f.WantAdd == AddFire) StandDown(f);
-            if (Reloading(f) || now < f.NextMove) return;
-            f.NextMove = now + (1.3f + UnityEngine.Random.value * 0.8f) * f.Pace;
-
-            Vector3 spot = Place(f, s, along);
-            float away = Flat(f.Tr.position - spot);
-            float slack = Mathf.Max(5f, AssaultSpacing() * 0.35f);
-            if (away < slack) { f.HasOrder = false; f.Stance = Stance.March; return; }
-            int state = away > 40f ? MainRun : MainWalk;
-            if (f.HasOrder && f.Stance == Stance.March && Flat(spot - f.Ordered) < slack * 1.5f
-                && IntField(f.Ai, _fMainState, -1) == state && StillOurPoint(f)) return;
-            Go(f, spot, state, PoseStand, now, Stance.March);
-        }
-
-        /// <summary>A bound forward. Vanilla clears aiming while moving;
-        /// this prefab has no walk_aiming clip.</summary>
-        static void Advance(Fighter f, Vector3 spot, float now)
-        {
-            f.Stance = Stance.Advance;
-            f.InCover = false;
-            f.Crouched = false;
-            ReleaseAim(f);
-            float away = Flat(f.Tr.position - spot);
-            int state = away > 55f ? MainRun : MainWalk;
-            if (now < f.NextMove || Reloading(f))
+            if (!d.InCover && now >= d.NextCover && CfgCoverChance.Value > 0f)
             {
-                if (state == MainWalk) Drive(f, MainWalk, AddNone, PoseStand, now, false);
+                float appetite = Mathf.Clamp01(CfgCoverChance.Value)
+                               * (0.35f + 0.8f * d.Suppression + 0.8f * d.Hurt);
+                d.NextCover = now + UnityEngine.Random.Range(4f, 10f) * d.Pace;
+                Vector3 spot;
+                if (UnityEngine.Random.value < appetite && Search()
+                    && FindCover(d, d.Target.position, out spot))
+                {
+                    Send(d, spot, now);
+                    d.Cover = spot;
+                    return;
+                }
+            }
+            if (Reloading(d))
+            {
+                if (d.IkDriven) ReleaseAim(d);
+                Face(d);
                 return;
             }
-            f.NextMove = now + (1.1f + UnityEngine.Random.value * 0.7f) * f.Pace;
-            float slack = Mathf.Max(6f, AssaultSpacing() * 0.4f);
-            if (f.HasOrder && f.Stance == Stance.Advance && Flat(spot - f.Ordered) < slack
-                && IntField(f.Ai, _fMainState, -1) == state && StillOurPoint(f)) return;
-            OrderMove(f, spot, state, AddNone, PoseStand);
+            if (!d.Armed || !d.Sees)
+            {
+                Hold(d, null, now);
+                Face(d);
+                return;
+            }
+            Fire(d, now);
         }
 
-        /// <summary>His place in the body right now.</summary>
-        static Vector3 Place(Fighter f, Squad s, Vector3 along)
-        {
-            if (s == null) return f.Tr.position;
-            Vector3 side = new Vector3(along.z, 0f, -along.x);
-            float spread = s.Threat == null ? 0.6f : 1f;   // looser only in contact
-            return s.Body + side * (f.Lateral * spread) + along * (f.Depth * spread);
-        }
-
-        // ------------------------------------------------------- fight in place
+        // ------------------------------------------------------- the weapon
 
         static bool ReadArmed(Fighter f)
         {
@@ -1110,10 +1176,13 @@ namespace NextDayRevival
             catch { return false; }
         }
 
-        /// <summary>Draw through the native RPC, then wait for its coroutine.
-        /// A slot is claimed before the model exists: never treat it as ready.
-        /// Retry a failed show after three seconds; a stale slot needs a hide
-        /// on a separate frame before showing again. No permanent give-up.</summary>
+        /// <summary>Draw through the game's own setter, then wait for its
+        /// coroutine. NPC_WeaponsManager.ShowWeapon does nothing while slot 0 is
+        /// already claimed, and NetworkShowWeapon claims the slot before its
+        /// delay and creates the model after it. A claimed slot without a model
+        /// for five seconds - the coroutine died with a disabled object - is
+        /// cleared through the native hide so the next draw can start. No
+        /// permanent give-up.</summary>
         static void EnsureArmed(Fighter f, float now)
         {
             bool wasArmed = f.Armed;
@@ -1122,7 +1191,6 @@ namespace NextDayRevival
             {
                 if (!wasArmed)
                 {
-                    f.HasOrder = false;
                     f.NextState = 0f;
                     if (CfgDebug.Value)
                         RevivalPlugin.L.LogInfo("NpcWar: weapon ready on " + f.Ai.name
@@ -1130,42 +1198,37 @@ namespace NextDayRevival
                 }
                 f.EquipTries = 0;
                 f.NextEquip = 0f;
+                f.SlotStuckSince = 0f;
                 f.EquipWarned = false;
                 return;
             }
-            ReleaseAim(f);
-            bool nativeSetter = _mSetMainWeaponId != null && f.WeaponId > 0;
-            if ((!nativeSetter && _mEquipWeapon == null)
-                || f.Ai == null || !Alive(f.Ai)
-                || !f.Ai.gameObject.activeInHierarchy || !IsMine(f.Ai)
-                || Reloading(f) || now < f.NextEquip) return;
-            f.NextEquip = now + (f.EquipTries >= 4 ? 10f : 3f);
+            if (wasArmed || f.IkDriven) ReleaseAim(f);
+            if (f.Ai == null || !Alive(f.Ai) || !f.Ai.gameObject.activeInHierarchy
+                || !IsMine(f.Ai) || Reloading(f) || now < f.NextEquip) return;
+            if (_mSetMainWeaponId == null && _mEquipWeapon == null) return;
             try
             {
-                // SetMainWeaponId is the game's complete path: it fills slot 0
-                // and, with show=true, starts NetworkShowWeapon. EquipWeapon
-                // alone only calls ShowWeapon; after Aggressive spawn the slot
-                // is still -1 because InitSpawnNpc intentionally passed false,
-                // which is why the field report showed fifteen chest flashes
-                // and no model. Keep the older call as a fallback for game
-                // builds where the setter is absent.
-                if (nativeSetter)
-                    _mSetMainWeaponId.Invoke(f.Ai,
-                        new object[] { f.WeaponId, true });
-                else if (_mEquipWeapon != null)
+                if (IntField(f.Wm, _fWeaponSlot, -1) == 0)
                 {
-                    // Only repair a poisoned slot after an earlier show timed
-                    // out. Hide and show are deliberately separate ticks.
-                    bool hide = f.EquipTries > 0
-                        && IntField(f.Wm, _fWeaponSlot, -1) == 0;
-                    _mEquipWeapon.Invoke(f.Ai, new object[] { !hide, false });
+                    if (f.SlotStuckSince <= 0f) { f.SlotStuckSince = now; return; }
+                    if (now - f.SlotStuckSince < 5f) return;
+                    f.SlotStuckSince = 0f;
+                    f.NextEquip = now + 1f;
+                    if (_mEquipWeapon != null)
+                        _mEquipWeapon.Invoke(f.Ai, new object[] { false, false });
+                    return;
                 }
+                f.SlotStuckSince = 0f;
+                f.NextEquip = now + (f.EquipTries >= 4 ? 10f : 3f);
+                // SetMainWeaponId(id, true) is the game's complete path: it
+                // fills slot 0 and starts NetworkShowWeapon. EquipWeapon alone
+                // only calls ShowWeapon, which has nothing to show after the
+                // Aggressive spawn left the slot at -1.
+                if (_mSetMainWeaponId != null && f.WeaponId > 0)
+                    _mSetMainWeaponId.Invoke(f.Ai, new object[] { f.WeaponId, true });
+                else if (_mEquipWeapon != null)
+                    _mEquipWeapon.Invoke(f.Ai, new object[] { true, false });
                 f.EquipTries++;
-                if (_mSetMainWeaponId == null
-                    && f.EquipTries > 0
-                    && IntField(f.Wm, _fWeaponSlot, -1) == 0)
-                    f.NextEquip = now + 0.5f;
-                f.HasOrder = false;
                 f.NextState = 0f;
             }
             catch (Exception ex)
@@ -1179,158 +1242,159 @@ namespace NextDayRevival
             {
                 f.EquipWarned = true;
                 RevivalPlugin.L.LogWarning("NpcWar: weapon not ready on " + f.Ai.name
-                    + " (slot " + IntField(f.Wm, _fWeaponSlot, -1)
+                    + " (item " + f.WeaponId + ", slot " + IntField(f.Wm, _fWeaponSlot, -1)
                     + ", category " + IntField(f.Wm, _fWeaponCategory, 0)
                     + "); holding fire and retrying.");
             }
         }
 
-        /// <summary>Hold this position, aim, and fire when there is something to
-        /// fire at. Cover and suppression decide the pose and the pauses.</summary>
-        static void HoldAndFire(Fighter f, Squad s, float now)
-        {
-            if (f.Target == null || !f.Target)
-            {
-                f.Target = null;
-                if (f.WantAdd == AddAim || f.WantAdd == AddFire) StandDown(f);
-                f.Stance = s == null ? Stance.Fire : Stance.March;
-                return;
-            }
-
-            // Reloading is the game's own animation and its own state; do not
-            // stand the man back up in the middle of it and do not hold the
-            // rifle on the target while he is changing the magazine.
-            if (Reloading(f))
-            {
-                f.Stance = Stance.Down;
-                ReleaseAim(f);
-                Face(f);
-                return;
-            }
-
-            bool crouch = f.InCover || f.Suppression > 0.45f || f.Hurt > 0.6f;
-            // Going to ground for a moment: still aiming, not shooting. A man
-            // with poor nerve does it more often and for longer.
-            if (CfgSuppression.Value && f.Suppression > 0.5f && now >= f.DuckUntil
-                && UnityEngine.Random.value < 0.35f * f.Suppression / f.Nerve)
-                f.DuckUntil = now + UnityEngine.Random.Range(0.8f, 2.4f) / f.Nerve;
-            bool ducked = now < f.DuckUntil;
-            // The prefab has no crouch aiming/shooting clips. Duck while
-            // suppressed, then stand before aiming instead of bending the chest.
-            crouch = crouch && ducked;
-            f.Stance = ducked ? Stance.Down : Stance.Fire;
-            f.Crouched = crouch;
-
-            if (!f.Armed)
-            {
-                ReleaseAim(f);
-                Face(f);
-                Drive(f, MainIdle, AddNone, PoseStand, now, true);
-                return;
-            }
-            int add = now < f.BurstUntil ? AddFire : AddAim;
-            Drive(f, MainIdle, add, crouch ? PoseCrouch : PoseStand, now, true);
-            Aim(f, now);
-
-            if (ducked || !f.IkDriven) return;
-            if (!f.Sees || now < f.ReactUntil || now < f.NextShot) return;
-            if (Vector3.Distance(f.Tr.position, f.Target.position) > CfgSightRange.Value) return;
-            if (Shoot(f)) ScheduleNextShot(f, now);
-        }
-
-        static void ScheduleNextShot(Fighter f, float now)
-        {
-            // The configured interval remains the upper balance knob, while
-            // the assault profile uses 65 percent of it to keep the squad's
-            // MGs applying pressure between movement bounds.
-            float baseDelay = Mathf.Max(0.18f, CfgFireInterval.Value * 0.65f)
-                            * (1f + 0.45f * f.Suppression);
-            int burstMax = Mathf.Max(1, CfgBurst.Value);
-            f.BurstUntil = now + 0.45f;
-            f.Burst++;
-            if (f.Burst < burstMax)
-                f.NextShot = now + baseDelay * UnityEngine.Random.Range(0.15f, 0.3f);
-            else
-            {
-                f.Burst = 0;
-                f.NextShot = now + UnityEngine.Random.Range(baseDelay, baseDelay * 2f);
-            }
-        }
-
         // ------------------------------------------------------------- sensing
 
-        /// <summary>Pick a target, then keep the line of fire up to date. Both
-        /// are rate limited: the scan every three quarters of a second, the
-        /// line of fire twice a second.</summary>
+        /// <summary>Pick a target, then keep the line of fire up to date. The
+        /// scan about three times a second, the line of fire about as often.</summary>
         static void Acquire(Fighter f, float now)
         {
             if (now >= f.NextScan)
             {
-                f.NextScan = now + 0.6f + UnityEngine.Random.value * 0.4f;
+                f.NextScan = now + 0.3f + UnityEngine.Random.value * 0.15f;
                 Transform had = f.Target;
-                f.Target = f.Squad != null ? PickTargetForMan(f) : PickTargetForDefender(f);
+                bool checkedLos;
+                if (f.Squad != null) checkedLos = PickTargetForMan(f, now);
+                else
+                {
+                    f.Target = PickTargetForDefender(f);
+                    f.TargetIsPlayer = false;
+                    checkedLos = false;
+                }
                 if (f.Target != null && f.Target != had)
                 {
-                    // Assault troops react promptly. Keep a configured shorter
-                    // delay, but cap the old 0.8-second ceiling so a contact
-                    // does not leave the whole line idle first.
-                    float reaction = Mathf.Min(0.45f,
-                        Mathf.Max(0.2f, CfgReactionMax.Value));
-                    f.ReactUntil = now + UnityEngine.Random.Range(0.1f, reaction)
-                        * (1.65f - 0.65f * f.Skill);
-                    f.LastSeen = now;
-                    f.NextLos = now;
-                    f.BlindSince = 0f;
+                    // Assault troops react at once; a defender needs a moment
+                    // to find out what hit him.
+                    f.ReactUntil = now + (f.Squad != null
+                        ? UnityEngine.Random.Range(0.05f, 0.25f)
+                        : UnityEngine.Random.Range(0.3f, 0.9f)) * (1.4f - 0.4f * f.Skill);
                     f.MuzzleBlockedSince = 0f;
+                    f.MateBlockedSince = 0f;
+                    if (!checkedLos) { f.LastSeen = now; f.NextLos = now; }
                 }
             }
-            if (f.Target == null || !f.Target) { f.Target = null; f.Sees = false; return; }
+            if (f.Target == null || !f.Target)
+            {
+                f.Target = null;
+                f.Sees = false;
+                f.TargetIsPlayer = false;
+                return;
+            }
             if (now < f.NextLos) return;
-            f.NextLos = now + 0.4f + UnityEngine.Random.value * 0.2f;
+            f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
             float height;
             f.Sees = AimPoint(f, f.Target, out height);
             f.AimHeight = height;
             if (f.Sees) f.LastSeen = now;
         }
 
-        /// <summary>A squad man: keep a living target in sight, otherwise the
-        /// nearest NPC he hates - a scene NPC, a defender, or a man of another
-        /// squad. Never his own squad, never a god-mode or safe-zone NPC.</summary>
-        static Transform PickTargetForMan(Fighter f)
+        static readonly Transform[] _cand = new Transform[5];
+        static readonly bool[] _candPlayer = new bool[5];
+        static readonly float[] _candSqr = new float[5];
+
+        /// <summary>A squad man: keep a target he can still see; otherwise the
+        /// nearest enemy he CAN see among the few nearest - a hated NPC, a man
+        /// of another squad, or the player his own AI is hunting. Never his
+        /// own squad, never a god-mode or safe-zone NPC. Returns whether the
+        /// line of fire was checked here.</summary>
+        static bool PickTargetForMan(Fighter f, float now)
         {
-            float sight = CfgSightRange.Value;
-            if (f.Target != null)
+            float range = AssaultRange();
+            Component player = KillTarget(f);
+            if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
             {
-                Component cur = f.Target.GetComponent(_npcType);
-                Fighter current = cur == null ? null : FighterOf(cur);
-                bool ownSquad = current != null && current.Squad == f.Squad;
-                bool recentlyAcquired = Time.time - f.LastSeen < 0.9f;
-                if (cur != null && !ownSquad && Alive(cur)
-                    && Hostile(f.Hated, FactionOf(cur))
-                    && Vector3.Distance(f.Tr.position, f.Target.position) <= sight * 1.2f
-                    && (f.Sees || recentlyAcquired)) return f.Target;
+                if (f.TargetIsPlayer)
+                {
+                    if (player != null && player.transform == f.Target) return false;
+                }
+                else
+                {
+                    Component cur = f.Target.GetComponent(_npcType);
+                    Fighter current = cur == null ? null : FighterOf(cur);
+                    if (cur != null && Alive(cur)
+                        && (current == null || current.Squad != f.Squad)
+                        && Hostile(f.Hated, FactionOf(cur))
+                        && Flat(f.Target.position - f.Tr.position) <= range * 1.1f)
+                        return false;
+                }
             }
 
-            Component best = null;
-            float bestSqr = sight * sight;
+            int n = 0;
             Vector3 p = f.Tr.position;
+            float rangeSqr = range * range;
+            if (player != null)
+            {
+                float d = (player.transform.position - p).sqrMagnitude;
+                if (d < rangeSqr) Insert(ref n, player.transform, true, d);
+            }
             for (int i = 0; i < _scene.Count; i++)
             {
                 Component c = _scene[i];
                 if (c == null || c == f.Ai) continue;
                 float d = (c.transform.position - p).sqrMagnitude;
-                if (d >= bestSqr) continue;
+                if (d >= rangeSqr || (n == _cand.Length && d >= _candSqr[n - 1])) continue;
                 Fighter other = FighterOf(c);
                 if (other != null && other.Squad == f.Squad) continue;
                 if (!Hostile(f.Hated, FactionOf(c))) continue;
                 if (other == null && !Targetable(c)) continue;
                 if (!Alive(c)) continue;
-                best = c;
-                bestSqr = d;
+                Insert(ref n, c.transform, false, d);
             }
-            if (best == null) return null;
-            if (FighterOf(best) == null) Enlist(best);
-            return best.transform;
+
+            f.Target = null;
+            f.TargetIsPlayer = false;
+            f.Sees = false;
+            if (n == 0) return true;
+            // The nearest three are tried for a line of fire; the nearest of all
+            // stays the target when none of them can be seen, so the man at
+            // least turns toward it.
+            int tries = Mathf.Min(n, 3);
+            for (int i = 0; i < tries; i++)
+            {
+                float height;
+                if (!AimPoint(f, _cand[i], out height)) continue;
+                f.Target = _cand[i];
+                f.TargetIsPlayer = _candPlayer[i];
+                f.Sees = true;
+                f.AimHeight = height;
+                f.LastSeen = now;
+                break;
+            }
+            if (f.Target == null)
+            {
+                f.Target = _cand[0];
+                f.TargetIsPlayer = _candPlayer[0];
+            }
+            f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
+            if (f.Sees && !f.TargetIsPlayer)
+            {
+                Component ai = f.Target.GetComponent(_npcType);
+                if (ai != null && FighterOf(ai) == null) Enlist(ai);
+            }
+            return true;
+        }
+
+        /// <summary>Keep the candidate arrays sorted by distance.</summary>
+        static void Insert(ref int n, Transform t, bool player, float sqr)
+        {
+            int at = n < _cand.Length ? n : _cand.Length - 1;
+            if (n == _cand.Length && sqr >= _candSqr[at]) return;
+            while (at > 0 && _candSqr[at - 1] > sqr)
+            {
+                _cand[at] = _cand[at - 1];
+                _candPlayer[at] = _candPlayer[at - 1];
+                _candSqr[at] = _candSqr[at - 1];
+                at--;
+            }
+            _cand[at] = t;
+            _candPlayer[at] = player;
+            _candSqr[at] = sqr;
+            if (n < _cand.Length) n++;
         }
 
         /// <summary>A defender fires back at a squad man - but not always at the
@@ -1376,7 +1440,7 @@ namespace NextDayRevival
         static Fighter NearestSquadMan(Fighter f, float rangeFactor)
         {
             Fighter best = null;
-            float bestSqr = CfgSightRange.Value * rangeFactor;
+            float bestSqr = Mathf.Max(CfgSightRange.Value, AssaultRange()) * rangeFactor;
             bestSqr *= bestSqr;
             for (int q = 0; q < _squads.Count; q++)
                 for (int i = 0; i < _squads[q].Men.Count; i++)
@@ -1410,60 +1474,19 @@ namespace NextDayRevival
                     if (other == null || !other.Equals(faction)) continue;
                 }
                 Fighter d = NewFighter(c, null);
-                // The man who was hit turns first; the camp behind him needs
-                // time to find out what happened.
                 d.ReactUntil = Time.time + UnityEngine.Random.Range(0.4f, 1.5f)
                              + away * 0.03f;
+                d.NextScan = Time.time;
                 _defenders.Add(d);
                 TryAlarm(c);
             }
         }
 
-        /// <summary>The nearest enemy any man has: his NPC target or the player
-        /// his own AI is fighting. The scene fallback matters during the first
-        /// scan after a landing and when an NPC has no clear line of fire yet;
-        /// otherwise Plan sees no threat and the whole squad keeps marching past
-        /// a hostile that is already inside SightRange.</summary>
-        static Transform NearestEnemyOfSquad(Squad s, Vector3 centre)
-        {
-            Transform best = null;
-            float bestSqr = CfgSightRange.Value * CfgSightRange.Value;
-            for (int i = 0; i < s.Men.Count; i++)
-            {
-                Fighter f = s.Men[i];
-                if (f.Ai == null || !Alive(f.Ai)) continue;
-                Transform t = f.Target;
-                Component player = KillTarget(f);
-                if (player != null) t = player.transform;
-                if (t == null || !t) continue;
-                float d = (t.position - centre).sqrMagnitude;
-                if (d < bestSqr) { best = t; bestSqr = d; }
-            }
-            for (int i = 0; i < _scene.Count; i++)
-            {
-                Component c = _scene[i];
-                if (c == null || !Alive(c)) continue;
-                Fighter other = FighterOf(c);
-                if (other != null && other.Squad == s) continue;
-                bool hated = false;
-                for (int m = 0; m < s.Men.Count; m++)
-                {
-                    Fighter man = s.Men[m];
-                    if (man.Ai != null && Hostile(man.Hated, FactionOf(c)))
-                    { hated = true; break; }
-                }
-                if (!hated || (other == null && !Targetable(c))) continue;
-                float d = (c.transform.position - centre).sqrMagnitude;
-                if (d >= bestSqr) continue;
-                best = c.transform; bestSqr = d;
-            }
-            return best;
-        }
-
         // ------------------------------------------------------------- firing
 
-        /// <summary>One shot at the man's target. False when the weapon did not
-        /// fire this frame (rate of fire, reload), so the burst waits for it.</summary>
+        /// <summary>One round at the man's NPC target. False when the weapon
+        /// did not fire this frame (rate of fire, reload, obstruction), so the
+        /// next attempt comes quickly.</summary>
         static bool Shoot(Fighter f)
         {
             if (!ReadArmed(f)) return false;
@@ -1474,16 +1497,19 @@ namespace NextDayRevival
             // Eyes can see over cover while the barrel is still behind it.
             if (!Clear(from, aimAt, f.Target))
             {
-                // Acquire's eye-height ray can legitimately remain clear while
-                // the muzzle is behind a wall or railing. Do not overwrite that
-                // useful sensor result; remember the barrel obstruction
-                // separately so ManStep can send the man around the obstacle.
                 if (f.MuzzleBlockedSince <= 0f) f.MuzzleBlockedSince = Time.time;
-                f.NextLos = Time.time + 0.5f;
                 f.NextShot = Time.time + 0.2f;
                 return false;
             }
             f.MuzzleBlockedSince = 0f;
+            // Never through a comrade of the line.
+            if (f.Squad != null && MateInLine(f, from, aimAt))
+            {
+                if (f.MateBlockedSince <= 0f) f.MateBlockedSince = Time.time;
+                f.NextShot = Time.time + 0.15f;
+                return false;
+            }
+            f.MateBlockedSince = 0f;
             float dist = Vector3.Distance(from, aimAt);
             Component targetAi = f.Target.GetComponent(_npcType);
             Fighter victim = targetAi == null ? null : FighterOf(targetAi);
@@ -1501,9 +1527,10 @@ namespace NextDayRevival
             int fired = VanillaShot(f, weapon, aim);
             if (fired <= 0)
             {
-                f.NextShot = Time.time + 0.1f;
+                f.NextShot = Time.time + 0.05f;
                 return false;
             }
+            if (f.Squad != null) f.Squad.Shots++;
             if (rocket) return true;
             // Being shot at is felt whether or not the round connects.
             if (victim != null && CfgSuppression.Value)
@@ -1514,7 +1541,7 @@ namespace NextDayRevival
             if (dir.sqrMagnitude < 0.0001f) return true;
             dir.Normalize();
 
-            float range = Mathf.Max(dist + 5f, CfgSightRange.Value + 20f);
+            float range = Mathf.Max(dist + 5f, RangeOf(f) + 20f);
             Vector3 impact;
             // Past the shooter's own 0.75 unit capsule.
             GameObject struck = Turret.RaycastObject(from + dir * 1.0f, dir, range, out impact);
@@ -1530,10 +1557,33 @@ namespace NextDayRevival
             if (!enemy) return true;
             if (hurt == null && f.Squad != null) Enlist(hitAi);
 
-            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", CfgDamage.Value)
-                && CfgDebug.Value)
-                RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " units.");
+            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", CfgDamage.Value))
+            {
+                if (f.Squad != null) f.Squad.Hits++;
+                if (CfgDebug.Value)
+                    RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " units.");
+            }
             return true;
+        }
+
+        /// <summary>Would this round pass within a man's width of a living
+        /// comrade standing between the muzzle and the target?</summary>
+        static bool MateInLine(Fighter f, Vector3 from, Vector3 to)
+        {
+            Vector3 axis = to - from;
+            float length = axis.magnitude;
+            if (length < 4f) return false;
+            axis /= length;
+            for (int i = 0; i < f.Squad.Men.Count; i++)
+            {
+                Fighter m = f.Squad.Men[i];
+                if (m == f || m.Tr == null || m.Ai == null || !Alive(m.Ai)) continue;
+                Vector3 chest = m.Tr.position + Vector3.up * ChestHeight - from;
+                float t = Vector3.Dot(chest, axis);
+                if (t < 2f || t > length - 2f) continue;
+                if ((chest - axis * t).sqrMagnitude < 2.0f * 2.0f) return true;
+            }
+            return false;
         }
 
         static bool RocketClear(Fighter f, Vector3 from, Vector3 aim)
@@ -1641,9 +1691,10 @@ namespace NextDayRevival
             {
                 if (victim.InCover) acc *= 0.55f;
                 else if (victim.Crouched) acc *= 0.75f;
-                if (victim.Stance == Stance.Reposition) acc *= 0.8f;
+                if (victim.Stance == Stance.Reposition || victim.Stance == Stance.Bound
+                    || victim.Stance == Stance.Advance) acc *= 0.8f;
             }
-            float far = Mathf.Clamp01(dist / Mathf.Max(1f, CfgSightRange.Value));
+            float far = Mathf.Clamp01(dist / Mathf.Max(1f, RangeOf(shooter)));
             if (UnityEngine.Random.value <= acc * (1f - 0.4f * far)) return Vector3.zero;
 
             Vector3 axis = (to - from).normalized;
@@ -1660,12 +1711,10 @@ namespace NextDayRevival
 
         /// <summary>The highest part of the target this man actually has a line
         /// to: chest first, then the head, then the waist. A rifleman on a tower
-        /// behind a parapet only ever shows his head and chest - aiming at the
-        /// centre of a body he cannot see is why the old squad never hit
-        /// anything up there. Returns false when nothing is visible; the aim
-        /// point is then the chest, for the pose. The HEIGHT comes back, not the
-        /// point, so the weapon keeps following a target that is moving between
-        /// two line-of-fire checks.</summary>
+        /// behind a parapet only ever shows his head and chest. Returns false
+        /// when nothing is visible; the aim point is then the chest, for the
+        /// pose. The HEIGHT comes back, not the point, so the weapon keeps
+        /// following a target that is moving between two line-of-fire checks.</summary>
         static bool AimPoint(Fighter f, Transform target, out float height)
         {
             Vector3 eye = f.Tr.position + Vector3.up * (f.Crouched ? CrouchEye : EyeHeight);
@@ -1710,14 +1759,15 @@ namespace NextDayRevival
         /// and _killTarget is a player.</summary>
         static void Aim(Fighter f, float now)
         {
+            if (f.Target == null || !f.Target) return;
             Face(f);
             Vector3 look = AimWorld(f);
-            // A little wander, so eight men do not all hold the same statue
-            // pose. Roughly a hand's width at fifty units.
-            float t = now * (0.7f + f.Slot * 0.13f);
+            // A little wander, so a line of men does not hold one statue pose.
+            // Roughly a hand's width at fifty units.
+            float t = now * (0.7f + (f.LaneOffset * 0.013f));
             look += new Vector3(Mathf.Sin(t * 1.3f), Mathf.Sin(t * 0.9f + 1.1f),
-                                Mathf.Cos(t * 1.1f)) * (0.35f + 0.5f * f.Suppression);
-            DriveAim(f, look);
+                                Mathf.Cos(t * 1.1f)) * (0.3f + 0.5f * f.Suppression);
+            DriveAim(f, look, now);
             if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
             {
                 try { _fAimingPoint.SetValue(f.Ai, look); }
@@ -1726,7 +1776,7 @@ namespace NextDayRevival
         }
 
         /// <summary>Turn the body toward the target. Each man turns at his own
-        /// speed, so a squad that acquires together does not snap together.</summary>
+        /// speed, so a line that acquires together does not snap together.</summary>
         static void Face(Fighter f)
         {
             if (f.Target == null || !f.Target) return;
@@ -1734,25 +1784,24 @@ namespace NextDayRevival
             flat.y = 0f;
             if (flat.sqrMagnitude < 0.01f) return;
             f.Tr.rotation = Quaternion.RotateTowards(f.Tr.rotation,
-                Quaternion.LookRotation(flat), (150f + 120f * f.Skill) * Time.deltaTime);
+                Quaternion.LookRotation(flat), (180f + 120f * f.Skill) * Time.deltaTime);
         }
 
         /// <summary>Hold the aim IK on a world point. SetupLookAtIk wires
         /// LookAtIKTarget as the solver target with a chest-to-hand chain, so
         /// moving that transform points the weapon - in elevation as well as in
-        /// azimuth. The vanilla controller lerps the weight back toward zero
-        /// every frame while _killTarget is null. Only drive over a ready
-        /// standing aim base clip, with an independent ramp.</summary>
-        static void DriveAim(Fighter f, Vector3 lookAt)
+        /// azimuth. The vanilla controller lerps the weight toward zero every
+        /// frame while _killTarget is null; we ramp our own weight like its
+        /// player branch does (5 per second) and set it every frame.</summary>
+        static void DriveAim(Fighter f, Vector3 lookAt, float now)
         {
-            if (!AimPoseReady(f)) { ReleaseAim(f); return; }
+            if (!AimPoseReady(f, now)) { if (f.IkDriven) ReleaseAim(f); return; }
             if (_fAimIk == null || _fLookTarget == null) return;
             if (f.IkMissing)
             {
                 // Unity can finish wiring _aimIk one or two frames after the
-                // NPC starts. A permanent failure bit made that race fatal:
-                // the men then fired (or stood) without ever pointing again.
-                if (Time.time < f.NextIkRetry) return;
+                // NPC starts. A permanent failure bit made that race fatal.
+                if (now < f.NextIkRetry) return;
                 f.IkMissing = false;
                 f.Ik = null;
                 f.Look = null;
@@ -1764,24 +1813,22 @@ namespace NextDayRevival
                     f.Ik = _fAimIk.GetValue(f.Ai) as Component;
                     f.Look = _fLookTarget.GetValue(f.Ai) as Transform;
                     if (f.Ik == null || f.Look == null)
-                    { f.IkMissing = true; f.NextIkRetry = Time.time + 1f; return; }
+                    { f.IkMissing = true; f.NextIkRetry = now + 1f; return; }
                     if (_fSolver == null) _fSolver = AccessTools.Field(f.Ik.GetType(), "solver");
                     if (_fSolver == null)
-                    { f.IkMissing = true; f.NextIkRetry = Time.time + 1f; return; }
+                    { f.IkMissing = true; f.NextIkRetry = now + 1f; return; }
                 }
                 object solver = _fSolver.GetValue(f.Ik);
                 if (solver == null)
-                { f.IkMissing = true; f.NextIkRetry = Time.time + 1f; return; }
+                { f.IkMissing = true; f.NextIkRetry = now + 1f; return; }
                 if (_fIkWeight == null)
                 {
                     _fIkWeight = AccessTools.Field(solver.GetType(), "IKPositionWeight");
                     if (_fIkWeight == null || _fIkWeight.FieldType != typeof(float))
-                    { f.IkMissing = true; f.NextIkRetry = Time.time + 1f; return; }
+                    { f.IkMissing = true; f.NextIkRetry = now + 1f; return; }
                 }
                 GameObject go = f.Ik.gameObject;
                 if (!go.activeSelf) go.SetActive(true);
-                // Ramp our own weight; repeatedly adding to the vanilla-faded
-                // value would equilibrate below full aim.
                 f.AimWeight = Mathf.Min(1f, f.AimWeight + Time.deltaTime * 5f);
                 _fIkWeight.SetValue(solver, f.AimWeight);
                 // Snap on the first frame of an engagement, then follow.
@@ -1794,42 +1841,26 @@ namespace NextDayRevival
             {
                 ReleaseAim(f);
                 f.IkMissing = true;
-                f.NextIkRetry = Time.time + 1f;
+                f.NextIkRetry = now + 1f;
                 if (CfgDebug.Value)
                     RevivalPlugin.L.LogWarning("NpcWar: aim IK - " + ex.Message);
             }
         }
 
-        // Check animation state, not last frame's already IK-rotated hand.
-        // Require the standing aiming BASE clip to have finished crossfading;
-        // a Once shooting overlay alone is not safe when it ends.
-        static bool AimPoseReady(Fighter f)
+        /// <summary>The same gate the vanilla LookAtIkController has - the man
+        /// stands in Aiming or Shooting - plus the two things that made
+        /// 6.16.2's men arch their backs: a weapon really in hand, and a short
+        /// moment for the crossfade out of the run or draw clip.</summary>
+        static bool AimPoseReady(Fighter f, float now)
         {
             if (!f.Armed || Reloading(f)
                 || IntField(f.Ai, _fMainState, -1) != MainIdle
-                || IntField(f.Ai, _fPoseState, -1) != PoseStand) return false;
+                || IntField(f.Ai, _fPoseState, -1) != PoseStand)
+            { f.PoseSince = 0f; return false; }
             int add = IntField(f.Ai, _fAddState, -1);
-            if (add != AddAim && add != AddFire) return false;
-            if (f.Anim == null && _fAnim != null) f.Anim = _fAnim.GetValue(f.Ai);
-            if (f.Anim == null) return false;
-            return AimClipReady(f.Anim, "asr_idle_aiming")
-                || AimClipReady(f.Anim, "rifle_idle_aiming")
-                || AimClipReady(f.Anim, "hg_idle_aiming");
-        }
-
-        static bool AimClipReady(object anim, string name)
-        {
-            try
-            {
-                if (_pAnimItem == null || _pAnimEnabled == null || _pAnimLayer == null
-                    || _pAnimWeight == null || _mAnimPlaying == null) return false;
-                object state = _pAnimItem.GetValue(anim, new object[] { name });
-                return state != null && (bool)_pAnimEnabled.GetValue(state, null)
-                    && (int)_pAnimLayer.GetValue(state, null) == 0
-                    && (float)_pAnimWeight.GetValue(state, null) >= 0.95f
-                    && (bool)_mAnimPlaying.Invoke(anim, new object[] { name });
-            }
-            catch { return false; }
+            if (add != AddAim && add != AddFire) { f.PoseSince = 0f; return false; }
+            if (f.PoseSince <= 0f) { f.PoseSince = now; return false; }
+            return now - f.PoseSince >= 0.15f;
         }
 
         static void ReleaseAim(Fighter f)
@@ -1846,14 +1877,13 @@ namespace NextDayRevival
             catch { }
         }
 
-        /// <summary>Out of the aim pose. The vanilla controller fades the IK
-        /// down and switches it off again on its own once the additional state
-        /// is no longer Aiming or Shooting.</summary>
+        /// <summary>Out of the aim pose. The vanilla controller switches the IK
+        /// off again on its own once the additional state is no longer Aiming
+        /// or Shooting.</summary>
         static void StandDown(Fighter f)
         {
             ReleaseAim(f);
             f.InCover = false;
-            f.BurstUntil = 0f;
             int add = IntField(f.Ai, _fAddState, -1);
             if (add != AddAim && add != AddFire) { f.WantAdd = AddNone; return; }
             Drive(f, MainIdle, AddNone, IntField(f.Ai, _fPoseState, PoseStand), Time.time, false);
@@ -1868,7 +1898,6 @@ namespace NextDayRevival
             f.Stance = stance;
             f.Crouched = pose == PoseCrouch;
             ReleaseAim(f);
-            f.BurstUntil = 0f;
             OrderMove(f, dest, state, AddNone, pose);
         }
 
@@ -1957,10 +1986,9 @@ namespace NextDayRevival
         }
 
         /// <summary>Keep the vanilla idle logic off a man we are driving.
-        /// IdleStateAction queues its own intentions on the tactical task when
-        /// there is no player kill target (IL_0629-06DC) and returns early
-        /// while GetCalculatedPauseTime is positive, so a short pause refreshed
-        /// twice a second is enough to hold a pose.</summary>
+        /// IdleStateAction queues its own intentions on the tactical task and
+        /// returns early while GetCalculatedPauseTime is positive, so a short
+        /// pause refreshed twice a second is enough to hold a pose.</summary>
         static void Quiet(Fighter f, bool pause)
         {
             float now = Time.time;
@@ -1996,16 +2024,6 @@ namespace NextDayRevival
                     && list[0] as Component == f.Point.GetComponent(_wpType);
             }
             catch { return false; }
-        }
-
-        static Vector3 Goal(Squad s)
-        {
-            switch (s.Phase)
-            {
-                case Phase.ToStart: return s.Tail;
-                case Phase.Advance: return s.Head;
-                default: return s.TowardHead ? s.Head : s.Tail;
-            }
         }
 
         /// <summary>NPC_AI2.SetStateWithAnimAndSync(position, main, additional,
@@ -2073,13 +2091,7 @@ namespace NextDayRevival
             }
         }
 
-        // ------------------------------------------------------ ground search
-        //
-        // Three searches, one shape: propose points around the man, drop the
-        // ones that are not on the NavMesh or are off the arrow, and score what
-        // is left with one or two rays. One search per frame across all fights
-        // (Search below), and each man asks at most once a second, so the whole
-        // thing costs a handful of rays a second no matter how big the fight is.
+        // ------------------------------------------------ defender cover search
 
         static bool Search()
         {
@@ -2091,7 +2103,7 @@ namespace NextDayRevival
         /// <summary>Somewhere close that breaks the line from the threat. Best
         /// is a spot that hides a crouching man but still lets a standing one
         /// shoot - the edge of a wall rather than the middle of it.</summary>
-        static bool FindCover(Fighter f, Squad s, Vector3 threat, out Vector3 spot)
+        static bool FindCover(Fighter f, Vector3 threat, out Vector3 spot)
         {
             spot = Vector3.zero;
             Vector3 me = f.Tr.position;
@@ -2108,7 +2120,7 @@ namespace NextDayRevival
                 float rad = UnityEngine.Random.Range(7f, 28f);
                 Vector3 c = me + new Vector3(Mathf.Sin(ang * Mathf.Deg2Rad), 0f,
                                              Mathf.Cos(ang * Mathf.Deg2Rad)) * rad;
-                if (!Reachable(f, s, c, 1.4f, out c)) continue;
+                if (!Reachable(f, c, out c)) continue;
                 bool hiddenLow = !Clear(c + Vector3.up * 1.9f, aimAtThreat, null);
                 if (!hiddenLow) continue;              // no protection, no cover
                 bool canShoot = Clear(c + Vector3.up * EyeHeight, aimAtThreat, null);
@@ -2120,92 +2132,21 @@ namespace NextDayRevival
             return best > 0f;
         }
 
-        /// <summary>A place from which this target CAN be shot at, preferring a
-        /// different angle to the one that is blocked. This is what gets a squad
-        /// past a man in a tower: step out of his firing lane and into one of
-        /// your own.</summary>
-        static bool FindFiringSpot(Fighter f, Squad s, Vector3 threat, out Vector3 spot)
-        {
-            spot = Vector3.zero;
-            Vector3 me = f.Tr.position;
-            Vector3 toThreat = threat - me;
-            toThreat.y = 0f;
-            float have = toThreat.magnitude;
-            if (have < 1f) return false;
-            float axis = Mathf.Atan2(toThreat.x, toThreat.z) * Mathf.Rad2Deg;
-            Vector3 aimAtThreat = threat + Vector3.up * ChestHeight;
-            float best = 0f;
-
-            for (int i = 0; i < 9; i++)
-            {
-                // Sideways, never straight at him.
-                float off = UnityEngine.Random.Range(40f, 135f)
-                          * (UnityEngine.Random.value < 0.5f ? -1f : 1f);
-                float rad = UnityEngine.Random.Range(14f, 48f);
-                float ang = axis + off;
-                Vector3 c = me + new Vector3(Mathf.Sin(ang * Mathf.Deg2Rad), 0f,
-                                             Mathf.Cos(ang * Mathf.Deg2Rad)) * rad;
-                if (!Reachable(f, s, c, 1.4f, out c)) continue;
-                Vector3 flat = threat - c;
-                flat.y = 0f;
-                float now = flat.magnitude;
-                if (now < have * 0.55f || now > CfgSightRange.Value) continue;
-                if (!Clear(c + Vector3.up * EyeHeight, aimAtThreat, null)) continue;
-                float score = 1f + Mathf.Abs(off) / 180f - rad / 120f
-                            + UnityEngine.Random.value * 0.3f;
-                if (score > best) { best = score; spot = c; }
-            }
-            return best > 0f;
-        }
-
-        /// <summary>The wide move: well out to one side and roughly at standoff
-        /// distance, on a longer leash than an ordinary reposition.</summary>
-        static bool FindFlankSpot(Fighter f, Squad s, Vector3 threat, out Vector3 spot)
-        {
-            spot = Vector3.zero;
-            if (s == null) return false;
-            Vector3 back = f.Tr.position - threat;
-            back.y = 0f;
-            if (back.sqrMagnitude < 1f) return false;
-            float axis = Mathf.Atan2(back.x, back.z) * Mathf.Rad2Deg;
-            float standoff = AssaultStandoff();
-            float side = UnityEngine.Random.value < 0.5f ? -1f : 1f;
-            Vector3 aimAtThreat = threat + Vector3.up * ChestHeight;
-            float best = 0f;
-
-            for (int i = 0; i < 8; i++)
-            {
-                float ang = axis + side * UnityEngine.Random.Range(55f, 115f);
-                float rad = standoff * UnityEngine.Random.Range(0.7f, 1.15f);
-                Vector3 c = threat + new Vector3(Mathf.Sin(ang * Mathf.Deg2Rad), 0f,
-                                                 Mathf.Cos(ang * Mathf.Deg2Rad)) * rad;
-                if (!Reachable(f, s, c, 1.5f, out c)) continue;
-                float score = 1f + UnityEngine.Random.value * 0.4f;
-                if (Clear(c + Vector3.up * EyeHeight, aimAtThreat, null)) score += 1.2f;
-                if (score > best) { best = score; spot = c; }
-            }
-            return best > 0f;
-        }
-
-        /// <summary>Is a proposed point real ground the man may stand on, and is
-        /// it still within the leash his arrow gives him?</summary>
-        static bool Reachable(Fighter f, Squad s, Vector3 c, float leash, out Vector3 at)
+        /// <summary>Is a proposed point real ground the man may stand on?</summary>
+        static bool Reachable(Fighter f, Vector3 c, out Vector3 at)
         {
             at = c;
-            float y;
             Vector3 hit;
             GameObject g = Turret.RaycastObject(new Vector3(c.x, c.y + 40f, c.z),
                 Vector3.down, 120f, out hit);
             if (g == null) return false;
-            y = hit.y;
-            if (Mathf.Abs(y - f.Tr.position.y) > 26f) return false;
+            if (Mathf.Abs(hit.y - f.Tr.position.y) > 26f) return false;
             NavMeshHit nav;
-            if (!NavMesh.SamplePosition(new Vector3(c.x, y + 0.2f, c.z), out nav, 8f,
+            if (!NavMesh.SamplePosition(new Vector3(c.x, hit.y + 0.2f, c.z), out nav, 8f,
                                         NavMesh.AllAreas))
                 return false;
             at = nav.position;
-            if (s == null) return true;
-            return DistanceToSegment(at, s.Tail, s.Head) <= CfgDetour.Value * leash;
+            return true;
         }
 
         // ------------------------------------------------------------- removal
@@ -2230,7 +2171,8 @@ namespace NextDayRevival
             }
             _squads.Remove(s);
             RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " ended (" + why
-                + ") - " + n + " men removed from the map.");
+                + ") - " + n + " men removed from the map; " + s.Shots + " shots at NPCs, "
+                + s.Hits + " hits.");
         }
 
         static bool NetDestroy(GameObject go)
@@ -2455,13 +2397,10 @@ namespace NextDayRevival
             return v.magnitude;
         }
 
-        static float DistanceToSegment(Vector3 p, Vector3 a, Vector3 b)
+        static Vector3 FlatV(Vector3 v)
         {
-            Vector3 ab = b - a, ap = p - a;
-            ab.y = 0f; ap.y = 0f;
-            float len = ab.sqrMagnitude;
-            float t = len < 0.0001f ? 0f : Mathf.Clamp01(Vector3.Dot(ap, ab) / len);
-            return Flat(p - (a + ab * t));
+            v.y = 0f;
+            return v;
         }
 
         // -------------------------------------------------------------- status
@@ -2470,19 +2409,19 @@ namespace NextDayRevival
         {
             if (CfgDebug == null || !CfgDebug.Value || _squads.Count == 0) return "";
             Squad s = _squads[0];
-            int fire = 0, move = 0, cover = 0, down = 0;
+            int fire = 0, move = 0, hold = 0, armed = 0;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || !Alive(f.Ai)) continue;
-                if (f.InCover) cover++;
+                if (f.Armed) armed++;
                 if (f.Stance == Stance.Fire) fire++;
-                else if (f.Stance == Stance.Down) down++;
-                else if (f.Stance != Stance.March) move++;
+                else if (f.Stance == Stance.Hold) hold++;
+                else move++;
             }
-            return " | " + s.Tag + ": " + fire + " firing, " + move + " moving, "
-                + down + " down, " + cover + " in cover"
-                + (s.Threat == null ? ", no contact" : (s.Closing ? ", closing" : ", holding"));
+            return " | " + s.Tag + " " + s.Phase + ": " + armed + " armed, " + fire + " firing, "
+                + move + " moving, " + hold + " holding"
+                + (s.Threat == null ? ", no contact" : ", contact team " + s.BoundTeam + " bounds");
         }
 
         public static void Draw()
