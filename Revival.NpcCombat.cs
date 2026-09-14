@@ -132,14 +132,17 @@ namespace NextDayRevival
         {
             CfgSightRange = cfg.Bind("NpcWar", "SightRange", 110f,
                 "Groesste Entfernung (Meter), auf die ein angegriffener NPC einen "
-                + "Truppsoldaten als Ziel annimmt und zurueckschiesst.");
+                + "Truppsoldaten als Ziel annimmt und zurueckschiesst. Mindestens "
+                + "AssaultRange; nur ein hoeherer Wert erweitert sie.");
             CfgDamage = cfg.Bind("NpcWar", "DamagePerShot", 18f,
-                "Schaden je Treffer an einem NPC.");
+                "Schaden je Treffer an einem NPC. Das Spiel wertet den Treffer als "
+                + "Kopftreffer und verdreifacht ihn: 18 nimmt 54 Lebenspunkte. Ein "
+                + "Verteidiger braucht fuer einen Truppsoldaten hoechstens zwei Treffer.");
             CfgAccuracy = cfg.Bind("NpcWar", "Accuracy", 0.6f,
                 "Trefferwahrscheinlichkeit auf kurze Entfernung (0..1); sie faellt "
-                + "zur Reichweite hin um 40 Prozent ab. Deckung, Hinknien und das "
-                + "persoenliche Koennen des Schuetzen veraendern sie zusaetzlich; "
-                + "der Angriff erhaelt einen kleinen Bonus.");
+                + "zur Reichweite hin ab, beim Verteidiger um 40, beim Landetrupp um "
+                + "55 Prozent. Deckung, Hinknien und das persoenliche Koennen des "
+                + "Schuetzen veraendern sie zusaetzlich.");
             CfgSpread = cfg.Bind("NpcWar", "MissSpread", 1.6f,
                 "Wie weit (Meter) ein verfehlter Schuss neben dem Ziel einschlaegt.");
             CfgMaxCombatants = cfg.Bind("NpcWar", "MaxDefenders", 32,
@@ -187,6 +190,10 @@ namespace NextDayRevival
         const float AheadRun = 4f;          // ... until the line is back within this
         const float PlantSeconds = 0.35f;   // standing in the aim clip before Shooting
         const float SteadySeconds = 1.2f;   // a target out of sight this long: still stand
+        const float SquadFalloff = 0.55f;   // squad hit chance lost at full AssaultRange
+        const float TryDamageHead = 3f;     // Turret.TryDamage hits count as Head: x3 in NPC_AI2
+        const int DefenderHitsToKill = 2;   // defender rounds that kill a full-health squad man
+        const float EnlistRadius = 120f;    // same-faction NPCs this close to a struck one join
 
         // NPC_AI2 states. NPCMainState: Idle 0, Walk 1, Run 2.
         // NPCAdditionalState: Empty 0, Aiming 1, Reloading 2, Shooting 3.
@@ -235,6 +242,7 @@ namespace NextDayRevival
             // out of sight still keeps him standing.
             public float PlantedSince, SteadyUntil;
             public float NextTargetCheck;   // defender: next Targetable re-check
+            public int StepFailures;        // squad man: consecutive ManStep exceptions
 
             // Defender posture.
             public float Nerve = 1f, Pace = 1f;
@@ -285,6 +293,10 @@ namespace NextDayRevival
             public int BoundTeam;
             public bool Armed;               // first weapon ready was reported
             public int Shots, Hits;
+            // Defender fire at this squad, for the 15 s report (6.16.7): the
+            // 6.16.6 log had no defender numbers at all.
+            public int TakenShots, TakenHits;
+            public bool DamageErrorLogged;
         }
 
         static readonly List<Squad> _squads = new List<Squad>();
@@ -479,7 +491,13 @@ namespace NextDayRevival
         /// the ordinary sight range for a defender.</summary>
         static float RangeOf(Fighter f)
         {
-            return f.Squad != null ? AssaultRange() : CfgSightRange.Value;
+            // 6.16.7: a defender answers at least as far as the squad fires.
+            // CONFIRMED asymmetry: SightRange 110 against AssaultRange 180, and
+            // the 6.16.6 squad fired with contact 46-175 units away. HYPOTHESIS
+            // that it is a main reason for 3 losses of 15 (E-057). The same
+            // range is the defender's accuracy falloff basis and target spread
+            // scale, so both follow the longer reach.
+            return f.Squad != null ? AssaultRange() : Mathf.Max(CfgSightRange.Value, AssaultRange());
         }
 
         // ------------------------------------------------------------ operations
@@ -684,15 +702,15 @@ namespace NextDayRevival
             for (int i = _defenders.Count - 1; i >= 0; i--)
             {
                 Fighter d = _defenders[i];
-                bool gone = d.Ai == null || d.Tr == null || !Alive(d.Ai)
-                    || NearestSquadMan(d, 2f) == null;
-                // A defender who can no longer be hurt (a talk started, god
-                // mode) is no target any more and leaves the fight. Twice a
-                // second is plenty and keeps the reflection off every frame.
+                bool gone = d.Ai == null || d.Tr == null || !Alive(d.Ai);
+                // A defender with no squad man anywhere near, or who can no
+                // longer be hurt (a talk started, god mode), leaves the fight.
+                // Twice a second is plenty: with 32 defenders and 15 men the
+                // distance test alone was 480 reflective IsAlive calls a frame.
                 if (!gone && now >= d.NextTargetCheck)
                 {
                     d.NextTargetCheck = now + 0.5f;
-                    gone = !Targetable(d.Ai);
+                    gone = NearestSquadMan(d, 2f) == null || !Targetable(d.Ai);
                 }
                 if (gone)
                 {
@@ -825,7 +843,16 @@ namespace NextDayRevival
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
-                ManStep(f, s, anchor, front, centre, now);
+                // One man's failure costs his turn, never the whole operation,
+                // and it is never silent: the first failure and every 600th
+                // after it (about ten seconds) go to the log with the stack.
+                try { ManStep(f, s, anchor, front, centre, now); f.StepFailures = 0; }
+                catch (Exception ex)
+                {
+                    if (f.StepFailures++ % 600 == 0)
+                        RevivalPlugin.L.LogWarning("NpcWar: " + s.Tag + " man step failed ("
+                            + f.StepFailures + "x) - " + ex);
+                }
             }
 
             if (now >= s.NextReport) Report(s, now, alive);
@@ -925,6 +952,8 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("NpcWar: " + s.Tag + " " + s.Phase + " - " + alive + " alive, "
                 + armed + " armed, " + fire + " firing, " + move + " moving, " + hold + " holding, "
                 + reload + " reloading; " + s.Shots + " shots at NPCs, " + s.Hits + " hits; "
+                + _defenders.Count + " defender(s) enlisted, " + s.TakenShots + " shots at the squad, "
+                + s.TakenHits + " hits; "
                 + (s.Threat == null ? "no contact"
                    : "contact " + Flat(s.Threat.position - s.Centre).ToString("0") + " units away")
                 + ", centre " + s.Centre.ToString("0") + ".");
@@ -1372,12 +1401,7 @@ namespace NextDayRevival
                 Transform had = f.Target;
                 bool checkedLos;
                 if (f.Squad != null) checkedLos = PickTargetForMan(f, now);
-                else
-                {
-                    f.Target = PickTargetForDefender(f);
-                    f.TargetIsPlayer = false;
-                    checkedLos = false;
-                }
+                else checkedLos = PickTargetForDefender(f, now);
                 if (f.Target != null && f.Target != had)
                 {
                     // Assault troops react at once; a defender needs a moment
@@ -1513,19 +1537,29 @@ namespace NextDayRevival
         /// <summary>A defender fires back at a squad man - but not always at the
         /// nearest one. Three men emptying their magazines into whoever is in
         /// front is what wiped a squad in seconds; real fire is distributed.</summary>
-        static Transform PickTargetForDefender(Fighter f)
+        static readonly Fighter[] _pick = new Fighter[3];
+        static readonly float[] _pickScore = new float[3];
+
+        /// <summary>A defender: keep a squad man he can see or saw a moment
+        /// ago; otherwise the first of the three best-scored squad men he CAN
+        /// see, like PickTargetForMan. Until 6.16.7 there was no line-of-fire
+        /// test here and Focus counted the defender himself, so a defender
+        /// swapped his target every two seconds or so, often to a man behind
+        /// a wall, dropped his aim and waited out a new reaction time (E-057
+        /// review). Returns whether the line of fire was checked here.</summary>
+        static bool PickTargetForDefender(Fighter f, float now)
         {
-            if (f.Target != null)
+            f.TargetIsPlayer = false;
+            float sight = RangeOf(f);
+            if (f.Target != null && f.Target)
             {
                 Component cur = f.Target.GetComponent(_npcType);
                 if (cur != null && Alive(cur)
-                    && Vector3.Distance(f.Tr.position, f.Target.position) <= CfgSightRange.Value * 1.2f
-                    && UnityEngine.Random.value < 0.8f)
-                    return f.Target;
+                    && Vector3.Distance(f.Tr.position, f.Target.position) <= sight * 1.2f
+                    && (f.Sees || now - f.LastSeen < 0.8f))
+                    return false;
             }
-            Fighter best = null;
-            float bestScore = float.MaxValue;
-            float sight = CfgSightRange.Value;
+            int n = 0;
             for (int q = 0; q < _squads.Count; q++)
                 for (int i = 0; i < _squads[q].Men.Count; i++)
                 {
@@ -1533,20 +1567,53 @@ namespace NextDayRevival
                     if (m.Ai == null || m.Tr == null || !Alive(m.Ai)) continue;
                     float d = Vector3.Distance(m.Tr.position, f.Tr.position);
                     if (d > sight) continue;
-                    // Every defender already shooting at him counts as half the
-                    // sight range of extra distance.
-                    float score = d + Focus(m) * sight * 0.5f
+                    // Every OTHER defender already shooting at him counts as
+                    // half the sight range of extra distance.
+                    float score = d + Focus(m, f) * sight * 0.5f
                                 + UnityEngine.Random.value * sight * 0.15f;
-                    if (score < bestScore) { best = m; bestScore = score; }
+                    if (n == _pick.Length && score >= _pickScore[n - 1]) continue;
+                    int k = n < _pick.Length ? n++ : n - 1;
+                    while (k > 0 && _pickScore[k - 1] > score)
+                    {
+                        _pick[k] = _pick[k - 1];
+                        _pickScore[k] = _pickScore[k - 1];
+                        k--;
+                    }
+                    _pick[k] = m;
+                    _pickScore[k] = score;
                 }
-            return best == null ? null : best.Tr;
+            if (n == 0)
+            {
+                f.Target = null;
+                f.Sees = false;
+                return false;
+            }
+            Transform chosen = null;
+            bool seen = false;
+            for (int i = 0; i < n && chosen == null; i++)
+            {
+                float height;
+                if (!AimPoint(f, _pick[i].Tr, out height)) continue;
+                chosen = _pick[i].Tr;
+                seen = true;
+                f.Sees = true;
+                f.AimHeight = height;
+                f.LastSeen = now;
+                f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
+            }
+            // Nobody visible: the best-scored man, so he at least turns toward
+            // him; Acquire then treats him as a fresh target.
+            if (chosen == null) chosen = _pick[0].Tr;
+            f.Target = chosen;
+            for (int i = 0; i < _pick.Length; i++) _pick[i] = null;
+            return seen;
         }
 
-        static int Focus(Fighter man)
+        static int Focus(Fighter man, Fighter asker)
         {
             int n = 0;
             for (int i = 0; i < _defenders.Count; i++)
-                if (_defenders[i].Target == man.Tr) n++;
+                if (_defenders[i] != asker && _defenders[i].Target == man.Tr) n++;
             return n;
         }
 
@@ -1572,27 +1639,37 @@ namespace NextDayRevival
         /// hostile player the normal way. They do not all react at once.</summary>
         static void Enlist(Component struck)
         {
+            int cap = CfgMaxCombatants.Value;
+            // The NPC actually shot at always gets a slot, one over the cap if
+            // need be. Before 6.16.7 the scene walk ran in scene order and could
+            // fill the cap with bystanders before it reached him.
+            if (FighterOf(struck) == null && _defenders.Count < cap + 1
+                && Alive(struck) && Targetable(struck))
+                AddDefender(struck, 0f);
             object faction = FactionOf(struck);
+            if (faction == null) return;
             Vector3 at = struck.transform.position;
-            for (int i = 0; i < _scene.Count && _defenders.Count < CfgMaxCombatants.Value; i++)
+            for (int i = 0; i < _scene.Count && _defenders.Count < cap; i++)
             {
                 Component c = _scene[i];
-                if (c == null || FighterOf(c) != null || !Targetable(c) || !Alive(c)) continue;
-                float away = 0f;
-                if (c != struck)
-                {
-                    away = (c.transform.position - at).magnitude;
-                    if (away > 60f) continue;
-                    object other = FactionOf(c);
-                    if (other == null || !other.Equals(faction)) continue;
-                }
-                Fighter d = NewFighter(c, null);
-                d.ReactUntil = Time.time + UnityEngine.Random.Range(0.4f, 1.5f)
-                             + away * 0.03f;
-                d.NextScan = Time.time;
-                _defenders.Add(d);
-                TryAlarm(c);
+                if (c == null || c == struck) continue;
+                // Cheapest test first: the rest is reflection.
+                float away = (c.transform.position - at).magnitude;
+                if (away > EnlistRadius) continue;
+                object other = FactionOf(c);
+                if (other == null || !other.Equals(faction)) continue;
+                if (FighterOf(c) != null || !Alive(c) || !Targetable(c)) continue;
+                AddDefender(c, away);
             }
+        }
+
+        static void AddDefender(Component c, float away)
+        {
+            Fighter d = NewFighter(c, null);
+            d.ReactUntil = Time.time + UnityEngine.Random.Range(0.4f, 1.5f) + away * 0.03f;
+            d.NextScan = Time.time;
+            _defenders.Add(d);
+            TryAlarm(c);
         }
 
         // ------------------------------------------------------------- firing
@@ -1644,6 +1721,7 @@ namespace NextDayRevival
                 return false;
             }
             if (f.Squad != null) f.Squad.Shots++;
+            else if (victim != null && victim.Squad != null) victim.Squad.TakenShots++;
             if (rocket) return true;
             // Being shot at is felt whether or not the round connects.
             if (victim != null && CfgSuppression.Value)
@@ -1671,11 +1749,36 @@ namespace NextDayRevival
             if (!enemy) return true;
             if (hurt == null && f.Squad != null) Enlist(hitAi);
 
-            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", CfgDamage.Value))
+            float damage = CfgDamage.Value;
+            if (f.Squad == null && hurt != null && hurt.Squad != null)
+                damage = DefenderRound(hurt, damage);
+            BreakKillStreak(hitAi);
+            try
             {
-                if (f.Squad != null) f.Squad.Hits++;
-                if (CfgDebug.Value)
-                    RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " units.");
+                if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage))
+                {
+                    if (f.Squad != null) f.Squad.Hits++;
+                    else if (hurt != null && hurt.Squad != null) hurt.Squad.TakenHits++;
+                    if (CfgDebug.Value)
+                        RevivalPlugin.L.LogInfo("NpcWar: hit at " + dist.ToString("0") + " units.");
+                }
+            }
+            catch (Exception ex)
+            {
+                // Safety net only; BreakKillStreak removes the known cause. A
+                // throw that leaves the NPC dead still counts as a hit. The
+                // first one per operation is logged whatever Debug says: the
+                // 6.16.6 stack trace was the only way to find the vanish.
+                bool dead = !Alive(hitAi);
+                Squad owner = f.Squad != null ? f.Squad : (hurt != null ? hurt.Squad : null);
+                if (dead && f.Squad != null) f.Squad.Hits++;
+                else if (dead && owner != null) owner.TakenHits++;
+                if (owner == null || !owner.DamageErrorLogged)
+                {
+                    if (owner != null) owner.DamageErrorLogged = true;
+                    RevivalPlugin.L.LogWarning("NpcWar: damage call threw (target "
+                        + (dead ? "dead" : "alive") + ") - " + ex);
+                }
             }
             return true;
         }
@@ -1796,10 +1899,10 @@ namespace NextDayRevival
         static Vector3 MissOffset(Fighter shooter, Fighter victim, Vector3 from,
                                   Vector3 to, float dist)
         {
-            // The user's requested small accuracy allowance is applied to the
-            // assault profile. It is deliberately only eight percentage points
-            // before the individual skill, range and cover modifiers.
-            float acc = Mathf.Clamp01(CfgAccuracy.Value + 0.08f) * shooter.Skill;
+            // 6.16.7: the squad's eight-point allowance is gone and its fire
+            // falls off harder over its long AssaultRange; 15 men with a bonus
+            // wiped a settlement for 3 losses (E-057).
+            float acc = Mathf.Clamp01(CfgAccuracy.Value) * shooter.Skill;
             acc *= 1f - 0.45f * shooter.Suppression;
             if (victim != null)
             {
@@ -1809,7 +1912,8 @@ namespace NextDayRevival
                     || victim.Stance == Stance.Advance) acc *= 0.8f;
             }
             float far = Mathf.Clamp01(dist / Mathf.Max(1f, RangeOf(shooter)));
-            if (UnityEngine.Random.value <= acc * (1f - 0.4f * far)) return Vector3.zero;
+            float falloff = shooter.Squad != null ? SquadFalloff : 0.4f;
+            if (UnityEngine.Random.value <= acc * (1f - falloff * far)) return Vector3.zero;
 
             Vector3 axis = (to - from).normalized;
             Vector3 side = Vector3.Cross(Vector3.up, axis);
@@ -2405,6 +2509,80 @@ namespace NextDayRevival
                 return full <= 0.01f ? 1f : Mathf.Clamp01(have / full);
             }
             catch { return 1f; }
+        }
+
+        /// <summary>HealthMax of a man, or -1 when it cannot be read.</summary>
+        static float HealthMax(Fighter f)
+        {
+            if (_fSpecs == null || f.Ai == null) return -1f;
+            try
+            {
+                object specs = _fSpecs.GetValue(f.Ai);
+                if (specs == null) return -1f;
+                if (_fHealthMax == null) _fHealthMax = AccessTools.Field(specs.GetType(), "HealthMax");
+                if (_fHealthMax == null) return -1f;
+                return Convert.ToSingle(_fHealthMax.GetValue(specs));
+            }
+            catch { return -1f; }
+        }
+
+        /// <summary>The DamagePerShot a defender's round on a squad man is
+        /// sent with. Turret.TryDamage passes damagePart 0 (Head) and damageType
+        /// 0, and NPC_AI2.CalculateDamageValueFromDamageData triples a Head hit
+        /// unless the type is 17/18 (CONFIRMED IL): 18 takes 54. A 120 point
+        /// squad man therefore survived two 6.16.6 defender hits with 12 left -
+        /// under 25, the vanilla wounded state, in which ApplyDamage ignores
+        /// further hits. Here the round is raised just enough that
+        /// DefenderHitsToKill hits kill a man at full health, read from his own
+        /// HealthMax, so a changed Patrol/CrewHealth keeps the rule. A squad
+        /// round (54) kills a defender of up to 108 points in two as well;
+        /// settlement NPCs take their points from NPC_SpawnPoint.Health in the
+        /// scene, which is not measured here.</summary>
+        static float DefenderRound(Fighter man, float configured)
+        {
+            float full = HealthMax(man);
+            if (full <= 0f) return configured;
+            return Mathf.Max(configured, (full + 1f) / (TryDamageHead * DefenderHitsToKill));
+        }
+
+        static FieldInfo _fLastKillerId;
+        static bool _lastKillerLooked;
+
+        /// <summary>Our rounds carry damageOwnerId 0. NPC_Settlement.StatsOnNpcKilled
+        /// counts consecutive kills by one id (_lastKillerId, _killedCount) and,
+        /// in a settlement with six or more spawn points, on the kill that leaves
+        /// no ready NPC after spawnPoints-1 kills in a row, reads
+        /// PhotonPlayer.Find(_lastKillerId).ID for an achievement: a
+        /// NullReferenceException for id 0 (CONFIRMED IL IL_00B6..IL_00CE and the
+        /// 6.16.6 runtime log). The NPC is already dead by then (DecreaseHealth
+        /// -> SetHealthValue -> DeathAction run first), but before 6.16.7 the
+        /// throw ended the whole operation: the squad vanished right after the
+        /// last defender fell (E-057). Resetting an id-0 streak to -1 makes
+        /// every one of our kills a "new killer" (IL_0115, count 1); a player's
+        /// streak is never touched. _lastKillerId is read and written only in
+        /// the constructor and StatsOnNpcKilled (CONFIRMED IL scan). A real
+        /// player id is NOT an option: kill credit, counter-attack and
+        /// settlement hostility would all go to that player.</summary>
+        static void BreakKillStreak(Component ai)
+        {
+            if (_fMySettlement == null || ai == null) return;
+            try
+            {
+                object home = _fMySettlement.GetValue(ai);
+                if (home == null) return;
+                if (!_lastKillerLooked)
+                {
+                    _lastKillerLooked = true;
+                    _fLastKillerId = AccessTools.Field(home.GetType(), "_lastKillerId");
+                    if (_fLastKillerId != null && _fLastKillerId.FieldType != typeof(int)) _fLastKillerId = null;
+                    if (_fLastKillerId == null)
+                        RevivalPlugin.L.LogWarning("NpcWar: NPC_Settlement._lastKillerId missing - "
+                            + "a settlement-clearing kill may throw (caught).");
+                }
+                if (_fLastKillerId != null && (int)_fLastKillerId.GetValue(home) == 0)
+                    _fLastKillerId.SetValue(home, -1);
+            }
+            catch { }
         }
 
         static bool Reloading(Fighter f)
