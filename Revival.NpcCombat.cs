@@ -313,6 +313,7 @@ namespace NextDayRevival
         const float LaneSlack = 4f;         // this close to his point a man is there
         const float AheadWalk = 12f;        // this far ahead of the line he walks ...
         const float AheadRun = 4f;          // ... until the line is back within this
+        const float Catchup = 30f;          // this far behind his place: close up before firing
         const float PlantSeconds = 0.35f;   // standing in the aim clip before Shooting
         const float SteadySeconds = 1.2f;   // a target out of sight this long: still stand
         const float SquadFalloff = 0.55f;   // squad hit chance lost at full AssaultRange
@@ -441,7 +442,7 @@ namespace NextDayRevival
             public Phase Phase;
             public bool TowardHead = true;   // patrol leg
             public float PatrolSeconds, PatrolEnds, HardEnd, NextRing;
-            public Vector3 Centre, Front;
+            public Vector3 Centre, Line, Front;
 
             // The contact picture, refreshed four times a second.
             public Transform Threat;
@@ -715,6 +716,14 @@ namespace NextDayRevival
                 CloseRange(), 250f);
         }
 
+        /// <summary>Does this man stand IN the assault line? The sniper and
+        /// the anti-tank gunner fight from behind it, so the point the line
+        /// walks at is measured without them (RunSquad).</summary>
+        static bool InLine(Fighter f)
+        {
+            return f.Class != SquadClass.Sniper && f.Class != SquadClass.AntiTank;
+        }
+
         /// <summary>How far ahead of (positive) or behind (negative) the line
         /// his class puts a man. The regular line is untouched.</summary>
         static float ClassRank(Fighter f)
@@ -981,14 +990,15 @@ namespace NextDayRevival
 
         static void RunSquad(Squad s, float now)
         {
-            int alive = 0;
-            Vector3 centre = Vector3.zero;
+            int alive = 0, inLine = 0;
+            Vector3 centre = Vector3.zero, lineSum = Vector3.zero, front = Vector3.zero;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
                 alive++;
                 centre += f.Tr.position;
+                if (InLine(f)) { inLine++; lineSum += f.Tr.position; }
             }
 
             if (s.Settlement == null) { Remove(s, "settlement gone"); return; }
@@ -997,6 +1007,13 @@ namespace NextDayRevival
             if (s.Phase == Phase.Patrol && now >= s.PatrolEnds) { Remove(s, "patrol over"); return; }
             centre /= alive;
             s.Centre = centre;
+            // Everything about the ADVANCE is measured on the assault line, not
+            // on the average of everybody. The sniper and the anti-tank gunner
+            // fight from behind the line, so every step they did not take moved
+            // the line's own point back: three snipers who stayed at the
+            // landing zone stopped the 6.17.1 squad dead (E-060).
+            Vector3 line = inLine > 0 ? lineSum / inLine : centre;
+            s.Line = line;
 
             // The ring of walk and tactical points follows the body, so whatever
             // the vanilla alarm picks between two orders is next to the squad,
@@ -1012,7 +1029,7 @@ namespace NextDayRevival
             Leg(s, out a, out b);
             Vector3 dir = Heading(a, b);
             float len = Flat(b - a);
-            float along = Vector3.Dot(FlatV(centre - a), dir);
+            float along = Vector3.Dot(FlatV(line - a), dir);
             if (along >= len - Arrive)
             {
                 if (s.Phase == Phase.ToStart) s.Phase = Phase.Advance;
@@ -1030,7 +1047,7 @@ namespace NextDayRevival
                 Leg(s, out a, out b);
                 dir = Heading(a, b);
                 len = Flat(b - a);
-                along = Vector3.Dot(FlatV(centre - a), dir);
+                along = Vector3.Dot(FlatV(line - a), dir);
             }
 
             // A hostile vehicle in reach (6.17), twice a second.
@@ -1067,11 +1084,11 @@ namespace NextDayRevival
 
             // The line faces the enemy while there is one in front of it;
             // otherwise it faces along the arrow.
-            Vector3 front = dir;
+            front = dir;
             float threatDist = 0f;
             if (s.Threat != null)
             {
-                Vector3 to = FlatV(s.Threat.position - centre);
+                Vector3 to = FlatV(s.Threat.position - line);
                 threatDist = to.magnitude;
                 if (threatDist > 1f && Vector3.Angle(to, dir) <= 100f) front = to / threatDist;
                 if (now >= s.NextBoundSwap)
@@ -1082,7 +1099,7 @@ namespace NextDayRevival
             }
             s.Front = front;
 
-            Vector3 anchor = Anchor(a, dir, len, centre, front, s.Threat != null,
+            Vector3 anchor = Anchor(a, dir, len, line, front, s.Threat != null,
                                     threatDist, stopAt);
 
             if (!s.Armed)
@@ -1104,7 +1121,7 @@ namespace NextDayRevival
                 // One man's failure costs his turn, never the whole operation,
                 // and it is never silent: the first failure and every 600th
                 // after it (about ten seconds) go to the log with the stack.
-                try { ManStep(f, s, anchor, front, centre, now); f.StepFailures = 0; }
+                try { ManStep(f, s, anchor, front, line, now); f.StepFailures = 0; }
                 catch (Exception ex)
                 {
                     if (f.StepFailures++ % 600 == 0)
@@ -1127,7 +1144,15 @@ namespace NextDayRevival
         {
             float room = Mathf.Max(0f, threatDist - stopAt);
             if (contact && Vector3.Angle(front, dir) > 1f)
-                return centre + front * Mathf.Min(Lead, room);
+            {
+                // Toward the enemy - but never back down the arrow. A squad
+                // shot at from behind turns and fights where it stands; it does
+                // not walk back to its landing zone (6.17.1 field report).
+                Vector3 point = centre + front * Mathf.Min(Lead, room);
+                float back = Vector3.Dot(FlatV(point - centre), dir);
+                if (back < 0f) point -= dir * back;
+                return point;
+            }
             float along = Vector3.Dot(FlatV(centre - a), dir);
             float step = Mathf.Min(len, Mathf.Max(0f, along) + Lead) - along;
             if (contact) step = Mathf.Min(step, room);
@@ -1219,7 +1244,8 @@ namespace NextDayRevival
                 + (s.Vehicle == null ? "" : ", hostile vehicle "
                    + Flat(s.Vehicle.transform.position - s.Centre).ToString("0") + " units away")
                 + ", " + s.Drones + " drone(s), " + s.Rockets + " LAW rocket(s)"
-                + ", centre " + s.Centre.ToString("0") + ".");
+                + ", centre " + s.Centre.ToString("0")
+                + ", line " + s.Line.ToString("0") + ".");
         }
 
         // -------------------------------------------------------- one man's turn
@@ -1285,11 +1311,22 @@ namespace NextDayRevival
                 f.FireSince = now;
             }
 
+            // How far ahead of (positive) or behind (negative) his place in
+            // the line he stands. A man more than Catchup behind it closes up
+            // before he fires again - forward always. The 6.17.1 line froze
+            // because its three snipers stood at the landing zone firing at a
+            // BTR 250 units away, which only their range reached, while the
+            // rest of the line walked off without them (E-060). An enemy
+            // inside close range is the exception: nobody runs past a man who
+            // is already shooting at him.
+            float ahead = Vector3.Dot(FlatV(f.Tr.position - centre), front) - f.RankOffset;
+
             // 2  A visible enemy in range and a weapon in hand: shoot now.
             bool sees = f.Target != null && f.Sees && now >= f.BlindUntil;
             float dist = f.Target == null ? 0f : Flat(f.Target.position - f.Tr.position);
             float range = RangeOf(f);
-            if (sees && f.Armed && dist <= range)
+            if (sees && f.Armed && dist <= range
+                && (ahead > -Catchup || dist <= CloseRange()))
             {
                 if (f.FireSince <= 0f)
                 {
@@ -1320,7 +1357,7 @@ namespace NextDayRevival
             //    instant it shows. No line of fire at all (BlindUntil) still
             //    sends him on at once, and the tank never waits.
             if (f.Armed && f.Target != null && now < f.SteadyUntil && now >= f.BlindUntil
-                && dist <= range && f.Class != SquadClass.Assault)
+                && dist <= range && ahead > -Catchup && f.Class != SquadClass.Assault)
             {
                 Steady(f, now);
                 return;
@@ -1452,7 +1489,21 @@ namespace NextDayRevival
             if (f.Armed && s != null && s.Threat != null)
             {
                 Transform keep = f.Target;
-                if (f.Target == null) f.Target = s.Threat;
+                if (f.Target == null)
+                {
+                    // Only an enemy he could hit is worth standing and aiming
+                    // at. The 6.17.1 line held its weapons on a vehicle a
+                    // quarter of a kilometre away that only its snipers could
+                    // reach - and turned its back on the arrow to do it.
+                    if (Flat(s.Threat.position - f.Tr.position) > RangeOf(f))
+                    {
+                        if (f.IkDriven) ReleaseAim(f);
+                        Drive(f, MainIdle, AddNone, PoseStand, now, true);
+                        FaceDir(f, s.Front);
+                        return;
+                    }
+                    f.Target = s.Threat;
+                }
                 Drive(f, MainIdle, AddAim, PoseStand, now, true);
                 Face(f);
                 if (!f.TargetIsPlayer) Aim(f, now);
@@ -1461,6 +1512,7 @@ namespace NextDayRevival
             }
             if (f.IkDriven) ReleaseAim(f);
             Drive(f, MainIdle, AddNone, PoseStand, now, true);
+            if (s != null) FaceDir(f, s.Front);
         }
 
         /// <summary>Stand and fire, the way every vanilla NPC does: MainState
@@ -1832,9 +1884,14 @@ namespace NextDayRevival
                 // No infantry and no player in reach: the squad's hostile
                 // vehicle, whose hull the line fires at while the anti-tank
                 // gunner kills it (he picks it himself, AntiTankStep).
+                // Only from about the distance the line closes to. A rifle
+                // does a hull no damage at all, so a man standing off emptying
+                // magazines into one 250 units away has left the assault
+                // (6.17.1 field report); that far out he walks on instead.
                 Squad sq = f.Squad;
+                float hull = Mathf.Min(range, VehicleStandoff() * 1.5f);
                 if (sq != null && sq.Vehicle != null && f.Class != SquadClass.AntiTank
-                    && (sq.Vehicle.transform.position - p).sqrMagnitude < rangeSqr)
+                    && (sq.Vehicle.transform.position - p).sqrMagnitude < hull * hull)
                 {
                     float height;
                     f.Target = sq.Vehicle.transform;
@@ -2374,6 +2431,17 @@ namespace NextDayRevival
             if (f.Target == null || !f.Target) return;
             Vector3 flat = f.Target.position - f.Tr.position;
             flat.y = 0f;
+            if (flat.sqrMagnitude < 0.01f) return;
+            f.Tr.rotation = Quaternion.RotateTowards(f.Tr.rotation,
+                Quaternion.LookRotation(flat), (180f + 120f * f.Skill) * Time.deltaTime);
+        }
+
+        /// <summary>Turn the body onto a direction - the line's front, when
+        /// there is nothing in reach to turn onto. Same rate as Face.</summary>
+        static void FaceDir(Fighter f, Vector3 dir)
+        {
+            if (f.Tr == null) return;
+            Vector3 flat = FlatV(dir);
             if (flat.sqrMagnitude < 0.01f) return;
             f.Tr.rotation = Quaternion.RotateTowards(f.Tr.rotation,
                 Quaternion.LookRotation(flat), (180f + 120f * f.Skill) * Time.deltaTime);

@@ -331,6 +331,17 @@ namespace NextDayRevival
                     harmony.Patch(setActive,
                         new HarmonyMethod(typeof(Crew).GetMethod(
                             "NpcActiveAiPrefix")), null, null, null, null);
+                // The gear meshes (ghillie, L-1 suit) the game's own NPC
+                // customization never switches on - see WearGear.
+                MethodInfo customization = AccessTools.Method(npc, "SetCustomization",
+                    null, null);
+                if (customization == null)
+                    RevivalPlugin.L.LogWarning("Crew: NPC_AI2.SetCustomization not found - "
+                        + "a ghillie or L-1 suit chosen in the editor stays invisible.");
+                else
+                    harmony.Patch(customization, null,
+                        new HarmonyMethod(typeof(Crew).GetMethod("GearCustomizationPostfix")),
+                        null, null, null);
                 MethodInfo walkPoints = AccessTools.Method(npc, "SetTemporaryWalkPoints", null, null);
                 if (walkPoints == null) throw new MissingMethodException("NPC_AI2.SetTemporaryWalkPoints");
                 harmony.Patch(walkPoints, new HarmonyMethod(typeof(Crew).GetMethod(
@@ -459,6 +470,136 @@ namespace NextDayRevival
             _appearance[spawn.GetInstanceID()] = new int[] {
                 100, spec.Body, spec.Hands, spec.Legs,
                 spec.Headwear, mask, spec.Backpack > 0 ? spec.Backpack : -1 };
+        }
+
+        // --------------------------------------------------------- gear meshes
+
+        // The model's gear node, its two known suits, and the reflection into
+        // the two components the game matches item ids with.
+        const string GearNode = "Bodys_Gears";
+        static Type _checkId, _itemMaterials;
+        static MethodInfo _findItem, _findInList, _changeMaterial;
+        static bool _gearLooked, _gearWarned;
+        static readonly Dictionary<int, bool> _gearLogged = new Dictionary<int, bool>();
+
+        /// <summary>The ghillie suit and the L-1 protective suit are not body
+        /// meshes. They hang under the model's Bodys_Gears node, and
+        /// NPC_AI2.SetCustomization never looks there: it hands the body slot
+        /// to BodyMeshesActiveManager, which walks Bodys alone and, finding no
+        /// child for the id, recurses with the DEFAULT body (CONFIRMED IL,
+        /// 2026-09-14). The string "Bodys_Gears" appears in two methods in the
+        /// whole game, both of them the player's own
+        /// (PlayerMenuCustomizationManager.BodyGearMeshesActiveManager,
+        /// SubPlayerDataSetupManager.SetPlayerObjects). So an NPC dressed in
+        /// the editor's ghillie silently wore the default body instead - the
+        /// 6.17.1 snipers.
+        ///
+        /// This is that manager for an NPC, one for one: the gear child that
+        /// carries the id is switched on and given the id's material
+        /// (Marauder_NPC_01: Ghillie_01 carries 4201 green and 4202 brown, RHBZ
+        /// carries the L-1 suits 4203-4205), its siblings are switched off, and
+        /// a body id that is no gear item at all leaves the node untouched. The
+        /// vanilla fallback has then already put the default body on, which is
+        /// what belongs under a suit anyway.</summary>
+        public static void GearCustomizationPostfix(object __instance, int[] __0)
+        {
+            try
+            {
+                Component ai = __instance as Component;
+                if (ai == null || __0 == null || __0.Length < 2 || __0[1] <= 0) return;
+                WearGear(ai.transform, __0[1], ai.name);
+            }
+            catch (Exception ex)
+            {
+                if (_gearWarned) return;
+                _gearWarned = true;
+                RevivalPlugin.L.LogWarning("Crew: gear mesh (ghillie, L-1 suit) - "
+                    + ex.Message);
+            }
+        }
+
+        /// <summary>Switch the gear mesh of this item id on, the way the player
+        /// menu does. False when the model has no gear node or no child for the
+        /// id - the ordinary case for a jacket, and then nothing is changed.</summary>
+        static bool WearGear(Transform root, int itemId, string who)
+        {
+            // Silently, for a model that has no gear node at all: this hook
+            // sees every NPC in the game, and most of them are not Marauders.
+            Transform node = FindNode(root, GearNode);
+            if (node == null) return false;
+            LookUpGear(node);
+            if (_checkId == null && _itemMaterials == null)
+                return Missing("neither CheckItemID nor ItemCustomMaterialsManager exists");
+            int match = -1;
+            for (int i = 0; i < node.childCount && match < 0; i++)
+                if (GearMatches(node.GetChild(i), itemId)) match = i;
+            if (match < 0) return false;
+            for (int i = 0; i < node.childCount; i++)
+                node.GetChild(i).gameObject.SetActive(i == match);
+            Transform worn = node.GetChild(match);
+            Component mats = _itemMaterials == null ? null : worn.GetComponent(_itemMaterials);
+            if (mats != null && _changeMaterial != null)
+                _changeMaterial.Invoke(mats, new object[] { itemId });
+            if (!_gearLogged.ContainsKey(itemId))
+            {
+                _gearLogged[itemId] = true;
+                RevivalPlugin.L.LogInfo("Crew: item " + itemId + " is a gear mesh ("
+                    + worn.gameObject.name + ") - worn over the body on " + who + ".");
+            }
+            return true;
+        }
+
+        static bool Missing(string why)
+        {
+            if (_gearWarned) return false;
+            _gearWarned = true;
+            RevivalPlugin.L.LogWarning("Crew: " + why + " - a ghillie or L-1 suit "
+                + "chosen in the editor cannot be shown on an NPC.");
+            return false;
+        }
+
+        /// <summary>Does this gear child carry the item id? The same two tests
+        /// the game makes, in the same order (NPC_AI2.ShowCharacterMesh).</summary>
+        static bool GearMatches(Transform child, int itemId)
+        {
+            if (child == null) return false;
+            Component check = _checkId == null ? null : child.GetComponent(_checkId);
+            if (check != null && _findItem != null)
+                return (bool)_findItem.Invoke(check, new object[] { itemId });
+            Component mats = _itemMaterials == null ? null : child.GetComponent(_itemMaterials);
+            if (mats != null && _findInList != null)
+                return (bool)_findInList.Invoke(mats, new object[] { itemId });
+            return false;
+        }
+
+        static void LookUpGear(Transform node)
+        {
+            if (_gearLooked) return;
+            _gearLooked = true;
+            _checkId = RevivalPlugin.TypeByName("CheckItemID");
+            _itemMaterials = RevivalPlugin.TypeByName("ItemCustomMaterialsManager");
+            if (_checkId != null)
+                _findItem = AccessTools.Method(_checkId, "FindItem", null, null);
+            if (_itemMaterials != null)
+            {
+                _findInList = AccessTools.Method(_itemMaterials, "FindItemIDInList",
+                    null, null);
+                _changeMaterial = AccessTools.Method(_itemMaterials,
+                    "ChangeMeshMaterialFromItemID", null, null);
+            }
+        }
+
+        /// <summary>The first child of this name anywhere under the root.</summary>
+        static Transform FindNode(Transform root, string name)
+        {
+            if (root == null) return null;
+            if (root.gameObject.name == name) return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform hit = FindNode(root.GetChild(i), name);
+                if (hit != null) return hit;
+            }
+            return null;
         }
 
         public static void NpcStartPostfix(object __instance)
