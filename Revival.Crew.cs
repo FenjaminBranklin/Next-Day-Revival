@@ -1183,7 +1183,12 @@ namespace NextDayRevival
             Vector3 ground;
             GameObject hit = Turret.RaycastObject(position + Vector3.up * 10f,
                 Vector3.down, 40f, out ground);
-            return hit == null ? position : ground + Vector3.up * 0.1f;
+            if (hit != null) return ground + Vector3.up * 0.1f;
+            // No collider is not no ground - see Ausstiege.
+            float height;
+            if (RevivalTroopInsertion.TerrainHeight(position, out height))
+                return new Vector3(position.x, height + 0.1f, position.z);
+            return position;
         }
 
         static void AssignSectors(Component settlement, Transform root, Transform car,
@@ -1498,10 +1503,22 @@ namespace NextDayRevival
 
                 // Onto the ground. A man dropped at hatch height falls, and a
                 // NavMeshAgent that starts in the air never finds the mesh.
+                // 6.18: away from every player the whole-map TerrainColliders
+                // are off (E-059), so the ray finds nothing and the man used to
+                // keep the carrier's own height - which is how a heli squad set
+                // down on a slope hundreds of units from anybody ended up
+                // beside the NavMesh and never walked anywhere. Height data
+                // needs no collider.
                 Vector3 boden;
                 GameObject unter = Turret.RaycastObject(wo[i] + Vector3.up * 6f,
                                                         Vector3.down, 30f, out boden);
                 if (unter != null) wo[i] = boden + Vector3.up * 0.1f;
+                else
+                {
+                    float hoehe;
+                    if (RevivalTroopInsertion.TerrainHeight(wo[i], out hoehe))
+                        wo[i] = new Vector3(wo[i].x, hoehe + 0.1f, wo[i].z);
+                }
             }
             return wo;
         }

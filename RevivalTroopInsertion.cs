@@ -152,10 +152,23 @@ namespace NextDayRevival
             public float PatrolMinutes = 120f;
             public List<RevivalComposition.CrewMan> Squad =
                 new List<RevivalComposition.CrewMan>();
+            // 6.18: the bends of a curved arrow, between tail and head, in the
+            // order the editor drew them. Empty for a straight arrow.
+            public readonly List<Vector3> Via = new List<Vector3>();
             internal float NextSpawn = -1f;
 
             public Vector3 Tail { get { return new Vector3(TailX, 0f, TailZ); } }
             public Vector3 Head { get { return new Vector3(HeadX, 0f, HeadZ); } }
+
+            /// <summary>Tail, every bend, head - the line the squad walks.</summary>
+            public List<Vector3> Arrow()
+            {
+                List<Vector3> path = new List<Vector3>();
+                path.Add(Tail);
+                for (int i = 0; i < Via.Count; i++) path.Add(Via[i]);
+                path.Add(Head);
+                return path;
+            }
         }
 
         static readonly List<Landing> _landings = new List<Landing>();
@@ -284,7 +297,12 @@ namespace NextDayRevival
         static bool Begin(Landing d)
         {
             Vector3 lz;
-            float yaw = FlatYaw(d.Tail - new Vector3(d.X, 0f, d.Z), d.Head - d.Tail);
+            // The helicopter faces the walk to the start line; with the zone on
+            // the line itself it faces the arrow's FIRST leg, which is where the
+            // squad goes next - not the straight line to a head that may lie
+            // round a bend.
+            List<Vector3> arrow = d.Arrow();
+            float yaw = FlatYaw(d.Tail - new Vector3(d.X, 0f, d.Z), arrow[1] - arrow[0]);
             Vector3 rayPoint;
             if (Turret.RaycastObject(new Vector3(d.X, 1500f, d.Z), Vector3.down, 3000f, out rayPoint) == null)
                 LogGroundMiss(d, new Vector3(d.X, 0f, d.Z));
@@ -329,9 +347,9 @@ namespace NextDayRevival
                     if (settlement != null) UnityEngine.Object.Destroy(settlement);
                     return false;
                 }
-                Vector3 tail = OnGround(d.Tail, at.y);
-                Vector3 head = OnGround(d.Head, at.y);
-                NpcWar.StartOperation(d.Name, settlement, men, tail, head, d.PatrolMinutes * 60f,
+                List<Vector3> arrow = d.Arrow();
+                for (int i = 0; i < arrow.Count; i++) arrow[i] = OnGround(arrow[i], at.y);
+                NpcWar.StartOperation(d.Name, settlement, men, arrow, d.PatrolMinutes * 60f,
                     loadout);
                 string cell = GridCell(at);
                 Net.SendBanner(1, cell);
@@ -465,8 +483,10 @@ namespace NextDayRevival
 
         /// <summary>Height of the active terrain at xz from its height data;
         /// false outside the terrain, without one, or on a reflection
-        /// failure (logged once).</summary>
-        static bool TerrainHeight(Vector3 xz, out float y)
+        /// failure (logged once). Internal since 6.18: NpcWar.Ground needs the
+        /// same answer for every walk point it builds, and for the same reason
+        /// - no collider does not mean no ground.</summary>
+        internal static bool TerrainHeight(Vector3 xz, out float y)
         {
             y = 0f;
             try
@@ -730,9 +750,14 @@ namespace NextDayRevival
                 //   intervalMin intervalMax patrolMinutes role weapon headwear mask body legs hands
                 //   class backpack
                 // An editor older than 6.17 writes the first 20 columns only:
-                // every soldier is then a regular without a backpack.
+                // every soldier is then a regular without a backpack. Since 6.18
+                // a BENT arrow adds one more column, "via" - the bends between
+                // tail and head as "x,z;x,z;..." - and a straight arrow still
+                // writes 22, so an older client keeps reading every line it used
+                // to read.
                 string[] c = raw.Split('\t');
-                if ((c.Length != 22 && c.Length != 20) || c[0].Trim().Length == 0 || c[0].Length > 64)
+                if ((c.Length != 23 && c.Length != 22 && c.Length != 20)
+                    || c[0].Trim().Length == 0 || c[0].Length > 64)
                 { bad++; continue; }
                 string name = c[0].Trim();
                 Landing d;
@@ -752,6 +777,7 @@ namespace NextDayRevival
                     if (d.Faction.Length == 0 || !Finite(d.X, d.Z, d.TailX, d.TailZ, d.HeadX, d.HeadZ))
                     { bad++; continue; }
                     if (d.IntervalMaxHours > 0f && d.IntervalMinHours < 0.25f) d.IntervalMinHours = 0.25f;
+                    if (c.Length > 22) ReadVia(d, c[22]);
                     byName[name] = d;
                     order.Add(d);
                 }
@@ -799,6 +825,37 @@ namespace NextDayRevival
                 if (_landings[i].Name == name) return _landings[i];
             return null;
         }
+
+        /// <summary>The optional 23rd column: the bends of a curved arrow, as
+        /// "x,z;x,z;...". A bend that does not parse or lies outside the world
+        /// is dropped and reported; the rest of the arrow still works, because
+        /// the objective is the head and the bends are only the way there.</summary>
+        static void ReadVia(Landing d, string raw)
+        {
+            d.Via.Clear();
+            if (raw == null) return;
+            raw = raw.Trim();
+            if (raw.Length == 0) return;
+            string[] parts = raw.Split(';');
+            int dropped = 0;
+            for (int i = 0; i < parts.Length && d.Via.Count < MaxBends; i++)
+            {
+                string part = parts[i].Trim();
+                if (part.Length == 0) continue;
+                string[] xz = part.Split(',');
+                float x = xz.Length == 2 ? Num(xz[0]) : float.NaN;
+                float z = xz.Length == 2 ? Num(xz[1]) : float.NaN;
+                if (!Finite(x, z)) { dropped++; continue; }
+                d.Via.Add(new Vector3(x, 0f, z));
+            }
+            if (dropped > 0)
+                RevivalPlugin.L.LogWarning("Troops: landing " + d.Name + " has "
+                    + dropped + " unreadable bend(s) in its arrow - they are skipped.");
+        }
+
+        /// <summary>At most this many bends between tail and head. The editor
+        /// enforces the same number (troopdef.MAX_ARROW_POINTS).</summary>
+        const int MaxBends = 6;
 
         static bool Finite(params float[] values)
         {

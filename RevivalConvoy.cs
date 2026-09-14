@@ -23,6 +23,17 @@
 // themselves again, which is what the behaviour block below expects. Switchable
 // with Convoy/ColumnLock.
 //
+// AND THEN THEY SPREAD OUT. Convoy vehicles ignore each other's colliders, so
+// "each drives itself" on its own put them in the same place instead of apart:
+// the escapee braked against the wreck of the vehicle in front of it and never
+// got past, everything behind piled into that, and a shoulder that could not be
+// found once was never looked for again. Since 2026-09-14 the survivors swing
+// off the road onto a firing position on either shoulder, turn their hulls onto
+// the shooting, close in on it in bounds up to Convoy/EngageAdvanceMetres, drive
+// AROUND a burning mate rather than queue into it, and are pushed apart by hand
+// if two hulls ever do overlap. The details are in the break-up block of
+// Revival.Patrol.cs.
+//
 // HOW IT REUSES THE PATROL. A convoy vehicle is an ordinary patrol Unit tagged
 // with a non-zero ConvoyId, so it is driven, gunned, crewed and wrecked by the
 // existing Patrol code. This file only decides WHICH vehicles spawn WHERE,
@@ -91,6 +102,7 @@ namespace NextDayRevival
         internal static ConfigEntry<float>   CfgLineupGap;
         internal static ConfigEntry<float>   CfgCruiseSpeed;
         internal static ConfigEntry<bool>    CfgColumnLock;
+        internal static ConfigEntry<float>   CfgEngageAdvance;
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
 
@@ -169,6 +181,13 @@ namespace NextDayRevival
                 + "zerstoert wird, loest sich der Verband auf und die "
                 + "Ueberlebenden fahren wieder selbst. Aus: jedes Fahrzeug faehrt "
                 + "von Anfang an allein - das alte Verhalten bis 6.8.3.");
+            CfgEngageAdvance = cfg.Bind("Convoy", "EngageAdvanceMetres", 120f,
+                "Wie weit ein Konvoi-Fahrzeug nach dem Verlust des ersten "
+                + "Fahrzeugs auf den Angreifer zu vorgehen darf, gemessen von der "
+                + "Stelle, an der der Verband zerfiel. Es schwenkt zuerst von der "
+                + "Strasse ab und geht dann in Spruengen naeher heran, solange der "
+                + "Angreifer weiter als 120 m weg ist. 0 = kein Vorgehen, die "
+                + "Fahrzeuge schwenken nur aus und halten.");
         }
 
         /// <summary>Full-gas cruise speed a convoy vehicle drives at, read by the
@@ -190,6 +209,15 @@ namespace NextDayRevival
         internal static bool ColumnLock
         {
             get { return CfgColumnLock == null || CfgColumnLock.Value; }
+        }
+
+        /// <summary>Metres a defender of a broken column may press towards the
+        /// shooting, measured from the place the formation broke. 0 keeps it at
+        /// the shoulder it swung out onto. Read by the patrol driver.</summary>
+        internal static float EngageAdvance
+        {
+            get { return CfgEngageAdvance == null ? 120f
+                                                  : Mathf.Max(0f, CfgEngageAdvance.Value); }
         }
 
         // ============================================================== state
@@ -220,6 +248,7 @@ namespace NextDayRevival
             internal string Route;
             internal float Born;
             internal bool LostOne;     // has any member died? then leave holds to the behaviour layer
+            internal float NextReport; // Time.time of the next break-up line in the log
             internal List<Member> Members = new List<Member>();
         }
 
@@ -527,6 +556,19 @@ namespace NextDayRevival
         ///   otherwise        one escapee (an APC by preference, front-most; a tank
         ///                    only if no APC survives) drives on, the rest hold
         ///
+        /// A vehicle whose way out is shut by its OWN convoy's wreck is never made
+        /// the escapee (Patrol.ConvoyEscapeBlocked). The usual loss is the head of
+        /// the column, and its wreck stands on the recorded road that everything
+        /// behind it drives along; making that vehicle the escapee handed the
+        /// convoy a leader whose only move was to queue into a burning hull, with
+        /// the rest of the column bunched up behind it. When no survivor can get
+        /// out at all, every one of them deploys and fights.
+        ///
+        /// "Hold" is Patrol.ConvoyDeploy: swing off the road line onto a firing
+        /// position, turn the hull onto the shooting and, while the shooting is
+        /// still far off, close in on it in bounds - see the break-up block in
+        /// Revival.Patrol.cs.
+        ///
         /// Re-run every tick, so if the escapee is killed or reaches the end, a new
         /// one is chosen from what remains until the convoy is boxed or down to one.
         /// The gun keeps scanning and firing underneath, held or not.
@@ -543,7 +585,18 @@ namespace NextDayRevival
                     if (c.Members[k].IsAlive) live.Add(c.Members[k]);
 
                 if (live.Count == 0) continue;
-                if (live.Count == 1) { CommandContinue(live[0]); continue; }
+                if (live.Count == 1)
+                {
+                    // A lone survivor whose road out is shut by its own burning
+                    // column mate is not escaping anywhere. Standing on the
+                    // throttle against that wreck for the rest of the event is
+                    // exactly what the column looked like from the outside.
+                    bool shut = Patrol.ConvoyEscapeBlocked(live[0].Handle);
+                    if (shut) Patrol.ConvoyDeploy(live[0].Handle);
+                    else CommandContinue(live[0]);
+                    Report(c, live, shut ? null : live[0]);
+                    continue;
+                }
 
                 // "First and last": a wreck on either END blocks the road that
                 // way. Both ends wrecked means the survivors are boxed between two
@@ -553,23 +606,73 @@ namespace NextDayRevival
                 if (boxed)
                 {
                     for (int k = 0; k < live.Count; k++) Patrol.ConvoyDeploy(live[k].Handle);
+                    Report(c, live, null);
                     continue;
                 }
 
                 // Not boxed: exactly one escapee continues, the rest hold. Prefer
-                // the front-most APC; a tank leaves only if no APC survives.
+                // the front-most APC; a tank leaves only if no APC survives. A
+                // vehicle that has given up on getting past the wreck in its way
+                // is never the escapee - the usual loss is the HEAD of the
+                // column, and its wreck sits on the recorded road every survivor
+                // behind it has to drive along. Picking that vehicle used to hand
+                // the whole convoy a leader that could only queue into a burning
+                // hull. When nobody can leave, everybody fights.
                 Member escapee = null;
                 for (int k = 0; k < live.Count; k++)
-                    if (!live[k].Tank && !Patrol.ConvoyTruck(live[k].Handle))
+                    if (!live[k].Tank && !Patrol.ConvoyTruck(live[k].Handle)
+                        && !Patrol.ConvoyEscapeBlocked(live[k].Handle))
                     { escapee = live[k]; break; }
-                if (escapee == null) escapee = live[0];
+                if (escapee == null)
+                    for (int k = 0; k < live.Count; k++)
+                        if (!Patrol.ConvoyEscapeBlocked(live[k].Handle))
+                        { escapee = live[k]; break; }
 
                 for (int k = 0; k < live.Count; k++)
                 {
-                    if (live[k] == escapee) CommandContinue(live[k]);
+                    if (escapee != null && live[k] == escapee) CommandContinue(live[k]);
                     else Patrol.ConvoyDeploy(live[k].Handle);
                 }
+                Report(c, live, escapee);
             }
+        }
+
+        /// <summary>
+        /// One line every 15 s while a convoy is broken up, and the whole point of
+        /// it is the last number: how close the nearest two surviving hulls are.
+        /// "They drive into each other instead of fanning out" is that number
+        /// sitting at a hull length while the count of vehicles WITH a firing
+        /// position stays at zero - both readable from the log, with no need to
+        /// watch the fight. A spread convoy reads roughly: everybody posted, the
+        /// closest pair well past twenty metres.
+        /// </summary>
+        static void Report(Convoy c, List<Member> live, Member escapee)
+        {
+            if (Time.time < c.NextReport) return;
+            c.NextReport = Time.time + 15f;
+
+            int posted = 0, looking = 0;
+            for (int k = 0; k < live.Count; k++)
+            {
+                if (escapee != null && live[k] == escapee) continue;
+                if (Patrol.ConvoyHasPost(live[k].Handle)) posted++;
+                else looking++;
+            }
+
+            float closest = -1f;
+            for (int a = 0; a < live.Count; a++)
+                for (int b = a + 1; b < live.Count; b++)
+                {
+                    float d = Flat(live[a].Pos - live[b].Pos);
+                    if (closest < 0f || d < closest) closest = d;
+                }
+
+            RevivalPlugin.L.LogInfo("Convoy " + c.Id + ": broken up - "
+                + live.Count + " alive, "
+                + (escapee == null ? "none escaping" : "1 escaping") + ", "
+                + posted + " at a firing position, " + looking + " still looking"
+                + (closest < 0f ? "" : ", closest pair " + closest.ToString("0") + " m")
+                + ".");
         }
 
         /// <summary>A member that is a wreck sitting on the road (still in the

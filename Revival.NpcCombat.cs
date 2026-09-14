@@ -31,6 +31,17 @@ namespace NextDayRevival
     //     removed   the living men of the squad leave the map; the dead stay
     //               CorpseMinutes for their loot (6.17)
     //
+    //   THE ARROW IS A PATH (6.18). It has a tail, a head and up to six bends
+    //   in between, and the squad walks the legs in order. A bend is how the
+    //   admin routes them around a lake or a wall; the HEAD is the objective
+    //   and nothing else is. Two things follow from that and both are new:
+    //   a contact beside the arrow may turn the line but may not walk it
+    //   further off the drawn leg than ArrowCorridor (Anchor -> Corridor), and
+    //   a man who stops covering ground is put back on his feet (Unstick) -
+    //   because far from every player the terrain colliders are off, a walk
+    //   point then keeps the arrow's own height, the NavMesh sample beside it
+    //   misses, and the whole squad waits for a player to come and look at it.
+    //
     // HOW THE SQUAD FIGHTS (6.16.5, after the 6.16.4 field report)
     //
     //   The user's order: side by side, briskly in the combat direction, fire
@@ -196,6 +207,10 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgAntiTankSelfDefense;
         internal static ConfigEntry<int>   CfgAntiTankDrones;
         internal static ConfigEntry<float> CfgAntiTankDroneSeconds;
+        // New in 6.18: the arrow may bend, it is a corridor and not a
+        // suggestion, and a squad that stops walking is put back on its feet.
+        internal static ConfigEntry<float> CfgArrowCorridor;
+        internal static ConfigEntry<float> CfgStuckSeconds;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -239,6 +254,16 @@ namespace NextDayRevival
             CfgBoundSeconds = cfg.Bind("NpcWar", "BoundSeconds", 4f,
                 "Im Feuerkampf wechseln die zwei Haelften des Trupps nach so vielen "
                 + "Sekunden: eine schiesst, die andere springt ein Stueck vor.");
+            CfgArrowCorridor = cfg.Bind("NpcWar", "ArrowCorridor", 60f,
+                "So weit (Meter) darf ein Gegner die Linie seitlich vom gezeichneten "
+                + "Pfeil wegziehen. Das Ziel bleibt immer die Pfeilspitze; ohne diese "
+                + "Grenze lief der Trupp jedem Kontakt neben dem Pfeil hinterher. "
+                + "0 = die Linie bleibt genau auf dem Pfeil.");
+            CfgStuckSeconds = cfg.Bind("NpcWar", "StuckSeconds", 6f,
+                "Steht ein Soldat so lange still, obwohl er laufen soll, bekommt er "
+                + "einen neuen Befehl und notfalls seinen NavMesh-Platz zurueck. Weit "
+                + "weg von jedem Spieler sind die Gelaende-Collider aus, und ohne das "
+                + "bleibt der Trupp liegen, wo ihn niemand sieht. 0 = aus.");
 
             CfgCorpseMinutes = cfg.Bind("NpcWar", "CorpseMinutes", 20f,
                 "So viele Minuten bleiben die Toten eines beendeten Einsatzes liegen, "
@@ -325,6 +350,10 @@ namespace NextDayRevival
         const float RetargetAngle = 40f;    // a point that turned further gets a full order
         const float PlayerNearCorpse = 60f; // a player this close keeps the dead on the map
         const float VehicleAim = 3f;        // aim height on a vehicle hull
+        const float FarTick = 250f;         // no player this close and no contact: a third of the men per frame
+        const float StuckMove = 1.5f;       // less ground than this covered counts as standing still
+        const float StallSeconds = 30f;     // no progress on the leg this long: one line of evidence
+        const float RescueQuiet = 150f;     // a man is only put back on the NavMesh with no player this close
         const float NpcDroneAim = 2.5f;     // FPV aim height on an NPC (chest of the 5 unit capsule)
         const float SquadLawDamage = 900f;  // the player LAW's blast (RocketHook, VehicleArmor)
         const float SquadLawRadius = 12f;
@@ -402,6 +431,12 @@ namespace NextDayRevival
             public Transform DroneTarget;
             public float LastFullOrder;     // Time.time of the last full (RPC) move order
 
+            // 6.18: where he stood when he last covered ground, and when. A man
+            // told to run who does not move is put back on his feet (Unstick).
+            public Vector3 LastPos;
+            public float MovedAt, NextUnstuck;
+            public int Unstuck;
+
             // Defender posture.
             public float Nerve = 1f, Pace = 1f;
             public float Suppression, Hurt, NextHurt, NextCover;
@@ -438,11 +473,28 @@ namespace NextDayRevival
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
             public readonly List<Fighter> Men = new List<Fighter>();
-            public Vector3 Lz, Tail, Head;
+            public Vector3 Lz;
+            // The combat arrow the editor drew. Two points for a straight one,
+            // more when it was bent around an obstacle; LegIndex is the segment
+            // the squad is walking, Path[LegIndex] -> Path[LegIndex + 1]. The
+            // head is the objective, always: every leg before it is only the
+            // way the admin wants them to take there.
+            public readonly List<Vector3> Path = new List<Vector3>();
+            public int LegIndex;
+            public Vector3 Tail { get { return Path[0]; } }
+            public Vector3 Head { get { return Path[Path.Count - 1]; } }
             public Phase Phase;
             public bool TowardHead = true;   // patrol leg
             public float PatrolSeconds, PatrolEnds, HardEnd, NextRing;
             public Vector3 Centre, Line, Front;
+            // The advance watchdog: how far the line has come on this leg at
+            // best, when that last improved, and how long the leg is.
+            public float Along, AlongSince, LegLen, NextStall;
+            // With no contact and no player near, a third of the men is stepped
+            // per frame - nobody can see the other two thirds.
+            public bool Quiet;
+            public float NextQuiet;
+            public int StepOffset;
 
             // The contact picture, refreshed four times a second.
             public Transform Threat;
@@ -743,28 +795,51 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ operations
 
-        /// <summary>Hand a freshly landed squad its combat arrow. The patrol
-        /// clock starts when the line reaches the arrow head; a squad that never
-        /// gets there is still removed after the walking allowance plus the
-        /// patrol time, so no landing can pile men up on the map.</summary>
+        /// <summary>Hand a freshly landed squad its combat arrow. The path is
+        /// tail, every bend the editor drew, head - at least two points. The
+        /// patrol clock starts when the line reaches the arrow head; a squad
+        /// that never gets there is still removed after the walking allowance
+        /// plus the patrol time, so no landing can pile men up on the map.</summary>
         internal static bool StartOperation(string tag, GameObject settlement, Array npcs,
-                                            Vector3 tail, Vector3 head, float patrolSeconds,
+                                            List<Vector3> path, float patrolSeconds,
                                             List<RevivalComposition.CrewMan> loadout)
         {
             if (!LookUp() || settlement == null || npcs == null) return false;
+            if (path == null || path.Count < 2)
+            {
+                RevivalPlugin.L.LogWarning("NpcWar: operation " + tag
+                    + " has no arrow (needs a tail and a head) - not started.");
+                return false;
+            }
             Squad s = new Squad();
             s.Tag = tag;
             s.Settlement = settlement;
             s.WalkRoot = WalkRootOf(settlement);
             s.Lz = settlement.transform.position;
-            s.Tail = tail;
-            s.Head = head;
-            s.Phase = Flat(s.Lz - tail) > StartDistance ? Phase.ToStart : Phase.Advance;
+            s.Path.AddRange(path);
+            // ToStart is the walk to the START LINE, and it is never a walk
+            // BACK. A zone that already lies down the arrow joins it where it
+            // stands: the anchor is a point ON the arrow, so the line is pulled
+            // onto it while it advances. Walking to the tail first put the
+            // forming-up point behind the objective and then marched the squad
+            // past its own landing zone again - "they gather somewhere far from
+            // the target and then run off" (field report on 6.17.2).
+            Vector3 down = FlatV(s.Lz - s.Tail);
+            float along0 = Vector3.Dot(down, Heading(s.Path[0], s.Path[1]));
+            s.Phase = along0 <= 0f && down.magnitude > StartDistance
+                    ? Phase.ToStart : Phase.Advance;
             s.PatrolSeconds = Mathf.Clamp(patrolSeconds, 60f, 7200f);
-            float walk = Vector3.Distance(s.Lz, tail) + Vector3.Distance(tail, head);
+            float walk = Vector3.Distance(s.Lz, s.Tail);
+            for (int i = 0; i + 1 < s.Path.Count; i++)
+                walk += Vector3.Distance(s.Path[i], s.Path[i + 1]);
             // One unit per second is a slow, fighting pace; plus half an hour.
             s.HardEnd = Time.time + walk + 1800f + s.PatrolSeconds;
             s.Centre = s.Lz;
+            // Below any real progress, so the first frame records where the
+            // squad actually starts instead of counting a walk that has not
+            // reached the tail yet as a stall.
+            s.Along = float.MinValue;
+            s.AlongSince = Time.time;
 
             for (int i = 0; i < npcs.Length; i++)
             {
@@ -790,8 +865,10 @@ namespace NextDayRevival
             _squads.Add(s);
             EnsurePointsRoot();
             RevivalPlugin.L.LogInfo("NpcWar: operation " + tag + " - " + s.Men.Count
-                + " men, arrow " + tail.ToString("0") + " -> " + head.ToString("0")
-                + ", " + (s.Phase == Phase.ToStart ? "running to the arrow first, " : "")
+                + " men, arrow " + s.Tail.ToString("0") + " -> " + s.Head.ToString("0")
+                + " over " + (s.Path.Count - 1) + " leg(s), " + walk.ToString("0")
+                + " units to walk, "
+                + (s.Phase == Phase.ToStart ? "running to the arrow first, " : "")
                 + "patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min"
                 + (s.WalkRoot == null ? ", no walk-point root found" : "") + "; "
                 + ClassSummary(s) + ".");
@@ -826,16 +903,20 @@ namespace NextDayRevival
             return f;
         }
 
-        /// <summary>The direction of the leg the squad is on, from a to b.</summary>
+        /// <summary>The direction of the leg the squad is on, from a to b. A
+        /// straight arrow has one leg; a bent one has a leg per drawn segment,
+        /// and the squad walks them in order on the way to the head.</summary>
         static void Leg(Squad s, out Vector3 a, out Vector3 b)
         {
+            int last = s.Path.Count - 2;
+            int i = s.LegIndex < 0 ? 0 : (s.LegIndex > last ? last : s.LegIndex);
             switch (s.Phase)
             {
-                case Phase.ToStart: a = s.Lz; b = s.Tail; break;
-                case Phase.Advance: a = s.Tail; b = s.Head; break;
+                case Phase.ToStart: a = s.Lz; b = s.Path[0]; break;
+                case Phase.Advance: a = s.Path[i]; b = s.Path[i + 1]; break;
                 default:
-                    if (s.TowardHead) { a = s.Tail; b = s.Head; }
-                    else { a = s.Head; b = s.Tail; }
+                    if (s.TowardHead) { a = s.Path[i]; b = s.Path[i + 1]; }
+                    else { a = s.Path[i + 1]; b = s.Path[i]; }
                     break;
             }
         }
@@ -1032,23 +1113,49 @@ namespace NextDayRevival
             float along = Vector3.Dot(FlatV(line - a), dir);
             if (along >= len - Arrive)
             {
-                if (s.Phase == Phase.ToStart) s.Phase = Phase.Advance;
+                int last = s.Path.Count - 2;
+                if (s.Phase == Phase.ToStart) { s.Phase = Phase.Advance; s.LegIndex = 0; }
                 else if (s.Phase == Phase.Advance)
                 {
-                    s.Phase = Phase.Patrol;
-                    s.PatrolEnds = now + s.PatrolSeconds;
-                    s.TowardHead = false;
-                    RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " reached the "
-                        + "arrow head with " + alive + " men - patrolling for "
-                        + (s.PatrolSeconds / 60f).ToString("0") + " min.");
+                    if (s.LegIndex < last)
+                    {
+                        s.LegIndex++;
+                        RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " turned at bend "
+                            + s.LegIndex + " of " + last + " with " + alive + " men.");
+                    }
+                    else
+                    {
+                        s.Phase = Phase.Patrol;
+                        s.PatrolEnds = now + s.PatrolSeconds;
+                        s.TowardHead = false;
+                        RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " reached the "
+                            + "arrow head with " + alive + " men - patrolling for "
+                            + (s.PatrolSeconds / 60f).ToString("0") + " min.");
+                    }
                 }
-                else s.TowardHead = !s.TowardHead;
+                else if (s.TowardHead)
+                {
+                    if (s.LegIndex < last) s.LegIndex++; else s.TowardHead = false;
+                }
+                else
+                {
+                    if (s.LegIndex > 0) s.LegIndex--; else s.TowardHead = true;
+                }
                 AssignLanes(s);
                 Leg(s, out a, out b);
                 dir = Heading(a, b);
                 len = Flat(b - a);
                 along = Vector3.Dot(FlatV(line - a), dir);
+                s.Along = along;
+                s.AlongSince = now;
             }
+            // The advance watchdog. A line that is walking gains ground on its
+            // leg; one that gains none for StallSeconds is stuck, and that is
+            // the whole "they never arrive" of the field report. Two floats a
+            // frame here, one log line every half minute in Report.
+            s.LegLen = len;
+            if (along > s.Along + 2f) { s.Along = along; s.AlongSince = now; }
+            else if (s.AlongSince <= 0f) s.AlongSince = now;
 
             // A hostile vehicle in reach (6.17), twice a second.
             if (now >= s.NextVehicleScan)
@@ -1114,10 +1221,26 @@ namespace NextDayRevival
                 }
             }
 
+            // Performance, spent where it cannot cost anything. With no contact
+            // and no player within FarTick this squad is a column of men walking
+            // a line that nobody is looking at; their NavMeshAgents keep walking
+            // between our orders, so stepping a third of them per frame changes
+            // what they do not at all and costs a third. One contact, or one
+            // player in sight, and everybody is stepped every frame again.
+            if (now >= s.NextQuiet)
+            {
+                s.NextQuiet = now + 0.5f;
+                s.Quiet = !PlayerNear(centre, FarTick);
+            }
+            int slice = s.Quiet && s.Threat == null ? 3 : 1;
+            if (slice > 1) s.StepOffset = (s.StepOffset + 1) % slice;
+            else s.StepOffset = 0;
+
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                if (slice > 1 && i % slice != s.StepOffset) continue;
                 // One man's failure costs his turn, never the whole operation,
                 // and it is never silent: the first failure and every 600th
                 // after it (about ten seconds) go to the log with the stack.
@@ -1138,7 +1261,8 @@ namespace NextDayRevival
         /// ahead of the line's centre, never past the leg's end - so a squad
         /// that landed beside the arrow is pulled onto it while it advances.
         /// With an enemy off the arrow it lies toward that enemy. Never closer
-        /// than stopAt to the enemy.</summary>
+        /// than stopAt to the enemy, and never further from the drawn leg than
+        /// the corridor (6.18).</summary>
         static Vector3 Anchor(Vector3 a, Vector3 dir, float len, Vector3 centre, Vector3 front,
                              bool contact, float threatDist, float stopAt)
         {
@@ -1151,12 +1275,31 @@ namespace NextDayRevival
                 Vector3 point = centre + front * Mathf.Min(Lead, room);
                 float back = Vector3.Dot(FlatV(point - centre), dir);
                 if (back < 0f) point -= dir * back;
-                return point;
+                return Corridor(a, dir, point);
             }
             float along = Vector3.Dot(FlatV(centre - a), dir);
             float step = Mathf.Min(len, Mathf.Max(0f, along) + Lead) - along;
             if (contact) step = Mathf.Min(step, room);
             return a + dir * (along + Mathf.Max(0f, step));
+        }
+
+        /// <summary>The arrow is the line's spine, not a suggestion. An enemy
+        /// beside it may pull the line's point off the drawn leg, but only this
+        /// far sideways; past that the point is put back into the corridor and
+        /// the advance carries on toward the head. Without the cap every
+        /// contact off the arrow moved the whole line after it, one Lead at a
+        /// time, and the squad ended up somewhere it had no business being -
+        /// the 6.17.2 field report. ArrowCorridor 0 keeps it exactly on the
+        /// arrow.</summary>
+        static Vector3 Corridor(Vector3 a, Vector3 dir, Vector3 point)
+        {
+            float wide = Mathf.Clamp(CfgArrowCorridor == null ? 60f : CfgArrowCorridor.Value,
+                                     0f, 400f);
+            Vector3 side = Side(dir);
+            float off = Vector3.Dot(FlatV(point - a), side);
+            if (off > wide) point -= side * (off - wide);
+            else if (off < -wide) point -= side * (off + wide);
+            return point;
         }
 
         /// <summary>The enemy the squad as a whole is fighting: the nearest one
@@ -1244,8 +1387,45 @@ namespace NextDayRevival
                 + (s.Vehicle == null ? "" : ", hostile vehicle "
                    + Flat(s.Vehicle.transform.position - s.Centre).ToString("0") + " units away")
                 + ", " + s.Drones + " drone(s), " + s.Rockets + " LAW rocket(s)"
+                + ", leg " + (s.LegIndex + 1) + "/" + Mathf.Max(1, s.Path.Count - 1)
+                + " at " + s.Along.ToString("0") + "/" + s.LegLen.ToString("0")
+                + (s.Quiet ? ", nobody near" : "")
                 + ", centre " + s.Centre.ToString("0")
                 + ", line " + s.Line.ToString("0") + ".");
+            if (s.Phase != Phase.Patrol && s.Threat == null
+                && now - s.AlongSince > StallSeconds && now >= s.NextStall)
+                Stalled(s, now);
+        }
+
+        /// <summary>The line has gained no ground on its leg for half a minute
+        /// and has nobody to fight. Say so once every half minute, with the one
+        /// number that decides it: how many men the NavMesh has lost. A squad
+        /// dropped far from every player walks on ground whose colliders are
+        /// switched off, and a man whose agent is not on the mesh will stand
+        /// there until the world ends (field report, 6.17.2).</summary>
+        static void Stalled(Squad s, float now)
+        {
+            s.NextStall = now + StallSeconds;
+            int off = 0, idle = 0, pathless = 0, unstuck = 0, live = 0;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || !Alive(f.Ai)) continue;
+                live++;
+                unstuck += f.Unstuck;
+                if (IntField(f.Ai, _fMainState, -1) == MainIdle) idle++;
+                NavMeshAgent a = Agent(f);
+                if (a == null || !a.isActiveAndEnabled) continue;
+                if (!a.isOnNavMesh) off++;
+                else if (!a.hasPath && !a.pathPending) pathless++;
+            }
+            RevivalPlugin.L.LogWarning("NpcWar: " + s.Tag + " has not gained ground for "
+                + (now - s.AlongSince).ToString("0") + " s on leg " + (s.LegIndex + 1)
+                + "/" + Mathf.Max(1, s.Path.Count - 1) + " (" + s.Along.ToString("0")
+                + "/" + s.LegLen.ToString("0") + ") - " + live + " men, " + off
+                + " off the NavMesh, " + pathless + " without a path, " + idle
+                + " idle, " + unstuck + " unstick attempt(s); line "
+                + s.Line.ToString("0") + ".");
         }
 
         // -------------------------------------------------------- one man's turn
@@ -1446,6 +1626,9 @@ namespace NextDayRevival
                 Hold(f, s, now);
                 return;
             }
+            // He is meant to be covering ground. If he is not, do something
+            // about it before the whole line waits for him.
+            Unstick(f, dest, now);
             float ahead = Vector3.Dot(FlatV(f.Tr.position - centre), front) - f.RankOffset;
             bool walking = f.Stance == Stance.Advance && f.WantMain == MainWalk;
             int state = MainRun;
@@ -1474,10 +1657,93 @@ namespace NextDayRevival
             // still ground to take: send him on at once instead of letting him
             // stand for the rest of the second.
             bool stopped = f.HasOrder && live == MainIdle && now - f.LastFullOrder > 0.6f;
-            if (now < f.NextMove && !stopped) return;
+            // The settlement alarm replaces the temporary walk list with the
+            // settlement's own tactical points (IntentionsActions IL_044F).
+            // Until now we noticed and then waited out the rest of the second -
+            // and for that second the man ran wherever the game had sent him.
+            // That is the "and then they run somewhere else" of the field
+            // report; a stolen point is taken back at once, at most three
+            // times a second so a missing reflection field cannot spam RPCs.
+            bool stolen = f.HasOrder && now - f.LastFullOrder > 0.3f && !StillOurPoint(f);
+            if (now < f.NextMove && !stopped && !stolen) return;
             f.NextMove = now + 1f;
             f.LastFullOrder = now;
             OrderMove(f, dest, state, AddNone, PoseStand);
+        }
+
+        /// <summary>
+        /// A man who was told to run and is not covering ground. One distance
+        /// compare a frame; it does something at most once every StuckSeconds.
+        ///
+        /// WHY THIS EXISTS. A landing zone far from every player is ground
+        /// whose whole-map TerrainColliders are switched off at runtime - the
+        /// same finding that made the helicopter miss its own zone in 6.17.1
+        /// (E-059). A walk point built from a downward ray then keeps the
+        /// arrow's own height instead of the hill's, the NavMesh sample beside
+        /// it misses, and the man stands where he was set down for good. The
+        /// player teleports over, the colliders come back, and it looks as if
+        /// the squad only ever moves when he is watching. It has to stop, and
+        /// it costs nothing when nothing is wrong.
+        ///
+        /// Three steps, in order of how visible they are:
+        ///   1  a fresh full order - he may simply have finished his path
+        ///   2  his agent back onto the NavMesh where he stands - not a move,
+        ///      just the half metre that puts him back on the mesh
+        ///   3  his place in the line, and only with no player within
+        ///      RescueQuiet, so nobody ever sees a man jump
+        /// </summary>
+        static void Unstick(Fighter f, Vector3 dest, float now)
+        {
+            float limit = CfgStuckSeconds == null ? 6f : CfgStuckSeconds.Value;
+            if (limit <= 0f) return;
+            // The clock only runs while he is walking. A man who has been
+            // firing, bounding or holding stood still because that was his job,
+            // and MoveInLine sets Stance to Advance only after this call - so
+            // what is read here is what he did last frame.
+            if (f.Stance != Stance.Advance
+                || f.MovedAt <= 0f || Flat(f.Tr.position - f.LastPos) > StuckMove)
+            {
+                f.LastPos = f.Tr.position;
+                f.MovedAt = now;
+                f.Unstuck = 0;
+                return;
+            }
+            if (now - f.MovedAt < limit || now < f.NextUnstuck) return;
+            f.NextUnstuck = now + limit;
+            f.Unstuck++;
+
+            NavMeshAgent a = Agent(f);
+            bool usable = a != null && a.isActiveAndEnabled;
+            bool offMesh = usable && !a.isOnNavMesh;
+            if (f.Unstuck == 1 && !offMesh)
+            {
+                // Most of the time this is all it takes.
+                f.NextMove = 0f;
+                f.HasOrder = false;
+                return;
+            }
+
+            bool rescue = f.Unstuck >= 3 && !PlayerNear(f.Tr.position, RescueQuiet);
+            Vector3 spot = Ground(rescue ? dest : f.Tr.position);
+            try
+            {
+                if (usable) a.Warp(spot);
+                else f.Tr.position = spot;
+            }
+            catch { }
+            f.LastPos = f.Tr.position;
+            f.MovedAt = now;
+            f.NextMove = 0f;
+            f.HasOrder = false;
+            // Loud the first few times and then every tenth: a man nothing can
+            // free must not drown the log a squad report is read out of.
+            if (f.Unstuck > 3 && f.Unstuck % 10 != 0) return;
+            RevivalPlugin.L.LogWarning("NpcWar: " + (f.Squad == null ? "?" : f.Squad.Tag)
+                + " - " + f.Ai.name + " stood still for " + limit.ToString("0") + " s ("
+                + (a == null ? "no agent" : (offMesh ? "off the NavMesh" : "on the NavMesh"))
+                + ", attempt " + f.Unstuck + ") - "
+                + (rescue ? "put back into the line at " : "put back on the mesh at ")
+                + spot.ToString("0") + ".");
         }
 
         /// <summary>At his place (the arrow head, or close range): stand, and
@@ -2734,13 +3000,29 @@ namespace NextDayRevival
             return t.IsEnum ? Enum.ToObject(t, value) : (object)value;
         }
 
+        /// <summary>The walkable point under a destination. The local ray comes
+        /// first so a floor above the terrain (a bridge, a building) wins, and
+        /// the terrain HEIGHT DATA answers when the ray finds nothing at all:
+        /// away from every player the whole-map TerrainColliders are off
+        /// (E-059), and a point left at the arrow's own height then misses the
+        /// NavMesh by the height of the hill it crosses - which is exactly how
+        /// a squad stops walking as soon as nobody is watching it.</summary>
         static Vector3 Ground(Vector3 p)
         {
             Vector3 hit;
             GameObject g = Turret.RaycastObject(p + Vector3.up * 30f, Vector3.down, 80f, out hit);
             Vector3 at = g == null ? p : hit + Vector3.up * 0.1f;
+            if (g == null)
+            {
+                float y;
+                if (RevivalTroopInsertion.TerrainHeight(p, out y))
+                    at = new Vector3(p.x, y + 0.1f, p.z);
+            }
             NavMeshHit nav;
             if (NavMesh.SamplePosition(at, out nav, 12f, NavMesh.AllAreas)) return nav.position;
+            // A wider net before giving up: a point that is off the mesh is a
+            // point the man will never walk to.
+            if (NavMesh.SamplePosition(at, out nav, 60f, NavMesh.AllAreas)) return nav.position;
             return at;
         }
 

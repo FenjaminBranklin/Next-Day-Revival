@@ -228,9 +228,12 @@ namespace NextDayRevival
                 int fpvId = RevivalPlugin.CfgDroneItemId == null
                     ? 1163 : RevivalPlugin.CfgDroneItemId.Value;
                 bool haveFpv = Turret.HasItem(fpvId);
-                bool haveSurv = CfgSurvEnabled != null && CfgSurvEnabled.Value
-                    && Turret.HasItem(SurveillanceId);
-                if (!haveAnt && !haveFpv && !haveSurv) return;
+                bool survOn = CfgSurvEnabled != null && CfgSurvEnabled.Value;
+                bool haveSurv = survOn && Turret.HasItem(SurveillanceId);
+                // A recon drone lying on the ground is the one state that used
+                // to be invisible AND blocking. It is worth a line of its own.
+                int grounded = survOn ? SurvDrone.GroundedAway : -1;
+                if (!haveAnt && !haveFpv && !haveSurv && grounded < 0) return;
 
                 bool inVeh = Antenna.PlayerInVehicle;
                 bool up = Antenna.Up;
@@ -314,6 +317,13 @@ namespace NextDayRevival
                     }
                 }
 
+                if (grounded >= 0)
+                {
+                    lines.Add(Loc.T("[" + survKey + "] разведдрон на земле в " + grounded + " м - подойди и нажми",
+                                    "[" + survKey + "] recon drone on the ground, " + grounded + " m - walk up and tap"));
+                    tints.Add(todo);
+                }
+
                 // Layout: a compact box on the left edge, below any top OSD.
                 float pad = 8f;
                 float lh = 20f;
@@ -355,6 +365,16 @@ namespace NextDayRevival
         /// Called every frame from Drone.Tick while nothing of ours flies. It
         /// returns true on the single frame the hold completes; the antenna must
         /// be up first, or a hint says why nothing happened.
+        ///
+        /// 6.18, field report: "the bar came, then it broke off and never came
+        /// back". Two holes, both closed here. The DRONE was never checked
+        /// before the bar started, so a pack with no 1163 in it charged for
+        /// twenty seconds and then returned in silence from Drone.Launch. And
+        /// when the gate closed UNDER a running bar - the antenna retracted
+        /// because the player boarded a car or the mast left the pack - the bar
+        /// simply vanished: LaunchDeniedHint only fires on the press, and the
+        /// key was still down. Now the reason is always said out loud, and the
+        /// bar comes back by itself the moment the gate opens again.
         /// </summary>
         public static bool WantFpvLaunch(KeyCode key)
         {
@@ -365,12 +385,35 @@ namespace NextDayRevival
 
             if (!Input.GetKey(key)) { FpvHold.Cancel(); return false; }
             bool allowed = Antenna.LaunchAllowed();
-            if (!allowed && Input.GetKeyDown(key))
+            bool have = HaveFpv();
+            if (Input.GetKeyDown(key))
             {
-                Antenna.LaunchDeniedHint();
-                return false;
+                if (!allowed) { Antenna.LaunchDeniedHint(); return false; }
+                if (!have) { NoFpvHint(); return false; }
             }
-            return FpvHold.Poll(key, allowed);
+            bool fired = FpvHold.Poll(key, allowed && have);
+            if (FpvHold.TakeLost())
+            {
+                if (!allowed) Antenna.LaunchDeniedHint();
+                else NoFpvHint();
+            }
+            return fired;
+        }
+
+        /// <summary>Is an FPV drone in the pack? Turret.HasItem caches for half
+        /// a second, so this may be asked every frame.</summary>
+        static bool HaveFpv()
+        {
+            if (RevivalPlugin.CfgDroneRequireItem == null
+                || !RevivalPlugin.CfgDroneRequireItem.Value) return true;
+            int id = RevivalPlugin.CfgDroneItemId == null ? 1163 : RevivalPlugin.CfgDroneItemId.Value;
+            return Turret.HasItem(id);
+        }
+
+        internal static void NoFpvHint()
+        {
+            Turret.Hinweis(Loc.T("FPV-дрона нет в рюкзаке",
+                                 "No FPV drone in the backpack"), 3f);
         }
 
         /// <summary>
@@ -459,6 +502,12 @@ namespace NextDayRevival
     {
         bool _active;
         float _start;
+        // True on the one frame a CHARGING hold was cut short because the gate
+        // closed under it. Nothing else in the flow can tell that apart from a
+        // released key, and the hints that explain a refusal only fire on the
+        // press - which is long past by then. The caller takes it once and
+        // says what happened.
+        bool _lost;
         static Texture2D _px;
 
         public bool Active { get { return _active; } }
@@ -466,11 +515,18 @@ namespace NextDayRevival
         /// <summary>
         /// Keep charging while the key is held and the gate allows it; return
         /// true the frame the configured hold time is reached, and reset so it
-        /// fires only once per hold.
+        /// fires only once per hold. A hold the gate cut short is remembered
+        /// for <see cref="TakeLost"/>; the key stays down, so the next frame
+        /// with an open gate starts a fresh bar on its own.
         /// </summary>
         public bool Poll(KeyCode key, bool gateOk)
         {
-            if (!gateOk || !Input.GetKey(key)) { _active = false; return false; }
+            if (!gateOk || !Input.GetKey(key))
+            {
+                if (_active && !gateOk) _lost = true;
+                _active = false;
+                return false;
+            }
 
             float len = Len();
             if (!_active) { _active = true; _start = Time.time; }
@@ -478,7 +534,11 @@ namespace NextDayRevival
             return false;
         }
 
-        public void Cancel() { _active = false; }
+        /// <summary>Was a charging hold cut short by its gate? Answers true at
+        /// most once per interruption.</summary>
+        public bool TakeLost() { bool lost = _lost; _lost = false; return lost; }
+
+        public void Cancel() { _active = false; _lost = false; }
 
         static float Len()
         {
@@ -1333,12 +1393,9 @@ namespace NextDayRevival
                 return;
             }
 
-            // On the ground as a grounded item: pick it back up.
-            if (_wreck != null)
-            {
-                if (Input.GetKeyDown(k) && NearWreck()) PickUp();
-                return;
-            }
+            // Standing beside the drone it dropped last flight: a tap picks it
+            // back up and that is the whole press.
+            if (_wreck != null && Input.GetKeyDown(k) && NearWreck()) { PickUp(); return; }
 
             // Idle: hold the key to launch. The antenna must be up and the drone
             // (and a battery) must be in the pack - checked before the bar even
@@ -1349,17 +1406,58 @@ namespace NextDayRevival
                         || DroneGear.CfgSurvRequireBattery.Value;
             bool haveDrone = Turret.HasItem(DroneGear.SurveillanceId);
             bool haveBat = !needBat || Turret.HasItem(DroneGear.BatteryId);
-            if (Input.GetKeyDown(k))
+            if (Input.GetKeyDown(k)) Refuse(antenna, haveDrone, haveBat);
+            bool go = Hold.Poll(k, antenna && haveDrone && haveBat);
+            // The bar died under the pilot's finger: say which of the three
+            // conditions went away, exactly as the press would have.
+            if (Hold.TakeLost()) Refuse(antenna, haveDrone, haveBat);
+            if (go) Launch();
+        }
+
+        /// <summary>
+        /// The one reason a launch is refused right now.
+        ///
+        /// A grounded drone used to be a DEAD KEY: the tick returned on
+        /// `_wreck != null` before it ever reached the launch, so a drone that
+        /// came down somewhere the pilot never walked back to switched the
+        /// surveillance key off for the rest of the session and said nothing
+        /// about it - the "surveillance did not work at all" of the field
+        /// report. It no longer blocks anything; it is only mentioned here,
+        /// where the pack turns out to be empty, because then it is the answer.
+        /// </summary>
+        static void Refuse(bool antenna, bool haveDrone, bool haveBat)
+        {
+            if (!antenna) { Antenna.LaunchDeniedHint(); return; }
+            if (!haveDrone)
             {
-                if (!antenna) Antenna.LaunchDeniedHint();
-                else if (!haveDrone)
-                    Turret.Hinweis(Loc.T("Разведдрона нет в рюкзаке",
-                                         "No surveillance drone in the backpack"), 3f);
-                else if (!haveBat)
-                    Turret.Hinweis(Loc.T("Нет аккумулятора для разведдрона",
-                                         "No battery for the surveillance drone"), 3f);
+                if (_wreck != null)
+                {
+                    int away = WreckAway();
+                    Turret.Hinweis(Loc.T("Разведдрон лежит на земле в " + away + " м отсюда - подбери его",
+                                         "The drone lies on the ground " + away + " m away - go and pick it up"), 4f);
+                    return;
+                }
+                Turret.Hinweis(Loc.T("Разведдрона нет в рюкзаке",
+                                     "No surveillance drone in the backpack"), 3f);
+                return;
             }
-            if (Hold.Poll(k, antenna && haveDrone && haveBat)) Launch();
+            if (!haveBat)
+                Turret.Hinweis(Loc.T("Нет аккумулятора для разведдрона",
+                                     "No battery for the surveillance drone"), 3f);
+        }
+
+        /// <summary>How far away the drone lying on the ground is, or -1 when
+        /// there is none. The on-screen guide reads it so the pilot is told
+        /// that his drone is waiting for him instead of wondering why a launch
+        /// does nothing.</summary>
+        public static int GroundedAway { get { return _wreck == null ? -1 : WreckAway(); } }
+
+        /// <summary>Metres from the player's body to the grounded drone.</summary>
+        static int WreckAway()
+        {
+            GameObject body = MapTools.LocalPlayer();
+            if (body == null) return 0;
+            return Mathf.RoundToInt(Vector3.Distance(body.transform.position, _wreckAt));
         }
 
         // ------------------------------------------------------------- launch

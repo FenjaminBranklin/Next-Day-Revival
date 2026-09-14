@@ -211,16 +211,23 @@ namespace NextDayRevival
             // raised antenna (unless the whole antenna gate is switched off).
             if (!Antenna.LaunchAllowed()) { Antenna.LaunchDeniedHint(); return; }
 
+            // Every way out of this method used to be silent. After a twenty
+            // second hold that is indistinguishable from a broken launch, and
+            // it is exactly what the 6.17.2 field report describes.
             Camera cam = CameraOwner.ViewCamera();
             if (cam == null)
             {
                 RevivalPlugin.L.LogWarning("Drohne: keine Kamera gefunden.");
+                Turret.Hinweis(Loc.T("Камера не найдена - дрон не стартует",
+                                     "No camera found - the drone does not launch"), 3f);
                 return;
             }
             if (!CameraOwner.Free)
             {
                 RevivalPlugin.L.LogInfo("Drohne: der Blick ist gerade vergeben - "
                     + "erst das Geschuetz verlassen.");
+                Turret.Hinweis(Loc.T("Обзор занят - сначала выйди из другого вида",
+                                     "The view is taken - leave the other view first"), 3f);
                 return;
             }
 
@@ -241,10 +248,16 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogInfo("Drohne: keine im Rucksack (Item "
                     + RevivalPlugin.CfgDroneItemId.Value + ").");
+                DroneGear.NoFpvHint();
                 return;
             }
 
-            if (!CameraOwner.Request(CameraOwner.Drohne, true, "Drohne")) return;
+            if (!CameraOwner.Request(CameraOwner.Drohne, true, "Drohne"))
+            {
+                Turret.Hinweis(Loc.T("Обзор занят - сначала выйди из другого вида",
+                                     "The view is taken - leave the other view first"), 3f);
+                return;
+            }
 
             _flying = true;
             _start = Time.time;
@@ -662,13 +675,32 @@ namespace NextDayRevival
                    < RevivalPlugin.CfgDroneSafeRadius.Value;
         }
 
+        static Transform _localRootCache;
+        static float _localRootRetry;
+
         /// <summary>
         /// Die Wurzel des eigenen Spielerobjekts. Fremde bleiben ueber
         /// photonView.isMine draussen - dasselbe Muster wie in
         /// Turret.PlayerInventories.
+        ///
+        /// Cached like Turret.HasItem caches PlayerInventories: Jammer.Melden
+        /// and Jammer.Fliegen call this every single frame while a jammer is
+        /// carried or manned, and FindObjectsOfType(PlayerMovementController)
+        /// per frame is exactly the "cost that never shows up in a log and
+        /// always shows up in the frame time" that HasItem's comment warns
+        /// about - measured as Drone.Tick alone in the F6 overlay. The cached
+        /// Transform is revalidated with Unity's own null check (true once the
+        /// underlying object is destroyed, e.g. on respawn), so a stale
+        /// reference cannot survive a rescan being needed.
         /// </summary>
         static Transform LocalPlayerRoot()
         {
+            if (_localRootCache != null) return _localRootCache;
+            // Before the player object exists (loading, not yet spawned) this
+            // would otherwise rescan every frame; a short cooldown hides that
+            // gap without bringing back the per-frame cost.
+            if (Time.time < _localRootRetry) return null;
+            _localRootRetry = Time.time + 0.2f;
             try
             {
                 Type t = RevivalPlugin.TypeByName("PlayerMovementController");
@@ -683,7 +715,8 @@ namespace NextDayRevival
                     // container, not this player. The controller itself sits
                     // on the player object and is the ancestor needed by the
                     // launch-collision guard.
-                    return mb.transform;
+                    _localRootCache = mb.transform;
+                    return _localRootCache;
                 }
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Drohne: Pilot nicht gefunden: " + ex.Message); }

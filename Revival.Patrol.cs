@@ -221,6 +221,36 @@ namespace NextDayRevival
             public bool Truck;
             public bool Deploy;
             public Vector3 DeployTarget;
+
+            // NDR convoy break-up (RevivalConvoy.Behaviour). DeployPosted marks
+            // that a REAL firing position was found - without it DeployTarget is
+            // just "where I happen to stand", and a vehicle that never found a
+            // shoulder has to be asked again (DeployRetry) instead of standing in
+            // the column line for the rest of the event. DeployAnchor is where the
+            // formation broke and bounds how far the defender may press forward.
+            // DeployTries counts the positions this vehicle failed to reach and
+            // turns the search ring by one notch each time: the candidates are
+            // fixed geometry, so without it a vehicle stopped by a rock would be
+            // handed the same unreachable shoulder every four seconds forever.
+            public bool DeployPosted;
+            public float DeployRetry;
+            public int DeployTries;
+            public Vector3 DeployAnchor;
+
+            // Where the attack came from, remembered per vehicle and shared
+            // across the convoy (ConvoyThreat). The gun clears Target as soon as
+            // it loses sight; the survivors still have to know which way to face.
+            public Vector3 Threat;
+            public float ThreatAt;
+
+            // Seconds this vehicle has been braking for a BURNING convoy mate,
+            // and the latched point it is steering to in order to get past one.
+            // A wreck never moves again, so without these the survivor behind it
+            // queues into it for the rest of the event.
+            public float Blocked;
+            public Vector3 BypassPoint;
+            public float BypassUntil;
+
             public float Died;           // Time.time the vehicle was killed
             public int CompositionVehicle = -1; // editor vehicle index, or legacy
             public List<RevivalComposition.CrewMan> CrewSnapshot;
@@ -487,6 +517,10 @@ namespace NextDayRevival
                     // NDR convoy column: Columns() has already put this vehicle
                     // where it belongs. It is not driven and it is not held.
                     if (u.Column) continue;
+                    // NDR convoy break-up: the members of one convoy ignore each
+                    // other's colliders, so once the column is gone nothing
+                    // physical keeps two hulls apart. This does.
+                    ConvoySeparate(u);
                     if (u.Deploy) { DeployStep(u); continue; }
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
@@ -1040,56 +1074,559 @@ namespace NextDayRevival
             if (u != null)
             {
                 u.Hold = hold;
-                if (!hold) u.Deploy = false;
+                if (!hold)
+                {
+                    u.Deploy = false;
+                    u.DeployPosted = false;
+                }
             }
         }
 
+        // =====================================================================
+        //  NDR convoy BREAK-UP (what happens after the first loss)
+        //
+        //  The column is over the moment a vehicle is destroyed, and from then
+        //  on the survivors belong to RevivalConvoy.Behaviour: one escapee
+        //  drives on, everybody else fights. "Fights" used to mean one sidestep
+        //  of 18 m onto a fixed shoulder, decided once and never revisited, with
+        //  nothing but ConvoyBlocked between hulls that ignore each other's
+        //  colliders. Three things came out of that, all of them visible in the
+        //  game as a convoy driving into itself instead of spreading out:
+        //
+        //    - The shoulder was only ever tried on ONE side (the slot's parity)
+        //      at four distances. A ditch, a wall or a slope on that side left
+        //      the vehicle standing in the column line, and it was never asked
+        //      again, because the deployment was a one-shot.
+        //    - The escapee's road runs THROUGH the wreck of the vehicle in front
+        //      of it. ConvoyBlocked brakes for it and resets the stuck timer, so
+        //      the escapee stood nose to tail against a burning hull for the rest
+        //      of the event - with the rest of the convoy piling up behind it.
+        //    - Convoy hulls are deliberately ghosted against each other, so two
+        //      of them that do end up in the same place simply interpenetrate,
+        //      and nothing ever pushes them apart again.
+        //
+        //  The three answers are DeployPost (both shoulders, three distances,
+        //  three offsets along the road, biased onto the side the shooting comes
+        //  from, retried until one is found), StartBypass (drive AROUND a mate's
+        //  wreck instead of queueing into it, and if that is impossible, tell the
+        //  behaviour layer that this vehicle cannot escape and must fight) and
+        //  ConvoySeparate (two convoy hulls are never allowed to overlap).
+        //
+        //  Retrying is not the same as arriving, and the first version of that
+        //  search could hand out positions no vehicle would ever drive to. Three
+        //  rules keep a "firing position" a place the vehicle actually reaches,
+        //  because a defender that does not reach one is a defender parked in the
+        //  column line - which is the same picture from the outside as no fix at
+        //  all:
+        //
+        //    1. Only positions the vehicle can drive to (PostCone). It has no
+        //       reverse, so a shoulder behind it is not a shoulder.
+        //    2. The search always answers. It walks its ring three times, giving
+        //       up the lane reservation and then the comfortable spacing, and only
+        //       calls a position impossible when even bare hull clearance fails.
+        //    3. A hull in the way costs THIS position, not the event: LegBlocked
+        //       looks along the leg being driven rather than down the nose, and a
+        //       few seconds of it sends the vehicle looking for another shoulder.
+        // =====================================================================
+
+        /// <summary>Metres to the side of the road the first firing position is
+        /// looked for. Further candidates step out from here.</summary>
+        const float DeploySpread = 20f;
+
+        /// <summary>Seconds between two attempts to find a firing position for a
+        /// vehicle that could not be given one. A defender standing in the middle
+        /// of the road is the failure the user saw; it has to keep trying.</summary>
+        const float DeployRetryEvery = 4f;
+
+        /// <summary>Degrees per second a defender at its post turns its hull onto
+        /// the threat. It is standing on the brake, so the heading is eased by
+        /// hand, exactly the way a carried column hull is.</summary>
+        const float DeployTurnRate = 25f;
+
+        /// <summary>
+        /// Degrees off its own nose a defender will still drive to a firing
+        /// position, and the narrower cone the search hands one out in.
+        ///
+        /// These two belong together, and the gap between them is the whole
+        /// point. There is no reverse gear here, so a post BEHIND the vehicle is
+        /// not a post: DeployStep abandons it the moment it sees it. The search
+        /// did not know that. Its candidates ran 14 m back, level, 14 m forward
+        /// in that order, so the FIRST one offered was a shoulder 125 degrees off
+        /// the nose - abandoned in the same physics step it was given, then
+        /// offered again four seconds later, because the ring is fixed geometry
+        /// and nothing about it had changed. A defender can leave that loop only
+        /// by turning its hull far enough onto the threat first. That is one of
+        /// the two ways a survivor ends up parked in the column line (the other
+        /// is DeployLane refusing every candidate), which is the convoy driving
+        /// into itself that the user reported.
+        /// </summary>
+        const float DeployCone = 110f;
+        const float PostCone = 95f;
+
+        /// <summary>Metres a firing position keeps from every other hull of the
+        /// same convoy, and from the position another defender was already given.
+        /// PostClearLast is the last-resort minimum: standing in the column line
+        /// is worse than a tight pair of posts.</summary>
+        const float PostClear = 22f;
+        const float PostClearLast = 14f;
+
+        /// <summary>Metres of clear air between two defenders' drive legs.</summary>
+        const float LaneClear = 14f;
+
+        /// <summary>Seconds a defender brakes for a hull in the way of its leg
+        /// before it gives up on THIS position and asks for another one. Standing
+        /// still is never the answer; a different shoulder always is.</summary>
+        const float BlockedPost = 3f;
+
+        /// <summary>A defender that is farther than this from the shooting closes
+        /// in on it in bounds of <see cref="EngageStep"/> metres.</summary>
+        const float EngageWithin = 120f;
+
+        const float EngageStep = 35f;
+
+        /// <summary>Seconds a defender stays at a post before taking the next
+        /// bound forward.</summary>
+        const float EngagePause = 5f;
+
+        /// <summary>Seconds of braking for a burning convoy mate before the
+        /// survivor tries to drive round it.</summary>
+        const float BypassAfter = 2f;
+
+        /// <summary>Seconds a bypass aim stays latched. Dropping it the moment
+        /// the corridor looks clear steers the vehicle straight back behind the
+        /// wreck it just started to pass.</summary>
+        const float BypassSeconds = 14f;
+
+        /// <summary>Metres of clear air between the two hulls while passing, on
+        /// top of both measured half widths.</summary>
+        const float BypassClear = 10f;
+
+        /// <summary>Metres beyond the wreck the bypass point sits, and the
+        /// distance at which the bypass counts as done.</summary>
+        const float BypassAhead = 16f;
+        const float BypassReached = 10f;
+
+        /// <summary>km/h a vehicle passes a wreck at.</summary>
+        const float BypassSpeed = 18f;
+
+        /// <summary>Metres ahead a burning convoy mate is looked for.</summary>
+        const float WreckLookAhead = 60f;
+
+        /// <summary>Seconds of being stopped by a wreck after which this vehicle
+        /// is written off as unable to escape and joins the fight instead.</summary>
+        const float EscapeGiveUp = 8f;
+
+        /// <summary>Metres of clear air between two convoy hulls, on top of both
+        /// measured half lengths.</summary>
+        const float SeparateGap = 3f;
+
+        /// <summary>Metres per second two overlapping hulls are eased apart.
+        /// A shove, not a teleport - it has to look like manoeuvring.</summary>
+        const float SeparateStep = 4f;
+
+        /// <summary>Seconds a remembered threat position is still worth facing.</summary>
+        const float ThreatMemory = 90f;
+
+        /// <summary>
+        /// Send this convoy vehicle to a firing position and keep it there.
+        ///
+        /// Called every tick by the behaviour layer for every survivor that is
+        /// not the escapee, so it is also the place that RETRIES: a vehicle that
+        /// could not be given a position keeps asking, and a vehicle that has
+        /// taken its position asks again once it wants the next bound forward
+        /// (DeployStep clears DeployPosted for that).
+        /// </summary>
         internal static void ConvoyDeploy(object handle)
         {
             Unit u = handle as Unit;
             if (u == null || u.Car == null || u.Died > 0f || u.Arrived) return;
-            if (u.Deploy) return;
-            u.Deploy = true;
-            u.Hold = true;
             Transform t = u.Car.transform;
-            u.DeployTarget = t.position;
-            // Stable, alternating shoulders. Reserve the destination so two
-            // survivors cannot choose the same firing position.
-            for (int attempt = 0; attempt < 4; attempt++)
+            if (!u.Deploy)
             {
-                float side = u.ColumnIndex % 2 == 0 ? 1f : -1f;
-                Vector3 target = t.position + t.right * (side * (18f + attempt * 6f))
-                    + t.forward * 8f;
-                float y;
-                Vector3 normal;
-                if (!RoadUnder(target, t, out y, out normal) || normal.y < 0.85f
-                    || Mathf.Abs(y - t.position.y) > 5f) continue;
-                if (!DeployRoom(u, target)) continue;
-                if (!DeployLane(u, target)) continue;
-                target.y = y;
-                u.DeployTarget = target;
-                break;
+                u.Deploy = true;
+                u.Hold = true;
+                u.DeployPosted = false;
+                u.DeployRetry = 0f;
+                u.DeployTries = 0;
+                u.DeployAnchor = t.position;
+                u.DeployTarget = t.position;
+                u.BypassUntil = 0f;
             }
+            if (u.DeployPosted || Time.time < u.DeployRetry) return;
+            u.DeployRetry = Time.time + DeployRetryEvery;
+
+            Vector3 post;
+            if (!DeployPost(u, t, out post))
+            {
+                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
+                    + u.ColumnIndex + " found no firing position - holding, "
+                    + "next attempt in " + DeployRetryEvery.ToString("0") + " s.");
+                return;
+            }
+            u.DeployTarget = post;
+            u.DeployPosted = true;
             RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
-                + u.ColumnIndex + " deploying to " + u.DeployTarget + ".");
+                + u.ColumnIndex + " deploying to " + u.DeployTarget + " ("
+                + FlatDistance(t.position, post).ToString("0") + " m out, "
+                + FlatDistance(u.DeployAnchor, post).ToString("0")
+                + " m from the column).");
         }
 
+        /// <summary>
+        /// A firing position off the road line: both shoulders, three distances
+        /// out and three offsets along the road, forward and abeam before
+        /// backward, and only ever one the vehicle can actually drive to
+        /// (<see cref="Reachable"/>). When the threat is known and still far away
+        /// the whole ring is carried a bound towards it, which is what turns
+        /// "spread out" into "close in" without the vehicle ever leaving the area
+        /// of its convoy. The ring is walked three times with one requirement
+        /// dropped each time, because the alternative to a cramped position is
+        /// not a better one - it is a vehicle parked in the middle of the road.
+        /// </summary>
+        static bool DeployPost(Unit u, Transform t, out Vector3 post)
+        {
+            post = t.position;
+            Vector3 road = u.Route == null ? t.forward
+                                           : RouteDirection(u.Route, u.Next, u.OneWay);
+            road.y = 0f;
+            if (road.sqrMagnitude < 0.0001f) road = t.forward;
+            road.y = 0f;
+            if (road.sqrMagnitude < 0.0001f) return false;
+            road = road.normalized;
+            Vector3 side = Vector3.Cross(Vector3.up, road);
+            side.y = 0f;
+            if (side.sqrMagnitude < 0.0001f) return false;
+            side = side.normalized;
+
+            Vector3 threat;
+            bool aimed = ConvoyThreat(u, out threat);
+            Vector3 toThreat = Vector3.zero;
+            float first = u.ColumnIndex % 2 == 0 ? 1f : -1f;
+            float bound = 0f;
+            if (aimed)
+            {
+                toThreat = threat - t.position;
+                toThreat.y = 0f;
+                if (toThreat.sqrMagnitude > 1f)
+                {
+                    float gap = toThreat.magnitude;
+                    // Swing towards the shooting only while the shooting is off
+                    // to one SIDE of the road. When it comes from straight down
+                    // the road, every vehicle of the column would otherwise pick
+                    // the same shoulder and queue up on it exactly as it stood
+                    // before - so the even and the odd slots split onto opposite
+                    // sides instead, which is what fanning out looks like.
+                    float sideways = Vector3.Dot(toThreat, side) / gap;
+                    if (Mathf.Abs(sideways) > 0.5f) first = sideways >= 0f ? 1f : -1f;
+                    float room = RevivalConvoy.EngageAdvance
+                               - FlatDistance(u.DeployAnchor, t.position);
+                    if (gap > EngageWithin && room > 10f)
+                        bound = Mathf.Min(EngageStep, Mathf.Min(gap - EngageWithin, room));
+                    toThreat = toThreat.normalized;
+                }
+                else aimed = false;
+            }
+
+            // Three passes over the same ring, each giving up one requirement.
+            // A defender that finds nothing holds where it stands, and where it
+            // stands is the column line in the middle of the road - so "nothing
+            // found" has to be the rarest answer this can give, not the usual
+            // one. Pass 0 reserves the drive to the post as well as the post,
+            // pass 1 only the post, pass 2 takes any ground that is merely clear
+            // of a hull. Forward and abeam before backward, because a shoulder
+            // behind the vehicle cannot be driven to at all.
+            for (int relax = 0; relax < 3; relax++)
+            {
+                for (int s = 0; s < 2; s++)
+                {
+                    float sign = s == 0 ? first : -first;
+                    for (int outward = 0; outward < 3; outward++)
+                    {
+                        // One notch further out per position this vehicle failed
+                        // to reach, so a shoulder it cannot get to is not offered
+                        // to it again and again.
+                        float reach = DeploySpread + ((outward + u.DeployTries) % 3) * 9f;
+                        for (int along = 0; along < 3; along++)
+                        {
+                            Vector3 cand = t.position
+                                + side * (sign * reach)
+                                + road * (along == 0 ? 14f : (along == 1 ? 0f : -14f));
+                            if (aimed && bound > 0f)
+                            {
+                                // Pressing forward only counts if the vehicle can
+                                // drive there. Shooting from BEHIND the column
+                                // would otherwise carry every candidate behind the
+                                // hull and the search would answer "nothing" - so
+                                // the vehicle swings out onto its shoulder first,
+                                // turns onto the threat there, and presses on the
+                                // bound after that.
+                                Vector3 pressed = cand + toThreat * bound;
+                                if (Reachable(t, pressed)) cand = pressed;
+                            }
+                            if (!Reachable(t, cand)) continue;
+                            bool clear = relax < 2
+                                ? DeployRoom(u, cand)
+                                : DeployClear(u, cand, PostClearLast);
+                            if (!clear) continue;
+                            if (relax < 1 && !DeployLane(u, cand)) continue;
+                            float y;
+                            Vector3 normal;
+                            if (!RoadUnder(cand, t, out y, out normal) || normal.y < 0.8f
+                                || Mathf.Abs(y - t.position.y) > 6f) continue;
+                            cand.y = y;
+                            post = cand;
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>Can this vehicle drive to that point at all? A convoy vehicle
+        /// has no reverse and no turn on the spot, so a point behind it is not
+        /// somewhere it can be sent. Deliberately narrower than the cone
+        /// <see cref="DeployStep"/> abandons a post at, so a position is never
+        /// handed out and thrown away in the same physics step.</summary>
+        static bool Reachable(Transform t, Vector3 point)
+        {
+            Vector3 local = t.InverseTransformPoint(point);
+            return Mathf.Abs(Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg) <= PostCone;
+        }
+
+        /// <summary>
+        /// Where the shooting is coming from, as far as this convoy knows it.
+        /// The vehicle's own gun target first; otherwise the freshest position
+        /// any member of the same convoy last had a target at - including the
+        /// vehicle that has just been destroyed, which is usually the only one
+        /// that ever saw the attacker.
+        /// </summary>
+        static bool ConvoyThreat(Unit u, out Vector3 point)
+        {
+            point = Vector3.zero;
+            if (u == null) return false;
+            if (u.Target != null) { point = u.Target.position; return true; }
+            if (u.ConvoyId == 0) return false;
+            bool found = false;
+            float freshest = 0f;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other.ConvoyId != u.ConvoyId || other.ThreatAt <= 0f) continue;
+                if (Time.time - other.ThreatAt > ThreatMemory) continue;
+                if (found && other.ThreatAt <= freshest) continue;
+                freshest = other.ThreatAt;
+                point = other.Threat;
+                found = true;
+            }
+            return found;
+        }
+
+        /// <summary>The nearest BURNING vehicle of this convoy in the forward
+        /// corridor. What <see cref="ConvoyBlocked"/> is braking for when it is
+        /// braking for something that will never move again.</summary>
+        static Unit ConvoyWreckAhead(Unit self, Vector3 direction)
+        {
+            if (self.ConvoyId == 0 || self.Car == null) return null;
+            direction.y = 0f;
+            if (direction.sqrMagnitude < 0.0001f) return null;
+            direction = direction.normalized;
+            Vector3 pos = self.Car.transform.position;
+            Unit best = null;
+            float bestAhead = 0f;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.ConvoyId != self.ConvoyId
+                    || other.Car == null || other.Arrived || other.Died <= 0f) continue;
+                Vector3 delta = other.Car.transform.position - pos;
+                delta.y = 0f;
+                float ahead = Vector3.Dot(delta, direction);
+                if (ahead <= 0f || ahead > WreckLookAhead) continue;
+                Vector3 lateral = delta - direction * ahead;
+                if (lateral.sqrMagnitude >= 196f) continue;
+                if (best != null && ahead >= bestAhead) continue;
+                best = other;
+                bestAhead = ahead;
+            }
+            return best;
+        }
+
+        /// <summary>Has this vehicle been stopped by a wreck of its own convoy
+        /// long enough to give up on getting past it? The behaviour layer asks
+        /// before it makes a vehicle the escapee: the road out is blocked by a
+        /// hull that will never move, so this one fights instead of queueing.
+        /// Deliberately not cleared again - a road that is shut stays shut for
+        /// this event, and a flag that flickers would swap escapees every
+        /// second.</summary>
+        internal static bool ConvoyEscapeBlocked(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Blocked >= EscapeGiveUp;
+        }
+
+        /// <summary>Has this convoy vehicle been given a real firing position?
+        /// False while it is still holding where it stands and looking for one -
+        /// and a survivor holding where it stands is a survivor standing in the
+        /// column line, which is the thing the break-up exists to end. The
+        /// behaviour layer reports the count.</summary>
+        internal static bool ConvoyHasPost(object handle)
+        {
+            Unit u = handle as Unit;
+            return u != null && u.Deploy && u.DeployPosted;
+        }
+
+        /// <summary>
+        /// Latch an aim point that leads PAST a burning convoy mate instead of
+        /// into it: clear of both measured hull widths, on the side the survivor
+        /// is already on, a little beyond the wreck. Latched for
+        /// <see cref="BypassSeconds"/>, because an aim that is dropped as soon as
+        /// the forward corridor looks clear puts the vehicle straight back behind
+        /// the wreck.
+        /// </summary>
+        static bool StartBypass(Unit u, Transform t, Unit wreck)
+        {
+            if (wreck == null || wreck.Car == null) return false;
+            if (u.ColumnLift <= 0f) ColumnFootprint(u);
+            if (wreck.ColumnLift <= 0f) ColumnFootprint(wreck);
+            Vector3 forward = t.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) return false;
+            forward = forward.normalized;
+            Vector3 side = Vector3.Cross(Vector3.up, forward);
+            side.y = 0f;
+            if (side.sqrMagnitude < 0.0001f) return false;
+            side = side.normalized;
+
+            Vector3 wreckPos = wreck.Car.transform.position;
+            Vector3 delta = wreckPos - t.position;
+            delta.y = 0f;
+            // Pass on the side the wreck is NOT on, so the vehicle keeps the line
+            // it already has instead of crossing in front of the hull.
+            float first = Vector3.Dot(delta, side) >= 0f ? -1f : 1f;
+            float room = u.ColumnHalfWidth + wreck.ColumnHalfWidth + BypassClear;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                float sign = attempt == 0 ? first : -first;
+                Vector3 point = wreckPos + side * (sign * room) + forward * BypassAhead;
+                float y;
+                Vector3 normal;
+                if (!RoadUnder(point, t, out y, out normal) || normal.y < 0.7f) continue;
+                point.y = y;
+                u.BypassPoint = point;
+                u.BypassUntil = Time.time + BypassSeconds;
+                u.Blocked = 0f;
+                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
+                    + u.ColumnIndex + " drives around the wreck on slot "
+                    + wreck.ColumnIndex + " at " + room.ToString("0") + " m.");
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Two convoy hulls are never allowed to occupy the same place.
+        ///
+        /// Every vehicle of one convoy is made to ignore every other one's
+        /// colliders at spawn, so a tight column does not explode and a faster
+        /// survivor does not shove the one ahead off the road. The price is that
+        /// physics can no longer separate them either: once the column is broken
+        /// and each vehicle steers for itself, two of them that meet simply
+        /// interpenetrate and stay that way. This eases the later slot (and
+        /// always the living vehicle, never the wreck) out of the overlap at
+        /// walking pace, and only onto ground a raycast actually found - a push
+        /// into thin air would be worse than the overlap.
+        /// </summary>
+        static void ConvoySeparate(Unit u)
+        {
+            if (u.ConvoyId == 0 || u.Car == null || u.Column
+                || u.Died > 0f || u.Arrived) return;
+            if (u.ColumnLift <= 0f) ColumnFootprint(u);
+            Transform t = u.Car.transform;
+            Vector3 push = Vector3.zero;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == u || other.ConvoyId != u.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                // Exactly one of a pair gives way, or they would shove each other
+                // back and forth forever. A wreck never gives way at all.
+                if (other.Died <= 0f && u.ColumnIndex <= other.ColumnIndex) continue;
+                if (other.ColumnLift <= 0f) ColumnFootprint(other);
+                Vector3 delta = t.position - other.Car.transform.position;
+                delta.y = 0f;
+                float clear = u.ColumnHalfLength + other.ColumnHalfLength + SeparateGap;
+                float gap = delta.magnitude;
+                if (gap >= clear) continue;
+                // Perfectly stacked hulls have no direction to separate along;
+                // step out sideways so the pair does not stay welded together.
+                Vector3 away = gap > 0.05f ? delta * (1f / gap) : t.right;
+                away.y = 0f;
+                if (away.sqrMagnitude < 0.0001f) away = Vector3.forward;
+                push += away.normalized * (clear - gap);
+            }
+            if (push.sqrMagnitude < 0.0001f) return;
+
+            float step = Mathf.Min(push.magnitude, SeparateStep * Time.fixedDeltaTime);
+            Vector3 want = t.position + push.normalized * step;
+            float y;
+            Vector3 normal;
+            if (!RoadUnder(want, t, out y, out normal)) return;
+            Vector3 bottom = t.rotation * new Vector3(0f, -u.ColumnLift, 0f);
+            want.y = y - bottom.y + 0.15f;
+            t.position = want;
+            if (Time.time >= u.ColumnGroundLog)
+            {
+                u.ColumnGroundLog = Time.time + 10f;
+                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
+                    + u.ColumnIndex + " eased out of an overlapping hull.");
+            }
+        }
+
+        /// <summary>A firing position is clear of every other hull of this convoy
+        /// AND of the position another defender has already been given. Two
+        /// defenders sent to the same shoulder are one defender.</summary>
         static bool DeployRoom(Unit self, Vector3 target)
+        {
+            if (!DeployClear(self, target, PostClear)) return false;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.ConvoyId != self.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                if (other.Deploy && FlatDistance(target, other.DeployTarget) < PostClear)
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Metres of clear air between a point and every other hull of
+        /// the same convoy - the one requirement a firing position never gives
+        /// up, because the convoy's hulls ignore each other's colliders.</summary>
+        static bool DeployClear(Unit self, Vector3 target, float room)
         {
             for (int i = 0; i < _units.Count; i++)
             {
                 Unit other = _units[i];
                 if (other == self || other.ConvoyId != self.ConvoyId
                     || other.Car == null || other.Arrived) continue;
-                if (FlatDistance(target, other.Car.transform.position) < 22f
-                    || (other.Deploy && FlatDistance(target, other.DeployTarget) < 22f))
-                    return false;
+                if (FlatDistance(target, other.Car.transform.position) < room) return false;
             }
             return true;
         }
 
-        // Reserve the approach as well as the endpoint. A clear shoulder is
-        // useless if reaching it cuts through another defender's hull/path.
+        /// <summary>
+        /// Reserve the approach as well as the endpoint. A clear shoulder is
+        /// useless if reaching it cuts through another defender or across the leg
+        /// another defender is driving.
+        ///
+        /// What this must NOT do is refuse everything. The first version compared
+        /// the two legs' midpoints against half of their summed length, which is
+        /// larger than the 45 m column gap as soon as the defenders start bounding
+        /// towards the shooting - so every candidate was rejected exactly when the
+        /// convoy was supposed to spread out, and every vehicle stayed on the
+        /// road. This measures the real distance between the two legs instead.
+        /// </summary>
         static bool DeployLane(Unit self, Vector3 target)
         {
             Vector3 start = self.Car.transform.position;
@@ -1103,16 +1640,32 @@ namespace NextDayRevival
                 Vector3 offset = other.Car.transform.position - start; offset.y = 0f;
                 float along = Mathf.Clamp01(Vector3.Dot(offset, leg) / leg.sqrMagnitude);
                 if ((offset - leg * along).sqrMagnitude < 144f) return false;
-                if (!other.Deploy) continue;
-                // Conservative path bounding discs prevent crossing approaches.
-                Vector3 otherStart = other.Car.transform.position;
-                Vector3 otherLeg = other.DeployTarget - otherStart; otherLeg.y = 0f;
-                Vector3 centers = (start + target - otherStart - other.DeployTarget) * 0.5f;
-                centers.y = 0f;
-                float radius = (leg.magnitude + otherLeg.magnitude) * 0.5f + 12f;
-                if (centers.sqrMagnitude < radius * radius) return false;
+                // A defender without a position of its own is standing still, and
+                // standing still is already covered by the hull distance above.
+                if (!other.Deploy || !other.DeployPosted) continue;
+                if (LegGap(start, target, other.Car.transform.position,
+                           other.DeployTarget) < LaneClear) return false;
             }
             return true;
+        }
+
+        /// <summary>The smallest flat distance between two drive legs, sampled in
+        /// five steps along each. Exact enough at convoy spacing: two legs that
+        /// really cross come out well under <see cref="LaneClear"/> even when the
+        /// crossing itself falls between two samples.</summary>
+        static float LegGap(Vector3 a0, Vector3 a1, Vector3 b0, Vector3 b1)
+        {
+            float best = float.MaxValue;
+            for (int i = 0; i <= 4; i++)
+            {
+                Vector3 a = Vector3.Lerp(a0, a1, i / 4f);
+                for (int k = 0; k <= 4; k++)
+                {
+                    float d = FlatDistance(a, Vector3.Lerp(b0, b1, k / 4f));
+                    if (d < best) best = d;
+                }
+            }
+            return best;
         }
 
         // Braking applies to free drivers AND deploying defenders, including
@@ -1125,11 +1678,17 @@ namespace NextDayRevival
             Vector3 pos = self.Car.transform.position;
             float speed = Velocity(self.Body).magnitude;
             float stop = Mathf.Max(18f, 12f + speed * 1.5f + speed * speed / 8f);
+            // While this vehicle is driving AROUND a burning mate, braking for
+            // that mate is the one thing it must not do - it would stop halfway
+            // past the wreck and stand there. ConvoySeparate keeps the hulls
+            // apart in the meantime; a LIVING mate still stops it.
+            bool passing = Time.time < self.BypassUntil;
             for (int i = 0; i < _units.Count; i++)
             {
                 Unit other = _units[i];
                 if (other == self || other.ConvoyId != self.ConvoyId
                     || other.Car == null || other.Arrived) continue;
+                if (passing && other.Died > 0f) continue;
                 Vector3 delta = other.Car.transform.position - pos;
                 delta.y = 0f;
                 float ahead = Vector3.Dot(delta, direction);
@@ -1161,6 +1720,38 @@ namespace NextDayRevival
             return false;
         }
 
+        /// <summary>
+        /// Is another hull of this convoy - burning or not - standing between the
+        /// defender and the position it was given?
+        ///
+        /// Only the LEG counts. The general brake (<see cref="ConvoyBlocked"/>)
+        /// looks a stopping distance down the nose, which for a vehicle swinging
+        /// 20 m sideways is most of the old column line: it braked for the mate it
+        /// was driving away from, and because it never got moving it never turned
+        /// away either.
+        /// </summary>
+        static bool LegBlocked(Unit u, Vector3 target)
+        {
+            Vector3 start = u.Car.transform.position;
+            Vector3 leg = target - start;
+            leg.y = 0f;
+            float len = leg.magnitude;
+            if (len < 0.01f) return false;
+            Vector3 dir = leg / len;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == u || other.ConvoyId != u.ConvoyId
+                    || other.Car == null || other.Arrived) continue;
+                Vector3 offset = other.Car.transform.position - start;
+                offset.y = 0f;
+                float ahead = Vector3.Dot(offset, dir);
+                if (ahead <= 0f || ahead > len + 6f) continue;
+                if ((offset - dir * ahead).sqrMagnitude < 121f) return true;
+            }
+            return false;
+        }
+
         static void DeployStep(Unit u)
         {
             Transform t = u.Car.transform;
@@ -1171,22 +1762,35 @@ namespace NextDayRevival
                 HoldStill(u);
                 Roll(u.Body, Vector3.zero);
                 if (u.Truck) UnloadCrew(u);
+                u.DeployTries = 0;      // it got there: the ring starts over
+                u.Stuck = 0f;           // and the next bound starts with a clean timer
+                DeployFight(u, t);
                 return;
             }
-            if (ConvoyBlocked(u, t.forward))
+            // Brake for what is in the way of THIS leg, not for whatever happens
+            // to lie off the nose. A defender swinging out sideways still has the
+            // vehicle ahead of it in the old column line: braking for that one
+            // stops it before it has turned, and a stopped vehicle never turns
+            // either - the two of them then stand in the road until the event is
+            // over. A hull that really is in the way costs this position, not the
+            // whole event, so it asks for another one within seconds.
+            if (LegBlocked(u, u.DeployTarget))
             {
                 HoldStill(u);
+                Roll(u.Body, Vector3.zero);
                 u.Stuck += Time.fixedDeltaTime;
-                if (u.Stuck > 8f) u.DeployTarget = t.position;
+                if (u.Stuck > BlockedPost) DeployGiveUp(u, t);
                 return;
             }
             Vector3 local = t.InverseTransformPoint(u.DeployTarget);
             float angle = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
             // If the vehicle overshot, stop and fight instead of circling back
             // through the formation. No waypoint recovery can teleport it.
-            if (Mathf.Abs(angle) > 100f)
+            // DeployPost only hands out positions inside PostCone, so this fires
+            // on a position that DRIFTED behind, never on a fresh one.
+            if (Mathf.Abs(angle) > DeployCone)
             {
-                u.DeployTarget = t.position;
+                DeployGiveUp(u, t);
                 return;
             }
             float gas, brake;
@@ -1198,7 +1802,55 @@ namespace NextDayRevival
             SetFloat(u.Rcc, "handbrakeInput", 0f);
             if (Velocity(u.Body).magnitude < 0.8f) u.Stuck += Time.fixedDeltaTime;
             else u.Stuck = 0f;
-            if (u.Stuck > 8f) u.DeployTarget = t.position;
+            if (u.Stuck > 8f) DeployGiveUp(u, t);
+        }
+
+        /// <summary>The position could not be reached. Stand and fight where the
+        /// vehicle is, but do NOT settle for it: ask for another one shortly, or
+        /// a defender that was blocked once spends the whole event in the middle
+        /// of the road, which is what the column used to look like.</summary>
+        static void DeployGiveUp(Unit u, Transform t)
+        {
+            u.DeployTarget = t.position;
+            u.DeployPosted = false;
+            u.DeployRetry = Time.time + DeployRetryEvery;
+            u.DeployTries++;
+            u.Stuck = 0f;
+        }
+
+        /// <summary>
+        /// A defender that has reached its position: put the hull on the threat,
+        /// and take the next bound towards it while it is still far away.
+        ///
+        /// The vehicle is standing on its brakes, so the heading is eased by hand
+        /// - the same thing PlaceInColumn does with a carried hull. Turning the
+        /// hull matters beyond looks: the gun traverses from where the hull
+        /// points, and the armour policy is written for a vehicle facing what
+        /// shoots at it.
+        /// </summary>
+        static void DeployFight(Unit u, Transform t)
+        {
+            Vector3 threat;
+            if (!ConvoyThreat(u, out threat)) return;
+            Vector3 to = threat - t.position;
+            to.y = 0f;
+            if (to.sqrMagnitude < 4f) return;
+
+            Quaternion want = Quaternion.LookRotation(to.normalized, t.up);
+            if (Quaternion.Angle(t.rotation, want) > 3f)
+                t.rotation = Quaternion.RotateTowards(t.rotation, want,
+                    DeployTurnRate * Time.fixedDeltaTime);
+
+            // Press the attack. DeployPost carries the whole candidate ring a
+            // bound closer when the threat is beyond EngageWithin, and refuses to
+            // go further than Convoy/EngageAdvanceMetres from where the column
+            // broke, so this closes in without ever becoming a chase.
+            if (!u.DeployPosted || Time.time < u.DeployRetry) return;
+            if (to.magnitude <= EngageWithin) return;
+            if (FlatDistance(u.DeployAnchor, t.position)
+                >= RevivalConvoy.EngageAdvance - 10f) return;
+            u.DeployPosted = false;
+            u.DeployRetry = Time.time + EngagePause;
         }
 
         static void UnloadCrew(Unit u)
@@ -1639,6 +2291,9 @@ namespace NextDayRevival
                 if (u.ConvoyId != convoyId || !u.Column) continue;
                 u.Column = false;
                 u.Stuck = 0f;
+                // The break-up state starts here, not at the spawn.
+                u.Blocked = 0f;
+                u.BypassUntil = 0f;
                 freed++;
             }
             if (freed > 0)
@@ -2369,6 +3024,17 @@ namespace NextDayRevival
         /// keeps undoing it.</summary>
         static void Keep(Unit u)
         {
+            // NDR convoy break-up: remember where the shooting came from. The gun
+            // drops its target the moment it loses sight of it, but the survivors
+            // of a broken column still have to know which way to spread out and
+            // which way to face - and usually the only vehicle that ever saw the
+            // attacker is the one that is now burning.
+            if (u.Target != null)
+            {
+                u.Threat = u.Target.position;
+                u.ThreatAt = Time.time;
+            }
+
             // ExpendFuel drains an unmanned vehicle exactly as fast as a driven
             // one and kills the engine at zero (20.6). A patrol meant to run
             // for hours needs its tank held up.
@@ -2420,12 +3086,35 @@ namespace NextDayRevival
             // --- where to aim ------------------------------------------------
             float look = Mathf.Clamp(vel.magnitude * 1.1f, 10f, 35f);
             Vector3 aim = LookAhead(r, u.Next, pos, look, u.OneWay);
+
+            // NDR convoy break-up: the recorded road of a convoy runs straight
+            // THROUGH the vehicle that has just been destroyed on it. Braking for
+            // that wreck also resets the stuck timer, so a survivor used to stand
+            // against a burning hull for the whole event and everything behind it
+            // piled up in the same place. Give it BypassAfter seconds, then steer
+            // round the wreck on a latched point clear of both hulls.
+            bool passing = Time.time < u.BypassUntil;
+            if (passing && FlatDistance(pos, u.BypassPoint) < BypassReached)
+            {
+                u.BypassUntil = 0f;
+                passing = false;
+            }
             if (ConvoyBlocked(u, t.forward))
             {
-                HoldStill(u);
-                u.Stuck = 0f;
-                return;
+                Unit wreck = ConvoyWreckAhead(u, t.forward);
+                if (wreck == null) u.Blocked = 0f;
+                else u.Blocked += dt;
+                if (wreck == null || u.Blocked < BypassAfter
+                    || !StartBypass(u, t, wreck))
+                {
+                    HoldStill(u);
+                    u.Stuck = 0f;
+                    return;
+                }
+                passing = true;
             }
+            else if (!passing) u.Blocked = 0f;
+            if (passing) aim = u.BypassPoint;
 
             Vector3 local = t.InverseTransformPoint(aim);
             local.y = 0f;
@@ -2439,6 +3128,8 @@ namespace NextDayRevival
                 // pure pursuit can hold the recorded line, but it never crawls.
                 want = RevivalConvoy.CruiseSpeed * CornerFactor(r, u.Next);
                 want = Mathf.Max(want, 20f);
+                // Squeezing past a burning mate is a crawl, not a cruise.
+                if (passing) want = BypassSpeed;
             }
             else
             {
