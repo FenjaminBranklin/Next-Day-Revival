@@ -370,6 +370,9 @@ namespace NextDayRevival
         public static void Tick()
         {
             if (!SurvDrone.Flying) return;
+            // God mode keeps the recon drone out of every fight: no NPC picks
+            // it as a target, so no round is fired at it at all.
+            if (Admin.GodModeActive) return;
             if (DroneGear.CfgSurvNpcFire == null || !DroneGear.CfgSurvNpcFire.Value) return;
             if (Time.time < _next) return;
 

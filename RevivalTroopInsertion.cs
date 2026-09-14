@@ -314,8 +314,11 @@ namespace NextDayRevival
         {
             try
             {
+                // Class defaults (a defender in UKB, a sniper's rifle, ...) on
+                // copies: the landing's own loadout lines stay as authored.
+                List<RevivalComposition.CrewMan> loadout = NpcWar.WithClassDefaults(d.Squad);
                 GameObject settlement = Crew.DropSquad(at, yaw, Mathf.Clamp(d.Count, 1, 16),
-                    d.Faction, d.Squad.Count > 0 ? d.Squad : null);
+                    d.Faction, loadout.Count > 0 ? loadout : null);
                 Array men = Crew.Men(settlement);
                 if (settlement == null || men == null || men.Length == 0)
                 {
@@ -325,7 +328,8 @@ namespace NextDayRevival
                 }
                 Vector3 tail = OnGround(d.Tail, at.y);
                 Vector3 head = OnGround(d.Head, at.y);
-                NpcWar.StartOperation(d.Name, settlement, men, tail, head, d.PatrolMinutes * 60f);
+                NpcWar.StartOperation(d.Name, settlement, men, tail, head, d.PatrolMinutes * 60f,
+                    loadout);
                 string cell = GridCell(at);
                 Net.SendBanner(1, cell);
                 Banner(1, cell);
@@ -617,8 +621,12 @@ namespace NextDayRevival
                 if (raw.Trim().Length == 0 || raw[0] == '#') continue;
                 // name enabled x z tailX tailZ headX headZ faction count
                 //   intervalMin intervalMax patrolMinutes role weapon headwear mask body legs hands
+                //   class backpack
+                // An editor older than 6.17 writes the first 20 columns only:
+                // every soldier is then a regular without a backpack.
                 string[] c = raw.Split('\t');
-                if (c.Length != 20 || c[0].Trim().Length == 0 || c[0].Length > 64) { bad++; continue; }
+                if ((c.Length != 22 && c.Length != 20) || c[0].Trim().Length == 0 || c[0].Length > 64)
+                { bad++; continue; }
                 string name = c[0].Trim();
                 Landing d;
                 if (!byName.TryGetValue(name, out d))
@@ -651,6 +659,8 @@ namespace NextDayRevival
                 man.Body = Id(c[17]);
                 man.Legs = Id(c[18]);
                 man.Hands = Id(c[19]);
+                man.Class = c.Length > 20 ? NpcWar.ClassKey(c[20]) : "regular";
+                man.Backpack = c.Length > 21 ? Id(c[21]) : 0;
                 man.Fpv = false;
                 d.Squad.Add(man);
             }

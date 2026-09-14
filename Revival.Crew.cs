@@ -449,9 +449,16 @@ namespace NextDayRevival
                 SetNumber(spawn, "HeadHatsAndSpecial", spec.Headwear);
             if (spec.Headwear > 0 || spec.Mask > 0)
                 SetNumber(spawn, "HeadMasks", spec.Mask > 0 ? spec.Mask : 0);
+            // The backpack slot (a troop landing may choose one, e.g. the UKB
+            // exoskeleton 6019). NPC_AI2.SetCustomization hands index 6 to
+            // NetworkBackpackMeshChange, which switches on the child of the
+            // prefab's Backpacks node whose ItemCustomMaterialsManager lists
+            // that ItemID (CONFIRMED IL; Marauder_NPC_01 carries a UKB_ekzo
+            // child). -1 keeps the game's own pick.
+            if (spec.Backpack > 0) SetNumber(spawn, "BackpackId", spec.Backpack);
             _appearance[spawn.GetInstanceID()] = new int[] {
                 100, spec.Body, spec.Hands, spec.Legs,
-                spec.Headwear, mask, -1 };
+                spec.Headwear, mask, spec.Backpack > 0 ? spec.Backpack : -1 };
         }
 
         public static void NpcStartPostfix(object __instance)
@@ -1533,7 +1540,10 @@ namespace NextDayRevival
                           RevivalComposition.CrewMan spec)
         {
             Set(sp, "Active", true);
-            SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value);
+            // A heli squad class may carry a hit point factor (NpcWar: the
+            // defender is heavier); every route crew keeps the factor 1.
+            float healthScale = spec == null ? 1f : Mathf.Clamp(spec.HealthScale, 0.25f, 5f);
+            SetNumber(sp, "Health", RevivalPlugin.CfgPatrolCrewHealth.Value * healthScale);
             SetNumber(sp, "Level", RevivalPlugin.CfgPatrolCrewLevel.Value);
             SetEnum(sp, "BehaviorPattern", "Aggressive");
             // Do not inherit a template guard's fixed position or task.
@@ -1965,6 +1975,14 @@ namespace NextDayRevival
                     ? 600f : RevivalPlugin.CfgPatrolCrewLawDamage.Value;
                 float radius = RevivalPlugin.CfgPatrolCrewLawRadius == null
                     ? 8f : RevivalPlugin.CfgPatrolCrewLawRadius.Value;
+                // A heli squad's anti-tank gunner fires the player LAW's blast,
+                // so VehicleArmor recognises it and a tank takes TankLawHits.
+                float squadDmg, squadRadius;
+                if (NpcWar.SquadLaw(__instance, out squadDmg, out squadRadius))
+                {
+                    dmg = squadDmg;
+                    radius = squadRadius;
+                }
                 RocketHook.Detonate(boom, dmg, radius, 3f);
 
                 if (!_detonateLogged && RevivalPlugin.L != null)
@@ -2143,6 +2161,12 @@ namespace NextDayRevival
             public float Armed;
             public float Deadline;
             public float NextSend;
+            // Height above the target's feet it flies at, and its own blast.
+            // A patrol crew drone keeps 1.1 and the Patrol/CrewDrone* values;
+            // a heli squad drone (LaunchAt) brings its own.
+            public float AimUp = 1.1f;
+            public float Damage = -1f, Radius = -1f;
+            public string What = "player";
         }
 
         class Remote
@@ -2180,12 +2204,15 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (RevivalPlugin.CfgPatrolCrewDrone == null
-                || !RevivalPlugin.CfgPatrolCrewDrone.Value) return;
+            bool patrol = RevivalPlugin.CfgPatrolCrewDrone != null
+                && RevivalPlugin.CfgPatrolCrewDrone.Value;
+            // Heli squad drones (NpcWar) fly under their own switch, so a map
+            // with patrol drones off still sees the anti-tank gunner's drone.
+            if (!patrol && !NpcWar.DronesEnabled) return;
             Net.EnsureHooked();
             Net.TickRemotes();
 
-            for (int i = _pending.Count - 1; i >= 0; i--)
+            for (int i = _pending.Count - 1; i >= 0 && patrol; i--)
             {
                 Pending p = _pending[i];
                 if (p.Root == null) { _pending.RemoveAt(i); continue; }
@@ -2248,10 +2275,64 @@ namespace NextDayRevival
                 + " m deliberate miss.");
         }
 
+        /// <summary>A heli squad's anti-tank gunner sends his FPV drone at a
+        /// hostile NPC or a vehicle (NpcWar). Same airframe, flight, network
+        /// and shoot-down as a patrol crew drone; the target, its aim height,
+        /// the deliberate miss and the blast come from the caller. Master only,
+        /// like every crew drone. Returns the drone id (0 = not launched).</summary>
+        internal static int LaunchAt(Vector3 from, GameObject target, float aimUp,
+                                     float miss, float damage, float radius, string what)
+        {
+            if (target == null) return 0;
+            Local d = new Local();
+            d.Id = _nextId++;
+            d.Target = target;
+            d.AimUp = aimUp;
+            d.Damage = damage;
+            d.Radius = radius;
+            d.What = string.IsNullOrEmpty(what) ? "target" : what;
+            d.Pos = from;
+            Vector3 to = AimPoint(d) - d.Pos;
+            d.Dir = to.sqrMagnitude < 0.01f ? Vector3.up : to.normalized;
+            float angle = Mathf.Abs(Mathf.Sin(d.Id * 12.9898f)) * Mathf.PI * 2f;
+            float r = Mathf.Max(0f, miss) * (0.45f + 0.55f * Mathf.Abs(Mathf.Sin(d.Id * 78.233f)));
+            d.Error = new Vector3(Mathf.Cos(angle) * r, 0f, Mathf.Sin(angle) * r);
+            d.Hp = Mathf.Max(1, RevivalPlugin.CfgPatrolCrewDroneHitpoints.Value);
+            d.Armed = Time.time + 1.2f;
+            d.Deadline = Time.time + 55f;
+            d.Go = Drone.Modell.Bauen();
+            d.Go.name = "NDR Crew FPV " + d.Id;
+            d.Go.transform.localScale *= 1.15f;
+            d.Go.transform.position = d.Pos;
+            d.Go.transform.rotation = Quaternion.LookRotation(d.Dir, Vector3.up);
+            Drone.Sound.Anhaengen(d.Go);
+            _local.Add(d);
+            Net.Send(Net.Start, d.Id, d.Pos, d.Dir, 0f, true);
+            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " launched at " + d.What + " "
+                + target.name + " (" + Vector3.Distance(from, target.transform.position).ToString("0")
+                + " units, blast " + damage.ToString("0") + " in " + radius.ToString("0.#") + ").");
+            return d.Id;
+        }
+
+        /// <summary>Is the drone with this id still in the air?</summary>
+        internal static bool InFlight(int id)
+        {
+            if (id <= 0) return false;
+            for (int i = 0; i < _local.Count; i++)
+                if (_local[i].Id == id && _local[i].Go != null) return true;
+            return false;
+        }
+
         static Vector3 AimPoint(GameObject target)
         {
             return target == null ? Vector3.zero
                 : target.transform.position + Vector3.up * 1.1f;
+        }
+
+        static Vector3 AimPoint(Local d)
+        {
+            return d.Target == null ? Vector3.zero
+                : d.Target.transform.position + Vector3.up * d.AimUp;
         }
 
         static void Move(Local d)
@@ -2268,7 +2349,7 @@ namespace NextDayRevival
             }
 
             Vector3 aim = d.Target == null ? d.Pos + d.Dir * 20f
-                : AimPoint(d.Target) + d.Error;
+                : AimPoint(d) + d.Error;
             Vector3 wanted = aim - d.Pos;
             if (wanted.sqrMagnitude > 0.001f) wanted.Normalize();
             else wanted = d.Dir;
@@ -2321,8 +2402,8 @@ namespace NextDayRevival
                 try
                 {
                     RocketHook.Detonate(point,
-                        RevivalPlugin.CfgPatrolCrewDroneDamage.Value,
-                        RevivalPlugin.CfgPatrolCrewDroneRadius.Value, 3f);
+                        d.Damage > 0f ? d.Damage : RevivalPlugin.CfgPatrolCrewDroneDamage.Value,
+                        d.Radius > 0f ? d.Radius : RevivalPlugin.CfgPatrolCrewDroneRadius.Value, 3f);
                 }
                 catch (Exception ex)
                 {

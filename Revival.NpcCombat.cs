@@ -28,7 +28,8 @@ namespace NextDayRevival
     //               attacks everything it sees that its faction hates
     //     Patrol    the survivors sweep the arrow up and down until the patrol
     //               time (at most two hours) is over
-    //     removed   every man of the squad, alive or dead, leaves the map
+    //     removed   the living men of the squad leave the map; the dead stay
+    //               CorpseMinutes for their loot (6.17)
     //
     // HOW THE SQUAD FIGHTS (6.16.5, after the 6.16.4 field report)
     //
@@ -89,6 +90,53 @@ namespace NextDayRevival
     //   back the same way and may still take cover; they are the enemy, not
     //   the assault.
     //
+    // CLASSES (6.17, after the 6.16.7 field report). Every soldier of a heli
+    //   landing carries an editor class (SquadClass; not to be confused with
+    //   the "defenders" above, who are the enemy):
+    //     regular   the assault line above
+    //     sniper    keeps SniperBack behind the line, engages out to SniperRange
+    //               with SniperAccuracy and one round every SniperShotSeconds,
+    //               never bounds
+    //     tank      runs TankLead ahead of the line, closes to TankCloseRange,
+    //               bounds on his own rhythm, never waits out a lost glimpse
+    //     defender  (Heavy) DefenderHealth times the hit points and, left empty
+    //               in the editor, the full UKB set with the exoskeleton. Below
+    //               DefenderRegenBelow of his health he kneels in the game's own
+    //               boss regeneration (NPC_AI2.StartRegeneration: MainState 12,
+    //               a 12 s pause, 25 percent of HealthMax back over 10 s, clips
+    //               ukb_boss_regen_* which the Marauder model carries). He cannot
+    //               fire then and takes DefenderRegenDamage times the damage:
+    //               the players' window.
+    //     antitank  keeps AntiTankBack behind the line, fires his rifle only
+    //               inside AntiTankSelfDefense and flies the FPV drone
+    //               (CrewDrone.LaunchAt) at the enemy the squad is fighting.
+    //               Against a vehicle he sends the drone first, then draws the
+    //               M72 LAW (AntiTankRockets rounds in all), runs into
+    //               AntiTankLawRange and fires the player LAW's blast.
+    //   ARMOUR scales every hit on a squad man (prefix on NPC_AI2.ApplyDamage):
+    //   the worn items' Regenerate value, weighted by body coverage and doubled
+    //   for UKB parts over the exoskeleton - the player's own gear rule - up to
+    //   ArmorMaxReduction.
+    //
+    // VEHICLES (6.17). A crewed patrol vehicle of a hated faction, or any
+    //   vehicle with a hostile player aboard, within 1.5 x AssaultRange is the
+    //   squad's threat when no infantry is: the line stops at VehicleStandoff
+    //   and its rifles fire at the hull (rifles do no vehicle damage); the
+    //   anti-tank gunner does the killing through the game's ExplosionObject.
+    //
+    // SMOOTH RUNNING (6.17). NPC_AI2.NavAgentMoveToPos clears the path with
+    //   isStopped = true before it sets the new one (CONFIRMED IL), so every
+    //   full move order cost a running man his speed - HYPOTHESIS: the hitch
+    //   before each step in the 6.16.7 report. A running man whose point moves
+    //   is re-aimed on his NavMeshAgent directly (Retarget); the full order, the
+    //   RPC the other clients follow, goes out at most every FullOrderSeconds
+    //   and keeps the speed the path reset would have cost.
+    //
+    // CORPSES (6.17). The 6.16.7 log: "ended (wiped out) - 15 men removed from
+    //   the map", bodies and loot gone. An operation that ends removes only its
+    //   living men; the dead and their settlement stay CorpseMinutes, longer
+    //   while a player stands by.
+    //
     // 6.16.0 FIELD BUG. InitSpawnNpc parents every NPC under the settlement's
     //   AllPeopleTr, so the settlement object is never moved; only the
     //   walk-point root follows the squad and the men move by NavMesh orders.
@@ -127,6 +175,27 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgAssaultRange;
         internal static ConfigEntry<float> CfgCloseRange;
         internal static ConfigEntry<float> CfgBoundSeconds;
+        // New in 6.17: corpses, vehicles, armour and the soldier classes.
+        internal static ConfigEntry<float> CfgCorpseMinutes;
+        internal static ConfigEntry<float> CfgVehicleStandoff;
+        internal static ConfigEntry<bool>  CfgFpvDrones;
+        internal static ConfigEntry<float> CfgArmorMaxReduction;
+        internal static ConfigEntry<float> CfgSniperRange;
+        internal static ConfigEntry<float> CfgSniperAccuracy;
+        internal static ConfigEntry<float> CfgSniperShotSeconds;
+        internal static ConfigEntry<float> CfgSniperBack;
+        internal static ConfigEntry<float> CfgTankLead;
+        internal static ConfigEntry<float> CfgTankCloseRange;
+        internal static ConfigEntry<float> CfgDefenderHealth;
+        internal static ConfigEntry<float> CfgDefenderRegenBelow;
+        internal static ConfigEntry<int>   CfgDefenderRegenCount;
+        internal static ConfigEntry<float> CfgDefenderRegenDamage;
+        internal static ConfigEntry<float> CfgAntiTankBack;
+        internal static ConfigEntry<int>   CfgAntiTankRockets;
+        internal static ConfigEntry<float> CfgAntiTankLawRange;
+        internal static ConfigEntry<float> CfgAntiTankSelfDefense;
+        internal static ConfigEntry<int>   CfgAntiTankDrones;
+        internal static ConfigEntry<float> CfgAntiTankDroneSeconds;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -170,6 +239,62 @@ namespace NextDayRevival
             CfgBoundSeconds = cfg.Bind("NpcWar", "BoundSeconds", 4f,
                 "Im Feuerkampf wechseln die zwei Haelften des Trupps nach so vielen "
                 + "Sekunden: eine schiesst, die andere springt ein Stueck vor.");
+
+            CfgCorpseMinutes = cfg.Bind("NpcWar", "CorpseMinutes", 20f,
+                "So viele Minuten bleiben die Toten eines beendeten Einsatzes liegen, "
+                + "damit man sie pluendern kann (1..120). Steht ein Spieler daneben, "
+                + "bleiben sie laenger. Nur die Lebenden verlassen die Karte sofort.");
+            CfgVehicleStandoff = cfg.Bind("NpcWar", "VehicleStandoff", 70f,
+                "Gegen ein feindliches Fahrzeug bleibt die Linie in diesem Abstand "
+                + "(Meter) stehen; nur der Panzerabwehrschuetze rueckt vor.");
+            CfgFpvDrones = cfg.Bind("NpcWar", "FpvDrones", true,
+                "Panzerabwehrschuetzen des Landetrupps fliegen FPV-Drohnen gegen "
+                + "NPCs und Fahrzeuge.");
+            CfgArmorMaxReduction = cfg.Bind("NpcWar", "ArmorMaxReduction", 0.7f,
+                "Hoechstens so viel Schaden (0..0,9) nimmt die Ruestung eines "
+                + "Truppsoldaten weg. Gerechnet wird wie beim Spieler: Regenerate-Wert "
+                + "der getragenen Teile, UKB-Teile mit Exoskelett doppelt.");
+
+            CfgSniperRange = cfg.Bind("NpcWarClasses", "SniperRange", 380f,
+                "Scharfschuetze: groesste Kampfentfernung (Meter).");
+            CfgSniperAccuracy = cfg.Bind("NpcWarClasses", "SniperAccuracy", 0.9f,
+                "Scharfschuetze: Trefferwahrscheinlichkeit auf kurze Entfernung (0..1); "
+                + "sie faellt zur Reichweite hin nur um 20 Prozent ab.");
+            CfgSniperShotSeconds = cfg.Bind("NpcWarClasses", "SniperShotSeconds", 2.8f,
+                "Scharfschuetze: Sekunden zwischen zwei Schuessen.");
+            CfgSniperBack = cfg.Bind("NpcWarClasses", "SniperBack", 45f,
+                "Scharfschuetze: so viele Meter bleibt er hinter der Linie.");
+            CfgTankLead = cfg.Bind("NpcWarClasses", "TankLead", 18f,
+                "Sturmsoldat (tank): so viele Meter laeuft er vor der Linie.");
+            CfgTankCloseRange = cfg.Bind("NpcWarClasses", "TankCloseRange", 10f,
+                "Sturmsoldat (tank): so nah (Meter) rueckt er an den Gegner heran.");
+            CfgDefenderHealth = cfg.Bind("NpcWarClasses", "DefenderHealth", 1.5f,
+                "Defender: Faktor auf die Lebenspunkte (Patrol/CrewHealth).");
+            CfgDefenderRegenBelow = cfg.Bind("NpcWarClasses", "DefenderRegenBelow", 0.5f,
+                "Defender: unter diesem Anteil seiner Lebenspunkte kniet er nieder und "
+                + "regeneriert (0,1..0,9). Solange schiesst er nicht.");
+            CfgDefenderRegenCount = cfg.Bind("NpcWarClasses", "DefenderRegenCount", 2,
+                "Defender: so oft darf er je Einsatz regenerieren.");
+            CfgDefenderRegenDamage = cfg.Bind("NpcWarClasses", "DefenderRegenDamage", 1.3f,
+                "Defender: Schadensfaktor, solange er kniet (das Fenster fuer die Spieler).");
+            CfgAntiTankBack = cfg.Bind("NpcWarClasses", "AntiTankBack", 25f,
+                "Panzerabwehrschuetze: so viele Meter bleibt er hinter der Linie.");
+            CfgAntiTankRockets = cfg.Bind("NpcWarClasses", "AntiTankRockets", 4,
+                "Panzerabwehrschuetze: LAW-Raketen je Einsatz, nur gegen Fahrzeuge.");
+            CfgAntiTankLawRange = cfg.Bind("NpcWarClasses", "AntiTankLawRange", 90f,
+                "Panzerabwehrschuetze: aus dieser Entfernung (Meter) feuert er die LAW.");
+            CfgAntiTankSelfDefense = cfg.Bind("NpcWarClasses", "AntiTankSelfDefense", 35f,
+                "Panzerabwehrschuetze: sein Gewehr benutzt er nur gegen Gegner, die "
+                + "naeher sind (Meter).");
+            CfgAntiTankDrones = cfg.Bind("NpcWarClasses", "AntiTankDrones", 3,
+                "Panzerabwehrschuetze: FPV-Drohnen je Einsatz.");
+            CfgAntiTankDroneSeconds = cfg.Bind("NpcWarClasses", "AntiTankDroneSeconds", 45f,
+                "Panzerabwehrschuetze: Sekunden zwischen zwei Drohnen.");
+        }
+
+        internal static bool DronesEnabled
+        {
+            get { return CfgFpvDrones == null || CfgFpvDrones.Value; }
         }
 
         // -------------------------------------------------------- world scale
@@ -194,6 +319,20 @@ namespace NextDayRevival
         const float TryDamageHead = 3f;     // Turret.TryDamage hits count as Head: x3 in NPC_AI2
         const int DefenderHitsToKill = 2;   // defender rounds that kill a full-health squad man
         const float EnlistRadius = 120f;    // same-faction NPCs this close to a struck one join
+        const float FullOrderSeconds = 3.5f; // a running man gets a full (RPC) move order at most this often
+        const float RetargetSlack = 4f;     // a point that moved less than this is left alone
+        const float RetargetAngle = 40f;    // a point that turned further gets a full order
+        const float PlayerNearCorpse = 60f; // a player this close keeps the dead on the map
+        const float VehicleAim = 3f;        // aim height on a vehicle hull
+        const float NpcDroneAim = 2.5f;     // FPV aim height on an NPC (chest of the 5 unit capsule)
+        const float SquadLawDamage = 900f;  // the player LAW's blast (RocketHook, VehicleArmor)
+        const float SquadLawRadius = 12f;
+        const int LawId = 1162;             // Crew.LAW_ID, the M72 LAW
+        const int ExoskeletonId = 6019;     // UKB exoskeleton, backpack slot
+        const int UkbHelmetId = 4017, UkbBodyId = 4316, UkbLegsId = 4509, UkbHandsId = 4603;
+        const int SniperRifleId = 1161;     // TAC-50, a sniper's default
+        const int MachineGunId = 1160;      // MG42, the tank's and the defender's default
+        const int RifleFallbackId = 1001;   // the anti-tank gunner's rifle when none is chosen
 
         // NPC_AI2 states. NPCMainState: Idle 0, Walk 1, Run 2.
         // NPCAdditionalState: Empty 0, Aiming 1, Reloading 2, Shooting 3.
@@ -202,6 +341,7 @@ namespace NextDayRevival
         // Marauder prefab has no walk or crouch aiming clip: a man aims and
         // fires standing still, exactly like every vanilla NPC.
         const int MainIdle = 0, MainWalk = 1, MainRun = 2;
+        const int MainRegen = 12;            // NPCMainState.Regeneration
         const int AddNone = 0, AddAim = 1, AddFire = 3;
         const int AddReload = 2;
         const int PoseStand = 0, PoseCrouch = 1;
@@ -216,6 +356,10 @@ namespace NextDayRevival
         /// <summary>What a man is doing this second. For the debug line and
         /// for deciding what to order once.</summary>
         enum Stance { Advance, Fire, Bound, Hold, Reposition }
+
+        /// <summary>The editor's soldier classes (troopdef.SQUAD_CLASSES):
+        /// regular, sniper, "tank" (Assault), "defender" (Heavy), antitank.</summary>
+        internal enum SquadClass { Regular, Sniper, Assault, Heavy, AntiTank }
 
         /// <summary>One NPC in a fight: a squad man or a defender.</summary>
         class Fighter
@@ -243,6 +387,19 @@ namespace NextDayRevival
             public float PlantedSince, SteadyUntil;
             public float NextTargetCheck;   // defender: next Targetable re-check
             public int StepFailures;        // squad man: consecutive ManStep exceptions
+
+            // 6.17: his class, what his armour leaves of a hit, the kneeling
+            // regeneration, the anti-tank gunner's drone, LAW and weapon switch.
+            public SquadClass Class;
+            public float ArmorScale = 1f;
+            public int RegenUsed;
+            public float RegenCheck, RegenHoldUntil;
+            public int RifleId, LawLeft, SwitchTo, SwitchPhase;
+            public float SwitchSince, NextSwitchWarn;
+            public int DroneId, DronesUsed;
+            public float NextDrone, DroneHoldUntil;
+            public Transform DroneTarget;
+            public float LastFullOrder;     // Time.time of the last full (RPC) move order
 
             // Defender posture.
             public float Nerve = 1f, Pace = 1f;
@@ -297,7 +454,25 @@ namespace NextDayRevival
             // 6.16.6 log had no defender numbers at all.
             public int TakenShots, TakenHits;
             public bool DamageErrorLogged;
+            // 6.17: the hostile vehicle in reach, and what the anti-tank
+            // gunners spent on it.
+            public Component Vehicle;
+            public float NextVehicleScan;
+            public int Drones, Rockets;
         }
+
+        /// <summary>The dead of an ended operation, left for their loot.</summary>
+        class Grave
+        {
+            public string Tag;
+            public GameObject Settlement;
+            public readonly List<GameObject> Bodies = new List<GameObject>();
+            public float Until;
+        }
+
+        static readonly List<Grave> _graves = new List<Grave>();
+        // Squad men by NPC_AI2 instance id, for the ApplyDamage armour prefix.
+        static readonly Dictionary<int, Fighter> _armoured = new Dictionary<int, Fighter>();
 
         static readonly List<Squad> _squads = new List<Squad>();
         static readonly List<Fighter> _defenders = new List<Fighter>();
@@ -326,6 +501,8 @@ namespace NextDayRevival
         static MethodInfo _mPhotonView, _mIsMine, _mMasterGetter, _mDestroy;
         static MethodInfo _mBulletsEnded, _mStartRotation, _mClearIntentions, _mPauseTime;
         static MethodInfo _mFireTo, _mHasBullets, _mMuzzle, _mCantWork;
+        static MethodInfo _mStartRegen, _mIsEnemy;
+        static FieldInfo _fNavAgent, _fMySpawnPoint;
         static object _wpTacticalValue;
 
         static bool LookUp()
@@ -404,6 +581,13 @@ namespace NextDayRevival
                 Type.EmptyTypes, null);
             _mPauseTime = AccessTools.Method(_npcType, "SetPauseTime",
                 new Type[] { typeof(float) }, null);
+            _mStartRegen = AccessTools.Method(_npcType, "StartRegeneration", Type.EmptyTypes, null);
+            _mIsEnemy = AccessTools.Method(_npcType, "IsEnemyFraction", null, null);
+            if (_mIsEnemy != null && _mIsEnemy.GetParameters().Length != 1) _mIsEnemy = null;
+            _fNavAgent = AccessTools.Field(_npcType, "_navAgent");
+            if (_fNavAgent != null && !typeof(NavMeshAgent).IsAssignableFrom(_fNavAgent.FieldType))
+                _fNavAgent = null;
+            _fMySpawnPoint = AccessTools.Field(_npcType, "MySpawnPoint");
 
             Type weapon = _fWeapon == null ? null : _fWeapon.FieldType;
             if (weapon != null)
@@ -457,6 +641,15 @@ namespace NextDayRevival
                     + (_fInitialized != null) + ", BehaviorPattern " + (_fBehavior != null)
                     + ", MySettlement.IsSafeSettlement " + (_fSafeSettlement != null)
                     + ") - squads may fire at NPCs that cannot be hurt.");
+            if (_mStartRegen == null)
+                RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2.StartRegeneration missing - a squad "
+                    + "defender will not kneel and regenerate.");
+            if (_fNavAgent == null)
+                RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2._navAgent missing - running men get "
+                    + "a full move order for every change of their point.");
+            if (_mIsEnemy == null)
+                RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2.IsEnemyFraction missing - a squad "
+                    + "ignores player vehicles.");
             return _ok;
         }
 
@@ -497,7 +690,46 @@ namespace NextDayRevival
             // that it is a main reason for 3 losses of 15 (E-057). The same
             // range is the defender's accuracy falloff basis and target spread
             // scale, so both follow the longer reach.
+            if (f.Squad != null && f.Class == SquadClass.Sniper) return SniperRange();
             return f.Squad != null ? AssaultRange() : Mathf.Max(CfgSightRange.Value, AssaultRange());
+        }
+
+        static float SniperRange()
+        {
+            return Mathf.Clamp(CfgSniperRange == null ? 380f : CfgSniperRange.Value, 60f, 900f);
+        }
+
+        static float SniperAccuracy()
+        {
+            return Mathf.Clamp01(CfgSniperAccuracy == null ? 0.9f : CfgSniperAccuracy.Value);
+        }
+
+        static float TankCloseRange()
+        {
+            return Mathf.Clamp(CfgTankCloseRange == null ? 10f : CfgTankCloseRange.Value, 5f, CloseRange());
+        }
+
+        static float VehicleStandoff()
+        {
+            return Mathf.Clamp(CfgVehicleStandoff == null ? 70f : CfgVehicleStandoff.Value,
+                CloseRange(), 250f);
+        }
+
+        /// <summary>How far ahead of (positive) or behind (negative) the line
+        /// his class puts a man. The regular line is untouched.</summary>
+        static float ClassRank(Fighter f)
+        {
+            switch (f.Class)
+            {
+                case SquadClass.Assault:
+                    return Mathf.Clamp(CfgTankLead == null ? 18f : CfgTankLead.Value, 0f, 60f);
+                case SquadClass.Sniper:
+                    return -Mathf.Clamp(CfgSniperBack == null ? 45f : CfgSniperBack.Value, 0f, 150f);
+                case SquadClass.AntiTank:
+                    return -Mathf.Clamp(CfgAntiTankBack == null ? 25f : CfgAntiTankBack.Value, 0f, 150f);
+                default:
+                    return 0f;
+            }
         }
 
         // ------------------------------------------------------------ operations
@@ -507,7 +739,8 @@ namespace NextDayRevival
         /// gets there is still removed after the walking allowance plus the
         /// patrol time, so no landing can pile men up on the map.</summary>
         internal static bool StartOperation(string tag, GameObject settlement, Array npcs,
-                                            Vector3 tail, Vector3 head, float patrolSeconds)
+                                            Vector3 tail, Vector3 head, float patrolSeconds,
+                                            List<RevivalComposition.CrewMan> loadout)
         {
             if (!LookUp() || settlement == null || npcs == null) return false;
             Squad s = new Squad();
@@ -535,7 +768,13 @@ namespace NextDayRevival
                 if (sector != null) UnityEngine.Object.Destroy(sector);
                 Fighter f = NewFighter(ai, s);
                 f.NextMove = Time.time + 0.2f + 0.05f * s.Men.Count;
+                // His loadout line is the one Crew dressed his spawn point with:
+                // spawn point "Crew<i>_<role>" took loadout[i % count].
+                RevivalComposition.CrewMan spec = loadout != null && loadout.Count > 0
+                    ? loadout[SpawnIndex(ai, i) % loadout.Count] : null;
+                Equip(f, spec);
                 s.Men.Add(f);
+                _armoured[ai.GetInstanceID()] = f;
             }
             if (s.Men.Count == 0) return false;
             AssignLanes(s);
@@ -545,7 +784,8 @@ namespace NextDayRevival
                 + " men, arrow " + tail.ToString("0") + " -> " + head.ToString("0")
                 + ", " + (s.Phase == Phase.ToStart ? "running to the arrow first, " : "")
                 + "patrol " + (s.PatrolSeconds / 60f).ToString("0") + " min"
-                + (s.WalkRoot == null ? ", no walk-point root found" : "") + ".");
+                + (s.WalkRoot == null ? ", no walk-point root found" : "") + "; "
+                + ClassSummary(s) + ".");
             return true;
         }
 
@@ -655,7 +895,7 @@ namespace NextDayRevival
             {
                 Fighter f = men[k];
                 f.LaneOffset = (k - (n - 1) * 0.5f) * step;
-                f.RankOffset = -(k % ranks) * RankDepth;
+                f.RankOffset = -(k % ranks) * RankDepth + ClassRank(f);
                 f.Team = k % 2;
             }
         }
@@ -676,11 +916,13 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (_squads.Count == 0 && _defenders.Count == 0) { _status = ""; return; }
+            if (_squads.Count == 0 && _defenders.Count == 0 && _graves.Count == 0)
+            { _status = ""; return; }
             if (!LookUp()) return;
             if (!IsMaster()) { _status = "NpcWar: not master client"; return; }
 
             float now = Time.time;
+            if (_graves.Count > 0) TickGraves(now);
             _searchBudget = 1;
             if (now >= _nextSceneScan)
             {
@@ -791,12 +1033,26 @@ namespace NextDayRevival
                 along = Vector3.Dot(FlatV(centre - a), dir);
             }
 
-            // The contact picture: who is the squad fighting?
+            // A hostile vehicle in reach (6.17), twice a second.
+            if (now >= s.NextVehicleScan)
+            {
+                s.NextVehicleScan = now + 0.5f;
+                s.Vehicle = HostileVehicle(s, centre);
+            }
+
+            // The contact picture: who is the squad fighting? Infantry and
+            // players first; the vehicle when there is nobody else.
             if (now >= s.NextThreat)
             {
                 s.NextThreat = now + 0.25f;
                 bool seen;
                 Transform enemy = SquadThreat(s, centre, now, out seen);
+                if (enemy == null && s.Vehicle != null)
+                {
+                    enemy = s.Vehicle.transform;
+                    seen = VehicleClear(centre + Vector3.up * EyeHeight,
+                                        enemy.position + Vector3.up * VehicleAim, s.Vehicle);
+                }
                 if (enemy != null) { s.Threat = enemy; s.ThreatSeen = seen; s.ThreatUntil = now + 6f; }
                 else if (now >= s.ThreatUntil) s.Threat = null;
                 else s.ThreatSeen = false;
@@ -804,8 +1060,10 @@ namespace NextDayRevival
             if (s.Threat != null && !s.Threat) s.Threat = null;
             // An enemy somebody can shoot at is closed to CloseRange and fought
             // from there. One that nobody can see is walked up to until
-            // somebody can - a line that stops at a wall wins nothing.
-            float stopAt = s.ThreatSeen ? CloseRange() : 8f;
+            // somebody can - a line that stops at a wall wins nothing. A
+            // vehicle is fought from VehicleStandoff.
+            bool vehicleFight = s.Vehicle != null && s.Threat != null && s.Threat == s.Vehicle.transform;
+            float stopAt = vehicleFight ? VehicleStandoff() : (s.ThreatSeen ? CloseRange() : 8f);
 
             // The line faces the enemy while there is one in front of it;
             // otherwise it faces along the arrow.
@@ -938,24 +1196,29 @@ namespace NextDayRevival
         static void Report(Squad s, float now, int alive)
         {
             s.NextReport = now + 15f;
-            int armed = 0, fire = 0, move = 0, hold = 0, reload = 0;
+            int armed = 0, fire = 0, move = 0, hold = 0, reload = 0, kneel = 0;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || !Alive(f.Ai)) continue;
                 if (f.Armed) armed++;
-                if (Reloading(f)) reload++;
+                if (IntField(f.Ai, _fMainState, -1) == MainRegen) kneel++;
+                else if (Reloading(f)) reload++;
                 else if (f.Stance == Stance.Fire) fire++;
                 else if (f.Stance == Stance.Hold) hold++;
                 else move++;
             }
             RevivalPlugin.L.LogInfo("NpcWar: " + s.Tag + " " + s.Phase + " - " + alive + " alive, "
                 + armed + " armed, " + fire + " firing, " + move + " moving, " + hold + " holding, "
-                + reload + " reloading; " + s.Shots + " shots at NPCs, " + s.Hits + " hits; "
+                + reload + " reloading, " + kneel + " kneeling; " + s.Shots + " shots at NPCs, "
+                + s.Hits + " hits; "
                 + _defenders.Count + " defender(s) enlisted, " + s.TakenShots + " shots at the squad, "
                 + s.TakenHits + " hits; "
                 + (s.Threat == null ? "no contact"
                    : "contact " + Flat(s.Threat.position - s.Centre).ToString("0") + " units away")
+                + (s.Vehicle == null ? "" : ", hostile vehicle "
+                   + Flat(s.Vehicle.transform.position - s.Centre).ToString("0") + " units away")
+                + ", " + s.Drones + " drone(s), " + s.Rockets + " LAW rocket(s)"
                 + ", centre " + s.Centre.ToString("0") + ".");
         }
 
@@ -966,11 +1229,27 @@ namespace NextDayRevival
         static void ManStep(Fighter f, Squad s, Vector3 anchor, Vector3 front,
                             Vector3 centre, float now)
         {
-            EnsureArmed(f, now);
+            // A defender kneeling in the game's own regeneration belongs to the
+            // game: RegenerationActions heals him and ends the state, and any
+            // order of ours - even the pause Quiet refreshes - would cut it short.
+            if (Regenerating(f, now))
+            {
+                f.Stance = Stance.Hold;
+                f.HasOrder = false;
+                if (f.IkDriven) ReleaseAim(f);
+                return;
+            }
+            // The anti-tank gunner putting one weapon away and drawing the
+            // other: no draw repair of ours in between, and no shot.
+            bool switching = WeaponSwitch(f, now);
+            if (switching) f.Armed = false;
+            else EnsureArmed(f, now);
             Acquire(f, now);
             // Sampled every frame, so a pass through a run between two shots
             // is never missed (Planted).
             Planted(f, now);
+            if (RegenDue(f, now) && StartRegen(f, now)) return;
+            if (f.Class == SquadClass.AntiTank && AntiTankStep(f, s, front, centre, now)) return;
 
             // A barrel behind a wall, or a comrade in the line of fire: the eyes
             // may see, the rifle may not. Run on with the line for a moment
@@ -1009,10 +1288,23 @@ namespace NextDayRevival
             // 2  A visible enemy in range and a weapon in hand: shoot now.
             bool sees = f.Target != null && f.Sees && now >= f.BlindUntil;
             float dist = f.Target == null ? 0f : Flat(f.Target.position - f.Tr.position);
-            if (sees && f.Armed && dist <= AssaultRange())
+            float range = RangeOf(f);
+            if (sees && f.Armed && dist <= range)
             {
-                if (f.FireSince <= 0f) f.FireSince = now;
-                f.SteadyUntil = now + SteadySeconds;
+                if (f.FireSince <= 0f)
+                {
+                    f.FireSince = now;
+                    // A sniper takes his time over the first round.
+                    if (f.Class == SquadClass.Sniper) f.NextShot = Mathf.Max(f.NextShot, now + 1f);
+                }
+                f.SteadyUntil = now + (f.Class == SquadClass.Sniper ? SteadySeconds * 2f : SteadySeconds);
+                // The anti-tank gunner keeps out of the gunfight: his rifle
+                // only answers an enemy close to him.
+                if (f.Class == SquadClass.AntiTank && dist > AntiTankSelfDefense())
+                {
+                    Steady(f, now);
+                    return;
+                }
                 if (BoundDue(f, s, front, dist, now))
                 {
                     StartBound(f, s, front, centre, now);
@@ -1026,18 +1318,33 @@ namespace NextDayRevival
             //    into a run for every glimpse he loses never plants his feet:
             //    he stands in the aim clip for a moment and fires again the
             //    instant it shows. No line of fire at all (BlindUntil) still
-            //    sends him on at once.
+            //    sends him on at once, and the tank never waits.
             if (f.Armed && f.Target != null && now < f.SteadyUntil && now >= f.BlindUntil
-                && dist <= AssaultRange())
+                && dist <= range && f.Class != SquadClass.Assault)
             {
                 Steady(f, now);
                 return;
             }
             f.FireSince = 0f;
 
-            // 3  Otherwise run on with the line.
+            // 3  Otherwise run on with the line - his class decides where in it
+            //    (LayOut); the tank goes no closer than TankCloseRange.
             Vector3 dest = anchor + Side(front) * f.LaneOffset + front * f.RankOffset;
+            if (f.Class == SquadClass.Assault && s.Threat != null)
+                dest = KeepOff(dest, s.Threat.position, front, TankCloseRange());
             MoveInLine(f, s, dest, front, centre, now);
+        }
+
+        /// <summary>A destination no closer than minDist to a point, pulled
+        /// straight back from it.</summary>
+        static Vector3 KeepOff(Vector3 dest, Vector3 threat, Vector3 front, float minDist)
+        {
+            Vector3 away = FlatV(dest - threat);
+            float d = away.magnitude;
+            if (d >= minDist) return dest;
+            if (d < 0.01f) away = front * -1f;
+            else away /= d;
+            return new Vector3(threat.x, dest.y, threat.z) + away * minDist;
         }
 
         /// <summary>His half of the squad is the one that moves now, he has
@@ -1045,8 +1352,21 @@ namespace NextDayRevival
         /// range and in front of the line.</summary>
         static bool BoundDue(Fighter f, Squad s, Vector3 front, float dist, float now)
         {
-            if (s.Threat == null || s.BoundTeam != f.Team || now < f.NextBound) return false;
-            if (now - f.FireSince < 1.5f || dist <= CloseRange() + BoundStep) return false;
+            // The sniper and the anti-tank gunner fight from where they stand,
+            // and nobody bounds at a vehicle.
+            if (f.Class == SquadClass.Sniper || f.Class == SquadClass.AntiTank) return false;
+            if (s.Threat == null || now < f.NextBound) return false;
+            if (s.Vehicle != null && s.Threat == s.Vehicle.transform) return false;
+            if (f.Class == SquadClass.Assault)
+            {
+                // The tank goes in on his own rhythm, not with a half of the line.
+                if (now - f.FireSince < 1.2f || dist <= TankCloseRange() + BoundStep * 0.5f) return false;
+            }
+            else
+            {
+                if (s.BoundTeam != f.Team) return false;
+                if (now - f.FireSince < 1.5f || dist <= CloseRange() + BoundStep) return false;
+            }
             Vector3 to = FlatV(f.Target.position - f.Tr.position);
             return Vector3.Angle(to, front) <= 60f;
         }
@@ -1057,15 +1377,16 @@ namespace NextDayRevival
             Vector3 side = Side(front);
             float drift = Vector3.Dot(FlatV(centre + side * f.LaneOffset - f.Tr.position), side);
             Vector3 dest = f.Tr.position + front * BoundStep + side * Mathf.Clamp(drift, -6f, 6f);
+            float close = f.Class == SquadClass.Assault ? TankCloseRange() : CloseRange();
             if (f.Target != null)
             {
                 float after = Flat(f.Target.position - dest);
-                if (after < CloseRange())
-                    dest -= front * Mathf.Min(BoundStep, CloseRange() - after);
+                if (after < close)
+                    dest -= front * Mathf.Min(BoundStep, close - after);
             }
             f.BoundDest = dest;
             f.BoundUntil = now + 4f;
-            f.NextBound = now + BoundSeconds() * 1.5f;
+            f.NextBound = now + (f.Class == SquadClass.Assault ? 2.5f : BoundSeconds() * 1.5f);
             f.FireSince = 0f;
             Go(f, dest, MainRun, PoseStand, now, Stance.Bound);
         }
@@ -1097,14 +1418,28 @@ namespace NextDayRevival
 
             if (f.IkDriven) ReleaseAim(f);
             f.Stance = Stance.Advance;
-            // Every order is a SetStateWithAnimAndSync RPC to every player
-            // around; the point is Lead units ahead, so re-aiming it once a
-            // second is plenty and keeps fifteen men off the network.
-            if (f.HasOrder && IntField(f.Ai, _fMainState, -1) == state
-                && Flat(dest - f.Ordered) < 12f && StillOurPoint(f) && now < f.MoveDeadline)
-                return;
-            if (now < f.NextMove) return;
+            int live = IntField(f.Ai, _fMainState, -1);
+            // Every full order is a SetStateWithAnimAndSync RPC to every player
+            // around, and on this machine NavAgentMoveToPos stops the man
+            // before it gives him the new path (6.17). While he runs to our
+            // point, a point that barely moved is left alone and one that
+            // moved on is re-aimed on his NavMeshAgent (Retarget); a full order
+            // goes out at most every FullOrderSeconds, or when he turns.
+            if (f.HasOrder && live == state && StillOurPoint(f) && now < f.MoveDeadline)
+            {
+                if (Flat(dest - f.Ordered) < RetargetSlack) return;
+                if (now - f.LastFullOrder < FullOrderSeconds
+                    && Vector3.Angle(FlatV(dest - f.Tr.position), FlatV(f.Ordered - f.Tr.position)) <= RetargetAngle
+                    && Retarget(f, dest, now))
+                    return;
+            }
+            // The game ended his path (RunStateAction -> Idle) while there is
+            // still ground to take: send him on at once instead of letting him
+            // stand for the rest of the second.
+            bool stopped = f.HasOrder && live == MainIdle && now - f.LastFullOrder > 0.6f;
+            if (now < f.NextMove && !stopped) return;
             f.NextMove = now + 1f;
+            f.LastFullOrder = now;
             OrderMove(f, dest, state, AddNone, PoseStand);
         }
 
@@ -1208,6 +1543,11 @@ namespace NextDayRevival
         /// crewman). FireTo additionally keeps the weapon's rate of fire.</summary>
         static float ShotDelay(Fighter f)
         {
+            if (f.Squad != null && f.Class == SquadClass.Sniper)
+            {
+                float slow = CfgSniperShotSeconds == null ? 2.8f : CfgSniperShotSeconds.Value;
+                return Mathf.Clamp(slow, 0.5f, 10f) * UnityEngine.Random.Range(0.85f, 1.15f);
+            }
             if (_fShotDelayCached != null && f.Ai != null)
             {
                 try
@@ -1424,7 +1764,8 @@ namespace NextDayRevival
             if (now < f.NextLos) return;
             f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
             float height;
-            f.Sees = AimPoint(f, f.Target, out height);
+            if (IsSquadVehicle(f, f.Target)) f.Sees = VehicleVisible(f, f.Target, out height);
+            else f.Sees = AimPoint(f, f.Target, out height);
             f.AimHeight = height;
             if (f.Sees) f.LastSeen = now;
         }
@@ -1440,7 +1781,7 @@ namespace NextDayRevival
         /// line of fire was checked here.</summary>
         static bool PickTargetForMan(Fighter f, float now)
         {
-            float range = AssaultRange();
+            float range = RangeOf(f);
             Component player = KillTarget(f);
             if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
             {
@@ -1486,7 +1827,24 @@ namespace NextDayRevival
             f.Target = null;
             f.TargetIsPlayer = false;
             f.Sees = false;
-            if (n == 0) return true;
+            if (n == 0)
+            {
+                // No infantry and no player in reach: the squad's hostile
+                // vehicle, whose hull the line fires at while the anti-tank
+                // gunner kills it (he picks it himself, AntiTankStep).
+                Squad sq = f.Squad;
+                if (sq != null && sq.Vehicle != null && f.Class != SquadClass.AntiTank
+                    && (sq.Vehicle.transform.position - p).sqrMagnitude < rangeSqr)
+                {
+                    float height;
+                    f.Target = sq.Vehicle.transform;
+                    f.Sees = VehicleVisible(f, f.Target, out height);
+                    f.AimHeight = height;
+                    if (f.Sees) f.LastSeen = now;
+                    f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
+                }
+                return true;
+            }
             // The nearest three are tried for a line of fire; the nearest of all
             // stays the target when none of them can be seen, so the man at
             // least turns toward it.
@@ -1685,7 +2043,8 @@ namespace NextDayRevival
             Vector3 from = Muzzle(weapon, f);
             if (from == Vector3.zero) return false;
             // Eyes can see over cover while the barrel is still behind it.
-            if (!Clear(from, aimAt, f.Target))
+            bool hull = IsSquadVehicle(f, f.Target);
+            if (hull ? !VehicleClear(from, aimAt, f.Squad.Vehicle) : !Clear(from, aimAt, f.Target))
             {
                 if (f.MuzzleBlockedSince <= 0f) f.MuzzleBlockedSince = Time.time;
                 f.NextShot = Time.time + 0.2f;
@@ -1722,7 +2081,19 @@ namespace NextDayRevival
             }
             if (f.Squad != null) f.Squad.Shots++;
             else if (victim != null && victim.Squad != null) victim.Squad.TakenShots++;
-            if (rocket) return true;
+            if (rocket)
+            {
+                // The anti-tank gunner's LAW rounds are counted: AntiTankRockets
+                // in all, then the rifle again (AntiTankStep).
+                if (f.Squad != null && f.Class == SquadClass.AntiTank && f.LawLeft > 0)
+                {
+                    f.LawLeft--;
+                    f.Squad.Rockets++;
+                    RevivalPlugin.L.LogInfo("NpcWar: " + f.Squad.Tag + " anti-tank gunner fired a LAW at "
+                        + f.Target.name + " (" + dist.ToString("0") + " units), " + f.LawLeft + " left.");
+                }
+                return true;
+            }
             // Being shot at is felt whether or not the round connects.
             if (victim != null && CfgSuppression.Value)
                 victim.Suppression = Mathf.Min(1f,
@@ -1903,6 +2274,8 @@ namespace NextDayRevival
             // falls off harder over its long AssaultRange; 15 men with a bonus
             // wiped a settlement for 3 losses (E-057).
             float acc = Mathf.Clamp01(CfgAccuracy.Value) * shooter.Skill;
+            if (shooter.Squad != null && shooter.Class == SquadClass.Sniper)
+                acc = SniperAccuracy() * shooter.Skill;
             acc *= 1f - 0.45f * shooter.Suppression;
             if (victim != null)
             {
@@ -1912,7 +2285,8 @@ namespace NextDayRevival
                     || victim.Stance == Stance.Advance) acc *= 0.8f;
             }
             float far = Mathf.Clamp01(dist / Mathf.Max(1f, RangeOf(shooter)));
-            float falloff = shooter.Squad != null ? SquadFalloff : 0.4f;
+            float falloff = shooter.Squad == null ? 0.4f
+                : (shooter.Class == SquadClass.Sniper ? 0.2f : SquadFalloff);
             if (UnityEngine.Random.value <= acc * (1f - falloff * far)) return Vector3.zero;
 
             Vector3 axis = (to - from).normalized;
@@ -2144,12 +2518,25 @@ namespace NextDayRevival
                 if (list == null) return;
                 list.Add(wp);
 
+                // NavAgentMoveToPos clears the path with isStopped = true before
+                // it sets the new one (CONFIRMED IL, 6.17): a man already running
+                // there would lose his speed on every order. Keep what he had.
+                NavMeshAgent agent = Agent(f);
+                bool moving = agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh
+                    && agent.hasPath && IntField(f.Ai, _fMainState, -1) == state;
+                Vector3 velocity = moving ? agent.velocity : Vector3.zero;
+
                 _mTempTask.Invoke(f.Ai, new object[] { Arg(_mTempTask, 0, 2) });   // Tactical
                 _fTempPoints.SetValue(f.Ai, list);
                 if (_fTempIndex != null) _fTempIndex.SetValue(f.Ai, 0);
                 _mTargetWp.Invoke(f.Ai, new object[] { wp });
                 Quiet(f, false);
                 if (!SetState(f, state, add, pose, 0, f.Tr.eulerAngles.y)) return;
+                if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
+                {
+                    if (agent.isStopped) agent.isStopped = false;
+                    if (moving && velocity.sqrMagnitude > 0.01f) agent.velocity = velocity;
+                }
                 f.WantMain = state; f.WantAdd = add; f.WantPose = pose;
                 f.NextState = Time.time + 0.3f;
                 f.HasOrder = true;
@@ -2367,30 +2754,1002 @@ namespace NextDayRevival
             return true;
         }
 
+        // ------------------------------------------------------------ classes
+
+        /// <summary>The editor's class name, normalized. Anything unknown is a
+        /// regular: troopdef.py validates, this is the second line.</summary>
+        internal static string ClassKey(string raw)
+        {
+            string k = raw == null ? "" : raw.Trim().ToLowerInvariant();
+            switch (k)
+            {
+                case "sniper":
+                case "tank":
+                case "defender":
+                case "antitank":
+                    return k;
+                default:
+                    return "regular";
+            }
+        }
+
+        static SquadClass ClassOf(string key)
+        {
+            switch (ClassKey(key))
+            {
+                case "sniper": return SquadClass.Sniper;
+                case "tank": return SquadClass.Assault;
+                case "defender": return SquadClass.Heavy;
+                case "antitank": return SquadClass.AntiTank;
+                default: return SquadClass.Regular;
+            }
+        }
+
+        /// <summary>Copies of a landing's loadout lines with the class defaults
+        /// in the slots the editor left empty: a sniper gets the TAC-50, a tank
+        /// and a defender the MG42, a defender the full UKB set with the
+        /// exoskeleton and DefenderHealth, an anti-tank gunner a rifle (the LAW
+        /// is his second weapon, never his first). A regular keeps the map's
+        /// default kit exactly as before 6.17. The authored lines stay as they
+        /// are: the same landing drops again.</summary>
+        internal static List<RevivalComposition.CrewMan> WithClassDefaults(
+            List<RevivalComposition.CrewMan> authored)
+        {
+            List<RevivalComposition.CrewMan> list = new List<RevivalComposition.CrewMan>();
+            if (authored == null) return list;
+            for (int i = 0; i < authored.Count; i++)
+            {
+                RevivalComposition.CrewMan a = authored[i];
+                if (a == null) continue;
+                RevivalComposition.CrewMan m = new RevivalComposition.CrewMan();
+                m.Role = a.Role;
+                m.Weapons = a.Weapons == null ? new int[0] : (int[])a.Weapons.Clone();
+                m.Headwear = a.Headwear;
+                m.Mask = a.Mask;
+                m.Body = a.Body;
+                m.Legs = a.Legs;
+                m.Hands = a.Hands;
+                m.Backpack = a.Backpack;
+                m.Fpv = a.Fpv;
+                m.Class = ClassKey(a.Class);
+                switch (ClassOf(m.Class))
+                {
+                    case SquadClass.Sniper:
+                        if (m.MainWeapon <= 0) m.Weapons = new int[] { SniperRifleId };
+                        break;
+                    case SquadClass.Assault:
+                        if (m.MainWeapon <= 0) m.Weapons = new int[] { MachineGunId };
+                        break;
+                    case SquadClass.Heavy:
+                        m.HealthScale = Mathf.Clamp(CfgDefenderHealth == null ? 1.5f
+                            : CfgDefenderHealth.Value, 0.5f, 5f);
+                        if (m.MainWeapon <= 0) m.Weapons = new int[] { MachineGunId };
+                        if (m.Headwear <= 0 && m.Mask <= 0) m.Headwear = UkbHelmetId;
+                        if (m.Body <= 0) m.Body = UkbBodyId;
+                        if (m.Legs <= 0) m.Legs = UkbLegsId;
+                        if (m.Hands <= 0) m.Hands = UkbHandsId;
+                        if (m.Backpack <= 0) m.Backpack = ExoskeletonId;
+                        break;
+                    case SquadClass.AntiTank:
+                        if (m.MainWeapon <= 0 || m.MainWeapon == LawId)
+                            m.Weapons = new int[] { RifleFallbackId };
+                        break;
+                }
+                list.Add(m);
+            }
+            return list;
+        }
+
+        /// <summary>The index of the spawn point an NPC came from. Crew names
+        /// them "Crew&lt;i&gt;_&lt;role&gt;" and dresses point i with loadout
+        /// line i % count; NPC_AI2.MySpawnPoint is the point (IL,
+        /// NPC_AI2.InitBossData). The array position is the fallback.</summary>
+        static int SpawnIndex(Component ai, int fallback)
+        {
+            try
+            {
+                Component sp = _fMySpawnPoint == null ? null : _fMySpawnPoint.GetValue(ai) as Component;
+                string name = sp == null ? null : sp.gameObject.name;
+                if (name != null && name.StartsWith("Crew"))
+                {
+                    int end = name.IndexOf('_');
+                    int n;
+                    if (end > 4 && int.TryParse(name.Substring(4, end - 4), out n) && n >= 0)
+                        return n;
+                }
+            }
+            catch { }
+            return fallback;
+        }
+
+        static void Equip(Fighter f, RevivalComposition.CrewMan spec)
+        {
+            f.Class = ClassOf(spec == null ? "" : spec.Class);
+            f.ArmorScale = ArmorScale(spec);
+            f.RifleId = f.WeaponId;
+            if (f.Class == SquadClass.AntiTank)
+            {
+                f.LawLeft = Mathf.Clamp(CfgAntiTankRockets == null ? 4 : CfgAntiTankRockets.Value, 0, 20);
+                f.NextDrone = Time.time + 12f;
+            }
+        }
+
+        static string ClassSummary(Squad s)
+        {
+            int[] n = new int[5];
+            float armour = 0f;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                n[(int)s.Men[i].Class]++;
+                armour += 1f - s.Men[i].ArmorScale;
+            }
+            return n[0] + " regular, " + n[1] + " sniper, " + n[2] + " tank, " + n[3]
+                + " defender, " + n[4] + " anti-tank; armour takes "
+                + (s.Men.Count == 0 ? 0f : armour / s.Men.Count * 100f).ToString("0")
+                + " percent of a hit on average";
+        }
+
+        // ------------------------------------------------------------- armour
+
+        /// <summary>What is left of a hit on a man in this loadout. The player's
+        /// own rule (PlayerLifeDataManager.DecreaseDamageFromGearRegenerate,
+        /// CONFIRMED IL): an item takes ItemRegenerate percent, doubled for a UKB
+        /// part while the exoskeleton gives energy. An NPC hit carries no
+        /// reliable body part (Turret.TryDamage always says Head), so the slots
+        /// are weighted by the body they cover. HYPOTHESIS: the weights.</summary>
+        static float ArmorScale(RevivalComposition.CrewMan spec)
+        {
+            if (spec == null) return 1f;
+            bool exo = spec.Backpack == ExoskeletonId;
+            float p = 0.18f * SlotProtection(spec.Headwear, exo)
+                    + 0.04f * SlotProtection(spec.Mask, exo)
+                    + 0.46f * SlotProtection(spec.Body, exo)
+                    + 0.22f * SlotProtection(spec.Legs, exo)
+                    + 0.10f * SlotProtection(spec.Hands, exo);
+            float cap = Mathf.Clamp(CfgArmorMaxReduction == null ? 0.7f : CfgArmorMaxReduction.Value, 0f, 0.9f);
+            return 1f - Mathf.Clamp(p, 0f, cap);
+        }
+
+        static float SlotProtection(int id, bool exo)
+        {
+            if (id <= 0) return 0f;
+            float k = ItemRegenerate(id) / 100f;
+            if (exo && IsUkbPart(id)) k *= 2f;
+            return Mathf.Clamp01(k);
+        }
+
+        static readonly Dictionary<int, float> _regenerate = new Dictionary<int, float>();
+        static MethodInfo _mItemScript, _mItemDb;
+
+        /// <summary>ItemSpawned.Regenerate of an item, through
+        /// ItemSpawnCategoriesDB.current.GetItemSpawnedScriptByID (IL). The UKB
+        /// set falls back to research/items.tsv (4017/4316 48.5, 4509 40, 4603
+        /// 0) when the database cannot be read.</summary>
+        static float ItemRegenerate(int id)
+        {
+            float v;
+            if (_regenerate.TryGetValue(id, out v)) return v;
+            v = -1f;
+            try
+            {
+                if (_mItemScript == null)
+                {
+                    Type db = RevivalPlugin.TypeByName("ItemSpawnCategoriesDB");
+                    if (db != null)
+                    {
+                        _mItemDb = AccessTools.PropertyGetter(db, "current");
+                        _mItemScript = AccessTools.Method(db, "GetItemSpawnedScriptByID",
+                            new Type[] { typeof(int) }, null);
+                    }
+                }
+                object current = _mItemDb == null ? null : _mItemDb.Invoke(null, null);
+                object script = current == null || _mItemScript == null ? null
+                    : _mItemScript.Invoke(current, new object[] { id });
+                if (script != null)
+                {
+                    FieldInfo field = AccessTools.Field(script.GetType(), "Regenerate");
+                    object raw = field == null ? null : field.GetValue(script);
+                    if (raw != null) v = ToFloat(raw);
+                }
+            }
+            catch { v = -1f; }
+            if (v < 0f)
+            {
+                switch (id)
+                {
+                    case UkbHelmetId: case UkbBodyId: v = 48.5f; break;
+                    case UkbLegsId: v = 40f; break;
+                    case UkbHandsId: v = 0f; break;
+                    default: return 0f;   // not cached: the database may load later
+                }
+            }
+            _regenerate[id] = v;
+            return v;
+        }
+
+        static MethodInfo _mUkbPart;
+        static bool _ukbLooked;
+
+        /// <summary>PlayerUKBController.UKB_IsPartOfEkzoskelet (IL: its four
+        /// static id lists), or the four UKB-1 ids when that cannot answer.</summary>
+        static bool IsUkbPart(int id)
+        {
+            if (id == UkbHelmetId || id == UkbBodyId || id == UkbLegsId || id == UkbHandsId) return true;
+            if (!_ukbLooked)
+            {
+                _ukbLooked = true;
+                Type t = RevivalPlugin.TypeByName("PlayerUKBController");
+                _mUkbPart = t == null ? null : AccessTools.Method(t, "UKB_IsPartOfEkzoskelet",
+                    new Type[] { typeof(int) }, null);
+                if (_mUkbPart != null && (!_mUkbPart.IsStatic || _mUkbPart.ReturnType != typeof(bool)))
+                    _mUkbPart = null;
+            }
+            if (_mUkbPart == null) return false;
+            try { return (bool)_mUkbPart.Invoke(null, new object[] { id }); }
+            catch { return false; }
+        }
+
+        /// <summary>A float, an int or an ObscuredFloat (implicit conversion);
+        /// -1 when it is none of them.</summary>
+        static float ToFloat(object raw)
+        {
+            if (raw == null) return -1f;
+            if (raw is float) return (float)raw;
+            if (raw is double) return (float)(double)raw;
+            if (raw is int) return (int)raw;
+            MethodInfo[] ms = raw.GetType().GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(float)) continue;
+                ParameterInfo[] ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == raw.GetType())
+                {
+                    try { return (float)ms[i].Invoke(null, new object[] { raw }); }
+                    catch { return -1f; }
+                }
+            }
+            return -1f;
+        }
+
+        // ------------------------------------------------------------ install
+
+        /// <summary>Two game hooks, both inert without an operation or a kill
+        /// by damage owner 0.</summary>
+        internal static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
+                MethodInfo stats = sType == null ? null : AccessTools.Method(sType, "StatsOnNpcKilled",
+                    new Type[] { typeof(int) }, null);
+                if (stats == null)
+                    RevivalPlugin.L.LogWarning("NpcWar: NPC_Settlement.StatsOnNpcKilled(int) not found - "
+                        + "the kill-streak guard is limited to squad rounds.");
+                else
+                    harmony.Patch(stats, new HarmonyMethod(typeof(NpcWar).GetMethod("KillStatsPrefix",
+                        BindingFlags.Public | BindingFlags.Static)), null, null, null, null);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("NpcWar: kill-streak guard not installed - " + ex);
+            }
+            try
+            {
+                Type npc = RevivalPlugin.TypeByName("NPC_AI2");
+                MethodInfo apply = npc == null ? null : AccessTools.Method(npc, "ApplyDamage", null, null);
+                ParameterInfo[] ps = apply == null ? null : apply.GetParameters();
+                if (ps == null || ps.Length == 0 || ps[0].ParameterType != typeof(float))
+                    RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2.ApplyDamage(float, ...) not found - "
+                        + "squad armour and the defender's kneeling window do not change damage.");
+                else
+                {
+                    harmony.Patch(apply, new HarmonyMethod(typeof(NpcWar).GetMethod("ApplyDamagePrefix",
+                        BindingFlags.Public | BindingFlags.Static)), null, null, null, null);
+                    RevivalPlugin.L.LogInfo("NpcWar: squad armour and kill-streak guard installed.");
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("NpcWar: squad armour not installed - " + ex);
+            }
+        }
+
+        /// <summary>Prefix on NPC_Settlement.StatsOnNpcKilled(killerId). Every
+        /// plugin kill carries owner 0 - squad rounds, the drone and LAW
+        /// blasts, turrets and patrol guns - and a settlement-clearing streak of
+        /// owner 0 reads PhotonPlayer.Find(0).ID and throws (RE 35). Resetting
+        /// an owner-0 streak to -1 here, where the streak is counted, covers
+        /// every one of them; a player's streak is never touched.</summary>
+        public static void KillStatsPrefix(object __instance, int __0)
+        {
+            if (__0 != 0 || __instance == null) return;
+            try
+            {
+                if (!_lastKillerLooked)
+                {
+                    _lastKillerLooked = true;
+                    _fLastKillerId = AccessTools.Field(__instance.GetType(), "_lastKillerId");
+                    if (_fLastKillerId != null && _fLastKillerId.FieldType != typeof(int)) _fLastKillerId = null;
+                }
+                if (_fLastKillerId != null && (int)_fLastKillerId.GetValue(__instance) == 0)
+                    _fLastKillerId.SetValue(__instance, -1);
+            }
+            catch { }
+        }
+
+        /// <summary>Prefix on NPC_AI2.ApplyDamage: a squad man's armour takes
+        /// its share of every hit (players, NPCs, blasts), and a defender takes
+        /// DefenderRegenDamage times as much while he kneels. ApplyDamage only
+        /// damages on the owner, so a changed value elsewhere changes nothing.</summary>
+        public static void ApplyDamagePrefix(object __instance, ref float __0)
+        {
+            if (_armoured.Count == 0 || __0 <= 0f) return;
+            try
+            {
+                Component c = __instance as Component;
+                if (c == null) return;
+                Fighter f;
+                if (!_armoured.TryGetValue(c.GetInstanceID(), out f)) return;
+                float k = f.ArmorScale;
+                if (f.Class == SquadClass.Heavy && IntField(f.Ai, _fMainState, -1) == MainRegen)
+                    k *= Mathf.Clamp(CfgDefenderRegenDamage == null ? 1.3f : CfgDefenderRegenDamage.Value, 1f, 5f);
+                __0 *= k;
+            }
+            catch { }
+        }
+
+        /// <summary>Is this NPC weapon controller a squad anti-tank gunner's?
+        /// CrewLaw then detonates the player LAW's blast (900 in 12), which
+        /// VehicleArmor recognises, instead of the patrol crew value.</summary>
+        internal static bool SquadLaw(object weaponController, out float damage, out float radius)
+        {
+            damage = SquadLawDamage;
+            radius = SquadLawRadius;
+            if (weaponController == null || _squads.Count == 0) return false;
+            for (int q = 0; q < _squads.Count; q++)
+                for (int i = 0; i < _squads[q].Men.Count; i++)
+                {
+                    Fighter m = _squads[q].Men[i];
+                    if (m.Class != SquadClass.AntiTank || m.Ai == null) continue;
+                    Component w = WeaponOf(m);
+                    if (w != null && (object)w == weaponController) return true;
+                }
+            return false;
+        }
+
+        // ------------------------------------------------- defender regeneration
+
+        static bool Regenerating(Fighter f, float now)
+        {
+            if (f.Class != SquadClass.Heavy) return false;
+            return IntField(f.Ai, _fMainState, -1) == MainRegen || now < f.RegenHoldUntil;
+        }
+
+        static bool RegenDue(Fighter f, float now)
+        {
+            if (f.Class != SquadClass.Heavy || _mStartRegen == null || now < f.RegenCheck) return false;
+            f.RegenCheck = now + 0.25f;
+            int allowed = Mathf.Clamp(CfgDefenderRegenCount == null ? 2 : CfgDefenderRegenCount.Value, 0, 10);
+            if (f.RegenUsed >= allowed || Reloading(f) || !IsMine(f.Ai)) return false;
+            float below = Mathf.Clamp(CfgDefenderRegenBelow == null ? 0.5f : CfgDefenderRegenBelow.Value, 0.1f, 0.9f);
+            float left = HealthFraction(f);
+            return left > 0f && left < below;
+        }
+
+        /// <summary>The game's own boss regeneration (IL): usedCount+1, a
+        /// quarter of HealthMax to heal in ten steps a second apart, the RPC,
+        /// SetStateWithAnimAndSync(Regeneration) with the ukb_boss_regen_start /
+        /// _idle clips and a 12 s pause; RegenerationActions heals and returns
+        /// him to Idle, ukb_boss_regen_end on the way out.</summary>
+        static bool StartRegen(Fighter f, float now)
+        {
+            try
+            {
+                ReleaseAim(f);
+                f.HasOrder = false;
+                f.Stance = Stance.Hold;
+                float before = HealthFraction(f);
+                _mStartRegen.Invoke(f.Ai, null);
+                f.RegenUsed++;
+                f.RegenHoldUntil = now + 1.5f;
+                f.WantMain = MainRegen;
+                f.WantAdd = AddNone;
+                RevivalPlugin.L.LogInfo("NpcWar: " + (f.Squad == null ? "" : f.Squad.Tag + " ")
+                    + "defender " + f.Ai.name + " kneels to regenerate at "
+                    + (before * 100f).ToString("0") + " percent health (" + f.RegenUsed + ").");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                f.RegenUsed = 1000;
+                RevivalPlugin.L.LogWarning("NpcWar: regeneration failed on " + f.Ai.name + " - "
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                return false;
+            }
+        }
+
+        // ------------------------------------------------------ anti-tank gunner
+
+        static float AntiTankSelfDefense()
+        {
+            return Mathf.Clamp(CfgAntiTankSelfDefense == null ? 35f : CfgAntiTankSelfDefense.Value, 5f, 200f);
+        }
+
+        /// <summary>The anti-tank gunner's own business before the ordinary
+        /// turn. True when it has taken his turn.</summary>
+        static bool AntiTankStep(Fighter f, Squad s, Vector3 front, Vector3 centre, float now)
+        {
+            // 1  His drone is in the air: he flies it, kneeling, facing its target.
+            if (f.DroneId > 0)
+            {
+                if (CrewDrone.InFlight(f.DroneId) && now < f.DroneHoldUntil)
+                {
+                    OperateDrone(f, now);
+                    return true;
+                }
+                f.DroneId = 0;
+                f.DroneTarget = null;
+            }
+
+            Component vehicle = s.Vehicle;
+            bool vehicleAlive = vehicle != null && VehicleAlive(vehicle);
+            if (vehicleAlive)
+            {
+                Transform hull = vehicle.transform;
+                float d = Flat(hull.position - f.Tr.position);
+                // 2  The drone goes in first ...
+                if (CanLaunch(f, now) && d > 25f && d < 350f)
+                {
+                    LaunchDrone(f, s, vehicle.gameObject, VehicleAim, 0.5f, "vehicle", now);
+                    return true;
+                }
+                // 3  ... then he runs in with the LAW.
+                if (f.LawLeft > 0 && !Reloading(f)) return LawAttack(f, s, vehicle, d, now);
+                if (f.LawLeft > 0)
+                {
+                    f.Stance = Stance.Hold;
+                    f.Target = hull;
+                    Face(f);
+                    return true;
+                }
+            }
+            // No vehicle, or no rocket left: the rifle again.
+            if (f.SwitchPhase == 0 && f.RifleId > 0 && f.RifleId != LawId
+                && CurrentItem(f) == LawId && !Reloading(f))
+                BeginSwitch(f, f.RifleId, now);
+
+            // 4  The drone at the enemy the squad is fighting, never into the
+            //    middle of his own men.
+            if (CanLaunch(f, now) && s.Threat != null && s.ThreatSeen && !vehicleAlive)
+            {
+                Component npc = s.Threat.GetComponent(_npcType);
+                Fighter other = npc == null ? null : FighterOf(npc);
+                float d = Flat(s.Threat.position - f.Tr.position);
+                float blast = RevivalPlugin.CfgDroneRadius == null ? 7f : RevivalPlugin.CfgDroneRadius.Value;
+                if (npc != null && Alive(npc) && (other == null || other.Squad != s)
+                    && d > 40f && d < 300f && !MateNear(s, s.Threat.position, blast + 8f))
+                {
+                    LaunchDrone(f, s, s.Threat.gameObject, NpcDroneAim, 1.5f, "NPC", now);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool CanLaunch(Fighter f, float now)
+        {
+            int allowed = Mathf.Clamp(CfgAntiTankDrones == null ? 3 : CfgAntiTankDrones.Value, 0, 20);
+            return DronesEnabled && f.DronesUsed < allowed && now >= f.NextDrone && f.DroneId == 0;
+        }
+
+        static void LaunchDrone(Fighter f, Squad s, GameObject target, float aimUp, float miss,
+                                string what, float now)
+        {
+            float seconds = Mathf.Clamp(CfgAntiTankDroneSeconds == null ? 45f : CfgAntiTankDroneSeconds.Value, 5f, 600f);
+            f.NextDrone = now + seconds;
+            if (target == null) return;
+            // The player FPV drone's blast: VehicleArmor knows it (a tank takes
+            // TankFpvHits), and against infantry it is what a real one does.
+            float damage = RevivalPlugin.CfgDroneDamage == null ? 550f : RevivalPlugin.CfgDroneDamage.Value;
+            float radius = RevivalPlugin.CfgDroneRadius == null ? 7f : RevivalPlugin.CfgDroneRadius.Value;
+            Vector3 from = f.Tr.position + Vector3.up * 3.2f + f.Tr.forward * 1.5f;
+            int id = 0;
+            try { id = CrewDrone.LaunchAt(from, target, aimUp, miss, damage, radius, what); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("NpcWar: FPV launch failed - " + ex.Message);
+            }
+            if (id <= 0) return;
+            f.DroneId = id;
+            f.DronesUsed++;
+            s.Drones++;
+            f.DroneTarget = target.transform;
+            f.DroneHoldUntil = now + 40f;
+            f.HasOrder = false;
+            if (f.IkDriven) ReleaseAim(f);
+        }
+
+        /// <summary>Kneel and face the drone's target while it flies.</summary>
+        static void OperateDrone(Fighter f, float now)
+        {
+            f.Stance = Stance.Hold;
+            f.HasOrder = false;
+            if (f.IkDriven) ReleaseAim(f);
+            Transform keep = f.Target;
+            if (f.DroneTarget != null) f.Target = f.DroneTarget;
+            Drive(f, MainIdle, AddNone, PoseCrouch, now, true);
+            Face(f);
+            f.Target = keep;
+        }
+
+        /// <summary>Draw the LAW, run into range with a line of fire, fire.</summary>
+        static bool LawAttack(Fighter f, Squad s, Component vehicle, float d, float now)
+        {
+            Transform hull = vehicle.transform;
+            float range = Mathf.Clamp(CfgAntiTankLawRange == null ? 90f : CfgAntiTankLawRange.Value,
+                SquadLawRadius * 2f + 12f, 250f);
+            Vector3 to = FlatV(hull.position - f.Tr.position);
+            Vector3 dir = to.sqrMagnitude < 0.01f ? f.Tr.forward : to.normalized;
+            Vector3 standoff = new Vector3(hull.position.x, f.Tr.position.y, hull.position.z)
+                - dir * Mathf.Min(range * 0.75f, Mathf.Max(0f, to.magnitude - 1f));
+
+            if (CurrentItem(f) != LawId || f.SwitchPhase != 0)
+            {
+                if (f.SwitchPhase == 0) BeginSwitch(f, LawId, now);
+                if (d > range) RunTo(f, standoff, now);
+                else { f.Target = hull; Hold(f, null, now); Face(f); }
+                return true;
+            }
+
+            Vector3 eye = f.Tr.position + Vector3.up * EyeHeight;
+            bool open = VehicleClear(eye, hull.position + Vector3.up * VehicleAim, vehicle);
+            if (d > range)
+            {
+                RunTo(f, standoff, now);
+                return true;
+            }
+            if (!open)
+            {
+                // In range but something in the way: a few steps closer.
+                RunTo(f, f.Tr.position + dir * Mathf.Min(15f, d * 0.5f), now);
+                return true;
+            }
+            f.Target = hull;
+            f.TargetIsPlayer = false;
+            f.Sees = true;
+            f.AimHeight = VehicleAim;
+            f.LastSeen = now;
+            if (!f.Armed)
+            {
+                Hold(f, null, now);
+                Face(f);
+                return true;
+            }
+            Fire(f, now);
+            return true;
+        }
+
+        /// <summary>Run to a point, with the same smooth re-aiming as the line.</summary>
+        static void RunTo(Fighter f, Vector3 dest, float now)
+        {
+            if (f.IkDriven) ReleaseAim(f);
+            if (Flat(dest - f.Tr.position) <= LaneSlack)
+            {
+                Hold(f, null, now);
+                return;
+            }
+            f.Stance = Stance.Reposition;
+            int live = IntField(f.Ai, _fMainState, -1);
+            if (f.HasOrder && live == MainRun && StillOurPoint(f) && now < f.MoveDeadline)
+            {
+                if (Flat(dest - f.Ordered) < RetargetSlack) return;
+                if (now - f.LastFullOrder < FullOrderSeconds && Retarget(f, dest, now)) return;
+            }
+            bool stopped = f.HasOrder && live == MainIdle && now - f.LastFullOrder > 0.6f;
+            if (now < f.NextMove && !stopped) return;
+            f.NextMove = now + 1f;
+            f.LastFullOrder = now;
+            OrderMove(f, dest, MainRun, AddNone, PoseStand);
+        }
+
+        static bool MateNear(Squad s, Vector3 point, float radius)
+        {
+            float sqr = radius * radius;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter m = s.Men[i];
+                if (m.Ai == null || m.Tr == null || !Alive(m.Ai)) continue;
+                if ((m.Tr.position - point).sqrMagnitude < sqr) return true;
+            }
+            return false;
+        }
+
+        // ------------------------------------------------------ weapon switch
+
+        static int CurrentItem(Fighter f)
+        {
+            if (f.Wm == null && _fWeaponsManager != null && f.Ai != null)
+            {
+                try { f.Wm = _fWeaponsManager.GetValue(f.Ai) as Component; }
+                catch { }
+            }
+            return IntField(f.Wm, _fWeaponItem, -1);
+        }
+
+        /// <summary>Put the weapon in hand away (NPC_AI2.EquipWeapon(false):
+        /// NPC_WeaponsManager.HideWeapon -> NetworkShowWeapon's hide, which
+        /// destroys the model and ends in ClearWeaponState - IL), then draw the
+        /// other through SetMainWeaponId(id, true), the path every first draw
+        /// takes. Both are RPCs, so every client sees the change.</summary>
+        static void BeginSwitch(Fighter f, int id, float now)
+        {
+            if (id <= 0 || f.SwitchPhase != 0 || _mEquipWeapon == null || _mSetMainWeaponId == null) return;
+            if (f.Ai == null || !Alive(f.Ai) || !IsMine(f.Ai) || Reloading(f)) return;
+            if (CurrentItem(f) == id && ReadArmed(f)) { f.WeaponId = id; return; }
+            f.SwitchTo = id;
+            f.SwitchSince = now;
+            f.SwitchPhase = 1;
+            ReleaseAim(f);
+            try { _mEquipWeapon.Invoke(f.Ai, new object[] { false, true }); }
+            catch (Exception ex)
+            {
+                f.SwitchPhase = 0;
+                if (now >= f.NextSwitchWarn)
+                {
+                    f.NextSwitchWarn = now + 30f;
+                    RevivalPlugin.L.LogWarning("NpcWar: putting the weapon away failed on " + f.Ai.name
+                        + " - " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                }
+            }
+        }
+
+        /// <summary>Advance a weapon switch. True while it is under way.</summary>
+        static bool WeaponSwitch(Fighter f, float now)
+        {
+            if (f.SwitchPhase == 0) return false;
+            if (f.Ai == null || !Alive(f.Ai)) { f.SwitchPhase = 0; return false; }
+            if (f.SwitchPhase == 1)
+            {
+                // The old weapon goes away and frees slot 0.
+                if (IntField(f.Wm, _fWeaponSlot, -1) == 0 && now - f.SwitchSince < 3f) return true;
+                f.WeaponId = f.SwitchTo;
+                f.SwitchPhase = 2;
+                f.SwitchSince = now;
+                try { _mSetMainWeaponId.Invoke(f.Ai, new object[] { f.SwitchTo, true }); }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("NpcWar: drawing " + f.SwitchTo + " failed on " + f.Ai.name
+                        + " - " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                }
+                return true;
+            }
+            if (ReadArmed(f) && CurrentItem(f) == f.SwitchTo)
+            {
+                f.SwitchPhase = 0;
+                f.NextState = 0f;
+                if (CfgDebug.Value)
+                    RevivalPlugin.L.LogInfo("NpcWar: " + f.Ai.name + " now holds " + f.SwitchTo + ".");
+                return false;
+            }
+            if (now - f.SwitchSince < 6f) return true;
+            f.SwitchPhase = 0;
+            if (now >= f.NextSwitchWarn)
+            {
+                f.NextSwitchWarn = now + 30f;
+                RevivalPlugin.L.LogWarning("NpcWar: weapon switch to " + f.SwitchTo + " on " + f.Ai.name
+                    + " did not finish (item " + CurrentItem(f) + ", slot " + IntField(f.Wm, _fWeaponSlot, -1)
+                    + ") - the draw is retried.");
+            }
+            return false;
+        }
+
+        // ---------------------------------------------------- smooth movement
+
+        static NavMeshAgent Agent(Fighter f)
+        {
+            if (_fNavAgent == null || f.Ai == null) return null;
+            try
+            {
+                NavMeshAgent a = _fNavAgent.GetValue(f.Ai) as NavMeshAgent;
+                return a == null ? null : a;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Move the man's walk point and his NavMeshAgent's destination
+        /// without a new order. SetDestination keeps the agent moving; only the
+        /// game's NavAgentMoveToPos stops it first. False when the agent cannot
+        /// take it; the caller then gives a full order.</summary>
+        static bool Retarget(Fighter f, Vector3 dest, float now)
+        {
+            NavMeshAgent a = Agent(f);
+            if (a == null || f.Point == null) return false;
+            try
+            {
+                if (!a.isActiveAndEnabled || !a.isOnNavMesh || a.pathPending) return false;
+                Vector3 target = Ground(dest);
+                f.Point.transform.position = target;
+                if (!a.SetDestination(target)) return false;
+                if (a.isStopped) a.isStopped = false;
+                f.Ordered = dest;
+                f.MoveDeadline = now + 6f + Flat(dest - f.Tr.position) * 0.25f;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // ------------------------------------------------------------ vehicles
+
+        static FieldInfo _fPassengers, _fDurability;
+        static bool _vehicleLooked;
+        static readonly Dictionary<string, object> _sideFaction = new Dictionary<string, object>();
+
+        static bool IsSquadVehicle(Fighter f, Transform t)
+        {
+            return t != null && f.Squad != null && f.Squad.Vehicle != null && t == f.Squad.Vehicle.transform;
+        }
+
+        static bool VehicleVisible(Fighter f, Transform hull, out float height)
+        {
+            height = VehicleAim;
+            Component v = f.Squad == null ? null : f.Squad.Vehicle;
+            if (v == null || hull == null) return false;
+            Vector3 eye = f.Tr.position + Vector3.up * (f.Crouched ? CrouchEye : EyeHeight);
+            return VehicleClear(eye, hull.position + Vector3.up * VehicleAim, v);
+        }
+
+        /// <summary>Clear, with any collider of the vehicle itself counting as
+        /// open: its colliders need not hang under the transform we aim at.</summary>
+        static bool VehicleClear(Vector3 from, Vector3 to, Component vehicle)
+        {
+            Vector3 dir = to - from;
+            float dist = dir.magnitude;
+            if (dist < 1f) return true;
+            dir /= dist;
+            Vector3 point;
+            GameObject hit = Turret.RaycastObject(from + dir * 1.2f, dir, dist, out point);
+            if (hit == null) return true;
+            if (vehicle == null) return false;
+            if (hit.transform.IsChildOf(vehicle.transform)) return true;
+            Component owner = hit.GetComponentInParent(vehicle.GetType());
+            return owner == vehicle || (to - point).sqrMagnitude < 9f;
+        }
+
+        /// <summary>The nearest vehicle inside 1.5 x AssaultRange of the squad
+        /// that its faction would attack: a patrol or convoy vehicle with its
+        /// crew aboard whose side the squad hates, or a vehicle with a player
+        /// aboard the squad's own AI treats as an enemy.</summary>
+        static Component HostileVehicle(Squad s, Vector3 centre)
+        {
+            Component[] all = VehicleScan.All();
+            if (all.Length == 0) return null;
+            float reach = AssaultRange() * 1.5f;
+            float bestSqr = reach * reach;
+            Component best = null;
+            for (int i = 0; i < all.Length; i++)
+            {
+                Component v = all[i];
+                if (v == null) continue;
+                float d = (v.transform.position - centre).sqrMagnitude;
+                if (d >= bestSqr || !VehicleAlive(v) || !VehicleHostile(s, v)) continue;
+                best = v;
+                bestSqr = d;
+            }
+            if (best != null && best != s.Vehicle)
+                RevivalPlugin.L.LogInfo("NpcWar: " + s.Tag + " engages the vehicle " + best.gameObject.name
+                    + " " + Mathf.Sqrt(bestSqr).ToString("0") + " units away.");
+            return best;
+        }
+
+        static void LookUpVehicle(Type t)
+        {
+            if (_vehicleLooked || t == null) return;
+            _vehicleLooked = true;
+            _fPassengers = AccessTools.Field(t, "Passengers");
+            _fDurability = AccessTools.Field(t, "Durability");
+            if (_fPassengers == null || _fDurability == null)
+                RevivalPlugin.L.LogWarning("NpcWar: VehicleGameSystem.Passengers or Durability missing - "
+                    + "squads may ignore vehicles or keep firing at wrecks.");
+        }
+
+        static bool VehicleAlive(Component v)
+        {
+            if (v == null || !v.gameObject.activeInHierarchy) return false;
+            LookUpVehicle(v.GetType());
+            if (_fDurability == null) return true;
+            try
+            {
+                float left = ToFloat(_fDurability.GetValue(v));
+                return left < 0f ? true : left > 0f;
+            }
+            catch { return true; }
+        }
+
+        static bool VehicleHostile(Squad s, Component v)
+        {
+            string side = null;
+            try { side = Patrol.CrewedSide(v); }
+            catch { side = null; }
+            if (side != null)
+            {
+                object faction = SideFaction(side);
+                if (faction == null) return false;
+                for (int m = 0; m < s.Men.Count; m++)
+                    if (s.Men[m].Ai != null && Hostile(s.Men[m].Hated, faction)) return true;
+                return false;
+            }
+            LookUpVehicle(v.GetType());
+            if (_fPassengers == null) return false;
+            Array seats = null;
+            try { seats = _fPassengers.GetValue(v) as Array; }
+            catch { seats = null; }
+            if (seats == null) return false;
+            for (int i = 0; i < seats.Length; i++)
+            {
+                object o = seats.GetValue(i);
+                GameObject go = o as GameObject;
+                if (go == null)
+                {
+                    Component c = o as Component;
+                    if (c != null) go = c.gameObject;
+                }
+                if (go == null || go.GetComponent(_npcType) != null) continue;
+                if (PlayerHostile(s, go)) return true;
+            }
+            return false;
+        }
+
+        static object SideFaction(string side)
+        {
+            object faction;
+            if (_sideFaction.TryGetValue(side, out faction)) return faction;
+            faction = null;
+            try
+            {
+                object opts = Fraktion.Optionen(side);
+                faction = opts == null ? null : _fMyFraction.GetValue(opts);
+            }
+            catch { faction = null; }
+            _sideFaction[side] = faction;
+            return faction;
+        }
+
+        /// <summary>NPC_AI2.IsEnemyFraction(player) of a living squad man - the
+        /// same test the game makes before it fights a player.</summary>
+        static bool PlayerHostile(Squad s, GameObject player)
+        {
+            if (_mIsEnemy == null || player == null) return false;
+            Type want = _mIsEnemy.GetParameters()[0].ParameterType;
+            object arg = null;
+            if (want == typeof(GameObject)) arg = player;
+            else if (typeof(Component).IsAssignableFrom(want)) arg = player.GetComponent(want);
+            else if (want.IsInstanceOfType(player)) arg = player;
+            if (arg == null) return false;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter m = s.Men[i];
+                if (m.Ai == null || !Alive(m.Ai)) continue;
+                try
+                {
+                    object r = _mIsEnemy.Invoke(m.Ai, new object[] { arg });
+                    return r is bool && (bool)r;
+                }
+                catch { return false; }
+            }
+            return false;
+        }
+
         // ------------------------------------------------------------- removal
 
-        /// <summary>The squad leaves the map: every man, alive or dead, through
+        /// <summary>The squad leaves the map: its LIVING men through
         /// PhotonNetwork.Destroy on the master, so every client loses the same
-        /// objects, then the local settlement and its walk points.</summary>
+        /// objects. The dead stay where they fell for CorpseMinutes with their
+        /// settlement, whose children they are (6.17: the 6.16.7 log removed 15
+        /// bodies with their loot on "wiped out").</summary>
         static void Remove(Squad s, string why)
         {
-            int n = 0;
+            int gone = 0;
+            Grave grave = new Grave();
+            grave.Tag = s.Tag;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Point != null) UnityEngine.Object.Destroy(f.Point);
                 if (f.Ai == null) continue;
-                if (NetDestroy(f.Ai.gameObject)) n++;
+                if (Alive(f.Ai)) { if (NetDestroy(f.Ai.gameObject)) gone++; }
+                else grave.Bodies.Add(f.Ai.gameObject);
             }
-            if (s.Settlement != null)
+            List<int> stale = new List<int>();
+            foreach (KeyValuePair<int, Fighter> pair in _armoured)
+                if (pair.Value == null || pair.Value.Squad == s) stale.Add(pair.Key);
+            for (int i = 0; i < stale.Count; i++) _armoured.Remove(stale[i]);
+            _squads.Remove(s);
+
+            float minutes = Mathf.Clamp(CfgCorpseMinutes == null ? 20f : CfgCorpseMinutes.Value, 1f, 120f);
+            if (grave.Bodies.Count > 0)
+            {
+                grave.Settlement = s.Settlement;
+                grave.Until = Time.time + minutes * 60f;
+                _graves.Add(grave);
+            }
+            else if (s.Settlement != null)
             {
                 Crew.Forget(s.Settlement);
                 UnityEngine.Object.Destroy(s.Settlement);
             }
-            _squads.Remove(s);
             RevivalPlugin.L.LogInfo("NpcWar: operation " + s.Tag + " ended (" + why
-                + ") - " + n + " men removed from the map; " + s.Shots + " shots at NPCs, "
-                + s.Hits + " hits.");
+                + ") - " + gone + " living men removed from the map, " + grave.Bodies.Count
+                + " dead stay " + (grave.Bodies.Count > 0 ? minutes.ToString("0") + " min for their loot" : "")
+                + "; " + s.Shots + " shots at NPCs, " + s.Hits + " hits, " + s.Drones + " drone(s), "
+                + s.Rockets + " LAW rocket(s).");
+        }
+
+        /// <summary>The dead of ended operations go once their time is up and
+        /// no player is standing among them.</summary>
+        static void TickGraves(float now)
+        {
+            for (int i = _graves.Count - 1; i >= 0; i--)
+            {
+                Grave g = _graves[i];
+                if (now < g.Until) continue;
+                for (int b = 0; b < g.Bodies.Count; b++)
+                {
+                    GameObject go = g.Bodies[b];
+                    if (go != null && PlayerNear(go.transform.position, PlayerNearCorpse))
+                    {
+                        g.Until = now + 60f;
+                        break;
+                    }
+                }
+                if (now < g.Until) continue;
+                int n = 0;
+                for (int b = 0; b < g.Bodies.Count; b++)
+                    if (g.Bodies[b] != null && NetDestroy(g.Bodies[b])) n++;
+                if (g.Settlement != null)
+                {
+                    Crew.Forget(g.Settlement);
+                    UnityEngine.Object.Destroy(g.Settlement);
+                }
+                _graves.RemoveAt(i);
+                RevivalPlugin.L.LogInfo("NpcWar: the dead of operation " + g.Tag + " are gone ("
+                    + n + " bodies removed).");
+            }
+        }
+
+        static PropertyInfo _ngsInstance;
+        static FieldInfo _ngsPlayers;
+        static bool _ngsLooked;
+
+        /// <summary>Is any player (NetworkGameServer.Instance.NetworkPlayers, the
+        /// list SurvNpcFire reads) within r of a point?</summary>
+        static bool PlayerNear(Vector3 p, float r)
+        {
+            if (!_ngsLooked)
+            {
+                _ngsLooked = true;
+                Type t = RevivalPlugin.TypeByName("NetworkGameServer");
+                _ngsInstance = t == null ? null : t.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+                _ngsPlayers = t == null ? null : AccessTools.Field(t, "NetworkPlayers");
+            }
+            try
+            {
+                object server = _ngsInstance == null ? null : _ngsInstance.GetValue(null, null);
+                IList players = server == null || _ngsPlayers == null ? null : _ngsPlayers.GetValue(server) as IList;
+                if (players == null) return false;
+                float sqr = r * r;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    GameObject go = players[i] as GameObject;
+                    if (go == null)
+                    {
+                        Component c = players[i] as Component;
+                        if (c != null) go = c.gameObject;
+                    }
+                    if (go != null && (go.transform.position - p).sqrMagnitude < sqr) return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         static bool NetDestroy(GameObject go)

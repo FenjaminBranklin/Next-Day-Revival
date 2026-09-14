@@ -1006,6 +1006,10 @@ namespace NextDayRevival
 
         internal static bool HasAccess { get { return Zutritt(); } }
 
+        /// <summary>Is the admin god mode on for this client? Read by the
+        /// surveillance drone, which god mode also keeps out of every fight.</summary>
+        internal static bool GodModeActive { get { return _godMode; } }
+
         public static void Install(Harmony harmony)
         {
             Net.EnsureHooked();

@@ -1,3 +1,3 @@
 # ndr_troopdrops.tsv - written by the map editor (Troop landings).
-# name	enabled	x	z	tailX	tailZ	headX	headZ	faction	count	intervalMin	intervalMax	patrolMinutes	role	weapon	headwear	mask	body	legs	hands
-# interval hours 0/0 = admin button only; weapon 0 = map default; uniform 0 = map default.
+# name	enabled	x	z	tailX	tailZ	headX	headZ	faction	count	intervalMin	intervalMax	patrolMinutes	role	weapon	headwear	mask	body	legs	hands	class	backpack
+# interval hours 0/0 = admin button only; weapon 0 = map default; uniform 0 = map default; class one of regular sniper tank defender antitank.

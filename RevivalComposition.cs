@@ -67,6 +67,13 @@ namespace NextDayRevival
             public int[] Weapons = new int[0];
             public int Headwear, Mask, Body, Legs, Hands;
             public bool Fpv = true;
+            // Heli troop landings only (troopdef.py): the soldier class the
+            // editor chose ("regular", "sniper", "tank", "defender",
+            // "antitank"), the backpack slot (0 = map default) and the hit
+            // point factor his class gives him. Route crews keep the defaults.
+            public string Class = "";
+            public int Backpack;
+            public float HealthScale = 1f;
 
             public int MainWeapon
             {

@@ -1569,6 +1569,17 @@ namespace NextDayRevival
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
 
+            // God mode: the battery does not run down. The charge left is
+            // pushed along with the clock (Battery() stays where it is), and a
+            // drone that was already nearly empty keeps one second in hand, so
+            // it never drops out of the sky.
+            if (Admin.GodModeActive)
+            {
+                _start += dt;
+                _end += dt;
+                if (_end < Time.time + 1f) _end = Time.time + 1f;
+            }
+
             Vector3 fwd = Forward();
             Vector3 right = Vector3.Cross(Vector3.up, fwd);
             if (right.sqrMagnitude < 0.000001f) right = Vector3.right;
@@ -1691,6 +1702,7 @@ namespace NextDayRevival
         internal static void NpcHit(Vector3 shooterPos)
         {
             if (!_flying) return;
+            if (Admin.GodModeActive) return;   // god mode: the drone cannot be shot down
             if (Time.time < _armed) return;
             _hp -= 1f;
             float dist = Vector3.Distance(shooterPos, _pos);
@@ -1711,6 +1723,7 @@ namespace NextDayRevival
         internal static void RemoteHit(int shooter, Vector3 point, int target, float damage)
         {
             if (!_flying) return;
+            if (Admin.GodModeActive) return;   // god mode: no player shot counts either
             int me = SurvNet.MyActor();
             if (me >= 0) { if (target != me) return; }
             else if (Vector3.Distance(point, _pos) > 8f) return;

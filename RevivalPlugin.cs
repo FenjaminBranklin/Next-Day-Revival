@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.16.7";
+        public const string VERSION = "6.17.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -478,6 +478,7 @@ namespace NextDayRevival
             SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
             RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
+            NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
             TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);

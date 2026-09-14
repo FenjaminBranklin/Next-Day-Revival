@@ -1802,6 +1802,24 @@ namespace NextDayRevival
             return false;
         }
 
+        /// <summary>
+        /// The side (Fraktion name) of a patrol or convoy vehicle whose crew is
+        /// still aboard, or null for anything else. Read-only; NpcWar asks it
+        /// whether a heli squad attacks the vehicle.
+        /// </summary>
+        internal static string CrewedSide(Component vgs)
+        {
+            if (vgs == null || _units.Count == 0) return null;
+            int id = vgs.GetInstanceID();
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.Vgs == null || u.Vgs.GetInstanceID() != id) continue;
+                return !u.CrewOut && u.CrewSize > 0 ? u.Seite : null;
+            }
+            return null;
+        }
+
         static MethodInfo _photonDestroy;
         static bool _photonDestroyLookedUp;
 
