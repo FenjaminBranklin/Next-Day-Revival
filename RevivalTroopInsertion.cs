@@ -285,6 +285,9 @@ namespace NextDayRevival
         {
             Vector3 lz;
             float yaw = FlatYaw(d.Tail - new Vector3(d.X, 0f, d.Z), d.Head - d.Tail);
+            Vector3 rayPoint;
+            if (Turret.RaycastObject(new Vector3(d.X, 1500f, d.Z), Vector3.down, 3000f, out rayPoint) == null)
+                LogGroundMiss(d, new Vector3(d.X, 0f, d.Z));
             if (!FindLandingSpot(new Vector3(d.X, 0f, d.Z), yaw, out lz))
             {
                 RevivalPlugin.L.LogWarning("Troops: landing " + d.Name + " has no ground "
@@ -448,7 +451,111 @@ namespace NextDayRevival
             GameObject hit = Turret.RaycastObject(new Vector3(xz.x, 1500f, xz.z),
                 Vector3.down, 3000f, out point);
             y = point.y;
-            return hit != null;
+            if (hit != null) return true;
+            // FIELD 2026-09-14 (6.17.0): F8 gave "no ground under (-548, -9)"
+            // seven times with the player ~400 units away, although the height
+            // data there is 478 and GW_Scene_1 carries two enabled whole-map
+            // TerrainColliders. HYPOTHESIS: that collision is off at runtime
+            // away from the player. Height data needs no collider.
+            return TerrainHeight(xz, out y);
+        }
+
+        static MethodInfo _activeTerrain, _sampleHeight, _terrainPosition, _terrainData, _terrainSize;
+        static bool _terrainLookedUp, _terrainWarned;
+
+        /// <summary>Height of the active terrain at xz from its height data;
+        /// false outside the terrain, without one, or on a reflection
+        /// failure (logged once).</summary>
+        static bool TerrainHeight(Vector3 xz, out float y)
+        {
+            y = 0f;
+            try
+            {
+                if (!_terrainLookedUp)
+                {
+                    _terrainLookedUp = true;
+                    Type t = RevivalPlugin.TypeByName("UnityEngine.Terrain");
+                    if (t != null)
+                    {
+                        _activeTerrain = AccessTools.PropertyGetter(t, "activeTerrain");
+                        _sampleHeight = AccessTools.Method(t, "SampleHeight", new Type[] { typeof(Vector3) }, null);
+                        _terrainPosition = AccessTools.Method(t, "GetPosition", new Type[0], null);
+                        _terrainData = AccessTools.PropertyGetter(t, "terrainData");
+                    }
+                }
+                if (_activeTerrain == null || _sampleHeight == null || _terrainPosition == null)
+                {
+                    if (!_terrainWarned)
+                        RevivalPlugin.L.LogWarning("Troops: Terrain.SampleHeight not found - no height fallback.");
+                    _terrainWarned = true;
+                    return false;
+                }
+                UnityEngine.Object terrain = _activeTerrain.Invoke(null, null) as UnityEngine.Object;
+                if (terrain == null) return false;
+                Vector3 origin = (Vector3)_terrainPosition.Invoke(terrain, null);
+                object data = _terrainData == null ? null : _terrainData.Invoke(terrain, null);
+                if (data != null && _terrainSize == null)
+                    _terrainSize = AccessTools.PropertyGetter(data.GetType(), "size");
+                if (data != null && _terrainSize != null)
+                {
+                    Vector3 size = (Vector3)_terrainSize.Invoke(data, null);
+                    if (xz.x < origin.x || xz.z < origin.z
+                        || xz.x > origin.x + size.x || xz.z > origin.z + size.z) return false;
+                }
+                y = origin.y + (float)_sampleHeight.Invoke(terrain,
+                    new object[] { new Vector3(xz.x, 0f, xz.z) });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!_terrainWarned)
+                    RevivalPlugin.L.LogWarning("Troops: terrain height at " + xz.ToString("0") + ": " + ex.Message);
+                _terrainWarned = true;
+                return false;
+            }
+        }
+
+        /// <summary>One line of evidence when the ray finds nothing under a
+        /// landing zone: every TerrainCollider (inactive ones too), the height
+        /// data there and how far the camera is.</summary>
+        static void LogGroundMiss(Landing d, Vector3 mark)
+        {
+            try
+            {
+                string colliders = "TerrainCollider type not found";
+                Type tc = RevivalPlugin.TypeByName("UnityEngine.TerrainCollider");
+                if (tc != null)
+                {
+                    MethodInfo enabled = AccessTools.PropertyGetter(tc, "enabled");
+                    UnityEngine.Object[] all = Resources.FindObjectsOfTypeAll(tc);
+                    colliders = all.Length + " TerrainCollider(s):";
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        Component c = all[i] as Component;
+                        if (c == null) continue;
+                        colliders += " " + c.gameObject.name + "(active=" + c.gameObject.activeInHierarchy
+                            + " enabled=" + (enabled == null ? "?" : Convert.ToString(enabled.Invoke(c, null)))
+                            + " layer=" + c.gameObject.layer + ")";
+                    }
+                }
+                float terrainY;
+                string height = TerrainHeight(mark, out terrainY) ? terrainY.ToString("0.0") : "none";
+                Camera cam = Camera.main;
+                string camera = "none";
+                if (cam != null)
+                {
+                    Vector3 p = cam.transform.position;
+                    camera = p.ToString("0") + ", "
+                        + Vector3.Distance(new Vector3(p.x, 0f, p.z), mark).ToString("0") + " units away";
+                }
+                RevivalPlugin.L.LogWarning("Troops: no ray hit under landing " + d.Name + " at "
+                    + mark.ToString("0") + "; height data " + height + "; camera " + camera
+                    + "; " + colliders);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Troops: ground diagnosis failed: " + ex.Message);
+            }
         }
 
         static Vector3 OnGround(Vector3 xz, float fallbackY)
