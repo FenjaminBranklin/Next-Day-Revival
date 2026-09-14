@@ -71,6 +71,20 @@ namespace NextDayRevival
     //   An empty magazine is the native reload (OnBulletsEnded). No ready
     //   native weapon means no shot, no effect and no damage.
     //
+    //   FEET FIRST (6.16.6, after the 6.16.5 field report). The shooting clips
+    //   are upper-body layers, so Shooting straight out of a run left the legs
+    //   running on the spot. A man is first put into Idle + Aiming, which
+    //   replaces the whole-body clip, and fires only once he is planted
+    //   (Planted). A target that ducks away for a moment keeps him standing
+    //   with the weapon up (Steady) instead of sprinting off for every lost
+    //   glimpse. Walking while firing does not exist for NPCs: the game forces
+    //   AdditionalState 0 in any MainState but Idle.
+    //
+    //   ONLY NPCS THAT CAN BE HURT. A target must be one NPC_AI2.ApplyDamage
+    //   really damages - not a StoreKeeper, not in a safe settlement, not
+    //   uninitialized - and enlisted defenders are checked like everyone else
+    //   (Targetable, Hurtable). The 6.16.5 squad hung on a settlement trader.
+    //
     //   Defenders - NPCs the squad attacks, and comrades close to them - fire
     //   back the same way and may still take cover; they are the enemy, not
     //   the assault.
@@ -171,6 +185,8 @@ namespace NextDayRevival
         const float LaneSlack = 4f;         // this close to his point a man is there
         const float AheadWalk = 12f;        // this far ahead of the line he walks ...
         const float AheadRun = 4f;          // ... until the line is back within this
+        const float PlantSeconds = 0.35f;   // standing in the aim clip before Shooting
+        const float SteadySeconds = 1.2f;   // a target out of sight this long: still stand
 
         // NPC_AI2 states. NPCMainState: Idle 0, Walk 1, Run 2.
         // NPCAdditionalState: Empty 0, Aiming 1, Reloading 2, Shooting 3.
@@ -180,7 +196,11 @@ namespace NextDayRevival
         // fires standing still, exactly like every vanilla NPC.
         const int MainIdle = 0, MainWalk = 1, MainRun = 2;
         const int AddNone = 0, AddAim = 1, AddFire = 3;
+        const int AddReload = 2;
         const int PoseStand = 0, PoseCrouch = 1;
+        // NPCBehaviorPattern: Aggressive 0, StoreKeeper 1, Harmless 2, Boss 3.
+        // NPC_AI2.ApplyDamage skips DecreaseHealth for a StoreKeeper.
+        const int BehaviorStoreKeeper = 1;
 
         // ------------------------------------------------------- runtime state
 
@@ -210,6 +230,11 @@ namespace NextDayRevival
             public int Team;              // 0/1: the two halves that bound in turn
             public float FireSince, BoundUntil, NextBound, BlindUntil;
             public Vector3 BoundDest;
+            // Since when his feet stand in a standing aim or shooting state
+            // (0 = not planted), and until when a target that has just gone
+            // out of sight still keeps him standing.
+            public float PlantedSince, SteadyUntil;
+            public float NextTargetCheck;   // defender: next Targetable re-check
 
             // Defender posture.
             public float Nerve = 1f, Pace = 1f;
@@ -283,6 +308,7 @@ namespace NextDayRevival
         static FieldInfo _fAimIk, _fLookTarget, _fSpecs, _fSolver, _fIkWeight;
         static FieldInfo _fHealth, _fHealthMax;
         static FieldInfo _fWeaponsManager, _fWeaponCategory, _fWeaponSlot, _fWeaponItem;
+        static FieldInfo _fInitialized, _fBehavior, _fMySettlement, _fSafeSettlement;
         static MethodInfo _mEquipWeapon, _mSetMainWeaponId;
         static MethodInfo _mIsAlive, _mTempTask, _mTargetWp, _mStateSync, _mAlarm;
         static MethodInfo _mPhotonView, _mIsMine, _mMasterGetter, _mDestroy;
@@ -336,6 +362,17 @@ namespace NextDayRevival
                 _fWeaponCategory = AccessTools.Field(manager, "WeaponCategoryEquiped");
                 _fWeaponSlot = AccessTools.Field(manager, "_currentWeaponSlotId");
                 _fWeaponItem = AccessTools.Field(manager, "_currentWeaponItemId");
+            }
+            // What NPC_AI2.ApplyDamage checks before it takes health off.
+            _fInitialized = AccessTools.Field(_npcType, "IsInitialized");
+            if (_fInitialized != null && _fInitialized.FieldType != typeof(bool)) _fInitialized = null;
+            _fBehavior = AccessTools.Field(_npcType, "BehaviorPattern");
+            _fMySettlement = AccessTools.Field(_npcType, "MySettlement");
+            if (_fMySettlement != null)
+            {
+                _fSafeSettlement = AccessTools.Field(_fMySettlement.FieldType, "IsSafeSettlement");
+                if (_fSafeSettlement != null && _fSafeSettlement.FieldType != typeof(bool))
+                    _fSafeSettlement = null;
             }
             _mEquipWeapon = AccessTools.Method(_npcType, "EquipWeapon",
                 new Type[] { typeof(bool), typeof(bool) }, null);
@@ -403,6 +440,11 @@ namespace NextDayRevival
             if (_fAimIk == null || _fLookTarget == null)
                 RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2._aimIk or LookAtIKTarget missing - "
                     + "the men will fire without pointing the weapon at the target.");
+            if (_fInitialized == null || _fBehavior == null || _fSafeSettlement == null)
+                RevivalPlugin.L.LogWarning("NpcWar: NPC_AI2 damage guards missing (IsInitialized "
+                    + (_fInitialized != null) + ", BehaviorPattern " + (_fBehavior != null)
+                    + ", MySettlement.IsSafeSettlement " + (_fSafeSettlement != null)
+                    + ") - squads may fire at NPCs that cannot be hurt.");
             return _ok;
         }
 
@@ -642,7 +684,17 @@ namespace NextDayRevival
             for (int i = _defenders.Count - 1; i >= 0; i--)
             {
                 Fighter d = _defenders[i];
-                if (d.Ai == null || d.Tr == null || !Alive(d.Ai) || NearestSquadMan(d, 2f) == null)
+                bool gone = d.Ai == null || d.Tr == null || !Alive(d.Ai)
+                    || NearestSquadMan(d, 2f) == null;
+                // A defender who can no longer be hurt (a talk started, god
+                // mode) is no target any more and leaves the fight. Twice a
+                // second is plenty and keeps the reflection off every frame.
+                if (!gone && now >= d.NextTargetCheck)
+                {
+                    d.NextTargetCheck = now + 0.5f;
+                    gone = !Targetable(d.Ai);
+                }
+                if (gone)
                 {
                     if (d.Ai != null && Alive(d.Ai)
                         && (d.WantAdd == AddAim || d.WantAdd == AddFire)) StandDown(d);
@@ -834,7 +886,7 @@ namespace NextDayRevival
                 if (c == null || !Alive(c)) continue;
                 Fighter other = FighterOf(c);
                 if (other != null && other.Squad == s) continue;
-                if (other == null && !Targetable(c)) continue;
+                if ((other == null || other.Squad == null) && !Targetable(c)) continue;
                 float d = (c.transform.position - centre).sqrMagnitude;
                 if (d >= bestSqr) continue;
                 if (!HatedBySquad(s, c)) continue;
@@ -887,6 +939,9 @@ namespace NextDayRevival
         {
             EnsureArmed(f, now);
             Acquire(f, now);
+            // Sampled every frame, so a pass through a run between two shots
+            // is never missed (Planted).
+            Planted(f, now);
 
             // A barrel behind a wall, or a comrade in the line of fire: the eyes
             // may see, the rifle may not. Run on with the line for a moment
@@ -928,12 +983,25 @@ namespace NextDayRevival
             if (sees && f.Armed && dist <= AssaultRange())
             {
                 if (f.FireSince <= 0f) f.FireSince = now;
+                f.SteadyUntil = now + SteadySeconds;
                 if (BoundDue(f, s, front, dist, now))
                 {
                     StartBound(f, s, front, centre, now);
                     return;
                 }
                 Fire(f, now);
+                return;
+            }
+
+            // 2b The target has only just gone out of sight. A man who breaks
+            //    into a run for every glimpse he loses never plants his feet:
+            //    he stands in the aim clip for a moment and fires again the
+            //    instant it shows. No line of fire at all (BlindUntil) still
+            //    sends him on at once.
+            if (f.Armed && f.Target != null && now < f.SteadyUntil && now >= f.BlindUntil
+                && dist <= AssaultRange())
+            {
+                Steady(f, now);
                 return;
             }
             f.FireSince = 0f;
@@ -1033,7 +1101,9 @@ namespace NextDayRevival
 
         /// <summary>Stand and fire, the way every vanilla NPC does: MainState
         /// Idle, AdditionalState Shooting, held, a round every
-        /// _shootingTimerDelayCached.</summary>
+        /// _shootingTimerDelayCached. The feet come first: a man who is not
+        /// planted yet is put into Idle + Aiming, and Shooting is only asked
+        /// for once that clip has faded in (Planted).</summary>
         static void Fire(Fighter f, float now)
         {
             f.Stance = Stance.Fire;
@@ -1052,14 +1122,55 @@ namespace NextDayRevival
                     return;
                 }
                 f.IkDriven = false;
-                Drive(f, MainIdle, AddFire, PoseStand, now, true);
+                Drive(f, MainIdle, Planted(f, now) ? AddFire : AddAim, PoseStand, now, true);
                 Face(f);
+                return;
+            }
+            if (!Planted(f, now))
+            {
+                Drive(f, MainIdle, AddAim, PoseStand, now, true);
+                Aim(f, now);
                 return;
             }
             Drive(f, MainIdle, AddFire, PoseStand, now, true);
             Aim(f, now);
             if (now < f.ReactUntil || !f.IkDriven || f.AimWeight < 0.6f || now < f.NextShot) return;
             if (Shoot(f)) f.NextShot = now + ShotDelay(f);
+        }
+
+        /// <summary>Are his feet planted in a standing clip? The shooting clips
+        /// are upper-body layers - NPC_AI2.SetBlendingAnimLayers puts
+        /// asr_shoot_auto, rifle_shoot_samopal and hg_shoot_auto on layer 6
+        /// with a spine mixing transform - and SwitchAnimationByStates plays
+        /// them with Animation.CrossFade, which fades out only that layer.
+        /// Straight out of a run the legs kept the run clip while
+        /// IdleStateAction stopped the NavMeshAgent: the 6.16.5 men ran on the
+        /// spot and fired (CONFIRMED IL). idle_aiming is a whole-body clip, so
+        /// a man counts as planted once he has stood in Idle + Aiming or
+        /// Shooting for the crossfade. A reload is a layer-6 clip too and
+        /// neither plants nor unplants him.</summary>
+        static bool Planted(Fighter f, float now)
+        {
+            if (IntField(f.Ai, _fMainState, -1) != MainIdle
+                || IntField(f.Ai, _fPoseState, -1) != PoseStand)
+            { f.PlantedSince = 0f; return false; }
+            int add = IntField(f.Ai, _fAddState, -1);
+            if (add == AddReload) return false;
+            if (add != AddAim && add != AddFire) { f.PlantedSince = 0f; return false; }
+            if (f.PlantedSince <= 0f) f.PlantedSince = now;
+            return now - f.PlantedSince >= PlantSeconds;
+        }
+
+        /// <summary>His target has just gone out of sight: feet stay planted in
+        /// the standing aim clip and the weapon stays on the spot.</summary>
+        static void Steady(Fighter f, float now)
+        {
+            f.Stance = Stance.Hold;
+            f.HasOrder = false;
+            Drive(f, MainIdle, AddAim, PoseStand, now, true);
+            Face(f);
+            if (f.TargetIsPlayer) f.IkDriven = false;
+            else Aim(f, now);
         }
 
         /// <summary>The NPC's own pause between two rounds:
@@ -1114,6 +1225,7 @@ namespace NextDayRevival
             EnsureArmed(d, now);
             Decay(d, now);
             Acquire(d, now);
+            Planted(d, now);
             if (d.Target == null || now - d.LastSeen > 8f)
             {
                 if (d.WantAdd == AddAim || d.WantAdd == AddFire) StandDown(d);
@@ -1318,6 +1430,7 @@ namespace NextDayRevival
                     Fighter current = cur == null ? null : FighterOf(cur);
                     if (cur != null && Alive(cur)
                         && (current == null || current.Squad != f.Squad)
+                        && ((current != null && current.Squad != null) || Targetable(cur))
                         && Hostile(f.Hated, FactionOf(cur))
                         && Flat(f.Target.position - f.Tr.position) <= range * 1.1f)
                         return false;
@@ -1341,7 +1454,7 @@ namespace NextDayRevival
                 Fighter other = FighterOf(c);
                 if (other != null && other.Squad == f.Squad) continue;
                 if (!Hostile(f.Hated, FactionOf(c))) continue;
-                if (other == null && !Targetable(c)) continue;
+                if ((other == null || other.Squad == null) && !Targetable(c)) continue;
                 if (!Alive(c)) continue;
                 Insert(ref n, c.transform, false, d);
             }
@@ -1553,7 +1666,8 @@ namespace NextDayRevival
             if (hurt != null && hurt.Squad != null && hurt.Squad == f.Squad) return true;
             bool enemy = f.Squad == null
                 ? hurt != null && hurt.Squad != null
-                : Hostile(f.Hated, FactionOf(hitAi)) && (hurt != null || Targetable(hitAi));
+                : Hostile(f.Hated, FactionOf(hitAi))
+                  && ((hurt != null && hurt.Squad != null) || Targetable(hitAi));
             if (!enemy) return true;
             if (hurt == null && f.Squad != null) Enlist(hitAi);
 
@@ -2337,14 +2451,38 @@ namespace NextDayRevival
         }
 
         /// <summary>May a squad shoot this scene NPC? Owned here, not god-moded,
-        /// not in a safe settlement (traders) and not in a conversation.</summary>
+        /// not in a safe settlement (traders), not in a conversation, and one
+        /// that NPC_AI2.ApplyDamage really hurts (Hurtable).</summary>
         static bool Targetable(Component ai)
         {
             if (!IsMine(ai)) return false;
             if (Bool(ai, "GodModeEnabled")) return false;
             if (Bool(ai, "_isSafeSettlement")) return false;
             if (Bool(ai, "IsTalkActive")) return false;
+            if (!Hurtable(ai)) return false;
             return FactionOf(ai) != null;
+        }
+
+        /// <summary>Would NPC_AI2.ApplyDamage take health off this NPC? It
+        /// returns early for an NPC that is not initialized or whose settlement
+        /// is a safe one, and a StoreKeeper never reaches DecreaseHealth
+        /// (CONFIRMED IL, 2026-09-14): the settlement trader swallowed every
+        /// round of the 6.16.5 squad. A guard that cannot be read refuses
+        /// nothing.</summary>
+        static bool Hurtable(Component ai)
+        {
+            try
+            {
+                if (_fInitialized != null && !(bool)_fInitialized.GetValue(ai)) return false;
+                if (IntField(ai, _fBehavior, -1) == BehaviorStoreKeeper) return false;
+                if (_fMySettlement != null && _fSafeSettlement != null)
+                {
+                    object home = _fMySettlement.GetValue(ai);
+                    if (home != null && (bool)_fSafeSettlement.GetValue(home)) return false;
+                }
+            }
+            catch { }
+            return true;
         }
 
         static bool IsMine(Component ai)
