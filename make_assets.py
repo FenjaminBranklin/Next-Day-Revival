@@ -35,6 +35,13 @@ GROUPS = [
     # Convoy-repair items: own art for the fire extinguisher (2063) and the
     # heavy tool kit (2064), replacing the ammo50/jammer placeholders.
     ("repairitems", ["repair_items_build.py"]),
+    # Vehicle modules (2060 thermal, 2061 night vision, 2062 large jammer):
+    # own art, replacing the portable jammer all three used to wear.
+    ("modules", ["vehicle_modules_build.py"]),
+    # Drone gear (2055 mast antenna, 2056 battery, 2057 recon drone): own art,
+    # replacing the jammer/ammo-tin/FPV-drone placeholders. The DEPLOYED mast
+    # head stays antenna_head.py in the "antenna" group below.
+    ("dronegear", ["drone_gear_build.py"]),
     # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),

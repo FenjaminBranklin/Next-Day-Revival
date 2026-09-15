@@ -107,7 +107,12 @@ namespace NextDayRevival
     //     regular   the assault line above
     //     sniper    keeps SniperBack behind the line, engages out to SniperRange
     //               with SniperAccuracy and one round every SniperShotSeconds,
-    //               never bounds
+    //               never bounds. 6.19: he is the man the squad picked for the
+    //               job. Cover, movement and being shot at cost him SniperSteady
+    //               of what they cost a rifleman, his own skill draw counts for
+    //               SniperSkill, his hit chance falls by SniperFalloff over the
+    //               whole of SniperRange, and his TAC-50 round takes
+    //               SniperDamage times DamagePerShot. He is slow and he hits.
     //     tank      runs TankLead ahead of the line, closes to TankCloseRange,
     //               bounds on his own rhythm, never waits out a lost glimpse
     //     defender  (Heavy) DefenderHealth times the hit points and, left empty
@@ -128,6 +133,24 @@ namespace NextDayRevival
     //   the worn items' Regenerate value, weighted by body coverage and doubled
     //   for UKB parts over the exoskeleton - the player's own gear rule - up to
     //   ArmorMaxReduction.
+    //
+    // BALANCE (6.19, after the field report on 6.18.0). The squad behaves the
+    //   way it should now, but "no party can be put together that really wipes
+    //   the settlement" - the 6.16.7 correction of E-057 went too far. Three
+    //   numbers move, and only three:
+    //     - a landing may set down 24 men instead of 16
+    //       (RevivalTroopInsertion.MaxSquad); over twenty they form three ranks
+    //       so the front stays as wide as sixteen men's was (LayOut).
+    //     - SquadFalloff 0.55 -> 0.4. The squad loses the same share of its hit
+    //       chance over its range as a defender does over his; 6.16.7 had
+    //       punished it twice, once with the allowance removed and once with the
+    //       steeper curve.
+    //     - DefenderHitsToKill 2 -> 3, so an unarmoured squad man survives one
+    //       more round of return fire (DefenderRound).
+    //   Everything else about the defenders - their reach, their target pick,
+    //   the 120 unit enlist radius, MaxDefenders - stands as 6.16.7 left it.
+    //   HYPOTHESIS until the field run: this is the middle ground between
+    //   E-057's "wiped a settlement for 3 losses" and 6.18.0's stalemate.
     //
     // VEHICLES (6.17). A crewed patrol vehicle of a hated faction, or any
     //   vehicle with a hostile player aboard, within 1.5 x AssaultRange is the
@@ -195,6 +218,7 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgSniperAccuracy;
         internal static ConfigEntry<float> CfgSniperShotSeconds;
         internal static ConfigEntry<float> CfgSniperBack;
+        internal static ConfigEntry<float> CfgSniperDamage;
         internal static ConfigEntry<float> CfgTankLead;
         internal static ConfigEntry<float> CfgTankCloseRange;
         internal static ConfigEntry<float> CfgDefenderHealth;
@@ -220,13 +244,16 @@ namespace NextDayRevival
                 + "AssaultRange; nur ein hoeherer Wert erweitert sie.");
             CfgDamage = cfg.Bind("NpcWar", "DamagePerShot", 18f,
                 "Schaden je Treffer an einem NPC. Das Spiel wertet den Treffer als "
-                + "Kopftreffer und verdreifacht ihn: 18 nimmt 54 Lebenspunkte. Ein "
-                + "Verteidiger braucht fuer einen Truppsoldaten hoechstens zwei Treffer.");
+                + "Kopftreffer und verdreifacht ihn: 18 nimmt 54 Lebenspunkte. Fuer "
+                + "den Verteidiger gilt dieser Wert nicht: sein Schuss wird so "
+                + "berechnet, dass genau drei Treffer einen unbeschaedigten "
+                + "Truppsoldaten toeten (DefenderHitsToKill, seit 6.19 drei statt "
+                + "zwei). Ruestung rechnet danach herunter.");
             CfgAccuracy = cfg.Bind("NpcWar", "Accuracy", 0.6f,
                 "Trefferwahrscheinlichkeit auf kurze Entfernung (0..1); sie faellt "
-                + "zur Reichweite hin ab, beim Verteidiger um 40, beim Landetrupp um "
-                + "55 Prozent. Deckung, Hinknien und das persoenliche Koennen des "
-                + "Schuetzen veraendern sie zusaetzlich.");
+                + "zur Reichweite hin bei beiden Seiten um 40 Prozent ab. Deckung, "
+                + "Hinknien und das persoenliche Koennen des Schuetzen veraendern "
+                + "sie zusaetzlich.");
             CfgSpread = cfg.Bind("NpcWar", "MissSpread", 1.6f,
                 "Wie weit (Meter) ein verfehlter Schuss neben dem Ziel einschlaegt.");
             CfgMaxCombatants = cfg.Bind("NpcWar", "MaxDefenders", 32,
@@ -282,13 +309,22 @@ namespace NextDayRevival
 
             CfgSniperRange = cfg.Bind("NpcWarClasses", "SniperRange", 380f,
                 "Scharfschuetze: groesste Kampfentfernung (Meter).");
-            CfgSniperAccuracy = cfg.Bind("NpcWarClasses", "SniperAccuracy", 0.9f,
+            CfgSniperAccuracy = cfg.Bind("NpcWarClasses", "SniperAccuracy", 0.97f,
                 "Scharfschuetze: Trefferwahrscheinlichkeit auf kurze Entfernung (0..1); "
-                + "sie faellt zur Reichweite hin nur um 20 Prozent ab.");
-            CfgSniperShotSeconds = cfg.Bind("NpcWarClasses", "SniperShotSeconds", 2.8f,
-                "Scharfschuetze: Sekunden zwischen zwei Schuessen.");
+                + "sie faellt zur Reichweite hin nur um 8 Prozent ab. Deckung, "
+                + "Bewegung und Beschuss kosten ihn nur 40 Prozent dessen, was sie "
+                + "einen Schuetzen der Linie kosten, und sein persoenliches Koennen "
+                + "zaehlt nur zu einem Drittel: er ist der ausgesuchte Schuetze. "
+                + "Bezahlt wird das mit SniperShotSeconds.");
+            CfgSniperShotSeconds = cfg.Bind("NpcWarClasses", "SniperShotSeconds", 4f,
+                "Scharfschuetze: Sekunden zwischen zwei Schuessen. Er trifft fast "
+                + "immer, aber langsam.");
             CfgSniperBack = cfg.Bind("NpcWarClasses", "SniperBack", 45f,
                 "Scharfschuetze: so viele Meter bleibt er hinter der Linie.");
+            CfgSniperDamage = cfg.Bind("NpcWarClasses", "SniperDamage", 2f,
+                "Scharfschuetze: Faktor auf DamagePerShot (0,5..6). Die TAC-50 ist "
+                + "ein Anti-Material-Gewehr; mit 2 nimmt ein Treffer 108 statt 54 "
+                + "Lebenspunkte. 1 = dieselbe Wirkung wie ein Gewehr der Linie.");
             CfgTankLead = cfg.Bind("NpcWarClasses", "TankLead", 18f,
                 "Sturmsoldat (tank): so viele Meter laeuft er vor der Linie.");
             CfgTankCloseRange = cfg.Bind("NpcWarClasses", "TankCloseRange", 10f,
@@ -332,8 +368,8 @@ namespace NextDayRevival
         const float Arrive = 25f;           // the line counts as arrived
         const float StartDistance = 60f;    // landing zone this far from the tail: run there first
         const float Lead = 30f;             // the line runs at a point this far ahead of itself
-        const float RankDepth = 12f;        // second rank this far behind the first
-        const int PerRank = 10;             // up to this many men in one line
+        const float RankDepth = 12f;        // each rank this far behind the one in front of it
+        const int PerRank = 10;             // up to this many men before another rank is opened
         const float BoundStep = 20f;        // one forward bound under fire
         const float LaneSlack = 4f;         // this close to his point a man is there
         const float AheadWalk = 12f;        // this far ahead of the line he walks ...
@@ -341,9 +377,12 @@ namespace NextDayRevival
         const float Catchup = 30f;          // this far behind his place: close up before firing
         const float PlantSeconds = 0.35f;   // standing in the aim clip before Shooting
         const float SteadySeconds = 1.2f;   // a target out of sight this long: still stand
-        const float SquadFalloff = 0.55f;   // squad hit chance lost at full AssaultRange
+        const float SquadFalloff = 0.4f;    // squad hit chance lost at full AssaultRange
+        const float SniperFalloff = 0.08f;  // a marksman keeps almost all of it out to SniperRange
+        const float SniperSteady = 0.4f;    // what suppression, cover and movement cost him of a rifleman's penalty
+        const float SniperSkill = 0.35f;    // how much of his personal skill draw still counts
         const float TryDamageHead = 3f;     // Turret.TryDamage hits count as Head: x3 in NPC_AI2
-        const int DefenderHitsToKill = 2;   // defender rounds that kill a full-health squad man
+        const int DefenderHitsToKill = 3;   // defender rounds that kill a full-health squad man
         const float EnlistRadius = 120f;    // same-faction NPCs this close to a struck one join
         const float FullOrderSeconds = 3.5f; // a running man gets a full (RPC) move order at most this often
         const float RetargetSlack = 4f;     // a point that moved less than this is left alone
@@ -754,7 +793,15 @@ namespace NextDayRevival
 
         static float SniperAccuracy()
         {
-            return Mathf.Clamp01(CfgSniperAccuracy == null ? 0.9f : CfgSniperAccuracy.Value);
+            return Mathf.Clamp01(CfgSniperAccuracy == null ? 0.97f : CfgSniperAccuracy.Value);
+        }
+
+        /// <summary>What one marksman's round takes compared with a rifle of the
+        /// line. His weapon is the TAC-50 (SniperRifleId), so his hit is worth
+        /// more than his rate of fire costs him.</summary>
+        static float SniperDamage()
+        {
+            return Mathf.Clamp(CfgSniperDamage == null ? 2f : CfgSniperDamage.Value, 0.5f, 6f);
         }
 
         static float TankCloseRange()
@@ -976,10 +1023,15 @@ namespace NextDayRevival
             LayOut(men.Count, LineSpacing(), men);
         }
 
-        /// <summary>Lane numbers to offsets: index k of n, left to right.</summary>
+        /// <summary>Lane numbers to offsets: index k of n, left to right.
+        /// 6.19: a landing may put 24 men down (RevivalTroopInsertion.MaxSquad),
+        /// and 24 in two ranks is a front 92 units wide - wider than the
+        /// settlement it attacks. Over twenty men take a third rank instead, so
+        /// the frontage stays about what sixteen had and neighbours in one rank
+        /// keep their LineSpacing.</summary>
         static void LayOut(int n, float spacing, List<Fighter> men)
         {
-            int ranks = n <= PerRank ? 1 : 2;
+            int ranks = n <= PerRank ? 1 : (n <= 2 * PerRank ? 2 : 3);
             float step = spacing / ranks;
             for (int k = 0; k < n; k++)
             {
@@ -1863,7 +1915,7 @@ namespace NextDayRevival
         {
             if (f.Squad != null && f.Class == SquadClass.Sniper)
             {
-                float slow = CfgSniperShotSeconds == null ? 2.8f : CfgSniperShotSeconds.Value;
+                float slow = CfgSniperShotSeconds == null ? 4f : CfgSniperShotSeconds.Value;
                 return Mathf.Clamp(slow, 0.5f, 10f) * UnityEngine.Random.Range(0.85f, 1.15f);
             }
             if (_fShotDelayCached != null && f.Ai != null)
@@ -2446,6 +2498,8 @@ namespace NextDayRevival
             float damage = CfgDamage.Value;
             if (f.Squad == null && hurt != null && hurt.Squad != null)
                 damage = DefenderRound(hurt, damage);
+            else if (f.Squad != null && f.Class == SquadClass.Sniper)
+                damage *= SniperDamage();
             BreakKillStreak(hitAi);
             try
             {
@@ -2595,21 +2649,30 @@ namespace NextDayRevival
         {
             // 6.16.7: the squad's eight-point allowance is gone and its fire
             // falls off harder over its long AssaultRange; 15 men with a bonus
-            // wiped a settlement for 3 losses (E-057).
+            // wiped a settlement for 3 losses (E-057). 6.19 takes the steeper
+            // half of that back (0.55 -> 0.4): the squad and the defenders now
+            // lose the same share of their hit chance over the same reach, and
+            // nobody is punished for the assault range being the longer one.
+            bool marksman = shooter.Squad != null && shooter.Class == SquadClass.Sniper;
             float acc = Mathf.Clamp01(CfgAccuracy.Value) * shooter.Skill;
-            if (shooter.Squad != null && shooter.Class == SquadClass.Sniper)
-                acc = SniperAccuracy() * shooter.Skill;
-            acc *= 1f - 0.45f * shooter.Suppression;
+            // 6.19: a marksman is picked for his shooting. His personal draw
+            // still separates a good sniper from a very good one, but only
+            // SniperSkill of it, and what shakes a rifleman - being shot at, a
+            // target behind cover, a target that moves - costs him SniperSteady
+            // of the same penalty. He pays for it with SniperShotSeconds.
+            if (marksman)
+                acc = SniperAccuracy() * (1f - SniperSkill + SniperSkill * shooter.Skill);
+            acc *= 1f - (marksman ? 0.45f * SniperSteady : 0.45f) * shooter.Suppression;
             if (victim != null)
             {
-                if (victim.InCover) acc *= 0.55f;
-                else if (victim.Crouched) acc *= 0.75f;
+                if (victim.InCover) acc *= Steadied(0.55f, marksman);
+                else if (victim.Crouched) acc *= Steadied(0.75f, marksman);
                 if (victim.Stance == Stance.Reposition || victim.Stance == Stance.Bound
-                    || victim.Stance == Stance.Advance) acc *= 0.8f;
+                    || victim.Stance == Stance.Advance) acc *= Steadied(0.8f, marksman);
             }
             float far = Mathf.Clamp01(dist / Mathf.Max(1f, RangeOf(shooter)));
             float falloff = shooter.Squad == null ? 0.4f
-                : (shooter.Class == SquadClass.Sniper ? 0.2f : SquadFalloff);
+                : (marksman ? SniperFalloff : SquadFalloff);
             if (UnityEngine.Random.value <= acc * (1f - falloff * far)) return Vector3.zero;
 
             Vector3 axis = (to - from).normalized;
@@ -2620,6 +2683,14 @@ namespace NextDayRevival
             float ang = UnityEngine.Random.value * Mathf.PI * 2f;
             float amt = Mathf.Max(0.4f, CfgSpread.Value) * (0.5f + UnityEngine.Random.value);
             return (side * Mathf.Cos(ang) + up * Mathf.Sin(ang)) * amt;
+        }
+
+        /// <summary>One of the factors a target's cover, crouch or movement
+        /// takes off a shooter's hit chance - and what is left of that penalty
+        /// for a marksman, who takes the time to shoot round it.</summary>
+        static float Steadied(float penalty, bool marksman)
+        {
+            return marksman ? 1f - (1f - penalty) * SniperSteady : penalty;
         }
 
         // ------------------------------------------------------------- aiming
@@ -4241,17 +4312,26 @@ namespace NextDayRevival
         /// unless the type is 17/18 (CONFIRMED IL): 18 takes 54. A 120 point
         /// squad man therefore survived two 6.16.6 defender hits with 12 left -
         /// under 25, the vanilla wounded state, in which ApplyDamage ignores
-        /// further hits. Here the round is raised just enough that
+        /// further hits. The round is therefore sized so that exactly
         /// DefenderHitsToKill hits kill a man at full health, read from his own
-        /// HealthMax, so a changed Patrol/CrewHealth keeps the rule. A squad
-        /// round (54) kills a defender of up to 108 points in two as well;
+        /// HealthMax, so a changed Patrol/CrewHealth keeps the rule.
+        /// 6.19: three hits, not two - the field report says no party can be put
+        /// together that wipes a settlement. The old Mathf.Max against the
+        /// configured DamagePerShot had to go with it: 18 configured takes 54 a
+        /// hit, which would leave a 120 point man at 12 after two - back in the
+        /// wounded band the derivation exists to avoid. A defender round is now
+        /// the derived value alone (40 of 120 points a hit), and DamagePerShot
+        /// keeps its meaning for every OTHER shooter, the squad included.
+        /// A squad round (54) kills a defender of up to 108 points in two;
         /// settlement NPCs take their points from NPC_SpawnPoint.Health in the
-        /// scene, which is not measured here.</summary>
+        /// scene (the constructor's own value is 150), which is not measured
+        /// here. Armour still scales the hit afterwards (ApplyDamagePrefix), so
+        /// a well-dressed man takes more than three.</summary>
         static float DefenderRound(Fighter man, float configured)
         {
             float full = HealthMax(man);
             if (full <= 0f) return configured;
-            return Mathf.Max(configured, (full + 1f) / (TryDamageHead * DefenderHitsToKill));
+            return (full + 1f) / (TryDamageHead * DefenderHitsToKill);
         }
 
         static FieldInfo _fLastKillerId;

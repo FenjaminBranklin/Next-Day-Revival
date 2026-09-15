@@ -338,7 +338,7 @@ namespace NextDayRevival
                 // Class defaults (a defender in UKB, a sniper's rifle, ...) on
                 // copies: the landing's own loadout lines stay as authored.
                 List<RevivalComposition.CrewMan> loadout = NpcWar.WithClassDefaults(d.Squad);
-                GameObject settlement = Crew.DropSquad(at, yaw, Mathf.Clamp(d.Count, 1, 16),
+                GameObject settlement = Crew.DropSquad(at, yaw, Mathf.Clamp(d.Count, 1, MaxSquad),
                     d.Faction, loadout.Count > 0 ? loadout : null);
                 Array men = Crew.Men(settlement);
                 if (settlement == null || men == null || men.Length == 0)
@@ -770,7 +770,7 @@ namespace NextDayRevival
                     d.TailX = Num(c[4]); d.TailZ = Num(c[5]);
                     d.HeadX = Num(c[6]); d.HeadZ = Num(c[7]);
                     d.Faction = Fraktion.Sauber(c[8]);
-                    d.Count = Mathf.Clamp((int)Num(c[9]), 1, 16);
+                    d.Count = Mathf.Clamp((int)Num(c[9]), 1, MaxSquad);
                     d.IntervalMinHours = Mathf.Max(0f, Num(c[10]));
                     d.IntervalMaxHours = Mathf.Max(d.IntervalMinHours, Num(c[11]));
                     d.PatrolMinutes = Mathf.Clamp(Num(c[12]), 1f, 120f);
@@ -782,7 +782,7 @@ namespace NextDayRevival
                     order.Add(d);
                 }
                 string role = c[13].Trim();
-                if (role.Length == 0 || d.Squad.Count >= 16) continue;
+                if (role.Length == 0 || d.Squad.Count >= MaxSquad) continue;
                 RevivalComposition.CrewMan man = new RevivalComposition.CrewMan();
                 man.Role = role;
                 int weapon = Id(c[14]);
@@ -856,6 +856,17 @@ namespace NextDayRevival
         /// <summary>At most this many bends between tail and head. The editor
         /// enforces the same number (troopdef.MAX_ARROW_POINTS).</summary>
         const int MaxBends = 6;
+
+        /// <summary>Most men one landing may put on the ground, and most
+        /// loadout lines one landing may carry. The editor enforces the same
+        /// number (troopdef.MAX_SQUAD_COUNT / MAX_SQUAD_ROSTER).
+        /// 6.19: 16 was not a party that could wipe a settlement against the
+        /// 6.16.7 defenders (user field report). A real Mi-8 seats 24, the
+        /// men leave in two files that already grow with the squad
+        /// (Crew.SquadOffset) and the assault line takes a third rank above
+        /// twenty (NpcWar.LayOut), so 24 is the cabin, not a round
+        /// number.</summary>
+        internal const int MaxSquad = 24;
 
         static bool Finite(params float[] values)
         {
@@ -1265,7 +1276,7 @@ namespace NextDayRevival
             Quaternion q = Quaternion.Euler(0f, _yaw, 0f);
             // A squad over eight men leaves in two files whose rows reach back
             // toward the helicopter (Crew.SquadOffset); step out far enough.
-            int count = Mathf.Clamp(Landing.Count, 1, 16);
+            int count = Mathf.Clamp(Landing.Count, 1, RevivalTroopInsertion.MaxSquad);
             float outside = 7f * k + (count > 8 ? ((count + 1) / 2 - 1) * 2f + 2f : 0f);
             Vector3 door = _lz + q * new Vector3(-outside, 0f, 2f * k);
             float y;

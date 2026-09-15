@@ -221,6 +221,51 @@ def weapon_icon(mesh_path, tex_path, out_path, w=317, h=183,
     return img
 
 
+def pack_icon(mesh_path, tex_path, out_path, yaw=0.60, pitch=0.25, size=300,
+              margin=0.87, gain=580.0, tilt=0.0):
+    """300x300 icon for a FLAT, pack-shaped item - crate, module, drone.
+
+    `item_icon` above is built for a long weapon: it renders on a 3:1 canvas and
+    tips the result by 49 degrees, which is what makes a rifle fill a square
+    picture. An item fitted to the magazine reference box (X wide, Y thin, Z
+    tall) comes out of that treatment as a slab seen almost edge-on -
+    toolkit_icon.png is the example lying on disk.
+
+    The recipe here is the one jammer_icon.py and drone_icon.py already use, so
+    that every new non-weapon item can share it instead of copying it again:
+    turn the thin Y axis toward the camera, render square, and let yaw and pitch
+    do the work. After the turn the picture reads as
+
+        up        ~ sin(yaw) * Y + cos(yaw) * Z
+        right     ~ -X
+        towards the camera ~ +Y
+
+    so whatever a model is meant to SHOW - a lens, a panel, antennas - belongs
+    on its +Y side, and a big yaw (0.9) looks down onto that side while a small
+    one (0.45) keeps a more frontal view of the X-Z silhouette.
+
+    `tilt` is for the one shape this otherwise leaves half a picture empty for:
+    something much taller than it is wide, like a bundled mast. Laid over the
+    diagonal it fills the square the way the game's own long items do.
+    """
+    v, nm, idx, uv = load(mesh_path)
+    tex = load_texture(tex_path)
+    a = math.radians(90.0)
+    rz = np.array([[math.cos(a), -math.sin(a), 0.0],
+                   [math.sin(a), math.cos(a), 0.0],
+                   [0.0, 0.0, 1.0]], np.float32)
+    v = v @ rz.T
+    nm = nm @ rz.T
+    big = render(v, nm, idx, uv, tex, size * SS, size * SS, yaw, pitch,
+                 fill=0.96, gain=gain)
+    if abs(tilt) > 1e-6:
+        big = big.rotate(tilt, resample=Image.BICUBIC, expand=True)
+    img = fit(big, size, size, margin=margin)
+    img = drop_shadow(img, offset=(4, 6), blur=6, strength=0.5)
+    img.save(out_path)
+    return img
+
+
 def report(path):
     img = Image.open(path)
     a = np.asarray(img)[..., 3]

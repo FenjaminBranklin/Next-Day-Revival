@@ -66,6 +66,9 @@ namespace NextDayRevival
         public static ConfigEntry<int> CfgSurvHitpoints;
         public static ConfigEntry<bool> CfgSurvRequireBattery;
         public static ConfigEntry<string> CfgSurvKey;
+        // --- Surveillance drone: the thermal/night optic in its camera
+        public static ConfigEntry<bool> CfgSurvThermal;
+        public static ConfigEntry<string> CfgSurvVisionKey;
         // --- Surveillance drone: relevance bubble, NPC combat, networking
         public static ConfigEntry<bool> CfgSurvRelevance;
         public static ConfigEntry<float> CfgSurvRelevanceRadius;
@@ -119,6 +122,14 @@ namespace NextDayRevival
                 + "(Ladebalken); im Flug wechselt ein Tastendruck zwischen Drohnen- "
                 + "und Koerpersicht, langes Halten holt sie zurueck; am Boden hebt "
                 + "sie ein Tastendruck in der Naehe wieder auf.");
+            CfgSurvThermal = cfg.Bind("DroneGear", "SurveillanceThermalOptic", true,
+                "Die Aufklaerungsdrohne hat eine Waermebild- und Nachtsichtkamera "
+                + "(fest eingebaut, kein Modul noetig). Aus: nur das normale Bild.");
+            CfgSurvVisionKey = cfg.Bind("DroneGear", "SurveillanceVisionKey", "N",
+                "Taste im Drohnenbild, die zwischen Normal, Waermebild und "
+                + "Nachtsicht umschaltet. Dieselbe Taste wie im Geschuetz "
+                + "(VehicleModules/VisionKey); beides kann nicht gleichzeitig "
+                + "aktiv sein.");
 
             CfgSurvRelevance = cfg.Bind("DroneGear", "SurveillanceKeepNpcAwake", true,
                 "NPCs im Umkreis der fliegenden Aufklaerungsdrohne wachhalten "
@@ -442,7 +453,10 @@ namespace NextDayRevival
         /// <summary>Appends the three new items to the shared item table.</summary>
         public static void AddItems(List<ItemDef> items)
         {
-            // Antenna (2055) - placeholder art: the jammer's whip-antenna model.
+            // Antenna (2055) - own art (drone_gear_build.py): the mast FOLDED on
+            // its carry frame. The DEPLOYED head stays a separate model
+            // (antenna_head.ndmesh, built at real metres and parented to the
+            // runtime mast further down this file).
             items.Add(new ItemDef(
                 AntennaId, 2030, false,
                 "Мачтовая антенна", "Mast antenna",
@@ -454,11 +468,11 @@ namespace NextDayRevival
                 + "over about twenty seconds and rises a few metres up. With no "
                 + "raised antenna no drone - FPV or surveillance - will launch. "
                 + "It cannot be deployed inside a vehicle.",
-                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
-                "jammer_icon.png", null,
+                "antenna_pack.ndmesh", "antenna_pack_diffuse.png",
+                "antenna_pack_normal.png", "antenna_pack_icon.png", null,
                 1, 0, 6.0f));
 
-            // Battery (2056) - placeholder art: an ammo box.
+            // Battery (2056) - own art: a lithium traction pack with its leads.
             items.Add(new ItemDef(
                 BatteryId, 2030, false,
                 "Аккумулятор дрона", "Drone battery",
@@ -468,12 +482,15 @@ namespace NextDayRevival
                 "A lithium traction battery for the surveillance drone. One launch "
                 + "spends one battery; the charge sets the flight time. The FPV "
                 + "drone runs off its own built-in cell and does not need one.",
-                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png",
-                "ammo50_icon.png", null,
+                "battery.ndmesh", "battery_diffuse.png", "battery_normal.png",
+                "battery_icon.png", null,
                 1, 0, 2.2f));
 
-            // Surveillance drone (2057) - placeholder art: the FPV mesh (shown
-            // large in the air via ModelScale; the ground item stays small).
+            // Surveillance drone (2057) - own art for the ITEM: a large
+            // multirotor folded for carrying. What flies is still the FPV
+            // airframe scaled up (SurvDrone.Shape -> Drone.Modell.Bauen), which
+            // is deliberate: in the air it reads as a big version of the same
+            // machine. Only the backpack and ground item is this model.
             items.Add(new ItemDef(
                 SurveillanceId, 2030, false,
                 "Разведывательный дрон", "Surveillance drone",
@@ -486,8 +503,8 @@ namespace NextDayRevival
                 + "without it crashing. When it does crash it settles to the "
                 + "ground as an item - walk up and pick it back up. Battery "
                 + "powered.",
-                "drone.ndmesh", "drone_diffuse.png", "drone_normal.png",
-                "drone_icon.png", null,
+                "survdrone.ndmesh", "survdrone_diffuse.png",
+                "survdrone_normal.png", "survdrone_icon.png", null,
                 1, 0, 3.5f));
         }
     }
@@ -1250,6 +1267,13 @@ namespace NextDayRevival
     ///             OUT of the drone view it holds position and does NOT crash -
     ///             that is the "briefly step out and come back" the user asked
     ///             for. The body may walk while the drone hovers.
+    ///   optic     the camera is a sensor head, not a webcam: the vision key
+    ///             steps normal -> thermal -> night in the drone's picture. The
+    ///             cold field and the warm mesh silhouettes are drawn by the very
+    ///             same code the gunner periscope uses (GunnerOptics.DrawExternal)
+    ///             through this drone's camera, so a man reads as a heat shape
+    ///             here exactly as he does through a turret. No module is needed -
+    ///             a recon drone that cannot see at dusk is not a recon drone.
     ///   recall    holding the key in flight brings it straight down where it is.
     ///   crash     an empty battery drops it out of the sky; either way it does
     ///             not detonate - it settles to the ground AS AN ITEM.
@@ -1295,6 +1319,17 @@ namespace NextDayRevival
         static KeyCode _key = KeyCode.B;
         static bool _keyParsed;
         static Texture2D _px;
+
+        // The camera optic. A recon drone whose whole job is to find people is
+        // worth little at dusk with a plain colour picture, so it carries the same
+        // thermal/night sensor the gunner periscope has - the picture comes from
+        // GunnerOptics.DrawExternal, so a man reads as a heat silhouette here
+        // exactly as he does through a turret. It is a SETTING, not flight state:
+        // the pilot's choice survives stepping out of the view, a recall and the
+        // next launch, so he does not re-select it every time he sends it up.
+        static VisionMode _vision = VisionMode.Normal;
+        static KeyCode _visionKey = KeyCode.N;
+        static bool _visionKeyParsed;
 
         // Authoritative damage state, kept on the OWNER's client only - like the
         // FPV drone's hit points. _hp is what is left; _armed guards the first
@@ -1559,6 +1594,11 @@ namespace NextDayRevival
             // player's own map at the spot the drone is over. The recon drone
             // never fires, so the left button is free for this.
             if (_viewing && Input.GetMouseButtonDown(0)) MarkHere();
+
+            // One key steps the camera optic: normal -> thermal -> night. Only
+            // while actually looking through the drone, so the key does nothing
+            // to a body that has stepped out of the view.
+            if (_viewing && ThermalAllowed() && Input.GetKeyDown(VisionKey())) CycleVision();
 
             if (_viewing) Steer();
             Move();
@@ -2084,6 +2124,57 @@ namespace NextDayRevival
             return _key;
         }
 
+        // ---------------------------------------------------------- camera optic
+
+        /// <summary>Whether this drone's camera has the thermal/night sensor at
+        /// all. Off by config means the key does nothing and the OSD says nothing
+        /// about an optic - the drone simply flies with a plain picture.</summary>
+        static bool ThermalAllowed()
+        {
+            return DroneGear.CfgSurvThermal == null || DroneGear.CfgSurvThermal.Value;
+        }
+
+        static KeyCode VisionKey()
+        {
+            if (_visionKeyParsed) return _visionKey;
+            _visionKeyParsed = true;
+            try
+            {
+                _visionKey = (KeyCode)Enum.Parse(typeof(KeyCode),
+                    DroneGear.CfgSurvVisionKey == null ? "N" : DroneGear.CfgSurvVisionKey.Value, true);
+            }
+            catch
+            {
+                _visionKey = KeyCode.N;
+                RevivalPlugin.L.LogWarning("SurvDrone: vision key \""
+                    + (DroneGear.CfgSurvVisionKey == null ? "?" : DroneGear.CfgSurvVisionKey.Value)
+                    + "\" unknown, using N.");
+            }
+            return _visionKey;
+        }
+
+        /// <summary>Normal -> thermal -> night -> normal. The drone carries both
+        /// sensors, so the ring is fixed and needs no module check.</summary>
+        static void CycleVision()
+        {
+            _vision = _vision == VisionMode.Normal ? VisionMode.Thermal
+                    : _vision == VisionMode.Thermal ? VisionMode.Night
+                    : VisionMode.Normal;
+            Turret.Hinweis(_vision == VisionMode.Thermal
+                ? Loc.T("Тепловизор", "Thermal")
+                : _vision == VisionMode.Night
+                    ? Loc.T("Ночное видение", "Night vision")
+                    : Loc.T("Обычная камера", "Normal camera"), 1.5f);
+        }
+
+        /// <summary>The short OSD tag for the optic in use.</summary>
+        static string VisionTag()
+        {
+            return _vision == VisionMode.Thermal ? Loc.T("ТЕПЛО", "THERMAL")
+                 : _vision == VisionMode.Night ? Loc.T("НОЧЬ", "NIGHT")
+                 : Loc.T("ТВ", "TV");
+        }
+
         // --------------------------------------------------------------- camera
 
         /// <summary>Called from CameraOwner.LateTick while this drone owns the view.</summary>
@@ -2130,6 +2221,14 @@ namespace NextDayRevival
                 float w = Screen.width, h = Screen.height;
                 Color old = GUI.color;
                 float sig = Signal();
+
+                // The sensor picture comes FIRST, under the whole overlay: the
+                // cold field plus the warm silhouettes, drawn by the same code the
+                // gunner periscope uses (GunnerOptics.DrawExternal), through this
+                // drone's own camera. Everything below - noise, brackets, numbers -
+                // is the video feed on top of it and stays readable.
+                if (ThermalAllowed() && _vision != VisionMode.Normal)
+                    GunnerOptics.DrawExternal(_vision, CameraOwner.ViewCamera());
 
                 if (sig < 1f) Rauschen(w, h, sig);
                 Rahmen(w, h, sig);
@@ -2204,8 +2303,11 @@ namespace NextDayRevival
             string timer = (seconds / 60).ToString("00") + ":"
                 + (seconds % 60).ToString("00");
             string state = Time.time >= _armed ? "ARM" : "SAFE";
-            OsdLabel(new Rect(m + 2f, m + 4f, 260f, 22f),
-                "[REC]  " + state + "  " + timer + "  CH8", ink);
+            // The optic tag rides on the recorder line, where a real feed puts the
+            // sensor it is recording from.
+            string optic = ThermalAllowed() ? "  " + VisionTag() : "";
+            OsdLabel(new Rect(m + 2f, m + 4f, 330f, 22f),
+                "[REC]  " + state + "  " + timer + "  CH8" + optic, ink);
 
             float battery = Battery();
             float volts = 14.0f + 2.8f * battery;
@@ -2321,15 +2423,21 @@ namespace NextDayRevival
             GUI.Label(new Rect(bx, by + bh + 4f, w, 22f), zeile);
         }
 
-        /// <summary>The always-on "left-click to mark" hint, and a brief flash
-        /// at the crosshair right after a mark is placed.</summary>
+        /// <summary>The always-on "left-click to mark" hint - with the optic key
+        /// beside it, so the thermal camera is discoverable without the config
+        /// file - and a brief flash at the crosshair right after a mark is placed.
+        /// </summary>
         static void MarkOverlay(float w, float h)
         {
             float cx = w * 0.5f, cy = h * 0.5f;
             Color ink = new Color(0.7f, 1f, 0.75f, 0.85f);
-            OsdLabel(new Rect(cx - 170f, h - Mathf.Max(18f, h * 0.045f) - 52f, 340f, 20f),
-                Loc.T("[ЛКМ] отметить это место на карте",
-                      "[LMB] mark this spot on the map"), ink);
+            string hint = Loc.T("[ЛКМ] отметить это место на карте",
+                                "[LMB] mark this spot on the map");
+            if (ThermalAllowed())
+                hint += Loc.T("   [" + VisionKey() + "] оптика",
+                              "   [" + VisionKey() + "] optic");
+            OsdLabel(new Rect(cx - 230f, h - Mathf.Max(18f, h * 0.045f) - 52f, 460f, 20f),
+                hint, ink);
 
             if (Time.time < _markFlash)
             {

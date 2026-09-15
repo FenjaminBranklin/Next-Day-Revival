@@ -92,6 +92,22 @@ ASSET_FILES = [
     "drone.ndmesh", "drone_diffuse.png", "drone_normal.png", "drone_icon.png",
     "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png", "jammer_icon.png",
     "antenna_head.ndmesh",
+    # Vehicle modules (2060/2061/2062) - own art (vehicle_modules_build.py).
+    # Before that all three wore the portable jammer's model, textures and icon.
+    "thermal.ndmesh", "thermal_diffuse.png", "thermal_normal.png",
+    "thermal_icon.png",
+    "nvmodule.ndmesh", "nvmodule_diffuse.png", "nvmodule_normal.png",
+    "nvmodule_icon.png",
+    "jammod.ndmesh", "jammod_diffuse.png", "jammod_normal.png",
+    "jammod_icon.png",
+    # Drone gear (2055/2056/2057) - own art (drone_gear_build.py). Before that
+    # the jammer, the .50 ammo tin and the FPV drone stood in for them.
+    "antenna_pack.ndmesh", "antenna_pack_diffuse.png", "antenna_pack_normal.png",
+    "antenna_pack_icon.png",
+    "battery.ndmesh", "battery_diffuse.png", "battery_normal.png",
+    "battery_icon.png",
+    "survdrone.ndmesh", "survdrone_diffuse.png", "survdrone_normal.png",
+    "survdrone_icon.png",
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
@@ -109,7 +125,9 @@ MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
           "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
-          "shell125.ndmesh"]
+          "shell125.ndmesh", "thermal.ndmesh", "nvmodule.ndmesh",
+          "jammod.ndmesh", "antenna_pack.ndmesh", "battery.ndmesh",
+          "survdrone.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
@@ -122,6 +140,9 @@ ICON_SIZES = {
     "fireext_icon.png": (300, 300), "toolkit_icon.png": (300, 300),
     "mine_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
+    "thermal_icon.png": (300, 300), "nvmodule_icon.png": (300, 300),
+    "jammod_icon.png": (300, 300), "antenna_pack_icon.png": (300, 300),
+    "battery_icon.png": (300, 300), "survdrone_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
@@ -714,6 +735,208 @@ def check_convoy_column():
         bad("Uniform check: only one appearance path carries the editor uniform")
 
 
+def check_gas_launcher():
+    """[14] Chemical launcher RG-Kh and its 30-minute gas cloud (static).
+
+    The four mistakes this keeps from coming back are the ones that would make
+    the weapon look broken instead of failing loudly: an id outside the grenade
+    band (then no slot accepts the tube at all - the 2065 lesson), a missing
+    grenade record (then the equipped tube has no data and is dropped), a shot
+    that does not consume its one-shot tube, and a cloud that keeps poisoning
+    after its time is up. Everything that needs eyes - the cloud in the sky,
+    the mask actually saving a player - stays an in-game acceptance item.
+    """
+    print("[14] Chemie-Granatwerfer und Giftgaswolke (statisch)")
+    gas_p = os.path.join(ROOT, "RevivalGasLauncher.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    if not os.path.exists(gas_p):
+        bad("RevivalGasLauncher.cs fehlt")
+        return
+    s = io.open(gas_p, encoding="utf-8").read()
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Gaswerfer: " + why)
+
+    # The id IS the equip category (ItemDataManager::GetItemCatData is a
+    # hard-coded id-range switch): only 1401..1500 lights up the grenade slot.
+    need("DEF_LAUNCHER = 1491" in s, "Id 1491", "Item-Id 1491 nicht gesetzt")
+    need("DEF_DONOR = 1403" in s,
+         "Spende 1403 (Granatenkategorie)",
+         "Spender ist nicht die Granate 1403 - dann keine Granatenkategorie")
+    gas_id = -1
+    marker = "DEF_LAUNCHER = "
+    if marker in s:
+        digits = ""
+        for ch in s[s.index(marker) + len(marker):]:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if digits:
+            gas_id = int(digits)
+    need(1401 <= gas_id <= 1500,
+         "Id liegt im Granatenband 1401..1500",
+         "Werfer-Id liegt ausserhalb 1401..1500 - dann nimmt kein Waffenslot sie an")
+    need("CfgLauncherId" not in s,
+         "keine frei setzbare Werfer-Id (Band bleibt garantiert)",
+         "die Id ist konfigurierbar - eine .cfg kann die Waffe unausruestbar machen")
+    # Equipment needs BOTH the hand model (ItemDef) and a grenade record that
+    # no server delivers for 1491.
+    need("DEF_LAUNCHER, DEF_DONOR, true," in s
+         and "GasGrenadeDataHook.Install(harmony)" in s
+         and '"GetGrenadeWeaponData"' in s,
+         "Handmodell und Granatendaten fuer 1491 vorhanden",
+         "Ausruestungsmodell oder Granatendaten fehlen")
+    # Left click fires through the game's own throw guards.
+    need("CantThrowGrenade" in s and "__result = true;" in s
+         and "GasLauncher.FireFromController(__instance as Component)" in s
+         and "_lastShotFrame == Time.frameCount" in s
+         and "finally { _firing = false; }" in s,
+         "Linksklick-Schuss haelt die Spielsperren ein und gibt sein Schloss frei",
+         "Linksklick-Schuss oder seine Wache fehlt")
+    # Exactly one tube per shot, taken from the equipped slot 2 - and no shot
+    # at all when it cannot be taken.
+    need("|| ConsumeEquipped(ctrl)" in s
+         and "new object[] { 2, DEF_LAUNCHER, true, false }" in s
+         and "ToInt(items.GetValue(2)) != DEF_LAUNCHER" in s
+         and "if (!consumed)" in s,
+         "verbraucht genau ein Rohr je Schuss, sonst faellt der Schuss aus",
+         "Verbrauch der ausgeruesteten Rohrwaffe nicht nachweisbar")
+    # The gas is the game's own Toxicity value, not a private counter.
+    need('AccessTools.Field(data.GetType(), "Toxicity")' in s
+         and "AddToxicity" in s,
+         "Wirkung ueber PlayerLifeData.Toxicity des Spiels",
+         "die Wolke schreibt nicht die Vergiftung des Spiels")
+    # Protection: sealed masks, L-1 suits, and the full set as immunity.
+    need('"4708,4710"' in s and '"4203,4204,4205"' in s
+         and "FullSetImmune" in s,
+         "Schutz durch Maske 4708/4710 und Anzug 4203-4205, Vollsatz immun",
+         "Schutzausruestung nicht hinterlegt")
+    # NPC damage: body part and damage type Toxicity (12), never head (0),
+    # plus the id-0 kill-streak guard from RE 35.
+    need("args[i] = 12;" in s and "args[i] = 1;" in s and "_lastKillerId" in s,
+         "NPC-Schaden als Toxicity am Rumpf, mit Kill-Streak-Wache",
+         "NPC-Schadensart/Trefferzone oder die Kill-Streak-Wache fehlt")
+    # Time is up means time is up, and the map cannot fill with clouds.
+    need("if (age >= _life) { Stop(); return; }" in s
+         and "CfgMaxClouds" in s and "GasLauncher.Register(c)" in s,
+         "Wolke endet mit ihrer Standzeit und ist mengenbegrenzt",
+         "Standzeitende oder Mengenbegrenzung der Wolken fehlt")
+    # One networked burst so a second client sees where the round landed.
+    need("RocketHook.Detonate" in s,
+         "vernetzter Zerleger am Einschlag (RocketHook.Detonate)",
+         "kein vernetzter Einschlag")
+    # RevivalPlugin seams.
+    for seam in ("GasLauncher.AddItems", "GasLauncher.BindConfig",
+                 "GasLauncher.Install", "GasLauncher.Tick", "GasLauncher.Draw"):
+        need(seam in plug, "Seam " + seam, "Seam fehlt in RevivalPlugin.cs: " + seam)
+
+
+def check_mortar():
+    """[15] Settlement mortar: the invariants that decide whether the feature is
+    correct rather than merely present.
+
+    The one hard requirement of the order was that a casualty from the firing
+    player's OWN faction must never turn him into a traitor. That rests on three
+    things in the source - anonymous damage (owner 0 through Turret.TryDamage),
+    a visible explosion that carries no damage of its own, and a player of the
+    shooter's own faction who is not hit at all - and every one of them is a
+    single line that a later edit could quietly undo. The rest of this section
+    guards the two mistakes that were made and fixed while writing it: an event
+    code inside the surveillance drone's block, and a kill credited to owner 0
+    that throws in NPC_Settlement.StatsOnNpcKilled. Aim mode, the map ring and
+    the flight of a bomb stay in-game acceptance items.
+    """
+    print("[15] Siedlungsmoerser (statisch)")
+    mortar_p = os.path.join(ROOT, "RevivalMortar.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    if not os.path.exists(mortar_p):
+        bad("RevivalMortar.cs fehlt")
+        return
+    s = io.open(mortar_p, encoding="utf-8").read()
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Mortar: " + why)
+
+    # --- the bomb is ammunition, and its id band is what makes it one.
+    need("DEF_SHELL = 2066" in s, "Bomben-Id 2066",
+         "Item-Id 2066 nicht gesetzt")
+    shell_id = -1
+    marker = "DEF_SHELL = "
+    if marker in s:
+        digits = ""
+        for ch in s[s.index(marker) + len(marker):]:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if digits:
+            shell_id = int(digits)
+    need(2001 <= shell_id <= 3000,
+         "Id liegt im Munitionsband 2001..3000",
+         "Bomben-Id liegt ausserhalb 2001..3000 - dann ist sie keine Munition")
+    need("DEF_SHELL, DEF_DONOR, false," in s,
+         "Bombe ist Munition, keine Waffe",
+         "die Bombe ist als Waffe eingetragen")
+
+    # --- THE FACTION RULE. Three independent lines, all three required.
+    need('"BlastDamage", 0f' in s,
+         "sichtbare Explosion ohne Schaden (BlastDamage 0)",
+         "BlastDamage ist nicht 0 - dann gehoert jeder Tote dem Schuetzen")
+    need('Turret.TryDamage(ai.gameObject, "NPC_AI2", "ApplyDamage", dmg)' in s,
+         "NPC-Schaden anonym (Turret.TryDamage, Besitzer 0)",
+         "NPC-Schaden laeuft nicht mehr ueber Turret.TryDamage")
+    need("FactionShield.SameFactionAsLocal(go)" in s,
+         "eigene Fraktion wird gar nicht getroffen",
+         "der Schutz der eigenen Fraktion fehlt im Spielerdurchlauf")
+    need("FactionShield.Arm();" in s and "const int Traitor = 6;" in s,
+         "Fraktionsnetz bewacht jeden Feuerauftrag",
+         "das Fraktionsnetz wird nicht mehr bewaffnet")
+
+    # --- the owner-0 price: StatsOnNpcKilled throws on PhotonPlayer.Find(0).
+    need("BreakKillStreak(ai);" in s and '"_lastKillerId"' in s,
+         "Abschussserie mit Besitzer 0 wird gebrochen",
+         "keine _lastKillerId-Wache - ein raeumender Treffer wirft")
+
+    # --- the Photon channel must not sit in another feature's block.
+    need("code >= surv && code <= surv + 3" in s
+         and "code >= troops && code <= troops + 2" in s,
+         "Ereigniscode kollidiert mit keinem anderen Kanal",
+         "die Kanalpruefung kennt Aufklaerungsdrohne oder Truppen nicht")
+    need('ps[1].ParameterType.Name != "PhotonPlayer"' in s,
+         "Spieler-RPC waehlt die PhotonPlayer-Ueberladung",
+         "die RPC-Auswahl kann die PhotonTargets-Ueberladung erwischen")
+
+    # --- reach, ground and the overlay.
+    need("Too far" in s and "Too close" in s,
+         "Klick ausserhalb der Reichweite wird abgelehnt, nicht beschnitten",
+         "keine Ablehnung fuer zu weit oder zu nah")
+    need("RevivalTroopInsertion.GroundY" in s,
+         "Boden fern vom Spieler ueber GroundY (E-059)",
+         "Einschlagshoehe ohne GroundY - fern vom Spieler gibt es keinen Strahl")
+    need("GUI.BeginClip(clip)" in s and "MapTools.MapViewportRect" in s,
+         "Kartenoverlay hart auf das Kartenfenster geschnitten",
+         "das Overlay ist nicht auf das Kartenfenster geschnitten")
+    need("MaxTries" in s,
+         "Aufstellung wird wiederholt, nicht einmal versucht",
+         "ein Fehlversuch beim Aufstellen wird nicht wiederholt")
+    need("if (Master())" in s and "{ dmg, 14 }" in s,
+         "Fahrzeugschaden nur auf dem Master, ueber Teil 14",
+         "Fahrzeugschaden nicht auf den Master begrenzt")
+
+    # --- RevivalPlugin seams.
+    for seam in ("Mortar.BindConfig", "Mortar.AddItems(Items)",
+                 "Mortar.Tick()", "Mortar.Draw()"):
+        need(seam in plug, "Seam " + seam,
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -729,8 +952,10 @@ if __name__ == "__main__":
     check_eac()
     check_winding()
     check_mine()
+    check_gas_launcher()
     check_convoy_ground_and_exit()
     check_convoy_column()
+    check_mortar()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

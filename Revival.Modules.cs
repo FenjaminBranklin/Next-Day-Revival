@@ -129,10 +129,12 @@ namespace NextDayRevival
 
         /// <summary>
         /// Adds the three module items to the shared item table. Called once from
-        /// Awake after BuildItemTable(). Placeholder art for now: the three reuse
-        /// the portable jammer's mesh/textures/icon so the build and the runtime
-        /// self-test are green; a Codex asset job produces distinct meshes,
-        /// textures and icons later (that is a generator/asset task, not ours).
+        /// Awake after BuildItemTable(). Each module carries its OWN model,
+        /// textures and inventory icon (vehicle_modules_build.py): a finned
+        /// sensor box with a germanium window, an intensifier tube on a mount,
+        /// and a finned transmitter with blade antennas. Before that all three
+        /// wore the portable jammer's art, which made three different pieces of
+        /// hardware one picture in the backpack.
         /// </summary>
         internal static void RegisterItems()
         {
@@ -152,8 +154,8 @@ namespace NextDayRevival
                 + "gives the gunner a toggleable thermal mode in the new periscope - "
                 + "warm bodies glow through smoke and darkness. 18 kg: heavy, but it "
                 + "fits in a backpack.",
-                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
-                "jammer_icon.png", null,
+                "thermal.ndmesh", "thermal_diffuse.png", "thermal_normal.png",
+                "thermal_icon.png", null,
                 1, 0, 18.0f));
 
             RevivalPlugin.Items.Add(new ItemDef(
@@ -168,8 +170,8 @@ namespace NextDayRevival
                 + "power pack, a mount. Installed into a vehicle it gives the gunner a "
                 + "toggleable night mode - a green picture that sees in the dark. "
                 + "14 kg, carried in a backpack.",
-                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
-                "jammer_icon.png", null,
+                "nvmodule.ndmesh", "nvmodule_diffuse.png", "nvmodule_normal.png",
+                "nvmodule_icon.png", null,
                 1, 0, 14.0f));
 
             RevivalPlugin.Items.Add(new ItemDef(
@@ -185,8 +187,8 @@ namespace NextDayRevival
                 + "larger radius than the carried one, and detonates any drone that "
                 + "closes in. 34 kg - heavier than the portable, but still backpack-"
                 + "portable.",
-                "jammer.ndmesh", "jammer_diffuse.png", "jammer_normal.png",
-                "jammer_icon.png", null,
+                "jammod.ndmesh", "jammod_diffuse.png", "jammod_normal.png",
+                "jammod_icon.png", null,
                 1, 0, 34.0f));
         }
 

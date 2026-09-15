@@ -3,7 +3,13 @@
 // old round scope, plus the thermal and night-vision overlays unlocked by the
 // installed modules (Revival.Modules.cs).
 //
-// Rendering is pure IMGUI (this is called from Turret.DrawScope, inside OnGUI):
+// TWO VIEWERS use this file. Turret.DrawScope calls Draw() for the gunner
+// periscope - frame, reticle, status and all. SurvDrone.Draw calls DrawExternal()
+// for the recon drone, which keeps its own video-feed HUD and only wants the
+// sensor picture underneath it: same cold field, same warm silhouettes, its own
+// camera. Everything below therefore talks about "the viewer", not "the gunner".
+//
+// Rendering is pure IMGUI (both entry points run inside OnGUI):
 //   - THERMAL crushes the whole picture to a very dark, deep-BLUE, low-contrast
 //     field: an almost fully opaque dark-blue quad kills the "normal view +
 //     shadows" read, a radial vignette drops the optic edges to black, and a
@@ -32,11 +38,24 @@
 //   - the frame, reticle and status text are drawn on top.
 //
 // PERFORMANCE: the GL fill runs once per vertex, tens of thousands of times a
-// frame. Two things keep it from stuttering - the ironbow/green ramp stops are
-// static (no per-vertex array allocation, which was the old lag), and small or
-// distant people are drawn as blobs rather than filled, so only close people
-// pay for their triangles. A true per-pixel camera post-effect would be nicer
-// still but needs a runtime shader this build cannot load reliably.
+// frame. Four things keep it from stuttering - the ironbow/green ramp stops are
+// static (no per-vertex array allocation, which was the old lag); silhouettes
+// are built LAZILY, only for a target that is actually about to be filled, and
+// kept across refresh ticks (the old code re-BAKED every NPC on the map, in or
+// out of view, several times a second - the real stutter); only the few largest
+// targets on screen are filled at all, the rest blob; and a person far away is
+// built from a COARSE LOD instead of the full character mesh. A true per-pixel
+// camera post-effect would be nicer still but needs a runtime shader this build
+// cannot load reliably.
+//
+// SIZE IS MEASURED, NEVER GUESSED: a human here is about 5 WORLD UNITS tall (the
+// NPC capsule is 5.0 and the chest sits 3.3 above the feet - world units are not
+// metres in this game) and the gunner optic runs at 32 or 20 degrees, a 2-3x
+// zoom over the game's 60. The old "1500/dist" size guess ignored both, called
+// every person beyond ~100 units tiny and drew them as a ramp dot: that is why
+// vehicles - which measure their size by projecting their own radius - read as
+// real shapes while people did not. People are now measured the same way, from
+// the camera's field of view, so the optic's zoom counts.
 //
 // ROBUSTNESS: each target gets its OWN triangle cap (people are still filled
 // before vehicles, but neither can drain a shared pool now), so one big vehicle
@@ -71,13 +90,7 @@ namespace NextDayRevival
         // list is rebuilt a few times a second and only projected each frame.
         static readonly List<Transform> _warm = new List<Transform>();   // people: crew + players
         static readonly List<Transform> _veh = new List<Transform>();     // vehicles
-        static readonly List<float> _vehR = new List<float>();            // vehicle world radius (m)
-        // Per-target mesh silhouettes, parallel to _veh / _warm. A target with a
-        // usable mesh is FILLED in its real shape (GL triangles); one without falls
-        // back to the old ramp ellipse. Vehicles are rigid (mesh + live transform);
-        // people are skinned, baked to world verts at the refresh tick.
-        static readonly List<Silh> _vehSilh = new List<Silh>();
-        static readonly List<Silh> _warmSilh = new List<Silh>();
+        static readonly List<float> _vehR = new List<float>();            // vehicle world radius (units)
         static float _warmUntil;
         static Type _npcType, _playerType, _vehType, _explType;
         static MethodInfo _npcAlive;   // NPC_AI2.IsAlive() - dead crew do not radiate
@@ -91,6 +104,7 @@ namespace NextDayRevival
         static readonly List<Flash> _flash = new List<Flash>();
         static readonly Dictionary<int, float> _boomSeen = new Dictionary<int, float>();
         static readonly List<int> _boomPurge = new List<int>();
+        static float _nextBoom;   // next explosion sample (see ScanExplosions)
 
         // GL immediate-mode fill (Unity 2018.1). Silhouettes are drawn as coloured
         // triangles over the cold field, so warm targets read in their real shape.
@@ -104,6 +118,10 @@ namespace NextDayRevival
         // rigid meshes are copied once and only re-projected per frame; skinned tris
         // (pose-independent) are cached here too, keyed by the shared mesh.
         static readonly Dictionary<int, MeshData> _meshCache = new Dictionary<int, MeshData>();
+        // source mesh id -> the index list of its BAKED snapshot. BakeMesh keeps the
+        // source topology, so this never changes while a man walks; reading
+        // Mesh.triangles off the snapshot at every bake copied it out again.
+        static readonly Dictionary<int, int[]> _bakedTris = new Dictionary<int, int[]>();
 
         sealed class MeshData { public Vector3[] v; public int[] t; }
         // A rigid mesh part reprojected live every frame. Normally its verts are a
@@ -117,8 +135,41 @@ namespace NextDayRevival
         {
             public readonly List<RigidPart> rigid = new List<RigidPart>();
             public readonly List<BakedPart> skinned = new List<BakedPart>();
+            // The baked world verts are a SNAPSHOT of one pose. bakeInv is the
+            // root's worldToLocal at that moment, so the draw can rigidly carry the
+            // snapshot along with the live transform
+            // (root.localToWorld * bakeInv): a walking man's silhouette sits on him
+            // every frame and only his LIMB pose is as old as the last bake,
+            // instead of the whole body trailing a third of a second behind.
+            public Matrix4x4 bakeInv = Matrix4x4.identity;
             public bool Any { get { return rigid.Count > 0 || skinned.Count > 0; } }
         }
+
+        // Silhouettes are expensive to build (BakeMesh plus a world-space copy of
+        // every vertex) and cheap to keep, so they are built on demand for the
+        // targets that are actually being filled and cached by instance id across
+        // refresh ticks. The old code rebuilt EVERY npc and vehicle on the map at
+        // every 0.35 s tick, in view or not, filled or not - hundreds of bakes and
+        // tens of megabytes of throwaway arrays a second. That was the stutter.
+        sealed class SilhEntry
+        {
+            public Silh s;
+            public Transform tr;
+            public float built;   // Time.time of the last build
+            public float used;    // Time.time it was last drawn (for purging)
+            public int level;     // LOD level it was built at (people)
+        }
+        static readonly Dictionary<int, SilhEntry> _silCache = new Dictionary<int, SilhEntry>();
+        static readonly Dictionary<int, float> _vehRadius = new Dictionary<int, float>();
+        static readonly List<int> _silPurge = new List<int>();
+        static float _nextSilPurge;
+        static int _builtThisFrame;
+        // A person is re-baked at about the old refresh rate (the pose moves); a
+        // vehicle's rigid parts follow their live transforms, so a rebuild is only
+        // needed when a part is shot off - seconds, not frames.
+        const float PersonRebuild = 0.30f;
+        const float VehicleRebuild = 1.50f;
+        const int MaxBuildsPerFrame = 2;
 
         static Texture2D Px()
         {
@@ -393,7 +444,7 @@ namespace NextDayRevival
             VisionMode mode = VehicleModules.CurrentMode(veh);
             try
             {
-                DrawVision(mode, veh);
+                DrawVision(mode, Camera.main);
                 DrawFrame(mode);
                 DrawReticle(mode);
                 DrawStatus(veh, mode);
@@ -402,9 +453,25 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>
+        /// The same cold field and warm silhouettes for a viewer that is NOT the
+        /// gunner periscope - the recon drone looking through its own camera. Draws
+        /// only the thermal/night picture; the caller keeps its own HUD on top and
+        /// supplies the camera it actually renders with. Repaint-only for the same
+        /// reason Draw() is: OnGUI runs once per input event, and the projection
+        /// sweep must not run on a mouse move.
+        /// </summary>
+        internal static void DrawExternal(VisionMode mode, Camera cam)
+        {
+            if (mode == VisionMode.Normal || cam == null) return;
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try { DrawVision(mode, cam); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("GunnerOptics external: " + ex); }
+        }
+
         // ------------------------------------------------------ scene tint
 
-        static void DrawVision(VisionMode mode, Transform veh)
+        static void DrawVision(VisionMode mode, Camera cam)
         {
             if (mode == VisionMode.Normal) return;
 
@@ -429,9 +496,8 @@ namespace NextDayRevival
                 ThermalGrain(full, new Color(0.60f, 0.90f, 0.60f, 0.04f));
             }
 
-            RefreshTargets();
-            Camera cam = Camera.main;
             if (cam == null) return;
+            RefreshTargets(cam);
 
             // Both THERMAL and NIGHT now fill each target in its REAL shape (its
             // own mesh triangles): ironbow for thermal, a green light-gain ramp
@@ -443,9 +509,11 @@ namespace NextDayRevival
             // Explosions radiate: draw the short-lived heat flares on top, in the
             // mode's palette. Living AI (crew AND hostiles) are already in the
             // warm set above via NPC_AI2, so enemies glow like everything else.
-            // Sample explosions EVERY frame (this runs once per Repaint), not only
-            // at the 0.35 s target-refresh tick: a tank-shot blast is caught the
-            // frame it appears instead of being missed between ticks.
+            // Sample explosions on their OWN fast tick (ScanExplosions, ten times a
+            // second) rather than at the 0.35 s target-refresh tick: a tank-shot
+            // blast is caught while it still burns instead of being missed between
+            // ticks. The flares themselves are projected and drawn every frame, so
+            // the flare animates smoothly whatever the sampling rate is.
             ScanExplosions();
             DrawFlashes(cam, thermal);
         }
@@ -468,10 +536,19 @@ namespace NextDayRevival
         }
 
         // Draw every warm target as filled mesh triangles in its true shape. The
-        // GL fill only runs on the Repaint pass; targets with no mesh are collected
-        // and drawn afterwards as the ramp ellipse, so nothing ever goes unlit.
-        static readonly List<int> _fbVeh = new List<int>();
-        static readonly List<int> _fbWarm = new List<int>();
+        // GL fill only runs on the Repaint pass; targets with no mesh, too small to
+        // be worth their triangles, or beyond the per-frame fill count are collected
+        // and drawn afterwards as the ramp blob, so nothing ever goes unlit.
+        struct FallBack { public Vector2 gui; public float px; }
+        static readonly List<FallBack> _fbVeh = new List<FallBack>();
+        static readonly List<FallBack> _fbWarm = new List<FallBack>();
+
+        // One projected target, measured ONCE per frame and then either filled or
+        // blobbed. The old code projected every target twice - once in the fill loop
+        // and again in the fallback loop - and threw the first result away.
+        struct Target { public int index; public Vector2 gui; public float px; }
+        static readonly List<Target> _tgtWarm = new List<Target>();
+        static readonly List<Target> _tgtVeh = new List<Target>();
 
         // Range caps and the on-screen size below which a person is cheaper (and
         // visually identical) as a ramp blob than as thousands of filled mesh
@@ -480,7 +557,31 @@ namespace NextDayRevival
         // without paying for their full mesh every frame.
         const float VehRange = 900f;
         const float PplRange = 600f;
-        const float PplMinPx = 14f;   // render more mid-range NPCs/players as real shapes, not blobs
+        // The person's on-screen BODY HEIGHT in pixels below which the blob is
+        // drawn. This is a MEASURED height now (see BodyHeight/PixelsPerUnit), not
+        // the old "1500/dist" guess that ignored both the world-unit scale and the
+        // optic's zoom and so turned every person past about 100 units into a dot.
+        // Kept low on purpose: a man below this reads as a mark, and "people are
+        // only dots" is the complaint this whole measurement exists to answer.
+        // Going lower costs nothing in the worst case - MaxFillPeople, not this,
+        // bounds how many bodies are filled, and PersonLod sends a small one to the
+        // coarsest LOD the character already ships.
+        const float PplMinPx = 14f;
+        // A human is about 5 world units tall here and his chest sits 3.3 above his
+        // feet: the NPC CapsuleCollider is 5.0/0.75 and REVERSE_ENGINEERING records
+        // the chest at 3.3, eyes at 4.2. Metres are NOT units in this game - the old
+        // code took 1.0 (knee height) as the heat centre, so the hot core of the
+        // ramp sat at a man's knees and his whole body ran at the ramp's rim colour.
+        const float BodyHeight = 5.0f;
+        const float ChestUp = 3.3f;
+        // How many targets of each kind may be FILLED in one frame - the largest on
+        // screen win, everything else blobs. A triangle budget alone does not bound
+        // the work: twenty close NPCs each cost their own mesh every frame long
+        // before any budget notices. This is the ceiling that keeps the view smooth
+        // in a settlement fight, and it degrades to the blob, never to nothing.
+        const int MaxFillPeople = 6;
+        const int MaxFillVehicles = 6;
+        static readonly float[] _topPx = new float[8];   // scratch for FillThreshold
         // Per-target triangle caps (used in DrawSilhouettes). Each target gets its
         // OWN cap so no target can drain a shared pool and leave the next as an
         // oval. Sized to hold a WHOLE target so nothing is truncated into holes:
@@ -498,6 +599,57 @@ namespace NextDayRevival
             _silThermal = thermal;
             _fbVeh.Clear();
             _fbWarm.Clear();
+            _tgtWarm.Clear();
+            _tgtVeh.Clear();
+            _builtThisFrame = 0;
+
+            // Pass 1 - project and MEASURE every target once, and throw away what
+            // is out of range or off the screen before it can cost anything.
+            float ppu = PixelsPerUnit(cam);
+            float sw = Screen.width, sh = Screen.height;
+            for (int i = 0; i < _warm.Count; i++)
+            {
+                Transform t = _warm[i];
+                if (t == null) continue;
+                Vector3 chest = t.position + new Vector3(0f, ChestUp, 0f);
+                float dist; Vector2 g;
+                if (!Project(cam, chest, out g, out dist)) continue;
+                if (dist > PplRange) continue;
+                float px = BodyHeight * ppu / (dist > 1f ? dist : 1f);
+                if (px > 4000f) px = 4000f;
+                if (g.x < -px || g.x > sw + px || g.y < -px || g.y > sh + px) continue;
+                Target tg = new Target();
+                tg.index = i; tg.gui = g; tg.px = px;
+                _tgtWarm.Add(tg);
+            }
+            for (int i = 0; i < _veh.Count; i++)
+            {
+                Transform t = _veh[i];
+                if (t == null) continue;
+                Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
+                float dist; Vector2 g;
+                if (!Project(cam, mid, out g, out dist)) continue;
+                if (dist > VehRange) continue;
+                // A vehicle measures its own half width by projecting a point one
+                // radius to the side - it always did, which is why vehicles read as
+                // shapes while people did not.
+                float r = i < _vehR.Count ? _vehR[i] : 3f;
+                Vector2 ge; float ed;
+                float px = 40f;
+                if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
+                    px = Mathf.Abs(ge.x - g.x);
+                px = Mathf.Clamp(px, 16f, 320f);
+                float margin = px * 2f;
+                if (g.x < -margin || g.x > sw + margin || g.y < -margin || g.y > sh + margin) continue;
+                Target tg = new Target();
+                tg.index = i; tg.gui = g; tg.px = px;
+                _tgtVeh.Add(tg);
+            }
+
+            // Only the biggest few of each kind are filled; the cut is the k-th
+            // largest on-screen size, found without sorting or allocating.
+            float warmCut = FillThreshold(_tgtWarm, MaxFillPeople);
+            float vehCut = FillThreshold(_tgtVeh, MaxFillVehicles);
 
             bool repaint = Event.current == null || Event.current.type == EventType.Repaint;
             Material m = repaint ? GLMat() : null;
@@ -512,7 +664,7 @@ namespace NextDayRevival
                 // starve the next; a generous FRAME ceiling only ever bites in a
                 // pathological scene (dozens of close vehicles at once), degrading
                 // to ovals for the overflow rather than for everything but one.
-                int frameBudget = 240000;   // global safety valve, rarely reached
+                int frameBudget = 120000;   // global safety valve, rarely reached
                 int spent = 0;
                 m.SetPass(0);
                 GL.PushMatrix();
@@ -523,37 +675,45 @@ namespace NextDayRevival
                 // the priority target and gets its own cap before vehicles, so it
                 // can never be starved by a big vehicle mesh. With per-target caps
                 // both people and vehicles now fit within one frame.
-                for (int i = 0; i < _warm.Count; i++)
+                for (int k = 0; k < _tgtWarm.Count; k++)
                 {
-                    Transform t = _warm[i];
-                    Silh s = i < _warmSilh.Count ? _warmSilh[i] : null;
+                    Target tg = _tgtWarm[k];
+                    Transform t = _warm[tg.index];
                     if (t == null) continue;
-                    Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
-                    float dist; Vector2 g;
-                    if (!Project(cam, chest, out g, out dist)) continue;
-                    if (dist > PplRange) continue;
-
-                    float px = Mathf.Clamp(1500f / dist, 8f, 46f);
                     int cap = PerPerson, left = frameBudget - spent;
                     if (cap > left) cap = left;
-                    // No mesh, too small to be worth its triangles, or the frame
-                    // ceiling is reached: draw a cheap blob so the target never
-                    // vanishes.
-                    if (s == null || !s.Any || px < PplMinPx || cap <= 0) { _fbWarm.Add(i); continue; }
-                    Vector2 centre = ScreenGL(g);
+                    // Too small to be worth its triangles, not one of the biggest
+                    // few on screen, or the frame ceiling is reached: a cheap blob,
+                    // so the target never vanishes.
+                    if (tg.px < PplMinPx || tg.px < warmCut || cap <= 0) { Fallback(_fbWarm, tg); continue; }
+                    // Built on demand, at a detail level that matches how big he is
+                    // on screen, and kept until he moves enough to need a new pose.
+                    Silh s = TargetSilh(t, true, PersonLod(tg.px));
+                    if (s == null || !s.Any) { Fallback(_fbWarm, tg); continue; }
+                    Vector2 centre = ScreenGL(tg.gui);
+                    // The ramp radius is about half the body: the chest runs
+                    // white/red hot and the limbs cool towards the yellow contour,
+                    // which is what a thermal sight shows.
+                    float pxR = tg.px * 0.55f;
                     int used = 0;
+                    // The baked pose is carried along by the live transform, so a
+                    // walking man does not trail behind his own silhouette.
+                    Matrix4x4 follow = VP * (t.localToWorldMatrix * s.bakeInv);
                     for (int p = 0; p < s.skinned.Count && used < cap; p++)
                     {
                         BakedPart bp = s.skinned[p];
-                        used += EmitMesh(bp.wv, bp.t, VP, centre, px, cap - used, false);
+                        used += EmitMesh(bp.wv, bp.t, follow, centre, pxR, cap - used, false);
                     }
                     for (int p = 0; p < s.rigid.Count && used < cap; p++)
                     {
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        used += EmitMesh(rp.v, rp.t, mvp, centre, px, cap - used, rp.box);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, pxR, cap - used, rp.box);
                     }
+                    // Everything was clipped away (all of him behind the near plane,
+                    // or a mesh that projected to nothing): show the mark anyway.
+                    if (used == 0) { Fallback(_fbWarm, tg); continue; }
                     spent += used;
                 }
 
@@ -562,36 +722,29 @@ namespace NextDayRevival
                 // (isReadable == false - the shipped BTR) is built as an oriented
                 // box per part in BuildRigid, so it STILL reads as a hull-and-turret
                 // silhouette that turns with the vehicle, never a formless oval.
-                for (int i = 0; i < _veh.Count; i++)
+                for (int k = 0; k < _tgtVeh.Count; k++)
                 {
-                    Transform t = _veh[i];
-                    Silh s = i < _vehSilh.Count ? _vehSilh[i] : null;
+                    Target tg = _tgtVeh[k];
+                    Transform t = _veh[tg.index];
                     if (t == null) continue;
-                    Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
-                    float dist; Vector2 g;
-                    if (!Project(cam, mid, out g, out dist)) continue;
-                    if (dist > VehRange) continue;
-
-                    float r = i < _vehR.Count ? _vehR[i] : 3f;
-                    Vector2 ge; float ed;
-                    float px = 40f;
-                    if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
-                        px = Mathf.Abs(ge.x - g.x);
-                    px = Mathf.Clamp(px, 16f, 320f);
                     int cap = PerVehicle, left = frameBudget - spent;
                     if (cap > left) cap = left;
-                    // Only genuinely missing geometry or the frame ceiling needs the
-                    // oval fallback now - every readable OR boxed vehicle has a Silh.
-                    if (s == null || !s.Any || cap <= 0) { _fbVeh.Add(i); continue; }
-                    Vector2 centre = ScreenGL(g);        // GL y-up centre
+                    // Only genuinely missing geometry, the per-frame fill count or
+                    // the frame ceiling needs the oval fallback now - every readable
+                    // OR boxed vehicle has a Silh.
+                    if (tg.px < vehCut || cap <= 0) { Fallback(_fbVeh, tg); continue; }
+                    Silh s = TargetSilh(t, false, 0);
+                    if (s == null || !s.Any) { Fallback(_fbVeh, tg); continue; }
+                    Vector2 centre = ScreenGL(tg.gui);        // GL y-up centre
                     int used = 0;
                     for (int p = 0; p < s.rigid.Count && used < cap; p++)
                     {
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        used += EmitMesh(rp.v, rp.t, mvp, centre, px, cap - used, rp.box);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, tg.px, cap - used, rp.box);
                     }
+                    if (used == 0) { Fallback(_fbVeh, tg); continue; }
                     spent += used;
                 }
 
@@ -601,40 +754,141 @@ namespace NextDayRevival
             else
             {
                 // Not a repaint (or no GL material): everything falls back.
-                for (int i = 0; i < _veh.Count; i++) _fbVeh.Add(i);
-                for (int i = 0; i < _warm.Count; i++) _fbWarm.Add(i);
+                for (int k = 0; k < _tgtVeh.Count; k++) Fallback(_fbVeh, _tgtVeh[k]);
+                for (int k = 0; k < _tgtWarm.Count; k++) Fallback(_fbWarm, _tgtWarm[k]);
             }
 
             // Ramp blobs for any target that is meshless or too small to fill,
             // in the active mode's palette (ironbow for thermal, green for night).
+            // Everything was measured in pass 1; nothing is projected twice.
             for (int k = 0; k < _fbVeh.Count; k++)
-            {
-                int i = _fbVeh[k];
-                Transform t = _veh[i];
-                if (t == null) continue;
-                Vector3 mid = t.position + new Vector3(0f, 1.0f, 0f);
-                float dist; Vector2 g;
-                if (!Project(cam, mid, out g, out dist)) continue;
-                if (dist > VehRange) continue;
-                float r = i < _vehR.Count ? _vehR[i] : 3f;
-                Vector2 ge; float ed; float px = 40f;
-                if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
-                    px = Mathf.Abs(ge.x - g.x);
-                px = Mathf.Clamp(px, 16f, 320f);
-                VehicleGlow(g, px, thermal);
-            }
+                VehicleGlow(_fbVeh[k].gui, _fbVeh[k].px, thermal);
             for (int k = 0; k < _fbWarm.Count; k++)
+                Blob(_fbWarm[k].gui, BlobSize(_fbWarm[k].px), thermal);
+        }
+
+        static void Fallback(List<FallBack> list, Target tg)
+        {
+            FallBack fb = new FallBack();
+            fb.gui = tg.gui; fb.px = tg.px;
+            list.Add(fb);
+        }
+
+        // A blob stands in for a body: Blob() draws it at about 2.3 times the size
+        // it is given, so half the measured body height keeps a distant man the same
+        // size as the silhouette he would have had.
+        static float BlobSize(float px)
+        {
+            float s = px * 0.42f;
+            return s < 3f ? 3f : (s > 60f ? 60f : s);
+        }
+
+        /// <summary>
+        /// Pixels per world unit at one unit of distance: size_px = size_units *
+        /// this / distance. Follows the camera's field of view, so the gunner
+        /// optic's 32/20 degree ZOOM counts - the missing half of the old size
+        /// guess, which assumed the game's 60 degrees and metres for units.
+        /// </summary>
+        static float PixelsPerUnit(Camera cam)
+        {
+            float fov = cam.fieldOfView;
+            if (fov < 1f || fov > 179f) fov = 60f;
+            float tan = Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+            if (tan < 0.0001f) tan = 0.0001f;
+            return Screen.height / (2f * tan);
+        }
+
+        /// <summary>
+        /// The on-screen size of the k-th largest target, i.e. the cut above which a
+        /// target is filled. No sort, no allocation: k is at most 8, so a small
+        /// ascending scratch array of the biggest ones seen so far is enough.
+        /// </summary>
+        static float FillThreshold(List<Target> list, int k)
+        {
+            if (k <= 0) return float.MaxValue;
+            if (k > _topPx.Length) k = _topPx.Length;
+            if (list.Count <= k) return 0f;
+            for (int i = 0; i < k; i++) _topPx[i] = 0f;
+            for (int i = 0; i < list.Count; i++)
             {
-                int i = _fbWarm[k];
-                Transform t = _warm[i];
-                if (t == null) continue;
-                Vector3 chest = t.position + new Vector3(0f, 1.0f, 0f);
-                float dist; Vector2 g;
-                if (!Project(cam, chest, out g, out dist)) continue;
-                if (dist > PplRange) continue;
-                float size = Mathf.Clamp(1500f / dist, 8f, 46f);
-                Blob(g, size, thermal);
+                float v = list[i].px;
+                if (v <= _topPx[0]) continue;
+                int j = 0;
+                while (j + 1 < k && _topPx[j + 1] < v) { _topPx[j] = _topPx[j + 1]; j++; }
+                _topPx[j] = v;
             }
+            return _topPx[0];
+        }
+
+        /// <summary>
+        /// How detailed a person's mesh needs to be for the size he is on screen.
+        /// A character LODGroup already carries properly decimated meshes; using the
+        /// one that fits costs a fraction of the triangles and looks the same,
+        /// which is what keeps a settlement fight smooth. Without a LODGroup this
+        /// is simply ignored (CollectLodRenderers then has nothing to choose from).
+        /// </summary>
+        static int PersonLod(float px)
+        {
+            if (px >= 220f) return 0;
+            if (px >= 110f) return 1;
+            if (px >= 45f) return 2;
+            return 3;
+        }
+
+        /// <summary>
+        /// The cached silhouette of one target, built on demand. A person is rebaked
+        /// about three times a second (his pose moves) or when his detail level
+        /// changes; a vehicle's parts follow their own live transforms, so it is only
+        /// rebuilt every couple of seconds to pick up a part that was shot off.
+        /// At most MaxBuildsPerFrame targets are built in any one frame - a target
+        /// still waiting draws as a blob for a frame or two instead of hitching.
+        /// </summary>
+        static Silh TargetSilh(Transform t, bool person, int level)
+        {
+            if (t == null) return null;
+            int id = t.GetInstanceID();
+            float now = Time.time;
+            SilhEntry e;
+            if (_silCache.TryGetValue(id, out e) && e.tr == t)
+            {
+                e.used = now;
+                float span = person ? PersonRebuild : VehicleRebuild;
+                bool stale = now - e.built >= span || e.level != level;
+                if (!stale || _builtThisFrame >= MaxBuildsPerFrame) return e.s;
+            }
+            else
+            {
+                if (_builtThisFrame >= MaxBuildsPerFrame) return null;
+                e = new SilhEntry();
+                e.tr = t;
+                _silCache[id] = e;
+            }
+            // The outgoing silhouette is handed to the person build so its baked
+            // vertex arrays can be written over instead of allocated again; it is
+            // dropped here and now, so nothing else can still be holding it.
+            Silh old = e.s;
+            e.s = person ? BuildPerson(t, level, old) : BuildRigid(t);
+            e.built = now;
+            e.used = now;
+            e.level = level;
+            _builtThisFrame++;
+            return e.s;
+        }
+
+        /// <summary>Drop silhouettes of targets nobody has looked at for a while -
+        /// a dead NPC, a wreck that despawned, a vehicle left behind.</summary>
+        static void PurgeSilhouettes()
+        {
+            float now = Time.time;
+            if (now < _nextSilPurge) return;
+            _nextSilPurge = now + 5f;
+            _vehRadius.Clear();     // radii are cheap to remeasure and may change
+            if (_silCache.Count == 0) return;
+            _silPurge.Clear();
+            foreach (KeyValuePair<int, SilhEntry> kv in _silCache)
+                if (kv.Value == null || kv.Value.tr == null || now - kv.Value.used > 10f)
+                    _silPurge.Add(kv.Key);
+            for (int i = 0; i < _silPurge.Count; i++) _silCache.Remove(_silPurge[i]);
         }
 
         // GUI space is y-down (top-left); the GL pixel matrix is y-up (bottom-left).
@@ -759,17 +1013,20 @@ namespace NextDayRevival
             // A person: crew and players run hotter than the hull, so the ramp is
             // pushed toward its core - a person reads as a small blazing red/white
             // heat source with a yellow edge, still a shape with an outline, never a
-            // flat coin. Round only, never a square, never a bright single point.
+            // flat coin. STANDING, not round: a man is roughly twice as tall as he
+            // is wide, and at the range where the blob replaces the mesh that
+            // proportion is the only thing left that says "man" rather than "mark".
+            float hw = s * 0.62f, hh = s * 1.20f;
             if (thermal)
             {
-                Glow(new Rect(c.x - s * 1.7f, c.y - s * 1.7f, s * 3.4f, s * 3.4f),
+                Glow(new Rect(c.x - hw * 2.2f, c.y - hh * 1.5f, hw * 4.4f, hh * 3.0f),
                      new Color(1.00f, 0.50f, 0.08f, 0.30f));  // small hot bloom
-                RampRect(c, s * 1.15f, s * 1.15f, 0.98f);     // ironbow body, red core
+                RampRect(c, hw, hh, 0.98f);                   // ironbow body, red core
             }
             else
             {
-                SoftRect(c, s * 2.0f, s * 2.0f, new Color(NightBloom.r, NightBloom.g, NightBloom.b, 0.42f));
-                HotRect (c, s * 1.15f, s * 1.15f, new Color(NightBody.r, NightBody.g, NightBody.b, 0.98f));
+                SoftRect(c, hw * 2.0f, hh * 1.4f, new Color(NightBloom.r, NightBloom.g, NightBloom.b, 0.42f));
+                HotRect (c, hw, hh, new Color(NightBody.r, NightBody.g, NightBody.b, 0.98f));
             }
         }
 
@@ -783,32 +1040,48 @@ namespace NextDayRevival
             return true;
         }
 
-        static void RefreshTargets()
+        /// <summary>
+        /// Rebuild the list of warm targets a few times a second. This is now a
+        /// CHEAP pass: it finds the transforms in range and nothing else. Building
+        /// their silhouettes here - for every NPC on the map, whether or not it was
+        /// ever drawn - is what made the optic stutter; that happens on demand in
+        /// DrawSilhouettes instead, only for what is actually filled.
+        /// </summary>
+        static void RefreshTargets(Camera cam)
         {
             if (Time.time < _warmUntil) return;
             _warmUntil = Time.time + 0.35f;
             VehicleModules.Sweep();
+            PurgeSilhouettes();
 
             _warm.Clear();
             _veh.Clear();
             _vehR.Clear();
-            _vehSilh.Clear();
-            _warmSilh.Clear();
             ResolveTypes();
-            AddAll(_npcType, true);    // AI (crew AND hostiles): skip the dead
-            AddAll(_playerType, false);
-            AddVehicles(_vehType);
-            // Explosions are sampled every frame from DrawVision, not here: they
-            // are brief and the 0.35 s target tick was too coarse to catch them.
+            Vector3 eye = cam.transform.position;
+            AddAll(_npcType, true, eye);    // AI (crew AND hostiles): skip the dead
+            AddAll(_playerType, false, eye);
+            AddVehicles(_vehType, eye);
+            // Explosions are sampled from DrawVision, not here: they are brief and
+            // the 0.35 s target tick was too coarse to catch them.
         }
 
         // Sample live ExplosionObject instances; seed a Flash for each newly seen
-        // one and forget ids that are gone. Cheap: explosions are rare and one
-        // extra FindObjectsOfType at the refresh tick (a few times a second).
+        // one and forget ids that are gone.
+        //
+        // FindObjectsOfType is a whole-scene sweep and the most expensive call in
+        // this file. Running it on every repaint - which is what "sample explosions
+        // EVERY frame" amounted to - is a per-scene walk that happens only while
+        // the optic is up: exactly the shape of "the thermal view is laggy". A
+        // blast lives a second or two and its flare 1.1 s, so ten samples a second
+        // still catch it far sooner than the 0.35 s target tick ever did, at a
+        // sixth of the cost on a 60 fps frame.
         static void ScanExplosions()
         {
             if (_explType == null) return;
             float now = Time.time;
+            if (now < _nextBoom) return;
+            _nextBoom = now + 0.10f;
             UnityEngine.Object[] objs;
             try { objs = UnityEngine.Object.FindObjectsOfType(_explType); }
             catch { return; }
@@ -878,14 +1151,25 @@ namespace NextDayRevival
             }
         }
 
-        static void AddAll(Type t, bool crew)
+        // Collect the living people near the viewer. The RANGE is decided here,
+        // on the squared distance, before anything expensive happens: a map-wide
+        // FindObjectsOfType costs what it costs, but everything after it - the
+        // IsAlive reflection call, the per-frame projection, the silhouette -
+        // then scales with what is actually near the optic instead of with how
+        // many NPCs the whole map has.
+        static void AddAll(Type t, bool crew, Vector3 eye)
         {
             if (t == null) return;
+            // A little past the fill range, so a man walking in is already in the
+            // list when he crosses it rather than popping in at the next tick.
+            float far = PplRange + 60f;
+            float far2 = far * far;
             UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(t);
             for (int i = 0; i < objs.Length; i++)
             {
                 Component c = objs[i] as Component;
                 if (c == null || c.transform == null) continue;
+                if ((c.transform.position - eye).sqrMagnitude > far2) continue;
                 // A corpse cools: a dead crewman must not radiate. If IsAlive()
                 // is missing or throws we keep the target (fail-safe, as before).
                 if (crew && _npcAlive != null)
@@ -898,11 +1182,10 @@ namespace NextDayRevival
                     catch { }
                 }
                 _warm.Add(c.transform);
-                _warmSilh.Add(BuildPerson(c.transform));
             }
         }
 
-        static void AddVehicles(Type t)
+        static void AddVehicles(Type t, Vector3 eye)
         {
             if (t == null) return;
             Transform mine = Turret.MannedVehicle;   // do not glow our own vehicle
@@ -911,15 +1194,17 @@ namespace NextDayRevival
             // at most 0,25 s old and this list is rebuilt every 0,35 s, so the
             // targets are no staler than before - but while the optic is up, the
             // turret and this view now pay for one whole-scene scan, not two.
+            float far = VehRange + 80f;
+            float far2 = far * far;
             Component[] objs = VehicleScan.All();
             for (int i = 0; i < objs.Length; i++)
             {
                 Component c = objs[i];
                 if (c == null || c.transform == null) continue;
                 if (c.transform == mine) continue;
+                if ((c.transform.position - eye).sqrMagnitude > far2) continue;
                 _veh.Add(c.transform);
                 _vehR.Add(VehicleRadius(c.transform));
-                _vehSilh.Add(BuildRigid(c.transform));
             }
         }
 
@@ -1134,37 +1419,131 @@ namespace NextDayRevival
             return result;
         }
 
+        // Like CollectLodRenderers, but for a PERSON: keep the LOD that MATCHES how
+        // big he is on screen (PersonLod) instead of always the finest one. A
+        // character LODGroup already ships properly decimated meshes, so a man who
+        // is 50 px tall costs a fraction of the triangles of the same man filling
+        // the screen and reads identically once he is a heat silhouette - that is
+        // what keeps a settlement fight smooth. `level` is a wish, not a demand: a
+        // group without renderers at that level uses the finest one that has any.
+        static void CollectPersonLods(Transform root, int level,
+                                      HashSet<Renderer> managed, HashSet<Renderer> skip)
+        {
+            try
+            {
+                LODGroup[] groups = root.GetComponentsInChildren<LODGroup>(true);
+                for (int gi = 0; gi < groups.Length; gi++)
+                {
+                    if (groups[gi] == null) continue;
+                    LOD[] lods = groups[gi].GetLODs();
+                    if (lods == null || lods.Length == 0) continue;
+                    // The COARSEST non-empty level at or below the wanted one; if
+                    // none of those has renderers, the first level that does.
+                    int keep = -1;
+                    for (int li = 0; li < lods.Length; li++)
+                    {
+                        Renderer[] rs = lods[li].renderers;
+                        if (rs == null || rs.Length == 0) continue;
+                        if (keep < 0 || li <= level) keep = li;
+                    }
+                    for (int li = 0; li < lods.Length; li++)
+                    {
+                        Renderer[] rs = lods[li].renderers;
+                        if (rs == null) continue;
+                        for (int ri = 0; ri < rs.Length; ri++)
+                        {
+                            Renderer r = rs[ri];
+                            if (r == null) continue;
+                            managed.Add(r);
+                            if (li != keep) skip.Add(r);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // The world-vertex array of the SAME part of the previous silhouette, when
+        // it has the same length. Every element is overwritten by the bake below,
+        // and the old silhouette is dropped by the caller the moment the new one
+        // replaces it, so the array simply changes hands.
+        static Vector3[] Recycle(Silh reuse, int part, int length)
+        {
+            if (reuse != null && part < reuse.skinned.Count)
+            {
+                BakedPart old = reuse.skinned[part];
+                if (old != null && old.wv != null && old.wv.Length == length) return old.wv;
+            }
+            return new Vector3[length];
+        }
+
+        // Triangles of a baked snapshot, cached by the SOURCE mesh. BakeMesh keeps
+        // the source topology, so the index list is the same at every bake, while
+        // Mesh.triangles hands out a fresh copy on every single read.
+        static int[] BakedTris(Mesh source, Mesh baked)
+        {
+            if (baked == null) return null;
+            if (source == null) return baked.triangles;
+            int id = source.GetInstanceID();
+            int[] t;
+            if (_bakedTris.TryGetValue(id, out t)) return t;
+            t = baked.triangles;
+            _bakedTris[id] = t;
+            return t;
+        }
+
         // A person: bake each SkinnedMeshRenderer to a world-space snapshot at the
         // refresh tick (baking every frame is too costly), plus any rigid child
         // meshes (helmet, weapon). The baked pose lags at most one refresh - fine
-        // for a heat silhouette. Triangles are pose-independent, so they are cached.
-        static Silh BuildPerson(Transform root)
+        // for a heat silhouette.
+        //
+        // Three things keep this off the frame time, because it is the one build
+        // that repeats while a man walks: only the LOD that matches his on-screen
+        // size is baked, the index list is cached per source mesh instead of being
+        // copied out of the snapshot every time, and the world-vertex arrays of the
+        // previous silhouette are written over. A character mesh is a few hundred
+        // kilobytes; re-baking the filled men three times a second used to hand the
+        // collector megabytes a second, and that garbage is the last of the stutter.
+        static Silh BuildPerson(Transform root, int level, Silh reuse)
         {
             Silh s = new Silh();
+            HashSet<Renderer> managed = new HashSet<Renderer>();
+            HashSet<Renderer> skip = new HashSet<Renderer>();
+            CollectPersonLods(root, level, managed, skip);
             try
             {
                 SkinnedMeshRenderer[] sk = root.GetComponentsInChildren<SkinnedMeshRenderer>();
                 for (int i = 0; i < sk.Length; i++)
                 {
                     SkinnedMeshRenderer smr = sk[i];
-                    if (smr == null || smr.sharedMesh == null || !smr.enabled) continue;
+                    if (smr == null || smr.sharedMesh == null) continue;
+                    if (managed.Contains(smr))
+                    {
+                        // WE pick the level, so the LODGroup's own per-camera
+                        // .enabled toggling is ignored here: otherwise the level
+                        // asked for is exactly the one the group just switched off.
+                        if (skip.Contains(smr)) continue;
+                        if (!smr.gameObject.activeInHierarchy) continue;
+                    }
+                    else if (!smr.enabled) continue;
                     if (_bakeScratch == null) _bakeScratch = new Mesh();
                     _bakeScratch.hideFlags = HideFlags.HideAndDontSave;
                     smr.BakeMesh(_bakeScratch);
                     Vector3[] lv = _bakeScratch.vertices;
                     if (lv == null || lv.Length == 0) continue;
+                    // BakeMesh produces a readable snapshot even if the source mesh
+                    // has no CPU copy, so the indices come from the snapshot too -
+                    // once per mesh, not once per bake.
+                    int[] tris = BakedTris(smr.sharedMesh, _bakeScratch);
+                    if (tris == null || tris.Length == 0) continue;
                     // BakeMesh yields verts in the renderer transform's local space;
                     // take them to world with its full localToWorld (scale 1 for
                     // these characters, so no double-scale).
                     Matrix4x4 mtx = smr.transform.localToWorldMatrix;
-                    Vector3[] wv = new Vector3[lv.Length];
+                    Vector3[] wv = Recycle(reuse, s.skinned.Count, lv.Length);
                     for (int k = 0; k < lv.Length; k++) wv[k] = mtx.MultiplyPoint3x4(lv[k]);
-                    // BakeMesh produces a readable snapshot even if the source
-                    // mesh has no CPU copy. Use that snapshot for indices too.
-                    int[] bakedTriangles = _bakeScratch.triangles;
-                    if (bakedTriangles == null || bakedTriangles.Length == 0) continue;
                     BakedPart bp = new BakedPart();
-                    bp.wv = wv; bp.t = bakedTriangles;
+                    bp.wv = wv; bp.t = tris;
                     s.skinned.Add(bp);
                 }
                 MeshFilter[] mfs = root.GetComponentsInChildren<MeshFilter>();
@@ -1173,7 +1552,11 @@ namespace NextDayRevival
                     MeshFilter mf = mfs[i];
                     if (mf == null || mf.sharedMesh == null) continue;
                     Renderer r = mf.GetComponent<Renderer>();
-                    if (r != null && !r.enabled) continue;
+                    if (r != null)
+                    {
+                        if (managed.Contains(r)) { if (skip.Contains(r)) continue; }
+                        else if (!r.enabled) continue;
+                    }
                     MeshData d = Cache(mf.sharedMesh);
                     if (d == null || d.v == null || d.t == null || d.v.Length == 0) continue;
                     RigidPart rp = new RigidPart();
@@ -1186,8 +1569,23 @@ namespace NextDayRevival
         }
 
         /// <summary>Horizontal world radius of a vehicle from its child renderers,
-        /// used to size its heat glow on screen. Clamped and never throwing.</summary>
+        /// used to size its heat glow on screen. Clamped and never throwing.
+        /// MEASURED ONCE per vehicle and cached: walking every child renderer of
+        /// every vehicle in range, three times a second, is exactly the kind of
+        /// invisible cost this file is otherwise careful about. PurgeSilhouettes
+        /// drops the cache every 5 s, so a vehicle that loses a part remeasures.
+        /// </summary>
         static float VehicleRadius(Transform t)
+        {
+            int id = t.GetInstanceID();
+            float cached;
+            if (_vehRadius.TryGetValue(id, out cached)) return cached;
+            float r = MeasureRadius(t);
+            _vehRadius[id] = r;
+            return r;
+        }
+
+        static float MeasureRadius(Transform t)
         {
             try
             {
