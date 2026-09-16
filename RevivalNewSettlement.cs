@@ -23,9 +23,8 @@
 //      only ever exists on the master client, so on a joined client the ring
 //      could never appear at all. The ring marks a PLACE, so it is now drawn
 //      from the configured coordinate on every client whenever the map is open.
-//      Its SHAPE is the ring at Locator, which is what the report named: the
-//      separate dashes of a patrol area, at Patrol's own cadence and stroke,
-//      orange instead of Locator red. Not a solid outline and not a filled area.
+//      Its shape uses the native TargetArea texture: the same alpha mask as
+//      TargetAreaRed, tinted orange. NGUI supplies the original map edge fade.
 //   4. ITS CONFIG KEYS WERE ALREADY IN EVERY INSTALLED nextday.revival.toolkit.cfg
 //      with the old coordinate (-1500, -1500) and count 4. Config.Bind takes the
 //      value out of that file and ignores the default in the code (CLAUDE.md,
@@ -141,15 +140,11 @@ namespace NextDayRevival
         static float _worldSince;
         static bool _announced;
         static string _lastFail = "";
-        static Texture2D _bar;
+        static Texture _ringStamp;
         static MethodInfo _isAlive;
         static bool _isAliveLooked;
 
-        /// <summary>Orange at the alpha Patrol gives an enabled route, so this
-        /// ring and the Locator one weigh the same on the map. Deliberately NOT
-        /// the target-ring red of Patrol.RouteColor: the camp has to read apart
-        /// from the looter and traitor patrol lines crossing the same map, and
-        /// the colour is the only thing about it that differs from them.</summary>
+        // Preserve the settlement colour while using the native ring silhouette.
         static readonly Color RingColor = new Color(1f, 0.55f, 0f, 0.95f);
 
         // ============================================================== binding
@@ -562,27 +557,15 @@ namespace NextDayRevival
         const float MapArtShiftX = 2f;
         const float MapArtShiftY = -4f;
 
-        // THE SHAPE IS THE ONE AT LOCATOR. The user pointed at the ring the
-        // patrol area around Locator already draws: SEPARATE DASHES, not a solid
-        // line and not a filled area. The five numbers below are Patrol's
-        // RouteDash, RouteGap, RouteStroke, RouteCurveStep and RouteSegOverlap
-        // verbatim - a 22 px run of line, a 12 px gap, a 3 px stroke whose long
-        // sides are feathered while its ends stay hard and flat, tessellated
-        // along the arc so each dash FOLLOWS the curve and points at the next.
-        // Only the colour differs: orange here, Locator red there.
-        const float Dash = 22f;
-        const float Gap = 12f;
-        const float Stroke = 3f;
-        const float CurveStep = 1.5f;
-        const float SegOverlap = 1.2f;
-
         /// <summary>The orange ring, drawn from the CONFIGURED place on every
         /// client whenever the world map is open - it marks a location, so it
         /// must not depend on objects that only the master client owns.</summary>
         public static void Draw()
         {
-            if (_cfgEnabled == null || !_cfgEnabled.Value) return;
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            if (_cfgEnabled == null || !_cfgEnabled.Value)
+            { MapInkLayer.Hide("settlement"); return; }
+            MapInkLayer layer = null;
             try
             {
                 Component manager, texture;
@@ -621,153 +604,44 @@ namespace NextDayRevival
                 float rx = Mathf.Max(2f, Mathf.Abs(east.x - mid.x));
                 float ry = Mathf.Max(2f, Mathf.Abs(north.y - mid.y));
 
-                // The ring as a closed polyline in the clip's LOCAL coordinates,
-                // because BeginClip moves the origin to the map's top-left.
-                List<Vector2> ring = Ring(mid - clip.position, rx, ry);
+                if (_ringStamp == null) _ringStamp = MapInkLayer.SettlementStamp();
+                if (_ringStamp == null) return;
+                layer = MapInkLayer.Begin("settlement", texture);
+                if (layer == null) return;
+                Rect ring = new Rect((mid.x - rx - full.x) * 1024f / full.width,
+                    (mid.y - ry - full.y) * 1024f / full.height,
+                    rx * 2f * 1024f / full.width, ry * 2f * 1024f / full.height);
+                layer.Draw(ring, _ringStamp, RingColor);
 
-                Color old = GUI.color;
-                Matrix4x4 oldMatrix = GUI.matrix;
-                try
+                // The map already names the village. Show faction details only
+                // on hover, like the patrol notes, instead of permanent IMGUI ink
+                // that would remain opaque while the native ring fades away.
+                Vector2 mouse = Event.current.mousePosition;
+                Vector2 delta = mouse - mid;
+                if (clip.Contains(mouse) && delta.x * delta.x / (rx * rx)
+                    + delta.y * delta.y / (ry * ry) <= 1f)
                 {
-                    GUI.color = RingColor;
-                    // BeginClip scissors every following draw to the visible map
-                    // - the same hard clip Patrol uses, so a ring on a panned or
-                    // zoomed map cannot paint over the UI around the panel.
-                    GUI.BeginClip(clip);
-                    try { DashClosed(ring, new Rect(0f, 0f, clip.width, clip.height)); }
-                    finally { GUI.EndClip(); }
-                    GUI.matrix = oldMatrix;
-
-                    // The label in ABSOLUTE coordinates, after the clip ends, so
-                    // a ring near the map edge still gets a readable name instead
-                    // of half a word.
-                    Vector2 at = new Vector2(mid.x + rx + 7f, mid.y);
-                    if (clip.Contains(at))
-                        GUI.Label(new Rect(at.x, at.y - 11f, 240f, 22f),
-                            Loc.T("Литвиновка - предатели",
+                    Color old = GUI.color;
+                    try
+                    {
+                        GUI.color = RingColor;
+                        GUI.Label(new Rect(mouse.x + 12f, mouse.y - 11f, 240f, 22f),
+                            Loc.T("\u041b\u0438\u0442\u0432\u0438\u043d\u043e\u0432\u043a\u0430 - \u043f\u0440\u0435\u0434\u0430\u0442\u0435\u043b\u0438",
                                   "Litvinovka - traitors"));
+                    }
+                    finally { GUI.color = old; }
                 }
-                finally { GUI.color = old; GUI.matrix = oldMatrix; }
             }
             catch (Exception ex)
             {
                 if (RevivalPlugin.L != null)
                     RevivalPlugin.L.LogWarning("TraitorSettlement map: " + ex.Message);
             }
-        }
-
-        /// <summary>The ring as a closed polyline, its first point repeated at
-        /// the end. Sampled at roughly two pixels so the fixed-length dashes
-        /// follow a curve and not a polygon, and capped so a map zoomed right in
-        /// cannot turn one marker into thousands of segments. A world circle
-        /// projects to a screen-axis-aligned ellipse, because both WorldToGui and
-        /// the MapArt correction are axis-aligned scales - so three projected
-        /// points describe it exactly and the rest is cos/sin.</summary>
-        static List<Vector2> Ring(Vector2 mid, float rx, float ry)
-        {
-            int n = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(rx, ry) * Mathf.PI),
-                                96, 512);
-            List<Vector2> pts = new List<Vector2>(n + 1);
-            for (int i = 0; i <= n; i++)
+            finally
             {
-                float a = i * Mathf.PI * 2f / n;
-                pts.Add(new Vector2(mid.x + Mathf.Cos(a) * rx,
-                                    mid.y + Mathf.Sin(a) * ry));
+                if (layer != null) layer.End();
+                else MapInkLayer.Hide("settlement");
             }
-            return pts;
-        }
-
-        /// <summary>Patrol's closed-loop dash cadence, verbatim: full dashes and
-        /// ordinary gaps the whole way round, with the length that does not
-        /// divide evenly absorbed by the closing gap - so the seam carries a
-        /// proper gap instead of a stub, and the dashes are never stretched to
-        /// fit. A ring too small for one dash and gap is left unmarked.</summary>
-        static void DashClosed(List<Vector2> pts, Rect clip)
-        {
-            int n = pts.Count;
-            if (n < 2) return;
-            float[] cum = new float[n];
-            for (int i = 1; i < n; i++)
-                cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).magnitude;
-            float total = cum[n - 1];
-            if (total < 1f) return;
-
-            float period = Dash + Gap;
-            int count = Mathf.FloorToInt(total / period);
-            if (count < 1) return;
-            float offset = (total - count * period) * 0.5f;
-            int cursor = 1;                 // walks forward only, see PointAtArc
-            for (int k = 0; k < count; k++)
-                CurvedDash(pts, cum, offset + k * period,
-                           offset + k * period + Dash, clip, ref cursor);
-        }
-
-        static Vector2[] _dashBuf;
-
-        /// <summary>One dash, FOLLOWING the ring's arc between its two
-        /// arc-length points: a chain of antialiased bars whose ends are tangent
-        /// to the ring, so the eye draws one continuous circle through the gaps.
-        /// The whole dash is sampled before anything is drawn, because the cull
-        /// needs its middle and <paramref name="cursor"/> may only walk forward.
-        /// The caller has set GUI.color and a hard map clip.</summary>
-        static void CurvedDash(List<Vector2> pts, float[] cum, float start,
-                               float end, Rect clip, ref int cursor)
-        {
-            float len = end - start;
-            if (len < 0.5f) return;
-            int steps = Mathf.Max(1, Mathf.CeilToInt(len / CurveStep));
-            if (_dashBuf == null || _dashBuf.Length < steps + 1)
-                _dashBuf = new Vector2[steps + 1];
-            for (int s = 0; s <= steps; s++)
-                _dashBuf[s] = PointAtArc(pts, cum, start + len * (s / (float)steps),
-                                         ref cursor);
-
-            // Cheap cull; the surrounding GUI.BeginClip is the real boundary.
-            if (!clip.Contains(_dashBuf[steps / 2])) return;
-            for (int s = 1; s <= steps; s++)
-                Bar(_dashBuf[s - 1], _dashBuf[s], s > 1, s < steps);
-        }
-
-        /// <summary>The point at arc length <paramref name="d"/> along the
-        /// polyline. <paramref name="i"/> is the segment the last call ended in
-        /// and is only ever advanced, so drawing the whole ring costs one walk
-        /// over it instead of one per sample.</summary>
-        static Vector2 PointAtArc(List<Vector2> pts, float[] cum, float d,
-                                  ref int i)
-        {
-            int n = pts.Count;
-            if (d <= 0f) return pts[0];
-            if (d >= cum[n - 1]) return pts[n - 1];
-            if (i < 1) i = 1;
-            while (i < n - 1 && cum[i] < d) i++;
-            float segLen = cum[i] - cum[i - 1];
-            float t = segLen > 1e-4f ? (d - cum[i - 1]) / segLen : 0f;
-            return Vector2.Lerp(pts[i - 1], pts[i], t);
-        }
-
-        /// <summary>One antialiased bar of a dash, rotated onto the chord from
-        /// <paramref name="a"/> to <paramref name="b"/>. An INNER end is grown by
-        /// half the overlap so consecutive bars meet with no notch on the outside
-        /// of the bend; the dash's two OUTER ends stay flush, flat and crisp.
-        /// </summary>
-        static void Bar(Vector2 a, Vector2 b, bool growA, bool growB)
-        {
-            Vector2 dir = b - a;
-            float len = dir.magnitude;
-            if (len < 0.25f) return;
-            Vector2 u = dir / len;
-            if (growA) a -= u * (SegOverlap * 0.5f);
-            if (growB) b += u * (SegOverlap * 0.5f);
-            dir = b - a;
-            len = dir.magnitude;
-            Vector2 mid = (a + b) * 0.5f;
-            float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-
-            Matrix4x4 m = GUI.matrix;
-            GUIUtility.RotateAroundPivot(angle, mid);
-            GUI.DrawTexture(new Rect(mid.x - len * 0.5f, mid.y - Stroke * 0.5f,
-                                     len, Stroke), BarTex());
-            GUI.matrix = m;
         }
 
         static bool Project(Vector3 point, Component texture, Camera camera,
@@ -796,33 +670,5 @@ namespace NextDayRevival
             return new Rect(x0, y0, Mathf.Max(0f, x1 - x0), Mathf.Max(0f, y1 - y0));
         }
 
-        /// <summary>The dash texture, built once: fully opaque across its width
-        /// so a dash END stays hard and flat, with the top and bottom rows faded
-        /// to nothing so the long SIDES are antialiased once the bar is stretched
-        /// to the stroke height and rotated. White, so GUI.color tints it. The
-        /// recipe is Patrol's Bar() - the Locator dashes and these are the same
-        /// stamp in two colours.</summary>
-        static Texture2D BarTex()
-        {
-            if (_bar != null) return _bar;
-            const int w = 4, h = 16;
-            const float feather = 3f;          // rows faded at each side
-            Color[] px = new Color[w * h];
-            for (int y = 0; y < h; y++)
-            {
-                float edge = Mathf.Min(y, h - 1 - y) + 0.5f;   // to the nearer side
-                float a = Mathf.Clamp01(edge / feather);
-                a = a * a * (3f - 2f * a);                     // smoothstep
-                for (int x = 0; x < w; x++)
-                    px[y * w + x] = new Color(1f, 1f, 1f, a);
-            }
-            _bar = new Texture2D(w, h, TextureFormat.ARGB32, false);
-            _bar.wrapMode = TextureWrapMode.Clamp;
-            _bar.filterMode = FilterMode.Bilinear;
-            _bar.SetPixels(px);
-            _bar.Apply();
-            _bar.hideFlags = HideFlags.HideAndDontSave;
-            return _bar;
-        }
     }
 }

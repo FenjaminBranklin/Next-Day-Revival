@@ -120,6 +120,20 @@ ASSET_FILES = [
     "scope50.png",
 ]
 
+# Dateinamen, die der Quelltext NENNT, ohne dass es sie geben muss.
+#
+# Das Artilleriefahrzeug der Siedlungen (ArtyModel in RevivalArtyBattery.cs)
+# ist erzeugte Geometrie wie das alte Moerserrohr. Es SUCHT aber zuerst nach
+# einem echten Modell und nimmt es, sobald es da liegt - jede dieser Dateien
+# haengt hinter File.Exists bzw. Assets.TextureIfPresent, das Fehlen ist der
+# Normalfall und kein Fehler. Wird ein echtes Modell geliefert, gehoert es in
+# ASSET_FILES, in make_assets.py und in die Startquittung (ClientIntegrity
+# lehnt jede Datei unter plugins\assets ab, die die Quittung nicht kennt).
+OPTIONAL_ASSETS = [
+    "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh",
+    "arty_diffuse.png",
+]
+
 MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
@@ -262,6 +276,9 @@ def check_item_table():
         p = os.path.join(ASSETS, f)
         if os.path.exists(p):
             ok("%-26s %8d Bytes" % (f, os.path.getsize(p)))
+        elif f in OPTIONAL_ASSETS:
+            # Optional: der Quelltext fragt danach und baut ohne sie weiter.
+            ok("%-26s optional, nicht vorhanden" % f)
         else:
             bad("im Quelltext genannt, aber nicht vorhanden: " + f)
     for f in ASSET_FILES:
@@ -937,6 +954,160 @@ def check_mortar():
              "Seam fehlt in RevivalPlugin.cs: " + seam)
 
 
+def check_arty_battery():
+    """[16] The settlement artillery vehicle, its crew and the recon drone.
+
+    Six rules decide whether this feature is what was ordered rather than merely
+    present, and every one of them is a line or two that a later edit could undo
+    without anything looking broken:
+
+      1. The crosshair may not outrun the turret. The whole point of the aim
+         rework is that the lay is stepped with MoveTowardsAngle at the gun's
+         own traverse rate and that the crosshair is DRAWN on that lay - draw it
+         on the mouse again and the limit becomes invisible, which is the same
+         as gone.
+      2. A shell the NPC crew fires must never be one player damaging another.
+         The master sweeps NPCs and vehicles; the blast on a player is applied
+         by that player's own client through Self().
+      3. The drone's circle must be the same circle on every client, so it comes
+         from PhotonNetwork.time and a phase taken from the settlement's own
+         position - never from an instance id or a random draw.
+      4. The crew must take the settlement's own faction, or a gun crew stands
+         in a village that shoots it.
+      5. The map overlay must be hard-clipped to the map window, the rule the
+         route overlay and the mortar ring both learned the hard way.
+      6. RevivalArtyBattery.cs must stay ASCII: it is a machine-written file and
+         build.ps1 requires BOM-less sources, so its Russian lives in
+         RevivalMortar.cs instead.
+    """
+    print("[16] Artilleriefahrzeug, Besatzung und Aufklaerungsdrohne (statisch)")
+    bat_p = os.path.join(ROOT, "RevivalArtyBattery.cs")
+    mortar_p = os.path.join(ROOT, "RevivalMortar.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    sync_p = os.path.join(ROOT, "sync_public.py")
+    if not os.path.exists(bat_p):
+        bad("RevivalArtyBattery.cs fehlt")
+        return
+    raw = io.open(bat_p, "rb").read()
+    b = raw.decode("utf-8", "replace")
+    s = io.open(mortar_p, encoding="utf-8").read() if os.path.exists(mortar_p) else ""
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+    sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("ArtyBattery: " + why)
+
+    # --- 6: ASCII, and no BOM in front of it.
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "RevivalArtyBattery.cs beginnt mit einer BOM")
+    nonascii = [c for c in b if ord(c) > 126]
+    need(not nonascii, "reines ASCII",
+         "RevivalArtyBattery.cs enthaelt Nicht-ASCII (" + "".join(nonascii[:8]) + ")")
+    need("Mortar.TextSpotted()" in b
+         and "internal static string TextSpotted()" in s
+         and "internal static string TextCrewAtGun()" in s,
+         "zweisprachige Zeilen liegen in RevivalMortar.cs",
+         "die Spielertexte der Batterie stehen nicht in der UTF-8-Datei")
+
+    # --- 1: the crosshair is the gun.
+    need("Mathf.MoveTowardsAngle(haveBear, wantBear, Traverse * dt)" in s,
+         "Fadenkreuz dreht nur so schnell wie der Turm",
+         "die Winkelbegrenzung des Fadenkreuzes fehlt")
+    need("Elevate * MetresPerDegree * dt" in s,
+         "Entfernung folgt der Rohrerhoehung",
+         "die radiale Begrenzung des Fadenkreuzes fehlt")
+    need("Vector3 under = _aimHave ? _aimPoint : tube;" in s,
+         "Overlay und Fadenkreuz sitzen auf der Richtung, nicht auf der Maus",
+         "das Overlay liest wieder die Mausposition")
+    need("Fire(_aiming, _aimPoint);" in s,
+         "der Klick feuert auf die Richtung des Rohres",
+         "der Klick feuert wieder auf den Mauspunkt")
+    need("t.Turret.localRotation" in s and "t.Barrel.localRotation" in s,
+         "Turm und Rohr werden wirklich gedreht",
+         "das Modell wird nicht mitgedreht")
+    need("ArtyModel.Build(out turret, out barrel)" in s,
+         "das Fahrzeug ersetzt das Rohr",
+         "die Aufstellung baut kein Fahrzeug")
+
+    # --- 2: an NPC shell never makes one player hurt another.
+    need("static void NpcImpact(Vector3 point)" in s
+         and "Sweep(point, false, out npc, out veh, out plr);" in s,
+         "NPC-Einschlag trifft Spieler nicht vom Master aus",
+         "der NPC-Einschlag laeuft durch den Spielerdurchlauf des Schuetzen")
+    need("internal static void Self(Vector3 point)" in s
+         and "Net.SendNpcImpact(point);" in s,
+         "jeder Client wendet den Einschlag auf den EIGENEN Spieler an",
+         "die Selbstanwendung des NPC-Einschlags fehlt")
+    need("if (d.Length > 3 && d[3] > 0.5f)" in s,
+         "vierter Float trennt Spieler- und NPC-Schuss",
+         "der Empfaenger unterscheidet die beiden Schussarten nicht")
+
+    # --- 3: one circle for every client.
+    need('AccessTools.PropertyGetter(photon, "time")' in b,
+         "Drohnenbahn haengt an der gemeinsamen Photon-Uhr",
+         "die Drohnenbahn benutzt keine gemeinsame Uhr")
+    need("centre.x * 0.0131f + centre.z * 0.0177f" in b,
+         "Phase kommt aus der Siedlungsposition",
+         "die Phase der Bahn ist nicht aus der Position abgeleitet")
+    need("Drone.Modell.Bauen()" in b,
+         "es fliegt eine echte Drohne, kein Symbol",
+         "die Aufklaerungsdrohne hat kein Modell")
+
+    # --- the delay and the random accuracy, both ordered explicitly.
+    need("_cfgReportDelay" in b and "_cfgReportJitter" in b,
+         "Meldung erreicht den Schuetzen mit Verzoegerung",
+         "die Meldeverzoegerung fehlt")
+    need("UnityEngine.Random.insideUnitCircle" in b and "_cfgAimError" in b,
+         "jede Feuerbitte traegt einen eigenen Zielfehler",
+         "der Zielfehler der Feuerbitte fehlt")
+    need("Mortar.Laid(p.SettlementId, point)" in b,
+         "gefeuert wird erst, wenn das Rohr steht",
+         "der Schuetze feuert, bevor der Turm auf dem Punkt ist")
+
+    # --- 4: the crew belongs to its settlement.
+    # The hated list is COPIED, never shared: other parts of the toolkit
+    # rewrite a settlement's list in place, and a shared reference would carry
+    # that edit back into the men it was taken from.
+    need("MatchFaction" in b
+         and "_fHated.SetValue(opt, hated.Clone() as Array)" in b,
+         "Besatzung uebernimmt die Fraktion der Siedlung (als Kopie)",
+         "die Besatzung behaelt eine fremde Fraktion")
+    need("Crew.DropSquad(at, gun.eulerAngles.y, 2, side, loadout)" in b,
+         "zwei Mann je Geschuetz: Schuetze und Drohnenfuehrer",
+         "die Besatzung wird nicht gesetzt")
+    need("ArtyBattery.CrewHoldsGun" in s,
+         "die Besatzung haelt das Visier, bis sie tot ist",
+         "der Spieler kann das Geschuetz an der lebenden Besatzung vorbei bedienen")
+
+    # --- 5: the map.
+    need("GUI.BeginClip(clip)" in b and "MapTools.MapViewportRect" in b,
+         "Kartenoverlay hart auf das Kartenfenster geschnitten",
+         "das Overlay der Batterie ist nicht auf das Kartenfenster geschnitten")
+    need("static void MapSnapshot(float now)" in b,
+         "Kartenstand wird beim Oeffnen eingefroren",
+         "die Drohnenposition auf der Karte ist nicht eingefroren")
+    need("new Color(0.72f, 0.13f, 0.125f" in b,
+         "Marker im Locator-Rot der Patrouillengrenze",
+         "der Drohnenmarker benutzt eine fremde Farbe")
+
+    # --- seams and the public repository.
+    for seam in ("ArtyBattery.BindConfig", "ArtyBattery.Tick()", "ArtyBattery.Draw()"):
+        need(seam in plug, "Seam " + seam,
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+    for seam in ("ArtyBattery.GunRaised", "ArtyBattery.GunLost"):
+        need(seam in s, "Seam " + seam,
+             "Seam fehlt in RevivalMortar.cs: " + seam)
+    # sync_public.py belongs to the private repository only; in the public
+    # copy there is nothing to check here.
+    if os.path.exists(sync_p):
+        need('"RevivalArtyBattery.cs"' in sync,
+             "Datei geht ins oeffentliche Repository",
+             "RevivalArtyBattery.cs fehlt in sync_public.py - dort baut das Repo nicht")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -956,6 +1127,7 @@ if __name__ == "__main__":
     check_convoy_ground_and_exit()
     check_convoy_column()
     check_mortar()
+    check_arty_battery()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

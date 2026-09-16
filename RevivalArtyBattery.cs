@@ -1,0 +1,1629 @@
+// Next Day: Survival - Revival Toolkit
+//
+// The settlement artillery battery: the crew that stands around the gun, the
+// recon drone their operator keeps in the air, and the fire missions the drone
+// buys them. The gun itself - loading, the map fire control, the flight of a
+// shell and the impact - stays in RevivalMortar.cs; this file is everything
+// AROUND it. Design notes: docs/ai/tasks/arty-vehicle-drone.md.
+//
+// WHAT A PLAYER MEETS, IN ORDER
+//
+//   1. Every settlement has a self-propelled howitzer instead of the old M1943
+//      tube (ArtyModel below builds it; Mortar.Raise stands it up).
+//   2. TWO MEN belong to it: a gunner at the sight and a drone operator. They
+//      are ordinary game NPCs, spawned once by the master client through
+//      Crew.DropSquad and wearing the FACTION OF THE SETTLEMENT they stand in,
+//      so they do not open fire on their own village.
+//   3. The operator flies a real recon drone in a wide circle around the
+//      settlement. It is the same airframe the player's own surveillance drone
+//      uses, and it is drawn on the M map.
+//   4. What the drone flies over, it sees. A hostile man under it is reported
+//      to the gunner - not instantly: a sighting takes seconds to travel, the
+//      gun has to be laid, and only then does the salvo leave. That delay is
+//      the whole point; a walking target is somewhere else by then.
+//   5. The salvo does NOT land on the spot. The whole mission carries one
+//      random aim error, and every shell inside it keeps the gun's ordinary
+//      dispersion - so the ground around the reported point is beaten, which is
+//      what artillery does.
+//   6. Kill the crew and it all stops. The operator's death takes the drone out
+//      of the sky, the gunner's death silences the gun - and only then can the
+//      player use the sight himself.
+//
+// WHO COMPUTES WHAT
+//
+//   MASTER CLIENT   spawns the crew, runs the spotting, decides every fire
+//                   mission and applies the impact to the NPCs and vehicles it
+//                   owns. There is exactly one master, so no mission is ever
+//                   run twice.
+//   EVERY CLIENT    flies the drone MODEL from a shared clock (PhotonNetwork.time
+//                   plus a phase derived from the settlement's own position), so
+//                   all clients draw the same drone in the same place without a
+//                   single byte of traffic. Each client also decides for ITSELF
+//                   whether it is standing under the drone, and applies an
+//                   incoming shell to its OWN player only. No client ever
+//                   damages another client's player, so nobody can be credited
+//                   with a casualty he did not cause.
+//
+// C# 3.0. This file is ASCII ONLY - it is written by tooling that cannot
+// guarantee a BOM-less UTF-8 file, and build.ps1 requires BOM-less sources. The
+// two bilingual lines this feature shows the player therefore live next to the
+// other Russian strings in RevivalMortar.cs (Mortar.TextCrewAtGun,
+// Mortar.TextSpotted) and are only called from here.
+//
+// SEAMS OUTSIDE THIS FILE (all marked "NDR settlement artillery"):
+//   RevivalPlugin.cs BindConfig -> ArtyBattery.BindConfig(Config)
+//   RevivalPlugin.cs Update     -> ArtyBattery.Tick()
+//   RevivalPlugin.cs OnGUI      -> ArtyBattery.Draw()
+//   RevivalMortar.cs Raise/Place -> ArtyBattery.GunRaised / GunLost
+//   RevivalMortar.cs Ground      -> ArtyBattery.CrewHoldsGun
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using BepInEx.Configuration;
+using HarmonyLib;
+using UnityEngine;
+
+namespace NextDayRevival
+{
+    /// <summary>
+    /// The crew, the recon drone and the automatic fire missions of every
+    /// settlement gun. The gun itself is <see cref="Mortar"/>; the vehicle's
+    /// geometry is <see cref="ArtyModel"/>.
+    /// </summary>
+    public static class ArtyBattery
+    {
+        // ------------------------------------------------------------- config
+
+        static ConfigEntry<bool> _cfgEnabled;
+        static ConfigEntry<bool> _cfgCrew;
+        static ConfigEntry<bool> _cfgCrewHolds;
+        static ConfigEntry<bool> _cfgDrone;
+        static ConfigEntry<bool> _cfgAutoFire;
+        static ConfigEntry<string> _cfgFaction;
+
+        static ConfigEntry<float> _cfgOrbitRadius;
+        static ConfigEntry<float> _cfgOrbitHeight;
+        static ConfigEntry<float> _cfgOrbitSpeed;
+        static ConfigEntry<float> _cfgModelRange;
+        static ConfigEntry<float> _cfgModelScale;
+
+        static ConfigEntry<float> _cfgSpotRadius;
+        static ConfigEntry<float> _cfgSpotSeconds;
+        static ConfigEntry<float> _cfgReportDelay;
+        static ConfigEntry<float> _cfgReportJitter;
+        static ConfigEntry<float> _cfgAimError;
+        static ConfigEntry<float> _cfgCooldown;
+        static ConfigEntry<float> _cfgGuardRadius;
+        static ConfigEntry<int> _cfgMagazine;
+        static ConfigEntry<float> _cfgResupply;
+
+        static bool Enabled { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
+        static float F(ConfigEntry<float> c, float fallback) { return c == null ? fallback : c.Value; }
+        static bool B(ConfigEntry<bool> c, bool fallback) { return c == null ? fallback : c.Value; }
+
+        /// <summary>Metres around the gun in which a living man counts as its
+        /// crew. The crew wanders a nine-metre ring (Crew.RingRadius), so this
+        /// has to be wider than that or a gunner who took three steps would be
+        /// declared dead.</summary>
+        internal static float GuardRadius { get { return Mathf.Max(4f, F(_cfgGuardRadius, 14f)); } }
+
+        public static void BindConfig(ConfigFile cfg)
+        {
+            _cfgEnabled = cfg.Bind("Artillery", "Enabled", true,
+                "The settlement artillery battery: a gunner and a drone operator "
+                + "at every gun, a recon drone in the air and the fire missions "
+                + "it buys. false leaves the bare gun for the player.");
+            _cfgCrew = cfg.Bind("Artillery", "SpawnCrew", true,
+                "Spawn the two men (gunner, drone operator) next to every gun. "
+                + "They are spawned by the master client only and take the "
+                + "faction of the settlement they stand in.");
+            _cfgCrewHolds = cfg.Bind("Artillery", "CrewHoldsTheGun", true,
+                "While a man who is hostile to you is alive at the gun, the sight "
+                + "is his: [F] is refused. Kill the crew and the gun is yours. "
+                + "false lets you push him aside and aim over his shoulder.");
+            _cfgDrone = cfg.Bind("Artillery", "Drone", true,
+                "The operator keeps a recon drone circling the settlement.");
+            _cfgAutoFire = cfg.Bind("Artillery", "AutoFire", true,
+                "The gunner answers what the drone reports. false keeps the drone "
+                + "in the air as a pure warning - useful for testing.");
+            _cfgFaction = cfg.Bind("Artillery", "CrewFaction", "looter",
+                "Fallback side of the crew when the settlement's own faction "
+                + "cannot be read: civilian, looter, traitor or neutral.");
+
+            _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 240f,
+                "Metres from the settlement centre the drone circles at.");
+            _cfgOrbitHeight = cfg.Bind("Artillery", "OrbitHeight", 85f,
+                "Metres above the ground under it. High enough to be a dot, low "
+                + "enough to be seen against the sky.");
+            _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 16f,
+                "Metres per second along the circle. At 240 m radius one lap "
+                + "takes about 95 s, so the same patch is looked at twice a "
+                + "minute and a crossing is not caught at once.");
+            _cfgModelRange = cfg.Bind("Artillery", "ModelRange", 800f,
+                "Metres from the player at which the drone gets a visible model. "
+                + "Beyond it the orbit is still computed - only the GameObject is "
+                + "not built, so a map full of settlements costs nothing.");
+            _cfgModelScale = cfg.Bind("Artillery", "ModelScale", 10f,
+                "Size of the recon drone model. The player's own surveillance "
+                + "drone uses 12.");
+
+            _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 110f,
+                "Metres around the point under the drone in which it sees a man. "
+                + "The drone's camera looks straight down, so this is a footprint "
+                + "on the ground, not a view range.");
+            _cfgSpotSeconds = cfg.Bind("Artillery", "SpotSeconds", 3f,
+                "Seconds a man has to stay inside the footprint before the "
+                + "operator is sure of him. Running through the edge of a pass "
+                + "is not a sighting.");
+            _cfgReportDelay = cfg.Bind("Artillery", "ReportSeconds", 9f,
+                "Seconds between the sighting and the gun being laid on it: the "
+                + "operator reads off the grid, the gunner writes it down and "
+                + "turns the turret. The turret's own travel is on top of this.");
+            _cfgReportJitter = cfg.Bind("Artillery", "ReportJitterSeconds", 5f,
+                "Random extra seconds on top of ReportSeconds, so a battery is "
+                + "never a metronome.");
+            _cfgAimError = cfg.Bind("Artillery", "AimErrorMetres", 28f,
+                "How far the WHOLE mission may sit off the reported point. Every "
+                + "shell then keeps the gun's own dispersion inside that - which "
+                + "is why a salvo beats the ground around a man instead of "
+                + "landing on his head.");
+            _cfgCooldown = cfg.Bind("Artillery", "MissionCooldownSeconds", 40f,
+                "Seconds after a mission before the same battery fires again.");
+            _cfgGuardRadius = cfg.Bind("Artillery", "CrewRadius", 14f,
+                "Metres around the gun in which a living man counts as its crew.");
+            _cfgMagazine = cfg.Bind("Artillery", "CrewRounds", 14,
+                "Shells the crew has to itself. The player's own loaded rounds "
+                + "are a separate count and are never fired by the NPC.");
+            _cfgResupply = cfg.Bind("Artillery", "CrewResupplySeconds", 120f,
+                "Seconds per shell the crew brings up from the ammunition point. "
+                + "A battery that is kept busy runs dry.");
+        }
+
+        // -------------------------------------------------------------- state
+
+        /// <summary>One gun and everything that belongs to it. Plain data: the
+        /// whole battery is driven from <see cref="Tick"/>, so nothing here needs
+        /// a MonoBehaviour and no settlement costs an Update of its own.</summary>
+        class Post
+        {
+            public int SettlementId;
+            public GameObject Gun;          // the vehicle Mortar raised
+            public Vector3 Centre;          // the settlement centre, the orbit's middle
+            public string Name;
+            public bool Safe;               // a trader camp: scenery, nothing more
+            public float Phase;             // where on the circle this drone starts
+
+            // crew, master client only
+            public GameObject CrewSettlement;
+            public Component Gunner;
+            public Component Operator;
+            public bool CrewAsked;
+            public bool FactionSet;
+            public float CrewTryAt;
+            public int CrewTries;
+
+            // crew as every client sees it: living men standing at the gun
+            public int MenNear;
+            public bool HostileNear;        // ... and at least one of them hates us
+            public int CountedAt = -1;      // the NPC scan this count belongs to
+
+            // the drone
+            public bool DroneUp;
+            public Vector3 DroneAt;
+            public GameObject DroneModel;
+            public float Ground;            // terrain height under the orbit point
+            public float GroundAt;          // Time.time it was last sampled
+
+            // spotting and the mission
+            public float SeenSince;         // when the current candidate came into view
+            public Vector3 SeenAt;
+            public bool Sighting;
+            public Vector3 Point;           // the reported point
+            public Vector2 Error;           // the mission's own aim error
+            public float ReportAt;
+            public float NextMissionAt;
+            public float NextScan;
+
+            // the local player's own warning, on every client
+            public float LocalSpotAt;
+            public Vector3 LocalSpotPoint;
+            public float NextWarn;
+
+            // the crew's shells
+            public int Rounds;
+            public float NextShell;
+        }
+
+        static readonly List<Post> _posts = new List<Post>();
+        static readonly Dictionary<int, Post> _byId = new Dictionary<int, Post>();
+
+        // The living NPCs, gathered ONCE for every post instead of once per post:
+        // FindObjectsOfType walks the whole scene, and a map with a dozen guns on
+        // it would otherwise walk it a dozen times a second.
+        static readonly List<Component> _npcs = new List<Component>();
+        static float _nextNpcScan;
+        static int _npcStamp;
+
+        // The map is only asked whether it is open a few times a second - the
+        // question is reflection, and the answer is used for a snapshot that is
+        // deliberately not live.
+        static float _nextMapCheck;
+        static bool _mapOpen;
+
+        /// <summary>What the map draws: where every drone was when the map was
+        /// opened. The order asked for the LAST position, not a live feed, and
+        /// freezing it is also what keeps the map cheap.</summary>
+        class Mark
+        {
+            public Vector3 Drone;
+            public Vector3 Centre;
+            public float Radius;
+            public bool Spotted;
+            public Vector3 SpotPoint;
+        }
+
+        static readonly List<Mark> _marks = new List<Mark>();
+
+        static Texture2D _px;
+        static Texture2D _ring;
+
+        // ------------------------------------------------- the gun's own seams
+
+        /// <summary>Mortar raised a gun for this settlement. A SAFE settlement -
+        /// a trader camp - keeps the vehicle as scenery and gets nothing else:
+        /// no crew, no drone, no fire missions.</summary>
+        internal static void GunRaised(int settlementId, GameObject gun,
+                                       Vector3 centre, string name, bool safe)
+        {
+            if (!Enabled || gun == null) return;
+            if (_byId.ContainsKey(settlementId)) return;
+            Post p = new Post();
+            p.SettlementId = settlementId;
+            p.Gun = gun;
+            p.Centre = centre;
+            p.Safe = safe;
+            p.Name = name == null ? "" : name;
+            // The phase comes from the settlement's POSITION, not from an
+            // instance id or a random draw: two clients agree on the position to
+            // the centimetre and on nothing else, and this is what makes both of
+            // them draw the drone at the same point of the same circle.
+            p.Phase = Mathf.Repeat(centre.x * 0.0131f + centre.z * 0.0177f,
+                                   Mathf.PI * 2f);
+            p.Rounds = Mathf.Clamp(_cfgMagazine == null ? 14 : _cfgMagazine.Value, 0, 60);
+            p.CrewTryAt = Time.time + 1.5f;
+            p.NextScan = Time.time + UnityEngine.Random.value;
+            _posts.Add(p);
+            _byId[settlementId] = p;
+            RevivalPlugin.L.LogInfo("ArtyBattery: gun for \"" + p.Name + "\" taken over, "
+                + "orbit " + Orbit().ToString("0") + " m around " + centre.ToString("0") + ".");
+        }
+
+        /// <summary>The scene changed under us - the gun is gone and so is
+        /// everything that stood around it.</summary>
+        internal static void GunLost(int settlementId)
+        {
+            Post p;
+            if (!_byId.TryGetValue(settlementId, out p)) return;
+            Drop(p);
+            _byId.Remove(settlementId);
+            _posts.Remove(p);
+        }
+
+        static void Drop(Post p)
+        {
+            if (p.DroneModel != null)
+            {
+                UnityEngine.Object.Destroy(p.DroneModel);
+                p.DroneModel = null;
+            }
+            // The men are the game's own NPCs and are left exactly where they
+            // are: a scene change removes them with everything else, and a crew
+            // settlement we tear down by hand would take its men's death
+            // bookkeeping with it.
+            p.CrewSettlement = null;
+            p.Gunner = null;
+            p.Operator = null;
+            p.DroneUp = false;
+        }
+
+        /// <summary>Does a crew that is hostile to the local player hold this
+        /// gun? Mortar asks before it lets the player take the sight.</summary>
+        internal static bool CrewHoldsGun(int settlementId)
+        {
+            if (!Enabled || !B(_cfgCrewHolds, true)) return false;
+            Post p;
+            if (!_byId.TryGetValue(settlementId, out p)) return false;
+            return p.HostileNear;
+        }
+
+        // --------------------------------------------------------------- tick
+
+        public static void Tick()
+        {
+            if (!Enabled) return;
+            try
+            {
+                if (_posts.Count == 0) return;
+                float now = Time.time;
+                bool master = RevivalTroopInsertion.MasterClient();
+
+                ScanNpcs(now);
+                MapSnapshot(now);
+
+                GameObject me = MapTools.LocalPlayer();
+                Vector3 mine = me == null ? Vector3.zero : me.transform.position;
+
+                for (int i = _posts.Count - 1; i >= 0; i--)
+                {
+                    Post p = _posts[i];
+                    if (p.Gun == null)
+                    {
+                        Drop(p);
+                        _byId.Remove(p.SettlementId);
+                        _posts.RemoveAt(i);
+                        continue;
+                    }
+                    Manning(p, now, master);
+                    Fly(p, now, me != null, mine);
+                    Warn(p, now, me, mine);
+                    if (master)
+                    {
+                        Spot(p, now);
+                        Mission(p, now);
+                    }
+                    Resupply(p, now);
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("ArtyBattery.Tick: " + ex);
+            }
+        }
+
+        // --------------------------------------------------------------- crew
+
+        /// <summary>The two men, and who of them is still alive. The head count
+        /// is tied to the NPC scan rather than to the frame: it walks every man
+        /// in range and reads his hated list, which is reflection, and the answer
+        /// cannot change between two scans anyway.</summary>
+        static void Manning(Post p, float now, bool master)
+        {
+            // Everybody counts the living men standing at the gun. It is the only
+            // crew state a joined client can see at all (it did not spawn them),
+            // and it is what decides whether the player may take the sight.
+            if (p.CountedAt != _npcStamp)
+            {
+                p.CountedAt = _npcStamp;
+                p.MenNear = 0;
+                p.HostileNear = false;
+                object myFaction = LocalFaction();
+                Vector3 gun = p.Gun.transform.position;
+                for (int i = 0; i < _npcs.Count; i++)
+                {
+                    Component ai = _npcs[i];
+                    if (ai == null) continue;
+                    if (Flat(ai.transform.position - gun) > GuardRadius) continue;
+                    p.MenNear++;
+                    if (myFaction != null && Hostile(HatedOf(ai), myFaction)) p.HostileNear = true;
+                }
+            }
+
+            if (p.Safe || !master || !B(_cfgCrew, true)) return;
+            if (p.CrewAsked)
+            {
+                if (p.CrewSettlement == null) return;
+                if (p.Gunner == null || p.Operator == null) Resolve(p);
+                if (!p.FactionSet && p.Gunner != null)
+                {
+                    p.FactionSet = true;
+                    MatchFaction(p);
+                }
+                return;
+            }
+            if (now < p.CrewTryAt) return;
+            Spawn(p, now);
+        }
+
+        static void Spawn(Post p, float now)
+        {
+            p.CrewTries++;
+            p.CrewTryAt = now + 5f;
+            try
+            {
+                Transform gun = p.Gun.transform;
+                // Behind the gun, where a crew stands: out of the muzzle's way
+                // and close enough that they read as ITS men.
+                Vector3 at = gun.position - gun.forward * 4.0f;
+                float y;
+                if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
+
+                List<RevivalComposition.CrewMan> loadout =
+                    new List<RevivalComposition.CrewMan>();
+                RevivalComposition.CrewMan gunner = new RevivalComposition.CrewMan();
+                gunner.Role = "gunner";
+                RevivalComposition.CrewMan spotter = new RevivalComposition.CrewMan();
+                spotter.Role = "drone_operator";
+                loadout.Add(gunner);
+                loadout.Add(spotter);
+
+                string side = _cfgFaction == null ? "looter" : _cfgFaction.Value;
+                GameObject crew = Crew.DropSquad(at, gun.eulerAngles.y, 2, side, loadout);
+                if (crew == null)
+                {
+                    if (p.CrewTries >= 4)
+                    {
+                        p.CrewAsked = true;
+                        RevivalPlugin.L.LogWarning("ArtyBattery: no crew could be spawned "
+                            + "for \"" + p.Name + "\" after " + p.CrewTries + " tries - that "
+                            + "gun stays unmanned.");
+                    }
+                    return;
+                }
+                p.CrewSettlement = crew;
+                p.CrewAsked = true;
+                Resolve(p);
+                if (p.Gunner != null)
+                {
+                    p.FactionSet = true;
+                    MatchFaction(p);
+                }
+                RevivalPlugin.L.LogInfo("ArtyBattery: crew for \"" + p.Name
+                    + "\" on its feet (gunner " + (p.Gunner != null)
+                    + ", operator " + (p.Operator != null) + ").");
+            }
+            catch (Exception ex)
+            {
+                p.CrewAsked = p.CrewTries >= 4;
+                RevivalPlugin.L.LogWarning("ArtyBattery: crew spawn failed for \""
+                    + p.Name + "\": " + ex.Message);
+            }
+        }
+
+        /// <summary>Pick the gunner and the operator out of the spawned men. The
+        /// array is the crew settlement's own NpcAI list, in spawn-point order,
+        /// so element 0 is the man built from the "gunner" role.</summary>
+        static void Resolve(Post p)
+        {
+            if (p.CrewSettlement == null) return;
+            try
+            {
+                Array men = Crew.Men(p.CrewSettlement);
+                if (men == null) return;
+                for (int i = 0; i < men.Length; i++)
+                {
+                    Component ai = men.GetValue(i) as Component;
+                    if (ai == null) continue;
+                    if (i == 0 && p.Gunner == null) p.Gunner = ai;
+                    else if (p.Operator == null && !ReferenceEquals(ai, p.Gunner)) p.Operator = ai;
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ArtyBattery: crew list of \"" + p.Name
+                    + "\": " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Put the crew on the settlement's own side.
+        ///
+        /// Crew.DropSquad builds a squad from one of the four editor sides, and
+        /// any of them can be the WRONG one here: a looter crew standing in a
+        /// military settlement starts a firefight inside the village within
+        /// seconds, and the first thing the player would see is his artillery
+        /// crew being shot by the people it belongs to. So the faction is copied
+        /// off a living man of the real settlement - MyFraction and the hated
+        /// list both, because the AI reads the hated list and nothing else
+        /// (NPC_AI2.IsEnemyFraction). Without a readable template the configured
+        /// side stands, which is what the fallback is for.
+        /// </summary>
+        static void MatchFaction(Post p)
+        {
+            Component template = SettlementMan(p);
+            if (template == null) return;
+            object mine = FactionOf(template);
+            Array hated = HatedOf(template);
+            if (mine == null && hated == null) return;
+            int done = 0;
+            done += Apply(p.Gunner, mine, hated) ? 1 : 0;
+            done += Apply(p.Operator, mine, hated) ? 1 : 0;
+            if (done > 0)
+                RevivalPlugin.L.LogInfo("ArtyBattery: crew of \"" + p.Name + "\" put on the "
+                    + "settlement's own side (" + (mine == null ? "?" : mine.ToString())
+                    + ") - " + done + " man(men).");
+        }
+
+        static bool Apply(Component ai, object mine, Array hated)
+        {
+            if (ai == null) return false;
+            try
+            {
+                object opt = Options(ai);
+                if (opt == null) return false;
+                if (mine != null && _fMyFraction != null) _fMyFraction.SetValue(opt, mine);
+                // A COPY of the list, not the template's own array. Other parts
+                // of the toolkit rewrite a settlement's hated list in place (the
+                // traitor camp does), and a shared reference would carry that
+                // edit into the men it was copied from.
+                if (hated != null && _fHated != null)
+                    _fHated.SetValue(opt, hated.Clone() as Array);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>A living man of the REAL settlement near the gun, to copy a
+        /// faction from. Our own two are skipped, and so is anyone further away
+        /// than the settlement itself is wide.</summary>
+        static Component SettlementMan(Post p)
+        {
+            Component best = null;
+            float bestD = 120f;
+            for (int i = 0; i < _npcs.Count; i++)
+            {
+                Component ai = _npcs[i];
+                if (ai == null) continue;
+                if (ReferenceEquals(ai, p.Gunner) || ReferenceEquals(ai, p.Operator)) continue;
+                float d = Flat(ai.transform.position - p.Centre);
+                if (d > bestD) continue;
+                bestD = d;
+                best = ai;
+            }
+            return best;
+        }
+
+        static bool Alive(Component ai)
+        {
+            if (ai == null) return false;
+            try
+            {
+                if (!Look() || _mIsAlive == null) return true;
+                object r = _mIsAlive.Invoke(ai, null);
+                return r is bool && (bool)r;
+            }
+            catch { return false; }
+        }
+
+        // -------------------------------------------------------------- drone
+
+        static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 240f), 40f, 1500f); }
+
+        /// <summary>Where this drone is right now. Pure function of the shared
+        /// clock and the settlement's own position, so every client gets the
+        /// same answer without anybody sending anything. The ground under the
+        /// orbit is sampled twice a second, not every frame: the drone moves a
+        /// few metres in that time and the terrain does not move at all.</summary>
+        static Vector3 DronePoint(Post p, float now)
+        {
+            float r = Orbit();
+            float speed = Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f);
+            float a = p.Phase + Clock() * speed / r;
+            Vector3 flat = new Vector3(p.Centre.x + Mathf.Cos(a) * r, 0f,
+                                       p.Centre.z + Mathf.Sin(a) * r);
+            if (p.GroundAt <= 0f || now - p.GroundAt > 0.5f)
+            {
+                p.GroundAt = now;
+                float y;
+                if (!RevivalTroopInsertion.GroundY(flat, out y)) y = p.Centre.y;
+                p.Ground = y;
+            }
+            flat.y = p.Ground + Mathf.Clamp(F(_cfgOrbitHeight, 85f), 20f, 400f);
+            return flat;
+        }
+
+        static void Fly(Post p, float now, bool havePlayer, Vector3 mine)
+        {
+            bool want = B(_cfgDrone, true) && OperatorFlies(p);
+            p.DroneUp = want;
+            if (!want)
+            {
+                if (p.DroneModel != null)
+                {
+                    UnityEngine.Object.Destroy(p.DroneModel);
+                    p.DroneModel = null;
+                }
+                return;
+            }
+
+            p.DroneAt = DronePoint(p, now);
+
+            // A model only where somebody could see it. The orbit itself is four
+            // lines of arithmetic and is computed everywhere, so the map and the
+            // spotting do not care whether a GameObject exists.
+            bool near = havePlayer
+                && Flat(p.DroneAt - mine) <= Mathf.Max(100f, F(_cfgModelRange, 800f));
+            if (!near)
+            {
+                if (p.DroneModel != null)
+                {
+                    UnityEngine.Object.Destroy(p.DroneModel);
+                    p.DroneModel = null;
+                }
+                return;
+            }
+            if (p.DroneModel == null) p.DroneModel = BuildDrone();
+            if (p.DroneModel == null) return;
+            p.DroneModel.transform.position = p.DroneAt;
+            // Nose along the circle: the tangent is the direction it flies.
+            Vector3 radial = p.DroneAt - p.Centre;
+            radial.y = 0f;
+            Vector3 tangent = new Vector3(-radial.z, 0f, radial.x);
+            if (tangent.sqrMagnitude > 0.01f)
+                p.DroneModel.transform.rotation =
+                    Quaternion.LookRotation(tangent.normalized, Vector3.up);
+        }
+
+        /// <summary>Is there anybody left to fly it? On the master that is the
+        /// operator himself; a joined client never spawned him and cannot tell
+        /// the two men apart, so it asks whether ANY of the gun's men is still
+        /// standing. The two answers differ only in the seconds between the
+        /// operator's death and the gunner's, and the drone is a dot in the sky
+        /// either way.</summary>
+        static bool OperatorFlies(Post p)
+        {
+            if (p.Safe) return false;                // a trader camp keeps no drone up
+            if (!B(_cfgCrew, true)) return true;     // no crew asked for: the drone is the battery
+            if (p.CrewSettlement != null) return Alive(p.Operator);
+            return p.MenNear > 0;
+        }
+
+        static bool GunnerServes(Post p)
+        {
+            if (!B(_cfgCrew, true)) return true;
+            if (p.CrewSettlement != null) return Alive(p.Gunner);
+            return p.MenNear > 0;
+        }
+
+        static bool _modelBroken;
+
+        /// <summary>The recon airframe, the same one the player's own
+        /// surveillance drone flies. A failure is said ONCE and then never
+        /// tried again: this runs every frame for every battery in range, and a
+        /// warning a frame would bury the log that explains it.</summary>
+        static GameObject BuildDrone()
+        {
+            if (_modelBroken) return null;
+            try
+            {
+                GameObject go = Drone.Modell.Bauen();
+                go.name = "NDR_ArtyReconDrone";
+                float s = Mathf.Clamp(F(_cfgModelScale, 10f), 1f, 40f);
+                go.transform.localScale = new Vector3(s, s, s);
+                return go;
+            }
+            catch (Exception ex)
+            {
+                _modelBroken = true;
+                RevivalPlugin.L.LogWarning("ArtyBattery: no recon drone model (" + ex.Message
+                    + ") - the drones still fly and still spot, they are simply not "
+                    + "drawn in the world.");
+                return null;
+            }
+        }
+
+        // ----------------------------------------------------------- spotting
+
+        /// <summary>The local player's own warning. Every client runs this for
+        /// ITSELF - it needs no authority, it is the only way a joined client
+        /// learns that it is being watched, and it is what puts the mark on his
+        /// map.</summary>
+        static void Warn(Post p, float now, GameObject me, Vector3 mine)
+        {
+            if (me == null || !p.DroneUp) return;
+            if (Flat(p.DroneAt - mine) > SpotRadius()) return;
+            p.LocalSpotAt = now;
+            p.LocalSpotPoint = mine;
+            if (now < p.NextWarn) return;
+            p.NextWarn = now + 25f;
+            Turret.Hinweis(Mortar.TextSpotted(), 3.5f);
+        }
+
+        static float SpotRadius() { return Mathf.Clamp(F(_cfgSpotRadius, 110f), 20f, 400f); }
+
+        /// <summary>Could the gun reach that point at all? Asked BEFORE the
+        /// sighting rather than after it: a man the gun cannot touch is not a
+        /// target, and reporting him would only put the battery through the
+        /// whole drill for a refusal at the end of it. The dead zone under the
+        /// gun matters here - a drone whose orbit passes over its own settlement
+        /// would otherwise keep reporting people standing next to the
+        /// vehicle.</summary>
+        static bool InReach(Post p, Vector3 at)
+        {
+            if (p.Gun == null) return false;
+            float d = Flat(at - p.Gun.transform.position);
+            return d >= Mortar.MinRange && d <= Mortar.MaxRange;
+        }
+
+        /// <summary>Master only: what the drone sees and hands to the gunner.
+        /// One candidate at a time - a battery has one gun, and a spotter who
+        /// keeps changing his mind never gets a mission off.</summary>
+        static void Spot(Post p, float now)
+        {
+            if (p.Safe || !B(_cfgAutoFire, true)) return;
+            if (p.Sighting || !p.DroneUp) return;
+            if (now < p.NextScan) return;
+            p.NextScan = now + 0.5f;
+            if (now < p.NextMissionAt) return;
+
+            float radius = SpotRadius();
+            Vector3 found = Vector3.zero;
+            bool have = false;
+
+            // Players first: they are the point of the whole feature, and the
+            // list is two field reads rather than a scene walk.
+            List<GameObject> players = Mortar.PlayerList();
+            for (int i = 0; i < players.Count && !have; i++)
+            {
+                GameObject go = players[i];
+                if (go == null) continue;
+                Vector3 at = go.transform.position;
+                if (Flat(p.DroneAt - at) > radius) continue;
+                if (!InReach(p, at)) continue;
+                if (!HostileToBattery(p, PlayerFaction(go), true)) continue;
+                found = at;
+                have = true;
+            }
+            // Then the NPCs the drone can see - a squad that landed out there is
+            // as good a target as a player, and the order asked for both.
+            for (int i = 0; i < _npcs.Count && !have; i++)
+            {
+                Component ai = _npcs[i];
+                if (ai == null) continue;
+                if (ReferenceEquals(ai, p.Gunner) || ReferenceEquals(ai, p.Operator)) continue;
+                Vector3 at = ai.transform.position;
+                if (Flat(p.DroneAt - at) > radius) continue;
+                if (!InReach(p, at)) continue;
+                if (!HostileToBattery(p, FactionOf(ai), false)) continue;
+                found = at;
+                have = true;
+            }
+
+            if (!have) { p.SeenSince = 0f; return; }
+
+            // A man has to stay under the drone before the operator is sure of
+            // him. Somebody who crosses the edge of the footprint is not a
+            // sighting, and without this the battery would fire at every shadow.
+            if (p.SeenSince <= 0f || Flat(found - p.SeenAt) > 45f)
+            {
+                p.SeenSince = now;
+                p.SeenAt = found;
+                return;
+            }
+            p.SeenAt = found;
+            if (now - p.SeenSince < Mathf.Max(0f, F(_cfgSpotSeconds, 3f))) return;
+
+            p.Sighting = true;
+            p.Point = found;
+            p.SeenSince = 0f;
+            // ONE error for the whole mission, drawn now: the shells that follow
+            // add the gun's own dispersion around this offset point, so the
+            // salvo beats an area near the man instead of on him.
+            Vector2 e = UnityEngine.Random.insideUnitCircle * Mathf.Max(0f, F(_cfgAimError, 28f));
+            p.Error = e;
+            p.ReportAt = now + Mathf.Max(0f, F(_cfgReportDelay, 9f))
+                + UnityEngine.Random.value * Mathf.Max(0f, F(_cfgReportJitter, 5f));
+            RevivalPlugin.L.LogInfo("ArtyBattery: \"" + p.Name + "\" drone reports "
+                + found.ToString("0") + ", gun laid in "
+                + (p.ReportAt - now).ToString("0.0") + " s, aim error "
+                + e.magnitude.ToString("0") + " m.");
+        }
+
+        /// <summary>Master only: the report reaches the gunner, he lays the gun
+        /// and fires the moment it is on. The turret's travel is a real part of
+        /// the delay - a target across the settlement waits longer than one in
+        /// front of the muzzle.</summary>
+        static void Mission(Post p, float now)
+        {
+            if (!p.Sighting) return;
+            if (now < p.ReportAt) return;
+            // A report that could not be answered inside a minute is stale. The
+            // turret needs twenty seconds for a half turn, so nothing legitimate
+            // reaches this - what does is a gun the player held the sight of
+            // while the mission waited, and a sighting nobody ever clears would
+            // block every later report from that battery for good.
+            if (now > p.ReportAt + 60f)
+            {
+                p.Sighting = false;
+                p.NextMissionAt = now + 10f;
+                return;
+            }
+            if (!GunnerServes(p)) { p.Sighting = false; return; }
+            if (Mortar.PlayerAiming(p.SettlementId)) return;   // the player has the sight
+            if (p.Rounds <= 0)
+            {
+                p.Sighting = false;
+                p.NextMissionAt = now + 20f;
+                return;
+            }
+
+            Vector3 point = new Vector3(p.Point.x + p.Error.x, p.Point.y,
+                                        p.Point.z + p.Error.y);
+            float y;
+            if (RevivalTroopInsertion.GroundY(point, out y)) point.y = y;
+
+            Mortar.Lay(p.SettlementId, point);
+            if (!Mortar.Laid(p.SettlementId, point)) return;   // still turning
+
+            int fired = Mortar.NpcFire(p.SettlementId, point, p.Rounds);
+            p.Sighting = false;
+            if (fired <= 0)
+            {
+                p.NextMissionAt = now + 10f;
+                return;
+            }
+            p.Rounds -= fired;
+            p.NextMissionAt = now + Mathf.Max(5f, F(_cfgCooldown, 40f));
+        }
+
+        static void Resupply(Post p, float now)
+        {
+            int cap = Mathf.Clamp(_cfgMagazine == null ? 14 : _cfgMagazine.Value, 0, 60);
+            if (p.Rounds >= cap) { p.NextShell = 0f; return; }
+            float per = Mathf.Max(5f, F(_cfgResupply, 120f));
+            if (p.NextShell <= 0f) { p.NextShell = now + per; return; }
+            if (now < p.NextShell) return;
+            p.NextShell = now + per;
+            p.Rounds++;
+        }
+
+        // ----------------------------------------------------- faction reading
+
+        /// <summary>Is this faction one the battery shoots at? The battery's own
+        /// hated list is the gunner's (he is the man firing); without one the
+        /// answer for a PLAYER is yes and for an NPC is no. That asymmetry is
+        /// deliberate: an unreadable player must not switch the feature off, and
+        /// an unreadable NPC must not get the battery shelling its own
+        /// village.</summary>
+        static bool HostileToBattery(Post p, object faction, bool isPlayer)
+        {
+            Array hated = HatedOf(p.Gunner);
+            if (hated == null) hated = HatedOf(p.Operator);
+            if (hated == null || faction == null) return isPlayer;
+            return Hostile(hated, faction);
+        }
+
+        /// <summary>The same test as NPC_AI2.IsEnemyFraction: is that faction in
+        /// this hated list? Compared as NUMBERS, not with Equals. An NPC's side
+        /// is the Fraction enum and a player's comes out of PlayerInfo.fraction,
+        /// which the game may hold as the enum or as a plain int - and boxed,
+        /// Equals between the two is false whatever the value is. That would
+        /// leave a battery that never fires at anybody and no line in the log to
+        /// say why.</summary>
+        static bool Hostile(Array hated, object faction)
+        {
+            if (hated == null || faction == null) return false;
+            int want;
+            try { want = Convert.ToInt32(faction); }
+            catch { return false; }
+            for (int i = 0; i < hated.Length; i++)
+            {
+                object h = hated.GetValue(i);
+                if (h == null) continue;
+                try { if (Convert.ToInt32(h) == want) return true; }
+                catch { if (h.Equals(faction)) return true; }
+            }
+            return false;
+        }
+
+        static Type _npcType;
+        static Type _optType;
+        static MethodInfo _mIsAlive;
+        static FieldInfo _fOptions, _fMyFraction, _fHated;
+        static bool _looked;
+
+        static bool Look()
+        {
+            if (_looked) return _npcType != null;
+            _looked = true;
+            _npcType = RevivalPlugin.TypeByName("NPC_AI2");
+            _optType = RevivalPlugin.TypeByName("NPCMainOptions");
+            if (_npcType == null)
+            {
+                RevivalPlugin.L.LogWarning("ArtyBattery: NPC_AI2 not found - the guns "
+                    + "stay unmanned and nothing is spotted.");
+                return false;
+            }
+            _mIsAlive = AccessTools.Method(_npcType, "IsAlive", null, null);
+            _fOptions = AccessTools.Field(_npcType, "MainOptions");
+            if (_optType != null)
+            {
+                _fMyFraction = AccessTools.Field(_optType, "MyFraction");
+                _fHated = AccessTools.Field(_optType, "HatedFractions");
+            }
+            if (_fOptions == null || _fMyFraction == null || _fHated == null)
+                RevivalPlugin.L.LogWarning("ArtyBattery: NPCMainOptions.MyFraction or "
+                    + "HatedFractions missing - the crew keeps the configured side and "
+                    + "only players are spotted.");
+            return true;
+        }
+
+        static object Options(Component ai)
+        {
+            if (ai == null || !Look() || _fOptions == null) return null;
+            try { return _fOptions.GetValue(ai); }
+            catch { return null; }
+        }
+
+        static object FactionOf(Component ai)
+        {
+            object opt = Options(ai);
+            if (opt == null || _fMyFraction == null) return null;
+            try { return _fMyFraction.GetValue(opt); }
+            catch { return null; }
+        }
+
+        static Array HatedOf(Component ai)
+        {
+            object opt = Options(ai);
+            if (opt == null || _fHated == null) return null;
+            try { return _fHated.GetValue(opt) as Array; }
+            catch { return null; }
+        }
+
+        static object LocalFaction()
+        {
+            GameObject me = MapTools.LocalPlayer();
+            return me == null ? null : PlayerFaction(me);
+        }
+
+        static MethodInfo _getInfo;
+        static bool _infoStatic;
+        static object _statsManager;
+        static FieldInfo _fFraction;
+        static PropertyInfo _pFraction;
+        static bool _statsLooked;
+
+        /// <summary>A player's faction as the Fraction enum value the NPC lists
+        /// are written in - the same field the mortar's own faction net reads
+        /// (PlayerStatisticsManager.GetPlayerInfo(go).fraction).</summary>
+        static object PlayerFaction(GameObject player)
+        {
+            if (player == null) return null;
+            try
+            {
+                if (!_statsLooked)
+                {
+                    _statsLooked = true;
+                    Type t = RevivalPlugin.TypeByName("PlayerStatisticsManager");
+                    if (t != null)
+                    {
+                        MethodInfo[] ms = t.GetMethods(BindingFlags.Public
+                            | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
+                        for (int i = 0; i < ms.Length; i++)
+                        {
+                            if (ms[i].Name != "GetPlayerInfo") continue;
+                            ParameterInfo[] ps = ms[i].GetParameters();
+                            if (ps.Length != 1) continue;
+                            if (!ps[0].ParameterType.IsAssignableFrom(typeof(GameObject))) continue;
+                            _getInfo = ms[i];
+                            _infoStatic = ms[i].IsStatic;
+                            break;
+                        }
+                        if (_getInfo != null && !_infoStatic)
+                        {
+                            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                            if (all.Length > 0) _statsManager = all[0];
+                        }
+                        if (_getInfo != null)
+                        {
+                            Type ret = _getInfo.ReturnType;
+                            _fFraction = AccessTools.Field(ret, "fraction");
+                            if (_fFraction == null) _fFraction = AccessTools.Field(ret, "Fraction");
+                            if (_fFraction == null)
+                                _pFraction = ret.GetProperty("fraction",
+                                    BindingFlags.Public | BindingFlags.Instance);
+                        }
+                    }
+                    if (_getInfo == null || (_fFraction == null && _pFraction == null))
+                        RevivalPlugin.L.LogWarning("ArtyBattery: a player's faction cannot be "
+                            + "read - every player under a drone counts as hostile.");
+                }
+                if (_getInfo == null) return null;
+                if (!_infoStatic && _statsManager == null) return null;
+                object info = _infoStatic
+                    ? _getInfo.Invoke(null, new object[] { player })
+                    : _getInfo.Invoke(_statsManager, new object[] { player });
+                if (info == null) return null;
+                if (_fFraction != null) return _fFraction.GetValue(info);
+                if (_pFraction != null) return _pFraction.GetValue(info, null);
+                return null;
+            }
+            catch { return null; }
+        }
+
+        // ------------------------------------------------------------ plumbing
+
+        static void ScanNpcs(float now)
+        {
+            if (now < _nextNpcScan) return;
+            _nextNpcScan = now + 1.5f;
+            _npcStamp++;
+            _npcs.Clear();
+            if (!Look()) return;
+            try
+            {
+                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_npcType);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Component ai = all[i] as Component;
+                    if (ai == null || ai.gameObject == null) continue;
+                    if (!Alive(ai)) continue;
+                    _npcs.Add(ai);
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ArtyBattery: NPC scan: " + ex.Message);
+            }
+        }
+
+        static MethodInfo _clockGetter;
+        static bool _clockLooked;
+
+        /// <summary>
+        /// The clock every client agrees on. PhotonNetwork.time is the room's
+        /// own server time in seconds, the same number on every machine in the
+        /// session, which is exactly what a drone position derived from nothing
+        /// but arithmetic needs. Time.time is the fallback and is per-client, so
+        /// without Photon two players see the same drone on different parts of
+        /// the same circle - harmless, because nothing but the picture depends
+        /// on it. The modulo keeps a four-day-old room inside float precision.
+        /// </summary>
+        static float Clock()
+        {
+            try
+            {
+                if (!_clockLooked)
+                {
+                    _clockLooked = true;
+                    Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+                    if (photon != null)
+                        _clockGetter = AccessTools.PropertyGetter(photon, "time");
+                }
+                if (_clockGetter != null)
+                {
+                    object v = _clockGetter.Invoke(null, null);
+                    if (v is double)
+                    {
+                        double d = (double)v;
+                        if (d > 0.0) return (float)(d % 100000.0);
+                    }
+                }
+            }
+            catch { }
+            return Time.time;
+        }
+
+        static float Flat(Vector3 v)
+        {
+            v.y = 0f;
+            return v.magnitude;
+        }
+
+        // ---------------------------------------------------------- the map
+
+        /// <summary>
+        /// Freeze what the map shows the moment it is opened.
+        ///
+        /// The order was explicit that this does not have to be live - "the last
+        /// position as the map was opened" - and taking it at its word is what
+        /// keeps the overlay cheap: the snapshot is a handful of vectors, and a
+        /// repaint touches no reflection at all.
+        /// </summary>
+        static void MapSnapshot(float now)
+        {
+            if (now < _nextMapCheck) return;
+            _nextMapCheck = now + 0.2f;
+            Component manager, texture;
+            Camera cam;
+            Vector2 world, map;
+            bool open = MapTools.Context(out manager, out texture, out cam, out world, out map);
+            if (open == _mapOpen) return;
+            _mapOpen = open;
+            if (!open) return;
+
+            _marks.Clear();
+            float r = Orbit();
+            for (int i = 0; i < _posts.Count; i++)
+            {
+                Post p = _posts[i];
+                if (!p.DroneUp) continue;
+                Mark m = new Mark();
+                m.Drone = p.DroneAt;
+                m.Centre = p.Centre;
+                m.Radius = r;
+                m.Spotted = now - p.LocalSpotAt < 90f;
+                m.SpotPoint = p.LocalSpotPoint;
+                _marks.Add(m);
+            }
+        }
+
+        public static void Draw()
+        {
+            if (!Enabled || _marks.Count == 0) return;
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            try
+            {
+                Component manager, texture;
+                Camera cam;
+                Vector2 world, map;
+                if (!MapTools.Context(out manager, out texture, out cam, out world, out map))
+                    return;
+
+                Rect clip;
+                if (!MapTools.MapScreenRect(texture, cam, out clip)) return;
+                Rect view;
+                if (MapTools.MapViewportRect(texture, cam, out view)) clip = Intersect(clip, view);
+                if (clip.width < 2f || clip.height < 2f) return;
+
+                Color old = GUI.color;
+                GUI.BeginClip(clip);
+                try
+                {
+                    for (int i = 0; i < _marks.Count; i++)
+                        DrawMark(_marks[i], texture, cam, world, map, clip);
+                }
+                finally
+                {
+                    GUI.EndClip();
+                    GUI.color = old;
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("ArtyBattery.Draw: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// One battery on the map: the orbit as SEPARATE dashes and the drone
+        /// itself as a small block, both in the Locator red the patrol border
+        /// already uses, plus the point where this player was last seen from the
+        /// air. Dashes rather than a ring on purpose - that is the house style
+        /// for every border drawn on this map, and a solid circle reads as a
+        /// zone the game itself drew.
+        /// </summary>
+        static void DrawMark(Mark m, Component texture, Camera cam,
+                             Vector2 world, Vector2 map, Rect clip)
+        {
+            // A drone whose settlement is not on this map at all (an interior
+            // scene has its own, much smaller map) is not drawn.
+            if (Mathf.Abs(m.Centre.x) > world.x * 0.75f
+                || Mathf.Abs(m.Centre.z) > world.y * 0.75f) return;
+
+            Vector2 centre, rim, dot;
+            if (!MapTools.WorldToGui(m.Centre, texture, cam, world, map, out centre)) return;
+            if (!MapTools.WorldToGui(m.Centre + new Vector3(m.Radius, 0f, 0f),
+                                     texture, cam, world, map, out rim)) return;
+            float hw = Mathf.Abs(rim.x - centre.x);
+            if (hw < 3f) return;
+
+            Color red = new Color(0.72f, 0.13f, 0.125f, 0.95f);   // Locator red
+
+            // The orbit: 30 dashes of two dots each, with the gap between them
+            // left empty.
+            GUI.color = red;
+            Vector2 c = centre - clip.position;
+            float squash = 1f;
+            Vector2 rimZ;
+            if (MapTools.WorldToGui(m.Centre + new Vector3(0f, 0f, m.Radius),
+                                    texture, cam, world, map, out rimZ))
+            {
+                float hh = Mathf.Abs(rimZ.y - centre.y);
+                if (hh > 1f) squash = hh / hw;
+            }
+            for (int i = 0; i < 30; i++)
+            {
+                float a0 = i * Mathf.PI * 2f / 30f;
+                for (int k = 0; k < 2; k++)
+                {
+                    float a = a0 + k * 0.035f;
+                    float x = c.x + Mathf.Cos(a) * hw;
+                    float y = c.y + Mathf.Sin(a) * hw * squash;
+                    GUI.DrawTexture(new Rect(x - 1f, y - 1f, 2f, 2f), Px());
+                }
+            }
+
+            // The drone itself, where it was when the map went up.
+            if (MapTools.WorldToGui(m.Drone, texture, cam, world, map, out dot))
+            {
+                Vector2 d = dot - clip.position;
+                GUI.color = new Color(0.05f, 0.05f, 0.05f, 0.85f);
+                GUI.DrawTexture(new Rect(d.x - 5f, d.y - 5f, 10f, 10f), Px());
+                GUI.color = red;
+                GUI.DrawTexture(new Rect(d.x - 4f, d.y - 4f, 8f, 8f), Px());
+                GUI.color = new Color(1f, 0.92f, 0.85f, 0.95f);
+                GUI.DrawTexture(new Rect(d.x - 1f, d.y - 1f, 2f, 2f), Px());
+            }
+
+            // Where the drone last had this player. A cross inside a ring, so it
+            // reads as "they know about this spot" rather than as a waypoint.
+            if (!m.Spotted) return;
+            Vector2 s;
+            if (!MapTools.WorldToGui(m.SpotPoint, texture, cam, world, map, out s)) return;
+            Vector2 q = s - clip.position;
+            GUI.color = new Color(1f, 0.55f, 0.20f, 0.90f);
+            GUI.DrawTexture(new Rect(q.x - 9f, q.y - 9f, 18f, 18f), Ring());
+            GUI.DrawTexture(new Rect(q.x - 6f, q.y - 1f, 13f, 2f), Px());
+            GUI.DrawTexture(new Rect(q.x - 1f, q.y - 6f, 2f, 13f), Px());
+        }
+
+        static Rect Intersect(Rect a, Rect b)
+        {
+            float x0 = Mathf.Max(a.x, b.x), y0 = Mathf.Max(a.y, b.y);
+            float x1 = Mathf.Min(a.xMax, b.xMax), y1 = Mathf.Min(a.yMax, b.yMax);
+            return new Rect(x0, y0, Mathf.Max(0f, x1 - x0), Mathf.Max(0f, y1 - y0));
+        }
+
+        static Texture2D Px()
+        {
+            if (_px == null) _px = Mortar.PxTexture();
+            return _px;
+        }
+
+        static Texture2D Ring()
+        {
+            if (_ring == null) _ring = Mortar.RingTexture();
+            return _ring;
+        }
+    }
+
+    /// <summary>
+    /// The settlement gun as generated geometry: a tracked self-propelled
+    /// howitzer with a hull, two running gears, a turret that turns and a barrel
+    /// that elevates.
+    ///
+    /// Built in code, exactly as the M1943 tube it replaces was. A vehicle per
+    /// settlement is decoration with no inventory icon, no hand pose and no UV
+    /// work; a generated mesh costs no asset file, no entry in the launch
+    /// receipt (ClientIntegrity rejects any file under plugins\assets the
+    /// receipt does not know) and no make_assets.py run to install.
+    ///
+    /// IF A REAL MODEL IS DROPPED IN, IT WINS. Whenever assets\arty_hull.ndmesh
+    /// (and optionally arty_turret.ndmesh, arty_barrel.ndmesh and
+    /// arty_diffuse.png) exist, they are loaded instead of the generated parts,
+    /// so a proper model replaces this one without a code change. The generated
+    /// shape is the fallback, not the intention.
+    ///
+    /// Winding follows the rule verify.py enforces on the shipped meshes: the
+    /// right-hand normal of each triangle's winding points the same way as its
+    /// stored normal, so nothing is culled while it is lit.
+    /// </summary>
+    internal static class ArtyModel
+    {
+        internal const float HullLength = 6.2f;
+        internal const float HullWidth = 2.9f;
+        internal const float HullTop = 1.55f;
+        internal const float BarrelLength = 4.1f;
+
+        /// <summary>Where the turret sits on the hull, in the hull's space.</summary>
+        static readonly Vector3 TurretAt = new Vector3(0f, HullTop, -0.35f);
+
+        /// <summary>Where the barrel pivots, in the turret's space.</summary>
+        static readonly Vector3 TrunnionAt = new Vector3(0f, 0.45f, 0.85f);
+
+        /// <summary>The muzzle in the BARREL's space - the barrel points along
+        /// its own +Z, so this is simply its length.</summary>
+        internal static Vector3 MuzzleLocal
+        {
+            get { return new Vector3(0f, 0f, BarrelLength + 0.55f); }
+        }
+
+        static Mesh _hull, _turret, _barrel;
+        static Material _material;
+
+        /// <summary>
+        /// Stand one vehicle up. The caller owns the returned root and receives
+        /// the two transforms it has to drive: the turret turns about its local
+        /// Y, the barrel elevates about its local X.
+        /// </summary>
+        internal static GameObject Build(out Transform turret, out Transform barrel)
+        {
+            GameObject root = new GameObject("NDR Arty Vehicle");
+            Material m = Skin();
+
+            Part(root, Hull(), m);
+
+            GameObject t = new GameObject("Turret");
+            t.transform.SetParent(root.transform, false);
+            t.transform.localPosition = TurretAt;
+            t.transform.localRotation = Quaternion.identity;
+            Part(t, TurretMesh(), m);
+
+            GameObject b = new GameObject("Barrel");
+            b.transform.SetParent(t.transform, false);
+            b.transform.localPosition = TrunnionAt;
+            b.transform.localRotation = Quaternion.identity;
+            Part(b, BarrelMesh(), m);
+
+            turret = t.transform;
+            barrel = b.transform;
+            return root;
+        }
+
+        static void Part(GameObject go, Mesh mesh, Material m)
+        {
+            if (mesh == null) return;
+            MeshFilter mf = go.AddComponent<MeshFilter>();
+            mf.mesh = mesh;
+            MeshRenderer mr = go.AddComponent<MeshRenderer>();
+            if (m != null) mr.material = m;
+        }
+
+        static Material Skin()
+        {
+            if (_material != null) return _material;
+            try
+            {
+                Shader sh = Shader.Find("Standard");
+                if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
+                Material m = new Material(sh);
+                m.name = "NDR_Arty_Material";
+                Texture2D tex = null;
+                try { tex = Assets.TextureIfPresent("arty_diffuse.png"); }
+                catch { }
+                if (tex != null) m.mainTexture = tex;
+                // The same dark olive-grey gun finish the tube wore, so a gun
+                // without a texture file still reads as military hardware.
+                Color olive = new Color(0.22f, 0.24f, 0.19f, 1f);
+                if (m.HasProperty("_Color")) m.SetColor("_Color", tex == null ? olive : Color.white);
+                if (tex == null) m.color = olive;
+                if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.22f);
+                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.30f);
+                _material = m;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ArtyModel material: " + ex.Message);
+            }
+            return _material;
+        }
+
+        /// <summary>A shipped mesh of this name, or null when there is none.
+        /// Silent on purpose: no file is the normal case.</summary>
+        static Mesh Shipped(string file)
+        {
+            try
+            {
+                string path = Path.Combine(RevivalPlugin.AssetDir, file);
+                if (!File.Exists(path)) return null;
+                Mesh m = Assets.Load(file);
+                if (m != null)
+                    RevivalPlugin.L.LogInfo("ArtyModel: " + file + " loaded - the shipped "
+                        + "model replaces the generated part.");
+                return m;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ArtyModel: " + file + ": " + ex.Message);
+                return null;
+            }
+        }
+
+        // ------------------------------------------------------------- meshes
+
+        static Mesh Hull()
+        {
+            if (_hull != null) return _hull;
+            _hull = Shipped("arty_hull.ndmesh");
+            if (_hull != null) return _hull;
+
+            List<Vector3> v = new List<Vector3>();
+            List<Vector3> n = new List<Vector3>();
+            List<Vector2> uv = new List<Vector2>();
+            List<int> tri = new List<int>();
+
+            float hl = HullLength * 0.5f;
+            float hw = HullWidth * 0.5f;
+
+            // The body: a lower hull the tracks hide half of, and a narrower
+            // superstructure on top of it. Two boxes read as a tracked vehicle
+            // from every angle a player sees it from.
+            Box(v, n, uv, tri, new Vector3(0f, 0.95f, 0f),
+                new Vector3(hw - 0.42f, 0.35f, hl));
+            Box(v, n, uv, tri, new Vector3(0f, 1.38f, -0.2f),
+                new Vector3(hw - 0.62f, 0.25f, hl - 0.55f));
+            // The glacis: a wedge at the front, so the nose is not a wall.
+            Box(v, n, uv, tri, new Vector3(0f, 1.18f, hl - 0.55f),
+                new Vector3(hw - 0.55f, 0.16f, 0.55f));
+
+            // Running gear: a track box each side and the road wheels inside it.
+            for (int s = -1; s <= 1; s += 2)
+            {
+                float x = s * (hw - 0.22f);
+                Box(v, n, uv, tri, new Vector3(x, 0.52f, 0f),
+                    new Vector3(0.22f, 0.50f, hl));
+                for (int i = 0; i < 6; i++)
+                {
+                    float z = -hl + 0.75f + i * ((HullLength - 1.5f) / 5f);
+                    Cyl(v, n, uv, tri,
+                        new Vector3(x - s * 0.24f, 0.45f, z),
+                        new Vector3(x + s * 0.02f, 0.45f, z),
+                        0.34f, 0.34f, 10);
+                }
+            }
+
+            _hull = Finish(v, n, uv, tri, "NDR_Arty_Hull");
+            return _hull;
+        }
+
+        static Mesh TurretMesh()
+        {
+            if (_turret != null) return _turret;
+            _turret = Shipped("arty_turret.ndmesh");
+            if (_turret != null) return _turret;
+
+            List<Vector3> v = new List<Vector3>();
+            List<Vector3> n = new List<Vector3>();
+            List<Vector2> uv = new List<Vector2>();
+            List<int> tri = new List<int>();
+
+            // The turret box, its sloped front plate and the commander's hatch.
+            Box(v, n, uv, tri, new Vector3(0f, 0.45f, 0f),
+                new Vector3(1.10f, 0.45f, 1.35f));
+            Box(v, n, uv, tri, new Vector3(0f, 0.45f, 1.20f),
+                new Vector3(0.78f, 0.34f, 0.20f));
+            Cyl(v, n, uv, tri, new Vector3(-0.35f, 0.90f, -0.35f),
+                new Vector3(-0.35f, 1.02f, -0.35f), 0.30f, 0.28f, 12);
+            // The traverse ring it sits on, so the seam to the hull is not a gap.
+            Cyl(v, n, uv, tri, new Vector3(0f, -0.06f, 0f),
+                new Vector3(0f, 0.04f, 0f), 1.15f, 1.12f, 20);
+
+            _turret = Finish(v, n, uv, tri, "NDR_Arty_Turret");
+            return _turret;
+        }
+
+        static Mesh BarrelMesh()
+        {
+            if (_barrel != null) return _barrel;
+            _barrel = Shipped("arty_barrel.ndmesh");
+            if (_barrel != null) return _barrel;
+
+            List<Vector3> v = new List<Vector3>();
+            List<Vector3> n = new List<Vector3>();
+            List<Vector2> uv = new List<Vector2>();
+            List<int> tri = new List<int>();
+
+            // Mantlet, tube, muzzle brake - the three shapes that make a barrel
+            // read as a howitzer's rather than a pipe.
+            Cyl(v, n, uv, tri, new Vector3(0f, 0f, -0.25f), new Vector3(0f, 0f, 0.35f),
+                0.26f, 0.22f, 14);
+            Cyl(v, n, uv, tri, new Vector3(0f, 0f, 0.30f),
+                new Vector3(0f, 0f, BarrelLength), 0.135f, 0.115f, 14);
+            Cyl(v, n, uv, tri, new Vector3(0f, 0f, BarrelLength),
+                new Vector3(0f, 0f, BarrelLength + 0.55f), 0.175f, 0.165f, 14);
+
+            _barrel = Finish(v, n, uv, tri, "NDR_Arty_Barrel");
+            return _barrel;
+        }
+
+        static Mesh Finish(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                           List<int> tri, string name)
+        {
+            Mesh mesh = new Mesh();
+            mesh.name = name;
+            mesh.vertices = v.ToArray();
+            mesh.normals = n.ToArray();
+            mesh.uv = uv.ToArray();
+            mesh.triangles = tri.ToArray();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        // --------------------------------------------------- geometry helpers
+
+        /// <summary>An axis-aligned box around <paramref name="c"/> with the
+        /// half-sizes <paramref name="h"/>. Each face keeps its own four
+        /// vertices so the normals stay flat, and every face is wound so its
+        /// right-hand normal points out of the body.</summary>
+        static void Box(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                        List<int> tri, Vector3 c, Vector3 h)
+        {
+            // Every pair below is picked so that right x up IS the face normal -
+            // see Face for why that decides which way the quad faces.
+            Face(v, n, uv, tri, c + new Vector3(0f, 0f, h.z), Vector3.forward,
+                 new Vector3(h.x, 0f, 0f), new Vector3(0f, h.y, 0f));
+            Face(v, n, uv, tri, c - new Vector3(0f, 0f, h.z), Vector3.back,
+                 new Vector3(-h.x, 0f, 0f), new Vector3(0f, h.y, 0f));
+            Face(v, n, uv, tri, c + new Vector3(h.x, 0f, 0f), Vector3.right,
+                 new Vector3(0f, 0f, -h.z), new Vector3(0f, h.y, 0f));
+            Face(v, n, uv, tri, c - new Vector3(h.x, 0f, 0f), Vector3.left,
+                 new Vector3(0f, 0f, h.z), new Vector3(0f, h.y, 0f));
+            Face(v, n, uv, tri, c + new Vector3(0f, h.y, 0f), Vector3.up,
+                 new Vector3(-h.x, 0f, 0f), new Vector3(0f, 0f, h.z));
+            Face(v, n, uv, tri, c - new Vector3(0f, h.y, 0f), Vector3.down,
+                 new Vector3(h.x, 0f, 0f), new Vector3(0f, 0f, h.z));
+        }
+
+        /// <summary>One quad at <paramref name="centre"/> spanned by
+        /// <paramref name="right"/> and <paramref name="up"/>, wound
+        /// (0,1,2),(0,2,3). The right-hand normal of that winding is
+        /// right x up, so the caller picks the two vectors in the order that
+        /// makes it the OUTWARD normal - a face wound the other way round is
+        /// culled while it is lit, which is the one mesh mistake verify.py
+        /// bothers to check for on the shipped meshes.</summary>
+        static void Face(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                         List<int> tri, Vector3 centre, Vector3 normal,
+                         Vector3 right, Vector3 up)
+        {
+            int b = v.Count;
+            v.Add(centre - right - up); n.Add(normal); uv.Add(new Vector2(0f, 0f));
+            v.Add(centre + right - up); n.Add(normal); uv.Add(new Vector2(1f, 0f));
+            v.Add(centre + right + up); n.Add(normal); uv.Add(new Vector2(1f, 1f));
+            v.Add(centre - right + up); n.Add(normal); uv.Add(new Vector2(0f, 1f));
+            tri.Add(b); tri.Add(b + 1); tri.Add(b + 2);
+            tri.Add(b); tri.Add(b + 2); tri.Add(b + 3);
+        }
+
+        /// <summary>One closed, capped, possibly tapered cylinder - the same
+        /// routine the mortar tube was built from, kept here because that file's
+        /// copy is private to it.</summary>
+        static void Cyl(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                        List<int> tri, Vector3 a, Vector3 b,
+                        float ra, float rb, int sides)
+        {
+            Vector3 w = b - a;
+            float h = w.magnitude;
+            if (h < 1e-4f || sides < 3) return;
+            w /= h;
+
+            Vector3 helper = Mathf.Abs(w.y) > 0.9f ? Vector3.forward : Vector3.up;
+            Vector3 u = Vector3.Cross(helper, w).normalized;
+            Vector3 vv = Vector3.Cross(w, u);
+
+            int sideBase = v.Count;
+            for (int i = 0; i <= sides; i++)
+            {
+                float t = i * Mathf.PI * 2f / sides;
+                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
+                Vector3 sn = (dir * h + w * (ra - rb)).normalized;
+                float uu = (float)i / sides;
+                v.Add(a + dir * ra); n.Add(sn); uv.Add(new Vector2(uu, 0f));
+                v.Add(b + dir * rb); n.Add(sn); uv.Add(new Vector2(uu, 1f));
+            }
+            for (int i = 0; i < sides; i++)
+            {
+                int b0 = sideBase + i * 2;
+                int t0 = b0 + 1;
+                int b1 = b0 + 2;
+                int t1 = b0 + 3;
+                tri.Add(b0); tri.Add(t1); tri.Add(t0);
+                tri.Add(b0); tri.Add(b1); tri.Add(t1);
+            }
+
+            int capTop = v.Count;
+            v.Add(b); n.Add(w); uv.Add(new Vector2(0.5f, 0.5f));
+            for (int i = 0; i <= sides; i++)
+            {
+                float t = i * Mathf.PI * 2f / sides;
+                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
+                v.Add(b + dir * rb); n.Add(w);
+                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
+            }
+            for (int i = 0; i < sides; i++)
+            {
+                tri.Add(capTop);
+                tri.Add(capTop + 1 + i);
+                tri.Add(capTop + 2 + i);
+            }
+
+            int capBottom = v.Count;
+            v.Add(a); n.Add(-w); uv.Add(new Vector2(0.5f, 0.5f));
+            for (int i = 0; i <= sides; i++)
+            {
+                float t = i * Mathf.PI * 2f / sides;
+                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
+                v.Add(a + dir * ra); n.Add(-w);
+                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
+            }
+            for (int i = 0; i < sides; i++)
+            {
+                tri.Add(capBottom);
+                tri.Add(capBottom + 2 + i);
+                tri.Add(capBottom + 1 + i);
+            }
+        }
+    }
+}

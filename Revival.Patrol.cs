@@ -4932,27 +4932,26 @@ namespace NextDayRevival
         /// </summary>
         public static void DrawMap()
         {
-            if (RevivalPlugin.CfgPatrol == null || !RevivalPlugin.CfgPatrol.Value)
-                return;
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            if (RevivalPlugin.CfgPatrol == null || !RevivalPlugin.CfgPatrol.Value)
+            { MapInkLayer.Hide("patrol"); return; }
 
             Component manager, texture;
             Camera camera;
             Vector2 world, map;
             if (!MapTools.Context(out manager, out texture, out camera,
-                                  out world, out map)) return;
+                                  out world, out map))
+            { MapInkLayer.Hide("patrol"); return; }
             Load(false);
 
-            // The visible map rectangle. Dashes are HARD-clipped to it with
-            // GUI.BeginClip so a route that runs off the shown map cannot paint
-            // over the game scene around the panel - the earlier per-point test
-            // let a stroke leak past the map edge into the grass. The real
-            // texture bounds are also required for map-relative stroke widths.
+            // The texture bounds register artwork and hover coordinates. Ink
+            // now lives in native NGUI widgets; the map panel supplies its soft
+            // clipping, while MapInkLayer crops at the artwork's own boundary.
             Rect clip;
             bool mapRect = MapTools.MapScreenRect(texture, camera, out clip);
             // Cached masks need the real texture bounds. Never substitute the
             // entire screen and stretch road ink across an unrelated UI region.
-            if (!mapRect) return;
+            if (!mapRect) { MapInkLayer.Hide("patrol"); return; }
 
             // The WHOLE map texture, before the visible window trims it below.
             // The picture covers the whole world, so the registration
@@ -4963,9 +4962,8 @@ namespace NextDayRevival
             // The map texture SCROLLS inside a clipping NGUI UIPanel (a
             // UIScrollView). MapScreenRect is the WHOLE texture, which when the
             // map is panned reaches far beyond the visible window - so dashes on
-            // the off-window part were painted over the surrounding UI (the "it
-            // lies over the whole UI when I scroll" bug). Clip to the panel's
-            // actual viewport as well, so nothing outside the map window draws.
+            // the off-window part used to paint over the surrounding UI. Keep
+            // the viewport for hover/label bounds; native ink uses NGUI clipping.
             Rect view;
             if (MapTools.MapViewportRect(texture, camera, out view))
                 clip = Intersect(clip, view);
@@ -4974,10 +4972,8 @@ namespace NextDayRevival
             Matrix4x4 oldMatrix = GUI.matrix;
             try
             {
-                // BeginClip scissors every following draw to the map and moves
-                // the origin to the map's top-left, so all dash coordinates are
-                // LOCAL to the clip. Projected points are offset by -clip.pos to
-                // match, and the dash routines cull against the local rect.
+                // Hover and clearance coordinates remain local to this window.
+                // Native ink is submitted separately in artwork coordinates.
                 Rect localClip = new Rect(0f, 0f, clip.width, clip.height);
 
                 // Hovering the enclosed area of a route pops a note about the
@@ -4992,6 +4988,8 @@ namespace NextDayRevival
                 Color hoverColor = Color.white;
 
                 MapInk.Begin();
+                MapInkLayer inkLayer = MapInkLayer.Begin("patrol", texture);
+                if (inkLayer == null) { MapInk.End(); return; }
                 GUI.BeginClip(clip);
                 try
                 {
@@ -5062,7 +5060,7 @@ namespace NextDayRevival
                         List<Vector2> ink = new List<Vector2>();
                         DrawRoadInk(route.Name, wline, route.MapLineLoop,
                             new Rect(full.x-clip.x, full.y-clip.y, full.width, full.height),
-                            localClip, grid, ink);
+                            localClip, grid, ink, inkLayer);
                         grid.Add(ink);
 
                         // First line under the cursor wins the note.
@@ -5089,7 +5087,7 @@ namespace NextDayRevival
                         }
                     }
                 }
-                finally { GUI.EndClip(); MapInk.End(); }
+                finally { GUI.EndClip(); inkLayer.End(); MapInk.End(); }
 
                 // Labels belong above the lines, including lines from routes
                 // later in the file.
@@ -5428,7 +5426,8 @@ namespace NextDayRevival
         // Each curved dash is one cached coverage mask, with map-relative
         // dimensions. Zoom scales the road and its ink together; pan only moves it.
         static void DrawRoadInk(string name, List<Vector3> world, bool loop,
-                                Rect full, Rect clip, ClearGrid grid, List<Vector2> ink)
+                                Rect full, Rect clip, ClearGrid grid, List<Vector2> ink,
+                                MapInkLayer inkLayer)
         {
             MapInk.Cache cache = MapInk.Get(name, world, loop);
             Vector2 scale = new Vector2(full.width / 1024f, full.height / 1024f);
@@ -5436,12 +5435,9 @@ namespace NextDayRevival
             {
                 MapInk.Dash dash = cache.Dashes[i];
                 Rect b = dash.Bounds;
-                Rect target = new Rect(full.x+b.x*scale.x, full.y+b.y*scale.y,
-                                       b.width*scale.x, b.height*scale.y);
-                // Bounds culling preserves a visible dash whose midpoint is
-                // outside the viewport; BeginClip handles the actual edge.
-                if (target.xMax < clip.xMin || target.xMin > clip.xMax
-                    || target.yMax < clip.yMin || target.yMin > clip.yMax) continue;
+                // Submit the full map geometry, even outside the viewport.
+                // NGUI clips per pixel and follows scroll transforms immediately;
+                // screen culling here would leave missing dashes after fast pans.
                 bool blocked = false;
                 for (int j = 0; j < dash.Points.Count; j += 8)
                 {
@@ -5449,7 +5445,7 @@ namespace NextDayRevival
                     if (grid != null && grid.Blocked(p)) { blocked = true; break; }
                 }
                 if (blocked) continue;
-                GUI.DrawTexture(target, dash.Texture);
+                inkLayer.Draw(b, dash.Texture, GUI.color);
                 for (int j = 0; j < dash.Points.Count; j += 4)
                     ink.Add(full.position + Vector2.Scale(dash.Points[j], scale));
             }

@@ -1,31 +1,48 @@
 // Next Day: Survival - Revival Toolkit
 //
-// The settlement mortar - an M1943 (PM-43) 120 mm tube standing in every
-// settlement, loaded by hand and aimed on the game's own map screen.
-// Design notes and the seam survey: docs/ai/tasks/stationary-artillery.md.
+// The settlement gun - a tracked self-propelled howitzer standing in every
+// settlement, manned by its own crew, loaded by hand and aimed on the game's
+// own map screen. Design notes and the seam survey:
+// docs/ai/tasks/stationary-artillery.md, and for the crew, the recon drone and
+// the automatic fire missions docs/ai/tasks/arty-vehicle-drone.md.
+//
+// This file is the GUN: the emplacement, the loading, the map fire control,
+// the flight of a shell and the impact. Everything standing AROUND it - the
+// gunner, the drone operator, the recon drone and the fire missions the drone
+// buys - is RevivalArtyBattery.cs.
 //
 // WHAT IT IS, IN THE ORDER THE PLAYER MEETS IT
 //
-//   1. A tube stands in the middle of every settlement, on a free, flat patch
-//      of ground. It is a LOCAL object built from a mesh this file generates
-//      at runtime - no asset file, no network object, no collider. Every
-//      client builds the same tube in the same place from the same rule.
-//   2. Walking up to it shows "[R] Load" / "[F] Aim". R moves 120 mm bombs
-//      (item 2066) out of the backpack into the tube, one press fills it.
-//   3. F opens the map and enters AIM MODE: the mouse pointer becomes a
-//      crosshair and a highlighted disc around the tube shows how far it
-//      reaches, with a second, small ring for the dead zone under the tube.
-//   4. A left click inside the reach fires there. No confirmation button -
+//   1. A gun vehicle stands in the middle of every settlement, on a free, flat
+//      patch of ground. It is a LOCAL object built from meshes ArtyModel
+//      generates at runtime - no asset file, no network object, no collider.
+//      Every client builds the same vehicle in the same place from the same
+//      rule. Its turret turns and its barrel elevates.
+//   2. TWO MEN belong to it, and by default they are at it: while a crew that
+//      is hostile to the player is alive around the gun, the sight is theirs
+//      and [F] is refused. Kill them and the gun is his.
+//   3. Walking up to a free gun shows "[R] Load" / "[F] Aim". R moves shells
+//      (item 2066) out of the backpack into the gun, one press fills it.
+//   4. F opens the map and enters AIM MODE: the mouse pointer becomes a
+//      crosshair and a highlighted disc around the gun shows how far it
+//      reaches, with a second, small ring for the dead zone under it.
+//   5. THE CROSSHAIR IS THE GUN, AND A GUN TURNS SLOWLY. The mouse only asks
+//      for a point; the crosshair walks towards it at the turret's own
+//      traverse rate and the barrel's own elevation rate, and the turret
+//      follows the crosshair. Swinging the mouse across the map does not swing
+//      the gun across the map - that was the order, and it is what makes a
+//      mortar out of a rifle.
+//   6. A left click inside the reach fires there. No confirmation button -
 //      the click IS the fire order, which is what was asked for.
-//   5. A few seconds later the bombs land, one after another, inside a
+//   7. A few seconds later the shells land, one after another, inside a
 //      dispersion circle around the aim point. They are heard leaving the
-//      tube, heard coming in, and seen going off.
+//      barrel, heard coming in, and seen going off.
 //
 // THE FACTION RULE, WHICH IS THE ONE HARD REQUIREMENT
 //
-// A mortar is an area weapon, so it WILL kill people from the firing player's
-// own faction. That must never turn him into a traitor. Three separate things
-// make sure of it, in order of how much they are relied on:
+// A howitzer is an area weapon, so it WILL kill people from the firing
+// player's own faction. That must never turn him into a traitor. Three
+// separate things make sure of it, in order of how much they are relied on:
 //
 //   1. EVERY NPC CASUALTY IS AN ANONYMOUS ONE. The kill is applied through
 //      NPC_AI2.ApplyDamage with damageOwnerId 0 (Turret.TryDamage fills every
@@ -60,8 +77,11 @@
 //             the shooter only. A player of the SHOOTER'S OWN faction is
 //             skipped outright where both factions can be read.
 // A joined client that fires raises one Photon event (Mortar/NetworkEventCode,
-// 184 by default) so the master applies the NPC and vehicle sweep for the
-// settlements it owns.
+// 190 by default) so the master applies the NPC and vehicle sweep for the
+// settlements it owns. The SAME event with a fourth float carries a shell the
+// NPC crew fired the other way round: the master sends it, and every client
+// applies that blast to its OWN player only - which is why an NPC battery can
+// wound a player without any client being credited with hurting another.
 //
 // C# 3.0. Comments, logs and identifiers are ASCII; the player-facing strings
 // are bilingual through Loc.T and carry real Cyrillic, so this file is UTF-8
@@ -72,6 +92,10 @@
 //   RevivalPlugin.cs BuildItemTable -> Mortar.AddItems(Items)
 //   RevivalPlugin.cs Update         -> Mortar.Tick()
 //   RevivalPlugin.cs OnGUI          -> Mortar.Draw()
+// and towards the battery around the gun (RevivalArtyBattery.cs):
+//   Raise/Place  -> ArtyBattery.GunRaised / ArtyBattery.GunLost
+//   Ground       -> ArtyBattery.CrewHoldsGun
+//   ArtyBattery  -> Mortar.Lay / Laid / NpcFire / PlayerAiming / PlayerList
 
 using System;
 using System.Collections;
@@ -84,16 +108,22 @@ using UnityEngine;
 namespace NextDayRevival
 {
     /// <summary>
-    /// Config, emplacements, loading, the map fire control and the impact.
-    /// The generated model is <see cref="MortarModel"/>, the Photon channel is
+    /// Config, emplacements, loading, the turret, the map fire control and the
+    /// impact. The generated vehicle is <see cref="ArtyModel"/>, its crew and
+    /// recon drone are <see cref="ArtyBattery"/>, the Photon channel is
     /// <see cref="Mortar.Net"/>, and the faction net is <see cref="FactionShield"/>.
+    ///
+    /// The class is still called Mortar. The gun grew a hull, a turret and a
+    /// crew, but every seam, config section and static check in the repository
+    /// is anchored on this name, and a rename would buy nothing but a day of
+    /// finding the places it was missed.
     /// </summary>
     public static class Mortar
     {
-        // THE BOMB'S ITEM ID. 2001..3000 is the AMMUNITION band, and an item's
+        // THE SHELL'S ITEM ID. 2001..3000 is the AMMUNITION band, and an item's
         // inventory category comes from its id band alone (the range switch in
         // ItemDataManager::GetItemCatData - see the long note at the head of
-        // RevivalAntiTankMine.cs). A mortar bomb is ammunition and is never
+        // RevivalAntiTankMine.cs). A howitzer shell is ammunition and is never
         // equipped into a weapon slot, so the ammunition band is the right one
         // and no weapon slot has to light up for it.
         // 2066 is free: research/items.tsv stops at 2034, and the plugin's own
@@ -123,6 +153,10 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgFlightBase;
         static ConfigEntry<float> _cfgFlightPer100;
 
+        static ConfigEntry<float> _cfgTraverse;
+        static ConfigEntry<float> _cfgElevate;
+        static ConfigEntry<float> _cfgClearance;
+
         static ConfigEntry<float> _cfgRadius;
         static ConfigEntry<float> _cfgDamage;
         static ConfigEntry<float> _cfgPlayerDamage;
@@ -142,23 +176,57 @@ namespace NextDayRevival
         }
         internal static float Radius { get { return Mathf.Max(1f, F(_cfgRadius, 16f)); } }
 
+        /// <summary>Degrees per second the turret turns - and, because the
+        /// crosshair may never outrun the gun, the rate the aim point walks
+        /// around the gun in aim mode as well.</summary>
+        internal static float Traverse { get { return Mathf.Clamp(F(_cfgTraverse, 9f), 0.5f, 90f); } }
+
+        /// <summary>Degrees per second the barrel elevates. It is what limits
+        /// how fast the aim point may move TOWARDS or AWAY from the gun, because
+        /// range is elevation on a howitzer.</summary>
+        internal static float Elevate { get { return Mathf.Clamp(F(_cfgElevate, 5f), 0.5f, 60f); } }
+
+        // The barrel's working arc. The gun is laid by range: MaxRange sits at
+        // the bottom of it and MinRange at the top, the way a high-angle weapon
+        // is actually fired.
+        internal const float ElevLow = 18f;
+        internal const float ElevHigh = 65f;
+
+        /// <summary>Metres of range one degree of elevation is worth. Everything
+        /// that limits the crosshair radially is derived from this, so the two
+        /// rates cannot drift apart.</summary>
+        internal static float MetresPerDegree
+        {
+            get { return (MaxRange - MinRange) / (ElevHigh - ElevLow); }
+        }
+
         // -------------------------------------------------------------- state
 
-        /// <summary>One emplacement. Plain data - the tube is driven from
+        /// <summary>One emplacement. Plain data - the gun is driven from
         /// <see cref="Tick"/>, so it needs no MonoBehaviour of its own and no
-        /// per-frame Update per settlement.</summary>
+        /// per-frame Update per settlement.
+        ///
+        /// Still called Tube, like the class around it: the type is private to
+        /// this file, every method here reads "Tube t", and renaming it would be
+        /// a diff with no behaviour in it.</summary>
         class Tube
         {
             public GameObject Go;
-            public Vector3 Muzzle;     // where the bomb leaves, for the report
+            public Transform Turret;   // turns about its local Y
+            public Transform Barrel;   // elevates about its local X
+            public float Yaw;          // where the turret is now, world degrees
+            public float Pitch;        // and where the barrel is now
+            public float WantYaw;      // where it is being laid
+            public float WantPitch;
             public string Name;
-            public int Rounds;
+            public int Rounds;         // the PLAYER's shells, loaded by hand
             public float ReadyAt;      // Time.time the next mission may start
             public int SettlementId;
+            public Vector3 Centre;     // the settlement centre it belongs to
         }
 
-        /// <summary>A bomb between the tube and the ground. Nothing is modelled
-        /// in flight: a mortar bomb is invisible on the way up, and a tracer
+        /// <summary>A shell between the gun and the ground. Nothing is modelled
+        /// in flight: a howitzer round is invisible on the way up, and a tracer
         /// would be both wrong and a networked object per round.</summary>
         class Shell
         {
@@ -168,6 +236,11 @@ namespace NextDayRevival
             public Vector3 From;
             public bool Left;
             public bool Whistled;
+            /// <summary>Fired by the NPC crew, not by the player. It decides who
+            /// applies the impact: a player's round is his own business, the
+            /// crew's round is the master's and goes out to every client so each
+            /// of them can hurt its OWN player with it.</summary>
+            public bool Npc;
         }
 
         // How often a settlement's free-ground search may come up empty before
@@ -186,6 +259,11 @@ namespace NextDayRevival
         static bool _cursorWas = true;   // the pointer state aim mode took over
         static bool _weOpenedMap;
         static float _aimSince;
+        static Vector3 _aimPoint;        // WHERE THE GUN IS LAID - the crosshair
+        static bool _aimHave;            // ... once it has been initialised
+        static Vector3 _aimWanted;       // the point the mouse is asking for
+        static bool _aimWantHave;
+        static float _aimStepAt;         // Time.time of the last crosshair step
         static Vector3 _fireTarget;      // the last aim point, drawn on the map
         static float _firedAt;           // Time.time of the last fire order
         static float _nextPlaceScan;
@@ -202,31 +280,29 @@ namespace NextDayRevival
         static MethodInfo _npcAlive;
         static bool _typesLooked;
 
-        static Material _material;
-        static Mesh _mesh;
         static Texture2D _px;
         static Texture2D _disc;
         static Texture2D _ring;
 
         // --------------------------------------------------------------- item
 
-        /// <summary>Adds the 120 mm bomb to the shared item table. Placeholder
+        /// <summary>Adds the 122 mm shell to the shared item table. Placeholder
         /// art on purpose: it reuses the 125 mm tank shell's mesh, textures and
         /// icon (shell125.*), which is a fat finned projectile in a box and
-        /// reads correctly for a mortar bomb. Three shipped items already do
+        /// reads correctly for a howitzer round. Three shipped items already do
         /// exactly this (the two vehicle modules and the drone battery); a
-        /// dedicated mortar_* generator is a separate asset job.</summary>
+        /// dedicated arty_* generator is a separate asset job.</summary>
         public static void AddItems(List<ItemDef> items)
         {
             items.Add(new ItemDef(
                 DEF_SHELL, DEF_DONOR, false,
-                "120-мм мина (1)", "120 mm mortar bomb (1)",
-                "Мина калибра 120 мм "
-                + "для миномёта М-1943. "
-                + "Заряжается с "
-                + "дула.",
-                "A 120 mm bomb for the M1943 mortar that stands in the settlements. "
-                + "Walk up to a tube, load it, then aim on the map.",
+                "122-мм снаряд (1)", "122 mm howitzer shell (1)",
+                "Снаряд калибра 122 мм "
+                + "для самоходной гаубицы "
+                + "в поселениях. "
+                + "Заряжается вручную.",
+                "A 122 mm shell for the self-propelled howitzer that stands in the "
+                + "settlements. Walk up to a free gun, load it, then aim on the map.",
                 "shell125.ndmesh", "shell125_diffuse.png", "shell125_normal.png",
                 "shell125_icon.png", null,
                 1, 0, 15.4f));
@@ -237,52 +313,59 @@ namespace NextDayRevival
         public static void BindConfig(ConfigFile cfg)
         {
             _cfgEnabled = cfg.Bind("Mortar", "Enabled", true,
-                "The settlement mortar: one M1943 tube per settlement, loaded "
-                + "with 120 mm bombs (item 2066) and aimed on the map screen.");
+                "The settlement gun: one self-propelled howitzer per settlement, "
+                + "loaded with 122 mm shells (item 2066) and aimed on the map "
+                + "screen. Its crew and their recon drone are [Artillery].");
             _cfgUseKey = cfg.Bind("Mortar", "UseKey", "F",
-                "Pressed at a tube, opens the map and enters aim mode. Pressed "
-                + "again (or Escape) leaves it.");
+                "Pressed at a gun, opens the map and enters aim mode. Pressed "
+                + "again (or Escape) leaves it. Refused while the gun's own crew "
+                + "is alive - see Artillery/CrewHoldsTheGun.");
             _cfgLoadKey = cfg.Bind("Mortar", "LoadKey", "R",
-                "Pressed at a tube, moves 120 mm bombs from the backpack into "
-                + "the tube until it is full or the pack is empty.");
+                "Pressed at a gun, moves 122 mm shells from the backpack into "
+                + "it until it is full or the pack is empty.");
             _cfgUseDistance = cfg.Bind("Mortar", "UseDistance", 3.5f,
-                "Metres from the tube at which the prompt appears and the keys "
+                "Metres from the gun at which the prompt appears and the keys "
                 + "work.");
             _cfgPlaceRange = cfg.Bind("Mortar", "PlaceRange", 250f,
-                "A settlement gets its tube the first time a player comes this "
+                "A settlement gets its gun the first time a player comes this "
                 + "close. Not tidiness: away from every player the whole-map "
                 + "TerrainColliders are off (E-059), so a free-ground search out "
                 + "there would hit nothing and could not tell a clear patch from "
                 + "the inside of a house.");
             _cfgSkipSafe = cfg.Bind("Mortar", "SkipSafeSettlements", false,
-                "true leaves the trader camps (IsSafeSettlement) without a tube.");
+                "true leaves the trader camps (IsSafeSettlement) without a gun. "
+                + "They never get a crew, a drone or a fire mission either way - "
+                + "this only decides whether the vehicle stands there at all.");
             _cfgScale = cfg.Bind("Mortar", "Scale", 1f,
-                "Size of the emplacement, 1 = the real M1943 (1.86 m tube).");
+                "Size of the vehicle, 1 = a 6.2 m hull with a 4 m barrel.");
             _cfgOpenMap = cfg.Bind("Mortar", "OpenMapOnAim", true,
                 "Let the use key open the map itself through "
                 + "UIController.ShowMap(true). false leaves opening the map to "
                 + "the player; aim mode then waits for it.");
 
             _cfgMaxRange = cfg.Bind("Mortar", "MaxRange", 1200f,
-                "Reach in metres. The real PM-43 throws 5700 m, but the world is "
-                + "5000 x 5000, so a true-to-life tube would cover the whole map "
-                + "from anywhere. 1200 m is the honest compromise: far enough to "
-                + "shell the next settlement, short enough that the map still "
-                + "has distance in it.");
+                "Reach in metres. A real 122 mm howitzer throws 15 km, but the "
+                + "world is 5000 x 5000, so a true-to-life gun would cover the "
+                + "whole map from anywhere. 1200 m is the honest compromise: far "
+                + "enough to shell the next settlement, short enough that the map "
+                + "still has distance in it.");
             _cfgMinRange = cfg.Bind("Mortar", "MinRange", 80f,
-                "Dead zone under the tube. A mortar cannot shoot straight down; "
-                + "this also keeps the operator from killing himself.");
+                "Dead zone under the gun. A howitzer cannot shoot straight down; "
+                + "this also keeps the gunner from killing himself.");
             _cfgMagazine = cfg.Bind("Mortar", "Magazine", 6,
-                "How many bombs a tube holds.");
+                "How many shells the player may load into a gun. The NPC crew "
+                + "has its own supply, Artillery/CrewRounds.");
             _cfgRounds = cfg.Bind("Mortar", "RoundsPerMission", 3,
-                "Bombs sent per fire order. A salvo, not a sniper shot.");
+                "Shells sent per fire order, by the player and by the crew. A "
+                + "salvo, not a sniper shot.");
             _cfgRoundInterval = cfg.Bind("Mortar", "RoundInterval", 1.4f,
-                "Seconds between two bombs leaving the tube.");
+                "Seconds between two shells leaving the barrel.");
             _cfgCooldown = cfg.Bind("Mortar", "CooldownSeconds", 20f,
-                "Seconds after a fire order before the tube accepts the next one.");
+                "Seconds after a fire order before the gun accepts the next one.");
             _cfgDispersion = cfg.Bind("Mortar", "Dispersion", 8f,
-                "Metres of scatter at any distance. Every bomb lands somewhere "
-                + "inside Dispersion + DispersionPercent of the range.");
+                "Metres of scatter at any distance. Every shell lands somewhere "
+                + "inside Dispersion + DispersionPercent of the range. An NPC "
+                + "crew's mission carries Artillery/AimErrorMetres on top.");
             _cfgDispersionPercent = cfg.Bind("Mortar", "DispersionPercent", 2f,
                 "Extra scatter as a percentage of the firing distance. 2 percent "
                 + "at 1200 m is another 24 m - this is an area weapon.");
@@ -292,6 +375,22 @@ namespace NextDayRevival
                 "Extra seconds of flight per 100 m. With the base, 1200 m takes "
                 + "about 14 s - long enough for a walking target to leave the "
                 + "beaten zone, which is what makes a spotter worth having.");
+
+            _cfgTraverse = cfg.Bind("Mortar", "TraverseDegreesPerSecond", 9f,
+                "How fast the turret turns - and with it, how fast the crosshair "
+                + "may be swung around the gun in aim mode. The crosshair IS the "
+                + "gun's lay: the mouse only asks for a point and the crosshair "
+                + "walks there at this rate, so a flick across the map does not "
+                + "move the muzzle across the map.");
+            _cfgElevate = cfg.Bind("Mortar", "ElevationDegreesPerSecond", 5f,
+                "How fast the barrel rises and falls. Range is elevation on a "
+                + "howitzer, so this is also how fast the crosshair may be pushed "
+                + "away from or pulled towards the gun.");
+            _cfgClearance = cfg.Bind("Mortar", "VehicleClearance", 3.6f,
+                "Metres of free ground the gun VEHICLE needs around its centre "
+                + "before a spot is accepted. The old tube needed 1.6 m; a hull "
+                + "six metres long parked inside a shed is the mistake this "
+                + "number exists to prevent.");
 
             _cfgRadius = cfg.Bind("Mortar", "ExplosionRadius", 16f,
                 "Metres. The damage falls off to zero at the rim. The patrol "
@@ -338,6 +437,7 @@ namespace NextDayRevival
             {
                 Flight();
                 FactionShield.Tick();
+                Slew();
                 GameObject player = MapTools.LocalPlayer();
                 if (player == null) { LeaveAim("no player"); _prompt = null; return; }
                 Place(player);
@@ -352,7 +452,7 @@ namespace NextDayRevival
 
         // ------------------------------------------------------- emplacements
 
-        /// <summary>Gives every settlement near the player its tube. The scan is
+        /// <summary>Gives every settlement near the player its gun. The scan is
         /// a full FindObjectsOfType, so it runs every second while a settlement
         /// in range is still without one and every five otherwise.
         ///
@@ -373,8 +473,9 @@ namespace NextDayRevival
                 if (_tubes[i].Go != null) continue;
                 // The scene changed under us. Forget the settlement too, so the
                 // next scene's own settlements are served again - and drop the
-                // bombs that were still in the air, or a mission fired outside
+                // shells that were still in the air, or a mission fired outside
                 // goes off at those coordinates inside the next scene.
+                ArtyBattery.GunLost(_tubes[i].SettlementId);   // NDR settlement artillery
                 _placed.Remove(_tubes[i].SettlementId);
                 _tries.Remove(_tubes[i].SettlementId);
                 _tubes.RemoveAt(i);
@@ -419,7 +520,7 @@ namespace NextDayRevival
                     _placed[id] = true;
                     RevivalPlugin.L.LogWarning("Mortar: no free ground in settlement "
                         + s.gameObject.name + " at " + centre.ToString("0") + " after "
-                        + tries + " tries - that settlement keeps no tube.");
+                        + tries + " tries - that settlement keeps no gun.");
                 }
                 else pending = true;
             }
@@ -445,13 +546,15 @@ namespace NextDayRevival
             Vector3 spot, normal;
             if (!FreeGround(centre, out spot, out normal)) return false;
 
-            // Point the tube away from the settlement centre, so it looks like
-            // it was dug in facing outwards rather than into the houses.
+            // Park the vehicle facing away from the settlement centre, so it
+            // looks like it was driven into position facing outwards rather than
+            // into the houses. The turret turns anyway; this is the hull.
             Vector3 out3 = spot - centre;
             out3.y = 0f;
             if (out3.sqrMagnitude < 0.01f) out3 = Vector3.forward;
 
-            GameObject go = new GameObject("NDR Mortar M1943");
+            Transform turret, barrel;
+            GameObject go = ArtyModel.Build(out turret, out barrel);
             go.transform.position = spot + normal * 0.02f;
             go.transform.rotation = Quaternion.LookRotation(out3.normalized, Vector3.up);
             // Stand it on the surface rather than through it, exactly as the
@@ -460,47 +563,56 @@ namespace NextDayRevival
             float sc = Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f);
             go.transform.localScale = new Vector3(sc, sc, sc);
 
-            MeshFilter mf = go.AddComponent<MeshFilter>();
-            mf.mesh = Model();
-            MeshRenderer mr = go.AddComponent<MeshRenderer>();
-            Material m = MortarMaterial();
-            if (m != null) mr.material = m;
-
             Tube t = new Tube();
             t.Go = go;
+            t.Turret = turret;
+            t.Barrel = barrel;
             t.Name = settlement.gameObject.name;
             t.SettlementId = id;
+            t.Centre = centre;
             t.Rounds = 0;
             t.ReadyAt = 0f;
-            // The bomb leaves at the muzzle, roughly 1.8 m up the inclined tube.
-            t.Muzzle = go.transform.TransformPoint(MortarModel.MuzzleLocal);
+            // Laid straight ahead at half reach to begin with, so a gun that is
+            // taken over does not start by swinging out of a random direction.
+            t.Yaw = go.transform.eulerAngles.y;
+            t.WantYaw = t.Yaw;
+            t.Pitch = PitchFor((MinRange + MaxRange) * 0.5f);
+            t.WantPitch = t.Pitch;
+            Point(t);
             _tubes.Add(t);
 
-            RevivalPlugin.L.LogInfo("Mortar: tube raised for settlement \"" + t.Name
+            // NDR settlement artillery. A TRADER CAMP gets the vehicle and
+            // nothing else: no crew, no drone, no fire missions. The camps are
+            // where the game puts a player in front of a shopkeeper, and an
+            // armed crew standing in one would shoot at him over the counter.
+            ArtyBattery.GunRaised(id, go, centre, t.Name, SafeSettlement(settlement));
+
+            RevivalPlugin.L.LogInfo("Mortar: gun raised for settlement \"" + t.Name
                 + "\" at " + spot.ToString("0") + " (centre " + centre.ToString("0")
                 + ", " + Vector3.Distance(centre, spot).ToString("0.0") + " m off).");
             return true;
         }
 
         /// <summary>The centre first, then rings outwards. A spot qualifies when
-        /// the ground under it is flat, nothing hangs over it (so the tube is
-        /// not inside a house) and no wall stands within arm's length of it.
+        /// the ground under it is flat, nothing hangs over it (so the gun is not
+        /// inside a house), no wall stands inside the hull's clearance and the
+        /// ground the hull would rest on is level with its centre.
         ///
         /// The offsets are fixed and walked in a fixed order, so two clients
         /// that search the same loaded terrain agree. They may still differ by a
         /// few metres when one of them searched while less of the world was
-        /// streamed in, and that is harmless: the tube is a local object, only
+        /// streamed in, and that is harmless: the gun is a local object, only
         /// the impact point travels over the wire, and nothing about the fire
-        /// mission is derived from where the other client drew the tube.</summary>
+        /// mission is derived from where the other client drew it.</summary>
         static bool FreeGround(Vector3 centre, out Vector3 spot, out Vector3 normal)
         {
             // TWO passes over the same points, and the second one is the reason
-            // every settlement ends up with a tube. The first asks for a tidy
-            // emplacement: flat, nothing overhead, no wall within arm's length.
-            // In a tight village every one of those points can fail on the wall
-            // test alone, and "no mortar at all" is a worse answer than "a
-            // mortar close to a wall" - the order was one in EVERY settlement.
-            // What the second pass does NOT drop is the roof test: a tube inside
+            // every settlement ends up with a gun. The first asks for a tidy
+            // emplacement: flat, nothing overhead, no wall inside the hull's own
+            // clearance. In a tight village every one of those points can fail
+            // on the wall test alone, and "no gun at all" is a worse answer than
+            // "a gun close to a wall" - the order was one in EVERY settlement.
+            // What the second pass does NOT drop is the roof test: a gun inside
             // a house would fire into the ceiling, which is not a cosmetic
             // problem.
             for (int pass = 0; pass < 2; pass++)
@@ -534,22 +646,37 @@ namespace NextDayRevival
             if (hit == null) return false;          // no ground we can measure
             if (n.y < 0.80f) return false;          // a slope, not an emplacement
 
-            // Roof, bridge, container: anything straight above means the tube
+            // Roof, bridge, container: anything straight above means the gun
             // would fire into a ceiling.
             Vector3 dummy;
             if (Turret.RaycastObject(point + Vector3.up * 0.4f, Vector3.up,
                                      7f, out dummy) != null) return false;
 
-            // A wall within 1.6 m at chest height. Four rays are enough to find
-            // a corner or a container the search would otherwise stand in.
+            // A wall inside the hull's clearance at chest height. EIGHT rays,
+            // not four: the vehicle is six metres long, and four rays can walk a
+            // hull straight through the corner between two of them.
             if (strict)
             {
+                float reach = Mathf.Clamp(F(_cfgClearance, 3.6f), 1.0f, 8f);
+                for (int i = 0; i < 8; i++)
+                {
+                    float a = i * Mathf.PI * 0.25f;
+                    Vector3 dir = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
+                    if (Turret.RaycastObject(point + Vector3.up * 0.9f, dir,
+                                             reach, out dummy) != null) return false;
+                }
+                // ... and the ground the hull would rest on has to be as flat as
+                // the patch under its centre. A gun standing half over a ditch
+                // hangs in the air.
                 for (int i = 0; i < 4; i++)
                 {
                     float a = i * Mathf.PI * 0.5f;
-                    Vector3 dir = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
-                    if (Turret.RaycastObject(point + Vector3.up * 0.9f, dir,
-                                             1.6f, out dummy) != null) return false;
+                    Vector3 probe = point + new Vector3(Mathf.Cos(a) * reach, 0f,
+                                                        Mathf.Sin(a) * reach);
+                    Vector3 corner;
+                    if (Turret.RaycastObject(probe + Vector3.up * 8f, Vector3.down,
+                                             30f, out corner) == null) continue;
+                    if (Mathf.Abs(corner.y - point.y) > 0.9f) return false;
                 }
             }
 
@@ -558,10 +685,15 @@ namespace NextDayRevival
             return true;
         }
 
-        // -------------------------------------------------- standing at a tube
+        // --------------------------------------------------- standing at a gun
 
         /// <summary>The prompt and the two keys, while the player is on foot at
-        /// a tube and not already aiming.</summary>
+        /// a gun and not already aiming.
+        ///
+        /// The gun is NOT his by default. While a crew that is hostile to him is
+        /// alive around it, the sight belongs to the gunner standing at it; the
+        /// prompt says so and both keys are refused. That is the whole rule -
+        /// kill the crew and the gun is yours.</summary>
         static void Ground(GameObject player)
         {
             _prompt = null;
@@ -569,21 +701,55 @@ namespace NextDayRevival
             if (t == null) return;
 
             int cap = Mathf.Clamp(I(_cfgMagazine, 6), 1, 30);
+            if (ArtyBattery.CrewHoldsGun(t.SettlementId))   // NDR settlement artillery
+            {
+                _prompt = Name() + "   " + TextCrewAtGun();
+                if (Input.GetKeyDown(Key(true)) || Input.GetKeyDown(Key(false)))
+                    Say(TextCrewAtGun());
+                return;
+            }
+
             string keys = "[" + Key(true) + "] " + Loc.T("Наводка", "Aim")
                 + "   [" + Key(false) + "] " + Loc.T("Зарядить", "Load");
-            _prompt = Loc.T("Миномёт", "Mortar")
-                + " " + t.Rounds + "/" + cap + "   " + keys;
+            _prompt = Name() + " " + t.Rounds + "/" + cap + "   " + keys;
 
             if (Input.GetKeyDown(Key(false))) Load(t, cap);
             else if (Input.GetKeyDown(Key(true))) EnterAim(t);
+        }
+
+        // ----------------------------------------------------- the two strings
+        //
+        // The battery around the gun (RevivalArtyBattery.cs) is written ASCII
+        // only, because it is machine-written and a stray BOM would break the
+        // BOM-less rule build.ps1 relies on. Its two player-facing lines
+        // therefore live here, with the rest of this feature's Russian.
+
+        /// <summary>What the gun is called on screen.</summary>
+        internal static string Name()
+        {
+            return Loc.T("Гаубица", "Howitzer");
+        }
+
+        /// <summary>The sight is taken: a living crew is standing at it.</summary>
+        internal static string TextCrewAtGun()
+        {
+            return Loc.T("Расчёт у орудия",
+                         "Its crew is at the gun");
+        }
+
+        /// <summary>A drone is overhead and this player is under it.</summary>
+        internal static string TextSpotted()
+        {
+            return Loc.T("Разведдрон над вами - уходите",
+                         "A recon drone is above you - move");
         }
 
         static void Load(Tube t, int cap)
         {
             if (t.Rounds >= cap)
             {
-                Say(Loc.T("Миномёт полон",
-                          "The tube is full"));
+                Say(Loc.T("Орудие заряжено полностью",
+                          "The gun is full"));
                 return;
             }
             int taken = 0;
@@ -594,14 +760,14 @@ namespace NextDayRevival
             }
             if (taken == 0)
             {
-                Say(Loc.T("Нужны мины",
-                          "No 120 mm bombs in the pack"));
+                Say(Loc.T("Нужны снаряды",
+                          "No 122 mm shells in the pack"));
                 return;
             }
             RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" loaded with " + taken
-                + " bomb(s), " + t.Rounds + " ready.");
-            Say(Loc.T("Миномёт заряжен",
-                      "Mortar loaded") + ": " + t.Rounds);
+                + " shell(s), " + t.Rounds + " ready.");
+            Say(Loc.T("Орудие заряжено",
+                      "Gun loaded") + ": " + t.Rounds);
         }
 
         static Tube Nearest(Vector3 from)
@@ -627,20 +793,62 @@ namespace NextDayRevival
         {
             _aiming = t;
             _aimSince = Time.time;
+            _aimStepAt = Time.time;
             _weOpenedMap = false;
+            // The crosshair STARTS where the gun is already pointing. Anything
+            // else would mean the first frame of aim mode swings the turret
+            // somewhere nobody asked for, and the whole point of the rate limit
+            // is that the crosshair and the muzzle are the same thing.
+            _aimPoint = LayPoint(t);
+            _aimHave = true;
+            _aimWantHave = false;
             if (_cfgOpenMap == null || _cfgOpenMap.Value) _weOpenedMap = ShowMap(true);
             if (!_weOpenedMap)
                 Say(Loc.T("Откройте карту",
                           "Open the map to aim"));
             RevivalPlugin.L.LogInfo("Mortar: aim mode at \"" + t.Name + "\", "
-                + t.Rounds + " ready, reach " + MaxRange.ToString("0") + " m"
+                + t.Rounds + " ready, reach " + MaxRange.ToString("0") + " m, traverse "
+                + Traverse.ToString("0.0") + " deg/s"
                 + (_weOpenedMap ? ", map opened by us." : ", waiting for the map."));
+        }
+
+        /// <summary>The world point the gun is laid on right now: its own yaw and
+        /// the range its elevation stands for.</summary>
+        static Vector3 LayPoint(Tube t)
+        {
+            float range = RangeFor(t.Pitch);
+            float rad = t.Yaw * Mathf.Deg2Rad;
+            Vector3 gun = t.Go == null ? Vector3.zero : t.Go.transform.position;
+            Vector3 flat = new Vector3(gun.x + Mathf.Sin(rad) * range, 0f,
+                                       gun.z + Mathf.Cos(rad) * range);
+            float y;
+            if (!RevivalTroopInsertion.GroundY(flat, out y)) y = gun.y;
+            return new Vector3(flat.x, y, flat.z);
+        }
+
+        /// <summary>Barrel elevation for a firing range. MaxRange sits at the
+        /// bottom of the arc and MinRange at the top: on a high-angle weapon the
+        /// nearer target is the steeper shot.</summary>
+        internal static float PitchFor(float range)
+        {
+            float span = Mathf.Max(1f, MaxRange - MinRange);
+            float t = Mathf.Clamp01((range - MinRange) / span);
+            return Mathf.Lerp(ElevHigh, ElevLow, t);
+        }
+
+        /// <summary>The inverse of <see cref="PitchFor"/>.</summary>
+        internal static float RangeFor(float pitch)
+        {
+            float t = Mathf.Clamp01((ElevHigh - pitch) / (ElevHigh - ElevLow));
+            return Mathf.Lerp(MinRange, MaxRange, t);
         }
 
         static void LeaveAim(string why)
         {
             if (_aiming == null) return;
             _aiming = null;
+            _aimHave = false;
+            _aimWantHave = false;
             ShowCursor();
             if (_weOpenedMap) ShowMap(false);
             _weOpenedMap = false;
@@ -683,11 +891,75 @@ namespace NextDayRevival
             }
 
             HideCursor();
-            if (!Input.GetMouseButtonDown(0)) return;
 
-            Vector3 target;
-            if (!MapPoint(texture, cam, world, out target)) return;   // clicked off the map
-            Fire(_aiming, target);
+            // THE CROSSHAIR IS THE GUN. The mouse only asks; the lay walks
+            // towards what it asks for at the turret's own rate, and the click
+            // fires where the gun is actually pointing - never where the pointer
+            // happens to be.
+            Vector3 wanted;
+            _aimWantHave = MapPoint(texture, cam, world, out wanted);
+            if (_aimWantHave) _aimWanted = wanted;
+            StepLay(_aiming, _aimWantHave ? _aimWanted : _aimPoint);
+
+            if (!Input.GetMouseButtonDown(0)) return;
+            if (!_aimHave) return;
+            Fire(_aiming, _aimPoint);
+        }
+
+        /// <summary>
+        /// One frame of laying the gun.
+        ///
+        /// The aim point is kept in the gun's own polar coordinates - bearing and
+        /// range - because those are the two things the vehicle can actually
+        /// change and each has its own speed: the turret traverses at
+        /// <see cref="Traverse"/> degrees a second, the barrel elevates at
+        /// <see cref="Elevate"/>, and range IS elevation (MetresPerDegree). The
+        /// mouse may be anywhere; the crosshair closes the gap at those two
+        /// rates and no faster. Near the gun a degree is a metre or two, so the
+        /// crosshair crawls; at full reach the same degree is twenty metres and
+        /// it sweeps - which is exactly how a real gun behaves and why the
+        /// limit is expressed in degrees rather than in pixels.
+        /// </summary>
+        static void StepLay(Tube t, Vector3 wanted)
+        {
+            float now = Time.time;
+            float dt = Mathf.Clamp(now - _aimStepAt, 0f, 0.25f);
+            _aimStepAt = now;
+            if (t == null || t.Go == null) return;
+            if (!_aimHave) { _aimPoint = LayPoint(t); _aimHave = true; }
+
+            Vector3 gun = t.Go.transform.position;
+            float haveBear = Bearing(_aimPoint - gun);
+            float haveRange = Flat(_aimPoint - gun);
+            float wantBear = Bearing(wanted - gun);
+            float wantRange = Mathf.Clamp(Flat(wanted - gun), MinRange, MaxRange);
+
+            float bear = Mathf.MoveTowardsAngle(haveBear, wantBear, Traverse * dt);
+            float range = Mathf.MoveTowards(haveRange, wantRange,
+                                            Elevate * MetresPerDegree * dt);
+            range = Mathf.Clamp(range, MinRange, MaxRange);
+
+            float rad = bear * Mathf.Deg2Rad;
+            Vector3 flat = new Vector3(gun.x + Mathf.Sin(rad) * range, 0f,
+                                       gun.z + Mathf.Cos(rad) * range);
+            float y;
+            if (!RevivalTroopInsertion.GroundY(flat, out y)) y = _aimPoint.y;
+            _aimPoint = new Vector3(flat.x, y, flat.z);
+
+            // The turret is told to follow the crosshair, not the mouse. Both
+            // move at the same rate, so it arrives in the same frame - the slew
+            // is what makes it visible from outside.
+            t.WantYaw = bear;
+            t.WantPitch = PitchFor(range);
+        }
+
+        /// <summary>Compass bearing of a flat direction, in the same degrees the
+        /// turret's world yaw is measured in (0 = +Z, 90 = +X).</summary>
+        static float Bearing(Vector3 v)
+        {
+            v.y = 0f;
+            if (v.sqrMagnitude < 1e-6f) return 0f;
+            return Mathf.Atan2(v.x, v.z) * Mathf.Rad2Deg;
         }
 
         /// <summary>Hides the system pointer so the crosshair is the only thing
@@ -794,6 +1066,160 @@ namespace NextDayRevival
             }
         }
 
+        // ------------------------------------------------------------- turret
+
+        /// <summary>Every gun turns towards where it is being laid, a little
+        /// each frame. This is the only place a turret or a barrel moves, so
+        /// there is exactly one rate in the game whatever asked for the lay -
+        /// the player's crosshair, the NPC gunner, or nothing at all.</summary>
+        static void Slew()
+        {
+            float dt = Mathf.Clamp(Time.deltaTime, 0f, 0.25f);
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (t.Go == null) continue;
+                t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
+                t.Pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
+                Point(t);
+            }
+        }
+
+        /// <summary>Write the current lay onto the model. The turret's angle is
+        /// stored in WORLD degrees and applied as a local one, so a hull parked
+        /// across a slope still points its gun where the map says it does.</summary>
+        static void Point(Tube t)
+        {
+            if (t.Go == null) return;
+            if (t.Turret != null)
+            {
+                float hull = t.Go.transform.eulerAngles.y;
+                t.Turret.localRotation =
+                    Quaternion.Euler(0f, Mathf.DeltaAngle(hull, t.Yaw), 0f);
+            }
+            // Positive pitch is UP, and a positive rotation about local X points
+            // the barrel's +Z down - hence the sign.
+            if (t.Barrel != null)
+                t.Barrel.localRotation = Quaternion.Euler(-t.Pitch, 0f, 0f);
+        }
+
+        /// <summary>Where the shell leaves, for the report and the smoke.</summary>
+        static Vector3 Muzzle(Tube t)
+        {
+            if (t.Go == null) return Vector3.zero;
+            if (t.Barrel != null) return t.Barrel.TransformPoint(ArtyModel.MuzzleLocal);
+            return t.Go.transform.position + Vector3.up * 2f;
+        }
+
+        static Tube ById(int settlementId)
+        {
+            for (int i = 0; i < _tubes.Count; i++)
+                if (_tubes[i].SettlementId == settlementId) return _tubes[i];
+            return null;
+        }
+
+        // ------------------------------------------- what the NPC crew may ask
+
+        /// <summary>Lay this gun on a point. Refused while the player has the
+        /// sight: two people cannot turn the same turret.</summary>
+        internal static void Lay(int settlementId, Vector3 point)
+        {
+            if (!Enabled) return;
+            Tube t = ById(settlementId);
+            if (t == null || t.Go == null || _aiming == t) return;
+            Vector3 gun = t.Go.transform.position;
+            t.WantYaw = Bearing(point - gun);
+            t.WantPitch = PitchFor(Mathf.Clamp(Flat(point - gun), MinRange, MaxRange));
+        }
+
+        /// <summary>Is the gun actually on that point yet? The NPC gunner waits
+        /// for this, which is why a target behind the vehicle costs him the
+        /// seconds the turret needs to come round.</summary>
+        internal static bool Laid(int settlementId, Vector3 point)
+        {
+            Tube t = ById(settlementId);
+            if (t == null || t.Go == null) return false;
+            Vector3 gun = t.Go.transform.position;
+            if (Mathf.Abs(Mathf.DeltaAngle(t.Yaw, Bearing(point - gun))) > 1.5f) return false;
+            float pitch = PitchFor(Mathf.Clamp(Flat(point - gun), MinRange, MaxRange));
+            return Mathf.Abs(t.Pitch - pitch) <= 1.5f;
+        }
+
+        /// <summary>
+        /// The gun nearest to an impact, laid on it.
+        ///
+        /// A joined client never runs an NPC crew's mission - that is the
+        /// master's - so its turrets would stand still while shells came out of
+        /// them. The impact event is the one thing it does hear, so the gun that
+        /// could have fired it is turned onto the point. It is cosmetic by
+        /// design: nothing is decided here, the turret simply ends up standing
+        /// where the shells are going.
+        /// </summary>
+        static void LayNearest(Vector3 point)
+        {
+            Tube best = null;
+            float bestD = MaxRange;
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (t.Go == null || _aiming == t) continue;
+                float d = Flat(point - t.Go.transform.position);
+                if (d > bestD) continue;
+                bestD = d;
+                best = t;
+            }
+            if (best != null) Lay(best.SettlementId, point);
+        }
+
+        /// <summary>Has the player taken this gun's sight?</summary>
+        internal static bool PlayerAiming(int settlementId)
+        {
+            return _aiming != null && _aiming.SettlementId == settlementId;
+        }
+
+        /// <summary>
+        /// The NPC crew's fire mission. Runs on the MASTER only (the battery
+        /// never calls it anywhere else), and differs from the player's order in
+        /// exactly three ways: the shells come out of the crew's own supply and
+        /// not out of a backpack, the mission is not drawn on anybody's map, and
+        /// every impact goes out over the wire so each client can apply it to its
+        /// own player. Returns how many shells left the barrel.
+        /// </summary>
+        internal static int NpcFire(int settlementId, Vector3 target, int available)
+        {
+            if (!Enabled || available <= 0) return 0;
+            Tube t = ById(settlementId);
+            if (t == null || t.Go == null || _aiming == t) return 0;
+            if (Time.time < t.ReadyAt) return 0;
+
+            Vector3 gun = t.Go.transform.position;
+            float dist = Flat(target - gun);
+            if (dist > MaxRange || dist < MinRange) return 0;
+
+            int want = Mathf.Clamp(I(_cfgRounds, 3), 1, 12);
+            int rounds = Mathf.Min(want, available);
+            t.ReadyAt = Time.time + Mathf.Max(0f, F(_cfgCooldown, 20f));
+
+            // The same net the player's own mission gets. The crew's damage is
+            // credited to owner 0 exactly as his is, so this should never have
+            // anything to do - and it costs nothing.
+            FactionShield.Arm();
+
+            float tof = Salvo(t, target, rounds, true);
+            RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" NPC crew fires " + rounds
+                + " round(s) -> " + target.ToString("0") + " d=" + dist.ToString("0")
+                + " tof=" + tof.ToString("0.0") + " s.");
+            return rounds;
+        }
+
+        /// <summary>The game's own player list, shared with the battery so it
+        /// does not have to walk the scene for what two field reads
+        /// answer.</summary>
+        internal static List<GameObject> PlayerList()
+        {
+            return Players();
+        }
+
         // ------------------------------------------------------- fire mission
 
         static void Fire(Tube t, Vector3 target)
@@ -809,8 +1235,8 @@ namespace NextDayRevival
             }
             if (t.Rounds <= 0)
             {
-                Say(Loc.T("Миномёт пуст",
-                          "The tube is empty"));
+                Say(Loc.T("Орудие пусто",
+                          "The gun is empty"));
                 return;
             }
             // A click outside the reach is REFUSED with a reason, never clamped
@@ -839,13 +1265,33 @@ namespace NextDayRevival
 
             FactionShield.Arm();
 
+            float tof = Salvo(t, target, rounds, false);
+
+            RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" " + rounds
+                + " round(s) -> " + target.ToString("0") + " d=" + dist.ToString("0")
+                + " tof=" + tof.ToString("0.0") + " s spread=" + Spread(dist).ToString("0")
+                + " m, " + t.Rounds + " left.");
+            Say(Loc.T("Огонь!", "Firing!") + " " + rounds
+                + " x " + dist.ToString("0") + " m, "
+                + Loc.T("Полёт", "flight") + " "
+                + tof.ToString("0") + " s");
+        }
+
+        /// <summary>The shells themselves, one salvo's worth. Shared by the
+        /// player's fire order and the NPC crew's so there is exactly one place
+        /// that decides where a round lands. Returns the flight time.</summary>
+        static float Salvo(Tube t, Vector3 target, int rounds, bool npc)
+        {
+            Vector3 gun = t.Go.transform.position;
+            float dist = Flat(target - gun);
             float spread = Spread(dist);
             float tof = Flight(dist);
             float gap = Mathf.Max(0.2f, F(_cfgRoundInterval, 1.4f));
+            Vector3 muzzle = Muzzle(t);
             for (int i = 0; i < rounds; i++)
             {
                 // Uniform over the AREA of the dispersion circle, not over its
-                // radius: r = R * sqrt(rand), or every bomb crowds the centre.
+                // radius: r = R * sqrt(rand), or every shell crowds the centre.
                 float a = UnityEngine.Random.value * Mathf.PI * 2f;
                 float r = spread * Mathf.Sqrt(UnityEngine.Random.value);
                 Vector3 flat = new Vector3(target.x + Mathf.Cos(a) * r, 0f,
@@ -854,21 +1300,14 @@ namespace NextDayRevival
                 if (!RevivalTroopInsertion.GroundY(flat, out y)) y = target.y;
 
                 Shell s = new Shell();
-                s.From = t.Muzzle;
+                s.From = muzzle;
                 s.Point = new Vector3(flat.x, y, flat.z);
                 s.LeaveAt = Time.time + i * gap;
                 s.ImpactAt = s.LeaveAt + tof;
+                s.Npc = npc;
                 _inFlight.Add(s);
             }
-
-            RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" " + rounds
-                + " round(s) -> " + target.ToString("0") + " d=" + dist.ToString("0")
-                + " tof=" + tof.ToString("0.0") + " s spread=" + spread.ToString("0")
-                + " m, " + t.Rounds + " left.");
-            Say(Loc.T("Огонь!", "Firing!") + " " + rounds
-                + " x " + dist.ToString("0") + " m, "
-                + Loc.T("Полёт", "flight") + " "
-                + tof.ToString("0") + " s");
+            return tof;
         }
 
         internal static float Spread(float dist)
@@ -883,8 +1322,9 @@ namespace NextDayRevival
                 + dist * 0.01f * F(_cfgFlightPer100, 0.85f));
         }
 
-        /// <summary>Bombs on the way: the muzzle report when one leaves, the
-        /// incoming whistle shortly before it lands, and the impact.</summary>
+        /// <summary>Shells on the way: the muzzle report when one leaves, the
+        /// incoming whistle shortly before it lands, and the impact - which is
+        /// a different one for the player's rounds and the crew's.</summary>
         static void Flight()
         {
             if (_inFlight.Count == 0) return;
@@ -904,7 +1344,11 @@ namespace NextDayRevival
                 }
                 if (now < s.ImpactAt) continue;
                 _inFlight.RemoveAt(i);
-                try { Impact(s.Point); }
+                try
+                {
+                    if (s.Npc) NpcImpact(s.Point);
+                    else Impact(s.Point);
+                }
                 catch (Exception ex) { RevivalPlugin.L.LogError("Mortar impact: " + ex); }
             }
         }
@@ -939,6 +1383,71 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Mortar: impact at " + point.ToString("0")
                 + " r=" + Radius.ToString("0") + " - " + npc + " NPC, " + veh
                 + " vehicle, " + plr + " player hit.");
+        }
+
+        /// <summary>
+        /// A shell the NPC crew fired. It lands on the master client - that is
+        /// the only client that ran the mission - and from there:
+        ///
+        ///   the picture  is the game's own networked explosion, spawned once
+        ///                here, so every client sees and hears one blast;
+        ///   NPCs and     are the master's own, swept exactly as a player's
+        ///   vehicles     shell sweeps them, with owner 0 on the damage;
+        ///   players      are NOT touched from here. The point goes out on the
+        ///                battery channel and every client - the master
+        ///                included, by calling Self directly - applies the blast
+        ///                to ITS OWN player only.
+        ///
+        /// That last rule is the whole reason this method exists beside
+        /// <see cref="Impact"/>. A master client that damaged other players
+        /// would be a player shooting players: kill credit, counter-attack and a
+        /// traitor flag, all for a shell an NPC fired. Damaging only yourself
+        /// cannot be held against anybody.
+        /// </summary>
+        static void NpcImpact(Vector3 point)
+        {
+            try
+            {
+                RocketHook.Detonate(point + Vector3.up * 0.2f,
+                                    Mathf.Max(0f, F(_cfgBlastDamage, 0f)), Radius, 3f);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Mortar: no visible explosion at "
+                    + point.ToString("0") + " - " + ex.Message);
+            }
+
+            int npc, veh, plr;
+            Sweep(point, false, out npc, out veh, out plr);
+            Self(point);
+            Net.SendNpcImpact(point);
+
+            RevivalPlugin.L.LogInfo("Mortar: NPC crew impact at " + point.ToString("0")
+                + " r=" + Radius.ToString("0") + " - " + npc + " NPC, " + veh
+                + " vehicle.");
+        }
+
+        /// <summary>The blast on our OWN player, and on nobody else's. Called on
+        /// every client that hears about an NPC crew's shell, including the one
+        /// that fired it.</summary>
+        internal static void Self(Vector3 point)
+        {
+            try
+            {
+                GameObject me = MapTools.LocalPlayer();
+                if (me == null) return;
+                float d = Vector3.Distance(me.transform.position, point);
+                if (d > Radius) return;
+                float dmg = Mathf.Max(0f, F(_cfgPlayerDamage, 260f)) * Falloff(d, Radius);
+                if (dmg < 1f) return;
+                if (PlayerDamage(me, dmg, point))
+                    RevivalPlugin.L.LogInfo("Mortar: NPC crew shell caught us at "
+                        + d.ToString("0") + " m for " + dmg.ToString("0") + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Mortar: own blast damage: " + ex.Message);
+            }
         }
 
         /// <summary>The impact sweep. <paramref name="shooter"/> is true on the
@@ -1274,7 +1783,7 @@ namespace NextDayRevival
             _npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (_npcType != null) _npcAlive = AccessTools.Method(_npcType, "IsAlive", null, null);
             if (_settlementType == null)
-                RevivalPlugin.L.LogWarning("Mortar: NPC_Settlement not found - no tubes "
+                RevivalPlugin.L.LogWarning("Mortar: NPC_Settlement not found - no guns "
                     + "will be raised.");
             return _npcType != null || _settlementType != null;
         }
@@ -1316,40 +1825,7 @@ namespace NextDayRevival
         {
             _status = text;
             _statusUntil = Time.time + 4f;
-            Turret.Hinweis(Loc.T("Миномёт", "Mortar")
-                + ": " + text, 3f);
-        }
-
-        static Mesh Model()
-        {
-            if (_mesh == null) _mesh = MortarModel.Build();
-            return _mesh;
-        }
-
-        static Material MortarMaterial()
-        {
-            if (_material != null) return _material;
-            try
-            {
-                Shader sh = Shader.Find("Standard");
-                if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
-                Material m = new Material(sh);
-                m.name = "NDR_Mortar_Material";
-                // Dark olive-grey gun finish. No texture file: the emplacement
-                // is generated geometry, so there is nothing to unwrap and
-                // nothing that has to survive the asset receipt.
-                Color olive = new Color(0.20f, 0.22f, 0.17f, 1f);
-                if (m.HasProperty("_Color")) m.SetColor("_Color", olive);
-                m.color = olive;
-                if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.25f);
-                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.35f);
-                _material = m;
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Mortar material: " + ex.Message);
-            }
-            return _material;
+            Turret.Hinweis(Name() + ": " + text, 3f);
         }
 
         // ----------------------------------------------------------- drawing
@@ -1366,8 +1842,8 @@ namespace NextDayRevival
         }
 
         /// <summary>The fire control: the reach as a highlighted disc on the
-        /// game's own map, the dead zone as a small ring, the tube as a cross,
-        /// and a crosshair where the pointer used to be.
+        /// game's own map, the dead zone as a small ring, the gun as a cross
+        /// with a short line along its bearing, and the crosshair on the lay.
         ///
         /// Two rules the route overlay already learned the hard way. Everything
         /// is HARD-clipped with GUI.BeginClip to the visible map window - the
@@ -1415,11 +1891,13 @@ namespace NextDayRevival
             if (hw < 2f || hh < 2f) return;
             float inner = MinRange / MaxRange;
 
-            // The world point under the crosshair, resolved ONCE per repaint:
-            // the ring under the cursor, the status line and the crosshair's
-            // colour must all agree, and the projection is reflection work.
-            Vector3 under;
-            bool onMap = MapPoint(texture, cam, world, out under);
+            // WHERE THE GUN IS LAID. Not where the pointer is: the crosshair is
+            // the lay, it is stepped towards the pointer in Update at the
+            // turret's own rate, and every number on this overlay - the beaten
+            // zone, the range, the flight time - belongs to it and not to a
+            // mouse that may be half a map ahead of the barrel.
+            Vector3 under = _aimHave ? _aimPoint : tube;
+            bool onMap = _aimHave;
             float distUnder = onMap ? Flat(under - tube) : -1f;
 
             Color old = GUI.color;
@@ -1433,7 +1911,7 @@ namespace NextDayRevival
                 GUI.color = new Color(0.30f, 0.85f, 0.45f, 0.95f);
                 GUI.DrawTexture(new Rect(c.x - hw, c.y - hh, hw * 2f, hh * 2f), Disc());
 
-                // The dead zone under the tube. Hiding it produces "I clicked
+                // The dead zone under the gun. Hiding it produces "I clicked
                 // and nothing happened".
                 if (inner > 0.02f)
                 {
@@ -1442,12 +1920,22 @@ namespace NextDayRevival
                                              hw * inner * 2f, hh * inner * 2f), Ring());
                 }
 
-                // The tube itself.
+                // The gun itself, and the line from it to where it points - the
+                // muzzle's own bearing, so a player can see the turret swing
+                // round on the map while he waits for it.
                 GUI.color = new Color(1f, 0.85f, 0.25f, 1f);
                 GUI.DrawTexture(new Rect(c.x - 5f, c.y - 1f, 10f, 2f), Px());
                 GUI.DrawTexture(new Rect(c.x - 1f, c.y - 5f, 2f, 10f), Px());
+                float lay = _aiming.Yaw * Mathf.Deg2Rad;
+                for (int i = 1; i <= 8; i++)
+                {
+                    float f = i / 8f * 0.16f;
+                    GUI.DrawTexture(new Rect(c.x + Mathf.Sin(lay) * hw * f - 1f,
+                                             c.y - Mathf.Cos(lay) * hh * f - 1f,
+                                             2f, 2f), Px());
+                }
 
-                // WHERE THE BOMBS WOULD GO. A mortar is an area weapon, and a
+                // WHERE THE SHELLS WOULD GO. A howitzer is an area weapon, and a
                 // player who is only shown a point believes he has a rifle. The
                 // circle under the crosshair is the beaten zone a click would
                 // buy, drawn to scale from the same Spread() the shells use.
@@ -1459,8 +1947,22 @@ namespace NextDayRevival
                          texture, cam, world, map, clip, Ring());
                 }
 
+                // Where the MOUSE is asking the gun to go, as a faint dot. It is
+                // not a second crosshair: it is the only way to see that the gun
+                // is still on its way there.
+                if (_aimWantHave)
+                {
+                    Vector2 wp;
+                    if (MapTools.WorldToGui(_aimWanted, texture, cam, world, map, out wp))
+                    {
+                        Vector2 w = wp - clip.position;
+                        GUI.color = new Color(0.85f, 0.95f, 0.85f, 0.35f);
+                        GUI.DrawTexture(new Rect(w.x - 2f, w.y - 2f, 4f, 4f), Px());
+                    }
+                }
+
                 // The mission that is on its way: the aim point as a cross with
-                // its dispersion circle, and every bomb still in the air as a
+                // its dispersion circle, and every shell still in the air as a
                 // dot where it will land. This is what makes a correction
                 // possible - a second salvo is aimed off the first one.
                 if (_firedAt > 0f && (_inFlight.Count > 0 || Time.time - _firedAt < 12f))
@@ -1493,7 +1995,14 @@ namespace NextDayRevival
                 GUI.color = old;
             }
 
-            DrawCrosshair(onMap, distUnder);
+            // The crosshair sits on the LAY, and is drawn after the clip is
+            // closed so it stays whole at the map's edge. Off the picture (the
+            // map is panned away from the gun) there is nothing to draw it on,
+            // and the status line alone has to do.
+            Vector2 cross = Vector2.zero;
+            bool haveCross = onMap
+                && MapTools.WorldToGui(under, texture, cam, world, map, out cross);
+            DrawCrosshair(haveCross, cross, onMap, distUnder);
         }
 
         /// <summary>One circle of <paramref name="radius"/> pixels around a world
@@ -1515,26 +2024,33 @@ namespace NextDayRevival
         /// <summary>The crosshair that replaced the mouse pointer, plus one line
         /// telling the player what a click here would do. Both are drawn in
         /// ABSOLUTE coordinates after the map clip is closed, so the crosshair
-        /// stays whole at the map's edge.</summary>
-        static void DrawCrosshair(bool onMap, float dist)
+        /// stays whole at the map's edge.
+        ///
+        /// It is drawn where the GUN points, not where the pointer is. That is
+        /// the visible half of the rate limit: swing the mouse and the cross
+        /// follows it at the turret's pace, with the faint dot on the map
+        /// showing what it is chasing.</summary>
+        static void DrawCrosshair(bool have, Vector2 m, bool onMap, float dist)
         {
-            Vector2 m = Event.current.mousePosition;
             Color old = GUI.color;
             bool good = onMap && dist >= MinRange && dist <= MaxRange;
 
-            GUI.color = good ? new Color(0.35f, 1f, 0.45f, 0.95f)
-                             : new Color(1f, 0.45f, 0.35f, 0.95f);
-            // A cross with a gap in the middle, so the pixel being aimed at is
-            // never covered by the crosshair itself.
-            GUI.DrawTexture(new Rect(m.x - 13f, m.y - 1f, 9f, 2f), Px());
-            GUI.DrawTexture(new Rect(m.x + 4f, m.y - 1f, 9f, 2f), Px());
-            GUI.DrawTexture(new Rect(m.x - 1f, m.y - 13f, 2f, 9f), Px());
-            GUI.DrawTexture(new Rect(m.x - 1f, m.y + 4f, 2f, 9f), Px());
-            GUI.DrawTexture(new Rect(m.x - 1f, m.y - 1f, 2f, 2f), Px());
-            GUI.color = old;
+            if (have)
+            {
+                GUI.color = good ? new Color(0.35f, 1f, 0.45f, 0.95f)
+                                 : new Color(1f, 0.45f, 0.35f, 0.95f);
+                // A cross with a gap in the middle, so the pixel being aimed at
+                // is never covered by the crosshair itself.
+                GUI.DrawTexture(new Rect(m.x - 13f, m.y - 1f, 9f, 2f), Px());
+                GUI.DrawTexture(new Rect(m.x + 4f, m.y - 1f, 9f, 2f), Px());
+                GUI.DrawTexture(new Rect(m.x - 1f, m.y - 13f, 2f, 9f), Px());
+                GUI.DrawTexture(new Rect(m.x - 1f, m.y + 4f, 2f, 9f), Px());
+                GUI.DrawTexture(new Rect(m.x - 1f, m.y - 1f, 2f, 2f), Px());
+                GUI.color = old;
+            }
 
             int cap = Mathf.Clamp(I(_cfgMagazine, 6), 1, 30);
-            string line = Loc.T("Миномёт", "Mortar")
+            string line = Name()
                 + " " + _aiming.Rounds + "/" + cap + "   "
                 + Loc.T("Дальность", "Reach")
                 + " " + MinRange.ToString("0") + "-" + MaxRange.ToString("0") + " m";
@@ -1601,6 +2117,13 @@ namespace NextDayRevival
             _ring = Circle(0f, false);
             return _ring;
         }
+
+        /// <summary>The white pixel and the empty circle, for the battery's own
+        /// map markers. Two textures for the whole feature rather than two per
+        /// file - they are tinted by GUI.color at every draw anyway.</summary>
+        internal static Texture2D PxTexture() { return Px(); }
+
+        internal static Texture2D RingTexture() { return Ring(); }
 
         static Texture2D Circle(float fillAlpha, bool fill)
         {
@@ -1689,7 +2212,7 @@ namespace NextDayRevival
                         filtered = filtered * 0.972f + noise * 0.028f;
                         if (thump)
                         {
-                            // A deep, hollow WHUMP out of a tube, not a crack.
+                            // A deep, hollow WHUMP out of a barrel, not a crack.
                             float body = (Mathf.Sin(2f * Mathf.PI * 41f * t) * 1.00f
                                 + Mathf.Sin(2f * Mathf.PI * 63f * t) * 0.45f)
                                 * Mathf.Exp(-t * 3.1f);
@@ -1722,8 +2245,10 @@ namespace NextDayRevival
 
         // -------------------------------------------------------- the network
 
-        /// <summary>One event, one direction: "a bomb went off here, apply it to
-        /// what you own". Built exactly like Admin.Net, including its refusal to
+        /// <summary>One event, two directions: "a shell went off here, apply it
+        /// to what you own" from a joined client to the master, and the same
+        /// event with a fourth float from the master to everybody when the NPC
+        /// crew fired it. Built exactly like Admin.Net, including its refusal to
         /// hook when the configured code collides with another channel.</summary>
         internal static class Net
         {
@@ -1786,6 +2311,21 @@ namespace NextDayRevival
 
             public static void SendImpact(Vector3 point)
             {
+                Send(point, 0f);
+            }
+
+            /// <summary>A shell the NPC crew fired, going the OTHER way: the
+            /// master tells every client where it landed so each of them can
+            /// apply it to its own player. The fourth float is what tells the
+            /// two apart; an old three-float payload still reads as a player's
+            /// shell, which is what it was.</summary>
+            public static void SendNpcImpact(Vector3 point)
+            {
+                Send(point, 1f);
+            }
+
+            static void Send(Vector3 point, float kind)
+            {
                 try
                 {
                     EnsureHooked();
@@ -1794,7 +2334,7 @@ namespace NextDayRevival
                         : Activator.CreateInstance(_optionsType);
                     _raise.Invoke(null, new object[] {
                         (byte)_cfgEventCode.Value,
-                        new float[] { point.x, point.y, point.z },
+                        new float[] { point.x, point.y, point.z, kind },
                         true, options });
                 }
                 catch (Exception ex)
@@ -1810,11 +2350,24 @@ namespace NextDayRevival
                 {
                     float[] d = content as float[];
                     if (d == null || d.Length < 3) return;
-                    // Only the owner of the NPCs and vehicles has anything to do
-                    // here, and players are the shooter's business.
+                    Vector3 point = new Vector3(d[0], d[1], d[2]);
+
+                    // An NPC crew's shell. It has already gone off on the master
+                    // for the NPCs and vehicles it owns; here it is our own
+                    // player's problem and nobody else's.
+                    if (d.Length > 3 && d[3] > 0.5f)
+                    {
+                        Self(point);
+                        LayNearest(point);
+                        return;
+                    }
+
+                    // A player's shell. Only the owner of the NPCs and vehicles
+                    // has anything to do with it, and players are the shooter's
+                    // business.
                     if (!Master()) return;
                     int npc, veh, plr;
-                    Sweep(new Vector3(d[0], d[1], d[2]), false, out npc, out veh, out plr);
+                    Sweep(point, false, out npc, out veh, out plr);
                     RevivalPlugin.L.LogInfo("Mortar: impact from player #" + sender
                         + " applied - " + npc + " NPC, " + veh + " vehicle.");
                 }
@@ -1836,8 +2389,8 @@ namespace NextDayRevival
         /// is the point - it watches the value itself. The player's faction is
         /// PlayerStatisticsManager.GetPlayerInfo(player).fraction (CONFIRMED,
         /// REVERSE_ENGINEERING 23), and Traitor is 6 in the Fraction enum. From
-        /// the moment a fire order leaves the tube until a few seconds after the
-        /// last bomb lands, a flip to Traitor is written straight back and
+        /// the moment a fire order leaves the gun until a few seconds after the
+        /// last shell lands, a flip to Traitor is written straight back and
         /// logged.
         ///
         /// HYPOTHESIS, deliberately labelled: that any game code writes that
@@ -2031,175 +2584,7 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>
-    /// The M1943 (PM-43) emplacement as generated geometry - baseplate, breech
-    /// ball, smooth-bore tube, muzzle ring, bipod and elevating screw.
-    ///
-    /// Built in code rather than shipped as an .ndmesh on purpose. A tube per
-    /// settlement is decoration with no inventory icon, no hand pose and no UV
-    /// work, and a generated mesh costs no asset file, no entry in the launch
-    /// receipt (ClientIntegrity rejects any file under plugins\assets that the
-    /// receipt does not know) and no make_assets.py run to install. The shape
-    /// follows the real weapon's dimensions: 1.86 m tube, 120 mm bore, a
-    /// circular baseplate just under a metre across, and about 70 degrees of
-    /// elevation.
-    ///
-    /// Winding follows the same rule verify.py enforces on the shipped meshes:
-    /// the right-hand normal of each triangle's winding points the same way as
-    /// its stored normal, so nothing is culled while it is lit.
-    /// </summary>
-    internal static class MortarModel
-    {
-        const float Elevation = 70f;       // degrees above horizontal
-        const float TubeLength = 1.86f;
-        const float TubeRadius = 0.075f;
-
-        /// <summary>Where a bomb leaves, in the object's local space - the
-        /// muzzle at the top of the inclined tube.</summary>
-        internal static Vector3 MuzzleLocal
-        {
-            get
-            {
-                Vector3 axis = Axis();
-                return Breech() + axis * (TubeLength + 0.08f);
-            }
-        }
-
-        static Vector3 Axis()
-        {
-            float rad = Elevation * Mathf.Deg2Rad;
-            // Local +Z is "forward" (away from the settlement centre), +Y is up.
-            return new Vector3(0f, Mathf.Sin(rad), Mathf.Cos(rad)).normalized;
-        }
-
-        static Vector3 Breech() { return new Vector3(0f, 0.10f, -0.22f); }
-
-        internal static Mesh Build()
-        {
-            List<Vector3> v = new List<Vector3>();
-            List<Vector3> n = new List<Vector3>();
-            List<Vector2> uv = new List<Vector2>();
-            List<int> tri = new List<int>();
-
-            Vector3 axis = Axis();
-            Vector3 breech = Breech();
-            Vector3 muzzle = breech + axis * TubeLength;
-
-            // Baseplate: a shallow round plate the whole thing sits on.
-            Cyl(v, n, uv, tri, new Vector3(0f, 0f, -0.22f), new Vector3(0f, 0.09f, -0.22f),
-                0.50f, 0.46f, 24);
-            // Breech ball: the socket the tube sits in.
-            Cyl(v, n, uv, tri, breech - axis * 0.12f, breech + axis * 0.06f,
-                0.12f, 0.10f, 14);
-            // The tube.
-            Cyl(v, n, uv, tri, breech, muzzle, TubeRadius, TubeRadius * 0.94f, 16);
-            // Muzzle ring: slightly proud of the tube, so the mouth reads.
-            Cyl(v, n, uv, tri, muzzle - axis * 0.02f, muzzle + axis * 0.08f,
-                0.095f, 0.090f, 16);
-
-            // Bipod: two legs from two thirds up the tube down to the ground,
-            // splayed sideways and forward, plus the elevating screw between
-            // them. A real M1943 has exactly this silhouette from the side.
-            Vector3 clamp = breech + axis * (TubeLength * 0.62f);
-            Cyl(v, n, uv, tri, clamp - new Vector3(0f, 0f, 0.05f),
-                clamp + new Vector3(0f, 0f, 0.07f), 0.085f, 0.085f, 10);
-            for (int s = -1; s <= 1; s += 2)
-            {
-                Vector3 foot = new Vector3(s * 0.62f, 0f, 0.52f);
-                Cyl(v, n, uv, tri, clamp, foot, 0.035f, 0.045f, 8);
-                // A small shoe so the leg does not end in a point.
-                Cyl(v, n, uv, tri, foot, foot + new Vector3(0f, 0.05f, 0f),
-                    0.09f, 0.07f, 10);
-            }
-            // The elevating screw, straight down from the clamp.
-            Vector3 screwTop = clamp - new Vector3(0f, 0.02f, 0f);
-            Cyl(v, n, uv, tri, new Vector3(0f, 0.06f, screwTop.z), screwTop,
-                0.030f, 0.030f, 8);
-
-            Mesh mesh = new Mesh();
-            mesh.name = "NDR_Mortar_M1943";
-            mesh.vertices = v.ToArray();
-            mesh.normals = n.ToArray();
-            mesh.uv = uv.ToArray();
-            mesh.triangles = tri.ToArray();
-            mesh.RecalculateBounds();
-            return mesh;
-        }
-
-        /// <summary>One closed, capped, possibly tapered cylinder from
-        /// <paramref name="a"/> to <paramref name="b"/>. Side and cap vertices
-        /// are separate so the caps stay flat and the sides stay round.</summary>
-        static void Cyl(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
-                        List<int> tri, Vector3 a, Vector3 b,
-                        float ra, float rb, int sides)
-        {
-            Vector3 w = b - a;
-            float h = w.magnitude;
-            if (h < 1e-4f || sides < 3) return;
-            w /= h;
-
-            // A right-handed basis U, V, W with U x V = W, so that the outward
-            // direction of ring point i is cos(t)U + sin(t)V.
-            Vector3 helper = Mathf.Abs(w.y) > 0.9f ? Vector3.forward : Vector3.up;
-            Vector3 u = Vector3.Cross(helper, w).normalized;
-            Vector3 vv = Vector3.Cross(w, u);
-
-            int sideBase = v.Count;
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                // The side normal of a frustum leans by the taper.
-                Vector3 sn = (dir * h + w * (ra - rb)).normalized;
-                float uu = (float)i / sides;
-                v.Add(a + dir * ra); n.Add(sn); uv.Add(new Vector2(uu, 0f));
-                v.Add(b + dir * rb); n.Add(sn); uv.Add(new Vector2(uu, 1f));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                int b0 = sideBase + i * 2;         // bottom i
-                int t0 = b0 + 1;                   // top i
-                int b1 = b0 + 2;                   // bottom i+1
-                int t1 = b0 + 3;                   // top i+1
-                // (B_i, T_i+1, T_i) and (B_i, B_i+1, T_i+1) wind outwards - the
-                // opposite order winds into the body and would be culled.
-                tri.Add(b0); tri.Add(t1); tri.Add(t0);
-                tri.Add(b0); tri.Add(b1); tri.Add(t1);
-            }
-
-            // Cap at b, outward normal +W.
-            int capTop = v.Count;
-            v.Add(b); n.Add(w); uv.Add(new Vector2(0.5f, 0.5f));
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                v.Add(b + dir * rb); n.Add(w);
-                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                tri.Add(capTop);
-                tri.Add(capTop + 1 + i);
-                tri.Add(capTop + 2 + i);
-            }
-
-            // Cap at a, outward normal -W, wound the other way round.
-            int capBottom = v.Count;
-            v.Add(a); n.Add(-w); uv.Add(new Vector2(0.5f, 0.5f));
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                v.Add(a + dir * ra); n.Add(-w);
-                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                tri.Add(capBottom);
-                tri.Add(capBottom + 2 + i);
-                tri.Add(capBottom + 1 + i);
-            }
-        }
-    }
+    // The M1943 tube's geometry (MortarModel) is gone with the tube: the
+    // settlement gun is the vehicle in RevivalArtyBattery.cs (ArtyModel), which
+    // carries its own copy of the cylinder builder this class used to hold.
 }

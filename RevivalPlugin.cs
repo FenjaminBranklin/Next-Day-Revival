@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.19.3";
+        public const string VERSION = "6.20.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -452,6 +452,7 @@ namespace NextDayRevival
             RevivalTroopInsertion.BindConfig(Config); // NDR heli troop insertion
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.BindConfig(Config);           // NDR settlement mortar
+            ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
@@ -1591,7 +1592,7 @@ namespace NextDayRevival
             // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
             M7Rifle.AddItems(Items);
 
-            // The 120 mm bomb for the settlement mortar (own file).
+            // The 122 mm shell for the settlement gun (own file).
             Mortar.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
@@ -2035,7 +2036,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
-            Mortar.Tick();                       // NDR settlement mortar (tubes, aim mode, shells)
+            Mortar.Tick();                       // NDR settlement mortar (guns, aim mode, shells)
+            ArtyBattery.Tick();                  // NDR settlement artillery (crew, recon drone, fire missions)
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
             FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
@@ -2071,6 +2073,7 @@ namespace NextDayRevival
             RevivalTroopInsertion.Draw();        // NDR heli troop insertion banner
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
+            ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
