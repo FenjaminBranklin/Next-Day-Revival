@@ -377,8 +377,12 @@ namespace NextDayRevival
                 _maskCommands.SetRenderTarget(_mask);
                 _maskCommands.SetViewport(new Rect(0, 0, _mask.width, _mask.height));
                 _maskCommands.ClearRenderTarget(true, true, Color.clear);
+                // The built-in matrix setter takes Unity's camera projection;
+                // Unity applies the graphics API / render-target conversion.
+                // Pre-converting here flips the D3D mask a second time and
+                // separates silhouettes from their bodies across screen Y.
                 _maskCommands.SetViewProjectionMatrices(cam.worldToCameraMatrix,
-                    GL.GetGPUProjectionMatrix(cam.projectionMatrix, true));
+                    cam.projectionMatrix);
                 // Fog variants use GLOBAL keywords. Disabling the material's
                 // keywords alone does not keep the white mask free of scene fog.
                 for (int i = 0; i < MaskFogKeywords.Length; i++)
