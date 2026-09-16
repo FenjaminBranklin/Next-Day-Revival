@@ -61,9 +61,21 @@
 // before vehicles, but neither can drain a shared pool now), so one big vehicle
 // can no longer starve every other into an oval - the bug this file last shipped.
 // A generous per-frame ceiling only bites in a pathological scene.
-// And EmitMesh skips any triangle whose on-screen box dwarfs the target - a wreck
-// or debris that ends up close to the camera produces near-plane-straddling
-// triangles that would otherwise stretch across the field and flood it yellow.
+//
+// NOTHING IS DRAWN AWAY FROM ITS TARGET. A triangle is emitted only if it lands
+// inside a box around the target's own projected centre, sized from the target's
+// measured on-screen size (Target.span). One test, three causes of the "random
+// geometric shapes glitching around the field" report: a triangle straddling the
+// near plane, which projects to enormous coordinates and floods the picture; an
+// index list cached for a mesh that has since been swapped; and a part whose
+// bounds box came out larger than the whole vehicle. Cheap, and it never reaches
+// a triangle that really belongs to the target. The cause behind most of that
+// report was upstream of the guard, in the silhouette itself: BuildPerson bakes
+// a man into WORLD space but never captured the bakeInv that the draw uses to
+// undo his world placement, so every baked vertex went through his
+// localToWorld twice and his heat shape was painted at a point that swung around
+// the map as he turned. GL work is also flushed in blocks (GLBlockTris) rather
+// than handed to immediate mode as one huge Begin/End batch.
 //
 // ASCII-only code and comments; on-screen text is bilingual through Loc.T.
 
@@ -113,6 +125,19 @@ namespace NextDayRevival
         // hot inner loop stays allocation- and branch-cheap.
         static bool _silThermal = true;
         static Material _glMat;
+        // Unity's immediate mode collects everything between GL.Begin and GL.End
+        // into ONE dynamic mesh. A settlement fight can hand it six people and six
+        // vehicles in a single block - well past a hundred thousand triangles, and
+        // so past the 65535 vertices a 16-bit index buffer addresses that it is not
+        // worth finding out what this build does with the overflow: the failure
+        // mode of a mesh whose indices wrap is triangles stitched between unrelated
+        // vertices, which is the very report this file is being fixed for.
+        // HYPOTHESIS, not measured: that the block ever actually overran here.
+        // Closing and reopening it every GLBlockTris triangles costs nothing if it
+        // did not - the material and the matrix stack survive a Begin/End pair, so
+        // this is a draw call boundary and nothing else, a dozen a frame at most.
+        const int GLBlockTris = 8192;
+        static int _glBlock;
         static Mesh _bakeScratch;   // reused snapshot target for skinned bakes
         // mesh id -> (verts, tris). mesh.vertices/.triangles each allocate, so the
         // rigid meshes are copied once and only re-projected per frame; skinned tris
@@ -124,12 +149,12 @@ namespace NextDayRevival
         static readonly Dictionary<int, int[]> _bakedTris = new Dictionary<int, int[]>();
 
         sealed class MeshData { public Vector3[] v; public int[] t; }
-        // A rigid mesh part reprojected live every frame. Normally its verts are a
-        // shared MeshFilter mesh and it is placed with the full local-to-world
-        // matrix. When baked==true the verts are a skinned snapshot (BakeMesh) that
-        // already carries the renderer's scale, so it is placed with position and
-        // rotation only (scale 1) to avoid a double scale - see PartModel.
-        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; public bool baked; public bool box; }
+        // A rigid mesh part reprojected live every frame: its verts are in the
+        // space of `tr` (a shared MeshFilter mesh under its own transform, a box
+        // built from a part's local bounds, or a vehicle's skinned part resolved
+        // into the vehicle root's space), so the draw places it with tr's full
+        // local-to-world matrix and nothing else.
+        sealed class RigidPart { public Vector3[] v; public int[] t; public Transform tr; }
         sealed class BakedPart { public Vector3[] wv; public int[] t; }   // world verts, baked at refresh
         sealed class Silh
         {
@@ -141,6 +166,13 @@ namespace NextDayRevival
             // (root.localToWorld * bakeInv): a walking man's silhouette sits on him
             // every frame and only his LIMB pose is as old as the last bake,
             // instead of the whole body trailing a third of a second behind.
+            //
+            // BuildPerson MUST set this. Left at identity the draw multiplies
+            // world-space verts by the man's localToWorld a SECOND time, which
+            // throws his silhouette to (R * p + p) - a point that swings around the
+            // map as he turns and lands anywhere on screen. That is what painted
+            // the field with random drifting geometry; the identity default is a
+            // safe no-op only for a silhouette that carries no baked part at all.
             public Matrix4x4 bakeInv = Matrix4x4.identity;
             public bool Any { get { return rigid.Count > 0 || skinned.Count > 0; } }
         }
@@ -546,7 +578,14 @@ namespace NextDayRevival
         // One projected target, measured ONCE per frame and then either filled or
         // blobbed. The old code projected every target twice - once in the fill loop
         // and again in the fallback loop - and threw the first result away.
-        struct Target { public int index; public Vector2 gui; public float px; }
+        //
+        // px is the size the LOOK is built on (clamped, so a blob never swells past
+        // the field and the fill threshold compares like with like). span is the
+        // same measurement UNCLAMPED and is used for one thing only: deciding how
+        // far from the target's screen centre its own geometry can possibly reach.
+        // A vehicle filling the screen really does span thousands of pixels, and a
+        // guard built on the clamped number would cut its hull away.
+        struct Target { public int index; public Vector2 gui; public float px; public float span; }
         static readonly List<Target> _tgtWarm = new List<Target>();
         static readonly List<Target> _tgtVeh = new List<Target>();
 
@@ -557,6 +596,15 @@ namespace NextDayRevival
         // without paying for their full mesh every frame.
         const float VehRange = 900f;
         const float PplRange = 600f;
+        // Half a body length in front of the lens. Closer than this a man is not a
+        // target, he is the VIEWER - manning a turret puts the gunner's own body
+        // within arm's reach of the camera - or someone standing against it. Either
+        // way his chest projects to a body several screens tall whose triangles all
+        // straddle the near plane, so the optic would spend its whole person budget
+        // on geometry it then has to throw away, and paint a heat mark in the
+        // middle of the field for it. The one place the view must stay clean is
+        // where the gunner is looking.
+        const float PplNear = 2.5f;
         // The person's on-screen BODY HEIGHT in pixels below which the blob is
         // drawn. This is a MEASURED height now (see BodyHeight/PixelsPerUnit), not
         // the old "1500/dist" guess that ignored both the world-unit scale and the
@@ -607,6 +655,12 @@ namespace NextDayRevival
             // is out of range or off the screen before it can cost anything.
             float ppu = PixelsPerUnit(cam);
             float sw = Screen.width, sh = Screen.height;
+            // The ceiling on how far a target's own geometry may reach from its
+            // centre (Target.span). A target close enough to fill the whole view
+            // legitimately spans the screen; nothing legitimately spans it three
+            // times over, so this is where a near-plane triangle with its enormous
+            // coordinates stops being treated as geometry at all.
+            float maxSpan = (sw > sh ? sw : sh) * 3f + 96f;
             for (int i = 0; i < _warm.Count; i++)
             {
                 Transform t = _warm[i];
@@ -614,12 +668,18 @@ namespace NextDayRevival
                 Vector3 chest = t.position + new Vector3(0f, ChestUp, 0f);
                 float dist; Vector2 g;
                 if (!Project(cam, chest, out g, out dist)) continue;
-                if (dist > PplRange) continue;
+                if (dist > PplRange || dist < PplNear) continue;
                 float px = BodyHeight * ppu / (dist > 1f ? dist : 1f);
+                if (!(px >= 0f)) continue;                 // NaN-safe
                 if (px > 4000f) px = 4000f;
-                if (g.x < -px || g.x > sw + px || g.y < -px || g.y > sh + px) continue;
+                // A man's mesh reaches about two thirds of his body height from the
+                // chest point that was projected; twice the height plus a floor is
+                // room enough for him, his rifle and his pack at any range.
+                float span = px * 2f + 96f;
+                if (span > maxSpan) span = maxSpan;
+                if (g.x < -span || g.x > sw + span || g.y < -span || g.y > sh + span) continue;
                 Target tg = new Target();
-                tg.index = i; tg.gui = g; tg.px = px;
+                tg.index = i; tg.gui = g; tg.px = px; tg.span = span;
                 _tgtWarm.Add(tg);
             }
             for (int i = 0; i < _veh.Count; i++)
@@ -635,14 +695,20 @@ namespace NextDayRevival
                 // shapes while people did not.
                 float r = i < _vehR.Count ? _vehR[i] : 3f;
                 Vector2 ge; float ed;
-                float px = 40f;
+                float raw = 40f;
                 if (Project(cam, mid + cam.transform.right * r, out ge, out ed))
-                    px = Mathf.Abs(ge.x - g.x);
-                px = Mathf.Clamp(px, 16f, 320f);
-                float margin = px * 2f;
-                if (g.x < -margin || g.x > sw + margin || g.y < -margin || g.y > sh + margin) continue;
+                    raw = Mathf.Abs(ge.x - g.x);
+                if (!(raw >= 0f) || raw > 20000f) raw = 20000f;   // NaN-safe
+                float px = Mathf.Clamp(raw, 16f, 320f);
+                // The measured radius already encloses the hull in x and z, so four
+                // radii from the centre covers hull, turret, tracks and a gun barrel
+                // even on the longest vehicle - measured UNCLAMPED, because a
+                // vehicle right in front of the optic is genuinely that big.
+                float span = raw * 4f + 96f;
+                if (span > maxSpan) span = maxSpan;
+                if (g.x < -span || g.x > sw + span || g.y < -span || g.y > sh + span) continue;
                 Target tg = new Target();
-                tg.index = i; tg.gui = g; tg.px = px;
+                tg.index = i; tg.gui = g; tg.px = px; tg.span = span;
                 _tgtVeh.Add(tg);
             }
 
@@ -669,6 +735,7 @@ namespace NextDayRevival
                 m.SetPass(0);
                 GL.PushMatrix();
                 GL.LoadPixelMatrix();          // screen pixels, origin bottom-left, y up
+                _glBlock = 0;
                 GL.Begin(GL.TRIANGLES);
 
                 // People (skinned) FIRST: a warm body - crew, player or hostile - is
@@ -702,14 +769,14 @@ namespace NextDayRevival
                     for (int p = 0; p < s.skinned.Count && used < cap; p++)
                     {
                         BakedPart bp = s.skinned[p];
-                        used += EmitMesh(bp.wv, bp.t, follow, centre, pxR, cap - used, false);
+                        used += EmitMesh(bp.wv, bp.t, follow, centre, pxR, tg.span, cap - used);
                     }
                     for (int p = 0; p < s.rigid.Count && used < cap; p++)
                     {
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        used += EmitMesh(rp.v, rp.t, mvp, centre, pxR, cap - used, rp.box);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, pxR, tg.span, cap - used);
                     }
                     // Everything was clipped away (all of him behind the near plane,
                     // or a mesh that projected to nothing): show the mark anyway.
@@ -742,7 +809,7 @@ namespace NextDayRevival
                         RigidPart rp = s.rigid[p];
                         if (rp.tr == null) continue;
                         Matrix4x4 mvp = VP * rp.tr.localToWorldMatrix;
-                        used += EmitMesh(rp.v, rp.t, mvp, centre, tg.px, cap - used, rp.box);
+                        used += EmitMesh(rp.v, rp.t, mvp, centre, tg.px, tg.span, cap - used);
                     }
                     if (used == 0) { Fallback(_fbVeh, tg); continue; }
                     spent += used;
@@ -883,6 +950,13 @@ namespace NextDayRevival
             if (now < _nextSilPurge) return;
             _nextSilPurge = now + 5f;
             _vehRadius.Clear();     // radii are cheap to remeasure and may change
+            // The two mesh caches are keyed by instance id and hold on to arrays for
+            // meshes that may long be destroyed - a slow leak, and an id that Unity
+            // hands out again would serve the wrong geometry. Neither is worth a
+            // per-entry liveness walk, so they are simply dropped once they grow past
+            // anything a scene needs; the rebuild is spread over MaxBuildsPerFrame.
+            if (_meshCache.Count > 1024) _meshCache.Clear();
+            if (_bakedTris.Count > 1024) _bakedTris.Clear();
             if (_silCache.Count == 0) return;
             _silPurge.Clear();
             foreach (KeyValuePair<int, SilhEntry> kv in _silCache)
@@ -902,46 +976,58 @@ namespace NextDayRevival
         // taken to clip space by mvp and divided by w by hand (fast, and correct on
         // 2018.1 without GL.GetGPUProjectionMatrix because we feed pixels, not a
         // matrix, to GL). Returns the number of triangles emitted (for the budget).
-        static int EmitMesh(Vector3[] verts, int[] tris, Matrix4x4 mvp, Vector2 centre, float pxR, int budget, bool noCap)
+        static int EmitMesh(Vector3[] verts, int[] tris, Matrix4x4 mvp, Vector2 centre, float pxR, float reach, int budget)
         {
             if (verts == null || tris == null || verts.Length == 0) return 0;
             float invR = pxR > 1f ? 1f / pxR : 1f;
             float w = Screen.width, h = Screen.height;
-            // A single triangle must never be much larger on screen than the target
-            // itself. ProjV rejects only vertices fully behind the camera, not a
-            // triangle that STRADDLES the near plane: such a triangle has one vertex
-            // with a near-zero w and projects to enormous screen coordinates,
-            // stretching across the whole field. Coloured at its far-from-centre rim
-            // (which is the ramp's yellow), one such triangle floods the picture solid
-            // yellow - exactly the "vehicle destroyed -> everything yellow" report,
-            // where the wreck/debris ends up close to the camera. Skip any triangle
-            // whose screen bounding box is far bigger than the target (NaN-safe: a NaN
-            // fails the <= test and is skipped too).
-            float triCap = pxR * 6f; if (triCap < 96f) triCap = 96f;
+            // THE STRAY-GEOMETRY GUARD, and the reason the field is not littered with
+            // drifting shapes: a triangle that belongs to this target must LAND ON
+            // this target. `reach` is how far the target's own pixels can possibly
+            // get from its projected centre (see Target.span), so every triangle has
+            // to fit inside that box - which bounds its size and its position in one
+            // test, and is NaN-safe (a NaN fails both comparisons).
+            //
+            // It catches, without having to know which one it is:
+            //   - a triangle STRADDLING the near plane. ProjV drops vertices behind
+            //     the camera, but a vertex just in front of it has a near-zero w and
+            //     projects to enormous coordinates; coloured at its far-from-centre
+            //     rim (the ramp's yellow) one such triangle floods the whole picture
+            //     - the old "vehicle destroyed -> everything yellow" report;
+            //   - geometry placed by a wrong matrix or a stale cached index list,
+            //     which lands at some unrelated point of the map and paints a small
+            //     weird shape wherever it happens to project;
+            //   - a part whose bounds box turned out far larger than the vehicle.
+            // Anything genuinely belonging to the target passes: `reach` is measured
+            // from the target's own unclamped on-screen size with a wide margin.
+            float lox = centre.x - reach, hix = centre.x + reach;
+            float loy = centre.y - reach, hiy = centre.y + reach;
             int drawn = 0;
+            int vn = verts.Length;
             for (int k = 0; k + 2 < tris.Length; k += 3)
             {
                 if (drawn >= budget) break;
                 int a = tris[k], b = tris[k + 1], c = tris[k + 2];
+                // An index list is cached per mesh and a mesh can be swapped or
+                // destroyed under us; an index that no longer fits its vertex array
+                // would either throw (killing the whole optic for the frame) or draw
+                // a triangle out of unrelated vertices. Skip it instead.
+                if (a < 0 || b < 0 || c < 0 || a >= vn || b >= vn || c >= vn) continue;
                 float ax, ay, bx, by, cx, cy;
                 if (!ProjV(mvp, verts[a], w, h, out ax, out ay)) continue;
                 if (!ProjV(mvp, verts[b], w, h, out bx, out by)) continue;
                 if (!ProjV(mvp, verts[c], w, h, out cx, out cy)) continue;
 
-                float minx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
-                float maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
-                float miny = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
-                float maxy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
-                // A box part IS deliberately the size of the whole vehicle, so it is
-                // exempt from the "triangle far bigger than the target" guard; ProjV
-                // already drops any triangle that straddles the near plane, which is
-                // the real flooding case. Real mesh parts keep the guard.
-                if (!noCap && (!((maxx - minx) <= triCap) || !((maxy - miny) <= triCap))) continue;
+                if (!(ax >= lox) || !(ax <= hix) || !(ay >= loy) || !(ay <= hiy)) continue;
+                if (!(bx >= lox) || !(bx <= hix) || !(by >= loy) || !(by <= hiy)) continue;
+                if (!(cx >= lox) || !(cx <= hix) || !(cy >= loy) || !(cy <= hiy)) continue;
 
                 Emit(ax, ay, centre, invR);
                 Emit(bx, by, centre, invR);
                 Emit(cx, cy, centre, invR);
                 drawn++;
+                // Keep the open immediate-mode block small (see GLBlockTris).
+                if (++_glBlock >= GLBlockTris) { _glBlock = 0; GL.End(); GL.Begin(GL.TRIANGLES); }
             }
             return drawn;
         }
@@ -1318,7 +1404,7 @@ namespace NextDayRevival
             v[6] = new Vector3(c.x + e.x, c.y + e.y, c.z + e.z);
             v[7] = new Vector3(c.x - e.x, c.y + e.y, c.z + e.z);
             RigidPart rp = new RigidPart();
-            rp.v = v; rp.t = _boxTris; rp.tr = tr; rp.box = true;
+            rp.v = v; rp.t = _boxTris; rp.tr = tr;
             s.rigid.Add(rp);
         }
 
@@ -1381,7 +1467,14 @@ namespace NextDayRevival
                     MeshData d = Cache(mesh);
                     if (d == null || d.v == null || d.t == null || d.v.Length == 0)
                     {
-                        AddBoxPart(s, skin.transform, skin.localBounds);
+                        // localBounds is expressed in the space Unity animates this
+                        // skin in - the ROOT BONE's, where there is one; the renderer
+                        // transform is only the right frame when there is not. Taking
+                        // the wrong one puts a vehicle-sized box wherever that
+                        // transform happens to sit, which is a stray shape, not a
+                        // silhouette.
+                        Transform bs = skin.rootBone != null ? skin.rootBone : skin.transform;
+                        AddBoxPart(s, bs, skin.localBounds);
                         continue;
                     }
                     Transform[] bones = skin.bones;
@@ -1507,6 +1600,12 @@ namespace NextDayRevival
         static Silh BuildPerson(Transform root, int level, Silh reuse)
         {
             Silh s = new Silh();
+            // The pose below is baked into WORLD space, so the draw has to undo the
+            // root's world placement before it re-applies the live one. Captured
+            // here, at the moment of the bake, and never anywhere else: without it
+            // every baked vertex is run through the man's localToWorld twice and
+            // his silhouette is drawn at a point that has nothing to do with him.
+            s.bakeInv = root.worldToLocalMatrix;
             HashSet<Renderer> managed = new HashSet<Renderer>();
             HashSet<Renderer> skip = new HashSet<Renderer>();
             CollectPersonLods(root, level, managed, skip);
@@ -1517,13 +1616,18 @@ namespace NextDayRevival
                 {
                     SkinnedMeshRenderer smr = sk[i];
                     if (smr == null || smr.sharedMesh == null) continue;
+                    // A switched-off GameObject is never drawn by the game and must
+                    // not be drawn here either: a character carries spare heads,
+                    // hats and weapon variants that are deactivated rather than
+                    // removed, and a deactivated one keeps whatever transform it was
+                    // left with - stray geometry sitting beside the man.
+                    if (!smr.gameObject.activeInHierarchy) continue;
                     if (managed.Contains(smr))
                     {
                         // WE pick the level, so the LODGroup's own per-camera
                         // .enabled toggling is ignored here: otherwise the level
                         // asked for is exactly the one the group just switched off.
                         if (skip.Contains(smr)) continue;
-                        if (!smr.gameObject.activeInHierarchy) continue;
                     }
                     else if (!smr.enabled) continue;
                     if (_bakeScratch == null) _bakeScratch = new Mesh();
@@ -1551,6 +1655,7 @@ namespace NextDayRevival
                 {
                     MeshFilter mf = mfs[i];
                     if (mf == null || mf.sharedMesh == null) continue;
+                    if (!mf.gameObject.activeInHierarchy) continue;   // see above
                     Renderer r = mf.GetComponent<Renderer>();
                     if (r != null)
                     {
