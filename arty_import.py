@@ -72,6 +72,35 @@ def components(v, f):
     return np.array([root(a) for a in faces[:, 0]])
 
 
+def split_recoil(mesh):
+    """Split connected bore/breech from its cradle without changing geometry.
+
+    The source's long component measures 27.36 units along local +Z. The other
+    three pieces are at most 9.62 long and remain attached to the trunnion.
+    Works on the shipped mesh as well as on a fresh GLB import.
+    """
+    v = np.asarray(mesh.V)
+    f = np.asarray(mesh.IDX).reshape(-1, 3)
+    labels = components(v, f)
+    moving = np.zeros(len(f), dtype=bool)
+    for label in np.unique(labels):
+        mask = labels == label
+        if np.ptp(v[np.unique(f[mask])], axis=0)[2] > 20.0:
+            moving[mask] = True
+    if not moving.any() or moving.all():
+        raise ValueError('Bohdana recoil component selection failed')
+    result = []
+    for mask, name in ((~moving, 'Bohdana cradle'), (moving, 'Bohdana recoil')):
+        indices = f[mask].reshape(-1)
+        part = Mesh(name)
+        part.V = [mesh.V[i] for i in indices]
+        part.N = [mesh.N[i] for i in indices]
+        part.T = [mesh.T[i] for i in indices]
+        part.IDX = list(range(len(indices)))
+        result.append(part)
+    return result
+
+
 def render(v, f, uv, texture, path, yaw, pitch):
     """Orthographic preview of the actual imported parts, with face lighting."""
     cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
@@ -110,7 +139,8 @@ def main():
     src = Path(sys.argv[1]) if len(sys.argv)>1 else ROOT/'test_2s22_bohdana_self-propelled_artillery.glb'
     if not src.exists() and len(sys.argv)==1:
         # Client packages contain the finished model, not the original download.
-        for name in ('hull.ndmesh', 'turret.ndmesh', 'barrel.ndmesh', 'diffuse.png'):
+        for name in ('hull.ndmesh', 'turret.ndmesh', 'barrel.ndmesh', 'recoil.ndmesh',
+                     'diffuse.png', 'metal.png', 'normal.png'):
             if not (ROOT/'assets'/('arty_'+name)).exists():
                 raise FileNotFoundError('Missing Bohdana source and shipped assets: '+str(src))
         print('Bohdana: keeping shipped assets; pass source.glb to rebuild')
@@ -198,7 +228,12 @@ def main():
                     mesh.T.extend(map(tuple, uvs if outward is normal else uvs[[0,2,1]]))
                     mesh.IDX.extend([base, base+1, base+2])
             # Restore original joints for the preview of the deployed posture.
-        mesh.write(str(assets/('arty_'+name+'.ndmesh')))
+        if name == 'barrel':
+            cradle, sliding = split_recoil(mesh)
+            cradle.write(str(assets/'arty_barrel.ndmesh'))
+            sliding.write(str(assets/'arty_recoil.ndmesh'))
+        else:
+            mesh.write(str(assets/('arty_'+name+'.ndmesh')))
         print(name, len(mesh.V), 'vertices', len(mesh.IDX)//3, 'triangles')
         pv = np.array(mesh.V)/SCALE @ frame + origin
         pf = np.array(mesh.IDX).reshape(-1, 3)

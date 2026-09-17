@@ -75,7 +75,7 @@ GAME_PLUGINS = os.path.join(GAME, "BepInEx", "plugins") if GAME else ""
 
 ASSET_FILES = [
     "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh",
-    "arty_diffuse.png",
+    "arty_recoil.ndmesh", "arty_diffuse.png", "arty_metal.png", "arty_normal.png",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
     "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -147,7 +147,7 @@ OPTIONAL_ASSETS = [
     "technical_mg_diffuse.png", "technical_mg_normal.png",
 ]
 
-MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
+MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_recoil.ndmesh", "mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
           "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
@@ -1177,7 +1177,7 @@ def check_arty_battery():
     # research/ gehoert nur ins private Repository; in der oeffentlichen
     # Kopie gibt es hier nichts zu pruefen.
     if os.path.isdir(os.path.join(ROOT, "research")):
-        for check in ("arty_regression_check.py", "arty_drone_orbit_check.py"):
+        for check in ("arty_regression_check.py", "arty_drone_orbit_check.py", "arty_combat_check.py"):
             need(os.path.exists(os.path.join(ROOT, "research", check)),
                  "research/" + check + " liegt vor",
                  "research/" + check + " fehlt - die Batterieregression ist unbelegt")

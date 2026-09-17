@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.23.0";
+        public const string VERSION = "6.24.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -1755,7 +1755,7 @@ namespace NextDayRevival
                 bool playerDrone = CfgDrone.Value && CfgDroneShootable.Value;
                 bool crewDrone = CfgPatrolCrewDrone != null
                     && CfgPatrolCrewDrone.Value;
-                if (!playerDrone && !crewDrone)
+                if (!playerDrone && !crewDrone && !ArtyBattery.Shootable)
                 {
                     L.LogInfo("Drohnen lassen sich nicht abschiessen (abgeschaltet).");
                     return;

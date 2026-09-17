@@ -255,6 +255,7 @@ namespace NextDayRevival
         /// would be both wrong and a networked object per round.</summary>
         class Shell
         {
+            public Tube Gun;
             public float LeaveAt;
             public float ImpactAt;
             public Vector3 Point;
@@ -485,6 +486,7 @@ namespace NextDayRevival
             if (!Enabled) return;
             try
             {
+                Net.EnsureHooked();
                 Flight();
                 FactionShield.Tick();
                 Slew();
@@ -1581,6 +1583,7 @@ namespace NextDayRevival
                 if (!RevivalTroopInsertion.GroundY(flat, out y)) y = target.y;
 
                 Shell s = new Shell();
+                s.Gun = t;
                 s.From = muzzle;
                 s.Point = new Vector3(flat.x, y, flat.z);
                 s.LeaveAt = Time.time + i * gap;
@@ -1616,6 +1619,16 @@ namespace NextDayRevival
                 if (!s.Left && now >= s.LeaveAt)
                 {
                     s.Left = true;
+                    if (s.Gun != null && s.Gun.Go != null)
+                    {
+                        s.From = Muzzle(s.Gun);
+                        ShotPicture(s.Gun, s.From);
+                        Vector3 forward = s.Gun.Barrel.forward;
+                        Vector3 centre = s.Gun.Centre;
+                        Net.SendArty(new object[] { "arty-v1", 2, new float[] {
+                            centre.x, centre.y, centre.z, s.From.x, s.From.y, s.From.z,
+                            forward.x, forward.y, forward.z } });
+                    }
                     Sound.Thump(s.From);
                 }
                 if (!s.Whistled && now >= s.ImpactAt - 1.4f)
@@ -1635,6 +1648,39 @@ namespace NextDayRevival
         }
 
         // ------------------------------------------------------------- impact
+
+        static void ShotPicture(Tube gun, Vector3 muzzle)
+        {
+            if (gun.Barrel == null) return;
+            ArtyRecoil recoil = gun.Barrel.GetComponent<ArtyRecoil>();
+            if (recoil != null) recoil.Kick();
+            ArtyRecoil.Smoke(muzzle, gun.Barrel.forward);
+        }
+
+        static void RemoteShot(float[] d)
+        {
+            if (d == null || d.Length != 9) return;
+            Vector3 centre = new Vector3(d[0], d[1], d[2]);
+            Vector3 muzzle = new Vector3(d[3], d[4], d[5]);
+            Vector3 forward = new Vector3(d[6], d[7], d[8]);
+            if (!ArtyRoom.Finite(centre) || !ArtyRoom.Finite(muzzle)
+                || !ArtyRoom.Finite(forward) || forward.sqrMagnitude < 0.9f
+                || forward.sqrMagnitude > 1.1f || (muzzle - centre).sqrMagnitude > 40000f) return;
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (t.Go == null || (t.Centre - centre).sqrMagnitude > 1f) continue;
+                if (_aiming != t)
+                {
+                    t.WantYaw = t.Yaw = Bearing(forward);
+                    t.WantPitch = t.Pitch = Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f)) * Mathf.Rad2Deg;
+                    Point(t);
+                }
+                ShotPicture(t, muzzle);
+                Sound.Thump(muzzle);
+                return;
+            }
+        }
 
         static void Impact(Vector3 point)
         {
@@ -2602,7 +2648,7 @@ namespace NextDayRevival
             static Type _optionsType;
             static FieldInfo _onEvent;
 
-            static void EnsureHooked()
+            internal static void EnsureHooked()
             {
                 if (_hooked || _failed || _cfgEventCode == null) return;
                 try
@@ -2688,11 +2734,40 @@ namespace NextDayRevival
                 }
             }
 
+            internal static void SendArty(object[] payload)
+            {
+                try
+                {
+                    EnsureHooked();
+                    if (!_hooked) return;
+                    object options = _optionsType == null ? null : Activator.CreateInstance(_optionsType);
+                    _raise.Invoke(null, new object[] { (byte)_cfgEventCode.Value, payload, true, options });
+                }
+                catch (Exception ex) { RevivalPlugin.L.LogWarning("Artillery event: " + ex.Message); }
+            }
+
             public static void OnPhotonEvent(byte code, object content, int sender)
             {
                 if (_cfgEventCode == null || code != (byte)_cfgEventCode.Value) return;
                 try
                 {
+                    object[] arty = content as object[];
+                    if (arty != null)
+                    {
+                        if (arty.Length < 3 || !(arty[0] is string) || (string)arty[0] != "arty-v1"
+                            || !(arty[1] is int)) return;
+                        int kind = (int)arty[1];
+                        if (kind == 2 && arty.Length == 3) RemoteShot(arty[2] as float[]);
+                        if (kind == 1 && arty.Length == 6 && Master()
+                            && arty[2] is string && arty[4] is double && arty[5] is double)
+                        {
+                            float[] ray = arty[3] as float[];
+                            if (ray == null || ray.Length != 6) return;
+                            ArtyBattery.HitDrone((string)arty[2], new Vector3(ray[0], ray[1], ray[2]),
+                                new Vector3(ray[3], ray[4], ray[5]), (double)arty[4], (double)arty[5]);
+                        }
+                        return;
+                    }
                     float[] d = content as float[];
                     if (d == null || d.Length < 3) return;
                     Vector3 point = new Vector3(d[0], d[1], d[2]);

@@ -101,6 +101,7 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgResupply;
 
         static bool Enabled { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
+        internal static bool Shootable { get { return Enabled && B(_cfgDrone, true); } }
         static float F(ConfigEntry<float> c, float fallback) { return c == null ? fallback : c.Value; }
         static bool B(ConfigEntry<bool> c, bool fallback) { return c == null ? fallback : c.Value; }
 
@@ -146,15 +147,16 @@ namespace NextDayRevival
                 + "Gruppe einen M72 LAW - an einer Haubitze nicht erwuenscht. "
                 + "1001 ist das Sturmgewehr des Spiels; 1160 waere das MG42.");
 
-            _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 240f,
+            _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 300f,
                 "Metres from the settlement centre the drone circles at.");
+            // Migrate the released default; retain deliberate custom radii.
+            if (_cfgOrbitRadius.Value == 240f) _cfgOrbitRadius.Value = 300f;
             _cfgOrbitHeight = cfg.Bind("Artillery", "OrbitHeight", 85f,
                 "Metres above the ground under it. High enough to be a dot, low "
                 + "enough to be seen against the sky.");
             _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 16f,
-                "Metres per second along the circle. At 240 m radius one lap "
-                + "takes about 95 s, so the same patch is looked at twice a "
-                + "minute and a crossing is not caught at once.");
+                "Metres per second along the circle. At 300 m radius one lap "
+                + "takes about 118 s.");
             _cfgModelRange = cfg.Bind("Artillery", "ModelRange", 800f,
                 "Metres from the player at which the drone gets a visible model. "
                 + "Beyond it the orbit is still computed - only the GameObject is "
@@ -233,6 +235,10 @@ namespace NextDayRevival
             public float GroundWant;        // ... and the last one actually measured
             public bool GroundSet;          // false until the first measurement
             public float GroundAt;          // Time.time it was last sampled
+            public int DroneHits = 3;
+            public double DroneReadyAt;
+            public float NextDroneState;
+            public string DroneKey;
 
             // spotting and the mission
             public float SeenSince;         // when the current candidate came into view
@@ -243,6 +249,9 @@ namespace NextDayRevival
             public float ReportAt;
             public float NextMissionAt;
             public float NextScan;
+            public GameObject Target;
+            public Component TargetNpc;
+            public GameObject Candidate;
 
             // the local player's own warning, on every client
             public float LocalSpotAt;
@@ -303,6 +312,7 @@ namespace NextDayRevival
             p.Centre = centre;
             p.Safe = safe;
             p.Name = name == null ? "" : name;
+            p.DroneKey = ArtyRoom.Key(centre);
             // The phase comes from the settlement's POSITION, not from an
             // instance id or a random draw: two clients agree on the position to
             // the centimetre and on nothing else, and this is what makes both of
@@ -689,7 +699,7 @@ namespace NextDayRevival
 
         // -------------------------------------------------------------- drone
 
-        static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 240f), 40f, 1500f); }
+        static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 300f), 40f, 1500f); }
 
         // The clock the drones actually fly on: the shared one, made smooth.
         static float _flightClock;
@@ -774,7 +784,8 @@ namespace NextDayRevival
 
         static void Fly(Post p, float now, bool havePlayer, Vector3 mine)
         {
-            bool want = B(_cfgDrone, true) && OperatorFlies(p);
+            DroneState(p, now);
+            bool want = B(_cfgDrone, true) && p.DroneHits > 0 && OperatorFlies(p);
             p.DroneUp = want;
             if (!want)
             {
@@ -842,6 +853,115 @@ namespace NextDayRevival
 
         static bool _modelBroken;
 
+        // Room properties survive late joins and master-client changes. The
+        // master is the only writer; local model culling never resets health.
+        static void DroneState(Post p, float now)
+        {
+            if (now < p.NextDroneState) return;
+            p.NextDroneState = now + 0.5f;
+            int previousHits = p.DroneHits;
+            double[] state = ArtyRoom.Read(p.DroneKey);
+            if (state != null)
+            {
+                p.DroneHits = (int)state[0];
+                p.DroneReadyAt = state[1];
+            }
+            if (ReplacementDue(p.DroneHits, p.DroneReadyAt, ArtyRoom.Now())
+                && RevivalTroopInsertion.MasterClient() && OperatorFlies(p))
+            {
+                p.DroneHits = 3;
+                ArtyRoom.Write(p.DroneKey, p.DroneHits, p.DroneReadyAt);
+            }
+            if (p.DroneHits <= 0 && previousHits > 0) CancelRecon(p);
+        }
+
+        internal static bool ReplacementDue(int hits, double readyAt, double now)
+        {
+            return hits <= 0 && ArtyRoom.Elapsed(now, readyAt) >= 0.0;
+        }
+
+        static void CancelRecon(Post p)
+        {
+            p.Sighting = false;
+            p.SeenSince = 0f;
+            p.Candidate = null;
+            p.LocalSpotAt = 0f;
+            _marks.Clear();
+            _mapOpen = false;
+        }
+
+        internal static void Shoot(Vector3 from, Vector3 direction)
+        {
+            if (!Shootable) return;
+            Post best = null;
+            float nearest = 600f;
+            direction.Normalize();
+            for (int i = 0; i < _posts.Count; i++)
+            {
+                Post p = _posts[i];
+                if (!p.DroneUp || p.DroneHits <= 0) continue;
+                float d;
+                if (!DroneRay(from, direction, p.DroneAt, out d) || d >= nearest) continue;
+                nearest = d;
+                best = p;
+            }
+            if (best == null) return;
+            if (RevivalTroopInsertion.MasterClient())
+                HitDrone(best.DroneKey, from, direction, best.DroneReadyAt, ArtyRoom.Now());
+            else Mortar.Net.SendArty(new object[] { "arty-v1", 1, best.DroneKey,
+                new float[] { from.x, from.y, from.z, direction.x, direction.y, direction.z },
+                best.DroneReadyAt, ArtyRoom.Now() });
+        }
+
+        static bool DroneRay(Vector3 from, Vector3 direction, Vector3 at, out float distance)
+        {
+            Vector3 delta = at - from;
+            distance = Vector3.Dot(delta, direction);
+            float radius = Mathf.Clamp(F(_cfgModelScale, 10f) * 0.14f, 0.4f, 4f);
+            if (distance < 1f || distance > 600f
+                || (delta - direction * distance).sqrMagnitude > radius * radius) return false;
+            // World geometry blocks fire. Start past the camera/body, and stop
+            // at the airframe's near surface rather than its centre.
+            return !Physics.Raycast(from + direction * 0.5f, direction,
+                Mathf.Max(0f, distance - radius - 0.5f), ~0, QueryTriggerInteraction.Ignore);
+        }
+
+        internal static void HitDrone(string key, Vector3 from, Vector3 direction, double generation, double shotTime)
+        {
+            if (!Shootable || !RevivalTroopInsertion.MasterClient()) return;
+            if (!ArtyRoom.Finite(from) || !ArtyRoom.Finite(direction)
+                || direction.sqrMagnitude < 0.9f || direction.sqrMagnitude > 1.1f) return;
+            for (int i = 0; i < _posts.Count; i++)
+            {
+                Post p = _posts[i];
+                if (p.DroneKey != key) continue;
+                p.NextDroneState = 0f;
+                DroneState(p, Time.time);
+                if (p.DroneHits <= 0 || !OperatorFlies(p) || generation != p.DroneReadyAt) return;
+                float distance;
+                double age = ArtyRoom.Elapsed(ArtyRoom.Now(), shotTime);
+                if (double.IsNaN(age) || age < -0.1 || age > 0.75) return;
+                // Rewind the deterministic orbit to the shooter's timestamp.
+                // Keep the measured terrain height: only a sub-second correction.
+                float angle = (float)Math.Max(0.0, age) * Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f) / Orbit();
+                Vector3 radial = p.DroneAt - p.Centre;
+                Vector3 rewind = new Vector3(radial.x * Mathf.Cos(angle) + radial.z * Mathf.Sin(angle),
+                    radial.y, -radial.x * Mathf.Sin(angle) + radial.z * Mathf.Cos(angle)) + p.Centre;
+                if (!DroneRay(from, direction, rewind, out distance)) return;
+                p.DroneHits--;
+                if (p.DroneHits == 0)
+                {
+                    p.DroneReadyAt = ArtyRoom.Now() + 1800.0;
+                    p.DroneUp = false;
+                    CancelRecon(p);
+                    RevivalPlugin.L.LogInfo("ArtyBattery: recon down at " + p.Name
+                        + "; replacement in 1800 seconds, only with a living operator.");
+                }
+                ArtyRoom.Write(p.DroneKey, p.DroneHits, p.DroneReadyAt);
+                return;
+            }
+        }
+
         /// <summary>The recon airframe, the same one the player's own
         /// surveillance drone flies. A failure is said ONCE and then never
         /// tried again: this runs every frame for every battery in range, and a
@@ -876,6 +996,7 @@ namespace NextDayRevival
         static void Warn(Post p, float now, GameObject me, Vector3 mine)
         {
             if (me == null || !p.DroneUp) return;
+            if (!HostileToBattery(p, PlayerFaction(me), true)) return;
             if (Flat(p.DroneAt - mine) > SpotRadius()) return;
             p.LocalSpotAt = now;
             p.LocalSpotPoint = mine;
@@ -914,6 +1035,8 @@ namespace NextDayRevival
             float radius = SpotRadius();
             Vector3 found = Vector3.zero;
             bool have = false;
+            GameObject target = null;
+            Component targetNpc = null;
 
             // Players first: they are the point of the whole feature, and the
             // list is two field reads rather than a scene walk.
@@ -927,6 +1050,7 @@ namespace NextDayRevival
                 if (!InReach(p, at)) continue;
                 if (!HostileToBattery(p, PlayerFaction(go), true)) continue;
                 found = at;
+                target = go;
                 have = true;
             }
             // Then the NPCs the drone can see - a squad that landed out there is
@@ -941,16 +1065,19 @@ namespace NextDayRevival
                 if (!InReach(p, at)) continue;
                 if (!HostileToBattery(p, FactionOf(ai), false)) continue;
                 found = at;
+                target = ai.gameObject;
+                targetNpc = ai;
                 have = true;
             }
 
-            if (!have) { p.SeenSince = 0f; return; }
+            if (!have) { p.SeenSince = 0f; p.Candidate = null; return; }
 
             // A man has to stay under the drone before the operator is sure of
             // him. Somebody who crosses the edge of the footprint is not a
             // sighting, and without this the battery would fire at every shadow.
-            if (p.SeenSince <= 0f || Flat(found - p.SeenAt) > 45f)
+            if (p.Candidate != target || p.SeenSince <= 0f || Flat(found - p.SeenAt) > 45f)
             {
+                p.Candidate = target;
                 p.SeenSince = now;
                 p.SeenAt = found;
                 return;
@@ -959,6 +1086,8 @@ namespace NextDayRevival
             if (now - p.SeenSince < Mathf.Max(0f, F(_cfgSpotSeconds, 3f))) return;
 
             p.Sighting = true;
+            p.Target = target;
+            p.TargetNpc = targetNpc;
             p.Point = found;
             p.SeenSince = 0f;
             // ONE error for the whole mission, drawn now: the shells that follow
@@ -981,6 +1110,10 @@ namespace NextDayRevival
         static void Mission(Post p, float now)
         {
             if (!p.Sighting) return;
+            // Recheck allegiance after the report delay, before laying/firing.
+            if (p.Target == null || !HostileToBattery(p, p.TargetNpc == null
+                ? PlayerFaction(p.Target) : FactionOf(p.TargetNpc), p.TargetNpc == null))
+            { p.Sighting = false; return; }
             if (now < p.ReportAt) return;
             // A report that could not be answered inside a minute is stale. The
             // turret needs twenty seconds for a half turn, so nothing legitimate
@@ -1035,17 +1168,21 @@ namespace NextDayRevival
         // ----------------------------------------------------- faction reading
 
         /// <summary>Is this faction one the battery shoots at? The battery's own
-        /// hated list is the gunner's (he is the man firing); without one the
-        /// answer for a PLAYER is yes and for an NPC is no. That asymmetry is
-        /// deliberate: an unreadable player must not switch the feature off, and
-        /// an unreadable NPC must not get the battery shelling its own
-        /// village.</summary>
+        /// hated list is the gunner's. Unknown identities are never targets,
+        /// and an explicit own-side match wins over even a malformed hated list.</summary>
         static bool HostileToBattery(Post p, object faction, bool isPlayer)
         {
-            Array hated = HatedOf(p.Gunner);
-            if (hated == null) hated = HatedOf(p.Operator);
-            if (hated == null || faction == null) return isPlayer;
-            return Hostile(hated, faction);
+            Component owner = p.Gunner != null ? p.Gunner : p.Operator;
+            if (owner == null) owner = SettlementMan(p);
+            return EnemyFaction(FactionOf(owner), HatedOf(owner), faction);
+        }
+
+        internal static bool EnemyFaction(object own, Array hated, object target)
+        {
+            if (own == null || target == null || hated == null) return false;
+            try { if (Convert.ToInt32(own) == Convert.ToInt32(target)) return false; }
+            catch { return false; }
+            return Hostile(hated, target);
         }
 
         /// <summary>The same test as NPC_AI2.IsEnemyFraction: is that faction in
@@ -1133,15 +1270,14 @@ namespace NextDayRevival
         }
 
         static MethodInfo _getInfo;
-        static bool _infoStatic;
-        static object _statsManager;
+        static Type _statsType;
         static FieldInfo _fFraction;
         static PropertyInfo _pFraction;
         static bool _statsLooked;
 
         /// <summary>A player's faction as the Fraction enum value the NPC lists
         /// are written in - the same field the mortar's own faction net reads
-        /// (PlayerStatisticsManager.GetPlayerInfo(go).fraction).</summary>
+        /// (player.GetComponent(PlayerStatisticsManager).GetPlayerInfo().fraction).</summary>
         static object PlayerFaction(GameObject player)
         {
             if (player == null) return null;
@@ -1150,26 +1286,10 @@ namespace NextDayRevival
                 if (!_statsLooked)
                 {
                     _statsLooked = true;
-                    Type t = RevivalPlugin.TypeByName("PlayerStatisticsManager");
-                    if (t != null)
+                    _statsType = RevivalPlugin.TypeByName("PlayerStatisticsManager");
+                    if (_statsType != null)
                     {
-                        MethodInfo[] ms = t.GetMethods(BindingFlags.Public
-                            | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
-                        for (int i = 0; i < ms.Length; i++)
-                        {
-                            if (ms[i].Name != "GetPlayerInfo") continue;
-                            ParameterInfo[] ps = ms[i].GetParameters();
-                            if (ps.Length != 1) continue;
-                            if (!ps[0].ParameterType.IsAssignableFrom(typeof(GameObject))) continue;
-                            _getInfo = ms[i];
-                            _infoStatic = ms[i].IsStatic;
-                            break;
-                        }
-                        if (_getInfo != null && !_infoStatic)
-                        {
-                            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
-                            if (all.Length > 0) _statsManager = all[0];
-                        }
+                        _getInfo = AccessTools.Method(_statsType, "GetPlayerInfo", Type.EmptyTypes, null);
                         if (_getInfo != null)
                         {
                             Type ret = _getInfo.ReturnType;
@@ -1182,13 +1302,12 @@ namespace NextDayRevival
                     }
                     if (_getInfo == null || (_fFraction == null && _pFraction == null))
                         RevivalPlugin.L.LogWarning("ArtyBattery: a player's faction cannot be "
-                            + "read - every player under a drone counts as hostile.");
+                            + "read - unknown players are excluded from artillery targets.");
                 }
                 if (_getInfo == null) return null;
-                if (!_infoStatic && _statsManager == null) return null;
-                object info = _infoStatic
-                    ? _getInfo.Invoke(null, new object[] { player })
-                    : _getInfo.Invoke(_statsManager, new object[] { player });
+                Component stats = player.GetComponent(_statsType);
+                if (stats == null) return null;
+                object info = _getInfo.Invoke(stats, null);
                 if (info == null) return null;
                 if (_fFraction != null) return _fFraction.GetValue(info);
                 if (_pFraction != null) return _pFraction.GetValue(info, null);
@@ -1298,7 +1417,7 @@ namespace NextDayRevival
                 m.Drone = p.DroneAt;
                 m.Centre = p.Centre;
                 m.Radius = r;
-                m.Spotted = now - p.LocalSpotAt < 90f;
+                m.Spotted = p.LocalSpotAt > 0f && now - p.LocalSpotAt < 90f;
                 m.SpotPoint = p.LocalSpotPoint;
                 _marks.Add(m);
             }
@@ -1478,7 +1597,7 @@ namespace NextDayRevival
             return vehicle.TransformPoint(new Vector3(side, 0f, -10.5f));
         }
 
-        static Mesh _hull, _turret, _barrel;
+        static Mesh _hull, _turret, _barrel, _recoil;
         static Material _material;
         static bool _loaded;
 
@@ -1499,6 +1618,10 @@ namespace NextDayRevival
                 b.transform.SetParent(t.transform, false);
                 b.transform.localPosition = TrunnionAt;
                 Part(b, _barrel);
+                GameObject sliding = new GameObject("Recoil tube and breech");
+                sliding.transform.SetParent(b.transform, false);
+                Part(sliding, _recoil);
+                b.AddComponent<ArtyRecoil>().Slide = sliding.transform;
                 turret = t.transform;
                 barrel = b.transform;
                 return root;
@@ -1519,16 +1642,20 @@ namespace NextDayRevival
         static bool Load()
         {
             if (_loaded) return _hull != null && _turret != null
-                && _barrel != null && _material != null;
+                && _barrel != null && _recoil != null && _material != null;
             _loaded = true;
             try
             {
                 _hull = Assets.Load("arty_hull.ndmesh");
                 _turret = Assets.Load("arty_turret.ndmesh");
                 _barrel = Assets.Load("arty_barrel.ndmesh");
+                _recoil = Assets.Load("arty_recoil.ndmesh");
                 // Albedo is sRGB colour, never linear mask/normal-map data.
                 Texture2D tex = Assets.Texture("arty_diffuse.png", false, true);
-                if (_hull == null || _turret == null || _barrel == null || tex == null)
+                Texture2D metal = Assets.Texture("arty_metal.png", true, true);
+                Texture2D normal = Assets.Texture("arty_normal.png", true, true);
+                if (_hull == null || _turret == null || _barrel == null || _recoil == null
+                    || tex == null || metal == null || normal == null)
                     throw new InvalidOperationException("Bohdana assets missing; repair the client package");
                 Shader shader = Shader.Find("Standard");
                 if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
@@ -1537,8 +1664,28 @@ namespace NextDayRevival
                 _material.mainTexture = tex;
                 _material.color = Color.white;
                 tex.wrapMode = TextureWrapMode.Clamp;
-                if (_material.HasProperty("_Glossiness")) _material.SetFloat("_Glossiness", 0.25f);
-                if (_material.HasProperty("_Metallic")) _material.SetFloat("_Metallic", 0.15f);
+                tex.anisoLevel = metal.anisoLevel = normal.anisoLevel = 8;
+                tex.filterMode = metal.filterMode = normal.filterMode = FilterMode.Trilinear;
+                // These shared 4K maps are uploaded once for every battery.
+                // Block compression plus releasing CPU pixels avoids retaining
+                // half a gigabyte of uncompressed readable texture data.
+                tex.Compress(true); tex.Apply(true, true);
+                metal.Compress(true); metal.Apply(true, true);
+                normal.Compress(true); normal.Apply(true, true);
+                if (_material.HasProperty("_MetallicGlossMap"))
+                {
+                    _material.SetTexture("_MetallicGlossMap", metal);
+                    _material.SetFloat("_GlossMapScale", 1f);
+                    _material.EnableKeyword("_METALLICGLOSSMAP");
+                }
+                if (_material.HasProperty("_BumpMap"))
+                {
+                    _material.SetTexture("_BumpMap", normal);
+                    _material.SetFloat("_BumpScale", 0.65f);
+                    _material.EnableKeyword("_NORMALMAP");
+                }
+                if (_material.HasProperty("_SpecularHighlights")) _material.SetFloat("_SpecularHighlights", 1f);
+                if (_material.HasProperty("_GlossyReflections")) _material.SetFloat("_GlossyReflections", 1f);
                 if (_material.HasProperty("_EmissionColor")) _material.SetColor("_EmissionColor", Color.black);
                 _material.DisableKeyword("_EMISSION");
                 RevivalPlugin.L.LogInfo("ArtyModel: supplied Bohdana model loaded");
@@ -1549,6 +1696,172 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogError("ArtyModel: " + ex.Message);
                 return false;
             }
+        }
+    }
+
+    // Reflection over the installed PUN version, with no compile-time game DLL.
+    internal static class ArtyRoom
+    {
+        static Type Photon { get { return RevivalPlugin.TypeByName("PhotonNetwork"); } }
+        static object Room()
+        {
+            Type t = Photon;
+            return t == null ? null : AccessTools.PropertyGetter(t, "room").Invoke(null, null);
+        }
+        internal static string Key(Vector3 centre)
+        {
+            return "ndr.arty." + UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
+                + "." + Mathf.RoundToInt(centre.x * 10f) + "." + Mathf.RoundToInt(centre.z * 10f);
+        }
+        internal static double Now()
+        {
+            try
+            {
+                Type t = Photon;
+                if (t != null) return Convert.ToDouble(AccessTools.PropertyGetter(t, "time").Invoke(null, null));
+            }
+            catch { }
+            return Time.realtimeSinceStartup;
+        }
+        internal static double Elapsed(double now, double then)
+        {
+            // PUN converts its uint32 millisecond timestamp to seconds. Handle
+            // its 49.7-day wrap for both a shot rewind and the replacement timer.
+            double delta = (now - then) % 4294967.296;
+            if (delta < -2147483.648) delta += 4294967.296;
+            if (delta > 2147483.648) delta -= 4294967.296;
+            return delta;
+        }
+        internal static bool Finite(Vector3 p)
+        {
+            return !(float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z)
+                || float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z));
+        }
+        internal static double[] Read(string key)
+        {
+            try
+            {
+                object room = Room();
+                if (room == null) return null;
+                object props = AccessTools.PropertyGetter(room.GetType(), "CustomProperties").Invoke(room, null);
+                System.Collections.IDictionary table = props as System.Collections.IDictionary;
+                double[] state = table == null ? null : table[key] as double[];
+                if (state == null || state.Length != 2 || state[0] < 0 || state[0] > 3
+                    || double.IsNaN(state[0]) || double.IsInfinity(state[0])
+                    || double.IsNaN(state[1]) || double.IsInfinity(state[1])) return null;
+                return state;
+            }
+            catch (Exception ex) { Warn(ex); return null; }
+        }
+        internal static void Write(string key, int hits, double readyAt)
+        {
+            if (!RevivalTroopInsertion.MasterClient()) return;
+            try
+            {
+                object room = Room();
+                if (room == null) return;
+                MethodInfo set = AccessTools.Method(room.GetType(), "SetCustomProperties", null, null);
+                Type ht = set.GetParameters()[0].ParameterType;
+                System.Collections.IDictionary table = Activator.CreateInstance(ht) as System.Collections.IDictionary;
+                table[key] = new double[] { hits, readyAt };
+                // Installed PUN signature: Hashtable, expected Hashtable, bool.
+                set.Invoke(room, new object[] { table, null, false });
+            }
+            catch (Exception ex) { Warn(ex); }
+        }
+        static bool _warned;
+        static void Warn(Exception ex)
+        {
+            if (_warned) return;
+            _warned = true;
+            RevivalPlugin.L.LogError("Artillery room state unavailable: " + ex.Message);
+        }
+    }
+
+    /// <summary>Fast hydraulic recoil, slower return and a delayed powder cloud.</summary>
+    public sealed class ArtyRecoil : MonoBehaviour
+    {
+        public Transform Slide;
+        float _shot = -100f;
+        static Material _smoke;
+        public void Kick() { _shot = Time.time; }
+        internal static float Stroke(float age)
+        {
+            if (age < 0f || age >= 0.95f) return 0f;
+            if (age < 0.085f) return 1.65f * Mathf.Sin(age / 0.085f * Mathf.PI * 0.5f);
+            float t = (age - 0.085f) / 0.865f;
+            return 1.65f * (1f - t * t * (3f - 2f * t));
+        }
+        void LateUpdate()
+        {
+            // Local +Z is the bore; elevation may change while it returns.
+            if (Slide != null) Slide.localPosition = -Vector3.forward * Stroke(Time.time - _shot);
+        }
+        internal static void Smoke(Vector3 muzzle, Vector3 forward)
+        {
+            if (_smoke == null)
+            {
+                Shader shader = Shader.Find("Particles/Alpha Blended");
+                if (shader == null) shader = Shader.Find("Legacy Shaders/Particles/Alpha Blended");
+                if (shader == null) return;
+                _smoke = new Material(shader);
+                Texture2D texture = new Texture2D(64, 64, TextureFormat.RGBA32, false);
+                Color[] pixels = new Color[64 * 64];
+                for (int y = 0; y < 64; y++)
+                    for (int x = 0; x < 64; x++)
+                    {
+                        float dx = (x - 31.5f) / 31.5f, dy = (y - 31.5f) / 31.5f;
+                        float a = Mathf.Clamp01(1f - dx * dx - dy * dy);
+                        pixels[y * 64 + x] = new Color(1f, 1f, 1f, a * a);
+                    }
+                texture.SetPixels(pixels);
+                texture.Apply();
+                texture.wrapMode = TextureWrapMode.Clamp;
+                _smoke.mainTexture = texture;
+            }
+            GameObject cloud = new GameObject("NDR artillery muzzle smoke");
+            cloud.transform.position = muzzle;
+            cloud.transform.rotation = Quaternion.LookRotation(forward);
+            ParticleSystem ps = cloud.AddComponent<ParticleSystem>();
+            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            ParticleSystem.MainModule main = ps.main;
+            main.playOnAwake = false;
+            main.loop = false;
+            main.duration = 0.35f;
+            main.startDelay = new ParticleSystem.MinMaxCurve(0.055f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(1.3f, 2.8f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(7f, 17f);
+            main.startSize = new ParticleSystem.MinMaxCurve(1.1f, 2.8f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
+            main.startColor = new ParticleSystem.MinMaxGradient(new Color(0.57f, 0.56f, 0.52f, 0.48f));
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.04f);
+            main.maxParticles = 48;
+            ParticleSystem.EmissionModule emission = ps.emission;
+            emission.rateOverTime = new ParticleSystem.MinMaxCurve(0f);
+            emission.SetBursts(new ParticleSystem.Burst[] { new ParticleSystem.Burst(0f, 32) });
+            ParticleSystem.ShapeModule shape = ps.shape;
+            shape.shapeType = ParticleSystemShapeType.Cone;
+            shape.angle = 22f;
+            shape.radius = 0.32f;
+            ParticleSystem.SizeOverLifetimeModule size = ps.sizeOverLifetime;
+            size.enabled = true;
+            size.size = new ParticleSystem.MinMaxCurve(1f, AnimationCurve.Linear(0f, 0.55f, 1f, 3.2f));
+            ParticleSystem.ColorOverLifetimeModule color = ps.colorOverLifetime;
+            color.enabled = true;
+            Gradient fade = new Gradient();
+            fade.SetKeys(new GradientColorKey[] { new GradientColorKey(Color.white, 0f),
+                new GradientColorKey(Color.white, 1f) }, new GradientAlphaKey[] {
+                new GradientAlphaKey(0f, 0f), new GradientAlphaKey(1f, 0.06f),
+                new GradientAlphaKey(0.6f, 0.45f), new GradientAlphaKey(0f, 1f) });
+            color.color = new ParticleSystem.MinMaxGradient(fade);
+            ParticleSystemRenderer renderer = cloud.GetComponent<ParticleSystemRenderer>();
+            renderer.sharedMaterial = _smoke;
+            renderer.renderMode = ParticleSystemRenderMode.Billboard;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+            ps.Play();
+            UnityEngine.Object.Destroy(cloud, 3.5f);
         }
     }
 }

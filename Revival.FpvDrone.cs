@@ -2385,7 +2385,7 @@ namespace NextDayRevival
                     && RevivalPlugin.CfgDrone.Value;
                 bool crewDrone = RevivalPlugin.CfgPatrolCrewDrone != null
                     && RevivalPlugin.CfgPatrolCrewDrone.Value;
-                if (!playerDrone && !crewDrone) return;
+                if (!playerDrone && !crewDrone && !ArtyBattery.Shootable) return;
                 if (__instance == null) return;
                 // While flying, the body cannot shoot at all (DroneInputHook).
                 // If it ever could, a pilot must not be able to shoot his own
@@ -2409,6 +2409,8 @@ namespace NextDayRevival
                     ? 400f : RevivalPlugin.CfgDroneShootRange.Value;
                 if (playerDrone)
                     Drone.Net.Beschuss(t.position, t.forward, range, 1f);
+                if (ArtyBattery.Shootable)
+                    ArtyBattery.Shoot(t.position, t.forward);
                 if (crewDrone)
                     CrewDrone.Beschuss(t.position, t.forward, range, 1f);
             }
