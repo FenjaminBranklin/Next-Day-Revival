@@ -1,10 +1,11 @@
-"""Deterministic 4K Bohdana surface atlas and matched PBR data.
+"""Bohdana atlas using the installed BTR exterior and wheel textures.
 
 Mapping stays compatible with arty_import.surface_uv: paint/rubber on the
 upper row, machinery/glass below. Linear metal R and smoothness A; normals
 are packed AG for the desktop Unity Standard shader. No baked highlights.
 """
 from pathlib import Path
+import os
 import numpy as np
 from PIL import Image
 import texlib
@@ -12,6 +13,52 @@ import texlib
 SIZE = 4096
 HALF = SIZE // 2
 ROOT = Path(__file__).resolve().parent
+PAINT_CROP = (550, 20, 806, 276)  # Plain exterior plate; no hatches or lamps.
+GUTTER = 64
+INNER = HALF - 2 * GUTTER
+
+
+def native_environment():
+    import UnityPy
+    data = Path(os.environ.get('NDR_GAME_DATA',
+        r'C:\Program Files (x86)\Steam\steamapps\common\Next Day Survival\nextday_game_Data'))
+    return UnityPy.load(str(data / 'resources.assets'))
+
+
+def native_maps():
+    names = ('btr-80a_alb', 'btr-80a_met', 'btr-80a_norm',
+             'btr-80a_wheel_alb', 'btr-80a_wheel_norm')
+    found = {}
+    for obj in native_environment().objects:
+        if obj.type.name != 'Texture2D':
+            continue
+        data = obj.read()
+        if data.m_Name in names:
+            found[data.m_Name] = data.image.convert('RGBA')
+    if set(found) != set(names):
+        raise ValueError('Native BTR exterior maps missing: '+str(set(names)-set(found)))
+    return found
+
+
+def paint_patch(image, normal=False):
+    """Repeat actual paint pixels with mirrored, normal-corrected seams."""
+    patch = np.asarray(image.crop(PAINT_CROP)).copy()
+    if normal:
+        patch[..., 0] = patch[..., 2] = 255  # Unity desktop AG encoding.
+    across = patch[:, ::-1].copy()
+    if normal:
+        across[..., 3] = 255-across[..., 3]
+    row = np.concatenate((patch, across), axis=1)
+    below = row[::-1].copy()
+    if normal:
+        below[..., 1] = 255-below[..., 1]
+    tile = np.concatenate((row, below), axis=0)
+    return np.tile(tile, (4, 4, 1))[:INNER, :INNER]
+
+
+def padded(pixels):
+    return Image.fromarray(np.pad(pixels, ((GUTTER,GUTTER),
+                                          (GUTTER,GUTTER),(0,0)), mode='edge'))
 
 
 def surface(kind, seed):
@@ -66,10 +113,28 @@ def main():
     metal=Image.new('RGBA',(SIZE,SIZE))
     normal=Image.new('RGBA',(SIZE,SIZE))
     for kind,pos in enumerate(((0,0),(HALF,0),(0,HALF),(HALF,HALF))):
+        if kind < 2:
+            continue
         a,m,n=surface(kind,0x4127+kind)
         diffuse.paste(Image.fromarray(a),pos)
         metal.paste(Image.fromarray(m),pos)
         normal.paste(Image.fromarray(n),pos)
+    native = native_maps()
+    paint = paint_patch(native['btr-80a_alb'])
+    material = paint_patch(native['btr-80a_met'])
+    # The BTR's map alpha is 1, multiplied by _GlossMapScale = 0.4.
+    material[..., 3] = np.rint(material[..., 3].astype(float)*0.4).astype(np.uint8)
+    diffuse.paste(padded(paint).convert('RGB'), (0,0))
+    metal.paste(padded(material), (0,0))
+    normal.paste(padded(paint_patch(native['btr-80a_norm'], True)), (0,0))
+    wheel = np.array(native['btr-80a_wheel_alb'].resize((INNER,INNER), Image.Resampling.BILINEAR))
+    wheel_normal = np.array(native['btr-80a_wheel_norm'].resize((INNER,INNER), Image.Resampling.BILINEAR))
+    wheel_normal[...,0] = wheel_normal[...,2] = 255
+    wheel_material = np.zeros((INNER,INNER,4), np.uint8)
+    wheel_material[...,3] = 30
+    diffuse.paste(padded(wheel).convert('RGB'), (HALF,0))
+    metal.paste(padded(wheel_material), (HALF,0))
+    normal.paste(padded(wheel_normal), (HALF,0))
     for name,img in (('diffuse',diffuse),('metal',metal),('normal',normal)):
         path=ROOT/'assets'/('arty_'+name+'.png')
         img.save(path)

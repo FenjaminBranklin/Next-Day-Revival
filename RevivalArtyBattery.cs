@@ -1681,7 +1681,8 @@ namespace NextDayRevival
                 if (_material.HasProperty("_BumpMap"))
                 {
                     _material.SetTexture("_BumpMap", normal);
-                    _material.SetFloat("_BumpScale", 0.65f);
+                    // Same normal strength as the native BTR exterior donor.
+                    _material.SetFloat("_BumpScale", 1f);
                     _material.EnableKeyword("_NORMALMAP");
                 }
                 if (_material.HasProperty("_SpecularHighlights")) _material.SetFloat("_SpecularHighlights", 1f);

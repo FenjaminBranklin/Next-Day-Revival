@@ -18,6 +18,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'build/arty_deps'))
+sys.path.insert(0, str(ROOT / 'build/arty_mtw_deps'))
 import gltf_read
 from ndmesh import Mesh
 
@@ -35,6 +36,10 @@ YAW_FRAME = np.stack([RIGHT, [0., 1., 0.], FLAT])
 GUN_FRAME = np.stack([RIGHT, UP, FORWARD])
 BODY_FRAME = np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])
 SCALE = .0254 * 3.0
+# Connected tyre shells measured in the pinned GLB, before deduplication.
+WHEEL_LABELS = (4938, 5335, 30167, 30303, 39539, 41961)
+ATLAS_INSET = 64.0 / 4096
+ATLAS_SPAN = 1920.0 / 4096
 
 
 def surface_uv(points, normal, material, low, span):
@@ -53,8 +58,101 @@ def surface_uv(points, normal, material, low, span):
         tile = (0, 1)
     axis = int(np.argmax(np.abs(normal)))
     axes = [i for i in range(3) if i != axis]
-    uv = (points[:, axes] - low[axes]) / span[axes]
-    return np.array(tile)*.5 + .015 + uv*.47
+    # Same texel density on all axes. Independent axis scaling stretched
+    # scratches on long panels and made adjacent projections disagree.
+    uv = (points[:, axes] - low[axes]) / max(span)
+    if tile == (1, 1):
+        # Non-wheel rubber parts sample only a clean patch of the native tread.
+        uv = np.array([0.08, 0.04]) + uv*np.array([0.55, 0.22])
+    return np.array(tile)*.5 + ATLAS_INSET + uv*ATLAS_SPAN
+
+
+def wheel_boxes(v, f, labels):
+    boxes = []
+    for label in WHEEL_LABELS:
+        points = v[np.unique(f[labels == label])]
+        if len(points) == 0:
+            raise ValueError('Measured Bohdana tyre component missing')
+        boxes.append((points.min(0), points.max(0)))
+    return boxes
+
+
+def without_wheels(v, f, labels, boxes):
+    """Remove complete wheel/hub components; keep axles and suspension."""
+    keep = np.ones(len(f), dtype=bool)
+    for label in np.unique(labels):
+        mask = labels == label
+        points = v[np.unique(f[mask])]
+        low, high = points.min(0), points.max(0)
+        if any(np.all(low >= lo-2) and np.all(high <= hi+2) for lo,hi in boxes):
+            keep[mask] = False
+    return keep
+
+
+def native_wheel():
+    from arty_texture import native_environment
+    from UnityPy.helpers.MeshHelper import MeshHandler
+    for obj in native_environment().objects:
+        if obj.type.name != 'Mesh':
+            continue
+        data = obj.read()
+        if data.m_Name == 'wheel_01':
+            handler = MeshHandler(data)
+            handler.process()
+            v = np.array(handler.m_Vertices)
+            n = np.array(handler.m_Normals)
+            uv = np.array(handler.m_UV0)[:, :2]
+            f = np.array(handler.get_triangles()).reshape(-1,3)
+            return round_wheel(v, n, uv, f)
+    raise ValueError('Native BTR wheel_01 mesh missing')
+
+
+def round_wheel(v, n, uv, f):
+    """Subdivide native 24-sector tyres to 48, retaining the authored UVs.
+
+    Project new tyre vertices onto their interpolated radius; subdividing flat
+    triangles alone would leave the same polygonal silhouette. Hub detail stays
+    as authored. Split normals and UV seams remain split.
+    """
+    vertices, normals, coords, triangles = list(v), list(n), list(uv), []
+    mids = {}
+    def midpoint(a, b):
+        key = tuple(sorted((int(a), int(b))))
+        if key in mids:
+            return mids[key]
+        p = (v[a]+v[b])*0.5
+        radii = np.linalg.norm(v[[a,b],1:], axis=1)
+        radius = np.linalg.norm(p[1:])
+        if min(radii) > 1.3 and radius > 1e-6:
+            p[1:] *= radii.mean()/radius
+        normal = n[a]+n[b]
+        normal /= np.linalg.norm(normal)
+        index = len(vertices)
+        vertices.append(p); normals.append(normal); coords.append((uv[a]+uv[b])*0.5)
+        mids[key] = index
+        return index
+    for a,b,c in f:
+        ab,bc,ca = midpoint(a,b), midpoint(b,c), midpoint(c,a)
+        triangles.extend(((a,ab,ca),(ab,b,bc),(ca,bc,c),(ab,bc,ca)))
+    return np.array(vertices), np.array(normals), np.clip(coords,0,1), np.array(triangles)
+
+
+def append_wheels(mesh, boxes):
+    v,n,uv,f = native_wheel()
+    extent = np.ptp(v,axis=0)
+    for low,high in boxes:
+        centre = ((low+high)*0.5-ORIGIN) @ BODY_FRAME.T*SCALE
+        size = (high-low)*SCALE
+        scale = np.array([size[2]/extent[0],size[1]/extent[1],size[1]/extent[2]])
+        # The left native wheel faces -X. Rotate the right wheels 180 degrees.
+        turn = np.array([-1.,1.,-1.]) if centre[0]>0 else np.ones(3)
+        points = v*scale*turn+centre
+        normals = n/scale*turn
+        normals /= np.linalg.norm(normals,axis=1)[:,None]
+        base = len(mesh.V)
+        mesh.V.extend(map(tuple,points)); mesh.N.extend(map(tuple,normals))
+        mesh.T.extend(map(tuple,.5+ATLAS_INSET+uv*ATLAS_SPAN))
+        mesh.IDX.extend((f+base).ravel().tolist())
 
 
 def components(v, f):
@@ -157,6 +255,9 @@ def main():
     keep = visible[mats] & (v[f][:, :, 2].min(1)>-250) & (v[f][:, :, 1].max(1)>0) & (mats!=1)
     f, mats = f[keep], mats[keep]
     labels = components(v, f)
+    boxes = wheel_boxes(v, f, labels)
+    keep = without_wheels(v, f, labels, boxes)
+    f, mats, labels = f[keep], mats[keep], labels[keep]
     part = np.zeros(len(f), dtype=int)
     # Whole connected components, never a coordinate cut through a triangle.
     # Barrel, breech cover and recoil cradle measured in the source preview.
@@ -228,6 +329,8 @@ def main():
                     mesh.T.extend(map(tuple, uvs if outward is normal else uvs[[0,2,1]]))
                     mesh.IDX.extend([base, base+1, base+2])
             # Restore original joints for the preview of the deployed posture.
+        if name == 'hull':
+            append_wheels(mesh, boxes)
         if name == 'barrel':
             cradle, sliding = split_recoil(mesh)
             cradle.write(str(assets/'arty_barrel.ndmesh'))
