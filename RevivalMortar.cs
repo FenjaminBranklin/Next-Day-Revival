@@ -13,8 +13,11 @@
 //
 // WHAT IT IS, IN THE ORDER THE PLAYER MEETS IT
 //
-//   1. A gun vehicle stands in the middle of every settlement, on a free, flat
-//      patch of ground. It is a LOCAL object built from the imported Bohdana meshes - no network object, no collider.
+//   1. A gun vehicle stands in the middle of every REAL settlement, on a free,
+//      flat patch of ground. Real is measured, not guessed: see NotASettlement.
+//      The game calls every group of NPCs an NPC_Settlement, quest camps and
+//      random bands included, and those keep no gun. It is a LOCAL object built
+//      from the imported Bohdana meshes - no network object, no collider.
 //      Every client builds the same vehicle in the same place from the same
 //      rule. Its turret turns and its barrel elevates.
 //   2. TWO MEN belong to it, and by default they are at it: while a crew that
@@ -138,7 +141,9 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgUseDistance;
         static ConfigEntry<float> _cfgPlaceRange;
         static ConfigEntry<float> _cfgScale;
-        static ConfigEntry<bool> _cfgSkipSafe;
+        static ConfigEntry<int> _cfgMinSpawnPoints;
+        static ConfigEntry<bool> _cfgOnlyPermanent;
+        static ConfigEntry<bool> _cfgSkipNeutral;
         static ConfigEntry<bool> _cfgOpenMap;
 
         static ConfigEntry<float> _cfgMaxRange;
@@ -167,6 +172,7 @@ namespace NextDayRevival
         static bool Enabled { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
         static float F(ConfigEntry<float> c, float fallback) { return c == null ? fallback : c.Value; }
         static int I(ConfigEntry<int> c, int fallback) { return c == null ? fallback : c.Value; }
+        static bool B(ConfigEntry<bool> c, bool fallback) { return c == null ? fallback : c.Value; }
 
         internal static float MaxRange { get { return Mathf.Max(50f, F(_cfgMaxRange, 1200f)); } }
         internal static float MinRange
@@ -252,6 +258,9 @@ namespace NextDayRevival
         static readonly List<Shell> _inFlight = new List<Shell>();
         static readonly Dictionary<int, bool> _placed = new Dictionary<int, bool>();
         static readonly Dictionary<int, int> _tries = new Dictionary<int, int>();
+        // The shortest distance a failed attempt was made from. Getting much
+        // closer than that buys the settlement a fresh set of tries.
+        static readonly Dictionary<int, float> _closest = new Dictionary<int, float>();
 
         static Tube _aiming;
         static bool _cursorHidden;
@@ -331,12 +340,29 @@ namespace NextDayRevival
                 + "TerrainColliders are off (E-059), so a free-ground search out "
                 + "there would hit nothing and could not tell a clear patch from "
                 + "the inside of a house.");
-            _cfgSkipSafe = cfg.Bind("Mortar", "SkipSafeSettlements", false,
-                "true leaves the trader camps (IsSafeSettlement) without a gun. "
-                + "They never get a crew, a drone or a fire mission either way - "
-                + "this only decides whether the vehicle stands there at all.");
+            // SkipSafeSettlements was taken out of the code on 2026-09-17. A trader
+            // camp now never gets a gun at all, and a key that decides nothing
+            // does not belong in the file (CLAUDE.md, point 4). The line in an
+            // already installed .cfg is inert and may be deleted by hand.
+            _cfgMinSpawnPoints = cfg.Bind("Mortar", "MinSpawnPoints", 8,
+                "How many NPC spawn points a place needs before it counts as a "
+                + "settlement and gets a battery. NPC_Settlement is the game's "
+                + "word for ANY group of NPCs, a two-man quest camp included. On "
+                + "the world map (level7): Peaces 18, Locator 17, Neutrals 14, "
+                + "Berezki 12, Military1 9 - and nothing else above 5. 0 turns "
+                + "the test off and gives every group a howitzer again.");
+            _cfgOnlyPermanent = cfg.Bind("Mortar", "OnlyPermanentSettlements", true,
+                "true leaves quest and random camps (NPC_SettlementType "
+                + "OnCallShow, OnCallRandom) without a gun. Those are switched on "
+                + "and off around the player, and every one that was switched on "
+                + "used to leave another battery and another drone orbit behind.");
+            _cfgSkipNeutral = cfg.Bind("Mortar", "SkipNeutralBase", true,
+                "true leaves the neutral base without a gun - every settlement "
+                + "whose object name contains \"[Neutral\". \"[MilitaryNeutral1]\" "
+                + "is not matched by that and keeps its battery.");
             _cfgScale = cfg.Bind("Mortar", "Scale", 1f,
-                "Size of the vehicle, 1 = a 6.2 m hull with a 4 m barrel.");
+                "Vehicle size multiplier. 1 = Bohdana at native vehicle scale: "
+                + "31.6 game units long, including deployed stabilizers.");
             _cfgOpenMap = cfg.Bind("Mortar", "OpenMapOnAim", true,
                 "Let the use key open the map itself through "
                 + "UIController.ShowMap(true). false leaves opening the map to "
@@ -386,10 +412,8 @@ namespace NextDayRevival
                 + "howitzer, so this is also how fast the crosshair may be pushed "
                 + "away from or pulled towards the gun.");
             _cfgClearance = cfg.Bind("Mortar", "VehicleClearance", 5.6f,
-                "Metres of free ground the gun VEHICLE needs around its centre "
-                + "before a spot is accepted. The old tube needed 1.6 m; a hull "
-                + "six metres long parked inside a shed is the mistake this "
-                + "number exists to prevent.");
+                "Minimum free-ground radius in game units. Placement also "
+                + "reserves the scaled Bohdana footprint (17 units at Scale=1).");
 
             _cfgRadius = cfg.Bind("Mortar", "ExplosionRadius", 16f,
                 "Metres. The damage falls off to zero at the rim. The patrol "
@@ -477,6 +501,7 @@ namespace NextDayRevival
                 ArtyBattery.GunLost(_tubes[i].SettlementId);   // NDR settlement artillery
                 _placed.Remove(_tubes[i].SettlementId);
                 _tries.Remove(_tubes[i].SettlementId);
+                _closest.Remove(_tubes[i].SettlementId);
                 _tubes.RemoveAt(i);
                 _inFlight.Clear();
             }
@@ -501,21 +526,44 @@ namespace NextDayRevival
                 if (s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)) continue;
                 int id = s.gameObject.GetInstanceID();
                 if (_placed.ContainsKey(id)) continue;
-                Vector3 centre = s.transform.position;
-                if (Vector3.Distance(new Vector3(centre.x, 0f, centre.z),
-                                     new Vector3(me.x, 0f, me.z)) > reach) continue;
-                if (_cfgSkipSafe != null && _cfgSkipSafe.Value && SafeSettlement(s))
+                // A PLACE, not a group of men. Asked before the distance test and
+                // remembered, so a quest camp is looked at once per scene and
+                // never again.
+                string no = NotASettlement(s);
+                if (no != null)
                 {
                     _placed[id] = true;
+                    RevivalPlugin.L.LogInfo("Mortar: no gun for \"" + s.gameObject.name
+                        + "\" - " + no + ".");
                     continue;
                 }
+                Vector3 centre = s.transform.position;
+                float away = Vector3.Distance(new Vector3(centre.x, 0f, centre.z),
+                                              new Vector3(me.x, 0f, me.z));
+                if (away > reach) continue;
                 if (Raise(s, centre, id))
                 {
                     _placed[id] = true;
                     continue;
                 }
+                // EIGHT TRIES, BUT NOT EIGHT SECONDS. The scan repeats once a
+                // second while something is pending, so the eight tries were
+                // spent inside eight seconds of the settlement first coming
+                // into PlaceRange - 250 m, where the whole-map TerrainColliders
+                // are off (E-059) and the search cannot succeed. A walker
+                // covers thirty metres in that time, so a settlement could be
+                // written off for the rest of the level before he was anywhere
+                // near it, and the write-off is permanent: only the stale-tube
+                // loop ever drops a _placed key, and a settlement with no tube
+                // has nothing to drop. Coming a real step closer - forty
+                // percent - is a different question about different ground, so
+                // it buys a fresh set of tries.
                 int tries = 0;
                 _tries.TryGetValue(id, out tries);
+                float closest;
+                bool triedBefore = _closest.TryGetValue(id, out closest);
+                if (triedBefore && away < closest * 0.6f) tries = 0;
+                if (!triedBefore || away < closest) _closest[id] = away;
                 tries++;
                 _tries[id] = tries;
                 if (tries >= MaxTries)
@@ -523,7 +571,8 @@ namespace NextDayRevival
                     _placed[id] = true;
                     RevivalPlugin.L.LogWarning("Mortar: no free ground in settlement "
                         + s.gameObject.name + " at " + centre.ToString("0") + " after "
-                        + tries + " tries - that settlement keeps no gun.");
+                        + tries + " tries from " + away.ToString("0")
+                        + " m - that settlement keeps no gun.");
                 }
                 else pending = true;
             }
@@ -532,13 +581,149 @@ namespace NextDayRevival
 
         static bool SafeSettlement(Component settlement)
         {
+            return Flag(settlement, "IsSafeSettlement");
+        }
+
+        static bool Flag(Component settlement, string field)
+        {
             try
             {
-                FieldInfo f = AccessTools.Field(settlement.GetType(), "IsSafeSettlement");
+                FieldInfo f = AccessTools.Field(settlement.GetType(), field);
                 if (f == null || f.FieldType != typeof(bool)) return false;
                 return (bool)f.GetValue(settlement);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// WHY THE GUN IS NOT FOR EVERY NPC_Settlement (field report 2026-09-17:
+        /// "artillery crews keep appearing at random places, the map is full of
+        /// drone circles").
+        ///
+        /// NPC_Settlement is not the game's word for "village". It is the word
+        /// for any group of NPCs with spawn points and walk points, and the open
+        /// world (level7) holds 39 of them: four real settlements, one trader
+        /// hub, thirteen "*_quest" camps of two or three men, four roaming bands
+        /// and eight Rnd* groups that are switched on around the player as he
+        /// walks. Giving every one of them a howitzer, a crew and a 240 m drone
+        /// orbit is what filled the map. Every reading below comes from the
+        /// game's own fields, dumped offline with research/mono.py:
+        ///
+        ///   SettlementType  Default(0) is a fixed place. OnCallShow(1) is a
+        ///                   quest camp, OnCallRandom(2) a random group; both
+        ///                   appear and vanish with the script that calls them.
+        ///   IsSafeSettlement  a trader camp. The order is explicit that the
+        ///                   neutral base keeps NO gun - not even as scenery.
+        ///   IsIndoors       catacombs and bunkers (level3, level6). A howitzer
+        ///                   under a roof fires into the ceiling.
+        ///   IsMain          the game's own flag for a main settlement. It
+        ///                   outranks the head count, because the other two open
+        ///                   worlds build their main places smaller than level7
+        ///                   does.
+        ///   NPC_SpawnPoint  how many men the place holds, and the sharpest
+        ///                   line there is. On level7: Peaces 18, Locator 17,
+        ///                   Neutrals 14, Berezki 12, Military1 9 - and then
+        ///                   nothing until 5. It is counted here with
+        ///                   GetComponentsInChildren, the same call
+        ///                   NPC_Settlement.StartMainInit uses to fill
+        ///                   _npcSpawnPoints and to size NpcAI, and nothing in
+        ///                   the game's own code destroys those children.
+        ///
+        /// What survives on level7 is exactly the four map-circled settlements:
+        /// Peaces, Locator, Berezki, Military1. The neutral base is dropped by
+        /// name AND by IsSafeSettlement.
+        ///
+        /// Returns null when the settlement gets a gun, otherwise the reason,
+        /// which goes into the log once per settlement.
+        /// </summary>
+        static string NotASettlement(Component s)
+        {
+            if (SafeSettlement(s)) return "a trader camp (IsSafeSettlement)";
+            if (Flag(s, "IsIndoors")) return "indoors";
+
+            // The neutral base, at the user's order. The bracket is part of the
+            // match on purpose: "NPC_Settlement[Neutrals]", "[Neutral]_boris" and
+            // "Settl[Neutral]_base_External" are the neutral base and its people,
+            // while "[MilitaryNeutral1]" is a military base and keeps its gun.
+            if (B(_cfgSkipNeutral, true)
+                && s.gameObject.name.IndexOf("[Neutral", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "the neutral base";
+
+            if (B(_cfgOnlyPermanent, true))
+            {
+                int type;
+                if (SettlementType(s, out type) && type != 0)
+                    return "a called-up camp (SettlementType " + type + ")";
+            }
+
+            // IsMain is the game's own word for a main settlement, and it
+            // OUTRANKS the head count. The count was measured on level7, where
+            // the four real places hold 9 to 18 men; on the other two open
+            // worlds the game's main settlements are smaller than that -
+            // level5's Settl[Peace] has six spawn points and Settl[Marauder]
+            // five, and a flat threshold of eight would leave both maps without
+            // a single battery. Only two settlements on level7 carry the flag
+            // (Peaces and Locator) and both clear the count anyway, so this
+            // adds nothing there and rescues the other maps.
+            if (Flag(s, "IsMain")) return null;
+
+            int want = _cfgMinSpawnPoints == null ? 8
+                : Mathf.Clamp(_cfgMinSpawnPoints.Value, 0, 64);
+            if (want > 0)
+            {
+                int men = SpawnPoints(s);
+                // -1 is "the type is missing", not "the place is empty". A gate
+                // that cannot be read must not silently disarm every settlement.
+                if (men >= 0 && men < want)
+                    return "too small for a battery (" + men + " spawn point(s), "
+                        + want + " wanted)";
+            }
+            return null;
+        }
+
+        /// <summary>The settlement's own NPC_SettlementType, as an int. False
+        /// when the field is not there or does not read as a number - the caller
+        /// then keeps the settlement rather than dropping it on a guess.</summary>
+        static bool SettlementType(Component s, out int value)
+        {
+            value = 0;
+            try
+            {
+                FieldInfo f = AccessTools.Field(s.GetType(), "SettlementType");
+                if (f == null || !f.FieldType.IsEnum) return false;
+                object v = f.GetValue(s);
+                if (v == null) return false;
+                value = Convert.ToInt32(v);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        static Type _spawnPointType;
+        static bool _spawnPointLooked;
+
+        /// <summary>How many men this settlement is built for. -1 when
+        /// NPC_SpawnPoint itself cannot be found. Inactive children count: an
+        /// OnCallRandom group is switched off until it is called, and its points
+        /// are off with it.</summary>
+        static int SpawnPoints(Component s)
+        {
+            try
+            {
+                if (!_spawnPointLooked)
+                {
+                    _spawnPointLooked = true;
+                    _spawnPointType = RevivalPlugin.TypeByName("NPC_SpawnPoint");
+                    if (_spawnPointType == null)
+                        RevivalPlugin.L.LogWarning("Mortar: NPC_SpawnPoint not found - "
+                            + "settlement size cannot be measured, so every fixed "
+                            + "settlement keeps a gun.");
+                }
+                if (_spawnPointType == null) return -1;
+                Component[] points = s.GetComponentsInChildren(_spawnPointType, true);
+                return points == null ? 0 : points.Length;
+            }
+            catch { return -1; }
         }
 
         /// <summary>Builds one emplacement at the first free, flat patch at or
@@ -590,10 +775,14 @@ namespace NextDayRevival
             _tubes.Add(t);
             _placed[id] = true;
 
-            // NDR settlement artillery. A TRADER CAMP gets the vehicle and
-            // nothing else: no crew, no drone, no fire missions. The camps are
-            // where the game puts a player in front of a shopkeeper, and an
-            // armed crew standing in one would shoot at him over the counter.
+            // NDR settlement artillery. The "safe" flag tells the battery to
+            // keep the vehicle as scenery: no crew, no drone, no fire mission.
+            // Since the settlement gate it is ALWAYS false here - NotASettlement refuses a
+            // trader camp before Raise is ever called, and no setting reopens
+            // that path, because the IsSafeSettlement test is the first line of
+            // the gate and nothing switches it off. It is passed anyway so the
+            // battery keeps its own rule about trader camps instead of
+            // inheriting one from this file's ordering.
             ArtyBattery.GunRaised(id, go, centre, t.Name, SafeSettlement(settlement));
 
             RevivalPlugin.L.LogInfo("Mortar: gun raised for settlement \"" + t.Name
@@ -659,15 +848,17 @@ namespace NextDayRevival
             // would fire into a ceiling.
             Vector3 dummy;
             if (Turret.RaycastObject(point + Vector3.up * 0.4f, Vector3.up,
-                                     7f, out dummy) != null) return false;
+                                     15f * Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f),
+                                     out dummy) != null) return false;
 
             // A wall inside the hull's clearance at chest height. EIGHT rays,
-            // not four: the vehicle is over ten metres long, and four rays can walk a
+            // not four: the vehicle is over thirty game units long; four rays can walk a
             // hull straight through the corner between two of them.
             if (strict)
             {
                 // Old configs contain the placeholder's 3.6 m clearance.
-                float reach = Mathf.Clamp(F(_cfgClearance, 5.6f), 5.6f, 8f);
+                float reach = Mathf.Max(F(_cfgClearance, 5.6f),
+                    17f * Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f));
                 for (int i = 0; i < 8; i++)
                 {
                     float a = i * Mathf.PI * 0.25f;
@@ -789,7 +980,7 @@ namespace NextDayRevival
             {
                 Tube t = _tubes[i];
                 if (t.Go == null) continue;
-                float d = (t.Go.transform.position - from).sqrMagnitude;
+                float d = (ArtyModel.UsePoint(t.Go.transform, from) - from).sqrMagnitude;
                 if (d > best) continue;
                 best = d;
                 found = t;
@@ -876,7 +1067,8 @@ namespace NextDayRevival
 
             float leash = Mathf.Max(1f, F(_cfgUseDistance, 3.5f)) * 2.5f;
             if (Vector3.Distance(player.transform.position,
-                                 _aiming.Go.transform.position) > leash)
+                                 ArtyModel.UsePoint(_aiming.Go.transform,
+                                     player.transform.position)) > leash)
             { LeaveAim("walked away"); return; }
 
             if (Input.GetKeyDown(KeyCode.Escape) || Input.GetKeyDown(Key(true)))

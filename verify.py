@@ -987,6 +987,35 @@ def check_mortar():
     need("MaxTries" in s,
          "Aufstellung wird wiederholt, nicht einmal versucht",
          "ein Fehlversuch beim Aufstellen wird nicht wiederholt")
+
+    # --- WER EINE BATTERIE BEKOMMT. NPC_Settlement ist im Spiel jede NPC-
+    # Gruppe: auf level7 sind es 39, davon vier echte Siedlungen. Ohne diese
+    # Pruefung bekam jedes Questlager und jede Zufallsgruppe eine Haubitze
+    # samt Besatzung und 240-m-Drohnenkreis auf der Karte (Feldbericht
+    # 2026-09-17). research/arty_regression_check.py spielt die vollstaendige
+    # Zaehlung von level7 gegen die echten Methoden durch.
+    need("string no = NotASettlement(s);" in s,
+         "jede Siedlung wird vor dem Geschuetz geprueft",
+         "Place() prueft nicht mehr, ob der Ort ueberhaupt eine Siedlung ist")
+    need('Flag(s, "IsIndoors")' in s and "SafeSettlement(s)" in s,
+         "Haendlerlager und Innenraeume bekommen kein Geschuetz",
+         "IsSafeSettlement oder IsIndoors wird nicht mehr geprueft")
+    need('"[Neutral"' in s,
+         "die neutrale Basis bleibt ohne Geschuetz",
+         "die Ausnahme fuer die neutrale Basis fehlt")
+    need("SettlementType(s, out type)" in s,
+         "Quest- und Zufallslager bleiben ohne Geschuetz",
+         "NPC_SettlementType wird nicht mehr gelesen")
+    need('RevivalPlugin.TypeByName("NPC_SpawnPoint")' in s
+         and "GetComponentsInChildren(_spawnPointType, true)" in s,
+         "die Groesse eines Ortes wird an seinen Spawnpunkten gemessen",
+         "die Spawnpunkte werden nicht mehr gezaehlt")
+    need("men >= 0 && men < want" in s,
+         "eine unlesbare Groesse entwaffnet nicht jede Siedlung",
+         "eine fehlende NPC_SpawnPoint-Klasse wuerde jede Siedlung ablehnen")
+    need('cfg.Bind("Mortar", "SkipSafeSettlements"' not in s,
+         "SkipSafeSettlements ist aus dem Code genommen",
+         "SkipSafeSettlements wird noch gebunden, entscheidet aber nichts mehr")
     need("if (Master())" in s and "{ dmg, 14 }" in s,
          "Fahrzeugschaden nur auf dem Master, ueber Teil 14",
          "Fahrzeugschaden nicht auf den Master begrenzt")
@@ -1112,6 +1141,46 @@ def check_arty_battery():
     need("Drone.Modell.Bauen()" in b,
          "es fliegt eine echte Drohne, kein Symbol",
          "die Aufklaerungsdrohne hat kein Modell")
+
+    # --- 3b: DIE BAHN MUSS RUND LAUFEN. PhotonNetwork.time ist eine ganze
+    # Millisekundenzahl, offline Environment.TickCount mit rund 15,6 ms
+    # Aufloesung; direkt in die Position gerechnet ergibt das ein Stottern
+    # (Feldbericht 2026-09-17). research/arty_drone_orbit_check.py misst beide
+    # Fassungen gegeneinander.
+    need("AdvanceFlightClock();" in b and "_flightClock * speed / r" in b,
+         "die Drohne fliegt auf der geglaetteten Uhr, nicht auf der rohen",
+         "die Bahn haengt wieder direkt an der rohen Netzuhr - das ruckelt")
+    need("drift > 1f || drift < -1f" in b,
+         "ein Sprung der Netzuhr wird in einem Schritt genommen",
+         "ein Uhrensprung wuerde minutenlang nachgezogen")
+    need("Mathf.Lerp(p.Ground, p.GroundWant" in b,
+         "die Bodenhoehe wird nachgefuehrt, nicht gestuft",
+         "die Drohne springt wieder auf jede neue Bodenmessung")
+    need("range * 1.1f" in b,
+         "das Modell hat eine Hysterese an der Sichtgrenze",
+         "am Sichtrand wird das Drohnenmodell im Wechsel gebaut und geloescht")
+    need("RevivalTroopInsertion.TerrainHeight(flat, out y)" in b,
+         "die Drohne fliegt ueber das Gelaende, nicht ueber Daecher",
+         "die Flughoehe kommt wieder aus einem Strahl ohne Layer-Maske")
+
+    # --- 3c: die Karte darf keine Kreise einer Ebene behalten, die weg ist.
+    need("if (_marks.Count > 0) _marks.Clear();" in b and "_mapOpen = false;" in b,
+         "ohne Batterien wird die Kartenaufnahme geleert",
+         "eine leere Postenliste laesst die alten Drohnenkreise stehen")
+    need("if (p.CrewSettlement != null) Crew.Forget(p.CrewSettlement);" in b,
+         "eine abgeraeumte Besatzung wird bei Crew abgemeldet",
+         "Crew._settlements behaelt einen Eintrag fuer ein zerstoertes Objekt")
+
+    # --- die beiden Regressionen zu diesem Feature muessen im Repository
+    # liegen. verify.py fuehrt sie nicht aus (es startet keine Unterprozesse),
+    # aber ein stilles Verschwinden faellt hier auf.
+    # research/ gehoert nur ins private Repository; in der oeffentlichen
+    # Kopie gibt es hier nichts zu pruefen.
+    if os.path.isdir(os.path.join(ROOT, "research")):
+        for check in ("arty_regression_check.py", "arty_drone_orbit_check.py"):
+            need(os.path.exists(os.path.join(ROOT, "research", check)),
+                 "research/" + check + " liegt vor",
+                 "research/" + check + " fehlt - die Batterieregression ist unbelegt")
 
     # --- the delay and the random accuracy, both ordered explicitly.
     need("_cfgReportDelay" in b and "_cfgReportJitter" in b,

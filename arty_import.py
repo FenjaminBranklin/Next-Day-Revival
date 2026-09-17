@@ -3,9 +3,10 @@
 Run: python arty_import.py [source.glb]
 Requires numpy, Pillow and fast-simplification==0.2.0 (build-time only).
 The supplied SketchUp export contains two trucks, a ground plane and invisible
-edge geometry. Keep the deployed truck, preserve its material colours, split
+edge geometry. Keep the deployed truck, assign weathered vehicle materials, split
 the original geometry at the gun joints and reduce its rendering cost.
-Source coordinates are inches. Runtime coordinates are metres, Y up, Z forward.
+Source coordinates are inches. Runtime uses 3 game units per metre, Y up,
+Z forward, matching the native BTR/T-72 rather than assuming Unity metres.
 """
 import hashlib
 import math
@@ -13,7 +14,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'build/arty_deps'))
@@ -33,7 +34,27 @@ UP = np.cross(FORWARD, RIGHT)
 YAW_FRAME = np.stack([RIGHT, [0., 1., 0.], FLAT])
 GUN_FRAME = np.stack([RIGHT, UP, FORWARD])
 BODY_FRAME = np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])
-SCALE = .0254
+SCALE = .0254 * 3.0
+
+
+def surface_uv(points, normal, material, low, span):
+    """Planar mapping in the source frame, continuous across coplanar faces.
+
+    The authored atlas is retained on rebuild: olive / rubber above steel /
+    glass. Insets keep mipmap filtering away from neighbouring materials.
+    """
+    if material in (11, 12, 13, 24, 37):
+        tile = (1, 1)
+    elif material in (35, 36):
+        tile = (1, 0)
+    elif material in (2, 8, 19, 27, 31, 39):
+        tile = (0, 0)
+    else:
+        tile = (0, 1)
+    axis = int(np.argmax(np.abs(normal)))
+    axes = [i for i in range(3) if i != axis]
+    uv = (points[:, axes] - low[axes]) / span[axes]
+    return np.array(tile)*.5 + .015 + uv*.47
 
 
 def components(v, f):
@@ -51,7 +72,7 @@ def components(v, f):
     return np.array([root(a) for a in faces[:, 0]])
 
 
-def render(v, f, colors, path, yaw, pitch):
+def render(v, f, uv, texture, path, yaw, pitch):
     """Orthographic preview of the actual imported parts, with face lighting."""
     cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
     r = np.array([[cy, 0, sy], [sy*sp, cp, -cy*sp], [-sy*cp, sp, cy*cp]])
@@ -78,7 +99,10 @@ def render(v, f, colors, path, yaw, pitch):
         sub = depth[y0:y1,x0:x1]
         mask = (a>=0)&(b>=0)&(c>=0)&(z>sub)
         sub[mask] = z[mask]
-        rgb[y0:y1,x0:x1][mask] = colors[i]*shade[i]*255
+        coords = a[..., None]*uv[tri[0]] + b[..., None]*uv[tri[1]] + c[..., None]*uv[tri[2]]
+        tx = np.clip((coords[..., 0]*(texture.shape[1]-1)).astype(int), 0, texture.shape[1]-1)
+        ty = np.clip(((1-coords[..., 1])*(texture.shape[0]-1)).astype(int), 0, texture.shape[0]-1)
+        rgb[y0:y1,x0:x1][mask] = (texture[ty, tx]*shade[i])[mask]
     Image.fromarray(np.clip(rgb,0,255).astype(np.uint8)).save(path)
 
 
@@ -133,11 +157,12 @@ def main():
     flip = np.einsum('ij,ij->i', face_normal, n[f].mean(1)) < 0
     f[flip] = f[flip][:, [0, 2, 1]]
     assets = ROOT/'assets'
-    palette = Image.new('RGB', (len(materials)*8, 8))
-    draw = ImageDraw.Draw(palette)
-    for i, m in enumerate(materials):
-        draw.rectangle((i*8, 0, i*8+7, 7), fill=tuple(int(x*255) for x in m['color']))
-    palette.save(assets/'arty_diffuse.png')
+    texture = np.array(Image.open(assets/'arty_diffuse.png').convert('RGB'))
+    if min(texture.shape[:2]) < 1024:
+        raise ValueError('Weathered artillery atlas missing; refusing the old flat palette')
+    selected = v[np.unique(f)]
+    low = selected.min(0)
+    span = np.maximum(selected.max(0)-low, 1e-6)
     preview_v, preview_f, preview_c = [], [], []
     offset = 0
     for index, name, origin, frame, budget in [
@@ -163,10 +188,14 @@ def main():
                 length = np.linalg.norm(normal)
                 if length < 2e-5: continue
                 normal /= length
+                source_points = vv[tri]
+                source_normal = np.cross(source_points[1]-source_points[0],
+                                         source_points[2]-source_points[0])
+                uvs = surface_uv(source_points, source_normal, int(mat), low, span)
                 for positions, outward in ((points,normal),(points[[0,2,1]],-normal)):
                     base = len(mesh.V)
                     mesh.V.extend(map(tuple, positions)); mesh.N.extend([tuple(outward)]*3)
-                    mesh.T.extend([((int(mat)+.5)/len(materials), .5)]*3)
+                    mesh.T.extend(map(tuple, uvs if outward is normal else uvs[[0,2,1]]))
                     mesh.IDX.extend([base, base+1, base+2])
             # Restore original joints for the preview of the deployed posture.
         mesh.write(str(assets/('arty_'+name+'.ndmesh')))
@@ -175,11 +204,10 @@ def main():
         pf = np.array(mesh.IDX).reshape(-1, 3)
         preview_v.append((pv-ORIGIN) @ BODY_FRAME.T*SCALE)
         preview_f.append(pf+offset); offset += len(pv)
-        uv = np.array(mesh.T)[pf[:, 0], 0]
-        preview_c.extend([materials[int(x*len(materials))]['color'] for x in uv])
+        preview_c.extend(mesh.T)
     pv, pf, pc = np.concatenate(preview_v), np.concatenate(preview_f), np.array(preview_c)
-    render(pv, pf, pc, assets/'arty_preview.png', -.85, .25)
-    render(pv, pf, pc, assets/'arty_side_preview.png', math.pi/2, 0)
+    render(pv, pf, pc, texture, assets/'arty_preview.png', -.85, .25)
+    render(pv, pf, pc, texture, assets/'arty_side_preview.png', math.pi/2, 0)
     print('runtime ring', (RING-ORIGIN)@BODY_FRAME.T*SCALE)
     print('runtime trunnion', (PIVOT-RING)@YAW_FRAME.T*SCALE)
     muzzle_source = np.array([194.92429479, 291.13868353, -233.19519393])

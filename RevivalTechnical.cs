@@ -821,10 +821,11 @@ namespace NextDayRevival
             TechnicalGun.Stations(all);
         }
 
-        static void SpawnInFront()
+        internal static string SpawnInFront()
         {
+            if (!Enabled) return "Technical is disabled in the configuration.";
             Camera cam = Camera.main;
-            if (cam == null) { RevivalPlugin.L.LogWarning("Technical: keine Kamera."); return; }
+            if (cam == null) return "No player camera available.";
 
             Vector3 ahead = cam.transform.forward;
             ahead.y = 0f;
@@ -838,17 +839,18 @@ namespace NextDayRevival
             if (under == null)
             {
                 RevivalPlugin.L.LogWarning("Technical: unter " + above + " ist kein Boden.");
-                return;
+                return "No ground found ahead of the player.";
             }
 
             Vector3 pos = ground + Vector3.up * 1.6f;
             Quaternion rot = Quaternion.LookRotation(ahead, Vector3.up);
             bool isTank;
             GameObject car = VehicleRegistry.Spawn("technical", pos, rot, out isTank);
-            if (car == null) return;   // registry/CarSpawn already logged why
+            if (car == null) return "Technical spawn failed; see the game log.";
             RevivalPlugin.L.LogInfo("Technical: Gun Truck erzeugt bei " + pos
                 + ", Boden \"" + under.name + "\".");
             TechnicalGun.Hinweis(TechnicalText.Spawned(), 4f);
+            return TechnicalText.Spawned();
         }
 
         static KeyCode Key()

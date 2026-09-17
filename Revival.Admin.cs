@@ -1265,6 +1265,11 @@ namespace NextDayRevival
             GUILayout.Label(Loc.T("случайная точка из редактора (Troop landings)",
                                   "random landing from the editor (Troop landings)"));
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Spawn technical", GUILayout.Width(190f)))
+                Melde(Technical.SpawnInFront());
+            GUILayout.Label("In front of you (MG gun truck)");
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));

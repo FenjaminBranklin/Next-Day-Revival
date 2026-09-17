@@ -213,7 +213,9 @@ namespace NextDayRevival
             public bool DroneUp;
             public Vector3 DroneAt;
             public GameObject DroneModel;
-            public float Ground;            // terrain height under the orbit point
+            public float Ground;            // terrain height the drone flies over NOW
+            public float GroundWant;        // ... and the last one actually measured
+            public bool GroundSet;          // false until the first measurement
             public float GroundAt;          // Time.time it was last sampled
 
             // spotting and the mission
@@ -321,7 +323,11 @@ namespace NextDayRevival
             // The men are the game's own NPCs and are left exactly where they
             // are: a scene change removes them with everything else, and a crew
             // settlement we tear down by hand would take its men's death
-            // bookkeeping with it.
+            // bookkeeping with it. Crew's OWN list is a different matter: it
+            // keeps every settlement it ever built so it can exempt them from
+            // the game's distance culling, and a battery that dropped its crew
+            // without saying so left an entry there for a destroyed object.
+            if (p.CrewSettlement != null) Crew.Forget(p.CrewSettlement);
             p.CrewSettlement = null;
             p.Gunner = null;
             p.Operator = null;
@@ -345,8 +351,27 @@ namespace NextDayRevival
             if (!Enabled) return;
             try
             {
-                if (_posts.Count == 0) return;
                 float now = Time.time;
+
+                // Before anything reads it: every orbit this frame is measured
+                // from the same smooth clock. It is advanced even with no
+                // batteries standing, so the first frame after one appears is
+                // not a snap from a clock that stopped minutes ago.
+                AdvanceFlightClock();
+
+                // NO BATTERIES, NO OVERLAY. The early return used to sit above
+                // this, and the map keeps what it was last given: after a level
+                // change - which empties this list, because the guns are local
+                // objects that die with the scene - the drone circles of the
+                // level we left were still painted over the one we are in, and
+                // nothing could ever clear them again. Reported as "countless
+                // drone circles on the map" (2026-09-17).
+                if (_posts.Count == 0)
+                {
+                    if (_marks.Count > 0) _marks.Clear();
+                    _mapOpen = false;
+                    return;
+                }
                 bool master = RevivalTroopInsertion.MasterClient();
 
                 ScanNpcs(now);
@@ -404,7 +429,8 @@ namespace NextDayRevival
                 {
                     Component ai = _npcs[i];
                     if (ai == null) continue;
-                    if (Flat(ai.transform.position - gun) > GuardRadius) continue;
+                    float radius = Mathf.Max(GuardRadius, 24f * p.Gun.transform.localScale.x);
+                    if (Flat(ai.transform.position - gun) > radius) continue;
                     p.MenNear++;
                     if (myFaction != null && Hostile(HatedOf(ai), myFaction)) p.HostileNear = true;
                 }
@@ -435,7 +461,7 @@ namespace NextDayRevival
                 Transform gun = p.Gun.transform;
                 // Behind the gun, where a crew stands: out of the muzzle's way
                 // and close enough that they read as ITS men.
-                Vector3 at = gun.position - gun.forward * 4.0f;
+                Vector3 at = gun.TransformPoint(new Vector3(0f, 0f, -19.5f));
                 float y;
                 if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
 
@@ -590,25 +616,83 @@ namespace NextDayRevival
 
         static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 240f), 40f, 1500f); }
 
+        // The clock the drones actually fly on: the shared one, made smooth.
+        static float _flightClock;
+        static bool _flightClockSet;
+
+        /// <summary>
+        /// FIELD 2026-09-17: "the drone moves very jerkily when it circles, it
+        /// does not look smooth from below". Two steps, one cause each.
+        ///
+        ///   1. THE CLOCK IS NOT CONTINUOUS. PhotonNetwork.time is an INTEGER
+        ///      MILLISECOND count divided by 1000 (PhotonNetwork::get_time ->
+        ///      get_ServerTimestamp in IL), and offline it is Environment
+        ///      .TickCount, whose resolution on Windows is the system timer
+        ///      tick - about 15.6 ms. A position derived straight from it
+        ///      therefore steps about 64 times a second while the game draws 60
+        ///      to 144 frames, so the drone holds still for a frame or two and
+        ///      then jumps. Online the same number is a server offset that is
+        ///      re-measured on every ping, which adds a jump in both directions.
+        ///   2. IT IS ONLY THE PICTURE THAT NEEDS TO BE SMOOTH. The reason the
+        ///      shared clock is used at all is that two clients must agree on
+        ///      where the drone is. They still do: this clock is advanced by the
+        ///      frame time and pulled back towards the shared one continuously,
+        ///      so it tracks it to a few milliseconds - under a centimetre of
+        ///      orbit at 16 m/s, against an aim error measured in tens of metres.
+        ///
+        /// A difference above a second is not drift, it is the room clock's own
+        /// wrap at 100000 s or a client that was paused, and is taken in one step.
+        /// </summary>
+        static void AdvanceFlightClock()
+        {
+            float net = Clock();
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.25f);
+            if (!_flightClockSet)
+            {
+                _flightClockSet = true;
+                _flightClock = net;
+                return;
+            }
+            _flightClock += dt;
+            float drift = net - _flightClock;
+            if (drift > 1f || drift < -1f) { _flightClock = net; return; }
+            _flightClock += drift * Mathf.Clamp01(dt * 2f);
+        }
+
         /// <summary>Where this drone is right now. Pure function of the shared
         /// clock and the settlement's own position, so every client gets the
         /// same answer without anybody sending anything. The ground under the
-        /// orbit is sampled twice a second, not every frame: the drone moves a
-        /// few metres in that time and the terrain does not move at all.</summary>
+        /// orbit is measured four times a second, not every frame - GroundY
+        /// casts a 3000 m ray - and the height the drone actually holds is
+        /// eased onto that measurement instead of stepping onto it, because a
+        /// step every quarter second over rolling ground is the second half of
+        /// the reported stutter.</summary>
         static Vector3 DronePoint(Post p, float now)
         {
             float r = Orbit();
             float speed = Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f);
-            float a = p.Phase + Clock() * speed / r;
+            float a = p.Phase + _flightClock * speed / r;
             Vector3 flat = new Vector3(p.Centre.x + Mathf.Cos(a) * r, 0f,
                                        p.Centre.z + Mathf.Sin(a) * r);
-            if (p.GroundAt <= 0f || now - p.GroundAt > 0.5f)
+            if (!p.GroundSet || now - p.GroundAt > 0.25f)
             {
                 p.GroundAt = now;
                 float y;
-                if (!RevivalTroopInsertion.GroundY(flat, out y)) y = p.Centre.y;
-                p.Ground = y;
+                // THE TERRAIN, NOT WHAT IS STANDING ON IT. GroundY casts a ray
+                // with no layer mask, so a roof, a truck or a treetop under the
+                // orbit answers as "ground" and the drone hops over every
+                // building it passes - at 240 m radius it passes several a lap.
+                // TerrainHeight reads the height data, which is the ground and
+                // nothing else, costs no ray at all, and is the same number
+                // away from every player (E-059). The ray is only the fallback
+                // for a scene that has no terrain.
+                if (!RevivalTroopInsertion.TerrainHeight(flat, out y)
+                    && !RevivalTroopInsertion.GroundY(flat, out y)) y = p.Centre.y;
+                p.GroundWant = y;
+                if (!p.GroundSet) { p.GroundSet = true; p.Ground = y; }
             }
+            p.Ground = Mathf.Lerp(p.Ground, p.GroundWant,
+                                  Mathf.Clamp01(Mathf.Min(Time.unscaledDeltaTime, 0.25f) * 4f));
             flat.y = p.Ground + Mathf.Clamp(F(_cfgOrbitHeight, 85f), 20f, 400f);
             return flat;
         }
@@ -632,8 +716,13 @@ namespace NextDayRevival
             // A model only where somebody could see it. The orbit itself is four
             // lines of arithmetic and is computed everywhere, so the map and the
             // spotting do not care whether a GameObject exists.
-            bool near = havePlayer
-                && Flat(p.DroneAt - mine) <= Mathf.Max(100f, F(_cfgModelRange, 800f));
+            //
+            // The two distances differ by a tenth on purpose. A single threshold
+            // is a coin toss for a player standing exactly at it: the model is
+            // built and destroyed on alternate frames, and the drone flickers.
+            float range = Mathf.Max(100f, F(_cfgModelRange, 800f));
+            float d = havePlayer ? Flat(p.DroneAt - mine) : float.MaxValue;
+            bool near = p.DroneModel != null ? d <= range * 1.1f : d <= range;
             if (!near)
             {
                 if (p.DroneModel != null)
@@ -1299,11 +1388,19 @@ namespace NextDayRevival
     /// vehicle. Shared meshes and material keep each settlement inexpensive.</summary>
     internal static class ArtyModel
     {
-        static readonly Vector3 TurretAt = new Vector3(0f, 2.09076942f, -3.4798f);
-        static readonly Vector3 TrunnionAt = new Vector3(0.35473356f, 1.4097f, -0.32180553f);
+        // Imported metres converted to the native vehicle scale (3 units/m).
+        static readonly Vector3 TurretAt = new Vector3(0f, 2.09076942f, -3.4798f) * 3f;
+        static readonly Vector3 TrunnionAt = new Vector3(0.35473356f, 1.4097f, -0.32180553f) * 3f;
         internal static Vector3 MuzzleLocal
         {
-            get { return new Vector3(-0.01442866f, -0.01224359f, 6.83341194f); }
+            get { return new Vector3(-0.01442866f, -0.01224359f, 6.83341194f) * 3f; }
+        }
+
+        internal static Vector3 UsePoint(Transform vehicle, Vector3 player)
+        {
+            // Both sides of the gun deck, outside the deployed stabilizers.
+            float side = vehicle.InverseTransformPoint(player).x < 0f ? -8.5f : 8.5f;
+            return vehicle.TransformPoint(new Vector3(side, 0f, -10.5f));
         }
 
         static Mesh _hull, _turret, _barrel;
@@ -1354,7 +1451,8 @@ namespace NextDayRevival
                 _hull = Assets.Load("arty_hull.ndmesh");
                 _turret = Assets.Load("arty_turret.ndmesh");
                 _barrel = Assets.Load("arty_barrel.ndmesh");
-                Texture2D tex = Assets.TextureIfPresent("arty_diffuse.png");
+                // Albedo is sRGB colour, never linear mask/normal-map data.
+                Texture2D tex = Assets.Texture("arty_diffuse.png", false, true);
                 if (_hull == null || _turret == null || _barrel == null || tex == null)
                     throw new InvalidOperationException("Bohdana assets missing; repair the client package");
                 Shader shader = Shader.Find("Standard");
@@ -1363,8 +1461,11 @@ namespace NextDayRevival
                 _material.name = "NDR_Bohdana_Material";
                 _material.mainTexture = tex;
                 _material.color = Color.white;
-                if (_material.HasProperty("_Glossiness")) _material.SetFloat("_Glossiness", 0.15f);
-                if (_material.HasProperty("_Metallic")) _material.SetFloat("_Metallic", 0f);
+                tex.wrapMode = TextureWrapMode.Clamp;
+                if (_material.HasProperty("_Glossiness")) _material.SetFloat("_Glossiness", 0.25f);
+                if (_material.HasProperty("_Metallic")) _material.SetFloat("_Metallic", 0.15f);
+                if (_material.HasProperty("_EmissionColor")) _material.SetColor("_EmissionColor", Color.black);
+                _material.DisableKeyword("_EMISSION");
                 RevivalPlugin.L.LogInfo("ArtyModel: supplied Bohdana model loaded");
                 return true;
             }
