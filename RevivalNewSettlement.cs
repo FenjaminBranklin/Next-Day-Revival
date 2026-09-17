@@ -314,6 +314,15 @@ namespace NextDayRevival
             }
 
             Unhate(settlement);
+            // THE CAMP IS A PLACE, SO IT GETS A BATTERY. Mortar's scan skips
+            // every NDR_ object, which is what keeps a wreck crew from growing
+            // a howitzer of its own - and it swept this camp up with them, so
+            // the traitor settlement was the one settlement on the map with no
+            // gun, no crew at it and no drone over it (field report
+            // 2026-09-17). Exactly ONE group is marked, or the camp would stand
+            // up two howitzers ninety metres apart; the first is the one nearest
+            // the coordinate the admin wrote down.
+            if (_camp.Count == 0) settlement.AddComponent<MortarSite>();
             _camp.Add(settlement);
             _lastFail = "";
             _emptySince = 0f;
@@ -464,6 +473,7 @@ namespace NextDayRevival
                 GameObject go = _camp[i];
                 if (go == null) continue;
                 Crew.Forget(go);
+                Mortar.SiteGone(go);        // NDR settlement artillery
                 UnityEngine.Object.Destroy(go);
             }
             _camp.Clear();

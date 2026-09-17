@@ -110,6 +110,26 @@ using UnityEngine;
 namespace NextDayRevival
 {
     /// <summary>
+    /// "This settlement is a PLACE, even though the toolkit built it."
+    ///
+    /// Mortar's scan refuses every object whose name starts with NDR_, and it
+    /// has to: Crew.DropSquad names every wreck crew, patrol crew, heli squad
+    /// and - this is the one that matters - every ARTILLERY CREW the same
+    /// NDR_PatrolCrew, so a gun that accepted them would raise a second gun
+    /// behind its own crew, and a third behind that one.
+    ///
+    /// The toolkit's own permanent camp at Litvinovka is built with the same
+    /// call and was swept up by that rule, which is why the traitor settlement
+    /// never had a howitzer, a crew or a drone over it (field report
+    /// 2026-09-17). This component is the exception, and it is deliberately
+    /// something a caller has to ADD: a runtime crew cannot grow one by
+    /// accident, and the battery's own crew never gets one.
+    /// </summary>
+    public sealed class MortarSite : MonoBehaviour
+    {
+    }
+
+    /// <summary>
     /// Config, emplacements, loading, the turret, the map fire control and the
     /// impact. The imported vehicle is <see cref="ArtyModel"/>, its crew and
     /// recon drone are <see cref="ArtyBattery"/>, the Photon channel is
@@ -261,6 +281,13 @@ namespace NextDayRevival
         // The shortest distance a failed attempt was made from. Getting much
         // closer than that buys the settlement a fresh set of tries.
         static readonly Dictionary<int, float> _closest = new Dictionary<int, float>();
+        // Said once per settlement: this one PASSED the gate and is only
+        // waiting for somebody to walk up to it. Without it the log answers
+        // "why has this village no battery" only for the settlements that were
+        // refused, and "no drone over the looter settlement" (field report
+        // 2026-09-17) reads exactly like a defect when it is a player who has
+        // not been there yet.
+        static readonly Dictionary<int, bool> _waiting = new Dictionary<int, bool>();
 
         static Tube _aiming;
         static bool _cursorHidden;
@@ -522,8 +549,11 @@ namespace NextDayRevival
                 if (s == null || s.gameObject == null) continue;
                 // Runtime NPC containers are not villages. DropSquad creates
                 // Crew.Name for every gun, convoy and insertion; accepting it
-                // here recursively creates another gun and another crew.
-                if (s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)) continue;
+                // here recursively creates another gun and another crew. The
+                // one exception carries a MortarSite, which nothing grows by
+                // accident - see that class.
+                if (s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)
+                    && !IsMarkedSite(s)) continue;
                 int id = s.gameObject.GetInstanceID();
                 if (_placed.ContainsKey(id)) continue;
                 // A PLACE, not a group of men. Asked before the distance test and
@@ -540,7 +570,18 @@ namespace NextDayRevival
                 Vector3 centre = s.transform.position;
                 float away = Vector3.Distance(new Vector3(centre.x, 0f, centre.z),
                                               new Vector3(me.x, 0f, me.z));
-                if (away > reach) continue;
+                if (away > reach)
+                {
+                    if (!_waiting.ContainsKey(id))
+                    {
+                        _waiting[id] = true;
+                        RevivalPlugin.L.LogInfo("Mortar: \"" + s.gameObject.name
+                            + "\" at " + centre.ToString("0") + " gets a battery, but it "
+                            + "is " + away.ToString("0") + " m away - it is built when a "
+                            + "player comes within " + reach.ToString("0") + " m.");
+                    }
+                    continue;
+                }
                 if (Raise(s, centre, id))
                 {
                     _placed[id] = true;
@@ -579,9 +620,41 @@ namespace NextDayRevival
             _nextPlaceScan = Time.time + (pending ? 1f : 5f);
         }
 
+        /// <summary>A marked site is being taken down - the traitor camp does
+        /// that when it was wiped out and is about to be rebuilt. Its gun goes
+        /// with it. Without this the rebuilt camp is a NEW object with a new
+        /// instance id, so it would be given a second howitzer while the first
+        /// one stood on beside it, once per raid, for as long as the level
+        /// lasts. A gun the player is aiming is covered: Aim leaves by itself
+        /// on the next tick when the tube is gone.</summary>
+        internal static void SiteGone(GameObject settlement)
+        {
+            if (settlement == null) return;
+            int id = settlement.GetInstanceID();
+            for (int i = _tubes.Count - 1; i >= 0; i--)
+            {
+                if (_tubes[i].SettlementId != id) continue;
+                ArtyBattery.GunLost(id);                  // NDR settlement artillery
+                if (_tubes[i].Go != null) UnityEngine.Object.Destroy(_tubes[i].Go);
+                _tubes.RemoveAt(i);
+            }
+            _placed.Remove(id);
+            _tries.Remove(id);
+            _closest.Remove(id);
+            _waiting.Remove(id);
+        }
+
         static bool SafeSettlement(Component settlement)
         {
             return Flag(settlement, "IsSafeSettlement");
+        }
+
+        /// <summary>Did the toolkit itself declare this object a place that
+        /// deserves a gun? See <see cref="MortarSite"/>.</summary>
+        static bool IsMarkedSite(Component settlement)
+        {
+            if (settlement == null || settlement.gameObject == null) return false;
+            return settlement.GetComponent<MortarSite>() != null;
         }
 
         static bool Flag(Component settlement, string field)
@@ -638,6 +711,12 @@ namespace NextDayRevival
         /// </summary>
         static string NotASettlement(Component s)
         {
+            // A place the toolkit itself declared. It is a settlement BY
+            // CONSTRUCTION - somebody wrote the coordinate down - so none of the
+            // measurements below apply to it: it carries no IsMain, it is not
+            // the game's Default type, and it holds one DropSquad group, which
+            // is under MinSpawnPoints by design.
+            if (IsMarkedSite(s)) return null;
             if (SafeSettlement(s)) return "a trader camp (IsSafeSettlement)";
             if (Flag(s, "IsIndoors")) return "indoors";
 
@@ -2366,8 +2445,15 @@ namespace NextDayRevival
             static AudioClip _thump;
             static AudioClip _whistle;
 
-            public static void Thump(Vector3 at) { Play(at, Clip(true), 40f, 900f); }
+            // A 152 mm gun is heard across the valley, not across the yard.
+            public static void Thump(Vector3 at) { Play(at, Clip(true), 60f, 1600f); }
             public static void Whistle(Vector3 at) { Play(at, Clip(false), 25f, 500f); }
+
+            /// <summary>tanh as a float - Mathf has none. The report is summed
+            /// well past full scale on purpose (that is where its loudness comes
+            /// from, since the peak is fixed at 1); a hard clamp would turn the
+            /// overshoot into square-wave fizz, and this bends it instead.</summary>
+            static float Soft(float v) { return (float)Math.Tanh(v); }
 
             static void Play(Vector3 at, AudioClip clip, float min, float max)
             {
@@ -2395,6 +2481,43 @@ namespace NextDayRevival
                 }
             }
 
+            /// <summary>
+            /// THE MUZZLE REPORT, AND WHY IT WAS REBUILT (field report
+            /// 2026-09-17: "the huge gun makes no sound at all when it fires,
+            /// that has to go WUMM").
+            ///
+            /// It was not silent. It was inaudible, which is worse, because
+            /// nothing in the log says so. The released clip was two sine waves
+            /// at 41 and 63 Hz plus noise through a one-pole filter with a
+            /// corner near 200 Hz, and measured over its own spectrum that put
+            /// 82 percent of its energy below 60 Hz and 99 percent below 120 Hz.
+            /// Laptop speakers, monitor speakers and most desktop boxes produce
+            /// nothing under about 120 Hz, so the player heard the shell whistle
+            /// in and the impact go off with no bang in between.
+            ///
+            /// A real gun report is not a bass note. It is a broadband crack
+            /// followed by a low-frequency blast and then rolling thunder off
+            /// the terrain, and it is the crack that carries on a small speaker.
+            /// So the clip is built in layers, each from its own one-pole
+            /// filtering of the same noise:
+            ///
+            ///   crack  unfiltered noise, gone in 30 ms   - the leading edge
+            ///   bark   ~1.7 kHz, gone in a quarter second - what makes it a GUN
+            ///   blast  ~440 Hz over half a second        - the pressure wave
+            ///   body   48/74/116/173 Hz                  - the weight of it
+            ///   e1/e2  echoes at 0.28 s and 0.74 s, each darker than the last
+            ///   e3     a ~39 Hz roll from 1.55 s         - thunder leaving
+            ///
+            /// tanh instead of a hard clamp: the sum is deliberately driven past
+            /// full scale to raise the loudness of a signal whose peak is fixed
+            /// at 1, and a hard clamp turns that into square-wave fizz.
+            ///
+            /// Measured on the result: the first 300 ms carry 44 percent of
+            /// their energy above 150 Hz (the old clip: half a percent) and
+            /// still 52 percent below 120 Hz, so the bang reaches a laptop AND
+            /// a subwoofer. The tail from 1.6 s is 51 percent below 120 Hz and
+            /// 2 percent above 1.2 kHz - rumble, not hiss.
+            /// </summary>
             static AudioClip Clip(bool thump)
             {
                 if (thump && _thump != null) return _thump;
@@ -2402,10 +2525,11 @@ namespace NextDayRevival
                 try
                 {
                     const int rate = 44100;
-                    float seconds = thump ? 1.5f : 1.6f;
+                    float seconds = thump ? 4.2f : 1.6f;
                     float[] data = new float[Mathf.RoundToInt(rate * seconds)];
                     int seed = thump ? 411 : 907;
                     float filtered = 0f;
+                    float mid = 0f, low = 0f, air = 0f, deep = 0f;
                     for (int i = 0; i < data.Length; i++)
                     {
                         float t = (float)i / rate;
@@ -2414,12 +2538,31 @@ namespace NextDayRevival
                         filtered = filtered * 0.972f + noise * 0.028f;
                         if (thump)
                         {
-                            // A deep, hollow WHUMP out of a barrel, not a crack.
-                            float body = (Mathf.Sin(2f * Mathf.PI * 41f * t) * 1.00f
-                                + Mathf.Sin(2f * Mathf.PI * 63f * t) * 0.45f)
-                                * Mathf.Exp(-t * 3.1f);
-                            float blast = filtered * 2.6f * Mathf.Exp(-t * 4.5f);
-                            data[i] = Mathf.Clamp(body + blast, -1f, 1f);
+                            mid = mid * 0.760f + noise * 0.240f;
+                            low = low * 0.938f + noise * 0.062f;
+                            air = air * 0.984f + noise * 0.016f;
+                            deep = deep * 0.9945f + noise * 0.0055f;
+
+                            float crack = noise * 2.30f * Mathf.Exp(-t * 38f);
+                            float bark = mid * 5.20f * Mathf.Exp(-t * 9f);
+                            float blast = low * 6.00f * Mathf.Exp(-t * 3.4f);
+                            float body = (Mathf.Sin(2f * Mathf.PI * 48f * t) * 0.85f
+                                + Mathf.Sin(2f * Mathf.PI * 74f * t) * 0.60f
+                                + Mathf.Sin(2f * Mathf.PI * 116f * t) * 0.42f
+                                + Mathf.Sin(2f * Mathf.PI * 173f * t) * 0.26f)
+                                * Mathf.Exp(-t * 2.2f);
+                            float e1 = t > 0.28f
+                                ? (Mathf.Sin(2f * Mathf.PI * 58f * (t - 0.28f)) * 0.40f
+                                   + low * 1.50f + air * 1.20f)
+                                  * Mathf.Exp(-(t - 0.28f) * 3.0f) : 0f;
+                            float e2 = t > 0.74f
+                                ? (Mathf.Sin(2f * Mathf.PI * 44f * (t - 0.74f)) * 0.30f
+                                   + air * 2.20f)
+                                  * Mathf.Exp(-(t - 0.74f) * 2.0f) : 0f;
+                            float e3 = t > 1.55f
+                                ? deep * 5.00f * Mathf.Exp(-(t - 1.55f) * 1.15f) : 0f;
+                            data[i] = Soft((crack + bark + blast + body * 1.10f
+                                            + e1 + e2 + e3) * 0.90f);
                         }
                         else
                         {

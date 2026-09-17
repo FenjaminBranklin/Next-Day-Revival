@@ -21,7 +21,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 GROUPS = [
-    ("arty", ["arty_import.py"]),
+    # arty_texture.py MUSS vor arty_import.py laufen: der Import liest den
+    # fertigen Atlas fuer die UV-Pruefung und fuer beide Vorschaubilder.
+    ("arty", ["arty_texture.py", "arty_import.py"]),
     # mg42/sniper50 now come from REAL imported models via textured_import.py
     # (barrett_build.py -> the TAC-50's .50 cal look, mg42real_build.py -> a real
     # MG42), replacing the procedural *_mesh/_texture/_icon generators, which

@@ -82,6 +82,7 @@ namespace NextDayRevival
         static ConfigEntry<bool> _cfgDrone;
         static ConfigEntry<bool> _cfgAutoFire;
         static ConfigEntry<string> _cfgFaction;
+        static ConfigEntry<int> _cfgCrewWeapon;
 
         static ConfigEntry<float> _cfgOrbitRadius;
         static ConfigEntry<float> _cfgOrbitHeight;
@@ -109,6 +110,14 @@ namespace NextDayRevival
         /// declared dead.</summary>
         internal static float GuardRadius { get { return Mathf.Max(4f, F(_cfgGuardRadius, 14f)); } }
 
+        /// <summary>The weapon both crewmen carry. Anything above zero keeps
+        /// Crew.DropSquad out of its LAW branch; Crew.UsableWeapon still falls
+        /// back to a weapon that has a model if this id has none.</summary>
+        static int CrewWeapon
+        {
+            get { return _cfgCrewWeapon == null ? 1001 : Mathf.Max(1, _cfgCrewWeapon.Value); }
+        }
+
         public static void BindConfig(ConfigFile cfg)
         {
             _cfgEnabled = cfg.Bind("Artillery", "Enabled", true,
@@ -131,6 +140,11 @@ namespace NextDayRevival
             _cfgFaction = cfg.Bind("Artillery", "CrewFaction", "looter",
                 "Fallback side of the crew when the settlement's own faction "
                 + "cannot be read: civilian, looter, traitor or neutral.");
+            _cfgCrewWeapon = cfg.Bind("Artillery", "CrewWeapon", 1001,
+                "Waffe der beiden Kanoniere. Ohne einen Eintrag hier greift "
+                + "Patrol/CrewLawCount, und das gibt dem ersten Mann jeder "
+                + "Gruppe einen M72 LAW - an einer Haubitze nicht erwuenscht. "
+                + "1001 ist das Sturmgewehr des Spiels; 1160 waere das MG42.");
 
             _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 240f,
                 "Metres from the settlement centre the drone circles at.");
@@ -201,6 +215,8 @@ namespace NextDayRevival
             public Component Operator;
             public bool CrewAsked;
             public bool FactionSet;
+            public int FactionTries;
+            public float FactionNextTry;
             public float CrewTryAt;
             public int CrewTries;
 
@@ -441,15 +457,57 @@ namespace NextDayRevival
             {
                 if (p.CrewSettlement == null) return;
                 if (p.Gunner == null || p.Operator == null) Resolve(p);
-                if (!p.FactionSet && p.Gunner != null)
+                // THE MATCH IS RETRIED UNTIL IT LANDS. It used to be latched on
+                // the first attempt whether or not a template man had been
+                // found, and a failed attempt is not rare: the gun is raised at
+                // PlaceRange and the crew follows 1.5 s later, which can be
+                // before the settlement's own men are on their feet. The crew
+                // then kept the CONFIGURED side for the rest of the level, and
+                // "looter" standing in Peaces or Military1 - both of which hate
+                // Marauders (measured hated lists, REVERSE_ENGINEERING) - is
+                // shot by its own village within seconds. A dead operator is a
+                // drone that never flies, which is exactly what was reported.
+                if (!p.FactionSet && p.Gunner != null && now >= p.FactionNextTry)
                 {
-                    p.FactionSet = true;
-                    MatchFaction(p);
+                    p.FactionSet = MatchFaction(p);
+                    if (!p.FactionSet)
+                    {
+                        p.FactionTries++;
+                        p.FactionNextTry = now + 2f;
+                        if (p.FactionTries >= 30)
+                        {
+                            p.FactionSet = true;
+                            RevivalPlugin.L.LogWarning("ArtyBattery: no living man of \""
+                                + p.Name + "\" to copy a side from after "
+                                + p.FactionTries + " tries - its crew keeps the "
+                                + "configured one.");
+                        }
+                    }
                 }
                 return;
             }
             if (now < p.CrewTryAt) return;
             Spawn(p, now);
+        }
+
+        /// <summary>The editor side that comes closest to a game faction, for
+        /// the two seconds before <see cref="MatchFaction"/> copies the real
+        /// one. Only four of the game's eight factions have an editor side at
+        /// all - a Military settlement has none - so this is the opening bid,
+        /// never the answer.</summary>
+        static string SideFor(Component template)
+        {
+            object mine = template == null ? null : FactionOf(template);
+            string name = mine == null ? "" : mine.ToString();
+            if (name == "Peace") return "civilian";
+            if (name == "Marauder") return "looter";
+            if (name == "Traitor") return "traitor";
+            // Military, Hermit, Wildman, MilitaryNeutral and Neutral all land
+            // here. Neutral hates Traitor and nobody else, and only the neutral
+            // base hates Neutral back, so it is the side that gets shot at least
+            // while the real one is being copied on.
+            if (name.Length > 0) return "neutral";
+            return _cfgFaction == null ? "looter" : _cfgFaction.Value;
         }
 
         static void Spawn(Post p, float now)
@@ -458,6 +516,15 @@ namespace NextDayRevival
             p.CrewTryAt = now + 5f;
             try
             {
+                // THE SIDE BEFORE THE MEN. Spawning first and correcting after
+                // leaves a window in which two Marauders stand in a settlement
+                // that shoots Marauders. The village is given up to four tries
+                // (20 s) to have somebody on his feet to read; after that the
+                // crew is raised anyway, because a battery is worth more than a
+                // perfect uniform and MatchFaction keeps trying.
+                Component template = SettlementMan(p);
+                if (template == null && p.CrewTries < 4) return;
+
                 Transform gun = p.Gun.transform;
                 // Behind the gun, where a crew stands: out of the muzzle's way
                 // and close enough that they read as ITS men.
@@ -465,16 +532,27 @@ namespace NextDayRevival
                 float y;
                 if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
 
+                // BOTH MEN CARRY A RIFLE, AND THE LOADOUT SAYS SO. Crew.DropSquad
+                // arms a man from the editor loadout and falls back to
+                // Patrol/CrewLawCount when the loadout names no weapon - and
+                // that key defaults to 1, so the FIRST man out of every squad
+                // gets an M72 LAW. For a patrol crew that is the point; for the
+                // two men standing at a howitzer it meant every battery on the
+                // map came with a rocketeer firing an endless supply of rockets
+                // from the village (field report 2026-09-17). A named weapon
+                // takes the branch that never looks at the LAW count.
                 List<RevivalComposition.CrewMan> loadout =
                     new List<RevivalComposition.CrewMan>();
                 RevivalComposition.CrewMan gunner = new RevivalComposition.CrewMan();
                 gunner.Role = "gunner";
+                gunner.Weapons = new int[] { CrewWeapon };
                 RevivalComposition.CrewMan spotter = new RevivalComposition.CrewMan();
                 spotter.Role = "drone_operator";
+                spotter.Weapons = new int[] { CrewWeapon };
                 loadout.Add(gunner);
                 loadout.Add(spotter);
 
-                string side = _cfgFaction == null ? "looter" : _cfgFaction.Value;
+                string side = SideFor(template);
                 GameObject crew = Crew.DropSquad(at, gun.eulerAngles.y, 2, side, loadout);
                 if (crew == null)
                 {
@@ -490,11 +568,7 @@ namespace NextDayRevival
                 p.CrewSettlement = crew;
                 p.CrewAsked = true;
                 Resolve(p);
-                if (p.Gunner != null)
-                {
-                    p.FactionSet = true;
-                    MatchFaction(p);
-                }
+                if (p.Gunner != null) p.FactionSet = MatchFaction(p);
                 RevivalPlugin.L.LogInfo("ArtyBattery: crew for \"" + p.Name
                     + "\" on its feet (gunner " + (p.Gunner != null)
                     + ", operator " + (p.Operator != null) + ").");
@@ -545,13 +619,13 @@ namespace NextDayRevival
         /// (NPC_AI2.IsEnemyFraction). Without a readable template the configured
         /// side stands, which is what the fallback is for.
         /// </summary>
-        static void MatchFaction(Post p)
+        static bool MatchFaction(Post p)
         {
             Component template = SettlementMan(p);
-            if (template == null) return;
+            if (template == null) return false;
             object mine = FactionOf(template);
             Array hated = HatedOf(template);
-            if (mine == null && hated == null) return;
+            if (mine == null && hated == null) return false;
             int done = 0;
             done += Apply(p.Gunner, mine, hated) ? 1 : 0;
             done += Apply(p.Operator, mine, hated) ? 1 : 0;
@@ -559,6 +633,7 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("ArtyBattery: crew of \"" + p.Name + "\" put on the "
                     + "settlement's own side (" + (mine == null ? "?" : mine.ToString())
                     + ") - " + done + " man(men).");
+            return done > 0;
         }
 
         static bool Apply(Component ai, object mine, Array hated)
