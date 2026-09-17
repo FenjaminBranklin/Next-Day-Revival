@@ -74,6 +74,8 @@ GAME = _spielpfad()
 GAME_PLUGINS = os.path.join(GAME, "BepInEx", "plugins") if GAME else ""
 
 ASSET_FILES = [
+    "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh",
+    "arty_diffuse.png",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
     "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -122,19 +124,30 @@ ASSET_FILES = [
 
 # Dateinamen, die der Quelltext NENNT, ohne dass es sie geben muss.
 #
-# Das Artilleriefahrzeug der Siedlungen (ArtyModel in RevivalArtyBattery.cs)
-# ist erzeugte Geometrie wie das alte Moerserrohr. Es SUCHT aber zuerst nach
-# einem echten Modell und nimmt es, sobald es da liegt - jede dieser Dateien
-# haengt hinter File.Exists bzw. Assets.TextureIfPresent, das Fehlen ist der
-# Normalfall und kein Fehler. Wird ein echtes Modell geliefert, gehoert es in
-# ASSET_FILES, in make_assets.py und in die Startquittung (ClientIntegrity
-# lehnt jede Datei unter plugins\assets ab, die die Quittung nicht kennt).
+# Das Artilleriefahrzeug der Siedlungen ist KEIN Fall mehr fuer diese Liste:
+# die vier arty_*-Dateien sind seit dem Bohdana-Modell Pflicht und stehen in
+# ASSET_FILES.
+#
+# Der Chemie-Granatwerfer 1491 (GasGunModel in RevivalGasLauncher.cs) baut
+# seinen Einzelschussgranatwerfer, seine Palettentextur und sein Inventarsymbol
+# im Code - vorher trug er das Modell der M72 LAW, und das lag in der
+# Granatenhand verkehrt herum und auf dem Kopf. Jeder dieser Namen haengt
+# hinter File.Exists bzw. Assets.TextureIfPresent, das Fehlen ist der Normalfall.
+#
+# Dasselbe gilt fuer die Technische (TechnicalModel in RevivalTechnical.cs):
+# Lafette, MG und Schild sind erzeugte Geometrie, und die Karosserie ist die
+# des Spender-UAZ. Liegt eine der Dateien unten doch da - technical_build.py
+# baut sie aus dem Quellmodell, das es im Toolkit-Ordner findet -, gewinnt sie
+# gegen das erzeugte Teil. Auch hier haengt jede hinter File.Exists bzw.
+# Assets.TextureIfPresent.
 OPTIONAL_ASSETS = [
-    "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh",
-    "arty_diffuse.png",
+    "gasgun.ndmesh", "gasgun_diffuse.png", "gasgun_icon.png",
+    "technical_body.ndmesh", "technical_mg.ndmesh", "technical_mount.ndmesh",
+    "technical_shield.ndmesh", "technical_diffuse.png", "technical_normal.png",
+    "technical_mg_diffuse.png", "technical_mg_normal.png",
 ]
 
-MESHES = ["mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
+MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
           "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
@@ -762,6 +775,14 @@ def check_gas_launcher():
     that does not consume its one-shot tube, and a cloud that keeps poisoning
     after its time is up. Everything that needs eyes - the cloud in the sky,
     the mask actually saving a player - stays an in-game acceptance item.
+
+    Since the weapon got its own model there is a fifth: falling back to
+    another weapon's art. The LAW's mesh is built in the RIFLE frame, and in
+    the grenade hand it lay backwards and upside down - so the checks at the
+    end insist on the own model, on the two config knobs that put it right
+    without a new DLL, and on a delivered gasgun.ndmesh beating the generated
+    geometry. How the launcher actually SITS in the hand stays an in-game
+    acceptance item; it cannot be measured here.
     """
     print("[14] Chemie-Granatwerfer und Giftgaswolke (statisch)")
     gas_p = os.path.join(ROOT, "RevivalGasLauncher.cs")
@@ -846,6 +867,29 @@ def check_gas_launcher():
     need("RocketHook.Detonate" in s,
          "vernetzter Zerleger am Einschlag (RocketHook.Detonate)",
          "kein vernetzter Einschlag")
+    # Das Modell. Frueher war es das der M72 LAW - die falsche Waffe, und in
+    # der Granatenhand lag sie verkehrt herum und auf dem Kopf, weil law.ndmesh
+    # im GEWEHRrahmen gebaut ist und dieses Item die Transformdaten der
+    # Splittergranate 1403 aufgeschrieben bekommt.
+    need("internal static class GasGunModel" in s
+         and "GasGunModel.MESH_FILE, GasGunModel.DIFFUSE_FILE" in s
+         and "GasGunModel.ICON_FILE" in s,
+         "eigenes Werfermodell statt der LAW-Kunst",
+         "das Item benennt nicht das eigene Modell - traegt es wieder die LAW?")
+    need("GasGunModel.Provide();" in s and "GasGunModel.TickIcon();" in s,
+         "Modell vor dem ItemDef bereitgestellt, Symbol im ersten Tick gerendert",
+         "Naht zum Modellbau fehlt (Provide/TickIcon)")
+    # Die Lage in der Hand ist ohne das laufende Spiel nicht messbar. Sie muss
+    # deshalb in der .cfg zu korrigieren sein, ohne neue DLL.
+    need('cfg.Bind("GasLauncher", "ModelEuler"' in s
+         and 'cfg.Bind("GasLauncher", "ModelOffset"' in s
+         and "static void Correct(Mesh m)" in s,
+         "Lage in der Hand einstellbar (ModelEuler/ModelOffset)",
+         "keine einstellbare Korrektur der Lage in der Hand")
+    # Und ein echtes Modell muss die erzeugte Geometrie ersetzen koennen.
+    need("Assets.Provide(MESH_FILE, _mesh)" in s and "Present(MESH_FILE)" in s,
+         "ein geliefertes gasgun.ndmesh schlaegt die erzeugte Geometrie",
+         "ein echtes Modell koennte die erzeugte Geometrie nicht ersetzen")
     # RevivalPlugin seams.
     for seam in ("GasLauncher.AddItems", "GasLauncher.BindConfig",
                  "GasLauncher.Install", "GasLauncher.Tick", "GasLauncher.Draw"):
@@ -1013,6 +1057,19 @@ def check_arty_battery():
          "die Spielertexte der Batterie stehen nicht in der UTF-8-Datei")
 
     # --- 1: the crosshair is the gun.
+    need('s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)' in s,
+         "runtime crew settlements cannot generate artillery",
+         "runtime crew exclusion missing: recursive artillery spawns")
+    need('_tubes[i].SettlementId == id && _tubes[i].Go != null' in s,
+         "gun allocation is idempotent per settlement",
+         "duplicate live-gun guard missing")
+    need('sharedMesh = mesh' in b and 'sharedMaterial = _material' in b,
+         "settlements share the imported meshes and material",
+         "artillery duplicates model resources per settlement")
+    need('Bohdana assets missing; repair the client package' in b
+         and 'static Mesh Hull()' not in b,
+         "missing Bohdana assets cannot become generated placeholder art",
+         "artillery still allows the generated vehicle fallback")
     need("Mathf.MoveTowardsAngle(haveBear, wantBear, Traverse * dt)" in s,
          "Fadenkreuz dreht nur so schnell wie der Turm",
          "die Winkelbegrenzung des Fadenkreuzes fehlt")
@@ -1108,6 +1165,358 @@ def check_arty_battery():
              "RevivalArtyBattery.cs fehlt in sync_public.py - dort baut das Repo nicht")
 
 
+def check_native_action_progress():
+    """Keep custom timed actions on the base game's interaction presentation."""
+    print("[17] Native action progress (static)")
+    native_p = os.path.join(ROOT, "Revival.NativeProgress.cs")
+    drone_p = os.path.join(ROOT, "RevivalDroneGear.cs")
+    repair_p = os.path.join(ROOT, "RevivalConvoyRepair.cs")
+    input_p = os.path.join(ROOT, "Revival.FpvDrone.cs")
+    turret_p = os.path.join(ROOT, "Revival.CameraTurret.cs")
+    if not all(os.path.exists(p) for p in
+               (native_p, drone_p, repair_p, input_p, turret_p)):
+        bad("Native action progress: source file missing")
+        return
+
+    native = io.open(native_p, encoding="utf-8").read()
+    drone = io.open(drone_p, encoding="utf-8").read()
+    repair = io.open(repair_p, encoding="utf-8").read()
+    input_hooks = io.open(input_p, encoding="utf-8").read()
+    turret = io.open(turret_p, encoding="utf-8").read()
+
+    if ('"HUD_InteractingProgress"' in native
+            and '"ShowInteractingProgressByTime"' in native):
+        ok("source routes custom actions to the original interaction HUD")
+    else:
+        bad("Native action progress: original HUD bridge missing")
+
+    if ('"PlayerInteractingWithItem"' in native
+            and '"CharacterInteractState"' in native
+            and '"PlayerUseItemAnim"' in native):
+        ok("source declares stationary and movement-capable animation paths")
+    else:
+        bad("Native action progress: original player animation paths missing")
+
+    if ('SetGlobalInteraction(stationary ? 1 : 2)' in native
+            and 'SetGlobalInteraction(0)' in native
+            and 'StopCoroutine(_animation)' in native):
+        ok("source includes native interaction and coroutine cleanup")
+    else:
+        bad("Native action progress: interaction cleanup missing")
+
+    drone_wired = ('NativeActionProgress.Begin(_owner' in drone
+                   and 'NativeActionProgress.Begin("antenna-deploy"' in drone
+                   and drone.count('NativeActionProgress.End(_owner)') >= 3
+                   and drone.count('NativeActionProgress.End("antenna-deploy")') >= 2)
+    if drone_wired:
+        ok("antenna and both drone launches use the native presentation")
+    else:
+        bad("Native action progress: drone or antenna lifecycle is not wired")
+
+    repair_wired = ('NativeActionProgress.Begin(ProgressOwner' in repair
+                    and repair.count('NativeActionProgress.End(ProgressOwner)') >= 4)
+    if repair_wired:
+        ok("convoy extinguish and repair use the native presentation")
+    else:
+        bad("Native action progress: convoy repair lifecycle is not wired")
+
+    turret_wired = ('NativeActionProgress.Begin(ReloadProgressOwner' in turret
+                    and 'NativeActionProgress.End(ReloadProgressOwner)' in turret
+                    and 'TickReloadProgress();' in turret)
+    if turret_wired:
+        ok("source routes turret reloads to the native presentation")
+    else:
+        bad("Native action progress: turret reload lifecycle is not wired")
+
+    # Repair owns a separate ConvoyFreezeHook in RevivalConvoyRepair.cs;
+    # it is not part of the drone input hook. Both must block movement.
+    movement_predicate = '"PlayerMovementController::PlayerCantMovement"'
+    stationary_locks = ('Antenna.Frozen' in input_hooks
+                        and 'DroneGear.LaunchBusy' in input_hooks
+                        and movement_predicate in input_hooks
+                        and movement_predicate in repair
+                        and 'if (ConvoyRepair.Busy) __result = true;' in repair)
+    if stationary_locks:
+        ok("stationary native actions retain their movement locks")
+    else:
+        bad("Native action progress: a stationary movement lock is missing")
+
+    legacy = ('FpvHold.Draw(' in drone or 'Antenna.Draw(' in drone
+              or 'Hold.Draw(' in drone or 'static void DrawBar()' in repair
+              or 'DrawLadeanzeige' in turret)
+    if not legacy:
+        ok("legacy custom progress bars are removed")
+    else:
+        bad("Native action progress: a legacy custom progress bar remains")
+
+    sync_p = os.path.join(ROOT, "sync_public.py")
+    if os.path.exists(sync_p):
+        sync = io.open(sync_p, encoding="utf-8").read()
+        if '"Revival.NativeProgress.cs"' in sync:
+            ok("native progress bridge is included in the public sync")
+        else:
+            bad("Native action progress: bridge missing from sync_public.py")
+
+
+def _code(src):
+    """The source with its // comments stripped.
+
+    Rules of the form "this call must NOT appear" have to read code, not prose:
+    a comment that EXPLAINS why a call is absent contains the call's name, and
+    a plain substring test then fails on the very documentation that proves the
+    rule is being honoured.
+    """
+    out = []
+    for line in src.splitlines():
+        i = line.find("//")
+        out.append(line if i < 0 else line[:i])
+    return "\n".join(out)
+
+
+def _bind_number(src, section, key):
+    """The default of a cfg.Bind("<section>", "<key>", <number>...) as a float,
+    or None. The config defaults ARE the balance, so the checks below read them
+    out of the source instead of repeating them."""
+    import re
+    m = re.search(r'Bind\(\s*"%s"\s*,\s*"%s"\s*,\s*(-?[0-9.]+)f?\s*,'
+                  % (re.escape(section), re.escape(key)), src)
+    return None if m is None else float(m.group(1))
+
+
+def check_technical():
+    """[17] The technical: three places, a gunner who stands, a weak gun.
+
+    Eight rules decide whether this is the vehicle that was ordered rather than
+    merely a vehicle, and every one of them is a line or two that a later edit
+    could undo without anything looking broken:
+
+      1. Three places, and the gunner is the LAST of them. The seat index is the
+         child order of SeatPoints (RE 18.1), so a fourth seat or a reordered
+         one silently puts somebody else on the gun.
+      2. It must stay fragile. CarSpawn.Prepare hands every mod vehicle
+         Durability 2000 - BTR armour. The cap is the VAZ-1111's 150, and it
+         must be applied DOWNWARDS only, or a re-applied cap would heal a
+         damaged truck.
+      3. The gun must stay weaker than the BTR autocannon, per shot AND per
+         second. That was the explicit request and it is two numbers in two
+         different files, so nothing but a comparison catches it drifting.
+      4. Recoil must stay small - also explicitly requested.
+      5. It must NOT eat armour. VehicleArmor.GunHit would give a machine gun
+         the autocannon's anti-vehicle rate, which is rule 3 undone by the back
+         door.
+      6. The gun follows the GUNNER'S BODY, which the game already synchronizes.
+         Replace that with a private Photon event and every client needs the
+         mod's event code to agree - the exact class of bug the turret's
+         rotation channel already cost once.
+      7. Placement is DERIVED from the donor's own mesh bounds, never typed in:
+         the vehicle models are not metric (the BTR's 2.9 m track measures
+         +-3.47 units), so absolute numbers are guesses.
+      8. The gunner's hands are SOLVED onto the grips, and that solution runs in
+         LateUpdate. The game has no animation for a man at a pintle mount, and
+         the animator rewrites every bone between Update and LateUpdate - a hand
+         placed any earlier is back at the man's side before anything is drawn.
+
+    Plus the file rule: RevivalTechnical.cs is machine-written and build.ps1
+    needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
+    file RevivalUralTruck.cs.
+
+    Plus the conversion path: technical_build.py has to keep finding a delivered
+    model in the toolkit folder and keep splitting the machine gun off into its
+    own mesh. Neither file has to exist - the vehicle ships on generated
+    geometry - but a gun welded into the body mesh cannot swivel, so losing that
+    split would quietly turn the finished vehicle back into a prop.
+    """
+    print("[17] Technische: drei Plaetze, stehender Schuetze, schwaches MG (statisch)")
+    tech_p = os.path.join(ROOT, "RevivalTechnical.cs")
+    ural_p = os.path.join(ROOT, "RevivalUralTruck.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    cam_p = os.path.join(ROOT, "Revival.CameraTurret.cs")
+    sync_p = os.path.join(ROOT, "sync_public.py")
+    build_p = os.path.join(ROOT, "technical_build.py")
+    if not os.path.exists(tech_p):
+        bad("RevivalTechnical.cs fehlt")
+        return
+    raw = io.open(tech_p, "rb").read()
+    t = raw.decode("utf-8", "replace")
+    tc = _code(t)            # the same file without its // comments
+    u = io.open(ural_p, encoding="utf-8").read() if os.path.exists(ural_p) else ""
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+    cam = io.open(cam_p, encoding="utf-8").read() if os.path.exists(cam_p) else ""
+    sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
+    build = io.open(build_p, encoding="utf-8").read() if os.path.exists(build_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Technical: " + why)
+
+    # --- file rule: ASCII, no BOM, Cyrillic elsewhere.
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "RevivalTechnical.cs beginnt mit einer BOM")
+    nonascii = [c for c in t if ord(c) > 126]
+    need(not nonascii, "reines ASCII",
+         "RevivalTechnical.cs enthaelt Nicht-ASCII (" + "".join(nonascii[:8]) + ")")
+    need("public static class TechnicalText" in u
+         and "internal static string NoAmmo(int itemId)" in u
+         and "TechnicalText.Spawned()" in t,
+         "zweisprachige Zeilen liegen in RevivalUralTruck.cs",
+         "die Spielertexte der Technischen stehen nicht in der UTF-8-Datei")
+
+    # --- 1: three places, the gunner last.
+    need("public const int SeatTotal = 3;" in t
+         and "public const int GunnerSeat = 2;" in t,
+         "drei Plaetze, das MG ist der letzte",
+         "Sitzzahl oder Geschuetzindex geaendert")
+    need("int keep = SeatTotal - 1;" in t
+         and "UnityEngine.Object.Destroy(vorn[i].gameObject);" in t,
+         "ueberzaehlige Sitze des Spenders werden entfernt",
+         "die Sitze des Spender-UAZ werden nicht auf drei gekuerzt")
+    need("gunner.SetAsLastSibling();" in t,
+         "der Stehplatz ist das letzte Kind von SeatPoints",
+         "der Stehplatz haengt nicht garantiert hinten")
+    need("new GameObject[seats.childCount]" in t,
+         "Passengers wird auf die neue Sitzzahl gesetzt",
+         "Passengers wird nicht neu dimensioniert")
+
+    # --- 2: fragile, and only ever downwards.
+    dur = _bind_number(t, "Technical", "Durability")
+    need(dur is not None and dur <= 150.0,
+         "Trefferpunkte %s, nicht mehr als der VAZ-1111 (150)"
+         % ("?" if dur is None else int(dur)),
+         "die Technische haelt mehr aus als das schwaechste Vanilla-Auto")
+    need("if (have <= cap) return;" in t,
+         "der Deckel wirkt nur nach unten",
+         "der Trefferpunkt-Deckel koennte Schaden zuruecknehmen")
+    need('Marke = "_TECHNICAL"' in t
+         and "btr-80a" not in tc.lower() and "_T72" not in tc,
+         "der Instanzname ist weder APC noch Panzer",
+         "der Name koennte als BTR oder T-72 gelesen werden, dann greift "
+         "VehicleArmor und die Technische waere nicht mehr zerbrechlich")
+
+    # --- 3: weaker than the BTR autocannon, per shot and per second.
+    mg_dmg = _bind_number(t, "TechnicalGun", "Damage")
+    mg_delay = _bind_number(t, "TechnicalGun", "FireDelay")
+    apc_dmg = _bind_number(plug, "Turret", "Damage")
+    apc_delay = _bind_number(plug, "Turret", "FireDelay")
+    have_all = None not in (mg_dmg, mg_delay, apc_dmg, apc_delay)
+    need(have_all and mg_dmg < apc_dmg,
+         "Schaden je Schuss %s < BTR %s" % (mg_dmg, apc_dmg),
+         "das MG trifft nicht mehr schwaecher als das BTR-Bordgeschuetz")
+    need(have_all and (mg_dmg / mg_delay) < (apc_dmg / apc_delay),
+         "Dauerleistung %.0f/s < BTR %.0f/s"
+         % ((mg_dmg / mg_delay) if have_all else 0,
+            (apc_dmg / apc_delay) if have_all else 0),
+         "die Dauerleistung des MG liegt ueber der des BTR-Bordgeschuetzes")
+
+    # --- 4: low recoil.
+    recoil = _bind_number(t, "TechnicalGun", "Recoil")
+    need(recoil is not None and 0.0 <= recoil <= 0.10,
+         "Rueckstoss %s Grad je Schuss, niedrig wie gefordert" % recoil,
+         "der Rueckstoss ist nicht mehr niedrig")
+
+    # --- 5: no anti-armour path.
+    need("VehicleArmor.GunHit" not in tc,
+         "das MG frisst keine Fahrzeugpanzerung",
+         "das MG benutzt den Panzerungspfad des BTR-Geschuetzes")
+
+    # --- 6: the gun follows the gunner's own synchronized bearing.
+    need("static void Koerper()" in t
+         and "body.transform.rotation = Quaternion.LookRotation" in t,
+         "der Koerper des Schuetzen dreht sich auf die Rohrrichtung",
+         "der Schuetze dreht sich nicht mit dem MG")
+    need("internal static void SlewRemote(Component vgs)" in t
+         and "mount.parent.InverseTransformDirection" in t,
+         "fremde MGs folgen der Koerperrichtung ihres Schuetzen",
+         "das MG anderer Spieler wird nicht nachgefuehrt")
+    need("PhotonNetwork" not in tc and "RaiseEvent" not in tc,
+         "kein eigener Netzwerkkanal fuer die Rohrrichtung",
+         "die Technische oeffnet einen eigenen Photon-Kanal, statt die schon "
+         "synchronisierte Koerperrichtung zu benutzen")
+    need('"NDR_TECHNICAL_V1"' in t and "DoInstantiate" in t,
+         "Spawnmarker wie beim T-72 und beim Ural",
+         "der Umbau erreicht Mitspieler und Nachzuegler nicht")
+
+    # --- 7: placement is derived, not typed in.
+    need("static bool Karosserie(GameObject car, out Vector3 min, out Vector3 max)" in t
+         and "root.InverseTransformPoint(" in t,
+         "die Masse kommen aus den Meshes des Spenders",
+         "die Aufbaumasse werden nicht am Fahrzeug gemessen")
+    need("CfgMountBack.Value * length" in t
+         and "CfgMountUp.Value * height" in t
+         and "CfgSeatBack.Value * length" in t,
+         "Lafette und Stehplatz sind Anteile der gemessenen Groesse",
+         "die Aufbaupunkte stehen als feste Zahlen im Quelltext")
+    need("float unitsPerMetre = length / DonorLengthMetres;" in t,
+         "Modelleinheiten werden in Meter umgerechnet",
+         "die Groesse des MG haengt nicht an der gemessenen Fahrzeuglaenge")
+
+    # --- 8: the hands on the grips, after the animation.
+    need("static void Arm(Transform upper, Transform fore, Transform hand," in t
+         and "Quaternion.AngleAxis(bend, axis.normalized)" in t,
+         "die Arme des Schuetzen werden auf die Griffe gerechnet",
+         "die Haende des Schuetzen liegen nicht am MG - es gibt keine "
+         "Loesung fuer die Arme")
+    need("internal static void LateAll()" in t
+         and "Technical.LateFrame();" in plug,
+         "Haende und fremde MGs laufen im LateUpdate",
+         "die Knochen werden nicht nach der Animation geschrieben - der "
+         "Animator ueberschreibt sie dann im selben Frame")
+    need("internal static Vector3 GripLocal(bool left)" in t
+         and "b.min.z + 0.12f * b.size.z" in t,
+         "die Griffpunkte kommen aus dem Modell des MG",
+         "die Griffpunkte eines gelieferten MG-Modells werden nicht an ihm "
+         "gemessen")
+
+    # --- the standing gunner and the third-person view, both ordered explicitly.
+    need("_inVehiclePose" in t and "static void ReleasePose()" in t,
+         "der Schuetze steht, und die Haltung wird zurueckgegeben",
+         "die Stehhaltung fehlt oder wird nicht zurueckgesetzt")
+    need("cam.transform.rotation = Quaternion.LookRotation(dir, Vector3.up);" in t
+         and "CfgCamBack" in t and "cam.fieldOfView" not in tc,
+         "Blick in der dritten Person, Bildwinkel unveraendert",
+         "die Kamera zielt nicht in der dritten Person oder schreibt den "
+         "Bildwinkel um, was wie ein Zielfernrohr aussieht")
+
+    # --- seams.
+    for seam in ("Technical.BindConfig", "TechnicalGun.BindConfig",
+                 "Technical.Install", "Technical.Tick()", "Technical.Draw()",
+                 "Technical.LateFrame()"):
+        need(seam in plug, "Seam " + seam,
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+    need('Add(Make("technical"' in u,
+         "Seam VehicleRegistry-Eintrag",
+         "die Technische steht nicht in der VehicleRegistry")
+    need("public const int GunTruck = 4;" in cam
+         and "TechnicalGun.LateTick();" in cam,
+         "Seam CameraOwner.GunTruck",
+         "die Kameravergabe kennt das MG der Technischen nicht")
+    # sync_public.py belongs to the private repository only; in the public
+    # copy there is nothing to check here.
+    if sync:
+        need('"RevivalTechnical.cs"' in sync,
+             "Datei geht ins oeffentliche Repository",
+             "RevivalTechnical.cs fehlt in sync_public.py - dort baut das Repo nicht")
+
+    # --- der Weg vom gelieferten Modell zu den Assetdateien.
+    #
+    # Nichts davon muss gebaut sein: das Fahrzeug faehrt mit erzeugter Geometrie
+    # auf dem Spender-UAZ. Aber das SKRIPT, das ein geliefertes Modell in die
+    # Dateien oben verwandelt, muss (a) das Modell im Toolkit-Ordner selbst
+    # finden - sonst ist der letzte Schritt wieder Handarbeit an der falschen
+    # Stelle - und (b) das MG aus dem Modell herausloesen, denn ein MG, das im
+    # selben Mesh wie der Rumpf steckt, kann sich im Spiel nicht drehen.
+    need("def source()" in build and "NAME_HINT" in build
+         and "def search_dirs()" in build,
+         "technical_build.py sucht das Quellmodell im Toolkit-Ordner",
+         "technical_build.py findet ein geliefertes Modell nicht mehr selbst")
+    need("def guess(table)" in build and "GUN_WORDS" in build
+         and '"technical_mg"' in build,
+         "das MG wird als eigenes Mesh aus dem Modell geloest",
+         "technical_build.py trennt das MG nicht mehr vom Rumpf - dann kann "
+         "es sich im Spiel nicht mit dem Schuetzen drehen")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -1128,6 +1537,8 @@ if __name__ == "__main__":
     check_convoy_column()
     check_mortar()
     check_arty_battery()
+    check_native_action_progress()
+    check_technical()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

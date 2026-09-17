@@ -557,6 +557,23 @@ namespace NextDayRevival
         const float MapArtShiftX = 2f;
         const float MapArtShiftY = -4f;
 
+        // Reserve before Patrol places names, including the first map frame.
+        internal static void ReserveMapLabels(MapLabels labels, Component texture,
+            Camera camera, Vector2 world, Vector2 map, Rect full)
+        {
+            if (_cfgEnabled == null || !_cfgEnabled.Value) return;
+            Vector3 centre = Centre();
+            if (Mathf.Abs(centre.x) > world.x || Mathf.Abs(centre.z) > world.y) return;
+            float radius = Mathf.Clamp(_cfgMapRadius == null ? 200f : _cfgMapRadius.Value, 20f, 1200f);
+            Vector2 mid, east, north;
+            if (!Project(centre, texture, camera, world, map, full, out mid)
+                || !Project(centre + new Vector3(radius, 0f, 0f), texture, camera, world, map, full, out east)
+                || !Project(centre + new Vector3(0f, 0f, radius), texture, camera, world, map, full, out north)) return;
+            float rx = Mathf.Max(2f, Mathf.Abs(east.x - mid.x));
+            float ry = Mathf.Max(2f, Mathf.Abs(north.y - mid.y));
+            labels.BlockScreen(new Rect(mid.x - rx, mid.y - ry, rx * 2f, ry * 2f));
+        }
+
         /// <summary>The orange ring, drawn from the CONFIGURED place on every
         /// client whenever the world map is open - it marks a location, so it
         /// must not depend on objects that only the master client owns.</summary>

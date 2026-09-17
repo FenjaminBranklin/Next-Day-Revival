@@ -513,6 +513,20 @@ namespace NextDayRevival
             Add(Make("tank", Loc.T("Танк Т-72", "T-72 tank"), null, true, true, null, null));
             Add(Make("ural", Loc.T("Урал (15 мест)", "Ural (15 seats)"),
                 UralTruck.Prefab, false, false, UralTruck.Umbauen, UralNetwork.SpawnData));
+            // The technical: same "custom prefab plus rebuild" shape as the
+            // Ural, so everything that spawns BY REGISTRY KIND gets it without
+            // knowing anything about its machine gun.
+            //
+            // What that does NOT yet include: RevivalComposition.Load rejects
+            // every vehicle type outside tank/btr/ural, so an editor route
+            // asking for a technical still receives a BTR. Widening that list
+            // is a convoy change - crew counts against three places, column
+            // behaviour, Unit.Truck - and deliberately not part of the vehicle
+            // itself. The technical is spawned by its own admin key, exactly as
+            // the Ural and the T-72 were when they shipped.
+            Add(Make("technical", TechnicalText.Label(),
+                Technical.Prefab, false, false, Technical.Umbauen,
+                TechnicalNetwork.SpawnData));
         }
 
         static Entry Make(string kind, string label, string prefab, bool isTank,
@@ -572,6 +586,49 @@ namespace NextDayRevival
 
             object[] net = e.NetData == null ? null : e.NetData();
             return CarSpawn.SpawnPrefab(e.Prefab, pos, rot, net, e.Rebuild);
+        }
+    }
+
+    /// <summary>
+    /// The player-facing lines of the technical (RevivalTechnical.cs).
+    ///
+    /// They live HERE and not beside the feature for one mechanical reason:
+    /// RevivalTechnical.cs is a machine-written ASCII file with no BOM, and
+    /// build.ps1 needs BOM-less sources, so real Cyrillic cannot sit in it.
+    /// This file already carries Cyrillic through Loc.T and is already the
+    /// feature's other seam (the VehicleRegistry entry above), so the split
+    /// costs nothing. It is the same arrangement RevivalArtyBattery.cs has with
+    /// RevivalMortar.cs.
+    /// </summary>
+    public static class TechnicalText
+    {
+        /// <summary>The registry label an admin or the route editor sees.</summary>
+        internal static string Label()
+        {
+            return Loc.T("Техничка (3 места)", "Technical (3 seats)");
+        }
+
+        internal static string Spawned()
+        {
+            return Loc.T("Техничка создана", "Technical spawned");
+        }
+
+        internal static string NoGun()
+        {
+            return Loc.T("Пулемёт не установлен", "No machine gun on this vehicle");
+        }
+
+        internal static string GunTaken()
+        {
+            return Loc.T("Место пулемётчика занято", "The gunner's place is taken");
+        }
+
+        internal static string NoAmmo(int itemId)
+        {
+            return Loc.T("Нет боеприпасов - предмет " + itemId
+                    + " отсутствует в багажнике, рюкзаке и разгрузке",
+                         "No ammunition - item " + itemId
+                    + " missing from trunk, backpack and vest");
         }
     }
 }

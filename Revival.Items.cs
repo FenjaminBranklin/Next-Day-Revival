@@ -222,6 +222,51 @@ namespace NextDayRevival
             return Texture(fileName, true, true);
         }
 
+        /// <summary>
+        /// Legt ein zur Laufzeit gebautes Mesh unter einem DATEINAMEN ab, damit
+        /// ein ItemDef es wie eine ausgelieferte Datei benennen kann. Beide
+        /// Nachschlagewege oben fragen erst den Zwischenspeicher und dann die
+        /// Platte, also beantwortet das hier jeden spaeteren Aufruf fuer diesen
+        /// Namen.
+        ///
+        /// ABGELEHNT, WENN DIE DATEI WIRKLICH DA LIEGT: ein von Hand
+        /// geliefertes Modell schlaegt erzeugte Geometrie immer - dieselbe
+        /// Regel, nach der ArtyModel arty_hull.ndmesh nimmt, sobald es jemand
+        /// hinlegt. Rueckgabe: ob der Zwischenspeicher gesetzt wurde.
+        /// </summary>
+        public static bool Provide(string fileName, Mesh mesh)
+        {
+            if (fileName == null || mesh == null) return false;
+            try
+            {
+                if (File.Exists(Path.Combine(RevivalPlugin.AssetDir, fileName))) return false;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Provide " + fileName + ": " + ex.Message);
+                return false;
+            }
+            _mesh[fileName] = mesh;
+            return true;
+        }
+
+        /// <summary>Wie oben, fuer eine zur Laufzeit gebaute Textur.</summary>
+        public static bool Provide(string fileName, Texture2D tex)
+        {
+            if (fileName == null || tex == null) return false;
+            try
+            {
+                if (File.Exists(Path.Combine(RevivalPlugin.AssetDir, fileName))) return false;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Provide " + fileName + ": " + ex.Message);
+                return false;
+            }
+            _tex[fileName] = tex;
+            return true;
+        }
+
         /// <summary>Liest eine .ndmesh. Prueft die Normalen, bevor sie ins Spiel geht.</summary>
         public static Mesh Load(string fileName)
         {

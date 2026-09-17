@@ -1140,6 +1140,30 @@ namespace NextDayRevival
             }
         }
 
+        // IMGUI drone marks are not visible to the native-widget scan. Reserve
+        // the same frozen snapshot before patrol and convoy names are placed.
+        internal static void ReserveMapLabels(MapLabels labels, Component texture,
+            Camera camera, Vector2 world, Vector2 map)
+        {
+            if (!Enabled) return;
+            for (int i = 0; i < _marks.Count; i++)
+            {
+                Mark mark = _marks[i];
+                if (Mathf.Abs(mark.Centre.x) > world.x * .75f || Mathf.Abs(mark.Centre.z) > world.y * .75f) continue;
+                Vector2 centre, east, north, point;
+                if (!MapTools.WorldToGui(mark.Centre, texture, camera, world, map, out centre)
+                    || !MapTools.WorldToGui(mark.Centre + new Vector3(mark.Radius, 0f, 0f),
+                        texture, camera, world, map, out east)
+                    || !MapTools.WorldToGui(mark.Centre + new Vector3(0f, 0f, mark.Radius),
+                        texture, camera, world, map, out north)) continue;
+                labels.BlockOrbit(centre, Mathf.Abs(east.x - centre.x), Mathf.Abs(north.y - centre.y));
+                if (MapTools.WorldToGui(mark.Drone, texture, camera, world, map, out point))
+                    labels.BlockScreen(new Rect(point.x - 6f, point.y - 6f, 12f, 12f));
+                if (mark.Spotted && MapTools.WorldToGui(mark.SpotPoint, texture, camera, world, map, out point))
+                    labels.BlockScreen(new Rect(point.x - 10f, point.y - 10f, 20f, 20f));
+            }
+        }
+
         public static void Draw()
         {
             if (!Enabled || _marks.Count == 0) return;
@@ -1270,359 +1294,84 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>
-    /// The settlement gun as generated geometry: a tracked self-propelled
-    /// howitzer with a hull, two running gears, a turret that turns and a barrel
-    /// that elevates.
-    ///
-    /// Built in code, exactly as the M1943 tube it replaces was. A vehicle per
-    /// settlement is decoration with no inventory icon, no hand pose and no UV
-    /// work; a generated mesh costs no asset file, no entry in the launch
-    /// receipt (ClientIntegrity rejects any file under plugins\assets the
-    /// receipt does not know) and no make_assets.py run to install.
-    ///
-    /// IF A REAL MODEL IS DROPPED IN, IT WINS. Whenever assets\arty_hull.ndmesh
-    /// (and optionally arty_turret.ndmesh, arty_barrel.ndmesh and
-    /// arty_diffuse.png) exist, they are loaded instead of the generated parts,
-    /// so a proper model replaces this one without a code change. The generated
-    /// shape is the fallback, not the intention.
-    ///
-    /// Winding follows the rule verify.py enforces on the shipped meshes: the
-    /// right-hand normal of each triangle's winding points the same way as its
-    /// stored normal, so nothing is culled while it is lit.
-    /// </summary>
+    /// <summary>The supplied Bohdana model, imported by arty_import.py.
+    /// Required assets only: missing art must never silently become a different
+    /// vehicle. Shared meshes and material keep each settlement inexpensive.</summary>
     internal static class ArtyModel
     {
-        internal const float HullLength = 6.2f;
-        internal const float HullWidth = 2.9f;
-        internal const float HullTop = 1.55f;
-        internal const float BarrelLength = 4.1f;
-
-        /// <summary>Where the turret sits on the hull, in the hull's space.</summary>
-        static readonly Vector3 TurretAt = new Vector3(0f, HullTop, -0.35f);
-
-        /// <summary>Where the barrel pivots, in the turret's space.</summary>
-        static readonly Vector3 TrunnionAt = new Vector3(0f, 0.45f, 0.85f);
-
-        /// <summary>The muzzle in the BARREL's space - the barrel points along
-        /// its own +Z, so this is simply its length.</summary>
+        static readonly Vector3 TurretAt = new Vector3(0f, 2.09076942f, -3.4798f);
+        static readonly Vector3 TrunnionAt = new Vector3(0.35473356f, 1.4097f, -0.32180553f);
         internal static Vector3 MuzzleLocal
         {
-            get { return new Vector3(0f, 0f, BarrelLength + 0.55f); }
+            get { return new Vector3(-0.01442866f, -0.01224359f, 6.83341194f); }
         }
 
         static Mesh _hull, _turret, _barrel;
         static Material _material;
+        static bool _loaded;
 
-        /// <summary>
-        /// Stand one vehicle up. The caller owns the returned root and receives
-        /// the two transforms it has to drive: the turret turns about its local
-        /// Y, the barrel elevates about its local X.
-        /// </summary>
         internal static GameObject Build(out Transform turret, out Transform barrel)
         {
+            turret = null;
+            barrel = null;
+            if (!Load()) return null;
             GameObject root = new GameObject("NDR Arty Vehicle");
-            Material m = Skin();
-
-            Part(root, Hull(), m);
-
-            GameObject t = new GameObject("Turret");
-            t.transform.SetParent(root.transform, false);
-            t.transform.localPosition = TurretAt;
-            t.transform.localRotation = Quaternion.identity;
-            Part(t, TurretMesh(), m);
-
-            GameObject b = new GameObject("Barrel");
-            b.transform.SetParent(t.transform, false);
-            b.transform.localPosition = TrunnionAt;
-            b.transform.localRotation = Quaternion.identity;
-            Part(b, BarrelMesh(), m);
-
-            turret = t.transform;
-            barrel = b.transform;
-            return root;
-        }
-
-        static void Part(GameObject go, Mesh mesh, Material m)
-        {
-            if (mesh == null) return;
-            MeshFilter mf = go.AddComponent<MeshFilter>();
-            mf.mesh = mesh;
-            MeshRenderer mr = go.AddComponent<MeshRenderer>();
-            if (m != null) mr.material = m;
-        }
-
-        static Material Skin()
-        {
-            if (_material != null) return _material;
             try
             {
-                Shader sh = Shader.Find("Standard");
-                if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
-                Material m = new Material(sh);
-                m.name = "NDR_Arty_Material";
-                Texture2D tex = null;
-                try { tex = Assets.TextureIfPresent("arty_diffuse.png"); }
-                catch { }
-                if (tex != null) m.mainTexture = tex;
-                // The same dark olive-grey gun finish the tube wore, so a gun
-                // without a texture file still reads as military hardware.
-                Color olive = new Color(0.22f, 0.24f, 0.19f, 1f);
-                if (m.HasProperty("_Color")) m.SetColor("_Color", tex == null ? olive : Color.white);
-                if (tex == null) m.color = olive;
-                if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.22f);
-                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.30f);
-                _material = m;
+                Part(root, _hull);
+                GameObject t = new GameObject("Turret");
+                t.transform.SetParent(root.transform, false);
+                t.transform.localPosition = TurretAt;
+                Part(t, _turret);
+                GameObject b = new GameObject("Barrel");
+                b.transform.SetParent(t.transform, false);
+                b.transform.localPosition = TrunnionAt;
+                Part(b, _barrel);
+                turret = t.transform;
+                barrel = b.transform;
+                return root;
+            }
+            catch
+            {
+                UnityEngine.Object.Destroy(root);
+                throw;
+            }
+        }
+
+        static void Part(GameObject go, Mesh mesh)
+        {
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            go.AddComponent<MeshRenderer>().sharedMaterial = _material;
+        }
+
+        static bool Load()
+        {
+            if (_loaded) return _hull != null && _turret != null
+                && _barrel != null && _material != null;
+            _loaded = true;
+            try
+            {
+                _hull = Assets.Load("arty_hull.ndmesh");
+                _turret = Assets.Load("arty_turret.ndmesh");
+                _barrel = Assets.Load("arty_barrel.ndmesh");
+                Texture2D tex = Assets.TextureIfPresent("arty_diffuse.png");
+                if (_hull == null || _turret == null || _barrel == null || tex == null)
+                    throw new InvalidOperationException("Bohdana assets missing; repair the client package");
+                Shader shader = Shader.Find("Standard");
+                if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+                _material = new Material(shader);
+                _material.name = "NDR_Bohdana_Material";
+                _material.mainTexture = tex;
+                _material.color = Color.white;
+                if (_material.HasProperty("_Glossiness")) _material.SetFloat("_Glossiness", 0.15f);
+                if (_material.HasProperty("_Metallic")) _material.SetFloat("_Metallic", 0f);
+                RevivalPlugin.L.LogInfo("ArtyModel: supplied Bohdana model loaded");
+                return true;
             }
             catch (Exception ex)
             {
-                RevivalPlugin.L.LogWarning("ArtyModel material: " + ex.Message);
-            }
-            return _material;
-        }
-
-        /// <summary>A shipped mesh of this name, or null when there is none.
-        /// Silent on purpose: no file is the normal case.</summary>
-        static Mesh Shipped(string file)
-        {
-            try
-            {
-                string path = Path.Combine(RevivalPlugin.AssetDir, file);
-                if (!File.Exists(path)) return null;
-                Mesh m = Assets.Load(file);
-                if (m != null)
-                    RevivalPlugin.L.LogInfo("ArtyModel: " + file + " loaded - the shipped "
-                        + "model replaces the generated part.");
-                return m;
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("ArtyModel: " + file + ": " + ex.Message);
-                return null;
-            }
-        }
-
-        // ------------------------------------------------------------- meshes
-
-        static Mesh Hull()
-        {
-            if (_hull != null) return _hull;
-            _hull = Shipped("arty_hull.ndmesh");
-            if (_hull != null) return _hull;
-
-            List<Vector3> v = new List<Vector3>();
-            List<Vector3> n = new List<Vector3>();
-            List<Vector2> uv = new List<Vector2>();
-            List<int> tri = new List<int>();
-
-            float hl = HullLength * 0.5f;
-            float hw = HullWidth * 0.5f;
-
-            // The body: a lower hull the tracks hide half of, and a narrower
-            // superstructure on top of it. Two boxes read as a tracked vehicle
-            // from every angle a player sees it from.
-            Box(v, n, uv, tri, new Vector3(0f, 0.95f, 0f),
-                new Vector3(hw - 0.42f, 0.35f, hl));
-            Box(v, n, uv, tri, new Vector3(0f, 1.38f, -0.2f),
-                new Vector3(hw - 0.62f, 0.25f, hl - 0.55f));
-            // The glacis: a wedge at the front, so the nose is not a wall.
-            Box(v, n, uv, tri, new Vector3(0f, 1.18f, hl - 0.55f),
-                new Vector3(hw - 0.55f, 0.16f, 0.55f));
-
-            // Running gear: a track box each side and the road wheels inside it.
-            for (int s = -1; s <= 1; s += 2)
-            {
-                float x = s * (hw - 0.22f);
-                Box(v, n, uv, tri, new Vector3(x, 0.52f, 0f),
-                    new Vector3(0.22f, 0.50f, hl));
-                for (int i = 0; i < 6; i++)
-                {
-                    float z = -hl + 0.75f + i * ((HullLength - 1.5f) / 5f);
-                    Cyl(v, n, uv, tri,
-                        new Vector3(x - s * 0.24f, 0.45f, z),
-                        new Vector3(x + s * 0.02f, 0.45f, z),
-                        0.34f, 0.34f, 10);
-                }
-            }
-
-            _hull = Finish(v, n, uv, tri, "NDR_Arty_Hull");
-            return _hull;
-        }
-
-        static Mesh TurretMesh()
-        {
-            if (_turret != null) return _turret;
-            _turret = Shipped("arty_turret.ndmesh");
-            if (_turret != null) return _turret;
-
-            List<Vector3> v = new List<Vector3>();
-            List<Vector3> n = new List<Vector3>();
-            List<Vector2> uv = new List<Vector2>();
-            List<int> tri = new List<int>();
-
-            // The turret box, its sloped front plate and the commander's hatch.
-            Box(v, n, uv, tri, new Vector3(0f, 0.45f, 0f),
-                new Vector3(1.10f, 0.45f, 1.35f));
-            Box(v, n, uv, tri, new Vector3(0f, 0.45f, 1.20f),
-                new Vector3(0.78f, 0.34f, 0.20f));
-            Cyl(v, n, uv, tri, new Vector3(-0.35f, 0.90f, -0.35f),
-                new Vector3(-0.35f, 1.02f, -0.35f), 0.30f, 0.28f, 12);
-            // The traverse ring it sits on, so the seam to the hull is not a gap.
-            Cyl(v, n, uv, tri, new Vector3(0f, -0.06f, 0f),
-                new Vector3(0f, 0.04f, 0f), 1.15f, 1.12f, 20);
-
-            _turret = Finish(v, n, uv, tri, "NDR_Arty_Turret");
-            return _turret;
-        }
-
-        static Mesh BarrelMesh()
-        {
-            if (_barrel != null) return _barrel;
-            _barrel = Shipped("arty_barrel.ndmesh");
-            if (_barrel != null) return _barrel;
-
-            List<Vector3> v = new List<Vector3>();
-            List<Vector3> n = new List<Vector3>();
-            List<Vector2> uv = new List<Vector2>();
-            List<int> tri = new List<int>();
-
-            // Mantlet, tube, muzzle brake - the three shapes that make a barrel
-            // read as a howitzer's rather than a pipe.
-            Cyl(v, n, uv, tri, new Vector3(0f, 0f, -0.25f), new Vector3(0f, 0f, 0.35f),
-                0.26f, 0.22f, 14);
-            Cyl(v, n, uv, tri, new Vector3(0f, 0f, 0.30f),
-                new Vector3(0f, 0f, BarrelLength), 0.135f, 0.115f, 14);
-            Cyl(v, n, uv, tri, new Vector3(0f, 0f, BarrelLength),
-                new Vector3(0f, 0f, BarrelLength + 0.55f), 0.175f, 0.165f, 14);
-
-            _barrel = Finish(v, n, uv, tri, "NDR_Arty_Barrel");
-            return _barrel;
-        }
-
-        static Mesh Finish(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
-                           List<int> tri, string name)
-        {
-            Mesh mesh = new Mesh();
-            mesh.name = name;
-            mesh.vertices = v.ToArray();
-            mesh.normals = n.ToArray();
-            mesh.uv = uv.ToArray();
-            mesh.triangles = tri.ToArray();
-            mesh.RecalculateBounds();
-            return mesh;
-        }
-
-        // --------------------------------------------------- geometry helpers
-
-        /// <summary>An axis-aligned box around <paramref name="c"/> with the
-        /// half-sizes <paramref name="h"/>. Each face keeps its own four
-        /// vertices so the normals stay flat, and every face is wound so its
-        /// right-hand normal points out of the body.</summary>
-        static void Box(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
-                        List<int> tri, Vector3 c, Vector3 h)
-        {
-            // Every pair below is picked so that right x up IS the face normal -
-            // see Face for why that decides which way the quad faces.
-            Face(v, n, uv, tri, c + new Vector3(0f, 0f, h.z), Vector3.forward,
-                 new Vector3(h.x, 0f, 0f), new Vector3(0f, h.y, 0f));
-            Face(v, n, uv, tri, c - new Vector3(0f, 0f, h.z), Vector3.back,
-                 new Vector3(-h.x, 0f, 0f), new Vector3(0f, h.y, 0f));
-            Face(v, n, uv, tri, c + new Vector3(h.x, 0f, 0f), Vector3.right,
-                 new Vector3(0f, 0f, -h.z), new Vector3(0f, h.y, 0f));
-            Face(v, n, uv, tri, c - new Vector3(h.x, 0f, 0f), Vector3.left,
-                 new Vector3(0f, 0f, h.z), new Vector3(0f, h.y, 0f));
-            Face(v, n, uv, tri, c + new Vector3(0f, h.y, 0f), Vector3.up,
-                 new Vector3(-h.x, 0f, 0f), new Vector3(0f, 0f, h.z));
-            Face(v, n, uv, tri, c - new Vector3(0f, h.y, 0f), Vector3.down,
-                 new Vector3(h.x, 0f, 0f), new Vector3(0f, 0f, h.z));
-        }
-
-        /// <summary>One quad at <paramref name="centre"/> spanned by
-        /// <paramref name="right"/> and <paramref name="up"/>, wound
-        /// (0,1,2),(0,2,3). The right-hand normal of that winding is
-        /// right x up, so the caller picks the two vectors in the order that
-        /// makes it the OUTWARD normal - a face wound the other way round is
-        /// culled while it is lit, which is the one mesh mistake verify.py
-        /// bothers to check for on the shipped meshes.</summary>
-        static void Face(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
-                         List<int> tri, Vector3 centre, Vector3 normal,
-                         Vector3 right, Vector3 up)
-        {
-            int b = v.Count;
-            v.Add(centre - right - up); n.Add(normal); uv.Add(new Vector2(0f, 0f));
-            v.Add(centre + right - up); n.Add(normal); uv.Add(new Vector2(1f, 0f));
-            v.Add(centre + right + up); n.Add(normal); uv.Add(new Vector2(1f, 1f));
-            v.Add(centre - right + up); n.Add(normal); uv.Add(new Vector2(0f, 1f));
-            tri.Add(b); tri.Add(b + 1); tri.Add(b + 2);
-            tri.Add(b); tri.Add(b + 2); tri.Add(b + 3);
-        }
-
-        /// <summary>One closed, capped, possibly tapered cylinder - the same
-        /// routine the mortar tube was built from, kept here because that file's
-        /// copy is private to it.</summary>
-        static void Cyl(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
-                        List<int> tri, Vector3 a, Vector3 b,
-                        float ra, float rb, int sides)
-        {
-            Vector3 w = b - a;
-            float h = w.magnitude;
-            if (h < 1e-4f || sides < 3) return;
-            w /= h;
-
-            Vector3 helper = Mathf.Abs(w.y) > 0.9f ? Vector3.forward : Vector3.up;
-            Vector3 u = Vector3.Cross(helper, w).normalized;
-            Vector3 vv = Vector3.Cross(w, u);
-
-            int sideBase = v.Count;
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                Vector3 sn = (dir * h + w * (ra - rb)).normalized;
-                float uu = (float)i / sides;
-                v.Add(a + dir * ra); n.Add(sn); uv.Add(new Vector2(uu, 0f));
-                v.Add(b + dir * rb); n.Add(sn); uv.Add(new Vector2(uu, 1f));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                int b0 = sideBase + i * 2;
-                int t0 = b0 + 1;
-                int b1 = b0 + 2;
-                int t1 = b0 + 3;
-                tri.Add(b0); tri.Add(t1); tri.Add(t0);
-                tri.Add(b0); tri.Add(b1); tri.Add(t1);
-            }
-
-            int capTop = v.Count;
-            v.Add(b); n.Add(w); uv.Add(new Vector2(0.5f, 0.5f));
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                v.Add(b + dir * rb); n.Add(w);
-                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                tri.Add(capTop);
-                tri.Add(capTop + 1 + i);
-                tri.Add(capTop + 2 + i);
-            }
-
-            int capBottom = v.Count;
-            v.Add(a); n.Add(-w); uv.Add(new Vector2(0.5f, 0.5f));
-            for (int i = 0; i <= sides; i++)
-            {
-                float t = i * Mathf.PI * 2f / sides;
-                Vector3 dir = u * Mathf.Cos(t) + vv * Mathf.Sin(t);
-                v.Add(a + dir * ra); n.Add(-w);
-                uv.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(t), 0.5f + 0.5f * Mathf.Sin(t)));
-            }
-            for (int i = 0; i < sides; i++)
-            {
-                tri.Add(capBottom);
-                tri.Add(capBottom + 2 + i);
-                tri.Add(capBottom + 1 + i);
+                RevivalPlugin.L.LogError("ArtyModel: " + ex.Message);
+                return false;
             }
         }
     }

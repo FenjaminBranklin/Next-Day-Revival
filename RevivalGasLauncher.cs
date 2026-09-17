@@ -49,10 +49,18 @@
 // the other client can load and an owner that survives the shooter leaving.
 // So a second player sees the explosion, not the fog. Noted, not hidden.
 //
-// ART. The tube reuses the LAW's mesh, textures and icon on purpose: a
-// disposable shoulder tube is exactly what this weapon is, and new art needs
-// `python make_assets.py`, which cannot run inside this task's sandbox. A
-// dedicated gasgun_* asset set is a follow-up; nothing else depends on it.
+// ART. The launcher has its own model (GasGunModel below): a
+// single-shot, break-open 50 mm grenade launcher in the RGS-50M pattern -
+// the tube Russian units actually fire irritant-gas rounds from - with its
+// own palette texture and its own inventory icon, all built in code. Until
+// then it wore the M72 LAW's art, which was the wrong weapon AND sat in the
+// hand backwards and upside down: law.ndmesh is authored in the toolkit's
+// RIFLE frame, and this is a GRENADE-slot item whose prefab gets the frag
+// grenade's transform written onto it. Generated geometry, not an asset file,
+// because `python make_assets.py` cannot run in a queue sandbox and because
+// every file under plugins\assets has to be in the launch receipt. A real
+// model still wins: assets\gasgun.ndmesh and gasgun_diffuse.png are read
+// whenever they exist.
 //
 // C# 3.0. Player-facing literals are bilingual (Loc.T) and carry real
 // Cyrillic, as in RevivalPlugin.cs; comments, logs and config text stay as
@@ -65,6 +73,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -112,6 +121,8 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgFullSetImmune;
         public static ConfigEntry<string> CfgKey;
         public static ConfigEntry<string> CfgTestKey;
+        public static ConfigEntry<string> CfgModelEuler;
+        public static ConfigEntry<string> CfgModelOffset;
 
         public static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
 
@@ -151,20 +162,25 @@ namespace NextDayRevival
         // --------------------------------------------------------------- item
         public static void AddItems(List<ItemDef> items)
         {
+            // The art is provided BEFORE the ItemDef exists. The factory
+            // resolves these three names through the Assets caches, and those
+            // are asked before the disk - so the generated launcher is already
+            // standing there when the game first asks for the hand model.
+            GasGunModel.Provide();
             items.Add(new ItemDef(
                 DEF_LAUNCHER, DEF_DONOR, true,
                 "Химический гранатомёт РГ-Х «Туман»", "RG-Kh 'Tuman' gas launcher",
-                "Одноразовая труба с химической гранатой. Один выстрел - и участок "
+                "Однозарядный гранатомёт с химической гранатой. Один выстрел - и участок "
                 + "на полчаса затягивает ядовитым газом: в облаке растёт отравление, "
                 + "и оно не разбирает, кто свой. Противогаз и костюм Л-1 спасают, "
-                + "открытое лицо - нет. После выстрела труба пуста.",
-                "Single-use tube with a chemical round. One shot leaves an area "
-                + "under toxic gas for half an hour: everything inside the cloud "
-                + "takes poisoning, and it does not care whose side you are on. A "
-                + "gas mask and an L-1 suit keep you alive in there, a bare face "
-                + "does not. The tube is empty after the shot.",
-                "law.ndmesh", "law_diffuse.png", "law_normal.png",
-                "law_icon.png", null,
+                + "открытое лицо - нет. После выстрела ствол пуст.",
+                "Single-shot launcher with a chemical round. One shot leaves an "
+                + "area under toxic gas for half an hour: everything inside the "
+                + "cloud takes poisoning, and it does not care whose side you are "
+                + "on. A gas mask and an L-1 suit keep you alive in there, a bare "
+                + "face does not. The barrel is empty after the shot.",
+                GasGunModel.MESH_FILE, GasGunModel.DIFFUSE_FILE, null,
+                GasGunModel.ICON_FILE, null,
                 1, 0, 8.0f));
         }
 
@@ -233,6 +249,22 @@ namespace NextDayRevival
             CfgTestKey = cfg.Bind("GasLauncher", "TestKey", "None",
                 "Nur zur Abnahme: setzt eine Wolke 15 m vor den Spieler, ohne "
                 + "Waffe und ohne Schuss. Standard None (aus).");
+            // DIE LAGE IN DER HAND IST NICHT MESSBAR OHNE DAS SPIEL. Das Item
+            // haengt im Granatenslot und bekommt deshalb die Transformdaten der
+            // Splittergranate 1403 auf die Prefabwurzel geschrieben (siehe
+            // GasGunModel). Die Vorgabe dreht das Modell um 180 Grad um X -
+            // genau die eine Drehung, die "falsch herum UND auf dem Kopf"
+            // rueckgaengig macht, so wie die LAW vorher in der Hand lag. Sitzt
+            // der Werfer damit immer noch schief, ist das hier die Schraube:
+            // keine neue DLL noetig, nur ein Neustart des Spiels.
+            CfgModelEuler = cfg.Bind("GasLauncher", "ModelEuler", "180,0,0",
+                "Drehung des Werfermodells in der Hand, Grad als x,y,z. "
+                + "180,0,0 dreht das Modell auf den Kopf und von vorn nach "
+                + "hinten; 0,0,0 laesst es, wie es gebaut ist.");
+            CfgModelOffset = cfg.Bind("GasLauncher", "ModelOffset", "0,0,0",
+                "Verschiebung des Werfermodells in der Hand, x,y,z in "
+                + "Modelleinheiten (1 Einheit = 393,5 mm, wie bei allen Meshes "
+                + "des Baukastens). Wird NACH der Drehung angewandt.");
         }
 
         static float Radius() { return CfgRadius == null ? 16f : Mathf.Clamp(CfgRadius.Value, 3f, 60f); }
@@ -279,6 +311,10 @@ namespace NextDayRevival
             try
             {
                 Keys();
+                // The inventory icon is RENDERED from the model, and a render
+                // wants a live frame - so it happens here, once, and not in
+                // Awake. Until it does, the icon is the LAW's old picture.
+                GasGunModel.TickIcon();
 
                 if (_key != KeyCode.None && Input.GetKeyDown(_key) && Equipped())
                 {
@@ -1063,6 +1099,783 @@ namespace NextDayRevival
                                    w + 4f, 26f), text, _style);
             }
             catch { }
+        }
+    }
+
+    /// <summary>
+    /// The launcher's own art: a single-shot, break-open 50 mm grenade
+    /// launcher in the RGS-50M pattern - the tube Russian units actually fire
+    /// irritant-gas rounds from - with its palette texture and its inventory
+    /// icon, all built in code.
+    ///
+    /// WHY THIS CLASS EXISTS. Until it did, the weapon wore the M72 LAW's
+    /// mesh, textures and icon. Two things were wrong with that, and the
+    /// second one is the one that made it look broken:
+    ///
+    ///   1. It is the wrong weapon. A LAW is a rocket launcher; this fires one
+    ///      chemical grenade.
+    ///   2. IT SAT IN THE HAND BACKWARDS AND UPSIDE DOWN. `law.ndmesh` is
+    ///      authored in the toolkit's RIFLE frame (muzzle at -Y, top at +Z,
+    ///      grip at y 0.624 - law_mesh.py, and the anchors in
+    ///      ItemFactory.BuildModel are measured from exactly that). Item 1491
+    ///      is a GRENADE-slot item that clones the frag grenade 1403, so
+    ///      `WeaponTranformManager.ApplyLocalTransformData` writes THE
+    ///      GRENADE's localPosition and localEulerAngles onto the prefab root
+    ///      (see ItemFactory.ApplyScale) - a transform meant for a fist-sized
+    ///      object lying in the palm, not for a rifle-frame tube that hangs
+    ///      0.624 units off its own origin.
+    ///
+    /// So this mesh is authored FOR THE GRENADE HAND: the grip closes around
+    /// the mesh ORIGIN, and the frame is turned by GasLauncher/ModelEuler
+    /// (default 180 degrees about X - the single flip that undoes "backwards
+    /// AND upside down") before the factory ever sees it. Both knobs are
+    /// config on purpose: a hand pose cannot be measured outside the running
+    /// game, and a wrong guess has to be fixable in the .cfg instead of in a
+    /// build.
+    ///
+    /// IF A REAL MODEL IS DROPPED IN, IT WINS - the rule ArtyModel already
+    /// follows for the settlement gun. `assets\gasgun.ndmesh`,
+    /// `gasgun_diffuse.png` and `gasgun_icon.png` are read whenever they
+    /// exist, so a converted third-party launcher replaces this geometry
+    /// without a code change; it only has to be authored with its grip at the
+    /// origin. All three are listed in verify.py OPTIONAL_ASSETS, and missing
+    /// is the normal case. A file that IS delivered belongs in ASSET_FILES,
+    /// in make_assets.py and in the launch receipt (ClientIntegrity refuses
+    /// any file under plugins\assets the receipt does not know).
+    ///
+    /// Winding follows the rule verify.py enforces on the shipped meshes: the
+    /// right-hand normal of each triangle points the same way as its stored
+    /// normal, so nothing is culled while it is lit.
+    /// </summary>
+    internal static class GasGunModel
+    {
+        internal const string MESH_FILE = "gasgun.ndmesh";
+        internal const string DIFFUSE_FILE = "gasgun_diffuse.png";
+        internal const string ICON_FILE = "gasgun_icon.png";
+        // What the launcher wore before. It stays the fallback for both the
+        // mesh and the icon, so every failure below lands on the picture the
+        // weapon had yesterday instead of on an empty hand or a blank square.
+        const string FALLBACK_MESH = "law.ndmesh";
+        const string FALLBACK_DIFFUSE = "law_diffuse.png";
+        const string FALLBACK_ICON = "law_icon.png";
+
+        // 1 unit = 393.5 mm. The scale every mesh of this toolkit is built at
+        // (law_mesh.py MM = 1/393.5; the anti-tank mine repeats it), and the
+        // root scale 0.01 in ItemFactory.ApplyScale is measured against it.
+        const float MM = 1f / 393.5f;
+
+        // The weapon, in that unit and in the frame described above: forward
+        // is -Y, up is +Z, the hand closes around the origin.
+        const float BORE = 25f * MM;          // 50 mm calibre
+        const float TUBE = 36f * MM;          // barrel outside
+        const float BZ = 0.175f;              // bore axis above the hand
+        const float MUZZLE_Y = -1.32f;        // 520 mm in front of the hand
+        const float BREECH_Y = -0.16f;        // the barrel's rear face
+        const float BUTT_Y = 0.95f;           // total length ~ 2.27 units, 894 mm
+
+        // The four quadrants of the palette texture. Every part is painted by
+        // moving its UVs into one of them, so one material carries four
+        // colours without a single UV seam to unwrap.
+        static readonly Vector2 BODY = new Vector2(0f, 0f);    // olive tube
+        static readonly Vector2 GRIP = new Vector2(1f, 0f);    // black polymer
+        static readonly Vector2 STEEL = new Vector2(0f, 1f);   // dark steel
+        static readonly Vector2 WARN = new Vector2(1f, 1f);    // chemical yellow
+
+        // The icon render puts its rig on a layer of its own and 6 km below the
+        // world, so its camera sees nothing but the launcher.
+        const int ICON_LAYER = 31;
+        const int ICON_SIZE = 300;            // the size every item icon has
+
+        static bool _provided;
+        static bool _iconDone;
+        static Mesh _mesh;
+        static Texture2D _skin;
+
+        // ------------------------------------------------------------ provide
+
+        /// <summary>
+        /// Builds (or reads) mesh and texture and hands them to the Assets
+        /// caches under the file names the ItemDef carries. Called from
+        /// AddItems, before the ItemDef exists, and exactly once.
+        /// </summary>
+        internal static void Provide()
+        {
+            if (_provided) return;
+            _provided = true;
+            try
+            {
+                bool shipped = Present(MESH_FILE);
+                // A shipped file is read through the normal cache and then
+                // corrected IN PLACE: the cached instance has to be the
+                // corrected one, and nothing but this weapon uses that name.
+                _mesh = shipped ? Assets.Load(MESH_FILE) : Build();
+                if (_mesh == null)
+                {
+                    RevivalPlugin.L.LogWarning("Gas launcher model: kein Mesh gebaut - "
+                        + "der Werfer traegt wieder die LAW.");
+                    Fallback();
+                    return;
+                }
+                Correct(_mesh);
+                if (!shipped) Assets.Provide(MESH_FILE, _mesh);
+
+                Texture2D skin = Skin();
+                if (skin != null) Assets.Provide(DIFFUSE_FILE, skin);
+
+                // Prime the icon so no lookup can cache a null before the
+                // render in TickIcon replaces it.
+                Texture2D old = Assets.Texture(FALLBACK_ICON, false, false);
+                if (old != null) Assets.Provide(ICON_FILE, old);
+
+                RevivalPlugin.L.LogInfo("Gas launcher model: "
+                    + (shipped ? "gasgun.ndmesh geladen" : "Geometrie erzeugt")
+                    + ", " + (_mesh.vertexCount) + " Vertices, bounds="
+                    + _mesh.bounds.size + ", Drehung " + EulerValue()
+                    + ", Versatz " + OffsetValue() + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Gas launcher model: " + ex);
+                try { Fallback(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// The old art under the new names. Not corrected and not repainted:
+        /// this is the LAW exactly as the weapon wore it before, which is a
+        /// known picture rather than a guess on top of a failure.
+        /// </summary>
+        static void Fallback()
+        {
+            Mesh law = Assets.Load(FALLBACK_MESH);
+            if (law != null) Assets.Provide(MESH_FILE, law);
+            Texture2D tex = Assets.Texture(FALLBACK_DIFFUSE, false, true);
+            if (tex != null) Assets.Provide(DIFFUSE_FILE, tex);
+            Texture2D icon = Assets.Texture(FALLBACK_ICON, false, false);
+            if (icon != null) Assets.Provide(ICON_FILE, icon);
+            _mesh = null;
+        }
+
+        /// <summary>Renders the inventory icon from the model. Once, from the
+        /// first tick, because a render wants a frame that is running.</summary>
+        internal static void TickIcon()
+        {
+            if (_iconDone) return;
+            _iconDone = true;
+            if (_mesh == null || Present(ICON_FILE)) return;
+            try
+            {
+                Texture2D icon = RenderIcon();
+                if (icon == null)
+                {
+                    RevivalPlugin.L.LogInfo("Gas launcher icon: nicht gerendert - "
+                        + "es bleibt bei " + FALLBACK_ICON + ".");
+                    return;
+                }
+                Assets.Provide(ICON_FILE, icon);
+                RevivalPlugin.L.LogInfo("Gas launcher icon: aus dem Modell gerendert ("
+                    + ICON_SIZE + "x" + ICON_SIZE + ").");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Gas launcher icon: " + ex.Message);
+            }
+        }
+
+        static bool Present(string file)
+        {
+            try { return File.Exists(Path.Combine(RevivalPlugin.AssetDir, file)); }
+            catch { return false; }
+        }
+
+        // ---------------------------------------------------------- correction
+
+        static Vector3 EulerValue()
+        {
+            return ParseVec3(GasLauncher.CfgModelEuler == null
+                             ? null : GasLauncher.CfgModelEuler.Value,
+                             new Vector3(180f, 0f, 0f));
+        }
+
+        static Vector3 OffsetValue()
+        {
+            return ParseVec3(GasLauncher.CfgModelOffset == null
+                             ? null : GasLauncher.CfgModelOffset.Value,
+                             Vector3.zero);
+        }
+
+        /// <summary>
+        /// Turns the finished mesh into the pose the grenade hand wants, about
+        /// the ORIGIN - which is where the grip is, so the weapon turns in the
+        /// fist and does not swing away from it.
+        /// </summary>
+        static void Correct(Mesh m)
+        {
+            Vector3 euler = EulerValue();
+            Vector3 offset = OffsetValue();
+            if (euler == Vector3.zero && offset == Vector3.zero) return;
+            Quaternion q = Quaternion.Euler(euler);
+
+            Vector3[] vs = m.vertices;
+            for (int i = 0; i < vs.Length; i++) vs[i] = q * vs[i] + offset;
+            m.vertices = vs;
+
+            Vector3[] ns = m.normals;
+            if (ns != null && ns.Length == vs.Length)
+            {
+                for (int i = 0; i < ns.Length; i++) ns[i] = q * ns[i];
+                m.normals = ns;
+            }
+            m.RecalculateBounds();
+        }
+
+        static Vector3 ParseVec3(string s, Vector3 fallback)
+        {
+            if (s == null || s.Length == 0) return fallback;
+            string[] parts = s.Split(',');
+            if (parts.Length != 3) return fallback;
+            float x, y, z;
+            if (!float.TryParse(parts[0].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out x)) return fallback;
+            if (!float.TryParse(parts[1].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out y)) return fallback;
+            if (!float.TryParse(parts[2].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out z)) return fallback;
+            return new Vector3(x, y, z);
+        }
+
+        // --------------------------------------------------------------- mesh
+
+        /// <summary>A point on the bore axis at that distance along the weapon.</summary>
+        static Vector3 Axis(float y) { return new Vector3(0f, y, BZ); }
+
+        static Mesh Build()
+        {
+            List<Vector3> v = new List<Vector3>();
+            List<Vector3> n = new List<Vector3>();
+            List<Vector2> uv = new List<Vector2>();
+            List<int> tri = new List<int>();
+            int mark;
+
+            // THE BARREL, hollow over its whole length. A 50 mm muzzle that is
+            // a flat disc reads as a painted circle, not as a bore - the same
+            // lesson law_mesh.py wrote down at length.
+            mark = v.Count;
+            Pipe(v, n, uv, tri, Axis(BREECH_Y), Axis(MUZZLE_Y), TUBE, BORE, 24);
+            Paint(uv, mark, BODY);
+
+            // Muzzle collar: the thicker ring the tube ends in.
+            mark = v.Count;
+            Pipe(v, n, uv, tri, Axis(MUZZLE_Y + 0.085f), Axis(MUZZLE_Y - 0.004f),
+                 TUBE + 0.016f, BORE, 24);
+            Paint(uv, mark, STEEL);
+
+            // Two chemical warning bands. A yellow band on an olive tube is
+            // what tells a player at a glance that this is not a rocket.
+            for (int i = 0; i < 2; i++)
+            {
+                float by = MUZZLE_Y + 0.34f + i * 0.26f;
+                mark = v.Count;
+                Pipe(v, n, uv, tri, Axis(by + 0.036f), Axis(by - 0.036f),
+                     TUBE + 0.009f, TUBE - 0.002f, 24);
+                Paint(uv, mark, WARN);
+            }
+
+            // The loaded round. Without it the bore looks straight through the
+            // weapon and out the other side; its nose stops well behind the
+            // muzzle, so what is left in front of it is a dark shaft.
+            mark = v.Count;
+            Cyl(v, n, uv, tri, Axis(BREECH_Y - 0.02f), Axis(MUZZLE_Y + 0.46f),
+                BORE - 0.004f, BORE - 0.004f, 18);
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Cyl(v, n, uv, tri, Axis(MUZZLE_Y + 0.46f), Axis(MUZZLE_Y + 0.30f),
+                BORE - 0.004f, 0.013f, 18);
+            Paint(uv, mark, WARN);
+
+            // THE BREECH. A box around the rear of the tube, the hinge pin it
+            // breaks open on, and the locking lever on the left.
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(0f, 0.06f, BZ - 0.012f),
+                  new Vector3(0.105f, 0.22f, 0.122f));
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Cyl(v, n, uv, tri, new Vector3(-0.118f, BREECH_Y + 0.03f, BZ - 0.105f),
+                new Vector3(0.118f, BREECH_Y + 0.03f, BZ - 0.105f), 0.022f, 0.022f, 12);
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(-0.118f, 0.13f, BZ - 0.005f),
+                  new Vector3(0.020f, 0.080f, 0.038f));
+            Paint(uv, mark, GRIP);
+
+            // THE PISTOL GRIP, raked 18 degrees, closed around the ORIGIN -
+            // that is the whole point of this model's frame.
+            mark = v.Count;
+            Tilted(v, n, uv, tri, new Vector3(0f, 0.03f, -0.045f),
+                   new Vector3(0.050f, 0.075f, 0.135f), 18f);
+            Paint(uv, mark, GRIP);
+
+            // Trigger guard: two cheeks, a bottom bar, the front post that
+            // carries it, and the trigger inside.
+            for (int s = -1; s <= 1; s += 2)
+            {
+                mark = v.Count;
+                Brick(v, n, uv, tri, new Vector3(s * 0.046f, -0.175f, -0.070f),
+                      new Vector3(0.011f, 0.125f, 0.016f));
+                Paint(uv, mark, STEEL);
+            }
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(0f, -0.295f, 0.004f),
+                  new Vector3(0.046f, 0.014f, 0.086f));
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(0f, -0.175f, -0.082f),
+                  new Vector3(0.046f, 0.120f, 0.012f));
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Tilted(v, n, uv, tri, new Vector3(0f, -0.135f, -0.030f),
+                   new Vector3(0.014f, 0.020f, 0.048f), 12f);
+            Paint(uv, mark, GRIP);
+
+            // THE STOCK: a tube frame out of the back of the breech and the
+            // butt plate at the end of it.
+            for (int s = -1; s <= 1; s += 2)
+            {
+                mark = v.Count;
+                Cyl(v, n, uv, tri, new Vector3(s * 0.062f, 0.24f, BZ - 0.055f),
+                    new Vector3(s * 0.070f, BUTT_Y - 0.02f, BZ - 0.175f),
+                    0.021f, 0.021f, 10);
+                Paint(uv, mark, STEEL);
+            }
+            mark = v.Count;
+            Cyl(v, n, uv, tri, new Vector3(0f, 0.26f, BZ + 0.085f),
+                new Vector3(0f, BUTT_Y - 0.06f, BZ - 0.035f), 0.018f, 0.018f, 10);
+            Paint(uv, mark, STEEL);
+            mark = v.Count;
+            Tilted(v, n, uv, tri, new Vector3(0f, BUTT_Y, BZ - 0.145f),
+                   new Vector3(0.072f, 0.032f, 0.115f), -8f);
+            Paint(uv, mark, GRIP);
+
+            // SIGHTS: a hooded front post over the muzzle end and a folding
+            // rear leaf on the breech. Two small parts, but they are what makes
+            // a tube read as a weapon that is aimed.
+            float fy = MUZZLE_Y + 0.17f;
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(0f, fy, BZ + TUBE + 0.012f),
+                  new Vector3(0.030f, 0.030f, 0.020f));
+            Brick(v, n, uv, tri, new Vector3(0f, fy, BZ + TUBE + 0.052f),
+                  new Vector3(0.009f, 0.012f, 0.032f));
+            for (int s = -1; s <= 1; s += 2)
+                Brick(v, n, uv, tri, new Vector3(s * 0.030f, fy, BZ + TUBE + 0.050f),
+                      new Vector3(0.008f, 0.026f, 0.042f));
+            Paint(uv, mark, STEEL);
+
+            mark = v.Count;
+            Brick(v, n, uv, tri, new Vector3(0f, 0.19f, BZ + 0.118f),
+                  new Vector3(0.052f, 0.040f, 0.022f));
+            Tilted(v, n, uv, tri, new Vector3(0f, 0.215f, BZ + 0.175f),
+                   new Vector3(0.048f, 0.010f, 0.048f), -10f);
+            Paint(uv, mark, STEEL);
+
+            Mesh mesh = new Mesh();
+            mesh.name = "NDR_GasGun";
+            // Built, not loaded: without this a scene change can sweep it up
+            // with Resources.UnloadUnusedAssets and leave an empty hand.
+            mesh.hideFlags = HideFlags.HideAndDontSave;
+            mesh.vertices = v.ToArray();
+            mesh.normals = n.ToArray();
+            mesh.uv = uv.ToArray();
+            mesh.triangles = tri.ToArray();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        // --------------------------------------------------------------- skin
+
+        /// <summary>
+        /// The palette: four flat quadrants with a little grain on them. No
+        /// mipmaps, so the quadrants can never bleed into each other at a
+        /// distance, and a 10 percent margin around each one so bilinear
+        /// filtering cannot either.
+        /// </summary>
+        static Texture2D Skin()
+        {
+            if (_skin != null) return _skin;
+            Texture2D shipped = Assets.TextureIfPresent(DIFFUSE_FILE);
+            if (shipped != null) { _skin = shipped; return _skin; }
+
+            const int S = 128;
+            Texture2D t = new Texture2D(S, S, TextureFormat.RGBA32, false);
+            t.name = DIFFUSE_FILE;
+            t.hideFlags = HideFlags.HideAndDontSave;
+            t.wrapMode = TextureWrapMode.Clamp;
+            t.filterMode = FilterMode.Bilinear;
+
+            Color[] px = new Color[S * S];
+            int seed = 1491;
+            for (int y = 0; y < S; y++)
+            {
+                for (int x = 0; x < S; x++)
+                {
+                    Color c = Quadrant(x >= S / 2, y >= S / 2);
+                    seed = seed * 1103515245 + 12345;
+                    float grain = (((seed >> 16) & 0xFF) / 255f - 0.5f) * 0.07f;
+                    px[y * S + x] = new Color(Mathf.Clamp01(c.r + grain),
+                                              Mathf.Clamp01(c.g + grain),
+                                              Mathf.Clamp01(c.b + grain), 1f);
+                }
+            }
+            t.SetPixels(px);
+            t.Apply(false);
+            _skin = t;
+            return _skin;
+        }
+
+        static Color Quadrant(bool right, bool top)
+        {
+            if (right && top) return new Color(0.74f, 0.63f, 0.10f, 1f);   // WARN
+            if (!right && top) return new Color(0.17f, 0.18f, 0.18f, 1f);  // STEEL
+            if (right) return new Color(0.10f, 0.10f, 0.11f, 1f);          // GRIP
+            return new Color(0.26f, 0.28f, 0.20f, 1f);                     // BODY
+        }
+
+        /// <summary>Moves the UVs of everything added since
+        /// <paramref name="from"/> into one quadrant of the palette.</summary>
+        static void Paint(List<Vector2> uv, int from, Vector2 quad)
+        {
+            for (int i = from; i < uv.Count; i++)
+            {
+                Vector2 t = uv[i];
+                uv[i] = new Vector2(quad.x * 0.5f + 0.06f + 0.38f * Mathf.Repeat(t.x, 1f),
+                                    quad.y * 0.5f + 0.06f + 0.38f * Mathf.Repeat(t.y, 1f));
+            }
+        }
+
+        // --------------------------------------------------------------- icon
+
+        /// <summary>
+        /// Renders the model into a 300x300 picture with a transparent
+        /// background: one camera, one light, one layer, six kilometres below
+        /// the world, all of it gone again before the frame ends. Returns null
+        /// when the result is not a usable icon - then the LAW's picture stays,
+        /// which is what the weapon had before.
+        /// </summary>
+        static Texture2D RenderIcon()
+        {
+            GameObject rig = null;
+            RenderTexture rt = null;
+            Material mat = null;
+            Texture2D icon = null;
+            RenderTexture before = RenderTexture.active;
+            try
+            {
+                mat = IconMaterial();
+                if (mat == null) return null;
+
+                // The weapon is BUILT pointing forward along -Y with its top at
+                // +Z. LookRotation puts that +Z on world up and its +Y on world
+                // right, which lays the launcher across the picture with the
+                // muzzle to the left; the two angles on top give it a
+                // three-quarter view.
+                //
+                // The hand correction is already baked into the mesh, so it has
+                // to come back out for the picture - otherwise the icon would
+                // inherit the 180 degree flip and show the launcher upside down
+                // in the inventory.
+                Quaternion view = Quaternion.Euler(-14f, 26f, 0f)
+                                  * Quaternion.LookRotation(Vector3.up, Vector3.right);
+                Quaternion look = view * Quaternion.Inverse(Quaternion.Euler(EulerValue()));
+
+                Bounds b = _mesh.bounds;
+                Vector3 e = b.extents;
+                float rx = 0f, ry = 0f;
+                for (int i = 0; i < 8; i++)
+                {
+                    Vector3 corner = new Vector3((i & 1) == 0 ? -e.x : e.x,
+                                                 (i & 2) == 0 ? -e.y : e.y,
+                                                 (i & 4) == 0 ? -e.z : e.z);
+                    Vector3 w = look * corner;
+                    rx = Mathf.Max(rx, Mathf.Abs(w.x));
+                    ry = Mathf.Max(ry, Mathf.Abs(w.y));
+                }
+                float size = Mathf.Max(rx, ry) * 1.10f;
+                if (size < 0.01f) return null;
+
+                rig = new GameObject("NDR_GasGun_IconRig");
+                rig.transform.position = new Vector3(0f, -6000f, 0f);
+
+                GameObject model = new GameObject("model");
+                model.transform.SetParent(rig.transform, false);
+                model.transform.localRotation = look;
+                model.transform.localPosition = -(look * b.center);
+                model.layer = ICON_LAYER;
+                MeshFilter mf = model.AddComponent<MeshFilter>();
+                mf.sharedMesh = _mesh;
+                MeshRenderer mr = model.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = mat;
+
+                GameObject lightGo = new GameObject("key");
+                lightGo.transform.SetParent(rig.transform, false);
+                lightGo.transform.localRotation = Quaternion.Euler(38f, -34f, 0f);
+                Light key = lightGo.AddComponent<Light>();
+                key.type = LightType.Directional;
+                key.color = new Color(1f, 0.98f, 0.93f, 1f);
+                key.intensity = 1.35f;
+                key.shadows = LightShadows.None;
+                key.cullingMask = 1 << ICON_LAYER;
+
+                GameObject camGo = new GameObject("cam");
+                camGo.transform.SetParent(rig.transform, false);
+                camGo.transform.localPosition = new Vector3(0f, 0f, -10f);
+                camGo.transform.localRotation = Quaternion.identity;
+                Camera cam = camGo.AddComponent<Camera>();
+                cam.enabled = false;                 // rendered by hand, never
+                                                     // into the game's frame
+                cam.orthographic = true;
+                cam.orthographicSize = size;
+                cam.nearClipPlane = 0.05f;
+                cam.farClipPlane = 40f;
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0f, 0f, 0f, 0f);
+                cam.cullingMask = 1 << ICON_LAYER;
+                // Forward on purpose: in a deferred frame the background would
+                // not keep its alpha, and the icon would be a black square.
+                cam.renderingPath = RenderingPath.Forward;
+                cam.useOcclusionCulling = false;
+
+                rt = new RenderTexture(ICON_SIZE, ICON_SIZE, 24,
+                                       RenderTextureFormat.ARGB32);
+                rt.hideFlags = HideFlags.HideAndDontSave;
+                rt.antiAliasing = 1;
+                rt.Create();
+                cam.targetTexture = rt;
+                cam.Render();
+
+                RenderTexture.active = rt;
+                icon = new Texture2D(ICON_SIZE, ICON_SIZE, TextureFormat.RGBA32, false);
+                icon.ReadPixels(new Rect(0f, 0f, ICON_SIZE, ICON_SIZE), 0, 0);
+                icon.Apply(false);
+                icon.name = ICON_FILE;
+                icon.wrapMode = TextureWrapMode.Clamp;
+
+                // An icon that is nearly empty or nearly full is not an icon:
+                // that is a render that went wrong, and the old picture is the
+                // better answer.
+                Color32[] px = icon.GetPixels32();
+                int solid = 0;
+                for (int i = 0; i < px.Length; i++) if (px[i].a > 128) solid++;
+                float share = (float)solid / px.Length;
+                if (share < 0.02f || share > 0.95f)
+                {
+                    RevivalPlugin.L.LogInfo("Gas launcher icon: verworfen, "
+                        + Mathf.RoundToInt(share * 100f) + " Prozent Deckung.");
+                    return null;
+                }
+                // Kept: everything else in this method is cleaned up below.
+                icon.hideFlags = HideFlags.HideAndDontSave;
+                Texture2D done = icon;
+                icon = null;
+                return done;
+            }
+            finally
+            {
+                RenderTexture.active = before;
+                if (icon != null) UnityEngine.Object.Destroy(icon);
+                if (rig != null) UnityEngine.Object.Destroy(rig);
+                if (rt != null)
+                {
+                    rt.Release();
+                    UnityEngine.Object.Destroy(rt);
+                }
+                if (mat != null) UnityEngine.Object.Destroy(mat);
+            }
+        }
+
+        static Material IconMaterial()
+        {
+            Shader sh = Shader.Find("Standard");
+            if (sh == null) sh = Shader.Find("Legacy Shaders/Diffuse");
+            if (sh == null) return null;
+            Material m = new Material(sh);
+            m.name = "NDR_GasGun_Icon";
+            Texture2D skin = Skin();
+            if (skin != null) m.mainTexture = skin;
+            if (m.HasProperty("_Color")) m.SetColor("_Color", Color.white);
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.28f);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0.10f);
+            return m;
+        }
+
+        // --------------------------------------------------- geometry helpers
+
+        /// <summary>One quad at <paramref name="centre"/>, spanned by the half
+        /// vectors <paramref name="right"/> and <paramref name="up"/> and wound
+        /// so that right x up is its OUTWARD normal.</summary>
+        static void Face(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                         List<int> tri, Vector3 centre, Vector3 normal,
+                         Vector3 right, Vector3 up)
+        {
+            int b = v.Count;
+            v.Add(centre - right - up); n.Add(normal); uv.Add(new Vector2(0f, 0f));
+            v.Add(centre + right - up); n.Add(normal); uv.Add(new Vector2(1f, 0f));
+            v.Add(centre + right + up); n.Add(normal); uv.Add(new Vector2(1f, 1f));
+            v.Add(centre - right + up); n.Add(normal); uv.Add(new Vector2(0f, 1f));
+            tri.Add(b); tri.Add(b + 1); tri.Add(b + 2);
+            tri.Add(b); tri.Add(b + 2); tri.Add(b + 3);
+        }
+
+        /// <summary>A box from three orthogonal half vectors, so it can stand
+        /// at an angle. hx x hy has to point along hz.</summary>
+        static void Box(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                        List<int> tri, Vector3 c, Vector3 hx, Vector3 hy, Vector3 hz)
+        {
+            Vector3 nx = hx.normalized, ny = hy.normalized, nz = hz.normalized;
+            Face(v, n, uv, tri, c + hz, nz, hx, hy);
+            Face(v, n, uv, tri, c - hz, -nz, -hx, hy);
+            Face(v, n, uv, tri, c + hx, nx, hy, hz);
+            Face(v, n, uv, tri, c - hx, -nx, -hy, hz);
+            Face(v, n, uv, tri, c + hy, ny, hz, hx);
+            Face(v, n, uv, tri, c - hy, -ny, -hz, hx);
+        }
+
+        /// <summary>An axis-aligned box.</summary>
+        static void Brick(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                          List<int> tri, Vector3 c, Vector3 h)
+        {
+            Box(v, n, uv, tri, c, new Vector3(h.x, 0f, 0f),
+                new Vector3(0f, h.y, 0f), new Vector3(0f, 0f, h.z));
+        }
+
+        /// <summary>A box tilted about X - a raked grip, a butt plate, a
+        /// folded sight leaf.</summary>
+        static void Tilted(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                           List<int> tri, Vector3 c, Vector3 h, float degrees)
+        {
+            Quaternion q = Quaternion.AngleAxis(degrees, Vector3.right);
+            Box(v, n, uv, tri, c, q * new Vector3(h.x, 0f, 0f),
+                q * new Vector3(0f, h.y, 0f), q * new Vector3(0f, 0f, h.z));
+        }
+
+        /// <summary>The wall of a (possibly tapered) cylinder, facing out or,
+        /// for the inside of a bore, in.</summary>
+        static void Wall(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                         List<int> tri, Vector3 a, Vector3 b,
+                         float ra, float rb, int sides, bool outward)
+        {
+            Vector3 w = b - a;
+            float h = w.magnitude;
+            if (h < 1e-4f || sides < 3) return;
+            w /= h;
+            Vector3 helper = Mathf.Abs(w.y) > 0.9f ? Vector3.forward : Vector3.up;
+            Vector3 u = Vector3.Cross(helper, w).normalized;
+            Vector3 t = Vector3.Cross(w, u);
+
+            int start = v.Count;
+            for (int i = 0; i <= sides; i++)
+            {
+                float ang = i * Mathf.PI * 2f / sides;
+                Vector3 dir = u * Mathf.Cos(ang) + t * Mathf.Sin(ang);
+                Vector3 sn = (dir * h + w * (ra - rb)).normalized;
+                if (!outward) sn = -sn;
+                float uu = (float)i / sides;
+                v.Add(a + dir * ra); n.Add(sn); uv.Add(new Vector2(uu, 0f));
+                v.Add(b + dir * rb); n.Add(sn); uv.Add(new Vector2(uu, 1f));
+            }
+            for (int i = 0; i < sides; i++)
+            {
+                int b0 = start + i * 2, t0 = b0 + 1, b1 = b0 + 2, t1 = b0 + 3;
+                if (outward)
+                {
+                    tri.Add(b0); tri.Add(t1); tri.Add(t0);
+                    tri.Add(b0); tri.Add(b1); tri.Add(t1);
+                }
+                else
+                {
+                    tri.Add(b0); tri.Add(t0); tri.Add(t1);
+                    tri.Add(b0); tri.Add(t1); tri.Add(b1);
+                }
+            }
+        }
+
+        /// <summary>A flat ring (or, with ri = 0, a disc) facing along
+        /// <paramref name="axis"/>.</summary>
+        static void Ring(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                         List<int> tri, Vector3 c, Vector3 axis,
+                         float ro, float ri, int sides)
+        {
+            if (sides < 3 || ro <= 0f) return;
+            Vector3 w = axis.normalized;
+            Vector3 helper = Mathf.Abs(w.y) > 0.9f ? Vector3.forward : Vector3.up;
+            Vector3 u = Vector3.Cross(helper, w).normalized;
+            Vector3 t = Vector3.Cross(w, u);
+
+            // A solid cap is a fan around one hub vertex. Running it through
+            // the ring below would put the hub in twice per segment and leave
+            // one zero-area triangle per side.
+            if (ri <= 0f)
+            {
+                int hub = v.Count;
+                v.Add(c); n.Add(w); uv.Add(new Vector2(0.5f, 0.5f));
+                int rim = v.Count;
+                for (int i = 0; i <= sides; i++)
+                {
+                    float ang = i * Mathf.PI * 2f / sides;
+                    float ca = Mathf.Cos(ang), sa = Mathf.Sin(ang);
+                    v.Add(c + (u * ca + t * sa) * ro); n.Add(w);
+                    uv.Add(new Vector2(0.5f + 0.5f * ca, 0.5f + 0.5f * sa));
+                }
+                for (int i = 0; i < sides; i++)
+                {
+                    tri.Add(hub); tri.Add(rim + i); tri.Add(rim + i + 1);
+                }
+                return;
+            }
+
+            int start = v.Count;
+            for (int i = 0; i <= sides; i++)
+            {
+                float ang = i * Mathf.PI * 2f / sides;
+                float ca = Mathf.Cos(ang), sa = Mathf.Sin(ang);
+                Vector3 dir = u * ca + t * sa;
+                v.Add(c + dir * ro); n.Add(w);
+                uv.Add(new Vector2(0.5f + 0.5f * ca, 0.5f + 0.5f * sa));
+                v.Add(c + dir * ri); n.Add(w);
+                uv.Add(new Vector2(0.5f + 0.5f * ca * ri / ro,
+                                   0.5f + 0.5f * sa * ri / ro));
+            }
+            for (int i = 0; i < sides; i++)
+            {
+                int o0 = start + i * 2, i0 = o0 + 1, o1 = o0 + 2, i1 = o0 + 3;
+                tri.Add(o0); tri.Add(o1); tri.Add(i1);
+                tri.Add(o0); tri.Add(i1); tri.Add(i0);
+            }
+        }
+
+        /// <summary>A closed, capped, possibly tapered cylinder.</summary>
+        static void Cyl(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                        List<int> tri, Vector3 a, Vector3 b,
+                        float ra, float rb, int sides)
+        {
+            if ((b - a).sqrMagnitude < 1e-8f) return;
+            Vector3 w = (b - a).normalized;
+            Wall(v, n, uv, tri, a, b, ra, rb, sides, true);
+            if (rb > 0f) Ring(v, n, uv, tri, b, w, rb, 0f, sides);
+            if (ra > 0f) Ring(v, n, uv, tri, a, -w, ra, 0f, sides);
+        }
+
+        /// <summary>A hollow pipe: outer wall, inner wall, and the two rings
+        /// that close the gap between them.</summary>
+        static void Pipe(List<Vector3> v, List<Vector3> n, List<Vector2> uv,
+                         List<int> tri, Vector3 a, Vector3 b,
+                         float ro, float ri, int sides)
+        {
+            if ((b - a).sqrMagnitude < 1e-8f) return;
+            if (ri <= 0f || ri >= ro) { Cyl(v, n, uv, tri, a, b, ro, ro, sides); return; }
+            Vector3 w = (b - a).normalized;
+            Wall(v, n, uv, tri, a, b, ro, ro, sides, true);
+            Wall(v, n, uv, tri, a, b, ri, ri, sides, false);
+            Ring(v, n, uv, tri, b, w, ro, ri, sides);
+            Ring(v, n, uv, tri, a, -w, ro, ri, sides);
         }
     }
 

@@ -44,6 +44,10 @@ namespace NextDayRevival
         public const int Turm = 1;
         public const int Drohne = 2;
         public const int Aufklaerer = 3;   // the reusable surveillance drone
+        // Named GunTruck and not Technical on purpose: a const called Technical
+        // inside this class would shadow the Technical CLASS for every line of
+        // it, which is the kind of quiet trap that costs an hour later.
+        public const int GunTruck = 4;     // the technical's machine gun
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -224,6 +228,7 @@ namespace NextDayRevival
             if (_owner == Turm) Turret.LateTick();
             else if (_owner == Drohne) Drone.LateTick();
             else if (_owner == Aufklaerer) SurvDrone.LateTick();
+            else if (_owner == GunTruck) TechnicalGun.LateTick();
         }
 
         /// <summary>
@@ -303,6 +308,8 @@ namespace NextDayRevival
         static int _gunnerIndex = -1;
         static float _nextScan;
         static float _nextShot;
+        const string ReloadProgressOwner = "turret-reload";
+        static float _shownReload;
         static bool _manning;
         static KeyCode _manKey = KeyCode.None;
         static bool _keyParsed;
@@ -395,6 +402,11 @@ namespace NextDayRevival
         /// </summary>
         static bool SetManning(bool on)
         {
+            if (!on)
+            {
+                NativeActionProgress.End(ReloadProgressOwner);
+                _shownReload = 0f;
+            }
             if (_manning == on) return true;
             if (on)
             {
@@ -637,7 +649,12 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (!RevivalPlugin.CfgTurret.Value) return;
+            if (!RevivalPlugin.CfgTurret.Value)
+            {
+                NativeActionProgress.End(ReloadProgressOwner);
+                _shownReload = 0f;
+                return;
+            }
             try
             {
                 Net.EnsureHooked();
@@ -664,6 +681,7 @@ namespace NextDayRevival
                     if (Fire()) _nextShot = Time.time + Ladezeit();
                     else _nextTry = Time.time + 1f;
                 }
+                TickReloadProgress();
             }
             catch (Exception ex)
             {
@@ -2246,10 +2264,9 @@ namespace NextDayRevival
                 // NDR vehicle modules: a modern wide periscope replaces the old
                 // round scope, with toggleable thermal / night vision when the
                 // matching module is installed. When it takes over the optic we
-                // skip the legacy scope entirely and only add the load bar.
+                // skip the legacy scope entirely. The native HUD presents reloads.
                 if (GunnerOptics.Draw(_tank, _vehicleRoot))
                 {
-                    DrawLadeanzeige();
                     return;
                 }
 
@@ -2257,7 +2274,6 @@ namespace NextDayRevival
                 if (glas != null) Vollbild(glas);
                 else if (RevivalPlugin.CfgTurretScopeOverlay.Value) DrawOverlay();
                 if (RevivalPlugin.CfgTurretCrosshair.Value && glas == null) DrawCrosshair();
-                DrawLadeanzeige();
             }
             catch (Exception ex)
             {
@@ -2406,38 +2422,26 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Ladebalken unter dem Fadenkreuz, solange nachgeladen wird.
-        ///
-        /// Er erscheint erst ab zwei Sekunden Ladezeit: beim BTR mit 0,9 s
-        /// waere er ein Flackern und im Weg. Beim Panzer ist er dagegen kein
-        /// Schmuck, sondern notwendig - zwoelf Sekunden lang passiert auf
-        /// Mausklick nichts, und ohne Rueckmeldung haelt der Spieler das
-        /// Geschuetz fuer kaputt.
+        /// Present slow weapon reloads with the original interaction HUD.
+        /// Keep the existing two-second threshold and seated aiming controls.
+        /// This runs in Update; OnGUI must not restart the native countdown.
         /// </summary>
-        static void DrawLadeanzeige()
+        static void TickReloadProgress()
         {
             float ladezeit = Ladezeit();
-            if (ladezeit < 2f) return;
             float rest = _nextShot - Time.time;
-            if (rest <= 0f || rest > ladezeit) return;
-
-            float w = Mathf.Max(160f, Screen.width * 0.16f);
-            float h = Mathf.Max(5f, Screen.height * 0.007f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.5f + Mathf.Max(44f, Screen.height * 0.08f);
-            float voll = 1f - Mathf.Clamp01(rest / ladezeit);
-
-            Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x - 1f, y - 1f, w + 2f, h + 2f), Punkt());
-            GUI.color = new Color(0.10f, 0.10f, 0.09f, 0.80f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Punkt());
-            GUI.color = new Color(0.85f, 0.55f, 0.15f, 0.95f);
-            GUI.DrawTexture(new Rect(x, y, w * voll, h), Punkt());
-            GUI.color = new Color(0.88f, 1f, 0.88f, 0.90f);
-            GUI.Label(new Rect(x, y + h + 3f, w, 22f),
-                      Loc.T("Заряжание ", "Loading ") + rest.ToString("0.0") + " s");
-            GUI.color = old;
+            if (ladezeit < 2f || rest <= 0f || rest > ladezeit)
+            {
+                NativeActionProgress.End(ReloadProgressOwner);
+                _shownReload = 0f;
+                return;
+            }
+            if (_shownReload == _nextShot
+                && NativeActionProgress.IsActive(ReloadProgressOwner)) return;
+            NativeActionProgress.End(ReloadProgressOwner);
+            if (NativeActionProgress.Begin(ReloadProgressOwner,
+                Loc.T("\u0417\u0430\u0440\u044f\u0436\u0430\u043d\u0438\u0435", "Loading"),
+                rest, false, null, null)) _shownReload = _nextShot;
         }
 
         static void Bars(float cx, float cy, float gap, float arm, float th)

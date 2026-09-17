@@ -4934,14 +4934,14 @@ namespace NextDayRevival
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (RevivalPlugin.CfgPatrol == null || !RevivalPlugin.CfgPatrol.Value)
-            { MapInkLayer.Hide("patrol"); return; }
+            { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
 
             Component manager, texture;
             Camera camera;
             Vector2 world, map;
             if (!MapTools.Context(out manager, out texture, out camera,
                                   out world, out map))
-            { MapInkLayer.Hide("patrol"); return; }
+            { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
             Load(false);
 
             // The texture bounds register artwork and hover coordinates. Ink
@@ -4951,7 +4951,7 @@ namespace NextDayRevival
             bool mapRect = MapTools.MapScreenRect(texture, camera, out clip);
             // Cached masks need the real texture bounds. Never substitute the
             // entire screen and stretch road ink across an unrelated UI region.
-            if (!mapRect) { MapInkLayer.Hide("patrol"); return; }
+            if (!mapRect) { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
 
             // The WHOLE map texture, before the visible window trims it below.
             // The picture covers the whole world, so the registration
@@ -4970,8 +4970,15 @@ namespace NextDayRevival
 
             Color old = GUI.color;
             Matrix4x4 oldMatrix = GUI.matrix;
+            MapLabels labels = null;
             try
             {
+                labels = MapLabels.Begin(texture, camera, full, world.x >= 4900f && world.y >= 4900f);
+                if (labels != null)
+                {
+                    NewSettlement.ReserveMapLabels(labels, texture, camera, world, map, full);
+                    ArtyBattery.ReserveMapLabels(labels, texture, camera, world, map);
+                }
                 // Hover and clearance coordinates remain local to this window.
                 // Native ink is submitted separately in artwork coordinates.
                 Rect localClip = new Rect(0f, 0f, clip.width, clip.height);
@@ -4989,7 +4996,7 @@ namespace NextDayRevival
 
                 MapInk.Begin();
                 MapInkLayer inkLayer = MapInkLayer.Begin("patrol", texture);
-                if (inkLayer == null) { MapInk.End(); return; }
+                if (inkLayer == null) { MapInk.End(); MapLabels.Hide(); return; }
                 GUI.BeginClip(clip);
                 try
                 {
@@ -5047,6 +5054,7 @@ namespace NextDayRevival
                             line.Add(MapArt(g, full, mapRect) - clip.position);
                         }
                         if (!lineOk || line.Count < 2) continue;
+                        if (labels != null) labels.BlockRoute(line, clip.position);
 
                         // Colour is the patrol's faction: looter and traitor
                         // red, civilian green, neutral white. A convoy route is
@@ -5082,6 +5090,7 @@ namespace NextDayRevival
                                     "Regular patrols pass through here. They may be "
                                     + "carrying valuable cargo, but they are dangerous, "
                                     + "heavily armed, and have an FPV drone.");
+                            hoverText = route.Name + "\n" + hoverText;
                             hoverAt = mouseAbs;
                             hoverColor = col;
                         }
@@ -5089,29 +5098,34 @@ namespace NextDayRevival
                 }
                 finally { GUI.EndClip(); inkLayer.End(); MapInk.End(); }
 
-                // Labels belong above the lines, including lines from routes
-                // later in the file.
+                // Place active convoys first. All lines and native markers are
+                // already reserved; every accepted name reserves its full bounds.
+                for (int labelPass = 0; labelPass < 2; labelPass++)
                 for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                 {
                     Route route;
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 1) continue;
-                    // A convoy route only exists on the map while a convoy is
-                    // driving it - the label goes with the line. NDR convoy.
                     if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
-                    // Same scene gate as the lines: a label for a route that
-                    // belongs to another scene must not sit on this map.
-                    if (route.P.Count >= 2 && !FitsScene(WorldLine(route), world))
-                        continue;
+                    if (route.IsConvoy != (labelPass == 0)) continue;
+                    if (!FitsScene(WorldLine(route), world)) continue;
                     Vector2 label;
                     if (!MapTools.WorldToGui(PatrolMapRoads.Correct(route.P[0].Pos), texture, camera,
                                              world, map, out label)) continue;
                     label = MapArt(label, full, mapRect);
-                    if (!clip.Contains(label)) continue;
-                    GUI.color = route.IsConvoy ? ConvoyColor(route.Enabled)
-                                               : RouteColor(route.Seite, route.Enabled);
-                    GUI.Label(new Rect(label.x + 7f, label.y - 12f, 230f, 22f),
-                              route.Name + (route.Enabled ? "" : Loc.T(" (выкл)", " (disabled)")));
+                    string title = MapLabels.DisplayName(route.Name);
+                    if (!route.Enabled) title += Loc.T(" (\u0412\u042b\u041a\u041b)", " (DISABLED)");
+                    bool overName = labels != null && labels.Draw(route.Name, title, label,
+                        route.Enabled, mouseAbs);
+                    // Hidden names remain discoverable at their route start as
+                    // well as anywhere along the road. Keep original names here.
+                    if (clip.Contains(mouseAbs) && (overName || (mouseAbs - label).sqrMagnitude < 196f))
+                    {
+                        hoverText = route.Name + (route.Enabled ? "" : Loc.T(" (\u0432\u044b\u043a\u043b)", " (disabled)"));
+                        hoverAt = mouseAbs;
+                        hoverColor = route.IsConvoy ? ConvoyColor(route.Enabled)
+                            : RouteColor(route.Seite, route.Enabled);
+                    }
                 }
 
                 GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f);
@@ -5131,6 +5145,7 @@ namespace NextDayRevival
             }
             finally
             {
+                if (labels != null) labels.End();
                 GUI.matrix = oldMatrix;
                 GUI.color = old;
             }

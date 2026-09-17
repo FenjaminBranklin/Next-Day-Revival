@@ -6,13 +6,13 @@
 // life on the road with two new carried items, in two steps:
 //
 //   1. Fire extinguisher (2063). Aim at the burning wreck and press the repair
-//      key. The body freezes, a progress bar runs (a short "spraying" action),
+//      key. The body freezes and the native interaction presentation runs,
 //      and the wreck fire goes out - the vehicle is still broken ("kaputt"),
 //      but the flames stop and cannot come back until it is either repaired or
 //      destroyed anew.
 //   2. Heavy tool kit (2064). With the fire out, aim at the same wreck and press
-//      the key again. A longer progress bar runs - the same idea as the game's
-//      own repair kit ("vehicle_repair_01"), which repairs a vehicle to
+//      the key again. A longer native interaction runs - the same idea as the
+//      game's own repair kit ("vehicle_repair_01"), which repairs a vehicle to
 //      DurabilityMax - and the vehicle is whole again. It is handed back to the
 //      game as an ordinary vehicle: Patrol stops managing it, so it never
 //      despawns, and if there is fuel in the tank the player can drive off.
@@ -46,9 +46,9 @@
 //     (default F) that only acts when on foot, aiming at a wreck, and carrying
 //     the matching item. F is the game's own interact key; if it clashes in
 //     game, rebind ConvoyRepair/Key.
-//   - The player animation is best-effort (the game's repair animation is a
-//     large state-machine method); the guaranteed feedback is the progress bar
-//     and the frozen body.
+//   - NativeActionProgress resolves the game's real interaction state and HUD
+//     at runtime. The existing freeze hook remains the authoritative gameplay
+//     lock and cleanup guard.
 
 using System;
 using System.Collections.Generic;
@@ -70,7 +70,7 @@ namespace NextDayRevival
 
     /// <summary>
     /// Config, the two new items, the targeting, the two-step state machine and
-    /// the on-screen prompt/progress bar for convoy vehicle repair.
+    /// the on-screen prompt and native interaction for convoy vehicle repair.
     /// </summary>
     public static class ConvoyRepair
     {
@@ -102,6 +102,7 @@ namespace NextDayRevival
         enum Phase { Idle, Extinguishing, Repairing }
 
         static Phase _phase = Phase.Idle;
+        const string ProgressOwner = "convoy-repair";
         static float _start;
         static float _len;
         static Component _vgs;          // VehicleGameSystem being worked on
@@ -147,7 +148,7 @@ namespace NextDayRevival
                 "Wie genau man das Wrack anschauen muss (Skalarprodukt Blick/Richtung, "
                 + "0 = egal, 1 = exakt). Sehr nahe Wracks (<3 m) gelten immer.");
             CfgExtinguishSeconds = cfg.Bind("ConvoyRepair", "ExtinguishSeconds", 4f,
-                "Dauer der Loesch-Aktion in Sekunden (Ladebalken, Koerper steht still).");
+                "Dauer der Loesch-Aktion (native Interaktion, Koerper steht still).");
             CfgRepairSeconds = cfg.Bind("ConvoyRepair", "RepairSeconds", 9f,
                 "Dauer der Reparatur mit dem schweren Werkzeugkasten in Sekunden.");
             CfgConsumeExtinguisher = cfg.Bind("ConvoyRepair", "ConsumeExtinguisher", true,
@@ -236,7 +237,17 @@ namespace NextDayRevival
         /// <summary>Called every frame from RevivalPlugin.Update.</summary>
         public static void Tick()
         {
-            if (!Enabled) return;
+            if (!Enabled)
+            {
+                if (_phase != Phase.Idle)
+                {
+                    NativeActionProgress.End(ProgressOwner);
+                    _phase = Phase.Idle;
+                    _vgs = null;
+                    _car = null;
+                }
+                return;
+            }
             try
             {
                 if (_phase != Phase.Idle) { TickActive(); return; }
@@ -245,12 +256,17 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("ConvoyRepair.Tick: " + ex);
+                NativeActionProgress.End(ProgressOwner);
                 _phase = Phase.Idle;
+                _vgs = null;
+                _car = null;
             }
         }
 
         static void TickActive()
         {
+            if (!NativeActionProgress.IsActive(ProgressOwner) || InVehicle())
+            { Cancel("Interaction interrupted"); return; }
             // Abort if the wreck vanished under us (despawned, destroyed anew,
             // scene change) or - for the repair step - the fire came back.
             if (_car == null || _vgs == null)
@@ -259,7 +275,7 @@ namespace NextDayRevival
                 && _car.GetComponent<NdrExtinguished>() == null)
             { Cancel(Loc.T("Снова горит", "Burning again")); return; }
 
-            if (Time.time - _start < _len) return;   // still working; bar in Draw()
+            if (Time.time - _start < _len) return;
 
             if (_phase == Phase.Extinguishing) FinishExtinguish();
             else FinishRepair();
@@ -382,16 +398,21 @@ namespace NextDayRevival
 
         static void Begin(Phase phase, Component vgs, GameObject car)
         {
+            float seconds = phase == Phase.Extinguishing
+                ? Mathf.Max(0.5f, CfgExtinguishSeconds.Value)
+                : Mathf.Max(0.5f, CfgRepairSeconds.Value);
+
+            string label = phase == Phase.Extinguishing
+                ? Loc.T("\u0422\u0443\u0448\u0435\u043d\u0438\u0435 \u043f\u043e\u0436\u0430\u0440\u0430", "Extinguishing fire")
+                : Loc.T("\u0420\u0435\u043c\u043e\u043d\u0442 \u043c\u0430\u0448\u0438\u043d\u044b", "Repairing vehicle");
+            if (!NativeActionProgress.Begin(ProgressOwner, label, seconds,
+                true, "repair", "vehicle_repair_01")) return;
             _phase = phase;
             _vgs = vgs;
             _car = car;
             _start = Time.time;
-            _len = phase == Phase.Extinguishing
-                ? Mathf.Max(0.5f, CfgExtinguishSeconds.Value)
-                : Mathf.Max(0.5f, CfgRepairSeconds.Value);
+            _len = seconds;
             _prompt = null;
-
-            TryPlayAnimation();
             Turret.Hinweis(phase == Phase.Extinguishing
                 ? Loc.T("Тушим...", "Extinguishing...")
                 : Loc.T("Ремонт...", "Repairing..."), 1.5f);
@@ -401,6 +422,7 @@ namespace NextDayRevival
         {
             RevivalPlugin.L.LogInfo("Convoy repair: action cancelled - " + why + ".");
             Turret.Hinweis(why, 1.5f);
+            NativeActionProgress.End(ProgressOwner);
             _phase = Phase.Idle;
             _vgs = null; _car = null;
         }
@@ -410,6 +432,7 @@ namespace NextDayRevival
         static void FinishExtinguish()
         {
             GameObject car = _car;
+            NativeActionProgress.End(ProgressOwner);
             _phase = Phase.Idle;
             _vgs = null; _car = null;
 
@@ -431,6 +454,7 @@ namespace NextDayRevival
         {
             Component vgs = _vgs;
             GameObject car = _car;
+            NativeActionProgress.End(ProgressOwner);
             _phase = Phase.Idle;
             _vgs = null; _car = null;
 
@@ -478,37 +502,10 @@ namespace NextDayRevival
             if (!Enabled) return;
             try
             {
-                if (_phase != Phase.Idle) { DrawBar(); return; }
+                if (_phase != Phase.Idle) return;
                 if (!string.IsNullOrEmpty(_prompt)) DrawPrompt(_prompt);
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("ConvoyRepair.Draw: " + ex); }
-        }
-
-        static void DrawBar()
-        {
-            float t = Mathf.Clamp01((Time.time - _start) / _len);
-            float rest = Mathf.Max(0f, _len - (Time.time - _start));
-            string label = _phase == Phase.Extinguishing
-                ? Loc.T("Тушение пожара", "Extinguishing fire")
-                : Loc.T("Ремонт машины", "Repairing vehicle");
-
-            float w = 320f, h = 22f;
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.66f;
-
-            Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x - 2f, y - 2f, w + 4f, h + 4f), Px());
-            GUI.color = new Color(0.12f, 0.12f, 0.12f, 0.9f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Px());
-            GUI.color = _phase == Phase.Extinguishing
-                ? new Color(0.30f, 0.62f, 0.95f, 0.95f)
-                : new Color(0.95f, 0.72f, 0.20f, 0.95f);
-            GUI.DrawTexture(new Rect(x, y, w * t, h), Px());
-            GUI.color = Color.white;
-            GUI.Label(new Rect(x, y - 22f, w, 20f),
-                label + "  " + Mathf.CeilToInt(rest) + " s");
-            GUI.color = old;
         }
 
         static void DrawPrompt(string text)
@@ -674,33 +671,6 @@ namespace NextDayRevival
             return fallback;
         }
 
-        /// <summary>
-        /// Best-effort: play the game's own repair animation on the local player
-        /// so the action looks like work, not a stare. The animation entry point
-        /// is a large state-machine method; if no simple string overload exists
-        /// this is skipped and the progress bar remains the feedback.
-        /// </summary>
-        static void TryPlayAnimation()
-        {
-            try
-            {
-                GameObject player = MapTools.LocalPlayer();
-                if (player == null) return;
-                Type psc = RevivalPlugin.TypeByName("PlayerStatesController");
-                if (psc == null) return;
-                Component ctrl = player.GetComponentInChildren(psc);
-                if (ctrl == null) return;
-                MethodInfo m = AccessTools.Method(psc, "PlayerPlayAnimationState",
-                    new Type[] { typeof(string) }, null);
-                if (m == null) return;
-                m.Invoke(ctrl, new object[] { "vehicle_repair_01" });
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Convoy repair: repair animation skipped: "
-                    + ex.Message);
-            }
-        }
     }
 
     /// <summary>

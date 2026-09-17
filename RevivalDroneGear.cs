@@ -14,7 +14,7 @@
 //
 // What it contains:
 //   DroneGear   config, the three new items, and the frame-loop coordination.
-//   LaunchHold  the press-and-hold "loading bar" both drones launch through.
+//   LaunchHold  the press-and-hold native interaction both drones launch through.
 //   Antenna     the mast that must be up before ANY drone may launch.
 //   SurvDrone   the reusable, battery-powered surveillance drone.
 //
@@ -91,14 +91,14 @@ namespace NextDayRevival
                 + "zu starten (FPV wie Aufklaerung). Aus: alte Sofortstart-Regel.");
             CfgDeploySeconds = cfg.Bind("DroneGear", "DeploySeconds", 20f,
                 "Sekunden, die das Ausfahren der Antenne dauert. Waehrenddessen "
-                + "steht der Spieler still (Ladebalken, wie beim Beerenpfluecken).");
+                + "steht der Spieler still (native Interaktion wie beim Beerenpfluecken).");
             CfgMastExtension = cfg.Bind("DroneGear", "BackpackMastExtension", 3.5f,
                 "Extended mast length above the backpack in metres (minimum 3.5). "
                 + "Placement follows the backpack bone and mesh; legacy head offsets are ignored.");
             CfgAntennaKey = cfg.Bind("DroneGear", "AntennaKey", "H",
                 "Taste, um die Mastantenne auszufahren bzw. wieder einzufahren. "
                 + "Nur zu Fuss; im Fahrzeug faehrt sie automatisch ein. Ein Druck "
-                + "startet das Ausfahren (Ladebalken, Spieler steht still), ein "
+                + "startet das Ausfahren (native Interaktion, Spieler steht still), ein "
                 + "weiterer Druck faehrt sie wieder ein.");
             CfgLaunchHoldSeconds = cfg.Bind("DroneGear", "LaunchHoldSeconds", 20f,
                 "Sekunden, die die rechte Maustaste gehalten werden muss, bis die "
@@ -119,7 +119,7 @@ namespace NextDayRevival
                 + "Inventar; die Akkuladung ist die Flugzeit.");
             CfgSurvKey = cfg.Bind("DroneGear", "SurveillanceKey", "B",
                 "Taste fuer die Aufklaerungsdrohne. Gedrueckt halten startet sie "
-                + "(Ladebalken); im Flug wechselt ein Tastendruck zwischen Drohnen- "
+                + "(native Interaktion); im Flug wechselt ein Tastendruck zwischen Drohnen- "
                 + "und Koerpersicht, langes Halten holt sie zurueck; am Boden hebt "
                 + "sie ein Tastendruck in der Naehe wieder auf.");
             CfgSurvThermal = cfg.Bind("DroneGear", "SurveillanceThermalOptic", true,
@@ -175,7 +175,8 @@ namespace NextDayRevival
         /// from inside Drone.Tick (see <see cref="WantFpvLaunch"/>); everything
         /// else - the antenna raise and the surveillance drone - ticks here.
         /// </summary>
-        public static readonly LaunchHold FpvHold = new LaunchHold();
+        public static readonly LaunchHold FpvHold = new LaunchHold(
+            "fpv-launch", "\u0417\u0430\u043f\u0443\u0441\u043a FPV", "FPV launch");
 
         public static void Tick()
         {
@@ -188,22 +189,24 @@ namespace NextDayRevival
                 // stale lock here, mirroring the "gate off" retract inside
                 // Antenna.TickCore that this early return would otherwise skip.
                 if (Antenna.Deploying || Antenna.Up) Antenna.ForceRetract("drone system disabled");
+                FpvHold.Cancel();
+                SurvDrone.Hold.Cancel();
                 return;
             }
+            if (!RevivalPlugin.CfgDrone.Value || Drone.Flying || SurvDrone.Flying)
+                FpvHold.Cancel();
             Antenna.Tick();
             SurvDrone.Tick();
         }
 
         /// <summary>
-        /// The one seam OnGUI hangs on. Draws the antenna raise bar, whichever
-        /// launch hold is running, and the surveillance overlay/prompts.
+        /// The one seam OnGUI hangs on. Long actions use the game's native
+        /// interaction HUD; this draws only the guide and drone overlay/prompts.
         /// </summary>
         public static void Draw()
         {
             if (CfgEnabled != null && !CfgEnabled.Value) return;
             DrawGuide();
-            Antenna.Draw();
-            FpvHold.Draw(Loc.T("Запуск FPV", "FPV launch"));
             SurvDrone.Draw();
         }
 
@@ -395,6 +398,8 @@ namespace NextDayRevival
                 return Input.GetKeyDown(key);
 
             if (!Input.GetKey(key)) { FpvHold.Cancel(); return false; }
+            if (SurvDrone.Flying || !CameraOwner.Free || Antenna.PlayerInVehicle)
+            { FpvHold.Cancel(); return false; }
             bool allowed = Antenna.LaunchAllowed();
             bool have = HaveFpv();
             if (Input.GetKeyDown(key))
@@ -510,22 +515,30 @@ namespace NextDayRevival
     }
 
     /// <summary>
-    /// A press-and-hold that shows a loading bar and fires once when the hold
-    /// completes - the "twenty seconds until it actually lifts" the antenna and
-    /// both drones share. Only one instance charges at a time in practice: a
-    /// player holds one key.
+    /// A press-and-hold that uses the native interaction presentation and fires
+    /// once when the hold completes - the "twenty seconds until it actually
+    /// lifts" both drones share. Only one instance charges at a time in practice.
     /// </summary>
     public sealed class LaunchHold
     {
         bool _active;
         float _start;
+        readonly string _owner;
+        readonly string _ru;
+        readonly string _en;
         // True on the one frame a CHARGING hold was cut short because the gate
         // closed under it. Nothing else in the flow can tell that apart from a
         // released key, and the hints that explain a refusal only fire on the
         // press - which is long past by then. The caller takes it once and
         // says what happened.
         bool _lost;
-        static Texture2D _px;
+
+        public LaunchHold(string owner, string ru, string en)
+        {
+            _owner = owner;
+            _ru = ru;
+            _en = en;
+        }
 
         public bool Active { get { return _active; } }
 
@@ -538,16 +551,33 @@ namespace NextDayRevival
         /// </summary>
         public bool Poll(KeyCode key, bool gateOk)
         {
+            if (_active && !NativeActionProgress.IsActive(_owner))
+            {
+                Cancel();
+                return false;
+            }
             if (!gateOk || !Input.GetKey(key))
             {
                 if (_active && !gateOk) _lost = true;
+                if (_active) NativeActionProgress.End(_owner);
                 _active = false;
                 return false;
             }
 
             float len = Len();
-            if (!_active) { _active = true; _start = Time.time; }
-            if (Time.time - _start >= len) { _active = false; return true; }
+            if (!_active)
+            {
+                if (!NativeActionProgress.Begin(_owner, Loc.T(_ru, _en), len,
+                    true, "berr", "use_military_medkit")) return false;
+                _active = true;
+                _start = Time.time;
+            }
+            if (Time.time - _start >= len)
+            {
+                _active = false;
+                NativeActionProgress.End(_owner);
+                return true;
+            }
             return false;
         }
 
@@ -555,7 +585,12 @@ namespace NextDayRevival
         /// most once per interruption.</summary>
         public bool TakeLost() { bool lost = _lost; _lost = false; return lost; }
 
-        public void Cancel() { _active = false; _lost = false; }
+        public void Cancel()
+        {
+            if (_active) NativeActionProgress.End(_owner);
+            _active = false;
+            _lost = false;
+        }
 
         static float Len()
         {
@@ -563,53 +598,15 @@ namespace NextDayRevival
                 ? 20f : Mathf.Max(0.5f, DroneGear.CfgLaunchHoldSeconds.Value);
         }
 
-        public void Draw(string label)
-        {
-            if (!_active) return;
-            try
-            {
-                float len = Len();
-                float t = Mathf.Clamp01((Time.time - _start) / len);
-                float rest = Mathf.Max(0f, len - (Time.time - _start));
-
-                float w = 300f, h = 22f;
-                float x = (Screen.width - w) * 0.5f;
-                float y = Screen.height * 0.66f;
-
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(x - 2f, y - 2f, w + 4f, h + 4f), Px());
-                GUI.color = new Color(0.12f, 0.12f, 0.12f, 0.9f);
-                GUI.DrawTexture(new Rect(x, y, w, h), Px());
-                GUI.color = new Color(0.30f, 0.72f, 0.95f, 0.95f);
-                GUI.DrawTexture(new Rect(x, y, w * t, h), Px());
-                GUI.color = Color.white;
-                GUI.Label(new Rect(x, y - 22f, w, 20f),
-                    label + "  " + Mathf.CeilToInt(rest) + " s");
-                GUI.color = old;
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogError("Launch bar: " + ex); }
-        }
-
-        static Texture2D Px()
-        {
-            if (_px == null)
-            {
-                _px = new Texture2D(1, 1);
-                _px.SetPixel(0, 0, Color.white);
-                _px.Apply();
-            }
-            return _px;
-        }
     }
 
     /// <summary>
     /// The mast antenna: a mod-tracked deploy state that gates every drone
     /// launch. Pressing the antenna key (DroneGear/AntennaKey, default H) while
     /// carrying an antenna on foot raises it over ~20 seconds - the player is
-    /// frozen (DroneInputHook reads <see cref="Deploying"/>) and a load bar
-    /// counts down - after which <see cref="Up"/> is true and a telescopic grey
-    /// mast stands up out of the backpack. Pressing the key again lowers it.
+    /// frozen (DroneInputHook reads <see cref="Deploying"/>) while the native
+    /// interaction HUD counts down - after which <see cref="Up"/> is true and a
+    /// telescopic grey mast stands up out of the backpack. Pressing the key again lowers it.
     /// Boarding a vehicle, or losing the antenna, retracts it automatically.
     ///
     /// Trigger note: the game has no item-use/right-click hook, so deploy is a
@@ -674,8 +671,6 @@ namespace NextDayRevival
         static float _vehUntil;
         static bool _vehResult;
 
-        static Texture2D _px;
-
         static bool GateOn
         {
             get
@@ -719,6 +714,7 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("Antenna tick: " + ex);
+                NativeActionProgress.End("antenna-deploy");
                 Deploying = false;
             }
         }
@@ -762,6 +758,8 @@ namespace NextDayRevival
 
             if (Deploying)
             {
+                if (!NativeActionProgress.IsActive("antenna-deploy"))
+                { Retract("native action lost"); return; }
                 float now = Time.time;
                 if (now >= _end) Finish();
                 else Grow((now - _start) / _len);
@@ -784,9 +782,12 @@ namespace NextDayRevival
 
         static void Begin()
         {
+            _len = Mathf.Max(0.5f, DroneGear.CfgDeploySeconds.Value);
+            if (!NativeActionProgress.Begin("antenna-deploy",
+                Loc.T("\u0410\u043d\u0442\u0435\u043d\u043d\u0430", "Antenna"), _len,
+                true, "berr", "use_military_medkit")) return;
             Deploying = true;
             _start = Time.time;
-            _len = Mathf.Max(0.5f, DroneGear.CfgDeploySeconds.Value);
             _end = _start + _len;
             BuildMast();
             Grow(0f);
@@ -796,6 +797,7 @@ namespace NextDayRevival
 
         static void Finish()
         {
+            NativeActionProgress.End("antenna-deploy");
             Deploying = false;
             Up = true;
             Grow(1f);
@@ -809,6 +811,7 @@ namespace NextDayRevival
         static void Retract(string why)
         {
             bool was = Up || Deploying;
+            if (Deploying) NativeActionProgress.End("antenna-deploy");
             Up = false;
             Deploying = false;
             DestroyMast();
@@ -1166,46 +1169,6 @@ namespace NextDayRevival
             return _grey;
         }
 
-        // -------------------------------------------------------------- bar
-
-        public static void Draw()
-        {
-            if (!Deploying) return;
-            try
-            {
-                float t = Mathf.Clamp01((Time.time - _start) / _len);
-                float rest = Mathf.Max(0f, _end - Time.time);
-
-                float w = 260f, h = 20f;
-                float x = (Screen.width - w) * 0.5f;
-                float y = Screen.height * 0.62f;
-
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(x - 2f, y - 2f, w + 4f, h + 4f), Px());
-                GUI.color = new Color(0.12f, 0.12f, 0.12f, 0.9f);
-                GUI.DrawTexture(new Rect(x, y, w, h), Px());
-                GUI.color = new Color(0.95f, 0.55f, 0.12f, 0.95f);
-                GUI.DrawTexture(new Rect(x, y, w * t, h), Px());
-                GUI.color = Color.white;
-                GUI.Label(new Rect(x, y - 22f, w, 20f),
-                    Loc.T("Антенна ", "Antenna ") + Mathf.CeilToInt(rest) + " s");
-                GUI.color = old;
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogError("Antenna draw: " + ex); }
-        }
-
-        static Texture2D Px()
-        {
-            if (_px == null)
-            {
-                _px = new Texture2D(1, 1);
-                _px.SetPixel(0, 0, Color.white);
-                _px.Apply();
-            }
-            return _px;
-        }
-
         // ---------------------------------------------------------- helpers
 
         static bool HaveAntenna()
@@ -1342,7 +1305,10 @@ namespace NextDayRevival
         static bool _startSent;
         static bool _endSent;
 
-        public static readonly LaunchHold Hold = new LaunchHold();
+        public static readonly LaunchHold Hold = new LaunchHold(
+            "surveillance-launch",
+            "\u0417\u0430\u043f\u0443\u0441\u043a \u0440\u0430\u0437\u0432\u0435\u0434\u0434\u0440\u043e\u043d\u0430",
+            "Surveillance launch");
 
         public static bool Flying { get { return _flying; } }
         public static bool Viewing { get { return _flying && _viewing; } }
@@ -1397,11 +1363,12 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (!Enabled) return;
+            if (!Enabled) { Hold.Cancel(); return; }
             try { TickCore(); }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("SurvDrone tick: " + ex);
+                Hold.Cancel();
                 End("error", false);
             }
         }
@@ -1436,6 +1403,8 @@ namespace NextDayRevival
             // (and a battery) must be in the pack - checked before the bar even
             // starts, so a 20 s hold cannot end in a bare "nothing happened".
             if (!Input.GetKey(k)) { Hold.Cancel(); return; }
+            if (Drone.Flying || !CameraOwner.Free || Antenna.PlayerInVehicle)
+            { Hold.Cancel(); return; }
             bool antenna = Antenna.LaunchAllowed();
             bool needBat = DroneGear.CfgSurvRequireBattery == null
                         || DroneGear.CfgSurvRequireBattery.Value;
@@ -2201,8 +2170,6 @@ namespace NextDayRevival
 
         public static void Draw()
         {
-            Hold.Draw(Loc.T("Запуск разведдрона", "Surveillance launch"));
-
             // Ground prompt when the pilot is standing over the downed drone.
             if (!_flying && _wreck != null && NearWreck())
             {

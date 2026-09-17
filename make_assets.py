@@ -21,6 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 GROUPS = [
+    ("arty", ["arty_import.py"]),
     # mg42/sniper50 now come from REAL imported models via textured_import.py
     # (barrett_build.py -> the TAC-50's .50 cal look, mg42real_build.py -> a real
     # MG42), replacing the procedural *_mesh/_texture/_icon generators, which
@@ -44,6 +45,12 @@ GROUPS = [
     ("dronegear", ["drone_gear_build.py"]),
     # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
+    # The technical (gun truck): body, machine gun, pintle and shield from a
+    # source model in assets/src. Every part is OPTIONAL - the vehicle runs on
+    # generated geometry and the donor UAZ body without it - so this script
+    # prints what it did not find and exits 0 when no source is there, and a
+    # full make_assets.py run is not broken by a missing model.
+    ("technical", ["technical_build.py"]),
     ("ammo", ["ammo_mesh.py", "ammo_texture.py", "ammo_icon.py"]),
     ("law", ["law_mesh.py", "law_texture.py", "law_icon.py"]),
     ("rocket", ["rocket_mesh.py", "rocket_texture.py", "rocket_icon.py"]),

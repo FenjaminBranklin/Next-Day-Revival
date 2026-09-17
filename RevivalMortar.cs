@@ -1,6 +1,6 @@
 // Next Day: Survival - Revival Toolkit
 //
-// The settlement gun - a tracked self-propelled howitzer standing in every
+// The settlement gun - a truck-mounted self-propelled howitzer standing in every
 // settlement, manned by its own crew, loaded by hand and aimed on the game's
 // own map screen. Design notes and the seam survey:
 // docs/ai/tasks/stationary-artillery.md, and for the crew, the recon drone and
@@ -14,8 +14,7 @@
 // WHAT IT IS, IN THE ORDER THE PLAYER MEETS IT
 //
 //   1. A gun vehicle stands in the middle of every settlement, on a free, flat
-//      patch of ground. It is a LOCAL object built from meshes ArtyModel
-//      generates at runtime - no asset file, no network object, no collider.
+//      patch of ground. It is a LOCAL object built from the imported Bohdana meshes - no network object, no collider.
 //      Every client builds the same vehicle in the same place from the same
 //      rule. Its turret turns and its barrel elevates.
 //   2. TWO MEN belong to it, and by default they are at it: while a crew that
@@ -109,7 +108,7 @@ namespace NextDayRevival
 {
     /// <summary>
     /// Config, emplacements, loading, the turret, the map fire control and the
-    /// impact. The generated vehicle is <see cref="ArtyModel"/>, its crew and
+    /// impact. The imported vehicle is <see cref="ArtyModel"/>, its crew and
     /// recon drone are <see cref="ArtyBattery"/>, the Photon channel is
     /// <see cref="Mortar.Net"/>, and the faction net is <see cref="FactionShield"/>.
     ///
@@ -386,7 +385,7 @@ namespace NextDayRevival
                 "How fast the barrel rises and falls. Range is elevation on a "
                 + "howitzer, so this is also how fast the crosshair may be pushed "
                 + "away from or pulled towards the gun.");
-            _cfgClearance = cfg.Bind("Mortar", "VehicleClearance", 3.6f,
+            _cfgClearance = cfg.Bind("Mortar", "VehicleClearance", 5.6f,
                 "Metres of free ground the gun VEHICLE needs around its centre "
                 + "before a spot is accepted. The old tube needed 1.6 m; a hull "
                 + "six metres long parked inside a shed is the mistake this "
@@ -496,6 +495,10 @@ namespace NextDayRevival
             {
                 Component s = all[i] as Component;
                 if (s == null || s.gameObject == null) continue;
+                // Runtime NPC containers are not villages. DropSquad creates
+                // Crew.Name for every gun, convoy and insertion; accepting it
+                // here recursively creates another gun and another crew.
+                if (s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)) continue;
                 int id = s.gameObject.GetInstanceID();
                 if (_placed.ContainsKey(id)) continue;
                 Vector3 centre = s.transform.position;
@@ -543,6 +546,10 @@ namespace NextDayRevival
         /// measure - the caller tries again from closer up.</summary>
         static bool Raise(Component settlement, Vector3 centre, int id)
         {
+            // Keep the allocation idempotent even if battery setup or logging
+            // threw after the model was registered on the previous scan.
+            for (int i = 0; i < _tubes.Count; i++)
+                if (_tubes[i].SettlementId == id && _tubes[i].Go != null) return true;
             Vector3 spot, normal;
             if (!FreeGround(centre, out spot, out normal)) return false;
 
@@ -555,6 +562,7 @@ namespace NextDayRevival
 
             Transform turret, barrel;
             GameObject go = ArtyModel.Build(out turret, out barrel);
+            if (go == null) return false;
             go.transform.position = spot + normal * 0.02f;
             go.transform.rotation = Quaternion.LookRotation(out3.normalized, Vector3.up);
             // Stand it on the surface rather than through it, exactly as the
@@ -580,6 +588,7 @@ namespace NextDayRevival
             t.WantPitch = t.Pitch;
             Point(t);
             _tubes.Add(t);
+            _placed[id] = true;
 
             // NDR settlement artillery. A TRADER CAMP gets the vehicle and
             // nothing else: no crew, no drone, no fire missions. The camps are
@@ -653,11 +662,12 @@ namespace NextDayRevival
                                      7f, out dummy) != null) return false;
 
             // A wall inside the hull's clearance at chest height. EIGHT rays,
-            // not four: the vehicle is six metres long, and four rays can walk a
+            // not four: the vehicle is over ten metres long, and four rays can walk a
             // hull straight through the corner between two of them.
             if (strict)
             {
-                float reach = Mathf.Clamp(F(_cfgClearance, 3.6f), 1.0f, 8f);
+                // Old configs contain the placeholder's 3.6 m clearance.
+                float reach = Mathf.Clamp(F(_cfgClearance, 5.6f), 5.6f, 8f);
                 for (int i = 0; i < 8; i++)
                 {
                     float a = i * Mathf.PI * 0.25f;

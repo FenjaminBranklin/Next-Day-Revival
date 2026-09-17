@@ -172,7 +172,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.20.0";
+        public const string VERSION = "6.21.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -444,6 +444,8 @@ namespace NextDayRevival
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
             UralTruck.BindConfig(Config);        // NDR 15-seat Ural cargo truck
+            Technical.BindConfig(Config);        // NDR technical (gun truck)
+            TechnicalGun.BindConfig(Config);     // NDR technical: the man at the MG
             AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
             GasLauncher.BindConfig(Config);      // NDR gas launcher
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
@@ -488,6 +490,7 @@ namespace NextDayRevival
             Patrol.Install(_harmony);
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
             UralTruck.Install(_harmony);         // NDR 15-seat Ural cargo truck
+            Technical.Install(_harmony);         // NDR technical (gun truck)
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             GasLauncher.Install(_harmony);       // NDR gas launcher
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
@@ -2029,6 +2032,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.Arena);       Arena.Tick();            FrameProf.E(FrameProf.Arena);
             FrameProf.S(FrameProf.CarSpawn);    CarSpawn.Tick();         FrameProf.E(FrameProf.CarSpawn);
             UralTruck.Tick();                    // NDR 15-seat Ural cargo truck (own spawn key)
+            Technical.Tick();                    // NDR technical: spawn key, durability cap, the MG
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
             GasLauncher.Tick();                  // NDR gas launcher (optional keys, cloud list)
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
@@ -2056,6 +2060,11 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.CameraLate);
             try { CameraOwner.LateTick(); }
             finally { FrameProf.E(FrameProf.CameraLate); }
+            // NDR technical: the gunners' arms and every other client's machine
+            // gun. Has to be LateUpdate - the animator writes the character's
+            // bones between Update and here, so a hand put on a grip earlier is
+            // back at the man's side before anything is drawn.
+            Technical.LateFrame();
         }
 
         void OnGUI()
@@ -2074,6 +2083,7 @@ namespace NextDayRevival
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
             ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)
+            Technical.Draw();                    // NDR technical: gunner crosshair and notices
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
