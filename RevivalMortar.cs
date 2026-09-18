@@ -160,6 +160,7 @@ namespace NextDayRevival
         static ConfigEntry<string> _cfgLoadKey;
         static ConfigEntry<float> _cfgUseDistance;
         static ConfigEntry<float> _cfgPlaceRange;
+        static ConfigEntry<float> _cfgPlaceSearch;
         static ConfigEntry<float> _cfgScale;
         static ConfigEntry<int> _cfgMinSpawnPoints;
         static ConfigEntry<bool> _cfgOnlyPermanent;
@@ -248,6 +249,15 @@ namespace NextDayRevival
             public float ReadyAt;      // Time.time the next mission may start
             public int SettlementId;
             public Vector3 Centre;     // the settlement centre it belongs to
+            /// <summary>The gun of a DRIVABLE howitzer (RevivalArtyVehicle.cs)
+            /// rather than a settlement emplacement. It belongs to no
+            /// settlement, so it is never given a crew, a drone or a place in
+            /// the settlement bookkeeping, and its Centre is not a village but
+            /// the vehicle's own position, kept up to date in <see cref="Slew"/>
+            /// so the shot report still finds the same gun on every client.
+            /// Everything else about it - the reach, the dispersion, the flight
+            /// time, the loading, the aim mode - is this file's, unchanged.</summary>
+            public bool Mobile;
         }
 
         /// <summary>A shell between the gun and the ground. Nothing is modelled
@@ -368,6 +378,15 @@ namespace NextDayRevival
                 + "TerrainColliders are off (E-059), so a free-ground search out "
                 + "there would hit nothing and could not tell a clear patch from "
                 + "the inside of a house.");
+            _cfgPlaceSearch = cfg.Bind("Mortar", "PlaceSearchRadius", 96f,
+                "How far from the settlement centre an emplacement is looked "
+                + "for, in game units - a man is 5 units tall and the vehicle "
+                + "31.6 units long, so this is about ten vehicle lengths. Every "
+                + "patch inside it is scored on the room around it and on how "
+                + "far it stands from the settlement's own spawn points, and "
+                + "the BEST one is taken. Until 6.25 the search stopped at the "
+                + "first patch that was merely legal, starting at the centre, "
+                + "which parked the gun in the middle of the village.");
             // SkipSafeSettlements was taken out of the code on 2026-09-17. A trader
             // camp now never gets a gun at all, and a key that decides nothing
             // does not belong in the file (CLAUDE.md, point 4). The line in an
@@ -523,6 +542,19 @@ namespace NextDayRevival
             for (int i = _tubes.Count - 1; i >= 0; i--)
             {
                 if (_tubes[i].Go != null) continue;
+                // A DRIVABLE howitzer that is gone is not a scene change: it was
+                // blown up or culled while the rest of the level stands. It owns
+                // no settlement bookkeeping to forget, and clearing every shell
+                // in the air would take the other guns' rounds with it, so only
+                // its own are dropped. On a real scene change the settlement
+                // tubes below go null in this same pass and clear the list.
+                if (_tubes[i].Mobile)
+                {
+                    DropShells(_tubes[i]);
+                    if (_aiming == _tubes[i]) LeaveAim("the howitzer is gone");
+                    _tubes.RemoveAt(i);
+                    continue;
+                }
                 // The scene changed under us. Forget the settlement too, so the
                 // next scene's own settlements are served again - and drop the
                 // shells that were still in the air, or a mission fired outside
@@ -817,7 +849,7 @@ namespace NextDayRevival
             for (int i = 0; i < _tubes.Count; i++)
                 if (_tubes[i].SettlementId == id && _tubes[i].Go != null) return true;
             Vector3 spot, normal;
-            if (!FreeGround(centre, out spot, out normal)) return false;
+            if (!FreeGround(settlement, centre, out spot, out normal)) return false;
 
             // Park the vehicle facing away from the settlement centre, so it
             // looks like it was driven into position facing outwards rather than
@@ -872,46 +904,171 @@ namespace NextDayRevival
             return true;
         }
 
-        /// <summary>The centre first, then rings outwards. A spot qualifies when
-        /// the ground under it is flat, nothing hangs over it (so the gun is not
-        /// inside a house), no wall stands inside the hull's clearance and the
-        /// ground the hull would rest on is level with its centre.
+        // The emplacement search. Fixed offsets walked in a fixed order, so two
+        // clients that search the same loaded terrain agree; they may still
+        // differ by a few metres when one of them searched while less of the
+        // world was streamed in, and that is harmless - the gun is a local
+        // object, only the impact point travels over the wire, and nothing
+        // about a fire mission is derived from where the other client drew it.
+        const int PlaceRings = 8;      // rings between the centre and the rim
+        const int PlacePerRing = 12;   // candidates on each of them
+        const int RoomRays = 12;       // directions the room around a patch is measured in
+
+        /// <summary>How much of the room around a patch still counts, in game
+        /// units. Anything beyond this is "open", and a parade ground does not
+        /// beat a clear field.</summary>
+        const float RoomReach = 54f;
+
+        /// <summary>How far away from the settlement's own spawn points still
+        /// counts. Their cloud is where the village lives - its houses, its
+        /// doors and the men walking between them - so it is the one piece of
+        /// "where the village is" the game hands us for free, on every map.</summary>
+        const float QuietReach = 45f;
+
+        const float QuietWeight = 0.5f;    // ... how much that distance is worth
+        const float AverageWeight = 0.25f; // open on every side beats open on three
+        const float CentrePull = 0.2f;     // and a near patch wins a tie
+
+        /// <summary>
+        /// THE BEST PATCH IN THE SETTLEMENT, NOT THE FIRST ONE THAT PASSES.
         ///
-        /// The offsets are fixed and walked in a fixed order, so two clients
-        /// that search the same loaded terrain agree. They may still differ by a
-        /// few metres when one of them searched while less of the world was
-        /// streamed in, and that is harmless: the gun is a local object, only
-        /// the impact point travels over the wire, and nothing about the fire
-        /// mission is derived from where the other client drew it.</summary>
-        static bool FreeGround(Vector3 centre, out Vector3 spot, out Vector3 normal)
+        /// Field report 2026-09-18: "the arty battery at Locator needs to be
+        /// behind the big satellite dish, not in front of it - and we need
+        /// better mechanisms so the batteries always spawn on free ground with
+        /// as much space around them as possible."
+        ///
+        /// Until then this walked the centre and six rings out to 24 units -
+        /// eight metres - and took the FIRST point that was merely legal. The
+        /// centre of a settlement is where its buildings are, so the gun ended
+        /// up wedged between them, in front of whatever the village is built
+        /// around. Now every candidate out to <see cref="SearchRadius"/> is
+        /// scored and the best one wins:
+        ///
+        ///   ROOM       the distance to the nearest wall in twelve directions.
+        ///              The tightest one is the score; a quarter of the average
+        ///              is added, so a patch that is open all round beats one
+        ///              that is open in three directions and against a house in
+        ///              the fourth.
+        ///   QUIET      how far it stands from the nearest of the settlement's
+        ///              own NPC spawn points, capped at QuietReach. A howitzer
+        ///              parked among the villagers has neither room nor sense.
+        ///   PULL       a fifth of the walk back to the centre, subtracted, so
+        ///              the gun stays part of its settlement instead of
+        ///              wandering to the edge of the disc for one more metre of
+        ///              grass.
+        ///
+        /// The two passes are unchanged and they are the reason every
+        /// settlement ends up with a gun: the first asks for a tidy emplacement
+        /// (flat, nothing overhead, no wall inside the hull's clearance), and
+        /// only when a tight village has no such patch at all does the second
+        /// drop the wall test. What neither pass drops is the roof test - a gun
+        /// inside a house would fire into the ceiling.
+        /// </summary>
+        static bool FreeGround(Component settlement, Vector3 centre,
+                               out Vector3 spot, out Vector3 normal)
         {
-            // TWO passes over the same points, and the second one is the reason
-            // every settlement ends up with a gun. The first asks for a tidy
-            // emplacement: flat, nothing overhead, no wall inside the hull's own
-            // clearance. In a tight village every one of those points can fail
-            // on the wall test alone, and "no gun at all" is a worse answer than
-            // "a gun close to a wall" - the order was one in EVERY settlement.
-            // What the second pass does NOT drop is the roof test: a gun inside
-            // a house would fire into the ceiling, which is not a cosmetic
-            // problem.
+            List<Vector3> village = SpawnPointsOf(settlement);
+            float rim = SearchRadius();
             for (int pass = 0; pass < 2; pass++)
             {
                 bool strict = pass == 0;
-                if (Clear(centre, strict, out spot, out normal)) return true;
-                for (float r = 4f; r <= 24f; r += 4f)
+                Vector3 bestSpot = Vector3.zero, bestNormal = Vector3.up;
+                float best = 0f;
+                bool have = false;
+                for (int ring = 0; ring <= PlaceRings; ring++)
                 {
-                    for (int i = 0; i < 12; i++)
+                    float r = rim * ring / PlaceRings;
+                    int count = ring == 0 ? 1 : PlacePerRing;
+                    for (int i = 0; i < count; i++)
                     {
-                        float a = i * Mathf.PI * 2f / 12f;
+                        float a = i * Mathf.PI * 2f / count;
                         Vector3 probe = centre + new Vector3(Mathf.Cos(a) * r, 0f,
                                                              Mathf.Sin(a) * r);
-                        if (Clear(probe, strict, out spot, out normal)) return true;
+                        Vector3 point, n;
+                        if (!Clear(probe, strict, out point, out n)) continue;
+                        float score = Score(point, centre, village);
+                        if (have && score <= best) continue;
+                        have = true;
+                        best = score;
+                        bestSpot = point;
+                        bestNormal = n;
                     }
                 }
+                if (!have) continue;
+                spot = bestSpot;
+                normal = bestNormal;
+                RevivalPlugin.L.LogInfo("Mortar: emplacement chosen "
+                    + Vector3.Distance(new Vector3(centre.x, 0f, centre.z),
+                                       new Vector3(spot.x, 0f, spot.z)).ToString("0")
+                    + " units off the centre, score " + best.ToString("0.0")
+                    + (strict ? "" : " (relaxed: no patch in this settlement kept "
+                        + "the hull clear of every wall)") + ".");
+                return true;
             }
             spot = Vector3.zero;
             normal = Vector3.up;
             return false;
+        }
+
+        /// <summary>How far out an emplacement is looked for.</summary>
+        static float SearchRadius()
+        {
+            return Mathf.Clamp(F(_cfgPlaceSearch, 96f), 24f, 400f);
+        }
+
+        /// <summary>What one patch is worth. See <see cref="FreeGround"/> for
+        /// the three terms and why each of them is there.</summary>
+        static float Score(Vector3 point, Vector3 centre, List<Vector3> village)
+        {
+            float reach = RoomReach * Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f);
+            float tight = reach, sum = 0f;
+            // The same knee-high ray the clearance test uses, only longer: a
+            // fence, a hut wall and a parked truck all stop it, and a kerb does
+            // not.
+            Vector3 from = point + Vector3.up * 0.9f;
+            for (int i = 0; i < RoomRays; i++)
+            {
+                float a = i * Mathf.PI * 2f / RoomRays;
+                Vector3 dir = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
+                Vector3 hit;
+                float d = reach;
+                if (Turret.RaycastObject(from, dir, reach, out hit) != null)
+                    d = Mathf.Clamp(Vector3.Distance(from, hit), 0f, reach);
+                if (d < tight) tight = d;
+                sum += d;
+            }
+
+            float quiet = QuietReach;
+            for (int i = 0; i < village.Count; i++)
+            {
+                float d = Flat(village[i] - point);
+                if (d < quiet) quiet = d;
+            }
+
+            return tight + sum / RoomRays * AverageWeight + quiet * QuietWeight
+                   - Flat(point - centre) * CentrePull;
+        }
+
+        /// <summary>Where the settlement's own men stand up. Empty when
+        /// NPC_SpawnPoint cannot be found at all, which only costs the search
+        /// its QUIET term - the room around a patch still decides.</summary>
+        static List<Vector3> SpawnPointsOf(Component s)
+        {
+            List<Vector3> list = new List<Vector3>();
+            try
+            {
+                if (s == null) return list;
+                // The same lazy lookup the size gate uses, through the same
+                // method, so there is only ever one of it.
+                if (!_spawnPointLooked) SpawnPoints(s);
+                if (_spawnPointType == null) return list;
+                Component[] points = s.GetComponentsInChildren(_spawnPointType, true);
+                if (points == null) return list;
+                for (int i = 0; i < points.Length; i++)
+                    if (points[i] != null) list.Add(points[i].transform.position);
+            }
+            catch { }
+            return list;
         }
 
         static bool Clear(Vector3 xz, bool strict, out Vector3 spot, out Vector3 normal)
@@ -1362,6 +1519,10 @@ namespace NextDayRevival
             {
                 Tube t = _tubes[i];
                 if (t.Go == null) continue;
+                // A gun that drives carries its own "centre" with it: it is what
+                // the shot report is keyed on (see RemoteShot), and a vehicle is
+                // at the same synchronized place on every client.
+                if (t.Mobile) t.Centre = t.Go.transform.position;
                 t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
                 t.Pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
                 Point(t);
@@ -1399,6 +1560,88 @@ namespace NextDayRevival
             for (int i = 0; i < _tubes.Count; i++)
                 if (_tubes[i].SettlementId == settlementId) return _tubes[i];
             return null;
+        }
+
+        // ------------------------------------------------- the gun that drives
+        //
+        // THE SEAM FOR RevivalArtyVehicle.cs. A drivable howitzer is the SAME
+        // gun as the one in the settlements - the same model, the same turret,
+        // the same 122 mm shell - so it is given to this fire control instead of
+        // growing a second one beside it. Everything the player does at it (walk
+        // up, F to aim, R to load, click the map to fire) is the code above,
+        // reached through one extra tube in the same list.
+        //
+        // What the vehicle gets back is an OPAQUE HANDLE. Tube is private to
+        // this file and stays private: the caller only ever hands it back.
+
+        /// <summary>
+        /// Take over the turret and barrel of one drivable howitzer. The body is
+        /// the model root under the vehicle - the thing that MOVES - and its
+        /// instance id is the tube's identity, so a second call for the same
+        /// vehicle returns the gun that is already registered instead of laying
+        /// a second one on it.
+        ///
+        /// Returns null when the section Mortar is switched off: the vehicle
+        /// then keeps a howitzer that is scenery, which is a complete vehicle
+        /// and not a failure.
+        /// </summary>
+        internal static object AttachMobile(GameObject body, Transform turret,
+                                            Transform barrel)
+        {
+            if (!Enabled || body == null) return null;
+
+            int id = body.GetInstanceID();
+            Tube have = ById(id);
+            if (have != null) return have;
+
+            Tube t = new Tube();
+            t.Go = body;
+            t.Turret = turret;
+            t.Barrel = barrel;
+            t.Mobile = true;
+            t.Name = body.transform.root == null ? body.name : body.transform.root.name;
+            t.SettlementId = id;
+            t.Centre = body.transform.position;
+            t.Rounds = 0;
+            t.ReadyAt = 0f;
+            // Laid straight ahead at half reach, exactly as a gun that is raised
+            // in a settlement: nothing swings anywhere on the first frame.
+            t.Yaw = body.transform.eulerAngles.y;
+            t.WantYaw = t.Yaw;
+            t.Pitch = PitchFor((MinRange + MaxRange) * 0.5f);
+            t.WantPitch = t.Pitch;
+            Point(t);
+            _tubes.Add(t);
+
+            RevivalPlugin.L.LogInfo("Mortar: the gun of the drivable howitzer \""
+                + t.Name + "\" is on the fire control - same reach ("
+                + MaxRange.ToString("0") + " m), same shell, no crew and no "
+                + "settlement behind it.");
+            return t;
+        }
+
+        /// <summary>Give a mobile gun back. Safe with null, safe twice, and safe
+        /// with a handle whose vehicle is already destroyed - which is the usual
+        /// case, because that is what tells the vehicle to call this.</summary>
+        internal static void ReleaseMobile(object handle)
+        {
+            Tube t = handle as Tube;
+            if (t == null) return;
+            if (_aiming == t) LeaveAim("the howitzer is gone");
+            DropShells(t);
+            if (_tubes.Remove(t))
+                RevivalPlugin.L.LogInfo("Mortar: the gun of \"" + t.Name
+                    + "\" left the fire control.");
+        }
+
+        /// <summary>Forget the rounds ONE gun still has in the air. Used when a
+        /// single gun disappears; a scene change is the other case and clears
+        /// the whole list, because out there the coordinates themselves stop
+        /// meaning anything.</summary>
+        static void DropShells(Tube t)
+        {
+            for (int i = _inFlight.Count - 1; i >= 0; i--)
+                if (_inFlight[i].Gun == t) _inFlight.RemoveAt(i);
         }
 
         // ------------------------------------------- what the NPC crew may ask

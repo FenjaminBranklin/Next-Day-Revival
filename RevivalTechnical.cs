@@ -50,6 +50,19 @@
 //     gunner and for every remote one, so the man on the truck you are looking
 //     at holds his gun too.
 //
+// THE PLACE IS THE GUN. Whoever is in seat 2 mans it by himself - the same
+// field report of 2026-09-18 said "man kann auf dem gunner sitz weder aimen
+// noch schiessen noch nachladen", and that is what a station you have to know
+// an undocumented key for looks like from the inside. G still lets go of it
+// (and moves back to a front seat), a deliberate stand-down is not overridden,
+// and the screen says so either way. TechnicalGun/AutoMan turns it off.
+//
+// AMMUNITION IS A BELT, NOT A TAP ON THE INVENTORY. A reload pulls BeltRounds
+// rounds out of the trunk, backpack and vest at once, takes ReloadSeconds with
+// the game's own progress bar, and only then does the gun fire - R reloads by
+// hand, an empty belt reloads itself on the trigger, and the rounds left are
+// under the crosshair.
+//
 // While the gun is MANNED on top of that:
 //
 //   * The view is third person, over the gunner's shoulder, along the barrel -
@@ -71,12 +84,31 @@
 //     (VehicleArmor.GunHit is NOT called). It is an anti-personnel machine gun,
 //     so armoured vehicles shrug it off exactly as they shrug off rifle fire.
 //
-// WHAT IS NOT PROVEN WITHOUT THE GAME. The rear-deck placement is derived from
-// the donor's OWN mesh bounds as fractions of its length, width and height -
-// never as absolute numbers, because the vehicle models are not metric (the
-// BTR's 2.9 m track measures +-3.47 model units). Every fraction is a config
-// key, the derived numbers are logged once per instance, and the exact standing
-// position, the pose and the camera distance are in-game acceptance items.
+// WHERE THE STATION STANDS (changed 2026-09-18 after the field report
+// technicalbug.png: "das mg schwebt, der spieler steht nicht richtig dran").
+// It used to be a fraction of the measured bounding box, with the height
+// fraction at 1.00 - the TOP of that box. A bounding box says nothing about
+// what is actually there: its top is the highest point of the whole vehicle,
+// aerial and roof rack included, so gun and gunner ended up standing in mid-air
+// above the cabin. The station is now derived from the donor's OWN REAR SEAT
+// instead - the rear-most seat point this rebuild removes anyway:
+//
+//   * its height plus the sit pose's measured foot offset (FeetAboveSeat) is
+//     the vehicle FLOOR, because the game itself seats a man there;
+//   * the man stands on that floor at that seat's position;
+//   * the pintle stands on the same floor, one arm's length in front of him
+//     (TechnicalModel.StandOff, in metres, measured on the gun that is really
+//     mounted), so his hands are AT the grips by construction.
+//
+// The old fractions remain as the fallback for a donor with no rear seat, and
+// everything derived is logged once per instance. Distances that measure a
+// PERSON (the arm, the pintle height) are metres and are converted with the
+// vehicle's own units-per-metre; distances that measure the VEHICLE are
+// fractions of its own measured size, because the vehicle models are not metric
+// (the BTR's 2.9 m track measures +-3.47 model units).
+//
+// The exact standing position, the pose and the camera distance stay in-game
+// acceptance items.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree
 // lambdas. This file is ASCII ONLY and has no BOM: it is machine-written and
@@ -136,6 +168,20 @@ namespace NextDayRevival
         /// size.</summary>
         const float DonorLengthMetres = 4.03f;
 
+        /// <summary>
+        /// The one measured constant of the game's own sit pose: how far ABOVE
+        /// a seat point the seated man's feet come to rest, in the game's world
+        /// units. VehicleGameSystem::SitToPassengerPlace only copies position
+        /// and rotation onto the player root; the animation then floats the
+        /// whole body above it (research/tank_crew_check.py, read off three
+        /// vanilla cabins: VAZ-1111, ZAZ-968, UAZ-3151). It is a property of the
+        /// CHARACTER and not of any vehicle, which is why it may be a constant
+        /// here while every vehicle number is measured - and it is the reason a
+        /// seat point is NOT the floor: a man stood at his seat point sinks to
+        /// the knees, a man stood this much higher stands ON it.
+        /// </summary>
+        const float FeetAboveSeat = 1.85f;
+
         public static ConfigEntry<bool> CfgEnabled;
         public static ConfigEntry<string> CfgKey;
         public static ConfigEntry<float> CfgDistance;
@@ -172,21 +218,39 @@ namespace NextDayRevival
                 + "BTR-Panzerung und waere fuer eine Technische voellig "
                 + "falsch. Der Wert wird bei jedem Durchlauf nach UNTEN "
                 + "gedeckelt, nie erhoeht, kann also keinen Schaden ruecknehmen.");
-            CfgMountBack = cfg.Bind("Technical", "MountBack", 0.30f,
-                "Wo die Lafette auf dem Fahrzeug steht, als Anteil der "
-                + "Fahrzeuglaenge vom HECK aus gemessen. 0 ist die Heckkante, "
-                + "1 die Bugkante. Alle Masse dieser Sektion sind Anteile der "
-                + "gemessenen Modellgroesse und keine Meter: die Fahrzeug-"
-                + "modelle des Spiels sind nicht metrisch.");
-            CfgMountUp = cfg.Bind("Technical", "MountUp", 1.00f,
-                "Hoehe des Lafettenfusses als Anteil der Fahrzeughoehe, vom "
-                + "tiefsten Punkt der Karosserie aus. 1.0 ist die Dachkante.");
+            CfgMountBack = cfg.Bind("Technical", "MountBack", 0.42f,
+                "RUECKFALL: wo die Lafette auf dem Fahrzeug steht, als Anteil "
+                + "der Fahrzeuglaenge vom HECK aus gemessen. 0 ist die "
+                + "Heckkante, 1 die Bugkante. Normalerweise wird der Standplatz "
+                + "aus dem hintersten Sitz des Spenders abgeleitet (siehe "
+                + "Stehplatz im Quelltext) und dieser Wert gar nicht benutzt - "
+                + "er greift nur bei einem Spender ohne Ruecksitz. Alle Masse "
+                + "dieser Sektion sind Anteile der gemessenen Modellgroesse und "
+                + "keine Meter: die Fahrzeugmodelle des Spiels sind nicht "
+                + "metrisch.");
+            // Renamed from "MountUp" on purpose. The old key defaulted to 1.00 -
+            // the top of the measured box, i.e. the roof edge or whatever aerial
+            // stands above it - and that is exactly the reported bug: MG and
+            // Schuetze standing in mid-air over the cabin. A changed default
+            // would not have reached anybody, because BepInEx keeps the value
+            // already written in the config file; a changed KEY does.
+            CfgMountUp = cfg.Bind("Technical", "MountUpFallback", 0.20f,
+                "RUECKFALL: Hoehe der Standflaeche als Anteil der Fahrzeug"
+                + "hoehe, vom tiefsten Punkt der Karosserie aus. Wird nur "
+                + "benutzt, wenn der Spender keinen Sitz hat, aus dem sich der "
+                + "Boden ableiten laesst. 1.0 waere die Dachkante - dort steht "
+                + "nichts, deshalb ist die Vorgabe der Wagenboden.");
             CfgMountSide = cfg.Bind("Technical", "MountSide", 0.00f,
                 "Seitenversatz der Lafette als Anteil der Fahrzeugbreite. "
                 + "0 heisst mittig.");
             CfgSeatBack = cfg.Bind("Technical", "GunnerBack", 0.10f,
-                "Wie weit der Schuetze HINTER der Lafette steht, als Anteil "
-                + "der Fahrzeuglaenge.");
+                "MINDESTABSTAND: wie weit der Schuetze hinter der Lafette "
+                + "steht, als Anteil der Fahrzeuglaenge. Der wirkliche Abstand "
+                + "ist der GROESSERE aus diesem Anteil und der Armlaenge, mit "
+                + "der der Mann die Griffe des aufgebauten MG erreicht "
+                + "(TechnicalModel.StandOff, in Metern am gemessenen Modell). "
+                + "So steht er nie IM Geschuetz, egal wie gross das Fahrzeug "
+                + "ist und welches MG-Modell darauf sitzt.");
             CfgSeatDrop = cfg.Bind("Technical", "GunnerDrop", 0.37f,
                 "Wie weit der Sitzpunkt des Schuetzen UNTER der Standflaeche "
                 + "liegt, als Anteil der Fahrzeughoehe. Der Grund steht in "
@@ -289,27 +353,78 @@ namespace NextDayRevival
             float unitsPerMetre = length / DonorLengthMetres;
             float centreX = (min.x + max.x) * 0.5f;
 
+            // How far the man has to stand behind the pintle axis so that the
+            // grips of the mounted gun land in his hands: the grips' own offset
+            // (measured on a delivered model, built in on the generated one)
+            // plus the length of an arm. In metres, converted with the
+            // vehicle's own scale - never a fraction of the vehicle, because a
+            // man is the same size on a jeep and on a lorry. The configured
+            // fraction stays as a MINIMUM, so it can still push him further
+            // back but never into the weapon.
+            float abstand = Mathf.Max(CfgSeatBack.Value * length,
+                                      TechnicalModel.StandOff() * unitsPerMetre);
+
             // Everything below is in the ROOT's local space and then converted
             // into whatever frame the target parent happens to be, so neither a
             // rotated chassis node nor a scaled prefab can move the gun.
-            Vector3 mountInRoot = new Vector3(
-                centreX + CfgMountSide.Value * width,
-                min.y + CfgMountUp.Value * height,
-                min.z + CfgMountBack.Value * length);
+            //
+            // THE STANDING PLACE IS THE DONOR'S OWN REAR SEAT, not a fraction of
+            // the bounding box. The box says nothing about what is actually
+            // THERE: its top is the highest point of the whole vehicle, aerial
+            // and roof rack included, and standing the station on it put gun and
+            // gunner in mid-air over the cabin (field report technicalbug.png,
+            // 2026-09-18). A seat the game itself puts a passenger on is by
+            // construction inside the body, above the floor and clear of the
+            // wheels. The mount then stands one arm's length IN FRONT of it, so
+            // the man and his weapon are placed by the same measurement and
+            // cannot drift apart.
+            float deckY, standZ;
+            string herkunft;
+            Vector3 seatPoint;
+            if (Stehplatz(car.transform, seats, out seatPoint))
+            {
+                deckY = seatPoint.y + FeetAboveSeat / Hoehenmass(car.transform);
+                standZ = seatPoint.z;
+                herkunft = "aus dem hintersten Sitz des Spenders";
+            }
+            else
+            {
+                deckY = min.y + CfgMountUp.Value * height;
+                standZ = min.z + CfgMountBack.Value * length - abstand;
+                herkunft = "aus den Anteilen MountUpFallback/MountBack";
+            }
+
+            // Two clamps, so a donor with a surprising seat can still only be
+            // wrong by a little: the deck stays inside the measured body, and
+            // neither the man nor the gun can hang off either end of it.
+            float deckClamped = Mathf.Clamp(deckY, min.y + 0.02f * height,
+                                            min.y + 0.95f * height);
+            float hinten = min.z + 0.04f * length;
+            float vorn = Mathf.Max(hinten, max.z - 0.04f * length - abstand);
+            float standClamped = Mathf.Clamp(standZ, hinten, vorn);
+            if (Mathf.Abs(deckClamped - deckY) > 0.001f
+                || Mathf.Abs(standClamped - standZ) > 0.001f)
+                RevivalPlugin.L.LogWarning("Technical: der abgeleitete Standplatz "
+                    + "lag ausserhalb der Karosserie (y " + deckY.ToString("0.00")
+                    + " -> " + deckClamped.ToString("0.00") + ", z "
+                    + standZ.ToString("0.00") + " -> " + standClamped.ToString("0.00")
+                    + ") und wurde hineingezogen.");
+            deckY = deckClamped;
+            standZ = standClamped;
+
+            float x = centreX + CfgMountSide.Value * width;
+            Vector3 mountInRoot = new Vector3(x, deckY, standZ + abstand);
             // TWO drops, because there are two poses and they do not measure
             // from the same place. The game's SIT clip floats the body high
-            // above the seat root (RE "The T-72 crew": the feet are about 1.85
-            // units above it), so a seated gunner has to be dropped by that
-            // much to stand on the deck. A man on his FEET has his root AT his
-            // feet, so he needs no drop at all - dropping him anyway would sink
-            // him into the truck bed to the knees. Which one applies is decided
-            // by the same switch that decides the pose.
+            // above the seat root (FeetAboveSeat), so a seated gunner has to be
+            // dropped by that much to stand on the deck. A man on his FEET has
+            // his root AT his feet, so he needs no drop at all - dropping him
+            // anyway would sink him into the truck bed to the knees. Which one
+            // applies is decided by the same switch that decides the pose.
             bool steht = TechnicalGun.CfgStandPose == null
                          || TechnicalGun.CfgStandPose.Value;
             float drop = steht ? StandDrop() : CfgSeatDrop.Value;
-            Vector3 seatInRoot = mountInRoot
-                + new Vector3(0f, -drop * height,
-                              -CfgSeatBack.Value * length);
+            Vector3 seatInRoot = new Vector3(x, deckY - drop * height, standZ);
 
             Sitze(car, vgs, seats, seatInRoot);
             Karosse(car, seats, min, max);
@@ -321,9 +436,74 @@ namespace NextDayRevival
                 + ".." + max.z.ToString("0.00") + " (L " + length.ToString("0.00")
                 + ", B " + width.ToString("0.00") + ", H " + height.ToString("0.00")
                 + ", " + unitsPerMetre.ToString("0.000") + " Einheiten je Meter). "
-                + "Lafette " + mountInRoot + ", Schuetze " + seatInRoot
+                + "Standflaeche y " + deckY.ToString("0.00") + " " + herkunft
+                + ", Armabstand " + abstand.ToString("0.00") + " Einheiten ("
+                + TechnicalModel.StandOff().ToString("0.00") + " m). Lafette "
+                + mountInRoot + ", Schuetze " + seatInRoot
                 + " (Absenkung " + drop.ToString("0.00") + ", "
                 + (steht ? "stehend" : "sitzend") + ").");
+
+            // A donor with a roof over its rear places has less room above the
+            // floor than a pintle needs. That is a property of the DONOR, not a
+            // fault here, and the alternative - standing the station on the roof
+            // - is the bug this rebuild was changed to fix. It is logged so that
+            // a report of "the barrel goes through the roof" has its answer in
+            // the file already.
+            float kopfraum = max.y - deckY;
+            float braucht = TechnicalModel.PivotHeight * unitsPerMetre;
+            if (kopfraum < braucht)
+                RevivalPlugin.L.LogInfo("Technical: ueber der Standflaeche liegen "
+                    + kopfraum.ToString("0.00") + " Einheiten, die Lafette ist "
+                    + braucht.ToString("0.00") + " hoch - das MG ragt also durch "
+                    + "das Dach des Spenders. Das ist gewollt: es steht damit auf "
+                    + "dem Wagenboden wie der Schuetze, statt ueber dem Dach zu "
+                    + "schweben.");
+        }
+
+        /// <summary>
+        /// The donor's own standing place: the rear-most seat point this rebuild
+        /// is about to remove, in the ROOT's local space. Returns false for a
+        /// donor with nothing but the two front places, and then the caller
+        /// falls back to the configured fractions.
+        ///
+        /// Why a seat and not the mesh: the seat is the one point on the vehicle
+        /// the GAME itself guarantees a man fits on. Its height is the floor
+        /// (plus the sit pose's own offset, see FeetAboveSeat), its length
+        /// position is behind the cabin, and both follow a different donor
+        /// without a single number changing here.
+        /// </summary>
+        static bool Stehplatz(Transform root, Transform seats, out Vector3 point)
+        {
+            point = Vector3.zero;
+            if (root == null || seats == null) return false;
+
+            int keep = SeatTotal - 1;                 // driver + co-driver stay
+            int seen = 0;
+            bool any = false;
+            for (int i = 0; i < seats.childCount; i++)
+            {
+                Transform c = seats.GetChild(i);
+                if (c == null || c.name == SeatName) continue;
+                seen++;
+                if (seen <= keep) continue;           // a front place, not ours
+                Vector3 p = root.InverseTransformPoint(c.position);
+                if (!any || p.z < point.z) { point = p; any = true; }
+            }
+            return any;
+        }
+
+        /// <summary>
+        /// World units per ROOT-LOCAL unit along y. Everything measured in this
+        /// class is root-local, while <see cref="FeetAboveSeat"/> is a world
+        /// measurement of the character - so it has to be divided by this before
+        /// the two can be added. It is 1 for every unscaled prefab and exists
+        /// for the one that is not.
+        /// </summary>
+        static float Hoehenmass(Transform root)
+        {
+            if (root == null) return 1f;
+            float s = Mathf.Abs(root.lossyScale.y);
+            return s < 0.0001f ? 1f : s;
         }
 
         /// <summary>
@@ -792,6 +972,15 @@ namespace NextDayRevival
             {
                 if (!Enabled) return;
                 TechnicalGun.LateAll();
+                // The gunner's view a SECOND time, from the plugin's own
+                // LateUpdate. CameraOwner.LateTick drives it from a postfix on
+                // CameraFPSController.LateUpdate, and that hook is installed by
+                // Turret.Install - which returns at its first line when the BTR
+                // gun is switched off. The technical must not lose its aim
+                // because a different feature is disabled. Writing the same
+                // transform twice in a frame costs one matrix and is harmless:
+                // the value is computed from the gun, not accumulated.
+                TechnicalGun.LateTick();
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Technical-LateFrame: " + ex.Message); }
         }
@@ -979,6 +1168,10 @@ namespace NextDayRevival
         public static ConfigEntry<float> CfgHandFade;
         public static ConfigEntry<float> CfgElbowOut;
         public static ConfigEntry<float> CfgGripLift;
+        public static ConfigEntry<bool> CfgAutoMan;
+        public static ConfigEntry<int> CfgBelt;
+        public static ConfigEntry<float> CfgReload;
+        public static ConfigEntry<string> CfgReloadKey;
 
         public static void BindConfig(ConfigFile cfg)
         {
@@ -1060,9 +1253,33 @@ namespace NextDayRevival
             CfgGripLift = cfg.Bind("TechnicalGun", "GripLift", 0f,
                 "Zusaetzliche Hoehe der Griffpunkte in Metern, falls die "
                 + "Haende im Spiel zu tief oder zu hoch am MG liegen.");
+            CfgAutoMan = cfg.Bind("TechnicalGun", "AutoMan", true,
+                "Wer auf dem Stehplatz steht, greift das MG von selbst. Der "
+                + "Platz IST das Geschuetz: bis 6.25.0 musste man wissen, dass "
+                + "dafuer noch eine Taste gedrueckt werden will, und wer das "
+                + "nicht wusste, stand an einem MG, das nichts tat (Feldbericht "
+                + "technicalbug.png). Mit G laesst man es trotzdem wieder los "
+                + "und wechselt nach vorn; wer losgelassen hat, wird nicht "
+                + "erneut aufgeschaltet, solange er auf dem Platz bleibt.");
+            CfgBelt = cfg.Bind("TechnicalGun", "BeltRounds", 50,
+                "Schuss je Gurt. So viele Patronen werden beim Nachladen aus "
+                + "Kofferraum, Rucksack und Weste in die Waffe gelegt; danach "
+                + "muss neu geladen werden. Das ist die eigentliche Grenze der "
+                + "Feuerkraft - der Schaden je Schuss liegt fest unter dem "
+                + "BTR-Bordgeschuetz.");
+            CfgReload = cfg.Bind("TechnicalGun", "ReloadSeconds", 4.5f,
+                "Wie lange das Einlegen eines Gurtes dauert. In dieser Zeit "
+                + "schiesst das MG nicht, und das Spiel zeigt seinen eigenen "
+                + "Fortschrittsbalken.");
+            CfgReloadKey = cfg.Bind("TechnicalGun", "ReloadKey", "R",
+                "Taste zum Nachladen von Hand, auch wenn der Gurt noch nicht "
+                + "leer ist. Dieselbe Taste wie beim Nachladen zu Fuss.");
         }
 
         // ------------------------------------------------------------- Zustand
+
+        /// <summary>Owner name of the native reload bar, like the BTR's.</summary>
+        const string ReloadOwner = "technical-reload";
 
         static Component _vgs;              // VehicleGameSystem of our technical
         static Transform _root;
@@ -1073,6 +1290,14 @@ namespace NextDayRevival
         static float _leerGemeldet;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
+        static KeyCode _reloadKey = KeyCode.None;
+        static bool _reloadKeyParsed;
+        static bool _atGun;                 // the local player is IN the place
+        static bool _standDown;             // ... and let go of the gun on purpose
+        static float _nextOffer;
+        static int _belt;                   // rounds in the gun
+        static int _pendingBelt;            // rounds going in while it reloads
+        static float _reloadDone;           // Time.time the belt is in, 0 = idle
         static Texture2D _dot;
         static string _hinweis;
         static float _hinweisBis;
@@ -1102,7 +1327,14 @@ namespace NextDayRevival
                     _nextScan = Time.time + 0.4f;
                     Rescan();
                 }
-                if (_vgs == null) { SetManning(false); ReleasePose(); return; }
+                if (_vgs == null)
+                {
+                    SetManning(false);
+                    ReleasePose();
+                    _atGun = false;
+                    _standDown = false;
+                    return;
+                }
 
                 // Somebody else may have taken the view back in the meantime -
                 // Turret.GetOutPrefix hands the camera to the game the moment
@@ -1111,8 +1343,11 @@ namespace NextDayRevival
                 // and firing for up to one scan interval after that.
                 if (_manning && !CameraOwner.Has(CameraOwner.GunTruck))
                 {
-                    _manning = false;
-                    ReleasePose();
+                    // Through SetManning, not by writing the flag: that is the
+                    // one path that also gives the pose and a running reload
+                    // back. Releasing a camera we no longer own is a no-op
+                    // (CameraOwner.Release checks the holder).
+                    SetManning(false);
                     RevivalPlugin.L.LogInfo("Technical-MG: die Kamera wurde "
                         + "anderweitig zurueckgegeben - das MG ist nicht mehr besetzt.");
                     return;
@@ -1125,19 +1360,34 @@ namespace NextDayRevival
                 // whether or not he has taken hold of the gun. The seat point
                 // is measured for exactly that (Technical.Aufbauen), so a
                 // gunner who only stands there must not sit down and float.
-                if (InSeat(Technical.GunnerSeat)) HoldPose();
-                else ReleasePose();
+                _atGun = InSeat(Technical.GunnerSeat);
+                if (_atGun) HoldPose();
+                else
+                {
+                    ReleasePose();
+                    _standDown = false;
+                    _offerWarned = false;
+                    // Keep the automatic takeover one second in the future for
+                    // as long as he is NOT in the place. Getting into a vehicle
+                    // switches the game's own camera, and CameraOwner remembers
+                    // whichever camera was current when it was asked - taking
+                    // the view in the middle of that switch would hold the wrong
+                    // one. One second after he is seated, the switch is done.
+                    _nextOffer = Time.time + 1f;
+                }
+
+                // The place IS the gun: whoever stands in it takes hold of it
+                // without being told a key first. See Anbieten.
+                if (_atGun && !_manning) Anbieten();
 
                 if (!_manning) return;
 
                 Aim();
+                Nachladen();
 
                 if (Input.GetMouseButton(0) && Time.time >= _nextShot
                     && Time.time >= _nextTry)
-                {
-                    if (Fire()) _nextShot = Time.time + CfgDelay.Value;
-                    else _nextTry = Time.time + 1f;
-                }
+                    Feuern();
             }
             catch (Exception ex)
             {
@@ -1182,10 +1432,19 @@ namespace NextDayRevival
         static void Clear()
         {
             SetManning(false);
+            Ladeabbruch();
             _vgs = null;
             _root = null;
             _mount = null;
             _gun = null;
+            _atGun = false;
+            _standDown = false;
+            _offerWarned = false;
+            // The belt belongs to the gun that was left behind, not to the next
+            // one: a fresh technical starts empty and is loaded once.
+            _belt = 0;
+            _pendingBelt = 0;
+            _reloadDone = 0f;
         }
 
         static void Toggle()
@@ -1202,6 +1461,10 @@ namespace NextDayRevival
             if (_manning)
             {
                 SetManning(false);
+                // Let go ON PURPOSE. Without this flag the automatic takeover
+                // below would put him straight back on the gun in the same
+                // second, and the key would look broken.
+                _standDown = true;
                 int back = FirstNormalSeat();
                 if (back >= 0) ChangeSeat(back);
                 RevivalPlugin.L.LogInfo("Technical-MG verlassen"
@@ -1211,16 +1474,66 @@ namespace NextDayRevival
 
             if (here == Technical.GunnerSeat)
             {
-                if (!SetManning(true)) return;
+                _standDown = false;
+                if (!SetManning(true)) { Hinweis(TechnicalText.CamBusy(), 3f); return; }
+                Hinweis(TechnicalText.AtGun(), 5f);
                 RevivalPlugin.L.LogInfo("Technical-MG besetzt (Sitz " + here
                     + ", der Spieler stand schon dort).");
                 return;
             }
 
+            _standDown = false;
             if (!ChangeSeat(Technical.GunnerSeat)) return;
-            if (!SetManning(true)) return;
+            if (!SetManning(true)) { Hinweis(TechnicalText.CamBusy(), 3f); return; }
+            Hinweis(TechnicalText.AtGun(), 5f);
             RevivalPlugin.L.LogInfo("Technical-MG besetzt (Sitz "
                 + Technical.GunnerSeat + ", vorher " + here + ").");
+        }
+
+        static bool _offerWarned;
+
+        /// <summary>
+        /// Take hold of the gun for a player who is already standing at it.
+        ///
+        /// THE PLACE IS THE GUN. It was reachable only through the G key, and
+        /// the field report of 2026-09-18 is what that costs: a player standing
+        /// at the machine gun of his own truck, unable to aim, fire or reload,
+        /// because nothing on the screen said that a key was missing. Anyone put
+        /// into the place - by G, by the game's own seat assignment, or by
+        /// another player leaving - now mans it by himself.
+        ///
+        /// Three things keep it from becoming a trap: it never runs after a
+        /// deliberate stand-down (G), it asks at most once a second, and it
+        /// reports a refused camera ONCE instead of every second. G always
+        /// remains the way out, and to a front seat with it.
+        /// </summary>
+        static void Anbieten()
+        {
+            if (_standDown) return;
+            if (CfgAutoMan != null && !CfgAutoMan.Value) return;
+            if (Time.time < _nextOffer) return;
+            _nextOffer = Time.time + 1f;
+
+            if (_mount == null || _gun == null)
+            {
+                if (!_offerWarned)
+                {
+                    _offerWarned = true;
+                    Hinweis(TechnicalText.NoGun(), 4f);
+                }
+                return;
+            }
+            if (SetManning(true))
+            {
+                _offerWarned = false;
+                Hinweis(TechnicalText.AtGun(), 5f);
+                RevivalPlugin.L.LogInfo("Technical-MG: der Stehplatz hat das MG "
+                    + "selbst besetzt (kein Tastendruck noetig).");
+                return;
+            }
+            if (_offerWarned) return;
+            _offerWarned = true;
+            Hinweis(TechnicalText.CamBusy(), 4f);
         }
 
         /// <summary>
@@ -1242,6 +1555,9 @@ namespace NextDayRevival
             }
             _manning = false;
             ReleasePose();
+            // A reload that is still running has to give the game's progress bar
+            // back with the gun, or it hangs on the HUD for good.
+            Ladeabbruch();
             CameraOwner.Release(CameraOwner.GunTruck);
             return true;
         }
@@ -1670,6 +1986,44 @@ namespace NextDayRevival
                 + st.LUpper.name + " / " + st.LFore.name + " / " + lh.name
                 + " und " + st.RUpper.name + " / " + st.RFore.name + " / "
                 + rh.name + ".");
+            Vermessung(st, body);
+        }
+
+        /// <summary>
+        /// One line per gunner that answers the two questions a screenshot of a
+        /// wrong-looking gun station always raises: does the man stand ON the
+        /// deck, and can his arms reach the grips at all? Both are read off the
+        /// live scene once per body - the pintle foot IS the deck, the man's
+        /// root is at his feet while he stands, and the arm length is the sum of
+        /// the two bones that were just found. Written because the report of
+        /// 2026-09-18 had to be answered from a picture instead of from the log.
+        /// </summary>
+        static void Vermessung(Station st, GameObject body)
+        {
+            try
+            {
+                Transform basis = st.Mount == null ? null : st.Mount.parent;
+                if (basis == null || st.Gun == null || st.RHand == null) return;
+
+                float deck = basis.position.y;
+                float root = body.transform.position.y;
+                Vector3 griff = st.Gun.TransformPoint(TechnicalModel.GripLocal(false));
+                float arm = Vector3.Distance(st.RUpper.position, st.RFore.position)
+                            + Vector3.Distance(st.RFore.position, st.RHand.position);
+                float weit = Vector3.Distance(st.RUpper.position, griff);
+
+                RevivalPlugin.L.LogInfo("Technical-MG: Schuetze \"" + body.name
+                    + "\" - Wurzel " + root.ToString("0.00") + ", Standflaeche "
+                    + deck.ToString("0.00") + " (Abstand "
+                    + (root - deck).ToString("0.00")
+                    + "; 0 heisst er steht darauf, deutlich mehr heisst er "
+                    + "schwebt oder sitzt). Griff " + griff.y.ToString("0.00")
+                    + ", also " + (griff.y - root).ToString("0.00")
+                    + " ueber seiner Wurzel. Armlaenge " + arm.ToString("0.00")
+                    + ", Schulter zum Griff " + weit.ToString("0.00")
+                    + (weit > arm ? " - ZU WEIT, die Arme sind gestreckt." : "."));
+            }
+            catch { }
         }
 
         /// <summary>Is there a forearm and an upper arm above this hand, and are
@@ -1972,24 +2326,164 @@ namespace NextDayRevival
         static readonly Color SpurEnde = new Color(1.00f, 0.62f, 0.20f, 1.0f);
         static readonly Color SpurHof = new Color(1.00f, 0.38f, 0.10f, 1.0f);
 
+        // ------------------------------------------------------- Gurt und Laden
+
         /// <summary>
-        /// One shot. Returns false when NONE was fired - then the reload delay
-        /// must not start either.
+        /// The trigger. The gun fires out of the BELT that is in it; an empty
+        /// belt starts a reload instead of a shot, which is what makes the
+        /// weapon behave like a weapon and not like a tap on an inventory.
         /// </summary>
-        static bool Fire()
+        static void Feuern()
         {
-            if (CfgRequireAmmo.Value && !TakeRound())
+            if (_gun == null) return;
+            if (_reloadDone > 0f) return;             // a belt is going in
+            if (_belt <= 0) { Ladebeginn(false); return; }
+            if (Fire())
             {
-                Hinweis(TechnicalText.NoAmmo(CfgAmmoId.Value), 2.5f);
+                _belt--;
+                _nextShot = Time.time + CfgDelay.Value;
+                if (_belt <= 0) Ladebeginn(false);
+            }
+            else _nextTry = Time.time + 1f;
+        }
+
+        /// <summary>
+        /// The reload clock, and the reload key. Both belong in Update: the
+        /// native progress bar is started once and then only waited on.
+        /// </summary>
+        static void Nachladen()
+        {
+            if (_reloadDone > 0f)
+            {
+                float rest = _reloadDone - Time.time;
+                if (rest > 0.02f)
+                {
+                    // Also the way back in: a gunner who let go mid-reload and
+                    // took hold again gets the bar for the REMAINING time. The
+                    // rounds were taken out of the box when the belt was pulled,
+                    // so the wait cannot be skipped by letting go of the gun.
+                    if (!NativeActionProgress.IsActive(ReloadOwner))
+                        NativeActionProgress.Begin(ReloadOwner,
+                            TechnicalText.Reloading(), rest, false, null, null);
+                    return;
+                }
+                _reloadDone = 0f;
+                _belt = _pendingBelt;
+                _pendingBelt = 0;
+                NativeActionProgress.End(ReloadOwner);
+                _nextShot = Time.time + CfgDelay.Value;
+                RevivalPlugin.L.LogInfo("Technical-MG: Gurt eingelegt, " + _belt
+                    + " Schuss in der Waffe.");
+                return;
+            }
+            if (Input.GetKeyDown(ReloadKey())) Ladebeginn(true);
+        }
+
+        /// <summary>
+        /// Put a belt in. The rounds are taken out of the trunk, the backpack
+        /// and the vest AT ONCE and at the START - a belt that is being fed into
+        /// the gun has left the box, so a gunner who dies halfway through loses
+        /// it, and a single shot can never cost a whole 200-round box.
+        ///
+        /// Returns silently when there is nothing to load; the player is told
+        /// once through the hint line and the log says where it looked.
+        /// </summary>
+        static void Ladebeginn(bool byHand)
+        {
+            if (_reloadDone > 0f) return;
+            int room = BeltRounds() - _belt;
+            if (room <= 0) return;
+            if (byHand && Time.time < _nextTry) return;
+
+            int got = Gurt(room);
+            if (got <= 0)
+            {
+                _nextTry = Time.time + 1f;
+                Hinweis(TechnicalText.NoAmmo(CfgAmmoId.Value), 3f);
                 if (Time.time >= _leerGemeldet)
                 {
                     _leerGemeldet = Time.time + 10f;
                     RevivalPlugin.L.LogInfo("Technical-MG: keine Munition (Item "
                         + CfgAmmoId.Value + ") im Kofferraum, Rucksack und in der Weste.");
                 }
-                return false;
+                return;
             }
 
+            float dauer = Mathf.Max(0.1f, CfgReload == null ? 4.5f : CfgReload.Value);
+            _pendingBelt = _belt + got;
+            _belt = 0;
+            _reloadDone = Time.time + dauer;
+            NativeActionProgress.End(ReloadOwner);
+            NativeActionProgress.Begin(ReloadOwner, TechnicalText.Reloading(),
+                                       dauer, false, null, null);
+            // No extra hint line: the game's own bar and the counter under the
+            // crosshair already say it, and three copies of one word is noise.
+            RevivalPlugin.L.LogInfo("Technical-MG: Gurt mit " + got
+                + " Schuss wird eingelegt (" + dauer.ToString("0.0") + " s"
+                + (byHand ? ", von Hand" : ", Gurt leer") + ").");
+        }
+
+        /// <summary>
+        /// Give the game's progress bar back when the gun is let go mid-reload,
+        /// otherwise it stands on the HUD for good. The CLOCK keeps running and
+        /// the pulled rounds stay pulled: the belt is half in the gun, letting
+        /// go of the grips does not put it back in the box, and it cannot be
+        /// used to skip the wait either. Nachladen picks the bar up again.
+        /// </summary>
+        static void Ladeabbruch()
+        {
+            NativeActionProgress.End(ReloadOwner);
+        }
+
+        /// <summary>
+        /// Pull up to <paramref name="want"/> rounds out of the vehicle's trunk,
+        /// then out of the backpack and the vest. The containers are found ONCE
+        /// for the whole belt: Turret.PlayerInventories walks the scene, and
+        /// doing that per round would turn a reload into a visible stall.
+        /// </summary>
+        static int Gurt(int want)
+        {
+            if (want <= 0) return 0;
+            if (CfgRequireAmmo == null || !CfgRequireAmmo.Value) return want;
+
+            int id = CfgAmmoId.Value;
+            int got = 0;
+
+            Component trunk = TrunkContainer(_root);
+            object trunkData = trunk == null ? null : Field(trunk, "_containerData");
+            while (got < want && trunk != null
+                   && Turret.TakeFrom(trunk, trunkData, "Kofferraum", id, "Technical-MG"))
+                got++;
+
+            if (got >= want) return got;
+
+            List<object> invs = Turret.PlayerInventories();
+            for (int i = 0; i < invs.Count && got < want; i++)
+            {
+                object pack = Field(invs[i], "_backpackData");
+                while (got < want
+                       && Turret.TakeFrom(invs[i], pack, "Rucksack", id, "Technical-MG"))
+                    got++;
+                object vest = Field(invs[i], "_gearsData");
+                while (got < want
+                       && Turret.TakeFrom(invs[i], vest, "Weste", id, "Technical-MG"))
+                    got++;
+            }
+            return got;
+        }
+
+        static int BeltRounds()
+        {
+            return CfgBelt == null ? 50 : Mathf.Max(1, CfgBelt.Value);
+        }
+
+        /// <summary>
+        /// One shot. Returns false when NONE was fired - then the reload delay
+        /// must not start either. The ammunition was paid for when the belt was
+        /// loaded, so this only puts the round on its way.
+        /// </summary>
+        static bool Fire()
+        {
             _pitch = Mathf.Clamp(_pitch + CfgRecoil.Value,
                                  CfgPitchMin.Value, CfgPitchMax.Value);
 
@@ -2098,31 +2592,6 @@ namespace NextDayRevival
 
         // ---------------------------------------------------------- Munition
 
-        /// <summary>
-        /// One round: the vehicle's own trunk first, then the player's backpack
-        /// and vest. Both steps go through Turret.TakeFrom, which is the one
-        /// place that knows how the game's ObscuredInt containers are emptied.
-        /// </summary>
-        static bool TakeRound()
-        {
-            int id = CfgAmmoId.Value;
-
-            Component trunk = TrunkContainer(_root);
-            if (trunk != null && Turret.TakeFrom(trunk, Field(trunk, "_containerData"),
-                                                "Kofferraum", id, "Technical-MG"))
-                return true;
-
-            List<object> invs = Turret.PlayerInventories();
-            for (int i = 0; i < invs.Count; i++)
-            {
-                if (Turret.TakeFrom(invs[i], Field(invs[i], "_backpackData"),
-                                    "Rucksack", id, "Technical-MG")) return true;
-                if (Turret.TakeFrom(invs[i], Field(invs[i], "_gearsData"),
-                                    "Weste", id, "Technical-MG")) return true;
-            }
-            return false;
-        }
-
         static Component TrunkContainer(Transform veh)
         {
             if (veh == null) return null;
@@ -2136,7 +2605,12 @@ namespace NextDayRevival
 
         public static void Draw()
         {
-            if (!_manning && (_hinweis == null || Time.time >= _hinweisBis)) return;
+            bool hint = _hinweis != null && Time.time < _hinweisBis;
+            // The standing hint is not a notice with a lifetime: as long as a
+            // player is in the gunner's place with his hands off the gun, the
+            // screen has to say how he takes hold of it again.
+            bool offer = _atGun && !_manning;
+            if (!_manning && !hint && !offer) return;
             if (Event.current != null && Event.current.type != EventType.Repaint) return;
 
             float cx = Screen.width * 0.5f;
@@ -2160,17 +2634,41 @@ namespace NextDayRevival
                 GUI.color = old;
             }
 
-            if (_hinweis != null && Time.time < _hinweisBis)
+            // The ammunition state, where a shooter looks for it: under the
+            // crosshair, and only while he is actually at the gun.
+            if (_manning)
             {
-                GUIStyle style = new GUIStyle(GUI.skin.label);
-                style.fontSize = 16;
-                style.normal.textColor = new Color(1f, 0.92f, 0.70f, 1f);
-                // Center the measured label without a TextRenderingModule type.
-                GUIContent hint = new GUIContent(_hinweis);
-                Vector2 size = style.CalcSize(hint);
-                GUI.Label(new Rect(cx - size.x * 0.5f,
-                    cy + 40f + (26f - size.y) * 0.5f, size.x, size.y), hint, style);
+                string text = _reloadDone > 0f
+                    ? TechnicalText.Reloading()
+                    : TechnicalText.Belt(_belt, BeltRounds());
+                Zeile(text, cx, cy + 72f,
+                      _belt <= 0 && _reloadDone <= 0f
+                          ? new Color(1f, 0.55f, 0.40f, 1f)
+                          : new Color(0.92f, 0.92f, 0.86f, 1f), 15);
             }
+
+            if (hint)
+                Zeile(_hinweis, cx, cy + 40f, new Color(1f, 0.92f, 0.70f, 1f), 16);
+            else if (offer)
+                Zeile(TechnicalText.ManHint(Key().ToString()), cx, cy + 40f,
+                      new Color(1f, 0.92f, 0.70f, 1f), 16);
+        }
+
+        /// <summary>One centred line of text. Centred by measurement, because
+        /// GUIStyle.alignment would pull in TextAnchor from
+        /// UnityEngine.TextRenderingModule, which this build does not
+        /// reference.</summary>
+        static void Zeile(string text, float cx, float y, Color colour, int size)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            GUIStyle style = new GUIStyle(GUI.skin.label);
+            style.fontSize = size;
+            style.normal.textColor = colour;
+            GUIContent content = new GUIContent(text);
+            Vector2 measured = style.CalcSize(content);
+            GUI.Label(new Rect(cx - measured.x * 0.5f,
+                               y + (26f - measured.y) * 0.5f,
+                               measured.x, measured.y), content, style);
         }
 
         // ------------------------------------------------------------ Helfer
@@ -2187,6 +2685,24 @@ namespace NextDayRevival
                     + " unbekannt, benutze G.");
             }
             return _key;
+        }
+
+        static KeyCode ReloadKey()
+        {
+            if (_reloadKeyParsed) return _reloadKey;
+            _reloadKeyParsed = true;
+            try
+            {
+                _reloadKey = (KeyCode)Enum.Parse(typeof(KeyCode),
+                                                 CfgReloadKey.Value, true);
+            }
+            catch
+            {
+                _reloadKey = KeyCode.R;
+                RevivalPlugin.L.LogWarning("Technical-MG: Nachladetaste "
+                    + CfgReloadKey.Value + " unbekannt, benutze R.");
+            }
+            return _reloadKey;
         }
 
         static FieldInfo _passField;
@@ -2252,8 +2768,15 @@ namespace NextDayRevival
     /// </summary>
     internal static class TechnicalModel
     {
-        /// <summary>Height of the elevation pivot above the pintle foot.</summary>
-        internal const float PivotHeight = 0.95f;
+        /// <summary>
+        /// Height of the elevation pivot above the pintle foot, in metres. It
+        /// is the ERGONOMIC number of the whole feature: the pintle stands on
+        /// the same deck the gunner stands on, so this plus the grips' own
+        /// small offset is exactly how high his hands end up. 1.10 m puts them
+        /// where a standing man holds a spade grip; at the old 0.95 m he
+        /// stooped for it.
+        /// </summary>
+        internal const float PivotHeight = 1.10f;
 
         /// <summary>The barrel axis height in the GUN's own space, and the two
         /// lengths the muzzle is built from.</summary>
@@ -2288,6 +2811,30 @@ namespace NextDayRevival
                     b.min.z + 0.12f * b.size.z);
             }
             return new Vector3(left ? -GripSide : GripSide, BoreY - 0.05f, GripBack);
+        }
+
+        /// <summary>
+        /// How far a man's hands reach in front of his own root when he holds
+        /// something at chest height, in metres. Together with the grips' own
+        /// position it says where the gunner has to stand, which is why it is
+        /// here beside them and not in the vehicle: it is a measurement of the
+        /// PERSON.
+        /// </summary>
+        const float ArmForward = 0.42f;
+
+        /// <summary>
+        /// How far BEHIND the pintle axis the gunner's own root belongs, in
+        /// metres: the grips sit behind the axis (see GripLocal - built in on
+        /// the generated gun, measured on a delivered one), and his hands reach
+        /// ArmForward in front of him. So the man is placed by the weapon that
+        /// is actually mounted: a longer gun moves him back by itself, and
+        /// nothing in the vehicle code has to know what it looks like.
+        /// The floor of 0.30 m keeps a gun whose grips sit in FRONT of its pivot
+        /// from pulling the gunner into the breech.
+        /// </summary>
+        internal static float StandOff()
+        {
+            return Mathf.Max(0.30f, ArmForward - GripLocal(true).z);
         }
 
         /// <summary>

@@ -765,6 +765,102 @@ def check_convoy_column():
         bad("Uniform check: only one appearance path carries the editor uniform")
 
 
+def _body(src, signature):
+    """The braces-balanced body of the method whose signature line is given, or
+    an empty string when that method is not there any more. Rules that belong to
+    ONE method have to be read inside it: `u.Stuck = 0f` appears half a dozen
+    times in Revival.Patrol.cs, and only one of them is the guard."""
+    start = src.find(signature)
+    if start < 0:
+        return ""
+    brace = src.find("{", start)
+    if brace < 0:
+        return ""
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace:i + 1]
+    return ""
+
+
+def check_patrol_fall():
+    """[18] The patrol ground guard (static).
+
+    The reported defect: vehicles and patrols that spawn somewhere, fall
+    through the map and reappear above it, on repeat. Three mistakes in
+    Revival.Patrol.cs made that loop, and these guards keep each of them from
+    coming back:
+
+      1. A placement that took the first collider under an origin 30 m up - a
+         tree crown, a shed roof, another vehicle - and that placed the hull on
+         the AUTHORED point when it hit nothing at all. Far from every player
+         the colliders are not loaded, and an automatic patrol starts at the
+         waypoint farthest from everybody.
+      2. A stuck timer that reads a falling hull as "not moving", because the
+         driver measures speed in the ground plane only.
+      3. A stuck recovery that warps that hull onto a waypoint without asking
+         whether there is anything under it - which is the "reappears above the
+         map" half of the loop.
+
+    The movement itself still needs an in-game acceptance pass; these are
+    source rules, not physics.
+    """
+    print("[18] Patrol ground guard (static)")
+    patrol_p = os.path.join(ROOT, "Revival.Patrol.cs")
+    if not os.path.exists(patrol_p):
+        bad("Patrol ground guard: source file missing")
+        return
+    code = _code(io.open(patrol_p, encoding="utf-8").read())
+
+    # 1. Every placement goes through the checked lookup AND reports a miss.
+    spot = _body(code, "static bool GroundSpot(")
+    if ("RoadUnder(point, own, out y, out normal)" in spot
+            and "return false;" in spot):
+        ok("placement uses the checked ground lookup and reports a miss")
+    else:
+        bad("Patrol ground guard: GroundSpot no longer reports a missing surface")
+
+    if "static Vector3 Grounded(" in code:
+        bad("Patrol ground guard: the unfiltered 30 m placement ray is back")
+    else:
+        ok("the unfiltered first-hit placement ray is gone")
+
+    # 2. A spawn refuses a place with nothing under it. The automatic already
+    #    backs off when a spawn produces no vehicle, so the refusal is a wait.
+    spawn = _body(code, "static void Spawn(Route src, bool auto)")
+    if ("GroundedWaypoint(r, start, 1.6f, true, out startPos)" in spawn
+            and "if (firm < 0)" in spawn):
+        ok("a patrol is not put down where there is nothing to stand on")
+    else:
+        bad("Patrol ground guard: the spawn no longer checks the ground")
+
+    # 3. The stuck recovery only warps onto a waypoint that HAS ground.
+    free = _body(code, "static void Free(Unit u, Vector3 pos)")
+    if ("GroundedWaypoint(r, to, 1.5f, !u.OneWay, out target)" in free
+            and "if (landed < 0)" in free):
+        ok("the stuck recovery never warps a hull into nothing")
+    else:
+        bad("Patrol ground guard: FREE can warp onto a waypoint with no ground")
+
+    # 4. Falling is not being stuck, and it is decided before the driver runs.
+    guard = _body(code, "static bool GroundGuard(")
+    if "if (GroundGuard(u)) continue;" in code and "u.Stuck = 0f;" in guard:
+        ok("a falling vehicle is taken off the stuck timer before the driver runs")
+    else:
+        bad("Patrol ground guard: a falling hull can still feed the stuck timer")
+
+    # 5. Repeated failures end the vehicle instead of dropping it in again.
+    recover = _body(code, "static void Recover(Unit u)")
+    if "u.Recoveries > FallRecoveries" in recover and "Drop(u," in recover:
+        ok("a vehicle that keeps falling is given up, not put back forever")
+    else:
+        bad("Patrol ground guard: a fallen vehicle can be recovered without limit")
+
+
 def check_gas_launcher():
     """[14] Chemical launcher RG-Kh and its 30-minute gas cloud (static).
 
@@ -777,21 +873,26 @@ def check_gas_launcher():
     the mask actually saving a player - stays an in-game acceptance item.
 
     Since the weapon got its own model there is a fifth: falling back to
-    another weapon's art. The LAW's mesh is built in the RIFLE frame, and in
-    the grenade hand it lay backwards and upside down - so the checks at the
-    end insist on the own model, on the two config knobs that put it right
-    without a new DLL, and on a delivered gasgun.ndmesh beating the generated
-    geometry. How the launcher actually SITS in the hand stays an in-game
-    acceptance item; it cannot be measured here.
+    another weapon's art. And since that model sat in the hand at an angle
+    nobody chose, there is a sixth, which is the interesting one. The pose of a
+    weapon comes from the transform data of the item it was CLONED from, and
+    this one has to clone the frag grenade 1403 to reach the grenade band at
+    all. Both halves of the fix are checked here: the mesh has to be built in
+    the game's own weapon frame (fist y 0.624, bore axis z 0.096, measured from
+    the RPD), and the prefab has to take a REAL WEAPON's pose through
+    ItemDef.HandPoseFrom instead of the grenade's. The guessed 180 degree flip
+    that used to stand in for both is checked to be GONE.
     """
     print("[14] Chemie-Granatwerfer und Giftgaswolke (statisch)")
     gas_p = os.path.join(ROOT, "RevivalGasLauncher.cs")
     plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    items_p = os.path.join(ROOT, "Revival.Items.cs")
     if not os.path.exists(gas_p):
         bad("RevivalGasLauncher.cs fehlt")
         return
     s = io.open(gas_p, encoding="utf-8").read()
     plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+    items = io.open(items_p, encoding="utf-8").read() if os.path.exists(items_p) else ""
 
     def need(cond, good, why):
         if cond:
@@ -867,10 +968,10 @@ def check_gas_launcher():
     need("RocketHook.Detonate" in s,
          "vernetzter Zerleger am Einschlag (RocketHook.Detonate)",
          "kein vernetzter Einschlag")
-    # Das Modell. Frueher war es das der M72 LAW - die falsche Waffe, und in
-    # der Granatenhand lag sie verkehrt herum und auf dem Kopf, weil law.ndmesh
-    # im GEWEHRrahmen gebaut ist und dieses Item die Transformdaten der
-    # Splittergranate 1403 aufgeschrieben bekommt.
+    # Das Modell. Frueher war es das der M72 LAW - die falsche Waffe, und es
+    # lag in der Hand schief, weil dieses Item die Transformdaten der
+    # Splittergranate 1403 aufgeschrieben bekommt (siehe die Haltungspruefungen
+    # unten: da liegt der eigentliche Fehler, nicht im Mesh).
     need("internal static class GasGunModel" in s
          and "GasGunModel.MESH_FILE, GasGunModel.DIFFUSE_FILE" in s
          and "GasGunModel.ICON_FILE" in s,
@@ -879,13 +980,46 @@ def check_gas_launcher():
     need("GasGunModel.Provide();" in s and "GasGunModel.TickIcon();" in s,
          "Modell vor dem ItemDef bereitgestellt, Symbol im ersten Tick gerendert",
          "Naht zum Modellbau fehlt (Provide/TickIcon)")
-    # Die Lage in der Hand ist ohne das laufende Spiel nicht messbar. Sie muss
-    # deshalb in der .cfg zu korrigieren sein, ohne neue DLL.
-    need('cfg.Bind("GasLauncher", "ModelEuler"' in s
-         and 'cfg.Bind("GasLauncher", "ModelOffset"' in s
-         and "static void Correct(Mesh m)" in s,
-         "Lage in der Hand einstellbar (ModelEuler/ModelOffset)",
-         "keine einstellbare Korrektur der Lage in der Hand")
+    # DIE LAGE IN DER HAND, erste Haelfte: das Mesh steht im Waffenrahmen des
+    # Spiels. Faust y 0.624, Laufachse z 0.096 - am RPD gemessen (RE 5), und
+    # check [5] haelt jedes gelieferte Waffenmesh daran fest.
+    need("const float HAND_Y = 0.624f;" in s
+         and "const float HAND_Z = 0.096f;" in s
+         and "static Vector3 ToWeapon(Vector3 p)" in s
+         and "v[i] = ToWeapon(v[i]);" in s,
+         "Modell im Waffenrahmen des Spiels (Faust y 0.624, Lauf z 0.096)",
+         "das Modell wird nicht in den Waffenrahmen geschoben - dann greift "
+         "die Hand daneben")
+    # Zweite Haelfte, und die wichtigere: die Prefabwurzel bekommt die Haltung
+    # einer echten Waffe statt die der Splittergranate, von der das Item nur
+    # seine Kategorie erbt.
+    need("def.HandPoseFrom = " in s
+         and 'cfg.Bind("GasLauncher", "HandPoseFrom", 1023' in s,
+         "Handhaltung einer echten Waffe (HandPoseFrom, Vorgabe RPD 1023)",
+         "das Item uebernimmt weiter die Haltung der Splittergranate")
+    need("public int HandPoseFrom;" in plug,
+         "ItemDef.HandPoseFrom vorhanden",
+         "ItemDef kennt kein HandPoseFrom")
+    need("_def.HandPoseFrom != 0 && HandPose(ref pos, ref euler)" in items
+         and 'WriteVec3(c, t, "localPosition", pos, names[i]);' in items
+         and 'WriteVec3(c, t, "localEulerAngles", euler, names[i]);' in items
+         and "HAND_POSE_EULER" in items,
+         "ItemFactory schreibt Lage und Drehung der Referenzwaffe",
+         "ItemFactory setzt nur die Skalierung - die Haltung bleibt die der "
+         "Spende")
+    # Die Feinkorrektur bleibt, aber sie dreht um die FAUST und nicht mehr um
+    # den Ursprung, und sie ist leer als Vorgabe: geraten wird hier nichts mehr.
+    need('cfg.Bind("GasLauncher", "GripEuler", "0,0,0"' in s
+         and 'cfg.Bind("GasLauncher", "GripOffset", "0,0,0"' in s
+         and "static void Correct(Mesh m)" in s
+         and "q * (vs[i] - pivot) + pivot + offset" in s,
+         "Feinkorrektur um den Griff einstellbar (GripEuler/GripOffset)",
+         "keine einstellbare Korrektur der Lage in der Hand, oder sie dreht "
+         "nicht um den Griff")
+    need("ModelEuler" not in s,
+         "der geratene 180-Grad-Kipper ist raus",
+         "ModelEuler steht wieder im Quelltext - das war die Vermutung, die "
+         "nicht gestimmt hat")
     # Und ein echtes Modell muss die erzeugte Geometrie ersetzen koennen.
     need("Assets.Provide(MESH_FILE, _mesh)" in s and "Present(MESH_FILE)" in s,
          "ein geliefertes gasgun.ndmesh schlaegt die erzeugte Geometrie",
@@ -910,6 +1044,11 @@ def check_mortar():
     code inside the surveillance drone's block, and a kill credited to owner 0
     that throws in NPC_Settlement.StatsOnNpcKilled. Aim mode, the map ring and
     the flight of a bomb stay in-game acceptance items.
+
+    Since 6.26 it also guards WHERE the gun is put: the emplacement search
+    scores every candidate patch and takes the best one. Drop the scoring and
+    it is again the first patch that merely passes, starting at the settlement
+    centre - which is where the houses are.
     """
     print("[15] Siedlungsmoerser (statisch)")
     mortar_p = os.path.join(ROOT, "RevivalMortar.cs")
@@ -1020,6 +1159,26 @@ def check_mortar():
          "Fahrzeugschaden nur auf dem Master, ueber Teil 14",
          "Fahrzeugschaden nicht auf den Master begrenzt")
 
+    # --- WO DAS GESCHUETZ STEHT. Bis 6.25 nahm FreeGround den ERSTEN Fleck,
+    # der die Pruefung bestand, und begann in der Siedlungsmitte - dort stehen
+    # die Haeuser. Der Feldbericht 2026-09-18 ("die Batterie in Locator muss
+    # hinter die Satellitenschuessel, ausserdem brauchen wir bessere
+    # Mechanismen, damit die Batterien immer auf freiem Grund mit moeglichst
+    # viel Platz drum herum spawnen") ist genau diese Zeile. Jetzt wird jeder
+    # Kandidat bewertet und der BESTE genommen; ohne die Bewertung ist die
+    # Suche wieder die alte, und nichts sonst wuerde das auffallen lassen.
+    need("float score = Score(point, centre, village);" in s
+         and "if (have && score <= best) continue;" in s,
+         "die Aufstellung nimmt den besten Platz, nicht den ersten",
+         "FreeGround bewertet die Kandidaten nicht mehr - es gewinnt wieder "
+         "der erste, also die Siedlungsmitte")
+    need("List<Vector3> village = SpawnPointsOf(settlement);" in s,
+         "die Spawnpunkte der Siedlung zaehlen als bewohnter Grund",
+         "die Bewertung kennt die Spawnpunkte der Siedlung nicht mehr")
+    need((_bind_number(s, "Mortar", "PlaceSearchRadius") or 0) >= 48,
+         "der Suchradius umfasst mehr als die Siedlungsmitte",
+         "PlaceSearchRadius ist zu klein - die Suche sieht nur die Mitte")
+
     # --- RevivalPlugin seams.
     for seam in ("Mortar.BindConfig", "Mortar.AddItems(Items)",
                  "Mortar.Tick()", "Mortar.Draw()"):
@@ -1052,6 +1211,10 @@ def check_arty_battery():
       6. RevivalArtyBattery.cs must stay ASCII: it is a machine-written file and
          build.ps1 requires BOM-less sources, so its Russian lives in
          RevivalMortar.cs instead.
+      7. The two men must STAY at the vehicle. Crew.DropSquad gives every squad
+         a ring of walk points and the vanilla idle logic walks it; the hold is
+         a pause refreshed twice a second plus a station warp, and without it
+         the gunner is back to wandering nine metres from his gun.
     """
     print("[16] Artilleriefahrzeug, Besatzung und Aufklaerungsdrohne (statisch)")
     bat_p = os.path.join(ROOT, "RevivalArtyBattery.cs")
@@ -1192,6 +1355,36 @@ def check_arty_battery():
     need("Mortar.Laid(p.SettlementId, point)" in b,
          "gefeuert wird erst, wenn das Rohr steht",
          "der Schuetze feuert, bevor der Turm auf dem Punkt ist")
+
+    # --- DIE BESATZUNG STEHT AM GESCHUETZ UND BEWEGT SICH NICHT (Auftrag
+    # 2026-09-18). Crew.DropSquad legt jeder Gruppe einen Ring aus acht
+    # Laufpunkten an, und die Spielroutine IdleStateAction laeuft ihn ab; ohne
+    # den Halt wandern die beiden Maenner wieder vom Fahrzeug weg. Der Halt
+    # selbst ist die Pause, die IdleStateAction frueh zurueckkehren laesst
+    # (CONFIRMED IL), und die Station wird mit NavMeshAgent.Warp gesetzt, weil
+    # ein blosses Versetzen den Mann am alten Pfad zurueckziehen wuerde.
+    need("static void Posted(Post p, float now, bool master)" in b
+         and "_mPauseTime.Invoke(ai, new object[] { 1.4f });" in b,
+         "die Besatzung wird an ihrer Station festgehalten",
+         "der Halt der Besatzung fehlt - die beiden Maenner laufen wieder ihren "
+         "Ring ab")
+    need("agent.Warp(at);" in b,
+         "der Mann wird auf die Station gewarpt, nicht versetzt",
+         "ohne Warp zieht der NavMeshAgent den Mann an seinen Pfad zurueck")
+    need("static readonly Vector3 GunnerPost" in b
+         and "static readonly Vector3 OperatorPost" in b,
+         "Schuetze und Drohnenfuehrer haben feste Plaetze am Fahrzeug",
+         "die beiden Stationen am Fahrzeug fehlen")
+    # Die Arbeitsanimation ist eine Kette von Rueckfallebenen, und jede einzelne
+    # endet mit einem Mann, der sich nicht bewegt: Arbeitszustand, eigener Clip
+    # aus dem Satz des Modells, sonst der Stand-Idle. Faellt eine davon weg,
+    # steht am Ende ein laufender oder ein zuckender Mann.
+    need("static int WorkState()" in b and "_workStateHeld" in b,
+         "ein Zustand, der nicht haelt, faellt auf den Stand-Idle zurueck",
+         "ohne Rueckfallebene wird ein nicht gehaltener Zustand zum RPC-Sturm")
+    need("now - since >= SettleSeconds" in b,
+         "der Mann steht erst, dann arbeitet er",
+         "ohne das Stehen davor bleibt der Ganzkoerper-Clip ein Laufclip")
 
     # --- 4: the crew belongs to its settlement.
     # The hated list is COPIED, never shared: other parts of the toolkit
@@ -1384,6 +1577,16 @@ def check_technical():
          LateUpdate. The game has no animation for a man at a pintle mount, and
          the animator rewrites every bone between Update and LateUpdate - a hand
          placed any earlier is back at the man's side before anything is drawn.
+      9. The standing place is the donor's own rear seat, not the top of the
+         bounding box, and the man stands one arm's length behind the grips.
+         Both are the 2026-09-18 field report (technicalbug.png): a bounding box
+         says nothing about what is actually there, so the station stood in the
+         air over the cabin, and a fraction of the vehicle's length put the man
+         inside his own weapon.
+     10. The place IS the gun: whoever is in it mans it without knowing a key,
+         and the gun has a BELT with a reload on the game's own progress bar.
+         The same report: "man kann auf dem gunner sitz weder aimen noch
+         schiessen noch nachladen".
 
     Plus the file rule: RevivalTechnical.cs is machine-written and build.ps1
     needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
@@ -1520,6 +1723,54 @@ def check_technical():
          "Modelleinheiten werden in Meter umgerechnet",
          "die Groesse des MG haengt nicht an der gemessenen Fahrzeuglaenge")
 
+    # --- 7b: the standing place comes off the donor's own rear seat.
+    #
+    # The 2026-09-18 field report (technicalbug.png) is what this guards: the
+    # station used to stand on a FRACTION of the bounding box, with the height
+    # fraction at 1.00 - the top of that box, which is the highest point of the
+    # whole vehicle and not a surface anybody can stand on. Gun and gunner hung
+    # in the air above the cabin. A seat the game itself puts a passenger on is
+    # inside the body by construction, and the sit pose's own foot offset turns
+    # it into the floor.
+    need("static bool Stehplatz(Transform root, Transform seats, out Vector3 point)" in t
+         and "FeetAboveSeat" in t
+         and "seatPoint.y + FeetAboveSeat" in t,
+         "der Stehplatz wird aus dem Ruecksitz des Spenders abgeleitet",
+         "der Stehplatz haengt wieder an einem Anteil der Bauteilhuelle - "
+         "deren Oberkante ist keine Standflaeche, sondern der hoechste Punkt "
+         "des ganzen Fahrzeugs")
+    need("TechnicalModel.StandOff() * unitsPerMetre" in t
+         and "internal static float StandOff()" in t,
+         "der Schuetze steht eine Armlaenge hinter den Griffen",
+         "der Abstand des Schuetzen zum MG haengt nicht mehr an der Armlaenge "
+         "- dann steht er im Geschuetz oder zu weit davon weg")
+
+    # --- 7c: the place IS the gun, and the gun has a belt.
+    #
+    # Both come from the same report: "man kann auf dem gunner sitz weder aimen
+    # noch schiessen noch nachladen". The place was reachable only through an
+    # undocumented key, and there was no reload at all - one round was taken
+    # from the inventory per shot.
+    need("static void Anbieten()" in t
+         and "if (_atGun && !_manning) Anbieten();" in t,
+         "wer auf dem Stehplatz steht, besetzt das MG selbst",
+         "der Stehplatz besetzt das MG nicht mehr selbst - dann steht ein "
+         "Spieler wieder an einem MG, das nichts tut")
+    belt = _bind_number(t, "TechnicalGun", "BeltRounds")
+    reload_s = _bind_number(t, "TechnicalGun", "ReloadSeconds")
+    need("static void Ladebeginn(bool byHand)" in t
+         and "NativeActionProgress.Begin(ReloadOwner" in t
+         and belt is not None and belt >= 1
+         and reload_s is not None and reload_s > 0,
+         "Gurt mit %s Schuss, %s s Nachladen am Balken des Spiels"
+         % ("?" if belt is None else int(belt), reload_s),
+         "das MG hat kein Nachladen mehr - ein Gurt mit Ladezeit war der "
+         "Kern des Feldberichts vom 2026-09-18")
+    need("static string ManHint(string key)" in u
+         and "internal static string Reloading()" in u,
+         "Bedienhinweis und Ladeanzeige stehen als Spielertext bereit",
+         "die Hinweiszeilen des Schuetzen fehlen in RevivalUralTruck.cs")
+
     # --- 8: the hands on the grips, after the animation.
     need("static void Arm(Transform upper, Transform fore, Transform hand," in t
          and "Quaternion.AngleAxis(bend, axis.normalized)" in t,
@@ -1586,6 +1837,173 @@ def check_technical():
          "es sich im Spiel nicht mit dem Schuetzen drehen")
 
 
+def check_arty_vehicle():
+    """[18] The drivable howitzer: the settlement gun, on wheels.
+
+    The order was "take exactly that model and turn it into a real vehicle,
+    like the tank". Six rules decide whether that is what was built rather than
+    a second howitzer that happens to look similar:
+
+      1. THE SAME MODEL. ArtyModel.Build - the one the settlement gun uses - and
+         no second import. A private Assets.Load here would be a fork of the
+         art: the day arty_import.py changes, one of the two howitzers moves.
+      2. THE SAME FIRE CONTROL. The turret is handed to Mortar, and given back.
+         A private reach, dispersion or flight time here would be the fire
+         mission written twice, and the two copies would drift apart.
+      3. A REAL VEHICLE, not a prop: the donor's driving physics, networking
+         and seats stay the donor's, and the rebuild reaches every client
+         through the same cached-spawn marker the T-72, the Ural and the
+         technical use.
+      4. NOT ARMOUR. The instance name must contain neither "btr-80a" nor
+         "_T72", or VehicleArmor/Turret/Tank would treat a soft-skinned gun
+         truck as an APC; and its hit points are capped DOWNWARDS only, below
+         the 2000 CarSpawn.Prepare hands out.
+      5. PLACEMENT IS DERIVED from the two measured boxes, never typed in - the
+         same rule the technical is held to, for the same reason: the models
+         are not metric, so an absolute number is a guess that a re-import
+         silently invalidates.
+      6. NO SETTLEMENT BOOKKEEPING. A gun that drives belongs to no village, so
+         it must never reach the battery's crew/drone path, and losing it must
+         not take the settlements' shells or their placement state with it.
+
+    Plus the file rule: RevivalArtyVehicle.cs is machine-written and build.ps1
+    needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
+    file RevivalUralTruck.cs.
+    """
+    print("[18] Fahrbare Haubitze: Siedlungsgeschuetz auf Raedern")
+    arty_p = os.path.join(ROOT, "RevivalArtyVehicle.cs")
+    mort_p = os.path.join(ROOT, "RevivalMortar.cs")
+    ural_p = os.path.join(ROOT, "RevivalUralTruck.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    adm_p = os.path.join(ROOT, "Revival.Admin.cs")
+    sync_p = os.path.join(ROOT, "sync_public.py")
+    if not os.path.exists(arty_p):
+        bad("RevivalArtyVehicle.cs fehlt")
+        return
+    raw = io.open(arty_p, "rb").read()
+    a = raw.decode("utf-8", "replace")
+    ac = _code(a)            # the same file without its // comments
+    mort = io.open(mort_p, encoding="utf-8").read() if os.path.exists(mort_p) else ""
+    u = io.open(ural_p, encoding="utf-8").read() if os.path.exists(ural_p) else ""
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+    adm = io.open(adm_p, encoding="utf-8").read() if os.path.exists(adm_p) else ""
+    sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("ArtyVehicle: " + why)
+
+    # --- file rule: ASCII, no BOM, Cyrillic elsewhere.
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "RevivalArtyVehicle.cs beginnt mit einer BOM")
+    nonascii = [c for c in a if ord(c) > 126]
+    need(not nonascii, "reines ASCII",
+         "RevivalArtyVehicle.cs enthaelt Nicht-ASCII (" + "".join(nonascii[:8]) + ")")
+    need("public static class ArtyVehicleText" in u
+         and "ArtyVehicleText.Spawned()" in a,
+         "zweisprachige Zeilen liegen in RevivalUralTruck.cs",
+         "die Spielertexte der Haubitze stehen nicht in der UTF-8-Datei")
+
+    # --- 1: the settlement gun's own model, imported once.
+    need("ArtyModel.Build(out turret, out barrel)" in ac,
+         "dasselbe Modell wie das Siedlungsgeschuetz",
+         "das Fahrzeug baut sein Modell nicht mit ArtyModel.Build")
+    need("Assets.Load" not in ac and ".ndmesh" not in ac,
+         "kein zweiter Import der Bohdana",
+         "die Datei laedt eigene Meshes - dann gibt es zwei Modelle, die "
+         "auseinanderlaufen koennen")
+
+    # --- 2: the fire control is Mortar's, and it is given back.
+    need("Mortar.AttachMobile(" in ac and "Mortar.ReleaseMobile(" in ac,
+         "das Rohr haengt an der vorhandenen Feuerleitung",
+         "die Haubitze uebergibt ihr Rohr nicht an Mortar")
+    need("internal static object AttachMobile(" in mort
+         and "internal static void ReleaseMobile(" in mort
+         and "public bool Mobile;" in mort,
+         "Seam Mortar.AttachMobile/ReleaseMobile und Tube.Mobile",
+         "die Feuerleitung kennt keine fahrende Haubitze")
+    need("Dispersion" not in ac and "FlightSeconds" not in ac
+         and "MaxRange" not in ac,
+         "keine zweite Feuermission (Reichweite, Streuung, Flugzeit)",
+         "das Fahrzeug schreibt die Feuermission ein zweites Mal - zwei "
+         "Kopien derselben Ballistik laufen auseinander")
+
+    # --- 3: a real vehicle - donor physics, seats, network.
+    need('Prefab = "ural-375(mod)_spawn"' in a,
+         "Spender ist der sechsraedrige Ural",
+         "der Spender ist nicht mehr der Sechsradlaster")
+    need("public const int SeatTotal = 3;" in a
+         and "new GameObject[seats.childCount]" in a,
+         "drei Plaetze, Passengers wird neu dimensioniert",
+         "Sitzzahl oder Passengers-Array stimmen nicht")
+    need('"RevivalArtyVehicle.cs"' in sync if sync else True,
+         "Datei geht ins oeffentliche Repository",
+         "RevivalArtyVehicle.cs fehlt in sync_public.py - dort baut das Repo nicht")
+    need('"NDR_ARTYVEH_V1"' in a and "DoInstantiate" in a,
+         "Spawnmarker wie beim T-72, beim Ural und bei der Technischen",
+         "der Umbau erreicht Mitspieler und Nachzuegler nicht")
+    need("RCCCarControllerV2" in a and "VehicleNetworkController" in a
+         and "PhotonView" in a,
+         "Fahrphysik und Netzwerk des Spenders werden geprueft",
+         "der Selbsttest prueft Fahrphysik oder Netzwerk nicht")
+    need("Renderer[] all = car.GetComponentsInChildren<Renderer>(true);" in a
+         and "r.enabled = false;" in a,
+         "der Karosseriewechsel schaltet nur Renderer ab - Kollider, "
+         "Radcollider und Schadenszonen des Spenders bleiben",
+         "der Karosseriewechsel greift nicht nur an den Renderern an - dann "
+         "kann er das Fahrzeug unfahrbar oder untreffbar machen")
+
+    # --- 4: not armour, and the cap only goes downwards.
+    dur = _bind_number(a, "ArtyVehicle", "Durability")
+    need(dur is not None and 150.0 < dur < 2000.0,
+         "Trefferpunkte %s: weniger als BTR-Panzerung (2000), mehr als der "
+         "VAZ-1111 (150)" % ("?" if dur is None else int(dur)),
+         "die Haubitze ist so zaeh wie ein BTR oder so zerbrechlich wie der "
+         "schwaechste Vanillawagen")
+    need("if (have <= cap) return;" in a,
+         "der Deckel wirkt nur nach unten",
+         "der Trefferpunkt-Deckel koennte Schaden zuruecknehmen")
+    need('Marke = "_ARTY"' in a
+         and "btr-80a" not in ac.lower() and "_T72" not in ac,
+         "der Instanzname ist weder APC noch Panzer",
+         "der Name koennte als BTR oder T-72 gelesen werden, dann greift die "
+         "Panzerungsregel des APC auf einen weichen Geschuetzwagen")
+
+    # --- 5: placement derived from the two measured boxes.
+    need("static bool Masse(GameObject car, out Vector3 min, out Vector3 max)" in a
+         and "root.InverseTransformPoint(" in a,
+         "die Masse kommen aus den Meshes des Spenders",
+         "die Aufbaumasse werden nicht am Fahrzeug gemessen")
+    need("float scale = donorLength / modelLength" in a,
+         "die Modellgroesse ist das Verhaeltnis der beiden Laengen",
+         "die Groesse des Modells steht als feste Zahl im Quelltext")
+
+    # --- 6: no settlement bookkeeping behind a gun that drives.
+    need("ArtyBattery" not in ac,
+         "kein Trupp und keine Drohne an einer fahrenden Haubitze",
+         "das Fahrzeug haengt an der Siedlungsbatterie - dann bekaeme ein "
+         "Fahrzeug Besatzung und Aufklaerungsdrohne einer Siedlung")
+    need("if (_tubes[i].Mobile)" in mort and "static void DropShells(Tube t)" in mort,
+         "eine verlorene fahrende Haubitze raeumt nur ihre eigenen Granaten",
+         "der Verlust einer fahrenden Haubitze greift in die Buchfuehrung der "
+         "Siedlungsgeschuetze ein")
+
+    # --- seams.
+    for seam in ("ArtyVehicle.BindConfig", "ArtyVehicle.Install",
+                 "ArtyVehicle.Tick()"):
+        need(seam in plug, "Seam " + seam,
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+    need('Add(Make("arty"' in u,
+         "Seam VehicleRegistry-Eintrag",
+         "die Haubitze steht nicht in der VehicleRegistry")
+    need("ArtyVehicle.SpawnInFront()" in adm,
+         "Seam Adminknopf",
+         "das Adminmenue kann keine Haubitze setzen - und eine freie F-Taste "
+         "gibt es nicht mehr")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -1604,10 +2022,12 @@ if __name__ == "__main__":
     check_gas_launcher()
     check_convoy_ground_and_exit()
     check_convoy_column()
+    check_patrol_fall()
     check_mortar()
     check_arty_battery()
     check_native_action_progress()
     check_technical()
+    check_arty_vehicle()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

@@ -102,6 +102,7 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgMapRadius;
         static ConfigEntry<float> _cfgRespawnMinutes;
         static ConfigEntry<KeyCode> _cfgKey;
+        static ConfigEntry<string> _cfgScene;
 
         /// <summary>The camp's centre, on the dirt road through Litvinovka.
         /// See the file header for how it was measured.</summary>
@@ -165,6 +166,13 @@ namespace NextDayRevival
                 + "die Vorgabe liegt auf dem Feldweg durch Litwinowka.");
             _cfgZ = cfg.Bind("TraitorSettlement", "Z", DefaultZ,
                 "Welt-Z der Siedlungsmitte.");
+            _cfgScene = cfg.Bind("TraitorSettlement", "Scene", MapScene.Home,
+                "Auf WELCHER Karte Litwinowka liegt - der Szenenname, den das "
+                + "Spiel laedt (GW_Scene_1 ist die Startregion; die anderen "
+                + "Oberflaechenkarten heissen GW_Scene_2 und GW_Scene_3, den "
+                + "genauen Namen zeigt das F4-Fenster an). X/Z gelten nur auf "
+                + "dieser Karte: in einer anderen Region entsteht weder das "
+                + "Lager noch der orange Ring. * = ueberall (nicht empfohlen).");
             _cfgSpread = cfg.Bind("TraitorSettlement", "Spread", 45f,
                 "Abstand der Gruppen von der Mitte in Metern (0..400). Klein "
                 + "genug, dass es ein Ort bleibt, gross genug, dass es kein "
@@ -209,6 +217,13 @@ namespace NextDayRevival
 
                 if (Time.time < _nextTick) return;
                 _nextTick = Time.time + 1f;
+
+                // LITVINOVKA IS A PLACE ON ONE MAP. X/Z mean nothing in another
+                // region, where the same coordinate is a random piece of
+                // landscape - so neither the camp nor its ring belongs there.
+                // The ground test in SpawnGroup cannot tell the two apart: the
+                // other surface maps have terrain at that coordinate too.
+                if (!Here()) return;
 
                 // A scene change destroys our GameObjects; Crew.StopAll (shift
                 // plus the patrol key) does the same on purpose. Either way the
@@ -394,6 +409,15 @@ namespace NextDayRevival
             return new Vector3(x, 0f, z);
         }
 
+        /// <summary>Is the configured map the one that is loaded? See MapScene:
+        /// an empty setting means the home map, and an unreadable scene name
+        /// answers true so the camp is never withheld by this test alone.
+        /// </summary>
+        static bool Here()
+        {
+            return MapScene.Owns(_cfgScene == null ? MapScene.Home : _cfgScene.Value);
+        }
+
         // ============================================================== upkeep
 
         /// <summary>Count what is left, and put the camp back up once the last
@@ -572,6 +596,7 @@ namespace NextDayRevival
             Camera camera, Vector2 world, Vector2 map, Rect full)
         {
             if (_cfgEnabled == null || !_cfgEnabled.Value) return;
+            if (!Here()) return;   // another region's map reserves nothing here
             Vector3 centre = Centre();
             if (Mathf.Abs(centre.x) > world.x || Mathf.Abs(centre.z) > world.y) return;
             float radius = Mathf.Clamp(_cfgMapRadius == null ? 200f : _cfgMapRadius.Value, 20f, 1200f);
@@ -592,6 +617,10 @@ namespace NextDayRevival
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (_cfgEnabled == null || !_cfgEnabled.Value)
             { MapInkLayer.Hide("settlement"); return; }
+            // THE RING MARKS A PLACE ON ONE MAP. The size test further down only
+            // catches the small interiors; another surface region is just as big
+            // as this one, so the ring used to be painted over Primorye as well.
+            if (!Here()) { MapInkLayer.Hide("settlement"); return; }
             MapInkLayer layer = null;
             try
             {

@@ -454,6 +454,15 @@ namespace NextDayRevival
             GameObject donor = LoadDonorWeapon();
             _mesh = Assets.Load(_def.Mesh);
             if (_mesh == null) throw new Exception("kein Mesh");
+            // WAS LIEGT WIRKLICH IN DER HAND. Ein zur Laufzeit gebautes Mesh
+            // (Assets.Provide) laeuft nicht durch Assets.Read und schreibt
+            // deshalb keine Zeile - dann stand im Log nur "Modell-Prefab
+            // gebaut", und ob das Modell oder ein Rueckfall drin lag, war aus
+            // dem Log nicht zu sehen. Y-Minimum ist die Muendung, y 0.624 die
+            // Faust: aus diesen Zahlen allein ist die Lage nachzurechnen.
+            RevivalPlugin.L.LogInfo(_def.Id + ": Handmodell " + _def.Mesh + ", "
+                + _mesh.vertexCount + " Vertices, bounds " + _mesh.bounds.min
+                + ".." + _mesh.bounds.max);
             _mat = MakeMaterial(donor);
 
             // Aufbau exakt wie beim RPD: Wurzel, darunter das Mesh-Objekt, daran
@@ -734,20 +743,52 @@ namespace NextDayRevival
             }
         }
 
+        // Die Haltung des RPD 1023 in der Hand, ausgemessen mit
+        // research/dump_prefab.py (CONFIRMED, docs/ai/REVERSE_ENGINEERING.md
+        // Abschnitt 5). Sie ist der Rueckfall, wenn das Referenzprefab zur
+        // Laufzeit nicht zu lesen ist: dann steht hier immer noch eine
+        // gemessene WAFFENhaltung und nicht die einer Faustgranate.
+        static readonly Vector3 HAND_POSE_POS =
+            new Vector3(-0.00116f, 0.00817f, 0.00112f);
+        static readonly Vector3 HAND_POSE_EULER =
+            new Vector3(356.584f, 258.039f, 169.966f);
+
         /// <summary>
-        /// Schreibt die gewuenschte Skalierung in die kopierten
-        /// Transform-Komponenten.
+        /// Schreibt die gewuenschte Skalierung - und, wenn das Item seine
+        /// Handhaltung von einer anderen Waffe borgt, auch Lage und Drehung -
+        /// in die kopierten Transform-Komponenten.
         ///
         /// ChangeWeaponHelper ruft WeaponTranformManager::ApplyLocalTransformData,
         /// und das setzt localPosition, localEulerAngles UND localScale der
         /// Wurzel aus den Feldern der Komponente. Was am Prefab steht, ist danach
         /// egal. Deshalb muss der Wert dorthin, nicht an transform.localScale.
+        ///
+        /// UND DESHALB IST DIE HALTUNG DES SPENDERS NICHT IMMER RICHTIG.
+        /// CopyDonorComponents uebernimmt genau diese Felder vom Spende-Prefab.
+        /// Klont ein Item eine Waffe, ist das die Loesung; klont es etwas
+        /// anderes, ist es der Fehler. Der Chemie-Granatwerfer 1491 MUSS die
+        /// Splittergranate 1403 klonen (nur die Id-Bahn 1401..1500 oeffnet den
+        /// Granatenslot) und bekam so die Lage eines faustgrossen Gegenstands
+        /// aufgeschrieben - das Rohr lag in der Hand in einem Winkel, den kein
+        /// Modell korrigieren kann. ItemDef.HandPoseFrom nennt die Waffe, deren
+        /// Haltung stattdessen gilt; gelesen wird sie aus deren eigenem Prefab,
+        /// also aus dem installierten Spiel und nicht aus einer Vermutung.
         /// </summary>
         void ApplyScale(GameObject root)
         {
             float s = RevivalPlugin.CfgScale.Value;
             if (s <= 0f) s = 0.01f;
             root.transform.localScale = new Vector3(s, s, s);
+
+            Vector3 pos = Vector3.zero, euler = Vector3.zero;
+            bool pose = _def.HandPoseFrom != 0 && HandPose(ref pos, ref euler);
+            if (pose)
+            {
+                // Auch an der Wurzel selbst, damit ein Weg, der
+                // ApplyLocalTransformData NICHT aufruft, dieselbe Lage sieht.
+                root.transform.localPosition = pos;
+                root.transform.localEulerAngles = euler;
+            }
 
             string[] names = { "WeaponTranformManager", "ItemTransformManager" };
             for (int i = 0; i < names.Length; i++)
@@ -756,18 +797,92 @@ namespace NextDayRevival
                 if (t == null) continue;
                 Component c = root.GetComponent(t);
                 if (c == null) continue;
-                FieldInfo f = AccessTools.Field(t, "localScale");
-                if (f == null || f.FieldType != typeof(Vector3)) continue;
+                WriteVec3(c, t, "localScale", new Vector3(s, s, s), names[i]);
+                if (!pose) continue;
+                WriteVec3(c, t, "localPosition", pos, names[i]);
+                WriteVec3(c, t, "localEulerAngles", euler, names[i]);
+            }
+        }
+
+        /// <summary>Setzt ein Vector3-Feld der Komponente und protokolliert,
+        /// was vorher darin stand - bei der Handhaltung ist genau das der
+        /// Messwert, den sonst niemand aufschreibt.</summary>
+        void WriteVec3(Component c, Type t, string field, Vector3 value, string typeName)
+        {
+            FieldInfo f = AccessTools.Field(t, field);
+            if (f == null || f.FieldType != typeof(Vector3))
+            {
+                RevivalPlugin.L.LogWarning(_def.Id + ": " + typeName + "." + field
+                                           + " fehlt - Feld nicht gesetzt.");
+                return;
+            }
+            try
+            {
+                object before = f.GetValue(c);
+                f.SetValue(c, value);
+                RevivalPlugin.L.LogInfo(_def.Id + ": " + typeName + "." + field
+                                        + " " + before + " -> " + value);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning(_def.Id + ": " + typeName + "." + field
+                                           + " nicht setzbar: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Liest Lage und Drehung der Referenzwaffe aus ihrem eigenen Prefab.
+        /// Findet sie sich nicht, bleibt es bei der gemessenen RPD-Haltung -
+        /// beides ist eine Waffenhaltung, und das ist der Punkt.
+        /// </summary>
+        bool HandPose(ref Vector3 pos, ref Vector3 euler)
+        {
+            pos = HAND_POSE_POS;
+            euler = HAND_POSE_EULER;
+            GameObject reference = null;
+            try
+            {
+                ResourceHook.Reentry = true;
+                reference = Resources.Load("PlayerDataPrefabs/Weapons/"
+                                           + _def.HandPoseFrom + "_Weapon") as GameObject;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning(_def.Id + ": Referenzwaffe "
+                    + _def.HandPoseFrom + ": " + ex.Message);
+            }
+            finally { ResourceHook.Reentry = false; }
+
+            string[] names = { "WeaponTranformManager", "ItemTransformManager" };
+            for (int i = 0; reference != null && i < names.Length; i++)
+            {
+                Type t = RevivalPlugin.TypeByName(names[i]);
+                if (t == null) continue;
+                Component c = reference.GetComponent(t);
+                if (c == null) continue;
+                FieldInfo fp = AccessTools.Field(t, "localPosition");
+                FieldInfo fe = AccessTools.Field(t, "localEulerAngles");
+                if (fp == null || fe == null
+                    || fp.FieldType != typeof(Vector3) || fe.FieldType != typeof(Vector3))
+                    continue;
                 try
                 {
-                    f.SetValue(c, new Vector3(s, s, s));
-                    RevivalPlugin.L.LogInfo(_def.Id + ": " + names[i] + ".localScale -> " + s);
+                    pos = (Vector3)fp.GetValue(c);
+                    euler = (Vector3)fe.GetValue(c);
+                    RevivalPlugin.L.LogInfo(_def.Id + ": Handhaltung von Waffe "
+                        + _def.HandPoseFrom + " (" + names[i] + "): " + pos + " / " + euler);
+                    return true;
                 }
                 catch (Exception ex)
                 {
-                    RevivalPlugin.L.LogWarning(_def.Id + ": localScale nicht setzbar: " + ex.Message);
+                    RevivalPlugin.L.LogWarning(_def.Id + ": Handhaltung nicht lesbar: "
+                                               + ex.Message);
                 }
             }
+            RevivalPlugin.L.LogInfo(_def.Id + ": Prefab der Referenzwaffe "
+                + _def.HandPoseFrom + " nicht lesbar - gemessene RPD-Haltung "
+                + HAND_POSE_POS + " / " + HAND_POSE_EULER + ".");
+            return true;
         }
 
         /// <summary>

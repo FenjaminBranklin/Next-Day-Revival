@@ -52,15 +52,35 @@
 // ART. The launcher has its own model (GasGunModel below): a
 // single-shot, break-open 50 mm grenade launcher in the RGS-50M pattern -
 // the tube Russian units actually fire irritant-gas rounds from - with its
-// own palette texture and its own inventory icon, all built in code. Until
-// then it wore the M72 LAW's art, which was the wrong weapon AND sat in the
-// hand backwards and upside down: law.ndmesh is authored in the toolkit's
-// RIFLE frame, and this is a GRENADE-slot item whose prefab gets the frag
-// grenade's transform written onto it. Generated geometry, not an asset file,
-// because `python make_assets.py` cannot run in a queue sandbox and because
-// every file under plugins\assets has to be in the launch receipt. A real
-// model still wins: assets\gasgun.ndmesh and gasgun_diffuse.png are read
-// whenever they exist.
+// own palette texture and its own inventory icon, all built in code.
+// Generated geometry, not an asset file, because `python make_assets.py`
+// cannot run in a queue sandbox and because every file under plugins\assets
+// has to be in the launch receipt. A real model still wins: assets\gasgun.ndmesh
+// and gasgun_diffuse.png are read whenever they exist (gasgun_build.py imports
+// one into exactly the frame described below).
+//
+// AND HOW IT SITS IN THE HAND - the part that was wrong twice. The model is
+// only half the job: a weapon's pose comes from the transform data of the
+// prefab it was CLONED from, and this item has to be cloned from the frag
+// grenade 1403 to land in the grenade band at all. So the tube got a
+// fist-sized object's pose written onto it and lay in the hand at some angle
+// nobody chose. The first attempt fought that with a guessed 180 degree flip
+// baked into the mesh; a guess is not a measurement, and it was wrong.
+//
+// What is right is what every other weapon of this toolkit does, and both
+// halves of it are MEASURED, not guessed:
+//   * the mesh is built in the RPD's frame - forward -Y, top +Z, the fist at
+//     y 0.624 and the bore axis at z 0.096 (CONFIRMED from the game's own RPD
+//     prefab, REVERSE_ENGINEERING section 5; verify.py [5] holds every shipped
+//     weapon mesh to it), exactly where law.ndmesh, mg42.ndmesh and
+//     sniper50.ndmesh put theirs;
+//   * and the prefab root is given a REAL WEAPON's hand pose instead of the
+//     grenade's: ItemDef.HandPoseFrom names the weapon whose
+//     localPosition/localEulerAngles the factory writes into the copied
+//     transform manager (GasLauncher/HandPoseFrom, default 1023 - the RPD the
+//     frame itself was measured from).
+// GripEuler/GripOffset stay as the fine adjustment, and they turn the model
+// about the FIST, so tuning cannot swing the weapon out of the hand.
 //
 // C# 3.0. Player-facing literals are bilingual (Loc.T) and carry real
 // Cyrillic, as in RevivalPlugin.cs; comments, logs and config text stay as
@@ -121,8 +141,9 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgFullSetImmune;
         public static ConfigEntry<string> CfgKey;
         public static ConfigEntry<string> CfgTestKey;
-        public static ConfigEntry<string> CfgModelEuler;
-        public static ConfigEntry<string> CfgModelOffset;
+        public static ConfigEntry<int> CfgHandPoseFrom;
+        public static ConfigEntry<string> CfgGripEuler;
+        public static ConfigEntry<string> CfgGripOffset;
 
         public static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
 
@@ -167,7 +188,7 @@ namespace NextDayRevival
             // are asked before the disk - so the generated launcher is already
             // standing there when the game first asks for the hand model.
             GasGunModel.Provide();
-            items.Add(new ItemDef(
+            ItemDef def = new ItemDef(
                 DEF_LAUNCHER, DEF_DONOR, true,
                 "Химический гранатомёт РГ-Х «Туман»", "RG-Kh 'Tuman' gas launcher",
                 "Однозарядный гранатомёт с химической гранатой. Один выстрел - и участок "
@@ -181,7 +202,17 @@ namespace NextDayRevival
                 + "face does not. The barrel is empty after the shot.",
                 GasGunModel.MESH_FILE, GasGunModel.DIFFUSE_FILE, null,
                 GasGunModel.ICON_FILE, null,
-                1, 0, 8.0f));
+                1, 0, 8.0f);
+            // THE HAND POSE DOES NOT COME FROM THE DONOR HERE. Every other item
+            // of this toolkit clones a weapon and inherits a weapon's
+            // localPosition/localEulerAngles with it; this one has to clone the
+            // frag grenade 1403 to reach the grenade band at all, and a fist-
+            // sized object's transform is what made the tube lie in the hand at
+            // an angle nobody chose. So it borrows a real weapon's pose - the
+            // RPD 1023 by default, the same weapon the mesh frame itself was
+            // measured from. ItemFactory.ApplyScale does the writing.
+            def.HandPoseFrom = CfgHandPoseFrom == null ? 1023 : CfgHandPoseFrom.Value;
+            items.Add(def);
         }
 
         // ------------------------------------------------------------- config
@@ -249,20 +280,33 @@ namespace NextDayRevival
             CfgTestKey = cfg.Bind("GasLauncher", "TestKey", "None",
                 "Nur zur Abnahme: setzt eine Wolke 15 m vor den Spieler, ohne "
                 + "Waffe und ohne Schuss. Standard None (aus).");
-            // DIE LAGE IN DER HAND IST NICHT MESSBAR OHNE DAS SPIEL. Das Item
-            // haengt im Granatenslot und bekommt deshalb die Transformdaten der
-            // Splittergranate 1403 auf die Prefabwurzel geschrieben (siehe
-            // GasGunModel). Die Vorgabe dreht das Modell um 180 Grad um X -
-            // genau die eine Drehung, die "falsch herum UND auf dem Kopf"
-            // rueckgaengig macht, so wie die LAW vorher in der Hand lag. Sitzt
-            // der Werfer damit immer noch schief, ist das hier die Schraube:
-            // keine neue DLL noetig, nur ein Neustart des Spiels.
-            CfgModelEuler = cfg.Bind("GasLauncher", "ModelEuler", "180,0,0",
-                "Drehung des Werfermodells in der Hand, Grad als x,y,z. "
-                + "180,0,0 dreht das Modell auf den Kopf und von vorn nach "
-                + "hinten; 0,0,0 laesst es, wie es gebaut ist.");
-            CfgModelOffset = cfg.Bind("GasLauncher", "ModelOffset", "0,0,0",
-                "Verschiebung des Werfermodells in der Hand, x,y,z in "
+            // DIE LAGE IN DER HAND. Sie ist jetzt GEMESSEN und nicht mehr
+            // geraten: das Modell steht im Rahmen des RPD (Faust bei y 0.624,
+            // Laufachse z 0.096), und die Prefabwurzel bekommt die Haltung
+            // einer echten Waffe statt die der Splittergranate 1403, von der
+            // dieses Item seine Kategorie erbt. HandPoseFrom nennt diese Waffe.
+            //
+            // 1023 ist das RPD - dasselbe Prefab, an dem der Meshrahmen des
+            // ganzen Baukastens ausgemessen wurde (CONFIRMED, RE Abschnitt 5).
+            // 1010 (Spende der M72 LAW) ist die naechste Alternative, falls ein
+            // Rohr in der Hand anders sitzen soll als ein MG. 0 schaltet die
+            // Uebernahme ab und laesst die Granatenhaltung stehen - das ist der
+            // Zustand, der vor 6.26 falsch aussah.
+            CfgHandPoseFrom = cfg.Bind("GasLauncher", "HandPoseFrom", 1023,
+                "Item-Id der Waffe, deren Haltung in der Hand der Werfer "
+                + "uebernimmt. 1023 = RPD (gemessener Bezugsrahmen), 1010 = "
+                + "Spende der M72 LAW, 0 = Haltung der Splittergranate "
+                + "behalten.");
+            // Feinkorrektur, falls der Werfer trotzdem noch schief liegt: keine
+            // neue DLL noetig, nur ein Neustart des Spiels. Beide drehen und
+            // schieben das MODELL, nicht die Hand - und die Drehung geht um die
+            // FAUST, damit der Werfer dabei nicht aus der Hand schwenkt.
+            CfgGripEuler = cfg.Bind("GasLauncher", "GripEuler", "0,0,0",
+                "Zusaetzliche Drehung des Werfermodells um den Griff, Grad als "
+                + "x,y,z. 0,0,0 laesst es, wie es gebaut ist: Muendung nach "
+                + "vorn (-Y), Visier oben (+Z).");
+            CfgGripOffset = cfg.Bind("GasLauncher", "GripOffset", "0,0,0",
+                "Zusaetzliche Verschiebung des Werfermodells, x,y,z in "
                 + "Modelleinheiten (1 Einheit = 393,5 mm, wie bei allen Meshes "
                 + "des Baukastens). Wird NACH der Drehung angewandt.");
         }
@@ -1109,39 +1153,49 @@ namespace NextDayRevival
     /// icon, all built in code.
     ///
     /// WHY THIS CLASS EXISTS. Until it did, the weapon wore the M72 LAW's
-    /// mesh, textures and icon. Two things were wrong with that, and the
-    /// second one is the one that made it look broken:
+    /// mesh, textures and icon - the wrong weapon, and in the hand it lay
+    /// turned every which way. The art was answered first; THE POSE IS WHAT
+    /// THIS ROUND ANSWERS, because the icon showed the launcher while the hand
+    /// still showed a tube at a nonsense angle.
     ///
-    ///   1. It is the wrong weapon. A LAW is a rocket launcher; this fires one
-    ///      chemical grenade.
-    ///   2. IT SAT IN THE HAND BACKWARDS AND UPSIDE DOWN. `law.ndmesh` is
-    ///      authored in the toolkit's RIFLE frame (muzzle at -Y, top at +Z,
-    ///      grip at y 0.624 - law_mesh.py, and the anchors in
-    ///      ItemFactory.BuildModel are measured from exactly that). Item 1491
-    ///      is a GRENADE-slot item that clones the frag grenade 1403, so
-    ///      `WeaponTranformManager.ApplyLocalTransformData` writes THE
-    ///      GRENADE's localPosition and localEulerAngles onto the prefab root
-    ///      (see ItemFactory.ApplyScale) - a transform meant for a fist-sized
-    ///      object lying in the palm, not for a rifle-frame tube that hangs
-    ///      0.624 units off its own origin.
+    /// THE FRAME - measured, not guessed. Every weapon of this toolkit is
+    /// built in the frame of the game's own RPD mesh: forward is -Y, the top
+    /// is +Z, the fist closes at y 0.624 and the bore axis runs at z 0.096
+    /// (CONFIRMED from prefab 1023 with research/dump_prefab.py,
+    /// docs/ai/REVERSE_ENGINEERING.md section 5; verify.py [5] holds
+    /// law.ndmesh, mg42.ndmesh, sniper50.ndmesh and m7.ndmesh to it, and the
+    /// muzzle/IK anchors in ItemFactory.BuildModel are measured from exactly
+    /// that frame). This launcher is now built there too - see the one frame
+    /// shift at the end of Build().
     ///
-    /// So this mesh is authored FOR THE GRENADE HAND: the grip closes around
-    /// the mesh ORIGIN, and the frame is turned by GasLauncher/ModelEuler
-    /// (default 180 degrees about X - the single flip that undoes "backwards
-    /// AND upside down") before the factory ever sees it. Both knobs are
-    /// config on purpose: a hand pose cannot be measured outside the running
-    /// game, and a wrong guess has to be fixable in the .cfg instead of in a
-    /// build.
+    /// THE SECOND HALF, AND THE ONE THAT WAS MISSING. A weapon's pose in the
+    /// hand is not in the mesh at all: `WeaponTranformManager.
+    /// ApplyLocalTransformData` writes localPosition, localEulerAngles and
+    /// localScale onto the prefab root from the fields of the copied
+    /// component, and those fields come from the item this one was CLONED
+    /// from. Item 1491 has to clone the frag grenade 1403 (nothing else lands
+    /// in the grenade band), so it inherited a fist-sized object's transform -
+    /// which is why the tube hung there at an angle no model correction could
+    /// name. `ItemDef.HandPoseFrom` (set in AddItems, applied in
+    /// ItemFactory.ApplyScale) replaces those two fields with a REAL weapon's,
+    /// so the launcher is posed the way the RPD, the MG42 and the LAW are.
+    ///
+    /// The earlier attempt baked a guessed 180 degree flip into the mesh
+    /// instead. It is gone: GripEuler/GripOffset remain as the fine
+    /// adjustment, they default to nothing, and they turn the model about the
+    /// FIST rather than the mesh origin, so a correction cannot lift the
+    /// weapon out of the hand.
     ///
     /// IF A REAL MODEL IS DROPPED IN, IT WINS - the rule ArtyModel already
     /// follows for the settlement gun. `assets\gasgun.ndmesh`,
     /// `gasgun_diffuse.png` and `gasgun_icon.png` are read whenever they
     /// exist, so a converted third-party launcher replaces this geometry
-    /// without a code change; it only has to be authored with its grip at the
-    /// origin. All three are listed in verify.py OPTIONAL_ASSETS, and missing
-    /// is the normal case. A file that IS delivered belongs in ASSET_FILES,
-    /// in make_assets.py and in the launch receipt (ClientIntegrity refuses
-    /// any file under plugins\assets the receipt does not know).
+    /// without a code change; it only has to be authored in the frame above,
+    /// which is what `gasgun_build.py` (GRIP_Y 0.624) produces. All three are
+    /// listed in verify.py OPTIONAL_ASSETS, and missing is the normal case. A
+    /// file that IS delivered belongs in ASSET_FILES, in make_assets.py and in
+    /// the launch receipt (ClientIntegrity refuses any file under
+    /// plugins\assets the receipt does not know).
     ///
     /// Winding follows the rule verify.py enforces on the shipped meshes: the
     /// right-hand normal of each triangle points the same way as its stored
@@ -1164,14 +1218,34 @@ namespace NextDayRevival
         // root scale 0.01 in ItemFactory.ApplyScale is measured against it.
         const float MM = 1f / 393.5f;
 
-        // The weapon, in that unit and in the frame described above: forward
-        // is -Y, up is +Z, the hand closes around the origin.
+        // THE BUILD FRAME. The geometry below is written around the grip,
+        // because every number in a weapon is easiest to read as "so far in
+        // front of the hand" - forward is -Y, up is +Z, and the fist closes at
+        // (GRIP_BUILD_Y, GRIP_BUILD_Z). ToWeapon() at the end of Build() moves
+        // that point onto the game's hand in one step; nothing below has to
+        // know about it.
         const float BORE = 25f * MM;          // 50 mm calibre
         const float TUBE = 36f * MM;          // barrel outside
-        const float BZ = 0.175f;              // bore axis above the hand
-        const float MUZZLE_Y = -1.32f;        // 520 mm in front of the hand
+        const float BZ = 0.175f;              // bore axis above the fist
+        const float MUZZLE_Y = -1.32f;        // 520 mm in front of the fist
         const float BREECH_Y = -0.16f;        // the barrel's rear face
-        const float BUTT_Y = 0.95f;           // total length ~ 2.27 units, 894 mm
+        // 315 mm of stock behind the fist. It used to be 0.95 (374 mm), which
+        // put the butt plate a full 100 mm further back than the RPD's own
+        // rear end (+1.321 in the weapon frame) - that far back it is in the
+        // player, not against the shoulder. The Barrett settled at +1.456 for
+        // the same reason (barrett_build.py); this lands at +1.424.
+        const float BUTT_Y = 0.80f;           // total length ~ 2.15 units, 848 mm
+        const float GRIP_BUILD_Y = 0.03f;     // centre of the pistol grip
+        const float GRIP_BUILD_Z = -0.045f;   // and how far it hangs below
+
+        // THE GAME'S HAND, measured from the RPD prefab 1023 and from its mesh
+        // (CONFIRMED, docs/ai/REVERSE_ENGINEERING.md section 5): the fist sits
+        // at y 0.624 - the RPD's own pistol grip spans 0.555..0.692 - and the
+        // bore axis of a shouldered weapon runs at z 0.096. verify.py [5]
+        // checks both on every shipped weapon mesh, and ItemFactory.BuildModel
+        // hangs the muzzle and IK anchors on exactly this frame.
+        const float HAND_Y = 0.624f;
+        const float HAND_Z = 0.096f;
 
         // The four quadrants of the palette texture. Every part is painted by
         // moving its UVs into one of them, so one material carries four
@@ -1227,10 +1301,15 @@ namespace NextDayRevival
                 Texture2D old = Assets.Texture(FALLBACK_ICON, false, false);
                 if (old != null) Assets.Provide(ICON_FILE, old);
 
+                // Y-Minimum ist die Muendung und y 0.624 die Faust - wer die
+                // Lage in der Hand nachrechnen will, liest genau diese Zeile.
                 RevivalPlugin.L.LogInfo("Gas launcher model: "
                     + (shipped ? "gasgun.ndmesh geladen" : "Geometrie erzeugt")
                     + ", " + (_mesh.vertexCount) + " Vertices, bounds="
-                    + _mesh.bounds.size + ", Drehung " + EulerValue()
+                    + _mesh.bounds.min + ".." + _mesh.bounds.max
+                    + ", Faust y " + HAND_Y.ToString("0.000", CultureInfo.InvariantCulture)
+                    + " z " + HAND_Z.ToString("0.000", CultureInfo.InvariantCulture)
+                    + ", Griffdrehung " + EulerValue()
                     + ", Versatz " + OffsetValue() + ".");
             }
             catch (Exception ex)
@@ -1292,22 +1371,32 @@ namespace NextDayRevival
 
         static Vector3 EulerValue()
         {
-            return ParseVec3(GasLauncher.CfgModelEuler == null
-                             ? null : GasLauncher.CfgModelEuler.Value,
-                             new Vector3(180f, 0f, 0f));
+            return ParseVec3(GasLauncher.CfgGripEuler == null
+                             ? null : GasLauncher.CfgGripEuler.Value,
+                             Vector3.zero);
         }
 
         static Vector3 OffsetValue()
         {
-            return ParseVec3(GasLauncher.CfgModelOffset == null
-                             ? null : GasLauncher.CfgModelOffset.Value,
+            return ParseVec3(GasLauncher.CfgGripOffset == null
+                             ? null : GasLauncher.CfgGripOffset.Value,
                              Vector3.zero);
         }
 
+        /// <summary>The point the fist closes around, in the finished weapon
+        /// frame. Both the built geometry and a delivered gasgun.ndmesh are
+        /// authored to hold here (gasgun_build.py GRIP_Y 0.624).</summary>
+        static Vector3 Hand()
+        {
+            return new Vector3(0f, HAND_Y, HAND_Z + (GRIP_BUILD_Z - BZ));
+        }
+
         /// <summary>
-        /// Turns the finished mesh into the pose the grenade hand wants, about
-        /// the ORIGIN - which is where the grip is, so the weapon turns in the
-        /// fist and does not swing away from it.
+        /// The fine adjustment from the .cfg, for the case the launcher still
+        /// does not sit right: a turn about the FIST and a shift afterwards.
+        /// Nothing by default - the pose is measured now, not guessed (see the
+        /// class comment). Turning about the fist rather than the mesh origin
+        /// is what keeps a correction from lifting the weapon out of the hand.
         /// </summary>
         static void Correct(Mesh m)
         {
@@ -1315,9 +1404,11 @@ namespace NextDayRevival
             Vector3 offset = OffsetValue();
             if (euler == Vector3.zero && offset == Vector3.zero) return;
             Quaternion q = Quaternion.Euler(euler);
+            Vector3 pivot = Hand();
 
             Vector3[] vs = m.vertices;
-            for (int i = 0; i < vs.Length; i++) vs[i] = q * vs[i] + offset;
+            for (int i = 0; i < vs.Length; i++)
+                vs[i] = q * (vs[i] - pivot) + pivot + offset;
             m.vertices = vs;
 
             Vector3[] ns = m.normals;
@@ -1348,6 +1439,19 @@ namespace NextDayRevival
 
         /// <summary>A point on the bore axis at that distance along the weapon.</summary>
         static Vector3 Axis(float y) { return new Vector3(0f, y, BZ); }
+
+        /// <summary>
+        /// From the build frame (everything measured from the grip) into the
+        /// frame the game holds a weapon in (the RPD's: fist at y 0.624, bore
+        /// axis at z 0.096). One translation, applied to the finished vertex
+        /// list - see the call at the end of Build().
+        /// </summary>
+        static Vector3 ToWeapon(Vector3 p)
+        {
+            return new Vector3(p.x,
+                               p.y + (HAND_Y - GRIP_BUILD_Y),
+                               p.z + (HAND_Z - BZ));
+        }
 
         static Mesh Build()
         {
@@ -1408,10 +1512,13 @@ namespace NextDayRevival
                   new Vector3(0.020f, 0.080f, 0.038f));
             Paint(uv, mark, GRIP);
 
-            // THE PISTOL GRIP, raked 18 degrees, closed around the ORIGIN -
-            // that is the whole point of this model's frame.
+            // THE PISTOL GRIP, raked 18 degrees. 0.15 units of it lie along the
+            // weapon, which is 59 mm - so once ToWeapon() has moved its centre
+            // onto the game's hand it spans y 0.549..0.699, within a couple of
+            // millimetres of the RPD's own grip (0.555..0.692). That is the
+            // whole point of this model's frame: the fist closes HERE.
             mark = v.Count;
-            Tilted(v, n, uv, tri, new Vector3(0f, 0.03f, -0.045f),
+            Tilted(v, n, uv, tri, new Vector3(0f, GRIP_BUILD_Y, GRIP_BUILD_Z),
                    new Vector3(0.050f, 0.075f, 0.135f), 18f);
             Paint(uv, mark, GRIP);
 
@@ -1476,6 +1583,14 @@ namespace NextDayRevival
             Tilted(v, n, uv, tri, new Vector3(0f, 0.215f, BZ + 0.175f),
                    new Vector3(0.048f, 0.010f, 0.048f), -10f);
             Paint(uv, mark, STEEL);
+
+            // INTO THE WEAPON FRAME, in one step and at the very end. Above,
+            // every part is placed relative to the grip; here the grip moves
+            // onto the game's hand, and with it the whole launcher. After this
+            // the mesh reads like law.ndmesh and mg42.ndmesh: muzzle at the Y
+            // minimum, fist at y 0.624, bore axis at z 0.096. A pure
+            // translation, so the normals stay as they are.
+            for (int i = 0; i < v.Count; i++) v[i] = ToWeapon(v[i]);
 
             Mesh mesh = new Mesh();
             mesh.name = "NDR_GasGun";
@@ -1578,10 +1693,10 @@ namespace NextDayRevival
                 // muzzle to the left; the two angles on top give it a
                 // three-quarter view.
                 //
-                // The hand correction is already baked into the mesh, so it has
-                // to come back out for the picture - otherwise the icon would
-                // inherit the 180 degree flip and show the launcher upside down
-                // in the inventory.
+                // Any GripEuler correction is baked into the mesh, so it comes
+                // back out for the picture: the icon shows the launcher the way
+                // it is BUILT, and tuning the pose in the hand can never leave
+                // the inventory with a tilted or upside-down tube.
                 Quaternion view = Quaternion.Euler(-14f, 26f, 0f)
                                   * Quaternion.LookRotation(Vector3.up, Vector3.right);
                 Quaternion look = view * Quaternion.Inverse(Quaternion.Euler(EulerValue()));

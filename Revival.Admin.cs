@@ -1270,6 +1270,13 @@ namespace NextDayRevival
                 Melde(Technical.SpawnInFront());
             GUILayout.Label("In front of you (MG gun truck)");
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // The drivable howitzer has no key of its own: F4..F12 are all
+            // taken. This button is its spawn, exactly as ArtyVehicle/Key says.
+            if (GUILayout.Button("Spawn howitzer", GUILayout.Width(190f)))
+                Melde(ArtyVehicle.SpawnInFront());
+            GUILayout.Label("In front of you (drivable 122 mm howitzer)");
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));

@@ -70,6 +70,15 @@ namespace NextDayRevival
         public int Bullets;            // Waffe: Gurtlaenge. Munition: Kapazitaet.
         public int ClipItemId;
         public float Weight;
+        // Die Haltung in der Hand kommt sonst vom Spender: CopyDonorComponents
+        // uebernimmt dessen localPosition/localEulerAngles, und fuer eine Waffe,
+        // die von einer Waffe geklont ist, stimmt das. Fuer ein Item, dessen
+        // Spender KEINE Waffe in der Hand ist - der Chemie-Granatwerfer 1491
+        // klont die Splittergranate 1403, weil nur die Id-Bahn 1401..1500 den
+        // Granatenslot oeffnet - steht hier die Id der Waffe, deren Haltung
+        // stattdessen gilt. 0 = nichts aendern, so wie bei jedem anderen Item.
+        // Angewandt in ItemFactory.ApplyScale.
+        public int HandPoseFrom;
         public ItemFactory Factory;
 
         public ItemDef(int id, int donorId, bool isWeapon,
@@ -172,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.25.0";
+        public const string VERSION = "6.26.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -440,6 +449,7 @@ namespace NextDayRevival
 
             BindConfig();
             MapUnblock.Install(gameObject, Config);
+            MapScene.BindConfig(Config);         // NDR region gate: one map's data on one map
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
@@ -455,6 +465,7 @@ namespace NextDayRevival
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.BindConfig(Config);           // NDR settlement mortar
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
+            ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
@@ -491,6 +502,7 @@ namespace NextDayRevival
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
             UralTruck.Install(_harmony);         // NDR 15-seat Ural cargo truck
             Technical.Install(_harmony);         // NDR technical (gun truck)
+            ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             GasLauncher.Install(_harmony);       // NDR gas launcher
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
@@ -2033,6 +2045,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.CarSpawn);    CarSpawn.Tick();         FrameProf.E(FrameProf.CarSpawn);
             UralTruck.Tick();                    // NDR 15-seat Ural cargo truck (own spawn key)
             Technical.Tick();                    // NDR technical: spawn key, durability cap, the MG
+            ArtyVehicle.Tick();                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
             GasLauncher.Tick();                  // NDR gas launcher (optional keys, cloud list)
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);

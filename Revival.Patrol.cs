@@ -79,6 +79,48 @@ namespace NextDayRevival
         /// BTR-80A is about 7.6 m long, so 4.2 m clears its own collider.</summary>
         const float NoseOffset = 4.2f;
 
+        // ------------------------------------------------------- the ground guard
+        //
+        //  A vehicle may only be put where there is something to stand on, and a
+        //  vehicle that is falling must never be treated as one that is merely
+        //  stuck. See GroundGuard for why the two together produced a hull that
+        //  appeared, dropped through the world and appeared above it again for
+        //  the rest of the session.
+
+        /// <summary>Metres a hull may sit below the surface the ground lookup
+        /// finds above it before it counts as buried rather than driving. A hull
+        /// stands about a metre under its own origin, and a wheel in a rut is
+        /// not a bug.</summary>
+        const float BuriedBy = 3f;
+
+        /// <summary>Metres per second downwards that make "no ground under the
+        /// hull" a fall. Without it a vehicle resting on a surface the lookup
+        /// does not recognise would be picked up and moved for no reason.</summary>
+        const float FallSpeed = 1.5f;
+
+        /// <summary>Seconds a hull may be falling before it is put back on the
+        /// road. Long enough for a jump, a ditch and one physics hiccup.</summary>
+        const float FallSeconds = 2f;
+
+        /// <summary>Seconds between two ground lookups for one vehicle. The
+        /// lookup is up to five casts and runs per vehicle, so it does not
+        /// belong in the physics step - the fall it looks for lasts seconds.</summary>
+        const float GroundEvery = 0.25f;
+
+        /// <summary>Recoveries inside <see cref="FallForget"/> before the
+        /// vehicle is given up instead of being put back again. Giving up starts
+        /// the ordinary replacement wait; putting it back again forever is the
+        /// bug.</summary>
+        const int FallRecoveries = 3;
+
+        /// <summary>Seconds of ordinary driving that clear the recovery
+        /// count.</summary>
+        const float FallForget = 60f;
+
+        /// <summary>Waypoints a placement walks forward looking for one with
+        /// ground under it before it gives up on the route.</summary>
+        const int GroundTries = 12;
+
         // ------------------------------------------------------------- the file
 
         class Point
@@ -122,6 +164,19 @@ namespace NextDayRevival
             /// being recorded, or one whose waypoints are wrong, is switched
             /// off without being deleted.</summary>
             public bool Enabled = true;
+
+            /// <summary>
+            /// WHICH MAP this route lies on, as the scene name (`scene=` in the
+            /// first waypoint's flags). Empty means the home map - every route
+            /// recorded before the game's other regions were reachable was
+            /// recorded there. The route is drawn and driven only while that map
+            /// is loaded; see MapScene and Revival.MapScene.cs for why a route
+            /// of one region used to show up on the map of another.
+            /// </summary>
+            public string Scene = "";
+
+            /// <summary>Is this route on the map that is open right now?</summary>
+            public bool Here { get { return MapScene.Owns(Scene); } }
 
             public string Seite
             {
@@ -197,6 +252,22 @@ namespace NextDayRevival
             public float Stuck;          // seconds below walking speed
             public int Frees;
             public int Reported;         // last lap written to the log
+
+            // Ground guard (GroundGuard, Supported, Recover). A hull with
+            // nothing under it is not driving, it is falling - and falling is
+            // vertical, so the stuck timer above reads it as standing still and
+            // the FREE warp fires into the same hole every StuckSeconds.
+            // Airborne is the last answer of the 4 Hz lookup, FallSince the
+            // Time.time it was first true, NextGround when to look again,
+            // Recoveries how often this vehicle was put back on the road and
+            // RecoverAt when that last happened (the count is forgotten after a
+            // minute of ordinary driving). FallLog rate-limits the report.
+            public bool Airborne;
+            public float FallSince;
+            public float NextGround;
+            public int Recoveries;
+            public float RecoverAt;
+            public float FallLog;
 
             // ---------------------------------------------------- the gun
             public bool Tank;            // which of the two value profiles
@@ -508,6 +579,10 @@ namespace NextDayRevival
                     }
                     if (!u.Armed) { Arm(u); continue; }
                     if (Gefallen(u)) continue;
+                    // A hull with nothing under it is falling, not stuck. It is
+                    // put back on the road here, before the driver can read the
+                    // fall as "not moving" and warp it into the same hole again.
+                    if (GroundGuard(u)) continue;
                     if (u.OneWay && !u.Column && u.Next == u.Route.P.Count - 1)
                         Advance(u, u.Car.transform.position);
                     // NDR convoy one-way: a convoy that has driven its whole
@@ -563,6 +638,10 @@ namespace NextDayRevival
             // dead end: the route most in need gets the vehicle instead.
             Route r = Active();
             if (r == null || r.IsConvoy) r = Duenn();   // NDR convoy: F11 never puts a lone patrol on a convoy road
+            // The named route may belong to another region. Its waypoints are
+            // not roads here, so fall back to a route this map does own rather
+            // than dropping a patrol into the landscape.
+            if (r != null && !r.Here) r = Duenn();
             if (r == null)
             {
                 RevivalPlugin.L.LogWarning("Patrol: route \""
@@ -759,6 +838,7 @@ namespace NextDayRevival
             {
                 Route r = _routes[_order[i]];
                 if (r.IsConvoy) continue;   // NDR convoy: driven by the convoy event, not the auto-patrol
+                if (!r.Here) continue;      // a route of another region is not driven here
                 if (!r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
                 int fehlt = r.Count - Fahren(r.Name);
                 if (fehlt <= 0) continue;
@@ -780,9 +860,12 @@ namespace NextDayRevival
             return groups.Count;
         }
 
-        /// <summary>Capacity requested by all enabled, usable patrol routes.
-        /// Recomputed from the current snapshot so editor changes apply live.
-        /// Legacy routes without a composition use one vehicle per patrol.</summary>
+        /// <summary>Capacity requested by all enabled, usable patrol routes ON
+        /// THIS MAP. Recomputed from the current snapshot so editor changes
+        /// apply live. Legacy routes without a composition use one vehicle per
+        /// patrol. Routes of another region ask for nothing here - otherwise the
+        /// capacity ceiling of the region on screen would be spent on patrols
+        /// that this map never spawns.</summary>
         static int PatrolVehicleLimit()
         {
             Load(false);
@@ -790,6 +873,7 @@ namespace NextDayRevival
             for (int i = 0; i < _order.Count; i++)
             {
                 Route r = _routes[_order[i]];
+                if (!r.Here) continue;
                 if (r.IsConvoy || !r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
                 RevivalComposition.Composition composition = RevivalComposition.Of(r.Name);
                 int vehicles = composition == null || composition.Vehicles.Count == 0
@@ -922,11 +1006,27 @@ namespace NextDayRevival
 
             // Same surface rule as the column placement, so a vehicle in a road
             // tunnel is put on the tunnel floor and not on the hill above it.
-            float roadY;
-            Vector3 roadNormal;
-            Vector3 pos = RoadUnder(line, null, out roadY, out roadNormal)
-                        ? new Vector3(line.x, roadY + 1.6f, line.z)
-                        : Grounded(line, 1.6f);
+            Vector3 pos;
+            if (!GroundSpot(line, null, 1.6f, out pos))
+            {
+                // Nothing under this exact slot. The height of the nearest
+                // metre of the SAME line that does have ground is the honest
+                // guess - the column is carried on that line anyway, so a slot
+                // that starts a metre out is corrected on the first physics
+                // step. A slot dropped onto an authored height with nothing
+                // under it is not: it falls, and the driver reads the fall as
+                // being stuck.
+                float lineY;
+                if (!LineHeight(r, arc, out lineY))
+                {
+                    RevivalPlugin.L.LogWarning("Convoy " + convoyId + ": no ground "
+                        + "within 60 m of " + arc.ToString("0") + " m on "
+                        + routeName + " - the slot is not filled. The colliders "
+                        + "around that stretch are probably not loaded.");
+                    return null;
+                }
+                pos = new Vector3(line.x, lineY + 1.6f, line.z);
+            }
 
             bool tank;
             GameObject car = VehicleRegistry.Spawn(kind, pos,
@@ -981,6 +1081,7 @@ namespace NextDayRevival
             c.Vehicle = r.Vehicle;
             c.Count = r.Count;
             c.Enabled = r.Enabled;
+            c.Scene = r.Scene;
             for (int i = 0; i < r.P.Count; i++) c.P.Add(r.P[i]);
             return c;
         }
@@ -1884,8 +1985,9 @@ namespace NextDayRevival
         }
 
         /// <summary>The names of every route marked as a convoy route (kind=
-        /// convoy) with enough waypoints to drive. The convoy event picks from
-        /// these.</summary>
+        /// convoy) with enough waypoints to drive ON THE MAP THAT IS LOADED. The
+        /// convoy event picks from these, so a convoy road of another region
+        /// never sends a column down a road that is not in this world.</summary>
         internal static List<string> ConvoyRouteNames()
         {
             Load(false);
@@ -1894,7 +1996,7 @@ namespace NextDayRevival
             {
                 Route r;
                 if (_routes.TryGetValue(_order[i], out r) && r != null
-                    && r.IsConvoy && r.Enabled && r.P.Count >= 3)
+                    && r.Here && r.IsConvoy && r.Enabled && r.P.Count >= 3)
                     names.Add(r.Name);
             }
             return names;
@@ -2198,9 +2300,13 @@ namespace NextDayRevival
                     found = true;
                 }
             }
-            // Missing collision data must not pull a previously grounded hull
-            // down into an untrusted route. Keep moving; retry at the next slot.
-            if (!found && u.Placed) targetY = Mathf.Max(targetY, t.position.y);
+            // Missing collision data must not pull a grounded hull down into an
+            // untrusted route. Keep moving; retry at the next slot. This holds
+            // for the FIRST placement too: the spawn only puts a vehicle where
+            // the same lookup found a surface (SpawnConvoyUnit), so the height
+            // it already stands at is measured, while the route's own y is
+            // whatever the recorder's camera was at.
+            if (!found) targetY = Mathf.Max(targetY, t.position.y);
             Vector3 target = new Vector3(line.x, targetY, line.z);
             if (Time.time >= u.ColumnGroundLog
                 && (!found || Mathf.Abs(y - line.y) > 3f
@@ -2598,6 +2704,32 @@ namespace NextDayRevival
                         + ", where the recording began.");
             }
 
+            // Nothing is put down where there is nothing to stand on. A patrol
+            // dropped into a place whose colliders are not loaded falls through
+            // the world, and the automatic that replaces it drops the next one
+            // into the same hole - which is the loop this guard ends. The
+            // automatic starts patrols at the waypoint FARTHEST from every
+            // player (Verteilt), so this is not a rare case.
+            Vector3 startPos;
+            int firm = GroundedWaypoint(r, start, 1.6f, true, out startPos);
+            if (firm < 0)
+            {
+                RevivalPlugin.L.LogWarning("Patrol: no ground under waypoint "
+                    + start + " of " + r.Name + " or the " + GroundTries
+                    + " after it - nothing is put down there. The colliders "
+                    + "around that stretch are probably not loaded; the "
+                    + "automatic tries again later.");
+                return;
+            }
+            if (firm != start)
+            {
+                RevivalPlugin.L.LogInfo("Patrol: waypoint " + start + " of "
+                    + r.Name + " has nothing under it - starting at waypoint "
+                    + firm + " instead.");
+                start = firm;
+                away = -1f;
+            }
+
             Vector3 ahead = r.P[(start + 1) % r.P.Count].Pos - r.P[start].Pos;
             ahead.y = 0f;
             if (ahead.sqrMagnitude < 0.0001f) ahead = Vector3.forward;
@@ -2630,7 +2762,18 @@ namespace NextDayRevival
                 // ordinary patrol route behavior, but starts front-to-tail on
                 // the first-leg centreline instead of stacking vehicles.
                 Vector3 spot = r.P[start].Pos - ahead * (RevivalConvoy.LineupGap * k);
-                Vector3 pos = Grounded(spot, 1.6f);
+                Vector3 pos;
+                if (!GroundSpot(spot, null, 1.6f, out pos))
+                {
+                    // The slot behind the start has no surface of its own (a
+                    // bridge gap, an unloaded prop). The start waypoint HAS one
+                    // and is at most a few dozen metres away, so its height is
+                    // the honest guess - an authored y is not.
+                    pos = new Vector3(spot.x, startPos.y, spot.z);
+                    RevivalPlugin.L.LogInfo("Patrol: no ground under line-up slot "
+                        + k + " on " + r.Name + " - it stands at the height of "
+                        + "waypoint " + start + ".");
+                }
                 bool tank;
                 GameObject car = VehicleRegistry.Spawn(kind,
                     pos, Quaternion.LookRotation(ahead, Vector3.up), out tank);
@@ -2798,6 +2941,7 @@ namespace NextDayRevival
             back.Vehicle = r.Vehicle;
             back.Count = r.Count;
             back.Enabled = r.Enabled;
+            back.Scene = r.Scene;
             for (int i = 0; i < n; i++) back.P.Add(r.P[i]);
             for (int i = n - 2; i >= 1; i--) back.P.Add(r.P[i]);
 
@@ -2816,24 +2960,107 @@ namespace NextDayRevival
             return v.magnitude;
         }
 
-        /// <summary>Put an authored X/Z point on the world surface. Roadnet v2
-        /// carries terrain y, so its short local ray is precise. Manual and
-        /// migrated routes may still have y=0; for those, start above the full
-        /// terrain height range instead of spawning below the map.</summary>
-        static Vector3 Grounded(Vector3 point, float lift)
+        /// <summary>
+        /// Put an authored X/Z point on a surface a vehicle may stand on, and
+        /// say whether such a surface was FOUND.
+        ///
+        /// The lookup is <see cref="RoadUnder"/> - the same one the convoy
+        /// column uses: it prefers the local road deck, retries from
+        /// progressively higher origins when the recorded line is buried, and
+        /// never accepts a wall, a vehicle or a character as ground. Up to here
+        /// this method cast ONE unfiltered ray from 30 m above the point and
+        /// took whatever it hit first, so a tree crown, a shed roof or another
+        /// patrol counted as road - and on a miss it returned the authored point
+        /// unchanged, which on a legacy route with y=0 is hundreds of metres
+        /// under the terrain.
+        ///
+        /// A false return means there is nothing here to stand on. Nothing may
+        /// be placed on the point it writes then; the callers look for another
+        /// waypoint or refuse to place at all.
+        /// </summary>
+        static bool GroundSpot(Vector3 point, Transform own, float lift,
+                               out Vector3 placed)
         {
-            Vector3 origin = point + Vector3.up * 30f;
-            float range = 200f;
-            if (point.y < 10f)
+            float y;
+            Vector3 normal;
+            if (RoadUnder(point, own, out y, out normal))
             {
-                origin.y = 2500f;
-                range = 3000f;
+                placed = new Vector3(point.x, y + lift, point.z);
+                return true;
             }
-            Vector3 ground;
-            GameObject under = Turret.RaycastObject(origin, Vector3.down,
-                                                    range, out ground);
-            return under == null ? point + Vector3.up * lift
-                                 : ground + Vector3.up * lift;
+            placed = point + Vector3.up * lift;
+            return false;
+        }
+
+        /// <summary>The first waypoint at or after <paramref name="start"/> with
+        /// ground under it, and where a vehicle stands on it; -1 when none of
+        /// the next <see cref="GroundTries"/> waypoints has any. Far from every
+        /// player the colliders around a route are not necessarily loaded, and
+        /// then the honest answer is "not here" - not a vehicle dropped into
+        /// nothing.
+        ///
+        /// <paramref name="wrap"/> is false for a one-way convoy: past the last
+        /// waypoint there is nothing farther along, and waypoint 0 is the start
+        /// of the route, a kilometre BACK down the road.</summary>
+        static int GroundedWaypoint(Route r, int start, float lift, bool wrap,
+                                    out Vector3 placed)
+        {
+            placed = Vector3.zero;
+            int n = r.P.Count;
+            if (n <= 0) return -1;
+            start = ((start % n) + n) % n;
+            int tries = GroundTries < n ? GroundTries : n;
+            for (int step = 0; step < tries; step++)
+            {
+                int at = start + step;
+                if (at >= n)
+                {
+                    if (!wrap) return -1;
+                    at -= n;
+                }
+                if (GroundSpot(r.P[at].Pos, null, lift, out placed)) return at;
+            }
+            return -1;
+        }
+
+        /// <summary>The surface height of the nearest point of this recorded
+        /// line that has one, searched outwards from <paramref name="arc"/> in
+        /// 5 m steps to 60 m either way. False when that whole stretch has no
+        /// ground under it, which means the area is not loaded rather than that
+        /// the route is wrong.</summary>
+        static bool LineHeight(Route r, float arc, out float y)
+        {
+            y = 0f;
+            int seg;
+            for (float step = 5f; step <= 60f; step += 5f)
+            {
+                float found;
+                Vector3 normal;
+                if (RoadUnder(PointOnRoute(r, arc + step, out seg), null,
+                              out found, out normal)
+                    || RoadUnder(PointOnRoute(r, arc - step, out seg), null,
+                                 out found, out normal))
+                {
+                    y = found;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>The waypoint of this route nearest to a position, measured
+        /// in the ground plane - where a vehicle that has left the road belongs
+        /// back on it.</summary>
+        static int Nearest(Route r, Vector3 pos)
+        {
+            int best = 0;
+            float bestDistance = 0f;
+            for (int i = 0; i < r.P.Count; i++)
+            {
+                float d = FlatDistance(r.P[i].Pos, pos);
+                if (i == 0 || d < bestDistance) { best = i; bestDistance = d; }
+            }
+            return best;
         }
 
         // =====================================================================
@@ -3018,6 +3245,155 @@ namespace NextDayRevival
                 _units.Remove(u);
             }
             return true;
+        }
+
+        // =====================================================================
+        //  The ground guard: a vehicle that is falling is not a vehicle that is
+        //  stuck
+        // =====================================================================
+
+        /// <summary>
+        /// Is there a surface under this hull that it could be standing on, and
+        /// is the hull on the right side of it?
+        ///
+        /// The lookup is <see cref="RoadUnder"/> with the vehicle's own
+        /// transform excluded, so neither the hull itself nor another vehicle
+        /// nor a man counts as ground. Two different failures matter:
+        ///
+        ///   BURIED - a surface is found and the hull sits more than
+        ///   <see cref="BuriedBy"/> metres below it. That is a vehicle inside
+        ///   the terrain, whatever its speed.
+        ///
+        ///   FALLING - no surface at all AND the hull is dropping faster than
+        ///   <see cref="FallSpeed"/>. The speed matters: a hull resting on
+        ///   something the lookup does not recognise is not in trouble and must
+        ///   not be picked up and moved.
+        /// </summary>
+        static bool Supported(Unit u)
+        {
+            Transform t = u.Car.transform;
+            float surface;
+            Vector3 normal;
+            if (RoadUnder(t.position, t, out surface, out normal))
+                return t.position.y >= surface - BuriedBy;
+            return Velocity(u.Body).y > -FallSpeed;
+        }
+
+        /// <summary>
+        /// A hull with nothing under it, handled before the driver sees it.
+        ///
+        /// WHY THIS EXISTS. <see cref="Drive"/> measures being stuck in the
+        /// GROUND PLANE (`groundVel.y = 0f`), and a vehicle falling through the
+        /// world falls straight down - so it reads as standing still, the stuck
+        /// escalation warps it onto a waypoint, it falls through again, and the
+        /// two repeat for as long as the session lasts. That pair is the
+        /// reported symptom: a vehicle that appears somewhere, drops, appears
+        /// above the map again, on repeat.
+        ///
+        /// So a falling hull is taken away from the stuck timer and handled
+        /// here instead: it is put back on verified ground at most
+        /// <see cref="FallRecoveries"/> times in <see cref="FallForget"/>
+        /// seconds, and if it keeps leaving the world after that it is given up
+        /// - which starts the ordinary replacement WAIT rather than another
+        /// immediate attempt at the same place.
+        ///
+        /// The lookup runs at <see cref="GroundEvery"/>, not per physics step:
+        /// it is several raycasts per vehicle, and a fall lasts seconds.
+        ///
+        /// Returns true when this unit is handled for this step - it is
+        /// falling, has just been put back, or has been removed - and the
+        /// driver must not run.
+        /// </summary>
+        static bool GroundGuard(Unit u)
+        {
+            // A column vehicle is not driven and does not fall: Columns() puts
+            // it on its slot every physics step and never lets a placed hull
+            // sink. Nothing here applies to it.
+            if (u.Column) return false;
+
+            if (Time.time >= u.NextGround)
+            {
+                u.NextGround = Time.time + GroundEvery;
+                bool firm = Supported(u);
+                if (firm)
+                {
+                    u.Airborne = false;
+                    u.FallSince = 0f;
+                    // A vehicle that has driven normally since the last
+                    // recovery is not the vehicle this guard gives up on.
+                    if (u.Recoveries > 0 && Time.time - u.RecoverAt > FallForget)
+                        u.Recoveries = 0;
+                }
+                else
+                {
+                    if (!u.Airborne) u.FallSince = Time.time;
+                    u.Airborne = true;
+                }
+            }
+            if (!u.Airborne) return false;
+
+            // Falling is not being stuck. Without this the FREE warp fires into
+            // the same hole every StuckSeconds.
+            u.Stuck = 0f;
+            if (Time.time - u.FallSince < FallSeconds) return true;
+
+            Recover(u);
+            return true;
+        }
+
+        /// <summary>Put a fallen vehicle back on the nearest waypoint of its own
+        /// route that has ground under it, or give it up. The unit may be gone
+        /// when this returns.</summary>
+        static void Recover(Unit u)
+        {
+            Transform t = u.Car.transform;
+            Route r = u.Route;
+            u.FallSince = Time.time;      // one attempt per FallSeconds
+            u.Recoveries++;
+            u.RecoverAt = Time.time;
+
+            if (u.Recoveries > FallRecoveries)
+            {
+                Drop(u, "it left the ground " + (u.Recoveries - 1) + " times in "
+                    + FallForget.ToString("0") + " s and every recovery failed");
+                return;
+            }
+
+            Vector3 target;
+            int at = GroundedWaypoint(r, Nearest(r, t.position), 1.5f,
+                                      !u.OneWay, out target);
+            if (at < 0)
+            {
+                if (Time.time >= u.FallLog)
+                {
+                    u.FallLog = Time.time + 10f;
+                    RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name
+                        + " is at " + t.position + " with nothing under it, and no "
+                        + "waypoint of its route has ground either - the colliders "
+                        + "around it are probably not loaded. Waiting.");
+                }
+                return;
+            }
+
+            Stop(u.Body);
+            SetFloat(u.Rcc, "gasInput", 0f);
+            SetFloat(u.Rcc, "brakeInput", 0f);
+            SetFloat(u.Rcc, "steerInput", 0f);
+            SetFloat(u.Rcc, "handbrakeInput", 0f);
+            t.position = target;
+            t.rotation = Quaternion.LookRotation(
+                RouteDirection(r, at, u.OneWay).normalized, Vector3.up);
+
+            u.Next = at;
+            u.Stuck = 0f;
+            u.Airborne = false;
+            u.FallSince = 0f;
+            // Let it settle on the road before the guard judges it again.
+            u.NextGround = Time.time + FallSeconds;
+
+            RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name
+                + " had no ground under it - put back on waypoint " + at
+                + " (" + u.Recoveries + " of " + FallRecoveries + ").");
         }
 
         /// <summary>Everything that has to be held every step, because the game
@@ -3737,7 +4113,28 @@ namespace NextDayRevival
                 steps++;
             }
 
-            Vector3 target = Grounded(r.P[to].Pos, 1.5f);
+            // Only onto a waypoint that HAS ground. Warping the hull onto an
+            // authored point with nothing under it is what turned one stuck
+            // vehicle into a vehicle that falls, is warped up, and falls again
+            // every StuckSeconds for the rest of the session.
+            Vector3 target;
+            int landed = GroundedWaypoint(r, to, 1.5f, !u.OneWay, out target);
+            if (landed < 0)
+            {
+                HoldStill(u);
+                Roll(u.Body, Vector3.zero);
+                u.Stuck = 0f;
+                if (Time.time >= u.FallLog)
+                {
+                    u.FallLog = Time.time + 10f;
+                    RevivalPlugin.L.LogWarning("Patrol: stuck on " + r.Name
+                        + " near waypoint " + from + ", but no waypoint from "
+                        + to + " on has ground under it - holding where it "
+                        + "stands instead of warping into nothing.");
+                }
+                return;
+            }
+            to = landed;
             Vector3 ahead = RouteDirection(r, to, u.OneWay);
 
             if (u.ConvoyId != 0 && (!DeployRoom(u, target) || !DeployLane(u, target)))
@@ -4626,6 +5023,10 @@ namespace NextDayRevival
             {
                 r = new Route();
                 r.Name = name;
+                // A route is recorded by driving it, so the map it lies on is
+                // simply the one the driver is standing in. Recording in the
+                // starting region writes no flag at all (MapScene.Store).
+                r.Scene = MapScene.Current;
                 _routes[name] = r;
                 _order.Add(name);
             }
@@ -4733,7 +5134,7 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("Patrol: route " + r.Name + ", "
                         + r.P.Count + " waypoints, " + r.Seite + " ("
                         + Fraktion.Erklaerung(r.Seite) + "), " + r.Wagen + ", "
-                        + r.Count + " patrol(s)"
+                        + r.Count + " patrol(s), map " + MapScene.Label(r.Scene)
                         + (r.Enabled ? "" : ", SWITCHED OFF") + ".");
                 }
                 if (bad > 0)
@@ -4882,6 +5283,9 @@ namespace NextDayRevival
             if (int.TryParse(FlagValue(p, "count"), out n)) r.Count = Mathf.Clamp(n, 0, 16);
             else r.Count = 1;
             r.Kind = FlagValue(p, "kind").Trim().ToLowerInvariant();   // NDR convoy
+            // Which map the route lies on. Absent = the home map, which is what
+            // every route written before this flag existed means.
+            r.Scene = MapScene.Clean(FlagValue(p, "scene"));
         }
 
         /// <summary>
@@ -4904,7 +5308,8 @@ namespace NextDayRevival
                     string one = parts[i].Trim();
                     if (one.Length == 0 || one == "spawn" || one == "off") continue;
                     if (one.StartsWith("fraction=") || one.StartsWith("vehicle=")
-                        || one.StartsWith("count=") || one.StartsWith("kind=")) continue;
+                        || one.StartsWith("count=") || one.StartsWith("kind=")
+                        || one.StartsWith("scene=")) continue;
                     keep.Add(one);
                 }
             }
@@ -4914,6 +5319,11 @@ namespace NextDayRevival
             if (v == "btr" || v == "tank" || v == "mixed") keep.Add("vehicle=" + v);
             keep.Add("count=" + r.Count.ToString(CultureInfo.InvariantCulture));
             if (r.IsConvoy) keep.Add("kind=convoy");   // NDR convoy
+            // Only a route that is NOT on the home map names its map, so a file
+            // of routes from the starting region keeps exactly the shape it has
+            // today and no older reader sees a flag it has to skip.
+            string scene = MapScene.Store(r.Scene);
+            if (scene.Length > 0) keep.Add("scene=" + scene);
             if (!r.Enabled) keep.Add("off");
             p.Flags = string.Join(",", keep.ToArray());
         }
@@ -5018,6 +5428,14 @@ namespace NextDayRevival
                         if (!_routes.TryGetValue(_order[routeIndex], out route)
                             || route == null || route.P.Count < 2) continue;
 
+                        // REGION GATE. The map on screen belongs to ONE scene,
+                        // and a route belongs to one scene too. Drawing the
+                        // routes of the starting region onto the map of Primorye
+                        // or the toxic swamp is what this stops - those patrols
+                        // are not there, and FitsScene below cannot tell, because
+                        // two surface maps are of a similar size. See MapScene.
+                        if (!route.Here) continue;
+
                         // A convoy route is an EVENT, not a standing road on
                         // the map: it is drawn only while a convoy is actually
                         // driving it. NDR convoy.
@@ -5106,6 +5524,7 @@ namespace NextDayRevival
                     Route route;
                     if (!_routes.TryGetValue(_order[routeIndex], out route)
                         || route == null || route.P.Count < 1) continue;
+                    if (!route.Here) continue;          // same region gate as the ring loop
                     if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
                     if (route.IsConvoy != (labelPass == 0)) continue;
                     if (!FitsScene(WorldLine(route), world)) continue;
@@ -5897,6 +6316,13 @@ namespace NextDayRevival
                 GUILayout.Space(6f);
 
                 // --------------------------------------------------- routes
+                // WHICH MAP THIS IS. The name the game loads the scene by, so
+                // an admin who walks into another region can read it off here
+                // and write it into the browser editor's map table
+                // (assets/editor/maps.json). Routes of another map are listed
+                // greyed out below and are neither drawn nor driven here.
+                GUILayout.Label(Loc.T("Эта карта (сцена): ", "This map (scene): ")
+                    + MapScene.Current);
                 GUILayout.Label(Loc.T("Маршруты - каждый это отдельный патруль",
                                       "Routes - each one is its own patrol"));
                 _rollen = GUILayout.BeginScrollView(_rollen, GUILayout.Height(260f));
@@ -5968,7 +6394,11 @@ namespace NextDayRevival
                 GUILayout.BeginHorizontal();
                 GUILayout.Label((aktiv ? "> " : "  ") + r.Name + "  "
                     + r.P.Count + Loc.T(" тчк  ", " wp  ") + Fahren(r.Name) + "/" + r.Count
-                    + Loc.T(" в рейсе", " out"),
+                    + Loc.T(" в рейсе", " out")
+                    // A route of ANOTHER map says so, and says which. Without
+                    // this line a route that is simply not in this region reads
+                    // as a route that is broken.
+                    + (r.Here ? "" : "  [" + MapScene.Label(r.Scene) + "]"),
                     GUILayout.Width(190f));
                 bool an = GUILayout.Toggle(r.Enabled, Loc.T("вкл", "on"), GUILayout.Width(45f));
                 if (an != r.Enabled)
@@ -6106,6 +6536,7 @@ namespace NextDayRevival
                 }
                 Route r = new Route();
                 r.Name = name;
+                r.Scene = MapScene.Current;   // the map the admin is standing in
                 _routes[name] = r;
                 _order.Add(name);
                 RevivalPlugin.CfgPatrolRoute.Value = name;
@@ -6142,6 +6573,13 @@ namespace NextDayRevival
             static void Jetzt(Route r)
             {
                 if (r.P.Count < 3) { Melde(r.Name + Loc.T(" нужно минимум три точки", " needs at least three waypoints")); return; }
+                if (!r.Here)
+                {
+                    Melde(r.Name + Loc.T(" на другой карте (", " is on another map (")
+                          + MapScene.Label(r.Scene) + Loc.T(") - здесь его дорог нет",
+                                                            ") - its roads are not in this region"));
+                    return;
+                }
                 int max = PatrolVehicleLimit();
                 if (PatrolUnitCount() >= max)
                 {

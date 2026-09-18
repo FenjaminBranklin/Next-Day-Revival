@@ -13,7 +13,10 @@
 //   2. TWO MEN belong to it: a gunner at the sight and a drone operator. They
 //      are ordinary game NPCs, spawned once by the master client through
 //      Crew.DropSquad and wearing the FACTION OF THE SETTLEMENT they stand in,
-//      so they do not open fire on their own village.
+//      so they do not open fire on their own village. They are POSTED at the
+//      vehicle and do not walk anywhere: the gunner works the fire-control box
+//      on the side of the hull, the operator stands a pace behind him flying
+//      the drone (Posted, further down).
 //   3. The operator flies a real recon drone in a wide circle around the
 //      settlement. It is the same airframe the player's own surveillance drone
 //      uses, and it is drawn on the M map.
@@ -64,6 +67,7 @@ using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace NextDayRevival
 {
@@ -83,6 +87,9 @@ namespace NextDayRevival
         static ConfigEntry<bool> _cfgAutoFire;
         static ConfigEntry<string> _cfgFaction;
         static ConfigEntry<int> _cfgCrewWeapon;
+        static ConfigEntry<bool> _cfgCrewPosted;
+        static ConfigEntry<int> _cfgWorkState;
+        static ConfigEntry<string> _cfgWorkClip;
 
         static ConfigEntry<float> _cfgOrbitRadius;
         static ConfigEntry<float> _cfgOrbitHeight;
@@ -106,9 +113,10 @@ namespace NextDayRevival
         static bool B(ConfigEntry<bool> c, bool fallback) { return c == null ? fallback : c.Value; }
 
         /// <summary>Metres around the gun in which a living man counts as its
-        /// crew. The crew wanders a nine-metre ring (Crew.RingRadius), so this
-        /// has to be wider than that or a gunner who took three steps would be
-        /// declared dead.</summary>
+        /// crew. Since 6.26 the two men are posted at the hull (Posted) and
+        /// stand 11 and 15 units off its centre, but this stays wide: the count
+        /// is also what a JOINED client goes by, and a settlement's own men
+        /// standing at the vehicle are crew enough for it.</summary>
         internal static float GuardRadius { get { return Mathf.Max(4f, F(_cfgGuardRadius, 14f)); } }
 
         /// <summary>The weapon both crewmen carry. Anything above zero keeps
@@ -146,21 +154,57 @@ namespace NextDayRevival
                 + "Patrol/CrewLawCount, und das gibt dem ersten Mann jeder "
                 + "Gruppe einen M72 LAW - an einer Haubitze nicht erwuenscht. "
                 + "1001 ist das Sturmgewehr des Spiels; 1160 waere das MG42.");
+            _cfgCrewPosted = cfg.Bind("Artillery", "CrewStandsAtTheGun", true,
+                "The gunner works the fire-control box on the side of the "
+                + "vehicle and the drone operator stands a pace behind him. "
+                + "Neither of them walks anywhere: they are posted, not "
+                + "patrolling. false gives back the crew that wandered the "
+                + "nine-metre ring Crew.DropSquad lays out for every squad.");
+            _cfgWorkState = cfg.Bind("Artillery", "CrewWorkState", 10,
+                "The NPCMainState the posted crew is held in. 10 is the game's "
+                + "own Working state - what an NPC busy with something in front "
+                + "of him is in; 0 is a plain standing idle. A state the "
+                + "installed game does not animate simply leaves the men "
+                + "standing, which is still motionless.");
+            _cfgWorkClip = cfg.Bind("Artillery", "CrewWorkClip", "",
+                "The animation clip the crew loops when the state above plays "
+                + "none. Empty picks the first clip of the model's own set "
+                + "whose name reads like work, and writes the choice to the "
+                + "log. \"-\" asks for no clip at all.");
 
-            _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 300f,
-                "Metres from the settlement centre the drone circles at.");
-            // Migrate the released default; retain deliberate custom radii.
-            if (_cfgOrbitRadius.Value == 240f) _cfgOrbitRadius.Value = 300f;
+            _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 600f,
+                "Metres from the settlement centre the drone circles at. The "
+                + "ring is the battery's warning line, not its reach: the gun "
+                + "itself carries to Mortar/MaxRange (1200 m), so a spotting at "
+                + "the far edge of the footprint is still a mission.");
+            // Migrate BOTH released defaults; retain deliberate custom radii.
+            // The order of 2026-09-18 was "der drohnen radius soll weiter
+            // erweitert werden, 600m oder noch mehr" - and a default change
+            // alone reaches nobody who already has a config file, because
+            // Config.Bind takes the value out of it (CLAUDE.md, point 4).
+            if (_cfgOrbitRadius.Value == 240f || _cfgOrbitRadius.Value == 300f)
+                _cfgOrbitRadius.Value = 600f;
             _cfgOrbitHeight = cfg.Bind("Artillery", "OrbitHeight", 85f,
                 "Metres above the ground under it. High enough to be a dot, low "
                 + "enough to be seen against the sky.");
             _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 16f,
-                "Metres per second along the circle. At 300 m radius one lap "
-                + "takes about 118 s.");
-            _cfgModelRange = cfg.Bind("Artillery", "ModelRange", 800f,
+                "Metres per second along the circle. At 600 m radius one lap "
+                + "takes about 236 s. The speed is left alone by the wider "
+                + "orbit on purpose: how long a man stays inside the footprint "
+                + "under the drone - 220 m of it, about 14 s - is what decides "
+                + "a sighting, and that depends on this number, not on the "
+                + "radius.");
+            _cfgModelRange = cfg.Bind("Artillery", "ModelRange", 1000f,
                 "Metres from the player at which the drone gets a visible model. "
                 + "Beyond it the orbit is still computed - only the GameObject is "
-                + "not built, so a map full of settlements costs nothing.");
+                + "not built, so a map full of settlements costs nothing. It has "
+                + "to clear the orbit by the width of a settlement, or the drone "
+                + "vanishes for part of every lap for a player standing at his "
+                + "own gun: at a 600 m ring the far side is 600 m from the "
+                + "centre and 800 from a man 200 m off it.");
+            // The same migration, and for the same reason: 800 was the released
+            // default and belonged to a 240-300 m ring.
+            if (_cfgModelRange.Value == 800f) _cfgModelRange.Value = 1000f;
             _cfgModelScale = cfg.Bind("Artillery", "ModelScale", 10f,
                 "Size of the recon drone model. The player's own surveillance "
                 + "drone uses 12.");
@@ -222,6 +266,14 @@ namespace NextDayRevival
             public float CrewTryAt;
             public int CrewTries;
 
+            // the two stations at the vehicle, and when each man was last put
+            // back on his: he stands in the ordinary idle for a moment before
+            // he goes to work, so the whole-body clip is the standing one
+            // underneath (Stand).
+            public float NextPost;
+            public float GunnerSince;
+            public float OperatorSince;
+
             // crew as every client sees it: living men standing at the gun
             public int MenNear;
             public bool HostileNear;        // ... and at least one of them hates us
@@ -274,19 +326,17 @@ namespace NextDayRevival
         static int _npcStamp;
 
         // The map is only asked whether it is open a few times a second - the
-        // question is reflection, and the answer is used for a snapshot that is
-        // deliberately not live.
+        // question is reflection. Drawing uses the flight position already
+        // computed by Fly, so a moving icon needs no extra scene queries.
         static float _nextMapCheck;
         static bool _mapOpen;
 
-        /// <summary>What the map draws: where every drone was when the map was
-        /// opened. The order asked for the LAST position, not a live feed, and
-        /// freezing it is also what keeps the map cheap.</summary>
+        /// <summary>Visible batteries and recent sightings, refreshed while
+        /// the map is open. The drone position comes from the live post.</summary>
         class Mark
         {
-            public Vector3 Drone;
+            public Post Source;
             public Vector3 Centre;
-            public float Radius;
             public bool Spotted;
             public Vector3 SpotPoint;
         }
@@ -295,6 +345,8 @@ namespace NextDayRevival
 
         static Texture2D _px;
         static Texture2D _ring;
+        static Texture2D _droneIcon;
+        const float DroneIconSize = 18f;
 
         // ------------------------------------------------- the gun's own seams
 
@@ -417,6 +469,7 @@ namespace NextDayRevival
                         continue;
                     }
                     Manning(p, now, master);
+                    Posted(p, now, master);
                     Fly(p, now, me != null, mine);
                     Warn(p, now, me, mine);
                     if (master)
@@ -536,11 +589,12 @@ namespace NextDayRevival
                 if (template == null && p.CrewTries < 4) return;
 
                 Transform gun = p.Gun.transform;
-                // Behind the gun, where a crew stands: out of the muzzle's way
-                // and close enough that they read as ITS men.
-                Vector3 at = gun.TransformPoint(new Vector3(0f, 0f, -19.5f));
-                float y;
-                if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
+                // AT THE VEHICLE, not behind it. They used to be set down 19.5
+                // units off the tail and then wandered the ring Crew.DropSquad
+                // lays out for a squad; they are now spawned on the gunner's
+                // own station and held there (Posted). Station puts them on the
+                // ground itself.
+                Vector3 at = Station(gun, true);
 
                 // BOTH MEN CARRY A RIFLE, AND THE LOADOUT SAYS SO. Crew.DropSquad
                 // arms a man from the editor loadout and falls back to
@@ -577,6 +631,11 @@ namespace NextDayRevival
                 }
                 p.CrewSettlement = crew;
                 p.CrewAsked = true;
+                // The men are not posted in the frame they were made. NPC_AI2
+                // .Start still has FindMySpawnPointAndSet to run, which puts a
+                // man on his spawn point, and a station warp that raced it
+                // would simply be undone.
+                p.NextPost = now + 1.5f;
                 Resolve(p);
                 if (p.Gunner != null) p.FactionSet = MatchFaction(p);
                 RevivalPlugin.L.LogInfo("ArtyBattery: crew for \"" + p.Name
@@ -697,9 +756,439 @@ namespace NextDayRevival
             catch { return false; }
         }
 
+        // ------------------------------------------------- the men at the gun
+
+        // WHERE THE TWO MEN STAND, in the vehicle's own space: +Z is the way
+        // the hull faces, +X its right side. A man is five units tall and the
+        // hull is 31.6 units long, so these are paces and not metres.
+        //
+        // The gunner stands at the fire-control box on the LEFT side of the
+        // hull and faces it - that is the console the order asks for. The
+        // turret sits aft (ArtyModel.TurretAt is 10.4 units behind the hull's
+        // origin), so the side of the fighting compartment is around -6, well
+        // out of the muzzle's way; 10.5 units out clears the deployed
+        // stabilizers, which ArtyModel.UsePoint puts the player's own use point
+        // just inside at 8.5.
+        //
+        // The operator stands beside him, a couple of paces further back: he is
+        // flying the drone, not working the gun. The two stations straddle the
+        // use point at -10.5 rather than sitting on it, so the player who walks
+        // up to the gun stands BETWEEN his crew instead of inside one of them.
+        static readonly Vector3 GunnerPost = new Vector3(-10.5f, 0f, -6f);
+        static readonly Vector3 OperatorPost = new Vector3(-10.5f, 0f, -14f);
+
+        /// <summary>Seconds a man stands in the ordinary idle after he has been
+        /// put on his station, before he goes to work. The shooting and working
+        /// clips of this game are upper-body layers over a whole-body one
+        /// (NPC_AI2.SetBlendingAnimLayers, CONFIRMED IL), and the whole-body
+        /// clip underneath has to be the STANDING one - straight out of a walk
+        /// the legs would keep walking on the spot. CrossFade's own fade is
+        /// 0.3 s.</summary>
+        const float SettleSeconds = 0.6f;
+
+        /// <summary>One of the two stations at the vehicle, on the ground.</summary>
+        static Vector3 Station(Transform gun, bool gunner)
+        {
+            Vector3 at = gun.TransformPoint(gunner ? GunnerPost : OperatorPost);
+            float y;
+            if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
+            return at;
+        }
+
+        /// <summary>Which way both men look: at the side of the hull they are
+        /// working on, which is the vehicle's local +X from where they stand.</summary>
+        static float StationYaw(Transform gun)
+        {
+            Vector3 face = gun.TransformDirection(Vector3.right);
+            face.y = 0f;
+            if (face.sqrMagnitude < 0.0001f) return gun.eulerAngles.y;
+            return Mathf.Atan2(face.x, face.z) * Mathf.Rad2Deg;
+        }
+
+        /// <summary>
+        /// THE CREW IS POSTED, NOT PATROLLING (order 2026-09-18: the gunner
+        /// should really stand AT the artillery thing, in a permanent animation
+        /// of working at the computer on the side of it, moving not at all; the
+        /// drone operator stands beside him and does not move either, because
+        /// he is flying the drone).
+        ///
+        /// Crew.DropSquad builds every squad a ring of eight walk points and
+        /// the game's own IdleStateAction walks the men round it, so the two
+        /// men drifted away from the vehicle they belong to and the "crew at
+        /// the gun" the player meets was whoever happened to be on the near
+        /// side of the ring. Two halves, and each of them runs where it can:
+        ///
+        ///   THE MASTER puts each man on his station and keeps the vanilla idle
+        ///   logic off him. IdleStateAction returns while GetCalculatedPauseTime
+        ///   is positive (CONFIRMED IL), so a pause refreshed twice a second
+        ///   holds him without touching the AI anywhere else, and the state
+        ///   itself goes out through the game's own SetStateWithAnimAndSync -
+        ///   which is an RPC, so every other client sees the same man in the
+        ///   same pose at the same place.
+        ///
+        ///   EVERY CLIENT paints the working clip if the state alone plays
+        ///   none. A joined client never spawned these two and cannot tell them
+        ///   from any other NPC, so it takes whoever is standing on the
+        ///   station - which, because the master holds them there, is the right
+        ///   man.
+        /// </summary>
+        static void Posted(Post p, float now, bool master)
+        {
+            if (p.Gun == null || p.Safe || !B(_cfgCrewPosted, true)) return;
+            if (now < p.NextPost) return;
+            p.NextPost = now + 0.5f;
+            try
+            {
+                Transform gun = p.Gun.transform;
+                float yaw = StationYaw(gun);
+                Vector3 gunnerAt = Station(gun, true);
+                Vector3 operatorAt = Station(gun, false);
+                p.GunnerSince = Stand(StationMan(p.Gunner, gunnerAt, master),
+                                      gunnerAt, yaw, master, p.GunnerSince, now, 0f);
+                p.OperatorSince = Stand(StationMan(p.Operator, operatorAt, master),
+                                        operatorAt, yaw, master, p.OperatorSince, now, 0.37f);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("ArtyBattery: the crew of \"" + p.Name
+                    + "\" could not be posted: " + ex.Message);
+            }
+        }
+
+        /// <summary>The man on that station. The master knows his own two by
+        /// name and takes NOBODY else: before his crew is up, and after it is
+        /// dead, the station stays empty rather than drafting the first
+        /// villager who walked past it. A client that joined never spawned
+        /// these two and has no way of telling them apart, so it takes whoever
+        /// is standing there - which, because the master holds them there, is
+        /// the right man.</summary>
+        static Component StationMan(Component known, Vector3 at, bool master)
+        {
+            if (known != null) return Alive(known) ? known : null;
+            if (master) return null;
+            Component best = null;
+            float bestD = 4f;
+            for (int i = 0; i < _npcs.Count; i++)
+            {
+                Component ai = _npcs[i];
+                if (ai == null) continue;
+                float d = Flat(ai.transform.position - at);
+                if (d > bestD) continue;
+                bestD = d;
+                best = ai;
+            }
+            return best;
+        }
+
+        /// <summary>One man, held on one station. Returns when he was last put
+        /// back on it, which is what decides whether he is still settling into
+        /// the standing clip or already at work.</summary>
+        static float Stand(Component ai, Vector3 at, float yaw, bool master,
+                           float since, float now, float phase)
+        {
+            if (ai == null) return 0f;
+            // Only a WALK costs him the standing clip. A man nudged half a pace
+            // is pushed back without being sent to the back of the queue for
+            // it, or two crewmen leaning on each other would keep each other in
+            // the settling idle for good.
+            if (master && Plant(ai, at, yaw) > WalkedOff) since = 0f;
+            if (since <= 0f) since = now;
+            bool settled = now - since >= SettleSeconds;
+            if (master) Drive(ai, at, settled ? WorkState() : MainIdle, yaw);
+            if (settled) Loop(ai, phase);
+            return since;
+        }
+
+        /// <summary>Units a man is out of place before he is pushed back at
+        /// all, and the distance above which the push counts as a walk.</summary>
+        const float StationSlack = 1.2f;
+        const float WalkedOff = 4f;
+
+        /// <summary>Master only: on the station, facing the hull, with the
+        /// game's idle logic held off him. Returns how far he had to be
+        /// carried.</summary>
+        static float Plant(Component ai, Vector3 at, float yaw)
+        {
+            Quiet(ai);
+            Transform t = ai.transform;
+            float away = Flat(t.position - at);
+            bool sunk = Mathf.Abs(t.position.y - at.y) > 3f;
+            bool turned = Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, yaw)) > 10f;
+            if (away <= StationSlack && !sunk)
+            {
+                if (turned) t.rotation = Quaternion.Euler(0f, yaw, 0f);
+                return 0f;
+            }
+            // The agent is WARPED, not teleported: it holds a path of its own
+            // and would drag him back along it from wherever we dropped him.
+            NavMeshAgent agent = Agent(ai);
+            try
+            {
+                if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
+                {
+                    agent.ResetPath();
+                    agent.Warp(at);
+                }
+            }
+            catch { }
+            t.position = at;
+            t.rotation = Quaternion.Euler(0f, yaw, 0f);
+            return away;
+        }
+
+        /// <summary>Keep the vanilla idle logic off a posted man. NPC_AI2
+        /// .IdleStateAction queues its own intentions on every idle pass and
+        /// returns early while GetCalculatedPauseTime is positive, so a short
+        /// pause refreshed twice a second is the whole hold - the same one
+        /// NpcWar uses to keep a man in an aim pose.</summary>
+        static void Quiet(Component ai)
+        {
+            try
+            {
+                if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
+                if (_mPauseTime != null) _mPauseTime.Invoke(ai, new object[] { 1.4f });
+            }
+            catch { }
+        }
+
+        /// <summary>The state the crew works in. 10 is NPCMainState.Working -
+        /// what an NPC busy with something in front of him is in. A number the
+        /// installed game does not animate costs nothing: SwitchAnimationByStates
+        /// skips a CrossFade whose clip does not exist (CONFIRMED IL), the man
+        /// keeps the standing clip he was settled into, and he still does not
+        /// move.</summary>
+        static int WorkState()
+        {
+            if (_workStateBroken) return MainIdle;
+            return _cfgWorkState == null ? MainWorking
+                : Mathf.Clamp(_cfgWorkState.Value, 0, 12);
+        }
+
+        // A state the game writes and then takes back is not a pose, it is a
+        // packet storm: every attempt is an RPC to every player in the room.
+        // Twelve in a row that do not stick and the crew keeps the plain
+        // standing idle for the rest of the session.
+        //
+        // ONCE IT HAS STUCK IT IS NEVER GIVEN UP AGAIN. The counter is there to
+        // catch a build whose NPCs do not know this state at all; a firefight at
+        // the battery also knocks a man out of it, over and over, and that must
+        // not be read as the same thing.
+        static int _workStateMisses;
+        static bool _workStateHeld;
+        static bool _workStateBroken;
+
+        /// <summary>NPC_AI2.SetStateWithAnimAndSync(position, main, additional,
+        /// pose, walk point index, use temporary points, temporary task, rotY)
+        /// with the game's own enum types built from the numbers. Sent only
+        /// when the man is not already in that state: every call is an RPC to
+        /// every player in the room and restarts the clip.</summary>
+        static void Drive(Component ai, Vector3 at, int main, float yaw)
+        {
+            // Without MainState there is no way to tell whether the state took,
+            // and a state re-sent every half second is an RPC storm. The man is
+            // planted and paused either way, which is most of the order.
+            if (!Look() || _mStateSync == null || _fMainState == null) return;
+            bool work = main != MainIdle;
+            if (IntField(ai, _fMainState, -1) == main
+                && IntField(ai, _fAddState, -1) == AddEmpty
+                && IntField(ai, _fPoseState, -1) == PoseStand)
+            {
+                if (work) { _workStateMisses = 0; _workStateHeld = true; }
+                return;
+            }
+            if (work && !_workStateHeld && ++_workStateMisses >= 12)
+            {
+                _workStateBroken = true;
+                RevivalPlugin.L.LogWarning("ArtyBattery: state " + main + " does not "
+                    + "hold on this build - the crew keeps the standing idle. It still "
+                    + "stands at the gun and still does not move.");
+                return;
+            }
+            try
+            {
+                bool useTemp = _fUseTemp == null || !(_fUseTemp.GetValue(ai) is bool)
+                    || (bool)_fUseTemp.GetValue(ai);
+                int task = IntField(ai, _fTempTask, 2);
+                _mStateSync.Invoke(ai, new object[] {
+                    at, Arg(_mStateSync, 1, main), Arg(_mStateSync, 2, AddEmpty),
+                    Arg(_mStateSync, 3, PoseStand), Arg(_mStateSync, 4, -1), useTemp,
+                    Arg(_mStateSync, 6, task), yaw });
+            }
+            catch (Exception ex)
+            {
+                if (_stateWarned) return;
+                _stateWarned = true;
+                RevivalPlugin.L.LogWarning("ArtyBattery: a crewman could not be put "
+                    + "into state " + main + " ("
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message)
+                    + ") - the crew stands at the gun without the working pose.");
+            }
+        }
+
+        static object Arg(MethodInfo m, int index, int value)
+        {
+            ParameterInfo[] ps = m.GetParameters();
+            if (index >= ps.Length) return value;
+            Type t = ps[index].ParameterType;
+            return t.IsEnum ? Enum.ToObject(t, value) : (object)value;
+        }
+
+        /// <summary>
+        /// The picture, on every client: if the state alone leaves the man in a
+        /// plain standing idle, a clip that LOOKS like work is looped over him
+        /// here. Nothing is invented - only a clip the model already carries is
+        /// played, it is found by name in the man's own animation set, and a
+        /// model that carries none leaves him standing, which is still exactly
+        /// what the order asked for: he does not move.
+        ///
+        /// The two men are given different phases of the same clip, or a
+        /// battery would be two identical puppets working in lockstep.
+        /// </summary>
+        static void Loop(Component ai, float phase)
+        {
+            try
+            {
+                Component anim = AnimationOf(ai);
+                if (anim == null) return;
+                string clip = WorkClip(anim);
+                if (clip == null) return;
+                object playing = _mIsPlaying == null ? null
+                    : _mIsPlaying.Invoke(anim, new object[] { clip });
+                if (playing is bool && (bool)playing) return;
+                object state = _mClipOf == null ? null
+                    : _mClipOf.Invoke(anim, new object[] { clip });
+                if (state == null) return;
+                LookAtState(state);
+                if (_pWrapMode != null && _loopWrap != null)
+                    _pWrapMode.SetValue(state, _loopWrap, null);
+                if (_mCrossFade != null)
+                    _mCrossFade.Invoke(anim, new object[] { clip, 0.35f });
+                else if (_mPlay != null) _mPlay.Invoke(anim, new object[] { clip });
+                // ... and out of step with the other man. Set AFTER the fade is
+                // started: CrossFade restarts the clip at zero.
+                if (phase > 0f && _pNormalizedTime != null)
+                    _pNormalizedTime.SetValue(state, phase, null);
+            }
+            catch { }
+        }
+
+        // The words a clip name is judged by, best first. The game's own NPCs
+        // do chores - NPCMainState has a Working state of its own - so the set
+        // carries something; which name it wears is data we cannot read from
+        // here, and the chosen one goes into the log.
+        static readonly string[] WorkWords = {
+            "work", "repair", "craft", "hammer", "weld", "dig", "cook",
+            "gather", "berr", "bush", "harvest", "pick", "search", "loot"
+        };
+
+        // ... and what is never work, whatever else the name says. "die" is
+        // deliberately not in the list: it is a substring of "soldier".
+        static readonly string[] NotWork = {
+            "death", "dead", "hit", "shoot", "fire", "reload", "aim",
+            "walk", "run", "crawl", "swim", "jump", "fall", "wound", "attack",
+            "remove", "get_", "throw", "sleep", "guitar", "regen", "melee",
+            "punch", "kick", "hook", "jab", "butt", "cough", "door"
+        };
+
+        static string _workClip;
+        static bool _workClipLooked;
+
+        /// <summary>The clip the crew works in, decided once for the whole
+        /// session off the first animation set we are shown.</summary>
+        static string WorkClip(Component anim)
+        {
+            if (_workClipLooked)
+                return _workClip != null && Has(anim, _workClip) ? _workClip : null;
+
+            string want = _cfgWorkClip == null ? "" : _cfgWorkClip.Value.Trim();
+            if (want == "-")
+            {
+                _workClipLooked = true;
+                RevivalPlugin.L.LogInfo("ArtyBattery: CrewWorkClip is \"-\" - the crew "
+                    + "stands at the gun in whatever the work state gives it.");
+                return null;
+            }
+            if (want.Length > 0)
+            {
+                _workClipLooked = true;
+                _workClip = Has(anim, want) ? want : null;
+                if (_workClip == null)
+                    RevivalPlugin.L.LogWarning("ArtyBattery: no clip \"" + want
+                        + "\" on the crew's model - the men stand still instead.");
+                return _workClip;
+            }
+
+            System.Collections.IEnumerable states = anim as System.Collections.IEnumerable;
+            if (states == null) return null;
+            int best = WorkWords.Length;
+            int seen = 0;
+            bool readable = true;
+            foreach (object state in states)
+            {
+                LookAtState(state);
+                if (_pStateName == null) { readable = false; break; }
+                string name = _pStateName.GetValue(state, null) as string;
+                if (name == null) continue;
+                seen++;
+                int rank = Rank(name);
+                if (rank < 0 || rank >= best) continue;
+                best = rank;
+                _workClip = name;
+            }
+            if (!readable)
+            {
+                // The set is there but its states will not tell us their names:
+                // asking again every half second would only repeat that.
+                _workClipLooked = true;
+                _workClip = null;
+                return null;
+            }
+            if (seen == 0) return null;          // an empty set: ask again later
+            _workClipLooked = true;
+            if (_workClip == null)
+                RevivalPlugin.L.LogInfo("ArtyBattery: none of the " + seen + " clips on "
+                    + "the crew's model reads like work - the men stand still at the "
+                    + "gun. Artillery/CrewWorkClip names one by hand.");
+            else
+                RevivalPlugin.L.LogInfo("ArtyBattery: the crew works the clip \""
+                    + _workClip + "\" (" + seen + " clips on the model).");
+            return _workClip;
+        }
+
+        /// <summary>Where a clip name stands in <see cref="WorkWords"/>, or -1
+        /// when it is no kind of work at all.</summary>
+        static int Rank(string name)
+        {
+            string lower = name.ToLowerInvariant();
+            for (int i = 0; i < NotWork.Length; i++)
+                if (lower.IndexOf(NotWork[i], StringComparison.Ordinal) >= 0) return -1;
+            for (int i = 0; i < WorkWords.Length; i++)
+                if (lower.IndexOf(WorkWords[i], StringComparison.Ordinal) >= 0) return i;
+            return -1;
+        }
+
+        static bool Has(Component anim, string clip)
+        {
+            try
+            {
+                return _mClipOf != null
+                    && _mClipOf.Invoke(anim, new object[] { clip }) != null;
+            }
+            catch { return false; }
+        }
+
         // -------------------------------------------------------------- drone
 
-        static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 300f), 40f, 1500f); }
+        static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 600f), 40f, 1500f); }
+
+        /// <summary>How far a bullet is allowed to reach the drone. It used to
+        /// be a flat 600 m, which was a third again as far as the old 240-300 m
+        /// ring; at a 600 m ring the same number would put the drone exactly on
+        /// the edge for a player standing at his own gun, and the counterplay
+        /// that was shipped with the drone's three hit points would be gone for
+        /// the settlement it circles. So it follows the orbit and keeps a
+        /// settlement's width on top of it.</summary>
+        static float ShootReach() { return Mathf.Max(600f, Orbit() + 200f); }
 
         // The clock the drones actually fly on: the shared one, made smooth.
         static float _flightClock;
@@ -766,7 +1255,8 @@ namespace NextDayRevival
                 // THE TERRAIN, NOT WHAT IS STANDING ON IT. GroundY casts a ray
                 // with no layer mask, so a roof, a truck or a treetop under the
                 // orbit answers as "ground" and the drone hops over every
-                // building it passes - at 240 m radius it passes several a lap.
+                // building it passes - even the old 240 m ring passed several a
+                // lap, and a 600 m one crosses more ground still.
                 // TerrainHeight reads the height data, which is the ground and
                 // nothing else, costs no ray at all, and is the same number
                 // away from every player (E-059). The ray is only the fallback
@@ -806,7 +1296,7 @@ namespace NextDayRevival
             // The two distances differ by a tenth on purpose. A single threshold
             // is a coin toss for a player standing exactly at it: the model is
             // built and destroyed on alternate frames, and the drone flickers.
-            float range = Mathf.Max(100f, F(_cfgModelRange, 800f));
+            float range = Mathf.Max(100f, F(_cfgModelRange, 1000f));
             float d = havePlayer ? Flat(p.DroneAt - mine) : float.MaxValue;
             bool near = p.DroneModel != null ? d <= range * 1.1f : d <= range;
             if (!near)
@@ -894,7 +1384,7 @@ namespace NextDayRevival
         {
             if (!Shootable) return;
             Post best = null;
-            float nearest = 600f;
+            float nearest = ShootReach();
             direction.Normalize();
             for (int i = 0; i < _posts.Count; i++)
             {
@@ -918,7 +1408,7 @@ namespace NextDayRevival
             Vector3 delta = at - from;
             distance = Vector3.Dot(delta, direction);
             float radius = Mathf.Clamp(F(_cfgModelScale, 10f) * 0.14f, 0.4f, 4f);
-            if (distance < 1f || distance > 600f
+            if (distance < 1f || distance > ShootReach()
                 || (delta - direction * distance).sqrMagnitude > radius * radius) return false;
             // World geometry blocks fire. Start past the camera/body, and stop
             // at the airframe's near surface rather than its centre.
@@ -1214,6 +1704,18 @@ namespace NextDayRevival
         static FieldInfo _fOptions, _fMyFraction, _fHated;
         static bool _looked;
 
+        // The posted crew. NPCMainState: Idle 0 ... Working 10.
+        // NPCAdditionalState: Empty 0. NPCPoseState: Normal 0.
+        const int MainIdle = 0;
+        const int MainWorking = 10;
+        const int AddEmpty = 0;
+        const int PoseStand = 0;
+
+        static FieldInfo _fMainState, _fAddState, _fPoseState, _fUseTemp, _fTempTask;
+        static FieldInfo _fNavAgent;
+        static MethodInfo _mStateSync, _mClearIntentions, _mPauseTime;
+        static bool _stateWarned;
+
         static bool Look()
         {
             if (_looked) return _npcType != null;
@@ -1237,7 +1739,113 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogWarning("ArtyBattery: NPCMainOptions.MyFraction or "
                     + "HatedFractions missing - the crew keeps the configured side and "
                     + "only players are spotted.");
+
+            // ... and what it takes to post the two men at the vehicle.
+            _fMainState = AccessTools.Field(_npcType, "MainState");
+            _fAddState = AccessTools.Field(_npcType, "AdditionalState");
+            _fPoseState = AccessTools.Field(_npcType, "PoseState");
+            _fUseTemp = AccessTools.Field(_npcType, "_useTemporaryWalkPoints");
+            _fTempTask = AccessTools.Field(_npcType, "TemporaryTask");
+            _fNavAgent = AccessTools.Field(_npcType, "_navAgent");
+            if (_fNavAgent != null && !typeof(NavMeshAgent).IsAssignableFrom(_fNavAgent.FieldType))
+                _fNavAgent = null;
+            _mStateSync = AccessTools.Method(_npcType, "SetStateWithAnimAndSync", null, null);
+            _mClearIntentions = AccessTools.Method(_npcType, "ClearIntentions",
+                Type.EmptyTypes, null);
+            _mPauseTime = AccessTools.Method(_npcType, "SetPauseTime",
+                new Type[] { typeof(float) }, null);
+            if (_mStateSync == null || _mPauseTime == null)
+                RevivalPlugin.L.LogWarning("ArtyBattery: NPC_AI2.SetStateWithAnimAndSync "
+                    + "or SetPauseTime missing - the crew cannot be held at the gun and "
+                    + "walks the ring its squad was given.");
             return true;
+        }
+
+        static int IntField(Component ai, FieldInfo f, int fallback)
+        {
+            if (ai == null || f == null) return fallback;
+            try
+            {
+                object v = f.GetValue(ai);
+                return v == null ? fallback : Convert.ToInt32(v);
+            }
+            catch { return fallback; }
+        }
+
+        static NavMeshAgent Agent(Component ai)
+        {
+            if (ai == null || !Look() || _fNavAgent == null) return null;
+            try { return _fNavAgent.GetValue(ai) as NavMeshAgent; }
+            catch { return null; }
+        }
+
+        // The legacy Animation component the game's NPCs are animated with
+        // (NPC_AI2.SwitchAnimationByStates calls Animation.CrossFade and
+        // Animation.Blend). build.ps1 references no AnimationModule, so the
+        // type is reached by name - once, and then cached like every other.
+        static Type _animType;
+        static MethodInfo _mIsPlaying, _mCrossFade, _mPlay, _mClipOf;
+        static PropertyInfo _pStateName, _pWrapMode, _pNormalizedTime;
+        static object _loopWrap;
+        static bool _animLooked;
+        static bool _animWarned;
+
+        /// <summary>The man's own animation set, or null when this build keeps
+        /// its NPCs on something else - in which case the crew simply stands.</summary>
+        static Component AnimationOf(Component ai)
+        {
+            if (ai == null) return null;
+            if (!_animLooked)
+            {
+                _animLooked = true;
+                _animType = RevivalPlugin.TypeByName("UnityEngine.Animation");
+                if (_animType != null)
+                {
+                    _mIsPlaying = AccessTools.Method(_animType, "IsPlaying",
+                        new Type[] { typeof(string) }, null);
+                    _mCrossFade = AccessTools.Method(_animType, "CrossFade",
+                        new Type[] { typeof(string), typeof(float) }, null);
+                    _mPlay = AccessTools.Method(_animType, "Play",
+                        new Type[] { typeof(string) }, null);
+                    _mClipOf = AccessTools.Method(_animType, "get_Item",
+                        new Type[] { typeof(string) }, null);
+                }
+                if (_animType == null || _mClipOf == null)
+                    RevivalPlugin.L.LogWarning("ArtyBattery: UnityEngine.Animation or its "
+                        + "clip lookup is missing - the crew stands at the gun without a "
+                        + "working loop.");
+            }
+            if (_animType == null || _mClipOf == null) return null;
+            try { return ai.GetComponentInChildren(_animType); }
+            catch { return null; }
+        }
+
+        /// <summary>The three AnimationState members this needs, read off the
+        /// first state object the set hands out.</summary>
+        static void LookAtState(object state)
+        {
+            if (state == null || _pStateName != null) return;
+            try
+            {
+                Type t = state.GetType();
+                _pStateName = t.GetProperty("name", BindingFlags.Public | BindingFlags.Instance);
+                _pWrapMode = t.GetProperty("wrapMode", BindingFlags.Public | BindingFlags.Instance);
+                _pNormalizedTime = t.GetProperty("normalizedTime",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (_pWrapMode != null)
+                {
+                    // WrapMode.Loop. By name, because a number is a guess.
+                    try { _loopWrap = Enum.Parse(_pWrapMode.PropertyType, "Loop"); }
+                    catch { _loopWrap = null; }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_animWarned) return;
+                _animWarned = true;
+                RevivalPlugin.L.LogWarning("ArtyBattery: AnimationState cannot be read ("
+                    + ex.Message + ") - the crew stands still instead of working.");
+            }
         }
 
         static object Options(Component ai)
@@ -1388,12 +1996,8 @@ namespace NextDayRevival
         // ---------------------------------------------------------- the map
 
         /// <summary>
-        /// Freeze what the map shows the moment it is opened.
-        ///
-        /// The order was explicit that this does not have to be live - "the last
-        /// position as the map was opened" - and taking it at its word is what
-        /// keeps the overlay cheap: the snapshot is a handful of vectors, and a
-        /// repaint touches no reflection at all.
+        /// Refresh visible batteries and sightings at the map polling rate.
+        /// Icons follow the existing flight state on every repaint.
         /// </summary>
         static void MapSnapshot(float now)
         {
@@ -1403,20 +2007,22 @@ namespace NextDayRevival
             Camera cam;
             Vector2 world, map;
             bool open = MapTools.Context(out manager, out texture, out cam, out world, out map);
-            if (open == _mapOpen) return;
+            if (!open)
+            {
+                if (_mapOpen) _marks.Clear();
+                _mapOpen = false;
+                return;
+            }
             _mapOpen = open;
-            if (!open) return;
 
             _marks.Clear();
-            float r = Orbit();
             for (int i = 0; i < _posts.Count; i++)
             {
                 Post p = _posts[i];
                 if (!p.DroneUp) continue;
                 Mark m = new Mark();
-                m.Drone = p.DroneAt;
+                m.Source = p;
                 m.Centre = p.Centre;
-                m.Radius = r;
                 m.Spotted = p.LocalSpotAt > 0f && now - p.LocalSpotAt < 90f;
                 m.SpotPoint = p.LocalSpotPoint;
                 _marks.Add(m);
@@ -1424,7 +2030,7 @@ namespace NextDayRevival
         }
 
         // IMGUI drone marks are not visible to the native-widget scan. Reserve
-        // the same frozen snapshot before patrol and convoy names are placed.
+        // the same icon bounds before patrol and convoy names are placed.
         internal static void ReserveMapLabels(MapLabels labels, Component texture,
             Camera camera, Vector2 world, Vector2 map)
         {
@@ -1432,16 +2038,11 @@ namespace NextDayRevival
             for (int i = 0; i < _marks.Count; i++)
             {
                 Mark mark = _marks[i];
+                if (!mark.Source.DroneUp) continue;
                 if (Mathf.Abs(mark.Centre.x) > world.x * .75f || Mathf.Abs(mark.Centre.z) > world.y * .75f) continue;
-                Vector2 centre, east, north, point;
-                if (!MapTools.WorldToGui(mark.Centre, texture, camera, world, map, out centre)
-                    || !MapTools.WorldToGui(mark.Centre + new Vector3(mark.Radius, 0f, 0f),
-                        texture, camera, world, map, out east)
-                    || !MapTools.WorldToGui(mark.Centre + new Vector3(0f, 0f, mark.Radius),
-                        texture, camera, world, map, out north)) continue;
-                labels.BlockOrbit(centre, Mathf.Abs(east.x - centre.x), Mathf.Abs(north.y - centre.y));
-                if (MapTools.WorldToGui(mark.Drone, texture, camera, world, map, out point))
-                    labels.BlockScreen(new Rect(point.x - 6f, point.y - 6f, 12f, 12f));
+                Vector2 point;
+                if (MapTools.WorldToGui(mark.Source.DroneAt, texture, camera, world, map, out point))
+                    labels.BlockScreen(DroneIconRect(point));
                 if (mark.Spotted && MapTools.WorldToGui(mark.SpotPoint, texture, camera, world, map, out point))
                     labels.BlockScreen(new Rect(point.x - 10f, point.y - 10f, 20f, 20f));
             }
@@ -1485,64 +2086,23 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// One battery on the map: the orbit as SEPARATE dashes and the drone
-        /// itself as a small block, both in the Locator red the patrol border
-        /// already uses, plus the point where this player was last seen from the
-        /// air. Dashes rather than a ring on purpose - that is the house style
-        /// for every border drawn on this map, and a solid circle reads as a
-        /// zone the game itself drew.
+        /// A compact quadcopter follows the drone, plus the point where this
+        /// player was last seen from the air. Icon size stays fixed on screen.
         /// </summary>
         static void DrawMark(Mark m, Component texture, Camera cam,
                              Vector2 world, Vector2 map, Rect clip)
         {
+            if (!m.Source.DroneUp) return;
             // A drone whose settlement is not on this map at all (an interior
             // scene has its own, much smaller map) is not drawn.
             if (Mathf.Abs(m.Centre.x) > world.x * 0.75f
                 || Mathf.Abs(m.Centre.z) > world.y * 0.75f) return;
 
-            Vector2 centre, rim, dot;
-            if (!MapTools.WorldToGui(m.Centre, texture, cam, world, map, out centre)) return;
-            if (!MapTools.WorldToGui(m.Centre + new Vector3(m.Radius, 0f, 0f),
-                                     texture, cam, world, map, out rim)) return;
-            float hw = Mathf.Abs(rim.x - centre.x);
-            if (hw < 3f) return;
-
-            Color red = new Color(0.72f, 0.13f, 0.125f, 0.95f);   // Locator red
-
-            // The orbit: 30 dashes of two dots each, with the gap between them
-            // left empty.
-            GUI.color = red;
-            Vector2 c = centre - clip.position;
-            float squash = 1f;
-            Vector2 rimZ;
-            if (MapTools.WorldToGui(m.Centre + new Vector3(0f, 0f, m.Radius),
-                                    texture, cam, world, map, out rimZ))
+            Vector2 dot;
+            if (MapTools.WorldToGui(m.Source.DroneAt, texture, cam, world, map, out dot))
             {
-                float hh = Mathf.Abs(rimZ.y - centre.y);
-                if (hh > 1f) squash = hh / hw;
-            }
-            for (int i = 0; i < 30; i++)
-            {
-                float a0 = i * Mathf.PI * 2f / 30f;
-                for (int k = 0; k < 2; k++)
-                {
-                    float a = a0 + k * 0.035f;
-                    float x = c.x + Mathf.Cos(a) * hw;
-                    float y = c.y + Mathf.Sin(a) * hw * squash;
-                    GUI.DrawTexture(new Rect(x - 1f, y - 1f, 2f, 2f), Px());
-                }
-            }
-
-            // The drone itself, where it was when the map went up.
-            if (MapTools.WorldToGui(m.Drone, texture, cam, world, map, out dot))
-            {
-                Vector2 d = dot - clip.position;
-                GUI.color = new Color(0.05f, 0.05f, 0.05f, 0.85f);
-                GUI.DrawTexture(new Rect(d.x - 5f, d.y - 5f, 10f, 10f), Px());
-                GUI.color = red;
-                GUI.DrawTexture(new Rect(d.x - 4f, d.y - 4f, 8f, 8f), Px());
-                GUI.color = new Color(1f, 0.92f, 0.85f, 0.95f);
-                GUI.DrawTexture(new Rect(d.x - 1f, d.y - 1f, 2f, 2f), Px());
+                GUI.color = Color.white;
+                GUI.DrawTexture(DroneIconRect(dot - clip.position), DroneIcon());
             }
 
             // Where the drone last had this player. A cross inside a ring, so it
@@ -1555,6 +2115,55 @@ namespace NextDayRevival
             GUI.DrawTexture(new Rect(q.x - 9f, q.y - 9f, 18f, 18f), Ring());
             GUI.DrawTexture(new Rect(q.x - 6f, q.y - 1f, 13f, 2f), Px());
             GUI.DrawTexture(new Rect(q.x - 1f, q.y - 6f, 2f, 13f), Px());
+        }
+
+        static Rect DroneIconRect(Vector2 centre)
+        {
+            return new Rect(centre.x - DroneIconSize * 0.5f,
+                centre.y - DroneIconSize * 0.5f, DroneIconSize, DroneIconSize);
+        }
+
+        // A top-down quadcopter: four rotors, diagonal arms and a narrow body.
+        // Generate once at double display resolution for clean small edges.
+        static bool DroneInk(float x, float y)
+        {
+            float ax = Mathf.Abs(x), ay = Mathf.Abs(y);
+            float rotor = (ax - 9f) * (ax - 9f) + (ay - 9f) * (ay - 9f);
+            return (ax <= 2.5f && ay <= 5f)
+                || (Mathf.Abs(ax - ay) <= 1.5f && ax <= 9f && ay <= 9f)
+                || (rotor >= 6.25f && rotor <= 20.25f);
+        }
+
+        static Texture2D DroneIcon()
+        {
+            if (_droneIcon != null) return _droneIcon;
+            const int size = 36;
+            Color[] pixels = new Color[size * size];
+            Color ink = new Color(0.72f, 0.13f, 0.125f, 0.95f); // Locator red
+            Color outline = new Color(1f, 0.95f, 0.85f, 0.95f);
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = x - (size - 1) * 0.5f;
+                    float dy = y - (size - 1) * 0.5f;
+                    if (DroneInk(dx, dy)) pixels[y * size + x] = ink;
+                    else
+                    {
+                        // A pale one-pixel outline keeps the red silhouette
+                        // legible over both dark terrain and map roads.
+                        for (int oy = -1; oy <= 1; oy++)
+                            for (int ox = -1; ox <= 1; ox++)
+                                if (DroneInk(dx + ox, dy + oy))
+                                    pixels[y * size + x] = outline;
+                    }
+                }
+            _droneIcon = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            _droneIcon.name = "NDR_ArtyDroneMapIcon";
+            _droneIcon.wrapMode = TextureWrapMode.Clamp;
+            _droneIcon.filterMode = FilterMode.Bilinear;
+            _droneIcon.SetPixels(pixels);
+            _droneIcon.Apply();
+            return _droneIcon;
         }
 
         static Rect Intersect(Rect a, Rect b)

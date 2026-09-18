@@ -527,6 +527,17 @@ namespace NextDayRevival
             Add(Make("technical", TechnicalText.Label(),
                 Technical.Prefab, false, false, Technical.Umbauen,
                 TechnicalNetwork.SpawnData));
+            // The drivable howitzer: the settlement gun's own model on the same
+            // six-wheel donor the Ural uses. Same "custom prefab plus rebuild"
+            // shape again, so the admin menu, the registry and anything that
+            // spawns BY KIND get it without knowing it carries a 122 mm gun.
+            // Like the technical it is NOT yet a composition/convoy vehicle
+            // type - RevivalComposition.Load still refuses everything outside
+            // tank/btr/ural - and that is deliberate: a convoy howitzer is a
+            // convoy question, not a vehicle one.
+            Add(Make("arty", ArtyVehicleText.Label(),
+                ArtyVehicle.Prefab, false, false, ArtyVehicle.Umbauen,
+                ArtyVehicleNetwork.SpawnData));
         }
 
         static Entry Make(string kind, string label, string prefab, bool isTank,
@@ -629,6 +640,71 @@ namespace NextDayRevival
                     + " отсутствует в багажнике, рюкзаке и разгрузке",
                          "No ammunition - item " + itemId
                     + " missing from trunk, backpack and vest");
+        }
+
+        /// <summary>Shown the moment a player takes hold of the gun. It names
+        /// every control the place has, because the field report of 2026-09-18
+        /// was a player standing at a machine gun that he could not aim, fire
+        /// or reload - and nothing on the screen said how.</summary>
+        internal static string AtGun()
+        {
+            return Loc.T("Пулемёт: ЛКМ - огонь, R - перезарядка, G - отойти",
+                         "Machine gun: LMB fire, R reload, G stand down");
+        }
+
+        /// <summary>Shown while a player stands in the gunner's place with his
+        /// hands off the gun. <paramref name="key"/> is the configured key.</summary>
+        internal static string ManHint(string key)
+        {
+            return Loc.T(key + " - встать к пулемёту",
+                         key + " - man the machine gun");
+        }
+
+        /// <summary>The gun could not take the view, because something else -
+        /// a drone, the BTR turret - is looking through the camera.</summary>
+        internal static string CamBusy()
+        {
+            return Loc.T("Камера занята - пулемёт сейчас не навести",
+                         "The camera is in use - the gun cannot be aimed now");
+        }
+
+        internal static string Reloading()
+        {
+            return Loc.T("Заряжание ленты", "Loading belt");
+        }
+
+        /// <summary>The rounds left in the belt, under the crosshair.</summary>
+        internal static string Belt(int have, int max)
+        {
+            return Loc.T("Лента " + have + "/" + max, "Belt " + have + "/" + max);
+        }
+    }
+
+    /// <summary>
+    /// The player-facing lines of the drivable howitzer (RevivalArtyVehicle.cs).
+    ///
+    /// Here for the same mechanical reason the technical's lines are:
+    /// RevivalArtyVehicle.cs is machine-written, ASCII and BOM-less because
+    /// build.ps1 requires BOM-less sources, so real Cyrillic cannot live in it.
+    /// This file already carries Cyrillic and is already that feature's other
+    /// seam (the VehicleRegistry entry above).
+    ///
+    /// The gun itself says nothing here: standing at it, loading it and aiming
+    /// it are the settlement gun's own prompts (RevivalMortar.cs), because it
+    /// IS the settlement gun's fire control.
+    /// </summary>
+    public static class ArtyVehicleText
+    {
+        /// <summary>The registry label an admin or the route editor sees.</summary>
+        internal static string Label()
+        {
+            return Loc.T("Гаубица (3 места)", "Howitzer (3 seats)");
+        }
+
+        internal static string Spawned()
+        {
+            return Loc.T("Гаубица создана - подойдите к орудию сзади",
+                         "Howitzer spawned - walk to the gun deck at the rear");
         }
     }
 }

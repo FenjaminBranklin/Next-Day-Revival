@@ -150,6 +150,12 @@ namespace NextDayRevival
             public int Count = 6;
             public float IntervalMinHours, IntervalMaxHours;
             public float PatrolMinutes = 120f;
+            /// <summary>WHICH MAP the landing zone and its arrow lie on, as the
+            /// scene name. Empty means the home map - every landing authored
+            /// before the game's other regions were reachable is there. A
+            /// landing never flies in a region it does not belong to; see
+            /// Revival.MapScene.cs.</summary>
+            public string Scene = "";
             public List<RevivalComposition.CrewMan> Squad =
                 new List<RevivalComposition.CrewMan>();
             // 6.18: the bends of a curved arrow, between tail and head, in the
@@ -159,6 +165,9 @@ namespace NextDayRevival
 
             public Vector3 Tail { get { return new Vector3(TailX, 0f, TailZ); } }
             public Vector3 Head { get { return new Vector3(HeadX, 0f, HeadZ); } }
+
+            /// <summary>Is this landing on the map that is loaded?</summary>
+            public bool Here { get { return MapScene.Owns(Scene); } }
 
             /// <summary>Tail, every bend, head - the line the squad walks.</summary>
             public List<Vector3> Arrow()
@@ -208,6 +217,10 @@ namespace NextDayRevival
                 {
                     Landing d = _landings[i];
                     if (!d.Enabled || d.IntervalMaxHours <= 0f) continue;
+                    // A landing zone of another region is not in this world. The
+                    // clock keeps running, so a landing that came due while the
+                    // admin was elsewhere flies shortly after the return.
+                    if (!d.Here) continue;
                     if (Busy(d)) { d.NextSpawn = -1f; continue; }
                     if (d.NextSpawn < 0f)
                     {
@@ -262,12 +275,17 @@ namespace NextDayRevival
                                  "only the master client starts troop landings");
                 Load(false);
                 List<Landing> usable = new List<Landing>();
+                int here = 0;
                 for (int i = 0; i < _landings.Count; i++)
+                {
+                    if (!_landings[i].Here) continue;   // another region's landing zone
+                    here++;
                     if (_landings[i].Enabled && !Busy(_landings[i])) usable.Add(_landings[i]);
+                }
                 if (usable.Count == 0)
-                    return _landings.Count == 0
-                        ? Loc.T("нет десантных точек (редактор -> Troop landings)",
-                                "no troop landings (editor -> Troop landings)")
+                    return here == 0
+                        ? Loc.T("на этой карте нет десантных точек (редактор -> Troop landings)",
+                                "no troop landings on this map (editor -> Troop landings)")
                         : Loc.T("все десантные точки уже заняты или выключены",
                                 "every troop landing is busy or disabled");
                 Landing d = usable[UnityEngine.Random.Range(0, usable.Count)];
@@ -754,9 +772,12 @@ namespace NextDayRevival
                 // a BENT arrow adds one more column, "via" - the bends between
                 // tail and head as "x,z;x,z;..." - and a straight arrow still
                 // writes 22, so an older client keeps reading every line it used
-                // to read.
+                // to read. A landing on a map OTHER than the home one adds a
+                // 24th column, "scene": it is written only when it is needed, so
+                // a file of landings in the starting region keeps writing the
+                // same 22 or 23 columns it always did.
                 string[] c = raw.Split('\t');
-                if ((c.Length != 23 && c.Length != 22 && c.Length != 20)
+                if ((c.Length != 24 && c.Length != 23 && c.Length != 22 && c.Length != 20)
                     || c[0].Trim().Length == 0 || c[0].Length > 64)
                 { bad++; continue; }
                 string name = c[0].Trim();
@@ -778,6 +799,7 @@ namespace NextDayRevival
                     { bad++; continue; }
                     if (d.IntervalMaxHours > 0f && d.IntervalMinHours < 0.25f) d.IntervalMinHours = 0.25f;
                     if (c.Length > 22) ReadVia(d, c[22]);
+                    if (c.Length > 23) d.Scene = MapScene.Clean(c[23]);
                     byName[name] = d;
                     order.Add(d);
                 }
@@ -815,8 +837,10 @@ namespace NextDayRevival
             }
             _landings.Clear();
             _landings.AddRange(fresh);
+            int here = 0;
+            for (int i = 0; i < _landings.Count; i++) if (_landings[i].Here) here++;
             RevivalPlugin.L.LogInfo("Troops: " + _landings.Count + " troop landing(s) from "
-                + label + ".");
+                + label + ", " + here + " on this map (" + MapScene.Current + ").");
         }
 
         static Landing Find(string name)
