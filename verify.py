@@ -1444,17 +1444,28 @@ def check_arty_battery():
          2026-09-18). The stations are built in a level frame, because the hull
          itself is stood on the ground normal, and their ground ray walks past
          the gun's own hierarchy, because the barrel sweeps over both of them.
+      9. The drone must be in the air before the player has been there (order of
+         2026-09-18). The gun waits for loaded terrain; the orbit needs only the
+         settlement centre, so a settlement that is going to get a battery flies
+         its drone from the moment the level is loaded - and gives it up again
+         with the scene.
+     10. The crew stands at its station FROM THE FIRST FRAME, not after a lap in
+         the air (second field report 2026-09-18). Both stations are handed to
+         Crew, so no ring is drawn around a single point with half of it on the
+         vehicle, and Crew's own spawn ray walks past the carrier.
     """
     print("[16] Artilleriefahrzeug, Besatzung und Aufklaerungsdrohne (statisch)")
     bat_p = os.path.join(ROOT, "RevivalArtyBattery.cs")
     mortar_p = os.path.join(ROOT, "RevivalMortar.cs")
     plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
     sync_p = os.path.join(ROOT, "sync_public.py")
+    crew_p = os.path.join(ROOT, "Revival.Crew.cs")
     if not os.path.exists(bat_p):
         bad("RevivalArtyBattery.cs fehlt")
         return
     raw = io.open(bat_p, "rb").read()
     b = raw.decode("utf-8", "replace")
+    crew = io.open(crew_p, encoding="utf-8").read() if os.path.exists(crew_p) else ""
     s = io.open(mortar_p, encoding="utf-8").read() if os.path.exists(mortar_p) else ""
     plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
     sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
@@ -1641,6 +1652,24 @@ def check_arty_battery():
          and "Mathf.Abs(t.position.y - at.y) > StationRise" in b,
          "ein Mann ueber seiner Station wird heruntergeholt",
          "die Hoehentoleranz laesst einen schwebenden Mann schweben")
+    # 9: UND ZWAR SOFORT. Die Korrektur oben ist eine Heilung 1,5 s nach dem
+    # Spawn, und genau diese anderthalb Sekunden waren die zweite Feldmeldung
+    # vom 2026-09-18 ("davor fliegen sie erstmal ne runde"). Der Mann darf gar
+    # nicht erst in der Luft entstehen: Crew bekommt beide Stationen statt eines
+    # Punktes, um den es sonst blind einen 4,5er Ring legt, und Crews eigener
+    # Bodenstrahl beim Aufsetzen geht an der Wanne des Traegers vorbei, statt
+    # den Mann auf Deck oder Rohr zu stellen.
+    need("static Vector3 CrewGround(Vector3 position, Transform carrier," in crew
+         and "PartOfCarrier(go, carrier)" in crew,
+         "der Aufsetzstrahl der Besatzung geht am Fahrzeug vorbei",
+         "der Aufsetzstrahl nimmt den ersten Treffer - neben dem Fahrzeug ist "
+         "das die Wanne, und der Mann entsteht darauf")
+    need("wo[i] = CrewGround(wo[i], car.transform, 6f, 30f);" in crew,
+         "jeder Ausstiegspunkt wird so auf den Boden gezogen",
+         "die Ausstiegspunkte benutzen wieder den ungefilterten Strahl")
+    need("internal static GameObject DropSquadAt(Vector3 home, Vector3[] positions," in crew,
+         "ein Rufer kann seine eigenen geprueften Plaetze uebergeben",
+         "ohne diesen Weg wird jede Gruppe wieder auf einen Ring verteilt")
 
     # --- 4: the crew belongs to its settlement.
     # The hated list is COPIED, never shared: other parts of the toolkit
@@ -1650,9 +1679,11 @@ def check_arty_battery():
          and "_fHated.SetValue(opt, hated.Clone() as Array)" in b,
          "Besatzung uebernimmt die Fraktion der Siedlung (als Kopie)",
          "die Besatzung behaelt eine fremde Fraktion")
-    need("Crew.DropSquad(at, StationYaw(gun), 2, side, loadout)" in b,
-         "zwei Mann je Geschuetz: Schuetze und Drohnenfuehrer",
-         "die Besatzung wird nicht gesetzt")
+    need("Crew.DropSquadAt(at, posts, StationYaw(gun), side, loadout)" in b
+         and "new Vector3[] { Station(gun, true), Station(gun, false) }" in b,
+         "zwei Mann je Geschuetz, jeder gleich auf seiner eigenen Station",
+         "die Besatzung wird auf einen einzigen Punkt gesetzt - Crew legt dann "
+         "wieder einen Ring darum, und dessen halbe Seite ist das Fahrzeug")
     need("ArtyBattery.CrewHoldsGun" in s,
          "die Besatzung haelt das Visier, bis sie tot ist",
          "der Spieler kann das Geschuetz an der lebenden Besatzung vorbei bedienen")
@@ -1664,15 +1695,52 @@ def check_arty_battery():
     need("static void MapSnapshot(float now)" in b,
          "Kartenstand wird beim Oeffnen eingefroren",
          "die Drohnenposition auf der Karte ist nicht eingefroren")
-    need("new Color(0.72f, 0.13f, 0.125f" in b,
-         "Marker im Locator-Rot der Patrouillengrenze",
-         "der Drohnenmarker benutzt eine fremde Farbe")
+    # Das Symbol gehoert zur KARTE, nicht zum Overlay (Auftrag 2026-09-18: "ich
+    # haette die farbe gerne als grau/weiss wie in der og karten
+    # beschriftungen"). Vorher war es das Locator-Rot der Patrouillengrenze.
+    # Heller Rumpf, dunkler Umriss - ein heller Halo um eine helle Silhouette
+    # waere gar keine Silhouette.
+    need("new Color(0.88f, 0.87f, 0.83f" in b
+         and "new Color(0.12f, 0.11f, 0.09f" in b,
+         "Drohnensymbol im Grau/Weiss der Kartenbeschriftung",
+         "der Drohnenmarker ist nicht im Grau/Weiss der Kartenbeschriftung")
+
+    # --- 9: DIE DROHNE WARTET NICHT AUF DEN SPIELER (Auftrag 2026-09-18: "ich
+    # will das die drohne auch angezeigt wird ohne das man vorher bei dem
+    # settlement war"). Mortar.Place sieht jede Siedlung der Ebene ab dem ersten
+    # Frame, stellt das Geschuetz aber erst innerhalb von PlaceRange auf, weil
+    # die Bodensuche geladene TerrainCollider braucht (E-059). Haengt die
+    # Batterie allein am Geschuetz, erscheint die Drohne erst nach dem Besuch.
+    # Der Geisterposten fliegt dieselbe Bahn (gleiche Phase aus derselben
+    # Mitte), er bekommt aber keine Besatzung und keinen Feuerauftrag, und er
+    # muss mit der Szene verschwinden - sonst stehen wieder Kreise einer Ebene
+    # auf der Karte, die weg ist.
+    need("internal static void GunExpected(int settlementId, Component settlement" in b
+         and "p.Ghost = true;" in b,
+         "eine Siedlung ohne Geschuetz fliegt ihre Drohne trotzdem",
+         "die Drohne entsteht erst mit dem Geschuetz - sie erscheint dann erst "
+         "nach dem Besuch der Siedlung")
+    need("if (p.Ghost) return true;" in b,
+         "der Drohnenfuehrer einer unbesuchten Siedlung gilt als lebend",
+         "ohne Besatzung am nicht existierenden Geschuetz bleibt die Drohne am "
+         "Boden")
+    need("g.Site == null || now - g.SeenAtScan > GhostTimeout" in b,
+         "ein Geisterposten stirbt mit seiner Siedlung",
+         "die Geisterposten werden nicht abgeraeumt - die Karte behaelt Drohnen "
+         "einer Ebene, die weg ist")
+    need("DropGhost(settlementId);" in b,
+         "das aufgestellte Geschuetz uebernimmt die Bahn seines Geisterpostens",
+         "Geist und Posten wuerden zwei Drohnen um dieselbe Siedlung fliegen")
+    need("Aimed(_ghosts, from, direction, ref best, ref nearest);" in b,
+         "auch die Drohne einer unbesuchten Siedlung laesst sich abschiessen",
+         "eine sichtbare Drohne ohne Posten waere unverwundbar")
 
     # --- seams and the public repository.
     for seam in ("ArtyBattery.BindConfig", "ArtyBattery.Tick()", "ArtyBattery.Draw()"):
         need(seam in plug, "Seam " + seam,
              "Seam fehlt in RevivalPlugin.cs: " + seam)
-    for seam in ("ArtyBattery.GunRaised", "ArtyBattery.GunLost"):
+    for seam in ("ArtyBattery.GunRaised", "ArtyBattery.GunLost",
+                 "ArtyBattery.GunExpected"):
         need(seam in s, "Seam " + seam,
              "Seam fehlt in RevivalMortar.cs: " + seam)
     # sync_public.py belongs to the private repository only; in the public
@@ -1844,12 +1912,16 @@ def check_technical():
          LateUpdate. The game has no animation for a man at a pintle mount, and
          the animator rewrites every bone between Update and LateUpdate - a hand
          placed any earlier is back at the man's side before anything is drawn.
-      9. The standing place is the donor's own rear seat, not the top of the
-         bounding box, and the man stands one arm's length behind the grips.
-         Both are the 2026-09-18 field report (technicalbug.png): a bounding box
-         says nothing about what is actually there, so the station stood in the
-         air over the cabin, and a fraction of the vehicle's length put the man
-         inside his own weapon.
+      9. The station is MEASURED on the donor: its height is a ray dropped onto
+         the donor's own colliders, its place along the vehicle comes off the
+         rear edge, and the man stands one arm's length behind the grips - on
+         the mount's own bearing, every frame, because a man at a pintle walks
+         around it. Three of the four are field reports. technicalbug.png: a
+         bounding box says nothing about what is there, so the station stood in
+         the air over the cabin. technical.png: the donor's rear seat is inside
+         the cabin, so the weapon reached into the windscreen and stood between
+         the front seats, and a gunner rooted to one spot had the grips beside
+         him as soon as he turned.
      10. The place IS the gun: whoever is in it mans it without knowing a key,
          and the gun has a BELT with a reload on the game's own progress bar.
          The same report: "man kann auf dem gunner sitz weder aimen noch
@@ -1981,8 +2053,8 @@ def check_technical():
          and "root.InverseTransformPoint(" in t,
          "die Masse kommen aus den Meshes des Spenders",
          "die Aufbaumasse werden nicht am Fahrzeug gemessen")
-    need("CfgMountBack.Value * length" in t
-         and "CfgMountUp.Value * height" in t
+    need("CfgMountRear.Value * length" in t
+         and "CfgDeckHeight.Value * height" in t
          and "CfgSeatBack.Value * length" in t,
          "Lafette und Stehplatz sind Anteile der gemessenen Groesse",
          "die Aufbaupunkte stehen als feste Zahlen im Quelltext")
@@ -1990,22 +2062,28 @@ def check_technical():
          "Modelleinheiten werden in Meter umgerechnet",
          "die Groesse des MG haengt nicht an der gemessenen Fahrzeuglaenge")
 
-    # --- 7b: the standing place comes off the donor's own rear seat.
+    # --- 7b: the deck is a MEASURED SURFACE, and the seat is only the fallback.
     #
-    # The 2026-09-18 field report (technicalbug.png) is what this guards: the
-    # station used to stand on a FRACTION of the bounding box, with the height
-    # fraction at 1.00 - the top of that box, which is the highest point of the
-    # whole vehicle and not a surface anybody can stand on. Gun and gunner hung
-    # in the air above the cabin. A seat the game itself puts a passenger on is
-    # inside the body by construction, and the sit pose's own foot offset turns
-    # it into the floor.
+    # Two field reports, two wrong derivations, and this is what guards the
+    # third. technicalbug.png: the station stood on a FRACTION of the bounding
+    # box with the height fraction at 1.00 - the top of that box is the highest
+    # point of the whole vehicle, aerial included, so gun and gunner hung in the
+    # air over the cabin. technical.png: it stood on the donor's rear SEAT, and a
+    # jeep's rear seat is inside the cabin - "das geschuetz ist viel zu niedrig,
+    # geht durch die scheibe, ist zwischen den sitzen". A collider hit is neither
+    # guess: it is the surface a pintle could be bolted to.
+    need("static bool Oberflaeche(GameObject car, Vector3 min, Vector3 max," in t
+         and "Physics.RaycastAll(" in t
+         and "Gehoert(root, col.transform)" in t,
+         "die Standflaeche wird am Spender gemessen (Strahl von oben)",
+         "die Standflaeche wird nicht mehr am Fahrzeug gemessen - dann ist sie "
+         "wieder geraten, und geraten war sie schon zweimal falsch")
     need("static bool Stehplatz(Transform root, Transform seats, out Vector3 point)" in t
          and "FeetAboveSeat" in t
          and "seatPoint.y + FeetAboveSeat" in t,
-         "der Stehplatz wird aus dem Ruecksitz des Spenders abgeleitet",
-         "der Stehplatz haengt wieder an einem Anteil der Bauteilhuelle - "
-         "deren Oberkante ist keine Standflaeche, sondern der hoechste Punkt "
-         "des ganzen Fahrzeugs")
+         "ohne Treffer bleibt der Boden am Ruecksitz des Spenders",
+         "der Rueckfall auf den Ruecksitz fehlt - ein Spender ohne greifbare "
+         "Kollisionskoerper haette dann gar keine Standflaeche")
     need("TechnicalModel.StandOff() * unitsPerMetre" in t
          and "internal static float StandOff()" in t,
          "der Schuetze steht eine Armlaenge hinter den Griffen",
@@ -2037,6 +2115,26 @@ def check_technical():
          and "internal static string Reloading()" in u,
          "Bedienhinweis und Ladeanzeige stehen als Spielertext bereit",
          "die Hinweiszeilen des Schuetzen fehlen in RevivalUralTruck.cs")
+
+    # --- 7d: the station is a CIRCLE. A man at a pintle walks around it, so the
+    # gunner is placed behind the MOUNT'S bearing every late frame - after the
+    # mount is final and before his arms are solved onto the grips. The same
+    # report: "der spieler hat zwar die haende am mg beim grade ausgucken, aber
+    # sobald er dreht sieht es glitchy und falsch aus" - at ninety degrees the
+    # grips stood beside a man rooted to one spot, and the arm solver, which
+    # always reaches, dragged his arms across his chest after them.
+    need("static void Stellung(Station st, GameObject body, bool drehen)" in t
+         and "new Vector3(0f, 0f, -TechnicalModel.StandOff())" in t,
+         "der Schuetze steht bei jedem Schwenk hinter seiner Waffe",
+         "der Schuetze steht wieder fest auf einem Punkt - dann liegen die "
+         "Griffe beim Drehen neben ihm")
+    _late = t.find("internal static void LateAll()")
+    _stellung = t.find("if (!losgelassen) Stellung(st, body, selbst);", _late)
+    _hands = t.find("Hands(st, body, dt);", _late)
+    need(_late >= 0 and _stellung > _late and _hands > _stellung,
+         "erst die Lafette, dann der Mann, dann die Arme - in einem LateUpdate",
+         "die Reihenfolge in LateAll stimmt nicht mehr: Lafette, Stehplatz und "
+         "Arme muessen in dieser Folge im selben Frame geschrieben werden")
 
     # --- 8: the hands on the grips, after the animation.
     need("static void Arm(Transform upper, Transform fore, Transform hand," in t

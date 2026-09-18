@@ -58,6 +58,8 @@
 //   RevivalPlugin.cs Update     -> ArtyBattery.Tick()
 //   RevivalPlugin.cs OnGUI      -> ArtyBattery.Draw()
 //   RevivalMortar.cs Raise/Place -> ArtyBattery.GunRaised / GunLost
+//   RevivalMortar.cs Place       -> ArtyBattery.GunExpected (the drone of a
+//                                  settlement whose gun is still to come)
 //   RevivalMortar.cs Ground      -> ArtyBattery.CrewHoldsGun
 
 using System;
@@ -255,6 +257,16 @@ namespace NextDayRevival
             public bool Safe;               // a trader camp: scenery, nothing more
             public float Phase;             // where on the circle this drone starts
 
+            // A KNOWN SETTLEMENT WITHOUT A GUN YET (see GunExpected). Gun, crew
+            // and fire missions wait for a player to come within Mortar's
+            // PlaceRange; the drone does not, so a ghost post flies the orbit and
+            // is drawn on the map from the moment the level is loaded. Site is
+            // the settlement itself: it dies with the scene, which is what tells
+            // the ghost to go.
+            public bool Ghost;
+            public Component Site;
+            public float SeenAtScan;        // Time.time Mortar last announced it
+
             // crew, master client only
             public GameObject CrewSettlement;
             public Component Gunner;
@@ -318,6 +330,21 @@ namespace NextDayRevival
         static readonly List<Post> _posts = new List<Post>();
         static readonly Dictionary<int, Post> _byId = new Dictionary<int, Post>();
 
+        // The settlements that are GOING to get a gun, with a drone in the air
+        // already. They are kept apart from _posts on purpose: everything in
+        // _posts has a vehicle standing in the world, and the crew, the posting,
+        // the spotting and the fire missions all read it.
+        static readonly List<Post> _ghosts = new List<Post>();
+        static readonly Dictionary<int, Post> _ghostById = new Dictionary<int, Post>();
+
+        /// <summary>Seconds a ghost post survives without Mortar naming it
+        /// again. Mortar rescans every one to five seconds, so this is only
+        /// reached when the settlement stopped being a candidate at all - it was
+        /// written off for want of free ground, or a setting turned the guns
+        /// off. A scene change is caught by the dead Site reference long before
+        /// this runs out.</summary>
+        const float GhostTimeout = 30f;
+
         // The living NPCs, gathered ONCE for every post instead of once per post:
         // FindObjectsOfType walks the whole scene, and a map with a dozen guns on
         // it would otherwise walk it a dozen times a second.
@@ -358,6 +385,11 @@ namespace NextDayRevival
         {
             if (!Enabled || gun == null) return;
             if (_byId.ContainsKey(settlementId)) return;
+            // The drone that was already circling this settlement hands over to
+            // the real post. Same centre, same phase, same shared clock, so the
+            // airframe does not move by a metre across the handover - only the
+            // owner of the orbit changes.
+            DropGhost(settlementId);
             Post p = new Post();
             p.SettlementId = settlementId;
             p.Gun = gun;
@@ -389,6 +421,81 @@ namespace NextDayRevival
             Drop(p);
             _byId.Remove(settlementId);
             _posts.Remove(p);
+            // A settlement whose gun was lost with the scene keeps no ghost
+            // either: Mortar rescans the NEW scene and names its settlements.
+            DropGhost(settlementId);
+        }
+
+        /// <summary>
+        /// THE DRONE DOES NOT WAIT FOR THE PLAYER (order of 2026-09-18: "ich
+        /// will das die drohne auch angezeigt wird ohne das man vorher bei dem
+        /// settlement war").
+        ///
+        /// Mortar's scan sees every settlement in the level from the first
+        /// frame - FindObjectsOfType has no range - but it only RAISES the gun
+        /// once a player is within PlaceRange, because the free-ground search
+        /// needs loaded terrain colliders (E-059). The battery hung off that
+        /// gun, so the drone existed only for settlements the player had
+        /// already walked into, and the map icon appeared after the visit
+        /// instead of telling him where not to go.
+        ///
+        /// A battery that is going to be built therefore gets its drone now.
+        /// The orbit needs nothing but the centre, the shared clock and the
+        /// phase derived from that centre, so a ghost post is the same circle
+        /// the real post will fly, on every client, to the metre - the handover
+        /// in GunRaised is invisible.
+        ///
+        /// What a ghost does NOT get, and why: no crew (the men are spawned at
+        /// the vehicle, which does not exist), no spotting and no fire mission
+        /// (InReach measures from the gun, and a settlement with no gun has
+        /// nothing to answer with), and therefore no "you are being watched"
+        /// warning either - a warning the battery cannot follow up on would be
+        /// a lie, and it would put the orange sighting mark on the map for a
+        /// mission that can never come. The drone is shot down exactly as any
+        /// other: Shoot and HitDrone walk the ghosts too, and the hit lives in
+        /// the same room property, keyed by the same centre, so it survives the
+        /// handover in both directions.
+        /// </summary>
+        internal static void GunExpected(int settlementId, Component settlement,
+                                         Vector3 centre, string name, bool safe)
+        {
+            if (!Enabled || settlement == null) return;
+            if (_byId.ContainsKey(settlementId)) return;   // the gun stands: not a ghost
+            Post p;
+            if (_ghostById.TryGetValue(settlementId, out p))
+            {
+                p.Site = settlement;
+                p.SeenAtScan = Time.time;
+                return;
+            }
+            p = new Post();
+            p.Ghost = true;
+            p.Site = settlement;
+            p.SeenAtScan = Time.time;
+            p.SettlementId = settlementId;
+            p.Centre = centre;
+            p.Safe = safe;
+            p.Name = name == null ? "" : name;
+            p.DroneKey = ArtyRoom.Key(centre);
+            // The SAME phase as the real post - see GunRaised.
+            p.Phase = Mathf.Repeat(centre.x * 0.0131f + centre.z * 0.0177f,
+                                   Mathf.PI * 2f);
+            _ghosts.Add(p);
+            _ghostById[settlementId] = p;
+            RevivalPlugin.L.LogInfo("ArtyBattery: recon drone for \"" + p.Name
+                + "\" is up before the gun is, orbit " + Orbit().ToString("0")
+                + " m around " + centre.ToString("0") + ".");
+        }
+
+        /// <summary>The ghost is done: its gun was raised, its settlement is
+        /// gone, or it stopped being a candidate for a battery.</summary>
+        static void DropGhost(int settlementId)
+        {
+            Post g;
+            if (!_ghostById.TryGetValue(settlementId, out g)) return;
+            Drop(g);
+            _ghostById.Remove(settlementId);
+            _ghosts.Remove(g);
         }
 
         static void Drop(Post p)
@@ -443,8 +550,10 @@ namespace NextDayRevival
                 // objects that die with the scene - the drone circles of the
                 // level we left were still painted over the one we are in, and
                 // nothing could ever clear them again. Reported as "countless
-                // drone circles on the map" (2026-09-17).
-                if (_posts.Count == 0)
+                // drone circles on the map" (2026-09-17). The ghosts are in the
+                // question because they draw on the same map, and they die with
+                // the scene the same way: their settlement is a scene object.
+                if (_posts.Count == 0 && _ghosts.Count == 0)
                 {
                     if (_marks.Count > 0) _marks.Clear();
                     _mapOpen = false;
@@ -478,6 +587,24 @@ namespace NextDayRevival
                         Mission(p, now);
                     }
                     Resupply(p, now);
+                }
+
+                // The settlements whose gun is still to come. Fly is the whole
+                // battery they have: it reads the shared clock, the centre and
+                // the room's drone state, and touches nothing that belongs to a
+                // vehicle - see GunExpected.
+                for (int i = _ghosts.Count - 1; i >= 0; i--)
+                {
+                    Post g = _ghosts[i];
+                    if (g.Site == null || now - g.SeenAtScan > GhostTimeout
+                        || _byId.ContainsKey(g.SettlementId))
+                    {
+                        Drop(g);
+                        _ghostById.Remove(g.SettlementId);
+                        _ghosts.RemoveAt(i);
+                        continue;
+                    }
+                    Fly(g, now, me != null, mine);
                 }
             }
             catch (Exception ex)
@@ -591,10 +718,23 @@ namespace NextDayRevival
                 Transform gun = p.Gun.transform;
                 // AT THE VEHICLE, not behind it. They used to be set down 19.5
                 // units off the tail and then wandered the ring Crew.DropSquad
-                // lays out for a squad; they are now spawned on the gunner's
-                // own station and held there (Posted). Station puts them on the
+                // lays out for a squad; they are now spawned on their own
+                // stations and held there (Posted). Station puts them on the
                 // ground itself.
-                Vector3 at = Station(gun, true);
+                //
+                // BOTH STATIONS GO OVER, not just the gunner's. FIELD
+                // 2026-09-18 ("sie werden zwar wieder auf den boden tp'd, aber
+                // davor fliegen sie erstmal ne runde"): handed a single point,
+                // Crew.Ausstiege laid its own 4.5-unit ring around it and put
+                // one man on each side - and one of those sides is the vehicle.
+                // He was spawned on the hull, in the air, and stayed there
+                // until Posted warped him down 1.5 s later, which is the "lap"
+                // of the report. Given the stations themselves there is no
+                // ring, no guess and nothing left to undo: the first position
+                // each man ever holds is the one he keeps.
+                Vector3[] posts =
+                    new Vector3[] { Station(gun, true), Station(gun, false) };
+                Vector3 at = posts[0];
 
                 // BOTH MEN CARRY A RIFLE, AND THE LOADOUT SAYS SO. Crew.DropSquad
                 // arms a man from the editor loadout and falls back to
@@ -620,7 +760,8 @@ namespace NextDayRevival
                 // Facing the hull from the off, and from the LEVEL frame the
                 // stations are built in: a gun stood on a ground normal has a
                 // Y euler that is not its heading at all.
-                GameObject crew = Crew.DropSquad(at, StationYaw(gun), 2, side, loadout);
+                GameObject crew =
+                    Crew.DropSquadAt(at, posts, StationYaw(gun), side, loadout);
                 if (crew == null)
                 {
                     if (p.CrewTries >= 4)
@@ -1468,6 +1609,12 @@ namespace NextDayRevival
         static bool OperatorFlies(Post p)
         {
             if (p.Safe) return false;                // a trader camp keeps no drone up
+            // A settlement nobody has reached yet has its operator BY
+            // ASSUMPTION: the men are spawned at the vehicle, the vehicle is
+            // built when a player comes close, and until then counting living
+            // crew at a gun that does not exist would answer "none" and ground
+            // every drone on the map - which is the very bug this is for.
+            if (p.Ghost) return true;
             if (!B(_cfgCrew, true)) return true;     // no crew asked for: the drone is the battery
             if (p.CrewSettlement != null) return Alive(p.Operator);
             return p.MenNear > 0;
@@ -1525,21 +1672,44 @@ namespace NextDayRevival
             Post best = null;
             float nearest = ShootReach();
             direction.Normalize();
-            for (int i = 0; i < _posts.Count; i++)
-            {
-                Post p = _posts[i];
-                if (!p.DroneUp || p.DroneHits <= 0) continue;
-                float d;
-                if (!DroneRay(from, direction, p.DroneAt, out d) || d >= nearest) continue;
-                nearest = d;
-                best = p;
-            }
+            // Both lists: a drone the player can see is a drone he can shoot,
+            // and half of them belong to settlements he has never entered.
+            Aimed(_posts, from, direction, ref best, ref nearest);
+            Aimed(_ghosts, from, direction, ref best, ref nearest);
             if (best == null) return;
             if (RevivalTroopInsertion.MasterClient())
                 HitDrone(best.DroneKey, from, direction, best.DroneReadyAt, ArtyRoom.Now());
             else Mortar.Net.SendArty(new object[] { "arty-v1", 1, best.DroneKey,
                 new float[] { from.x, from.y, from.z, direction.x, direction.y, direction.z },
                 best.DroneReadyAt, ArtyRoom.Now() });
+        }
+
+        /// <summary>The nearest drone of one list the shot line passes through,
+        /// kept only if it beats what the caller already had.</summary>
+        static void Aimed(List<Post> list, Vector3 from, Vector3 direction,
+                          ref Post best, ref float nearest)
+        {
+            for (int i = 0; i < list.Count; i++)
+            {
+                Post p = list[i];
+                if (!p.DroneUp || p.DroneHits <= 0) continue;
+                float d;
+                if (!DroneRay(from, direction, p.DroneAt, out d) || d >= nearest) continue;
+                nearest = d;
+                best = p;
+            }
+        }
+
+        /// <summary>The post, ghost or real, whose drone lives under this room
+        /// key. The key is the settlement centre, so exactly one of them can
+        /// hold it (GunRaised retires the ghost before it takes over).</summary>
+        static Post ByKey(string key)
+        {
+            for (int i = 0; i < _posts.Count; i++)
+                if (_posts[i].DroneKey == key) return _posts[i];
+            for (int i = 0; i < _ghosts.Count; i++)
+                if (_ghosts[i].DroneKey == key) return _ghosts[i];
+            return null;
         }
 
         static bool DroneRay(Vector3 from, Vector3 direction, Vector3 at, out float distance)
@@ -1560,35 +1730,31 @@ namespace NextDayRevival
             if (!Shootable || !RevivalTroopInsertion.MasterClient()) return;
             if (!ArtyRoom.Finite(from) || !ArtyRoom.Finite(direction)
                 || direction.sqrMagnitude < 0.9f || direction.sqrMagnitude > 1.1f) return;
-            for (int i = 0; i < _posts.Count; i++)
+            Post p = ByKey(key);
+            if (p == null) return;
+            p.NextDroneState = 0f;
+            DroneState(p, Time.time);
+            if (p.DroneHits <= 0 || !OperatorFlies(p) || generation != p.DroneReadyAt) return;
+            float distance;
+            double age = ArtyRoom.Elapsed(ArtyRoom.Now(), shotTime);
+            if (double.IsNaN(age) || age < -0.1 || age > 0.75) return;
+            // Rewind the deterministic orbit to the shooter's timestamp.
+            // Keep the measured terrain height: only a sub-second correction.
+            float angle = (float)Math.Max(0.0, age) * Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f) / Orbit();
+            Vector3 radial = p.DroneAt - p.Centre;
+            Vector3 rewind = new Vector3(radial.x * Mathf.Cos(angle) + radial.z * Mathf.Sin(angle),
+                radial.y, -radial.x * Mathf.Sin(angle) + radial.z * Mathf.Cos(angle)) + p.Centre;
+            if (!DroneRay(from, direction, rewind, out distance)) return;
+            p.DroneHits--;
+            if (p.DroneHits == 0)
             {
-                Post p = _posts[i];
-                if (p.DroneKey != key) continue;
-                p.NextDroneState = 0f;
-                DroneState(p, Time.time);
-                if (p.DroneHits <= 0 || !OperatorFlies(p) || generation != p.DroneReadyAt) return;
-                float distance;
-                double age = ArtyRoom.Elapsed(ArtyRoom.Now(), shotTime);
-                if (double.IsNaN(age) || age < -0.1 || age > 0.75) return;
-                // Rewind the deterministic orbit to the shooter's timestamp.
-                // Keep the measured terrain height: only a sub-second correction.
-                float angle = (float)Math.Max(0.0, age) * Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f) / Orbit();
-                Vector3 radial = p.DroneAt - p.Centre;
-                Vector3 rewind = new Vector3(radial.x * Mathf.Cos(angle) + radial.z * Mathf.Sin(angle),
-                    radial.y, -radial.x * Mathf.Sin(angle) + radial.z * Mathf.Cos(angle)) + p.Centre;
-                if (!DroneRay(from, direction, rewind, out distance)) return;
-                p.DroneHits--;
-                if (p.DroneHits == 0)
-                {
-                    p.DroneReadyAt = ArtyRoom.Now() + 1800.0;
-                    p.DroneUp = false;
-                    CancelRecon(p);
-                    RevivalPlugin.L.LogInfo("ArtyBattery: recon down at " + p.Name
-                        + "; replacement in 1800 seconds, only with a living operator.");
-                }
-                ArtyRoom.Write(p.DroneKey, p.DroneHits, p.DroneReadyAt);
-                return;
+                p.DroneReadyAt = ArtyRoom.Now() + 1800.0;
+                p.DroneUp = false;
+                CancelRecon(p);
+                RevivalPlugin.L.LogInfo("ArtyBattery: recon down at " + p.Name
+                    + "; replacement in 1800 seconds, only with a living operator.");
             }
+            ArtyRoom.Write(p.DroneKey, p.DroneHits, p.DroneReadyAt);
         }
 
         /// <summary>The recon airframe, the same one the player's own
@@ -2166,6 +2332,18 @@ namespace NextDayRevival
                 m.SpotPoint = p.LocalSpotPoint;
                 _marks.Add(m);
             }
+            // The drones of the settlements the player has not been to. They
+            // carry no sighting: a ghost never warns, because its battery has
+            // nothing to fire (GunExpected).
+            for (int i = 0; i < _ghosts.Count; i++)
+            {
+                Post g = _ghosts[i];
+                if (!g.DroneUp) continue;
+                Mark m = new Mark();
+                m.Source = g;
+                m.Centre = g.Centre;
+                _marks.Add(m);
+            }
         }
 
         // IMGUI drone marks are not visible to the native-widget scan. Reserve
@@ -2273,13 +2451,21 @@ namespace NextDayRevival
                 || (rotor >= 6.25f && rotor <= 20.25f);
         }
 
+        // THE COLOUR OF THE PRINTED MAP, NOT OF A GAME MARKER (order of
+        // 2026-09-18: "ich haette die farbe gerne als grau/weiss wie in der og
+        // karten beschriftungen"). The icon used to be drawn in the Locator red
+        // of the patrol border, which reads as the toolkit's own overlay; the
+        // map's baked place names and the route labels next to it (MapLabels,
+        // .64/.61/.51) are a pale warm grey, so the quadcopter is now drawn in
+        // the same family, one step towards white because an 18 px silhouette
+        // carries less of its colour than a letter does.
         static Texture2D DroneIcon()
         {
             if (_droneIcon != null) return _droneIcon;
             const int size = 36;
             Color[] pixels = new Color[size * size];
-            Color ink = new Color(0.72f, 0.13f, 0.125f, 0.95f); // Locator red
-            Color outline = new Color(1f, 0.95f, 0.85f, 0.95f);
+            Color ink = new Color(0.88f, 0.87f, 0.83f, 0.95f);      // label grey/white
+            Color outline = new Color(0.12f, 0.11f, 0.09f, 0.85f);  // printer's black
             for (int y = 0; y < size; y++)
                 for (int x = 0; x < size; x++)
                 {
@@ -2288,8 +2474,10 @@ namespace NextDayRevival
                     if (DroneInk(dx, dy)) pixels[y * size + x] = ink;
                     else
                     {
-                        // A pale one-pixel outline keeps the red silhouette
-                        // legible over both dark terrain and map roads.
+                        // The outline is the DARK one now: a pale halo around a
+                        // pale silhouette is no silhouette at all, and the map
+                        // has light roads and light lettering on it as well as
+                        // dark terrain.
                         for (int oy = -1; oy <= 1; oy++)
                             for (int ox = -1; ox <= 1; ox++)
                                 if (DroneInk(dx + ox, dy + oy))

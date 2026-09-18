@@ -84,28 +84,56 @@
 //     (VehicleArmor.GunHit is NOT called). It is an anti-personnel machine gun,
 //     so armoured vehicles shrug it off exactly as they shrug off rifle fire.
 //
-// WHERE THE STATION STANDS (changed 2026-09-18 after the field report
-// technicalbug.png: "das mg schwebt, der spieler steht nicht richtig dran").
-// It used to be a fraction of the measured bounding box, with the height
-// fraction at 1.00 - the TOP of that box. A bounding box says nothing about
-// what is actually there: its top is the highest point of the whole vehicle,
-// aerial and roof rack included, so gun and gunner ended up standing in mid-air
-// above the cabin. The station is now derived from the donor's OWN REAR SEAT
-// instead - the rear-most seat point this rebuild removes anyway:
+// WHERE THE STATION STANDS (twice corrected from the game, both times from a
+// picture; this is the second pass, field report technical.png of 2026-09-18:
+// "das geschuetz ist viel zu niedrig, geht durch die scheibe, ist zwischen den
+// sitzen anstatt solide hinten mit space um die stuetze drum rum").
 //
-//   * its height plus the sit pose's measured foot offset (FeetAboveSeat) is
-//     the vehicle FLOOR, because the game itself seats a man there;
-//   * the man stands on that floor at that seat's position;
-//   * the pintle stands on the same floor, one arm's length in front of him
-//     (TechnicalModel.StandOff, in metres, measured on the gun that is really
-//     mounted), so his hands are AT the grips by construction.
+// Pass one stood the station on a fraction of the measured bounding box, with
+// the height fraction at 1.00 - the TOP of that box, which is the highest point
+// of the whole vehicle, aerial and roof rack included, so gun and gunner hung in
+// the air over the cabin. Pass two took the donor's own REAR SEAT instead. That
+// fixed the floating and broke the position: a jeep's rear seat is INSIDE the
+// cabin. Its height is the cabin floor, so the pintle - 1.10 m tall - reached
+// exactly windscreen height, and the mount, standing one arm's length in FRONT
+// of the man, landed between the two front seats. Both sentences of the report
+// are that one derivation.
 //
-// The old fractions remain as the fallback for a donor with no rear seat, and
-// everything derived is logged once per instance. Distances that measure a
-// PERSON (the arm, the pintle height) are metres and are converted with the
-// vehicle's own units-per-metre; distances that measure the VEHICLE are
-// fractions of its own measured size, because the vehicle models are not metric
-// (the BTR's 2.9 m track measures +-3.47 model units).
+// A seat is where the game sits a man, not where a weapon can stand. The station
+// is therefore derived from the two things that do answer the question:
+//
+//   * ALONG the vehicle, from the REAR EDGE of the measured body (MountRear).
+//     The pintle stands in the rear quarter, and it is pushed forward only as
+//     far as it must be for the gunner - who walks AROUND it, see below - to
+//     keep body under his feet. It never passes the middle.
+//   * UPWARDS, from the donor's own TOP SURFACE at that point: a ray is dropped
+//     from above the measured box onto the donor's own colliders and the highest
+//     hit is the deck (Oberflaeche). That is a surface that really exists, which
+//     is what neither the bounding box nor the seat was. On a closed cabin it is
+//     the roof, and gun and gunner stand on it with clear space around the
+//     pintle - which is what was asked for.
+//
+// Under that measurement stand three fallbacks, in the order of how much each
+// one knows: the top of the wide MESH parts over the rear (Dachkante - a box
+// top, so an aerial welded into the body mesh can still push it up), then the
+// donor's rear seat (its height plus the sit pose's measured foot offset,
+// FeetAboveSeat, is the floor the game itself stands a man on), then the
+// configured fraction. Which one was used is logged once per instance, together
+// with everything else that was derived.
+//
+// Distances that measure a PERSON (the arm, the pintle height) are metres and
+// are converted with the vehicle's own units-per-metre; distances that measure
+// the VEHICLE are fractions of its own measured size, because the vehicle models
+// are not metric (the BTR's 2.9 m track measures +-3.47 model units).
+//
+// THE STATION IS A CIRCLE, NOT A POINT. A man at a pintle mount walks around it;
+// he does not stand on one spot and reach after the grips. The gunner is
+// therefore placed one arm's length behind the mount ON THE MOUNT'S OWN BEARING
+// every frame (TechnicalGun.Stellung), so the grips are in front of his chest at
+// every angle. That is the rest of the same report - "sobald er dreht sieht es
+// glitchy und falsch aus": at zero degrees the old fixed place looked right,
+// and at ninety the grips stood beside the man while the arm solver dragged his
+// arms across his own chest after them.
 //
 // The exact standing position, the pose and the camera distance stay in-game
 // acceptance items.
@@ -186,8 +214,8 @@ namespace NextDayRevival
         public static ConfigEntry<string> CfgKey;
         public static ConfigEntry<float> CfgDistance;
         public static ConfigEntry<float> CfgDurability;
-        public static ConfigEntry<float> CfgMountBack;
-        public static ConfigEntry<float> CfgMountUp;
+        public static ConfigEntry<float> CfgMountRear;
+        public static ConfigEntry<float> CfgDeckHeight;
         public static ConfigEntry<float> CfgMountSide;
         public static ConfigEntry<float> CfgSeatBack;
         public static ConfigEntry<float> CfgSeatDrop;
@@ -218,28 +246,34 @@ namespace NextDayRevival
                 + "BTR-Panzerung und waere fuer eine Technische voellig "
                 + "falsch. Der Wert wird bei jedem Durchlauf nach UNTEN "
                 + "gedeckelt, nie erhoeht, kann also keinen Schaden ruecknehmen.");
-            CfgMountBack = cfg.Bind("Technical", "MountBack", 0.42f,
-                "RUECKFALL: wo die Lafette auf dem Fahrzeug steht, als Anteil "
-                + "der Fahrzeuglaenge vom HECK aus gemessen. 0 ist die "
-                + "Heckkante, 1 die Bugkante. Normalerweise wird der Standplatz "
-                + "aus dem hintersten Sitz des Spenders abgeleitet (siehe "
-                + "Stehplatz im Quelltext) und dieser Wert gar nicht benutzt - "
-                + "er greift nur bei einem Spender ohne Ruecksitz. Alle Masse "
-                + "dieser Sektion sind Anteile der gemessenen Modellgroesse und "
-                + "keine Meter: die Fahrzeugmodelle des Spiels sind nicht "
-                + "metrisch.");
-            // Renamed from "MountUp" on purpose. The old key defaulted to 1.00 -
-            // the top of the measured box, i.e. the roof edge or whatever aerial
-            // stands above it - and that is exactly the reported bug: MG and
-            // Schuetze standing in mid-air over the cabin. A changed default
-            // would not have reached anybody, because BepInEx keeps the value
-            // already written in the config file; a changed KEY does.
-            CfgMountUp = cfg.Bind("Technical", "MountUpFallback", 0.20f,
+            // Renamed from "MountBack" on purpose, and no longer a fallback: the
+            // Lafette is placed from the rear edge on EVERY donor. The old key
+            // was only used when the donor had no rear seat, and the seat it
+            // gave way to is the reported bug - on a jeep it sits between the
+            // cabin walls, so the gun stood between the front seats. A changed
+            // default would not have reached anybody, because BepInEx keeps the
+            // value already written in the config file; a changed KEY does.
+            CfgMountRear = cfg.Bind("Technical", "MountRear", 0.26f,
+                "Wo die Lafette auf dem Fahrzeug steht, als Anteil der "
+                + "Fahrzeuglaenge von der HECKKANTE aus gemessen. 0 ist die "
+                + "Heckkante, 1 die Bugkante. Der Wert wird nur nach vorn "
+                + "korrigiert, und zwar so weit, dass der Schuetze hinter der "
+                + "Lafette noch auf dem Fahrzeug steht; ueber die Mitte hinaus "
+                + "kommt die Lafette nie. Alle Masse dieser Sektion sind "
+                + "Anteile der gemessenen Modellgroesse und keine Meter: die "
+                + "Fahrzeugmodelle des Spiels sind nicht metrisch.");
+            // Renamed from "MountUpFallback" for the same reason: its default
+            // was the vehicle floor (0.20), and the floor is exactly what put
+            // the weapon into the windscreen. The deck height is measured on the
+            // vehicle now (Oberflaeche); this value is only the last resort.
+            CfgDeckHeight = cfg.Bind("Technical", "DeckFallback", 0.90f,
                 "RUECKFALL: Hoehe der Standflaeche als Anteil der Fahrzeug"
                 + "hoehe, vom tiefsten Punkt der Karosserie aus. Wird nur "
-                + "benutzt, wenn der Spender keinen Sitz hat, aus dem sich der "
-                + "Boden ableiten laesst. 1.0 waere die Dachkante - dort steht "
-                + "nichts, deshalb ist die Vorgabe der Wagenboden.");
+                + "benutzt, wenn weder eine Oberflaeche getroffen wird noch der "
+                + "Spender einen Ruecksitz hat. 0.90 liegt knapp unter der "
+                + "Oberkante des Aufbaus, also auf dem Dach - dort steht die "
+                + "Lafette frei, waehrend sie auf dem Wagenboden durch die "
+                + "Scheiben ragt.");
             CfgMountSide = cfg.Bind("Technical", "MountSide", 0.00f,
                 "Seitenversatz der Lafette als Anteil der Fahrzeugbreite. "
                 + "0 heisst mittig.");
@@ -368,40 +402,53 @@ namespace NextDayRevival
             // into whatever frame the target parent happens to be, so neither a
             // rotated chassis node nor a scaled prefab can move the gun.
             //
-            // THE STANDING PLACE IS THE DONOR'S OWN REAR SEAT, not a fraction of
-            // the bounding box. The box says nothing about what is actually
-            // THERE: its top is the highest point of the whole vehicle, aerial
-            // and roof rack included, and standing the station on it put gun and
-            // gunner in mid-air over the cabin (field report technicalbug.png,
-            // 2026-09-18). A seat the game itself puts a passenger on is by
-            // construction inside the body, above the floor and clear of the
-            // wheels. The mount then stands one arm's length IN FRONT of it, so
-            // the man and his weapon are placed by the same measurement and
-            // cannot drift apart.
-            float deckY, standZ;
+            // ALONG THE VEHICLE the pintle is placed from the REAR EDGE of the
+            // measured body and pushed forward only as far as the gunner needs:
+            // he stands one arm's length behind it and walks around it, so the
+            // whole circle has to have body under it. It never passes the middle.
+            // The donor's rear SEAT, which pass two used, is not that place - on
+            // a jeep it sits between the cabin walls, which is how the gun came
+            // to stand between the front seats (field report technical.png).
+            float x = centreX + CfgMountSide.Value * width;
+            float mountZ = min.z + Mathf.Max(CfgMountRear.Value * length,
+                                             abstand + 0.06f * length);
+            mountZ = Mathf.Min(mountZ, min.z + 0.50f * length);
+            float standZ = mountZ - abstand;
+
+            // UPWARDS from the donor's own TOP SURFACE at that point - a surface
+            // that really exists, which is what neither the bounding box (pass
+            // one: the station hung over the cabin) nor the rear seat (pass two:
+            // the cabin floor, so the weapon reached into the windscreen) was.
+            // The seat survives as the fallback for a donor whose colliders
+            // cannot be hit, and the configured fraction under that.
+            float deckY;
             string herkunft;
             Vector3 seatPoint;
-            if (Stehplatz(car.transform, seats, out seatPoint))
+            if (Oberflaeche(car, min, max, x, mountZ, out deckY))
+                herkunft = "von der gemessenen Oberflaeche ueber dem Heck";
+            else if (Dachkante(car, min, max, out deckY))
+                herkunft = "von der Oberkante der Aufbauteile ueber dem Heck "
+                    + "(kein Kollisionstreffer)";
+            else if (Stehplatz(car.transform, seats, out seatPoint))
             {
                 deckY = seatPoint.y + FeetAboveSeat / Hoehenmass(car.transform);
-                standZ = seatPoint.z;
-                herkunft = "aus dem hintersten Sitz des Spenders";
+                herkunft = "aus dem hintersten Sitz des Spenders (keine "
+                    + "Oberflaeche getroffen)";
             }
             else
             {
-                deckY = min.y + CfgMountUp.Value * height;
-                standZ = min.z + CfgMountBack.Value * length - abstand;
-                herkunft = "aus den Anteilen MountUpFallback/MountBack";
+                deckY = min.y + CfgDeckHeight.Value * height;
+                herkunft = "aus dem Anteil DeckFallback (weder Oberflaeche noch "
+                    + "Ruecksitz)";
             }
 
-            // Two clamps, so a donor with a surprising seat can still only be
-            // wrong by a little: the deck stays inside the measured body, and
-            // neither the man nor the gun can hang off either end of it.
-            float deckClamped = Mathf.Clamp(deckY, min.y + 0.02f * height,
-                                            min.y + 0.95f * height);
-            float hinten = min.z + 0.04f * length;
-            float vorn = Mathf.Max(hinten, max.z - 0.04f * length - abstand);
-            float standClamped = Mathf.Clamp(standZ, hinten, vorn);
+            // Two clamps, so a donor that measures surprisingly can still only be
+            // wrong by a little: the deck stays inside the measured body - up to
+            // its very top, because that is where a deck belongs on a closed
+            // cabin - and the man cannot hang off the tail.
+            float deckClamped = Mathf.Clamp(deckY, min.y + 0.02f * height, max.y);
+            float hinten = min.z + 0.02f * length;
+            float standClamped = Mathf.Max(standZ, hinten);
             if (Mathf.Abs(deckClamped - deckY) > 0.001f
                 || Mathf.Abs(standClamped - standZ) > 0.001f)
                 RevivalPlugin.L.LogWarning("Technical: der abgeleitete Standplatz "
@@ -412,7 +459,6 @@ namespace NextDayRevival
             deckY = deckClamped;
             standZ = standClamped;
 
-            float x = centreX + CfgMountSide.Value * width;
             Vector3 mountInRoot = new Vector3(x, deckY, standZ + abstand);
             // TWO drops, because there are two poses and they do not measure
             // from the same place. The game's SIT clip floats the body high
@@ -443,34 +489,164 @@ namespace NextDayRevival
                 + " (Absenkung " + drop.ToString("0.00") + ", "
                 + (steht ? "stehend" : "sitzend") + ").");
 
-            // A donor with a roof over its rear places has less room above the
-            // floor than a pintle needs. That is a property of the DONOR, not a
-            // fault here, and the alternative - standing the station on the roof
-            // - is the bug this rebuild was changed to fix. It is logged so that
-            // a report of "the barrel goes through the roof" has its answer in
-            // the file already.
+            // The deck is normally the topmost surface of the donor, and then
+            // there is nothing above it at all. If something IS above it and
+            // there is less room than the pintle is tall, the weapon rises
+            // through that part - which is worth one line in the log, because it
+            // is the answer to a report of "the barrel goes through the roof".
             float kopfraum = max.y - deckY;
             float braucht = TechnicalModel.PivotHeight * unitsPerMetre;
-            if (kopfraum < braucht)
+            if (kopfraum > 0.05f * height && kopfraum < braucht)
                 RevivalPlugin.L.LogInfo("Technical: ueber der Standflaeche liegen "
-                    + kopfraum.ToString("0.00") + " Einheiten, die Lafette ist "
-                    + braucht.ToString("0.00") + " hoch - das MG ragt also durch "
-                    + "das Dach des Spenders. Das ist gewollt: es steht damit auf "
-                    + "dem Wagenboden wie der Schuetze, statt ueber dem Dach zu "
-                    + "schweben.");
+                    + kopfraum.ToString("0.00") + " Einheiten Aufbau, die Lafette "
+                    + "ist " + braucht.ToString("0.00") + " hoch - das MG ragt "
+                    + "also hindurch. Die Standflaeche ist die gemessene "
+                    + "Oberflaeche des Spenders; ein Aufbau DARUEBER (Dachtraeger, "
+                    + "Antenne) bleibt stehen, weil er nicht getragen wird.");
         }
 
         /// <summary>
-        /// The donor's own standing place: the rear-most seat point this rebuild
-        /// is about to remove, in the ROOT's local space. Returns false for a
-        /// donor with nothing but the two front places, and then the caller
-        /// falls back to the configured fractions.
+        /// The donor's own TOP SURFACE at a point, in the ROOT's local space: a
+        /// ray dropped from above the measured box onto the vehicle's own
+        /// colliders, taking the highest hit that belongs to this vehicle.
         ///
-        /// Why a seat and not the mesh: the seat is the one point on the vehicle
-        /// the GAME itself guarantees a man fits on. Its height is the floor
-        /// (plus the sit pose's own offset, see FeetAboveSeat), its length
-        /// position is behind the cabin, and both follow a different donor
-        /// without a single number changing here.
+        /// This is the one question the two earlier derivations both got wrong.
+        /// A bounding box gives the highest POINT of the whole vehicle - an
+        /// aerial, a roof rack - and a seat gives a place inside the cabin; a
+        /// collider is the thing a pintle could actually be bolted to. Hits on
+        /// anything that is not part of this vehicle are ignored, so a truck
+        /// parked under a bridge measures the same as one in the open, and the
+        /// wheels are ignored for the same reason the measured box ignores them.
+        ///
+        /// Returns false when nothing was hit - a donor whose colliders are not
+        /// up yet at rebuild time, or sit on a layer the physics query does not
+        /// see. The caller then falls back to the seat and to the fraction, and
+        /// says in the log which of the three it used.
+        /// </summary>
+        static bool Oberflaeche(GameObject car, Vector3 min, Vector3 max,
+                                float x, float z, out float y)
+        {
+            y = 0f;
+            if (car == null) return false;
+            Transform root = car.transform;
+            float height = Mathf.Max(0.001f, max.y - min.y);
+
+            Vector3 start = root.TransformPoint(
+                new Vector3(x, max.y + 0.5f * height, z));
+            Vector3 ziel = root.TransformPoint(new Vector3(x, min.y, z));
+            Vector3 weg = ziel - start;
+            float weite = weg.magnitude;
+            if (weite < 0.0001f) return false;
+
+            RaycastHit[] treffer = Physics.RaycastAll(start, weg / weite, weite);
+            if (treffer == null) return false;
+
+            bool any = false;
+            for (int i = 0; i < treffer.Length; i++)
+            {
+                Collider col = treffer[i].collider;
+                if (col == null || col.isTrigger) continue;
+                if (!Gehoert(root, col.transform)) continue;
+                if (IstRad(col.transform)) continue;
+                float local = root.InverseTransformPoint(treffer[i].point).y;
+                if (!any || local > y) { y = local; any = true; }
+            }
+            return any;
+        }
+
+        /// <summary>
+        /// The rougher of the two surface measurements, and the fallback for the
+        /// sharper one: the highest MESH part standing over the rear of the body,
+        /// counting only parts wide enough to be a roof, a hardtop or a bed. An
+        /// aerial, a mirror or a lamp is narrow and drops out, and that filter is
+        /// the whole difference to the bounding box of the first pass, whose top
+        /// was whatever stood highest anywhere on the vehicle.
+        ///
+        /// It is still a box top and not a surface - a donor whose whole body is
+        /// ONE mesh measures that mesh, aerial included - which is why the
+        /// collider ray is the measurement and this is only its fallback. It
+        /// stands above the seat in that order all the same: too high by a
+        /// fitting is a pintle standing proud, too low by a cabin is a pintle in
+        /// the windscreen, and the second one is the reported bug.
+        /// </summary>
+        static bool Dachkante(GameObject car, Vector3 min, Vector3 max, out float y)
+        {
+            y = 0f;
+            if (car == null) return false;
+            Transform root = car.transform;
+            float width = Mathf.Max(0.001f, max.x - min.x);
+            float mitte = (min.z + max.z) * 0.5f;
+
+            bool any = false;
+            MeshFilter[] all = car.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                MeshFilter mf = all[i];
+                if (mf == null || mf.sharedMesh == null) continue;
+                if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
+
+                Vector3 lo, hi;
+                if (!Huelle(root, mf, out lo, out hi)) continue;
+                if (lo.z > mitte) continue;                  // nothing over the rear
+                if (hi.x - lo.x < 0.40f * width) continue;   // an aerial, not a deck
+                if (!any || hi.y > y) { y = hi.y; any = true; }
+            }
+            return any;
+        }
+
+        /// <summary>
+        /// One mesh part's own box in the ROOT's local space. Mesh-local corners
+        /// are transformed through the root, so a rotated or scaled instance
+        /// measures the same as one standing at the origin - a world AABB would
+        /// not.
+        /// </summary>
+        static bool Huelle(Transform root, MeshFilter mf, out Vector3 lo,
+                           out Vector3 hi)
+        {
+            lo = Vector3.zero;
+            hi = Vector3.zero;
+            if (root == null || mf == null || mf.sharedMesh == null) return false;
+
+            Bounds b = mf.sharedMesh.bounds;
+            for (int c = 0; c < 8; c++)
+            {
+                Vector3 corner = new Vector3(
+                    (c & 1) == 0 ? b.min.x : b.max.x,
+                    (c & 2) == 0 ? b.min.y : b.max.y,
+                    (c & 4) == 0 ? b.min.z : b.max.z);
+                Vector3 p = root.InverseTransformPoint(
+                    mf.transform.TransformPoint(corner));
+                if (c == 0) { lo = p; hi = p; continue; }
+                lo = Vector3.Min(lo, p);
+                hi = Vector3.Max(hi, p);
+            }
+            return true;
+        }
+
+        /// <summary>Is this transform a part of that vehicle?</summary>
+        static bool Gehoert(Transform root, Transform t)
+        {
+            while (t != null)
+            {
+                if (t == root) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// The donor's own FLOOR: the rear-most seat point this rebuild is about
+        /// to remove, in the ROOT's local space. Returns false for a donor with
+        /// nothing but the two front places, and then the caller falls back to
+        /// the configured fraction.
+        ///
+        /// Only the HEIGHT of it is used, and only when no surface could be
+        /// measured (see Oberflaeche): a seat is the one point on the vehicle the
+        /// GAME itself guarantees a man fits on, so its height plus the sit
+        /// pose's own offset (FeetAboveSeat) is a floor that certainly exists.
+        /// Its POSITION along the vehicle is not the station - it is a place
+        /// between the cabin walls, and using it stood the pintle between the
+        /// front seats (field report technical.png, 2026-09-18).
         /// </summary>
         static bool Stehplatz(Transform root, Transform seats, out Vector3 point)
         {
@@ -722,9 +898,9 @@ namespace NextDayRevival
         /// The body's bounds in the vehicle root's LOCAL space, from the meshes
         /// themselves. Wheels are left out: they are the only part that sits
         /// below the body and turns, and including them would push the deck
-        /// height down by a wheel radius. Mesh-local corners are transformed
-        /// through the root, so a rotated or scaled instance measures the same
-        /// as one standing at the origin - a world AABB would not.
+        /// height down by a wheel radius. Each part is measured by
+        /// <see cref="Huelle"/>, which is why a rotated or scaled instance
+        /// measures the same as one standing at the origin.
         /// </summary>
         static bool Karosserie(GameObject car, out Vector3 min, out Vector3 max)
         {
@@ -740,19 +916,11 @@ namespace NextDayRevival
                 if (mf == null || mf.sharedMesh == null) continue;
                 if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
 
-                Bounds b = mf.sharedMesh.bounds;
-                for (int c = 0; c < 8; c++)
-                {
-                    Vector3 corner = new Vector3(
-                        (c & 1) == 0 ? b.min.x : b.max.x,
-                        (c & 2) == 0 ? b.min.y : b.max.y,
-                        (c & 4) == 0 ? b.min.z : b.max.z);
-                    Vector3 p = root.InverseTransformPoint(
-                        mf.transform.TransformPoint(corner));
-                    if (!any) { min = p; max = p; any = true; continue; }
-                    min = Vector3.Min(min, p);
-                    max = Vector3.Max(max, p);
-                }
+                Vector3 lo, hi;
+                if (!Huelle(root, mf, out lo, out hi)) continue;
+                if (!any) { min = lo; max = hi; any = true; continue; }
+                min = Vector3.Min(min, lo);
+                max = Vector3.Max(max, hi);
             }
             return any;
         }
@@ -1165,6 +1333,7 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgStandPose;
         public static ConfigEntry<int> CfgStandPoseValue;
         public static ConfigEntry<bool> CfgHands;
+        public static ConfigEntry<bool> CfgOrbit;
         public static ConfigEntry<float> CfgHandFade;
         public static ConfigEntry<float> CfgElbowOut;
         public static ConfigEntry<float> CfgGripLift;
@@ -1244,6 +1413,17 @@ namespace NextDayRevival
                 + "die Griffe gerechnet - fuer den eigenen Schuetzen und fuer "
                 + "den jedes Mitspielers. Findet sich das Skelett nicht, "
                 + "passiert nichts und es steht einmal im Log.");
+            CfgOrbit = cfg.Bind("TechnicalGun", "GunnerOrbit", true,
+                "Den Schuetzen bei jedem Schwenk HINTER seine Waffe stellen, "
+                + "statt ihn auf einem festen Punkt der Ladeflaeche stehen zu "
+                + "lassen. Ein Mann an einer Lafette geht um sie herum; steht er "
+                + "fest, liegen die Griffe beim Geradeausschauen vor ihm und bei "
+                + "90 Grad neben ihm, und der Armrechner zieht ihm die Arme vor "
+                + "die Brust - genau das meldete das Feldbild technical.png "
+                + "(\"sobald er dreht sieht es glitchy und falsch aus\"). Der "
+                + "Standpunkt kommt aus der Lafette selbst, also ohne neue "
+                + "Netzwerknachricht. Abschalten stellt den Schuetzen wieder "
+                + "fest auf seinen Sitzpunkt.");
             CfgHandFade = cfg.Bind("TechnicalGun", "HandFade", 0.25f,
                 "Sekunden, in denen die Haende an die Griffe wandern und "
                 + "wieder los. 0 heisst sofort.");
@@ -1789,12 +1969,14 @@ namespace NextDayRevival
 
         /// <summary>
         /// The per-frame work for EVERY technical in the scene: the machine gun
-        /// of a vehicle somebody else is shooting from, and the arms of every
-        /// gunner - the local one and each remote one.
+        /// of a vehicle somebody else is shooting from, where its gunner stands,
+        /// and the arms of every gunner - the local one and each remote one.
         ///
         /// This has to be LateUpdate. The game's animator writes the character's
         /// bones every frame between Update and LateUpdate; a hand put on a grip
-        /// in Update is back at the man's side before anything is drawn.
+        /// in Update is back at the man's side before anything is drawn. The
+        /// standing place belongs in the same pass for the same reason: the man
+        /// has to be where he will be DRAWN before his arms are solved.
         /// </summary>
         internal static void LateAll()
         {
@@ -1803,9 +1985,81 @@ namespace NextDayRevival
             {
                 Station st = _stations[i];
                 if (st.Vgs == null) continue;
+                // In this order, and all three in the same late frame: the mount
+                // is final before the man is placed behind it, and the man is
+                // final before his arms are solved onto the grips. Any other
+                // order leaves one of the three a frame behind the other two,
+                // which is what a turning gunner looks wrong from.
                 SlewRemote(st.Vgs);                       // returns at once for our own
-                Hands(st, PassengerAt(st.Vgs, Technical.GunnerSeat), dt);
+                GameObject body = PassengerAt(st.Vgs, Technical.GunnerSeat);
+
+                // Who owns the bearing here? We do while WE man this gun - the
+                // mouse turns the mount and the man is turned with it. Otherwise
+                // the man owns it: SlewRemote has just read the mount's bearing
+                // off his body, so writing his rotation back would be a loop.
+                bool selbst = _manning && ReferenceEquals(st.Vgs, _vgs);
+                // A local gunner who let go on purpose (G) is left alone
+                // altogether: he is standing in the place, not working the gun,
+                // and it is HIS bearing the mount is following.
+                bool losgelassen = !selbst && _atGun
+                                   && ReferenceEquals(st.Vgs, _vgs);
+                if (!losgelassen) Stellung(st, body, selbst);
+
+                Hands(st, body, dt);
             }
+        }
+
+        /// <summary>
+        /// Put the gunner BEHIND his gun - on the far side of the pintle from the
+        /// muzzle, at every bearing. A man at a pintle mount walks around it; he
+        /// does not stand on one spot and reach after the grips.
+        ///
+        /// This is the second half of the field report technical.png: "der
+        /// spieler hat zwar die haende am mg beim grade ausgucken, aber sobald er
+        /// dreht sieht es glitchy und falsch aus". The place was one fixed point
+        /// on the deck. Straight ahead the grips were in front of his chest and
+        /// everything solved cleanly; at ninety degrees they stood beside him,
+        /// and <see cref="Arm"/> - which always reaches, because that is what an
+        /// IK solver does - dragged his arms across his own body after them. The
+        /// station is a CIRCLE, and the radius is the same StandOff the seat
+        /// point was built from, so the picture at zero degrees is unchanged.
+        ///
+        /// The standing point is asked of the MOUNT'S OWN space, so it carries
+        /// the vehicle's units-per-metre, the chassis frame and the suspension
+        /// with it and there is no scale arithmetic here at all. No network
+        /// message either: every client computes the same circle from the same
+        /// mount, exactly as <see cref="SlewRemote"/> computes the same bearing.
+        /// </summary>
+        static void Stellung(Station st, GameObject body, bool drehen)
+        {
+            try
+            {
+                if (CfgOrbit == null || !CfgOrbit.Value) return;
+                if (body == null || st.Mount == null) return;
+
+                Vector3 mitte = st.Mount.position;
+                Vector3 stand = st.Mount.TransformPoint(
+                    new Vector3(0f, 0f, -TechnicalModel.StandOff()));
+                float radius = Vector3.Distance(stand, mitte);
+                if (radius < 0.0001f) return;
+
+                // Never DRAG a body that is not at this station anymore: one
+                // that died, got out, or was moved by the game belongs to the
+                // game. Three radii is far more than the place is wide, and a
+                // man who has just been seated is at its centre-most point.
+                if (Vector3.Distance(body.transform.position, mitte) > 3f * radius)
+                    return;
+
+                body.transform.position = stand;
+                if (!drehen) return;
+
+                Vector3 dir = st.Mount.forward;
+                dir.y = 0f;
+                if (dir.sqrMagnitude < 0.000001f) return;
+                body.transform.rotation = Quaternion.LookRotation(dir.normalized,
+                                                                  Vector3.up);
+            }
+            catch { }
         }
 
         // --------------------------------------------------- Hands on the gun

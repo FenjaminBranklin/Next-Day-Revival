@@ -10,6 +10,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.AI;
 
 namespace NextDayRevival
 {
@@ -750,7 +751,8 @@ namespace NextDayRevival
                 {
                     Vector3 offset = SquadOffset(index, _spawningCount, true);
                     offset.z += k == 0 ? -1.5f : 1.5f;
-                    Vector3 pos = CrewGround(_spawningCar.TransformPoint(offset));
+                    Vector3 pos = CrewGround(_spawningCar.TransformPoint(offset),
+                                             _spawningCar);
                     coordinates.Add(5); coordinates.Add(pos.x);
                     coordinates.Add(pos.y); coordinates.Add(pos.z);
                 }
@@ -1101,13 +1103,33 @@ namespace NextDayRevival
                 ? key.Substring(13) : null;
         }
 
+        /// <summary>
+        /// A squad set down on points the CALLER has already checked - one per
+        /// man - instead of the ring <see cref="Ausstiege"/> lays around a
+        /// single drop point.
+        ///
+        /// That ring is 4.5 units wide and it is drawn blind: at a vehicle half
+        /// of it lies ON the vehicle, and the man who drew that half was spawned
+        /// on the hull. A caller who already knows where each of its men belongs
+        /// - the artillery battery knows both of its stations, on the ground
+        /// beside the gun, before it asks for anybody - should not have that
+        /// answer thrown away and guessed at again.
+        /// </summary>
+        internal static GameObject DropSquadAt(Vector3 home, Vector3[] positions,
+            float yaw, string faction, List<RevivalComposition.CrewMan> loadout)
+        {
+            if (positions == null || positions.Length == 0) return null;
+            _groundPositions = positions;
+            try { return DropSquad(home, yaw, positions.Length, faction, loadout); }
+            finally { _groundPositions = null; }
+        }
+
         internal static GameObject DropGroundSquad(Vector3 home, Vector3[] positions,
             string faction, List<RevivalComposition.CrewMan> loadout, string key)
         {
             _groundKey = key;
-            _groundPositions = positions;
-            try { return DropSquad(home, 0f, positions.Length, faction, loadout); }
-            finally { _groundKey = null; _groundPositions = null; }
+            try { return DropSquadAt(home, positions, 0f, faction, loadout); }
+            finally { _groundKey = null; }
         }
 
         /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
@@ -1315,17 +1337,79 @@ namespace NextDayRevival
             return new Vector3(side * across, 0f, along);
         }
 
-        static Vector3 CrewGround(Vector3 position)
+        /// <summary>
+        /// The ground under a point beside a carrier, IGNORING THE CARRIER AND
+        /// ANYONE ALREADY STANDING THERE.
+        ///
+        /// FIELD 2026-09-18 ("die crew mitglieder fliegen immernoch, sie werden
+        /// zwar wieder auf den boden tp'd, aber davor fliegen sie erstmal ne
+        /// runde"). A single cast takes the FIRST collider it meets, and beside
+        /// a vehicle that collider is the vehicle: its deck, its wing, or - on
+        /// the artillery truck - the barrel that sweeps over the crew stations.
+        /// The man was put down ON it, several units up, and stayed in that
+        /// daylight until something else carried him back down. This walks past
+        /// up to four such hits, exactly the way ArtyBattery.GunGround does for
+        /// the station it later warps him onto, so the FIRST position a man is
+        /// ever given is already on the ground and nothing has to be undone.
+        /// </summary>
+        static Vector3 CrewGround(Vector3 position, Transform carrier,
+                                  float above, float below)
         {
-            Vector3 ground;
-            GameObject hit = Turret.RaycastObject(position + Vector3.up * 10f,
-                Vector3.down, 40f, out ground);
-            if (hit != null) return ground + Vector3.up * 0.1f;
+            try
+            {
+                Vector3 from = position + Vector3.up * above;
+                float rest = above + below;
+                for (int i = 0; i < 4 && rest > 0f; i++)
+                {
+                    Vector3 hit;
+                    GameObject go = Turret.RaycastObject(from, Vector3.down, rest, out hit);
+                    if (go == null) break;
+                    if (!PartOfCarrier(go, carrier) && !IsMan(go))
+                        return hit + Vector3.up * 0.1f;
+                    rest -= Vector3.Distance(from, hit) + 0.25f;
+                    from = hit + Vector3.down * 0.25f;
+                }
+            }
+            catch { }
             // No collider is not no ground - see Ausstiege.
             float height;
             if (RevivalTroopInsertion.TerrainHeight(position, out height))
                 return new Vector3(position.x, height + 0.1f, position.z);
             return position;
+        }
+
+        static Vector3 CrewGround(Vector3 position, Transform carrier)
+        {
+            return CrewGround(position, carrier, 10f, 40f);
+        }
+
+        /// <summary>Does that collider belong to the vehicle the men come out
+        /// of? Its deck, its bonnet and its barrel are not their floor.</summary>
+        static bool PartOfCarrier(GameObject go, Transform carrier)
+        {
+            if (go == null || carrier == null) return false;
+            Transform t = go.transform;
+            while (t != null)
+            {
+                if (t == carrier) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        /// <summary>A man is not ground either. The men of one squad are placed
+        /// one after another, and a point over a capsule that is already there
+        /// would stand the next man on his mate's shoulders.</summary>
+        static bool IsMan(GameObject go)
+        {
+            if (go == null) return false;
+            Transform t = go.transform;
+            for (int i = 0; i < 4 && t != null; i++)
+            {
+                if (t.GetComponent<NavMeshAgent>() != null) return true;
+                t = t.parent;
+            }
+            return false;
         }
 
         static void AssignSectors(Component settlement, Transform root, Transform car,
@@ -1347,7 +1431,7 @@ namespace NextDayRevival
                     point.transform.SetParent(root, false);
                     Vector3 offset = SquadOffset(i, count, true);
                     offset.z += k == 0 ? -1.5f : 1.5f;
-                    point.transform.position = CrewGround(car.TransformPoint(offset));
+                    point.transform.position = CrewGround(car.TransformPoint(offset), car);
                     Component wp = point.AddComponent(pointType);
                     SetEnum(wp, "Type", "Tactical");
                     points.Add(wp);
@@ -1646,16 +1730,13 @@ namespace NextDayRevival
                 // down on a slope hundreds of units from anybody ended up
                 // beside the NavMesh and never walked anywhere. Height data
                 // needs no collider.
-                Vector3 boden;
-                GameObject unter = Turret.RaycastObject(wo[i] + Vector3.up * 6f,
-                                                        Vector3.down, 30f, out boden);
-                if (unter != null) wo[i] = boden + Vector3.up * 0.1f;
-                else
-                {
-                    float hoehe;
-                    if (RevivalTroopInsertion.TerrainHeight(wo[i], out hoehe))
-                        wo[i] = new Vector3(wo[i].x, hoehe + 0.1f, wo[i].z);
-                }
+                // 2026-09-18: and the cast goes PAST THE CARRIER. An exit
+                // point is by definition right beside the hull, so the first
+                // thing a downward ray finds there is the hull itself - a wing,
+                // the deck, or the gun barrel laid across it - and the man was
+                // spawned standing on the vehicle. The reach stays short (6 up)
+                // so a roof over the exit is still not mistaken for the floor.
+                wo[i] = CrewGround(wo[i], car.transform, 6f, 30f);
             }
             return wo;
         }

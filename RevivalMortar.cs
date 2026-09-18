@@ -606,6 +606,18 @@ namespace NextDayRevival
                                               new Vector3(me.x, 0f, me.z));
                 if (away > reach)
                 {
+                    // NDR settlement artillery. THE DRONE DOES NOT WAIT FOR THE
+                    // GUN. This scan sees every settlement in the level from the
+                    // first frame, but the gun is only raised once a player is
+                    // inside PlaceRange - so the recon drone, which needs
+                    // nothing but this centre, used to appear only after a visit
+                    // (order of 2026-09-18). The battery is told about the place
+                    // now and flies its drone; ArtyBattery.GunRaised takes the
+                    // orbit over unchanged when the vehicle really stands. It is
+                    // repeated on every scan: the battery drops a place it stops
+                    // hearing about.
+                    ArtyBattery.GunExpected(id, s, centre, s.gameObject.name,
+                                            SafeSettlement(s));
                     if (!_waiting.ContainsKey(id))
                     {
                         _waiting[id] = true;
@@ -633,6 +645,12 @@ namespace NextDayRevival
                 // has nothing to drop. Coming a real step closer - forty
                 // percent - is a different question about different ground, so
                 // it buys a fresh set of tries.
+                // The ground was not there to build on, and the next try comes
+                // from closer up. The drone is not waiting for it either - the
+                // same announcement as for a settlement out of reach, and it
+                // stops as soon as the settlement is written off below.
+                ArtyBattery.GunExpected(id, s, centre, s.gameObject.name,
+                                        SafeSettlement(s));
                 int tries = 0;
                 _tries.TryGetValue(id, out tries);
                 float closest;
