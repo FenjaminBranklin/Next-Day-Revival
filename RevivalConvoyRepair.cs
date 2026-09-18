@@ -579,16 +579,24 @@ namespace NextDayRevival
             {
                 Component c = all[i] as Component;
                 if (c == null) continue;
-                if (GetFloat(c, "Durability", 1f) > 0f) continue;   // not a wreck
 
+                // DISTANCE FIRST, durability after. Reading Durability is a
+                // reflected field read with a boxed result, and the range is six
+                // metres: testing every vehicle in the scene for it, four times a
+                // second, was most of what this scan cost, and all but the one or
+                // two vehicles beside the player were thrown away immediately
+                // afterwards anyway. The result is identical.
                 Vector3 to = c.transform.position - me;
                 float dist = to.magnitude;
                 if (dist > range) continue;
+                if (dist >= best) continue;
                 // Looking at it - but a wreck you are almost touching counts
                 // regardless of exact aim.
                 if (dist > 3f && Vector3.Dot(to.normalized, look) < aim) continue;
 
-                if (dist < best) { best = dist; bestVgs = c; }
+                if (GetFloat(c, "Durability", 1f) > 0f) continue;   // not a wreck
+
+                best = dist; bestVgs = c;
             }
 
             if (bestVgs == null) return false;
@@ -611,7 +619,7 @@ namespace NextDayRevival
                 Component[] all = VehicleScan.All();   // shared cached scan
                 for (int i = 0; i < all.Length; i++)
                 {
-                    FieldInfo f = AccessTools.Field(all[i].GetType(), "_localPlayerPassengerId");
+                    FieldInfo f = CachedField(all[i].GetType(), "_localPlayerPassengerId");
                     if (f == null) continue;
                     object v = f.GetValue(all[i]);
                     if (v is int && (int)v >= 0) { inv = true; break; }
@@ -659,11 +667,29 @@ namespace NextDayRevival
             }
         }
 
+        // AccessTools.Field walks the type and its bases on every call, and these
+        // two fields are asked for on the same handful of types over and over in
+        // the per-frame scans above. One dictionary lookup instead. A field that
+        // does not exist is remembered as null, so a missing one is not searched
+        // for again either.
+        static readonly Dictionary<string, FieldInfo> _fields =
+            new Dictionary<string, FieldInfo>();
+
+        static FieldInfo CachedField(Type type, string field)
+        {
+            string key = type.FullName + "." + field;
+            FieldInfo fi;
+            if (_fields.TryGetValue(key, out fi)) return fi;
+            fi = AccessTools.Field(type, field);
+            _fields[key] = fi;
+            return fi;
+        }
+
         static float GetFloat(Component c, string field, float fallback)
         {
             try
             {
-                FieldInfo fi = AccessTools.Field(c.GetType(), field);
+                FieldInfo fi = CachedField(c.GetType(), field);
                 if (fi != null && fi.FieldType == typeof(float))
                     return (float)fi.GetValue(c);
             }

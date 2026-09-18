@@ -322,7 +322,16 @@ namespace NextDayRevival
     // adding children to the source texture's picking/coordinate bounds.
     internal sealed class MapLabels : MonoBehaviour
     {
-        sealed class Entry { internal Component Widget; internal int Frame; }
+        // Bounds/Placed remember what the last placement search decided, so a
+        // frame that only re-arms the name can answer the cursor test without
+        // running that search again.
+        sealed class Entry
+        {
+            internal Component Widget;
+            internal int Frame;
+            internal Rect Bounds;
+            internal bool Placed;
+        }
         static MapLabels instance;
         static Type labelType, widgetType;
         static UnityEngine.Object font;
@@ -450,7 +459,24 @@ namespace NextDayRevival
             }
         }
 
-        internal static MapLabels Begin(Component texture, Camera camera, Rect mapRect, bool overworld)
+        /// <summary>Is there a layer whose last placement can be re-armed? A
+        /// caller that wants to skip the placement search has to build once
+        /// before there is anything to skip.</summary>
+        internal static bool HasLayer { get { return instance != null; } }
+
+        /// <summary>
+        /// Opens the layer for this frame. <paramref name="reuse"/> keeps the
+        /// placement the last build produced: the obstacle grid, the reserved
+        /// road lines and every name stay exactly as they are, and only the
+        /// panel-relative bookkeeping is refreshed so the names travel with a
+        /// panned or zoomed map. The search itself - a few hundred rectangle
+        /// tests per name against a grid holding one box per road point - is
+        /// what made this the most expensive thing the toolkit did per frame,
+        /// and it only ever produces a different answer when the routes, the
+        /// map scale or the panel's alpha change.
+        /// </summary>
+        internal static MapLabels Begin(Component texture, Camera camera, Rect mapRect,
+                                        bool overworld, bool reuse)
         {
             if (!FindFont()) { Hide(); return null; }
             if (instance == null)
@@ -458,6 +484,7 @@ namespace NextDayRevival
                 GameObject go = new GameObject("NDR map labels");
                 go.hideFlags = HideFlags.HideAndDontSave;
                 instance = go.AddComponent<MapLabels>();
+                reuse = false;              // nothing placed yet to re-arm
             }
             MapLabels layer = instance;
             layer.source = texture;
@@ -466,6 +493,7 @@ namespace NextDayRevival
             Vector3[] corners = (Vector3[])Get(texture, "localCorners");
             layer.bottomLeft = corners[0]; layer.topRight = corners[2];
             layer.Follow();
+            if (reuse) return layer;
             layer.ReadPlaces();
             Texture artwork = Get(texture, "mainTexture") as Texture;
             layer.layout.Begin(overworld && artwork != null
@@ -488,10 +516,28 @@ namespace NextDayRevival
         internal Vector2 Artwork(Vector2 screen)
         { return new Vector2((screen.x - full.x) * 1024f / full.width, (screen.y - full.y) * 1024f / full.height); }
 
+        // How far apart the kept points of a reserved road are, in artwork
+        // pixels. The line arrives at rather less than one pixel per point (it
+        // is sampled every four metres of road), and one reserved rectangle per
+        // point put four figures' worth of boxes into the grid for a single
+        // route - which every later name then had to be tested against. Six is
+        // the spacing the road walk below re-samples to anyway, so nothing that
+        // reads the reserved line loses resolution, and the boxes still cover
+        // the whole stroke because each spans from one kept point to the next.
+        const float BlockStep = 6f;
+
         internal void BlockRoute(string key, List<Vector2> localPoints, Vector2 screenOrigin)
         {
-            List<Vector2> points = new List<Vector2>(localPoints.Count);
-            for (int i = 0; i < localPoints.Count; i++) points.Add(Artwork(localPoints[i] + screenOrigin));
+            List<Vector2> points = new List<Vector2>(localPoints.Count / 4 + 2);
+            Vector2 last = Vector2.zero;
+            for (int i = 0; i < localPoints.Count; i++)
+            {
+                Vector2 a = Artwork(localPoints[i] + screenOrigin);
+                if (points.Count > 0 && i < localPoints.Count - 1
+                    && (a - last).sqrMagnitude < BlockStep * BlockStep) continue;
+                points.Add(a);
+                last = a;
+            }
             layout.BlockLine(points, 3f);
             // The same line guides the route's own name below.
             if (!string.IsNullOrEmpty(key)) roads[key] = points;
@@ -596,8 +642,11 @@ namespace NextDayRevival
             Rect bounds;
             List<Vector2> road;
             roads.TryGetValue(key, out road);
+            entry.Placed = false;
             if (!layout.Place(key, road, Artwork(screenAnchor), size, out bounds))
             { widget.gameObject.SetActive(false); return false; }
+            entry.Bounds = bounds;
+            entry.Placed = true;
             float sx = (topRight.x - bottomLeft.x) / 1024f;
             float sy = (topRight.y - bottomLeft.y) / 1024f;
             widget.transform.localScale = new Vector3(sx, sy, 1f);
@@ -608,6 +657,22 @@ namespace NextDayRevival
             Set(widget, "depth", (int)Get(source, "depth") + 3);
             widget.gameObject.SetActive(true);
             return bounds.Contains(Artwork(mouse));
+        }
+
+        /// <summary>
+        /// Re-arms a name the last build placed: the widget keeps the spot the
+        /// placement search gave it - it is positioned in the picture's own
+        /// coordinates and travels with the panel - and only the cursor is
+        /// tested against it again. Returns false for a name this layer does
+        /// not know or could not place, so the caller falls back to the route's
+        /// own hover spot exactly as it does after a failed placement.
+        /// </summary>
+        internal bool Keep(string key, Vector2 mouse)
+        {
+            Entry entry;
+            if (!entries.TryGetValue(key, out entry)) return false;
+            entry.Frame = frame;
+            return entry.Placed && entry.Bounds.Contains(Artwork(mouse));
         }
 
         internal void End()

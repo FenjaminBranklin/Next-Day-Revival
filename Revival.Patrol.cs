@@ -213,6 +213,21 @@ namespace NextDayRevival
             internal int MapLineN = -1;
             internal bool MapLineLoop;
 
+            // What the map overlay's last BUILD worked out for this route (see
+            // Patrol.DrawMap). MapProj is the projected line kept relative to
+            // the map picture's own screen origin, which makes it independent
+            // of where the map is scrolled; MapBounds is its extent plus the
+            // hover slack, so the cursor test can skip a route in one compare.
+            // MapAnchor is the projected first waypoint, the fallback hover
+            // spot for the route's name. All of it survives until the overlay's
+            // layout signature changes, so an unchanged map costs no
+            // projection, no clearance pass and no placement search at all.
+            internal List<Vector2> MapProj;
+            internal Rect MapBounds;
+            internal Vector2 MapAnchor;
+            internal bool MapInked;
+            internal bool MapNamed;
+
             // NDR convoy (RevivalConvoy.cs): "convoy" marks a route the convoy
             // event drives as a column of tanks and APCs. Empty/"patrol" is an
             // ordinary auto-patrol route. Stored as kind= in the first
@@ -5333,6 +5348,87 @@ namespace NextDayRevival
         //  Map overlay
         // =====================================================================
 
+        // ------------------------------------------------------ layout signature
+        //
+        // WHY THIS EXISTS. The overlay used to work the whole map out again on
+        // every single repaint: each route's thousand-point line re-projected
+        // into a fresh list, a clearance grid rebuilt dash by dash, every dash
+        // re-submitted through four reflected property writes, one reserved
+        // rectangle per line point, and then a few hundred rectangle tests for
+        // each name against that grid. With the map open that measured about
+        // seven milliseconds a frame in the F6 overlay - by a wide margin the
+        // most expensive thing the toolkit did.
+        //
+        // None of it depends on where the map is SCROLLED. Ink and names are
+        // native NGUI widgets placed in the map picture's own coordinates and
+        // parented beside the map texture, so panning and zooming carry them
+        // along by themselves. What the result does depend on is the map's
+        // scale, the scene, the panel's alpha, and which routes are drawn in
+        // what state. That is the signature below; while it holds, the widgets
+        // from the last build simply stay where they are.
+        static float _layW, _layH, _layWorldX, _layWorldY, _layAlpha;
+        static int _layHash;
+        static float _layAt;
+        static bool _layValid;
+
+        // A slow heartbeat on top of the signature, and the reason the signature
+        // is allowed to be a short list rather than an exhaustive one. Native
+        // markers - the player above all - move without any of it changing, and
+        // a name has to give way to one that has moved under it; the same goes
+        // for anything the signature does not name, such as a route's faction
+        // colour or an edited Places line. One rebuild a second is invisible to
+        // the eye and costs a sixtieth of what doing it every frame did.
+        const float MapLayoutHeartbeat = 1f;
+
+        /// <summary>True when the overlay has to be worked out again, which
+        /// also records the new signature. False means every widget on the map
+        /// is still correct and this frame only has to re-test the cursor.
+        /// </summary>
+        static bool MapLayoutChanged(Rect full, Vector2 world, float alpha)
+        {
+            int hash = 17;
+            for (int i = 0; i < _order.Count; i++)
+            {
+                Route r;
+                if (!_routes.TryGetValue(_order[i], out r) || r == null) continue;
+                // The route OBJECT, so a reload that keeps the names still
+                // rebuilds; the waypoint count, because that is what rebuilds
+                // the cached world line; and every flag the drawing reads.
+                hash = hash * 31 + r.GetHashCode();
+                hash = hash * 31 + r.P.Count;
+                if (r.Enabled) hash += 7;
+                if (r.Here) hash += 13;
+                if (r.IsConvoy) hash += ConvoyRouteActive(r.Name) ? 29 : 43;
+            }
+
+            if (_layValid && hash == _layHash
+                && Mathf.Abs(full.width - _layW) < 0.5f
+                && Mathf.Abs(full.height - _layH) < 0.5f
+                && world.x == _layWorldX && world.y == _layWorldY
+                && Mathf.Abs(alpha - _layAlpha) < 0.01f
+                && Time.unscaledTime - _layAt < MapLayoutHeartbeat)
+                return false;
+
+            _layHash = hash;
+            _layW = full.width; _layH = full.height;
+            _layWorldX = world.x; _layWorldY = world.y;
+            _layAlpha = alpha;
+            _layAt = Time.unscaledTime;
+            _layValid = true;
+            return true;
+        }
+
+        /// <summary>Drops the cached layout, so the next repaint builds the
+        /// overlay from scratch. Every path that takes the overlay off the map
+        /// goes through this - what is cached describes widgets that are no
+        /// longer there.</summary>
+        static void MapLayoutDrop()
+        {
+            _layValid = false;
+            MapInkLayer.Hide("patrol");
+            MapLabels.Hide();
+        }
+
         /// <summary>
         /// Draws every recorded route as one faction-coloured dashed line ALONG
         /// the road it drives, running down the middle of that road. A convoy
@@ -5344,14 +5440,14 @@ namespace NextDayRevival
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (RevivalPlugin.CfgPatrol == null || !RevivalPlugin.CfgPatrol.Value)
-            { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
+            { MapLayoutDrop(); return; }
 
             Component manager, texture;
             Camera camera;
             Vector2 world, map;
             if (!MapTools.Context(out manager, out texture, out camera,
                                   out world, out map))
-            { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
+            { MapLayoutDrop(); return; }
             Load(false);
 
             // The texture bounds register artwork and hover coordinates. Ink
@@ -5361,7 +5457,7 @@ namespace NextDayRevival
             bool mapRect = MapTools.MapScreenRect(texture, camera, out clip);
             // Cached masks need the real texture bounds. Never substitute the
             // entire screen and stretch road ink across an unrelated UI region.
-            if (!mapRect) { MapInkLayer.Hide("patrol"); MapLabels.Hide(); return; }
+            if (!mapRect) { MapLayoutDrop(); return; }
 
             // The WHOLE map texture, before the visible window trims it below.
             // The picture covers the whole world, so the registration
@@ -5383,181 +5479,53 @@ namespace NextDayRevival
             MapLabels labels = null;
             try
             {
-                labels = MapLabels.Begin(texture, camera, full, world.x >= 4900f && world.y >= 4900f);
-                if (labels != null)
+                MapInkLayer inkLayer = MapInkLayer.Begin("patrol", texture);
+                if (inkLayer == null) { MapLayoutDrop(); return; }
+
+                // Everything below is either a REBUILD - the full projection,
+                // clearance and placement work - or a re-arm, which keeps the
+                // widgets the last build left on the map and only re-tests the
+                // cursor against them. See MapLayoutChanged, which is asked
+                // FIRST and unconditionally, because it also records the
+                // signature the next frame compares against.
+                bool changed = MapLayoutChanged(full, world, inkLayer.Alpha);
+                bool rebuild = changed || !MapLabels.HasLayer || !inkLayer.CanKeep;
+
+                labels = MapLabels.Begin(texture, camera, full,
+                    world.x >= 4900f && world.y >= 4900f, !rebuild);
+                if (rebuild && labels != null)
                 {
                     NewSettlement.ReserveMapLabels(labels, texture, camera, world, map, full);
                     ArtyBattery.ReserveMapLabels(labels, texture, camera, world, map);
                 }
-                // Hover and clearance coordinates remain local to this window.
-                // Native ink is submitted separately in artwork coordinates.
-                Rect localClip = new Rect(0f, 0f, clip.width, clip.height);
 
-                // Hovering the enclosed area of a route pops a note about the
-                // patrols it carries. The ring is tested in clip-LOCAL space, so
-                // the absolute cursor is shifted by -clip.position to match; the
-                // box itself is drawn after EndClip in absolute coordinates so it
-                // can sit over the map edge and is never scissored.
+                // Hovering a route pops a note about the patrols it carries.
+                // The note itself is drawn in absolute coordinates so it may sit
+                // over the map edge and is never scissored.
                 Vector2 mouseAbs = Event.current.mousePosition;
-                Vector2 mouseLocal = mouseAbs - clip.position;
                 string hoverText = null;
                 Vector2 hoverAt = Vector2.zero;
                 Color hoverColor = Color.white;
 
-                MapInk.Begin();
-                MapInkLayer inkLayer = MapInkLayer.Begin("patrol", texture);
-                if (inkLayer == null) { MapInk.End(); MapLabels.Hide(); return; }
-                GUI.BeginClip(clip);
-                try
-                {
-                    // Every dash point drawn so far, so a later route's ring is
-                    // trimmed where it crosses one drawn earlier. Routes are
-                    // drawn in file order; the earlier ring keeps its line.
-                    ClearGrid grid = new ClearGrid(RouteClearance);
+                if (rebuild) BuildRouteInk(inkLayer, labels, texture, camera,
+                                           world, map, full, clip, mapRect);
+                else inkLayer.Keep();
+                inkLayer.End();
 
-                    // TWO passes: every ACTIVE convoy road first, the standing
-                    // patrol roads after it. A convoy often shares tarmac with a
-                    // patrol, and the clearance grid drops whichever line comes
-                    // second at a crossing - so the rare, time-limited convoy
-                    // gets the road and the patrol is the one that opens a gap,
-                    // never the other way round. NDR convoy.
-                    for (int pass = 0; pass < 2; pass++)
-                    for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
-                    {
-                        Route route;
-                        if (!_routes.TryGetValue(_order[routeIndex], out route)
-                            || route == null || route.P.Count < 2) continue;
+                // The cursor is the one thing that does change every frame. It
+                // is tested against the projected lines the build left behind,
+                // and a route whose extent does not reach the cursor at all is
+                // dismissed on its bounding box.
+                RouteHover(full, clip, mouseAbs,
+                           ref hoverText, ref hoverAt, ref hoverColor);
 
-                        // REGION GATE. The map on screen belongs to ONE scene,
-                        // and a route belongs to one scene too. Drawing the
-                        // routes of the starting region onto the map of Primorye
-                        // or the toxic swamp is what this stops - those patrols
-                        // are not there, and FitsScene below cannot tell, because
-                        // two surface maps are of a similar size. See MapScene.
-                        if (!route.Here) continue;
-
-                        // A convoy route is an EVENT, not a standing road on
-                        // the map: it is drawn only while a convoy is actually
-                        // driving it. NDR convoy.
-                        bool convoy = route.IsConvoy && ConvoyRouteActive(route.Name);
-                        if (route.IsConvoy && !convoy) continue;
-                        if (convoy != (pass == 0)) continue;
-
-                        // FOLLOW the driven road instead of encircling the run.
-                        // The line is built ONCE in world space (WorldLine,
-                        // cached on the route) and only PROJECTED here, so it
-                        // does not jitter as the map/camera micro-moves.
-                        // Project every point; if any falls behind the UI
-                        // camera the line is skipped this frame rather than
-                        // drawn broken.
-                        List<Vector3> wline = WorldLine(route);
-                        if (wline == null || wline.Count < 2) continue;
-
-                        // SCENE GATE. The map shows the CURRENT scene, and its
-                        // WORLD_SIZE is that scene's terrain size. A route lives
-                        // on one terrain (the overworld), so on any smaller map -
-                        // a bunker or other interior - its coordinates fall many
-                        // terrain-widths outside and the ring smears across the
-                        // wrong map. Draw the route only where it can fit.
-                        if (!FitsScene(wline, world)) continue;
-
-                        List<Vector2> line = new List<Vector2>(wline.Count);
-                        bool lineOk = true;
-                        for (int i = 0; i < wline.Count; i++)
-                        {
-                            Vector2 g;
-                            if (!MapTools.WorldToGui(wline[i], texture, camera,
-                                                     world, map, out g))
-                            { lineOk = false; break; }
-                            line.Add(MapArt(g, full, mapRect) - clip.position);
-                        }
-                        if (!lineOk || line.Count < 2) continue;
-                        // Reserves the ink AND hands the placement pass the line
-                        // this route's name belongs to.
-                        if (labels != null) labels.BlockRoute(route.Name, line, clip.position);
-
-                        // Colour is the patrol's faction: looter and traitor
-                        // red, civilian green, neutral white. A convoy route is
-                        // amber, to read apart from the patrol areas. NDR convoy.
-                        Color col = route.IsConvoy ? ConvoyColor(route.Enabled)
-                                                   : RouteColor(route.Seite, route.Enabled);
-                        GUI.color = col;
-
-                        // This line's own dash points, added to the grid only
-                        // after it is fully drawn so it never clears itself.
-                        List<Vector2> ink = new List<Vector2>();
-                        DrawRoadInk(route.Name, wline, route.MapLineLoop,
-                            new Rect(full.x-clip.x, full.y-clip.y, full.width, full.height),
-                            localClip, grid, ink, inkLayer);
-                        grid.Add(ink);
-
-                        // First line under the cursor wins the note.
-                        if (hoverText == null
-                            && NearPolyline(line, mouseLocal, RouteHoverPx))
-                        {
-                            hoverText = route.IsConvoy
-                                ? Loc.T(
-                                    "По этой дороге сейчас идёт военный конвой: "
-                                    + "2 танка и 2 БТР с ценным грузом. "
-                                    + "Они опасны и хорошо вооружены.",
-                                    "A military convoy is on this road RIGHT NOW: "
-                                    + "2 tanks and 2 APCs carrying valuable cargo. "
-                                    + "They are dangerous and heavily armed.")
-                                : Loc.T(
-                                    "Здесь регулярно проходят патрули. Возможно, "
-                                    + "они везут ценный груз, но они опасны, хорошо "
-                                    + "вооружены и имеют FPV-дрон.",
-                                    "Regular patrols pass through here. They may be "
-                                    + "carrying valuable cargo, but they are dangerous, "
-                                    + "heavily armed, and have an FPV drone.");
-                            hoverText = route.Name + "\n" + hoverText;
-                            hoverAt = mouseAbs;
-                            hoverColor = col;
-                        }
-                    }
-                }
-                finally { GUI.EndClip(); inkLayer.End(); MapInk.End(); }
-
-                // THREE passes. Names the player placed by hand go down first,
-                // so every automatic name gives way to them; then the rare,
-                // time-limited convoys; then the standing patrols. All lines
-                // and native markers are already reserved; every accepted name
-                // reserves its full bounds.
-                for (int labelPass = 0; labelPass < 3; labelPass++)
-                for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
-                {
-                    Route route;
-                    if (!_routes.TryGetValue(_order[routeIndex], out route)
-                        || route == null || route.P.Count < 1) continue;
-                    if (!route.Here) continue;          // same region gate as the ring loop
-                    if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
-                    int wantedPass = labels != null && labels.Pinned(route.Name)
-                        ? 0 : (route.IsConvoy ? 1 : 2);
-                    if (wantedPass != labelPass) continue;
-                    if (!FitsScene(WorldLine(route), world)) continue;
-                    Vector2 label;
-                    if (!MapTools.WorldToGui(PatrolMapRoads.Correct(route.P[0].Pos), texture, camera,
-                                             world, map, out label)) continue;
-                    label = MapArt(label, full, mapRect);
-                    // The start point is the FALLBACK anchor and the hover spot
-                    // only. A route whose road was drawn above gets its name
-                    // beside that road, wherever the road is open and straight,
-                    // and a route named in MapLabels/Places gets the place the
-                    // player picked for it instead.
-                    string title = MapLabels.DisplayName(route.Name);
-                    if (!route.Enabled) title += Loc.T(" (\u0412\u042b\u041a\u041b)", " (DISABLED)");
-                    bool overName = labels != null && labels.Draw(route.Name, title, label,
-                        route.Enabled, mouseAbs);
-                    // Hidden names remain discoverable at their route start as
-                    // well as anywhere along the road. Keep original names here.
-                    if (clip.Contains(mouseAbs) && (overName || (mouseAbs - label).sqrMagnitude < 196f))
-                    {
-                        hoverText = route.Name + (route.Enabled ? "" : Loc.T(" (\u0432\u044b\u043a\u043b)", " (disabled)"));
-                        hoverAt = mouseAbs;
-                        hoverColor = route.IsConvoy ? ConvoyColor(route.Enabled)
-                            : RouteColor(route.Seite, route.Enabled);
-                    }
-                }
+                if (rebuild)
+                    DrawRouteNames(labels, texture, camera, world, map, full, clip,
+                                   mapRect, mouseAbs,
+                                   ref hoverText, ref hoverAt, ref hoverColor);
+                else
+                    KeepRouteNames(labels, full, clip, mouseAbs,
+                                   ref hoverText, ref hoverAt, ref hoverColor);
 
                 GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f);
                 GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
@@ -5573,6 +5541,8 @@ namespace NextDayRevival
             {
                 if (RevivalPlugin.L != null)
                     RevivalPlugin.L.LogWarning("Patrol map overlay: " + ex.Message);
+                // A half-finished build must not be re-armed next frame.
+                _layValid = false;
             }
             finally
             {
@@ -5580,6 +5550,271 @@ namespace NextDayRevival
                 GUI.matrix = oldMatrix;
                 GUI.color = old;
             }
+        }
+
+        /// <summary>
+        /// One full build of the route ink: project every drawn route's cached
+        /// world line, reserve it for the name placement, run the clearance
+        /// pass and submit the surviving dashes. Called only when the overlay's
+        /// layout signature has actually moved.
+        /// </summary>
+        static void BuildRouteInk(MapInkLayer inkLayer, MapLabels labels,
+                                  Component texture, Camera camera,
+                                  Vector2 world, Vector2 map, Rect full, Rect clip,
+                                  bool mapRect)
+        {
+            for (int i = 0; i < _order.Count; i++)
+            {
+                Route r;
+                if (_routes.TryGetValue(_order[i], out r) && r != null)
+                { r.MapInked = false; r.MapNamed = false; }
+            }
+
+            MapInk.Begin();
+            GUI.BeginClip(clip);
+            try
+            {
+                // Every dash point drawn so far, so a later route's ring is
+                // trimmed where it crosses one drawn earlier. Routes are
+                // drawn in file order; the earlier ring keeps its line. The
+                // grid works in the SCALED PICTURE's own frame - screen pixels
+                // with the map's origin taken out - so the clearance radius is
+                // still the screen distance it always was, while the decisions
+                // no longer depend on where the map is scrolled.
+                ClearGrid grid = new ClearGrid(RouteClearance);
+                Vector2 scale = new Vector2(full.width / 1024f, full.height / 1024f);
+
+                // TWO passes: every ACTIVE convoy road first, the standing
+                // patrol roads after it. A convoy often shares tarmac with a
+                // patrol, and the clearance grid drops whichever line comes
+                // second at a crossing - so the rare, time-limited convoy
+                // gets the road and the patrol is the one that opens a gap,
+                // never the other way round. NDR convoy.
+                for (int pass = 0; pass < 2; pass++)
+                for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+                {
+                    Route route;
+                    if (!_routes.TryGetValue(_order[routeIndex], out route)
+                        || route == null || route.P.Count < 2) continue;
+
+                    // REGION GATE. The map on screen belongs to ONE scene,
+                    // and a route belongs to one scene too. Drawing the
+                    // routes of the starting region onto the map of Primorye
+                    // or the toxic swamp is what this stops - those patrols
+                    // are not there, and FitsScene below cannot tell, because
+                    // two surface maps are of a similar size. See MapScene.
+                    if (!route.Here) continue;
+
+                    // A convoy route is an EVENT, not a standing road on
+                    // the map: it is drawn only while a convoy is actually
+                    // driving it. NDR convoy.
+                    bool convoy = route.IsConvoy && ConvoyRouteActive(route.Name);
+                    if (route.IsConvoy && !convoy) continue;
+                    if (convoy != (pass == 0)) continue;
+
+                    // FOLLOW the driven road instead of encircling the run.
+                    // The line is built ONCE in world space (WorldLine,
+                    // cached on the route) and only PROJECTED here, so it
+                    // does not jitter as the map/camera micro-moves.
+                    // Project every point; if any falls behind the UI
+                    // camera the line is skipped this frame rather than
+                    // drawn broken.
+                    List<Vector3> wline = WorldLine(route);
+                    if (wline == null || wline.Count < 2) continue;
+
+                    // SCENE GATE. The map shows the CURRENT scene, and its
+                    // WORLD_SIZE is that scene's terrain size. A route lives
+                    // on one terrain (the overworld), so on any smaller map -
+                    // a bunker or other interior - its coordinates fall many
+                    // terrain-widths outside and the ring smears across the
+                    // wrong map. Draw the route only where it can fit.
+                    if (!FitsScene(wline, world)) continue;
+
+                    // The projected line is kept RELATIVE to the map picture's
+                    // own origin, and the list is reused: that is what lets the
+                    // cursor test and the reserved road survive a pan without
+                    // being rebuilt, and it keeps a few hundred kilobytes a
+                    // second out of the collector.
+                    List<Vector2> line = route.MapProj;
+                    if (line == null)
+                    { line = new List<Vector2>(wline.Count); route.MapProj = line; }
+                    line.Clear();
+                    bool lineOk = true;
+                    for (int i = 0; i < wline.Count; i++)
+                    {
+                        Vector2 g;
+                        if (!MapTools.WorldToGui(wline[i], texture, camera,
+                                                 world, map, out g))
+                        { lineOk = false; break; }
+                        line.Add(MapArt(g, full, mapRect) - full.position);
+                    }
+                    if (!lineOk || line.Count < 2) continue;
+                    route.MapBounds = Extent(line, RouteHoverPx);
+                    route.MapInked = true;
+                    // Reserves the ink AND hands the placement pass the line
+                    // this route's name belongs to.
+                    if (labels != null) labels.BlockRoute(route.Name, line, full.position);
+
+                    // Colour is the patrol's faction: looter and traitor
+                    // red, civilian green, neutral white. A convoy route is
+                    // amber, to read apart from the patrol areas. NDR convoy.
+                    GUI.color = route.IsConvoy ? ConvoyColor(route.Enabled)
+                                               : RouteColor(route.Seite, route.Enabled);
+
+                    // This line's own dash points, added to the grid only
+                    // after it is fully drawn so it never clears itself.
+                    List<Vector2> ink = new List<Vector2>();
+                    DrawRoadInk(route.Name, wline, route.MapLineLoop,
+                                scale, grid, ink, inkLayer);
+                    grid.Add(ink);
+                }
+            }
+            finally { GUI.EndClip(); MapInk.End(); }
+        }
+
+        /// <summary>The bounding box of a projected line, grown by
+        /// <paramref name="slack"/>. The cursor test uses it to dismiss a route
+        /// that is nowhere near the pointer without walking its thousand
+        /// segments.</summary>
+        static Rect Extent(List<Vector2> line, float slack)
+        {
+            float x0 = line[0].x, x1 = x0, y0 = line[0].y, y1 = y0;
+            for (int i = 1; i < line.Count; i++)
+            {
+                Vector2 p = line[i];
+                if (p.x < x0) x0 = p.x; else if (p.x > x1) x1 = p.x;
+                if (p.y < y0) y0 = p.y; else if (p.y > y1) y1 = p.y;
+            }
+            return new Rect(x0 - slack, y0 - slack,
+                            x1 - x0 + slack * 2f, y1 - y0 + slack * 2f);
+        }
+
+        /// <summary>
+        /// The note that pops when the cursor comes near a drawn road. The
+        /// first line under the cursor wins it, in the order the ink was laid
+        /// down: the active convoys first, the standing patrols after them.
+        /// This runs on EVERY repaint - the cursor is the one thing that moves
+        /// when nothing else does - against the lines the last build left.
+        /// </summary>
+        static void RouteHover(Rect full, Rect clip, Vector2 mouseAbs,
+                               ref string hoverText, ref Vector2 hoverAt,
+                               ref Color hoverColor)
+        {
+            if (!clip.Contains(mouseAbs)) return;
+            Vector2 mouseRel = mouseAbs - full.position;
+            for (int pass = 0; pass < 2; pass++)
+            for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+            {
+                Route route;
+                if (!_routes.TryGetValue(_order[routeIndex], out route)
+                    || route == null || !route.MapInked || route.MapProj == null) continue;
+                if (route.IsConvoy != (pass == 0)) continue;
+                if (!route.MapBounds.Contains(mouseRel)) continue;
+                if (!NearPolyline(route.MapProj, mouseRel, RouteHoverPx)) continue;
+
+                hoverText = route.IsConvoy
+                    ? Loc.T(
+                        "По этой дороге сейчас идёт военный конвой: "
+                        + "2 танка и 2 БТР с ценным грузом. "
+                        + "Они опасны и хорошо вооружены.",
+                        "A military convoy is on this road RIGHT NOW: "
+                        + "2 tanks and 2 APCs carrying valuable cargo. "
+                        + "They are dangerous and heavily armed.")
+                    : Loc.T(
+                        "Здесь регулярно проходят патрули. Возможно, "
+                        + "они везут ценный груз, но они опасны, хорошо "
+                        + "вооружены и имеют FPV-дрон.",
+                        "Regular patrols pass through here. They may be "
+                        + "carrying valuable cargo, but they are dangerous, "
+                        + "heavily armed, and have an FPV drone.");
+                hoverText = route.Name + "\n" + hoverText;
+                hoverAt = mouseAbs;
+                hoverColor = route.IsConvoy ? ConvoyColor(route.Enabled)
+                                            : RouteColor(route.Seite, route.Enabled);
+                return;
+            }
+        }
+
+        /// <summary>
+        /// THREE passes. Names the player placed by hand go down first, so
+        /// every automatic name gives way to them; then the rare, time-limited
+        /// convoys; then the standing patrols. All lines and native markers are
+        /// already reserved; every accepted name reserves its full bounds.
+        /// </summary>
+        static void DrawRouteNames(MapLabels labels, Component texture, Camera camera,
+                                   Vector2 world, Vector2 map, Rect full, Rect clip,
+                                   bool mapRect, Vector2 mouseAbs,
+                                   ref string hoverText, ref Vector2 hoverAt,
+                                   ref Color hoverColor)
+        {
+            for (int labelPass = 0; labelPass < 3; labelPass++)
+            for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+            {
+                Route route;
+                if (!_routes.TryGetValue(_order[routeIndex], out route)
+                    || route == null || route.P.Count < 1) continue;
+                if (!route.Here) continue;          // same region gate as the ring loop
+                if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
+                int wantedPass = labels != null && labels.Pinned(route.Name)
+                    ? 0 : (route.IsConvoy ? 1 : 2);
+                if (wantedPass != labelPass) continue;
+                if (!FitsScene(WorldLine(route), world)) continue;
+                Vector2 label;
+                if (!MapTools.WorldToGui(PatrolMapRoads.Correct(route.P[0].Pos), texture, camera,
+                                         world, map, out label)) continue;
+                label = MapArt(label, full, mapRect);
+                route.MapAnchor = label - full.position;
+                route.MapNamed = true;
+                // The start point is the FALLBACK anchor and the hover spot
+                // only. A route whose road was drawn above gets its name
+                // beside that road, wherever the road is open and straight,
+                // and a route named in MapLabels/Places gets the place the
+                // player picked for it instead.
+                string title = MapLabels.DisplayName(route.Name);
+                if (!route.Enabled) title += Loc.T(" (\u0412\u042b\u041a\u041b)", " (DISABLED)");
+                bool overName = labels != null && labels.Draw(route.Name, title, label,
+                    route.Enabled, mouseAbs);
+                // Hidden names remain discoverable at their route start as
+                // well as anywhere along the road. Keep original names here.
+                if (clip.Contains(mouseAbs) && (overName || (mouseAbs - label).sqrMagnitude < 196f))
+                    NameHover(route, mouseAbs, ref hoverText, ref hoverAt, ref hoverColor);
+            }
+        }
+
+        /// <summary>
+        /// The same pass on a frame that changed nothing: every name the last
+        /// build placed keeps its widget and the spot the placement search gave
+        /// it, and only the cursor is tested against it. The names are walked in
+        /// file order, which within a pass is the order the build used, so the
+        /// same name wins the note as before.
+        /// </summary>
+        static void KeepRouteNames(MapLabels labels, Rect full, Rect clip, Vector2 mouseAbs,
+                                   ref string hoverText, ref Vector2 hoverAt,
+                                   ref Color hoverColor)
+        {
+            bool overMap = clip.Contains(mouseAbs);
+            Vector2 mouseRel = mouseAbs - full.position;
+            for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
+            {
+                Route route;
+                if (!_routes.TryGetValue(_order[routeIndex], out route)
+                    || route == null || !route.MapNamed) continue;
+                bool overName = labels != null && labels.Keep(route.Name, mouseAbs);
+                if (overMap && (overName
+                        || (mouseRel - route.MapAnchor).sqrMagnitude < 196f))
+                    NameHover(route, mouseAbs, ref hoverText, ref hoverAt, ref hoverColor);
+            }
+        }
+
+        /// <summary>The note a route's NAME pops: the route, and whether it is
+        /// switched off.</summary>
+        static void NameHover(Route route, Vector2 mouseAbs, ref string hoverText,
+                              ref Vector2 hoverAt, ref Color hoverColor)
+        {
+            hoverText = route.Name + (route.Enabled ? "" : Loc.T(" (\u0432\u044b\u043a\u043b)", " (disabled)"));
+            hoverAt = mouseAbs;
+            hoverColor = route.IsConvoy ? ConvoyColor(route.Enabled)
+                : RouteColor(route.Seite, route.Enabled);
         }
 
         /// <summary>
@@ -5870,30 +6105,33 @@ namespace NextDayRevival
         }
 
         // Each curved dash is one cached coverage mask, with map-relative
-        // dimensions. Zoom scales the road and its ink together; pan only moves it.
+        // dimensions. Zoom scales the road and its ink together; pan only moves
+        // it. The clearance points are therefore measured in the SCALED
+        // PICTURE's own frame, with the map's screen origin left out: the
+        // distances - and so every decision here - are the same screen
+        // distances as before, but they no longer change when the map is
+        // scrolled, which is what lets a panned map keep the whole pass.
         static void DrawRoadInk(string name, List<Vector3> world, bool loop,
-                                Rect full, Rect clip, ClearGrid grid, List<Vector2> ink,
+                                Vector2 scale, ClearGrid grid, List<Vector2> ink,
                                 MapInkLayer inkLayer)
         {
             MapInk.Cache cache = MapInk.Get(name, world, loop);
-            Vector2 scale = new Vector2(full.width / 1024f, full.height / 1024f);
             for (int i = 0; i < cache.Dashes.Count; i++)
             {
                 MapInk.Dash dash = cache.Dashes[i];
-                Rect b = dash.Bounds;
                 // Submit the full map geometry, even outside the viewport.
                 // NGUI clips per pixel and follows scroll transforms immediately;
                 // screen culling here would leave missing dashes after fast pans.
                 bool blocked = false;
                 for (int j = 0; j < dash.Points.Count; j += 8)
                 {
-                    Vector2 p = full.position + Vector2.Scale(dash.Points[j], scale);
+                    Vector2 p = Vector2.Scale(dash.Points[j], scale);
                     if (grid != null && grid.Blocked(p)) { blocked = true; break; }
                 }
                 if (blocked) continue;
-                inkLayer.Draw(b, dash.Texture, GUI.color);
+                inkLayer.Draw(dash.Bounds, dash.Texture, GUI.color);
                 for (int j = 0; j < dash.Points.Count; j += 4)
-                    ink.Add(full.position + Vector2.Scale(dash.Points[j], scale));
+                    ink.Add(Vector2.Scale(dash.Points[j], scale));
             }
         }
 

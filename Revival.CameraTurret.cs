@@ -1608,7 +1608,16 @@ namespace NextDayRevival
             for (int i = 0; i < invs.Count && !found; i++)
                 if (CountItem(invs[i], wanted) > 0) found = true;
             _hasResult[wanted] = found;
-            _hasUntil[wanted] = Time.time + 0.5f;
+            // EVERY id expires on the same half-second boundary, not half a
+            // second after it was last asked for. The frame-shared discovery
+            // above only helps when the expiries LAND IN THE SAME FRAME, and
+            // with a per-id deadline they drifted apart: half a dozen ids -
+            // jammer, FPV drone, recon drone, battery, extinguisher, tool kit -
+            // meant half a dozen separate whole-scene
+            // FindObjectsOfType(PlayerInventoryManager) scans per second, each
+            // in a frame of its own. Aligned, that is one scan for all of them.
+            // No answer is ever older than the half second it was before.
+            _hasUntil[wanted] = ((int)(Time.time / 0.5f) + 1) * 0.5f;
             return found;
         }
 
@@ -2498,20 +2507,33 @@ namespace NextDayRevival
             return v is int ? (int)v : -1;
         }
 
+        // The conversion operator, once per type. Obscured() is called for EVERY
+        // inventory slot of every container the item scans walk, and finding the
+        // operator meant a full Type.GetMethods() - an allocated array of the
+        // whole public static method table - for each of those slots. The type
+        // is always the same ObscuredInt, so the answer is looked up once.
+        static readonly Dictionary<Type, MethodInfo> _toInt =
+            new Dictionary<Type, MethodInfo>();
+
         /// <summary>ObscuredInt zu int ueber den impliziten Operator.</summary>
         static int Obscured(object value)
         {
             if (value is int) return (int)value;
             Type t = value.GetType();
-            MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
-            for (int i = 0; i < ms.Length; i++)
+            MethodInfo op;
+            if (!_toInt.TryGetValue(t, out op))
             {
-                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(int)) continue;
-                ParameterInfo[] ps = ms[i].GetParameters();
-                if (ps.Length == 1 && ps[0].ParameterType == t)
-                    return (int)ms[i].Invoke(null, new object[] { value });
+                op = null;
+                MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+                for (int i = 0; i < ms.Length; i++)
+                {
+                    if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(int)) continue;
+                    ParameterInfo[] ps = ms[i].GetParameters();
+                    if (ps.Length == 1 && ps[0].ParameterType == t) { op = ms[i]; break; }
+                }
+                _toInt[t] = op;
             }
-            return -1;
+            return op == null ? -1 : (int)op.Invoke(null, new object[] { value });
         }
 
         static object MakeObscured(Type t, int value)

@@ -19,6 +19,9 @@ namespace NextDayRevival
         Component Source;
         Vector3 BottomLeft, TopRight;
         int Used, LastFrame, DrawDepth;
+        // How many widgets the last COMPLETED submission used. Keep re-arms
+        // exactly those, so a frame that changes nothing costs no reflection.
+        int Submitted;
         float SourceAlpha;
 
         internal static MapInkLayer Begin(string name, Component source)
@@ -66,6 +69,27 @@ namespace NextDayRevival
             layer.Used = 0;
             layer.End();
         }
+
+        /// <summary>The map texture's own alpha, as this frame's Begin read it.
+        /// The ink is tinted with it, so a caller that wants to re-arm the last
+        /// submission instead of rebuilding it has to notice when it moves.
+        /// </summary>
+        internal float Alpha { get { return SourceAlpha; } }
+
+        /// <summary>Is there a submission left to re-arm? LateUpdate drops the
+        /// pool whenever the map goes away or a frame passes without one, so a
+        /// caller has to ask before it decides to skip its own work.</summary>
+        internal bool CanKeep { get { return Submitted > 0; } }
+
+        /// <summary>
+        /// Keeps exactly the widgets the last completed submission left on
+        /// screen. Their positions are the picture's OWN coordinates and the
+        /// layer follows the map panel, so panning and zooming carry them along
+        /// without a single property write. The caller uses this whenever the
+        /// drawn set cannot have changed; the alternative is several thousand
+        /// reflected writes per frame for an identical picture.
+        /// </summary>
+        internal void Keep() { Used = Submitted; }
 
         void Follow()
         {
@@ -129,6 +153,7 @@ namespace NextDayRevival
             for (int i = Used; i < Widgets.Count; i++)
                 if (Widgets[i] != null && Widgets[i].gameObject.activeSelf)
                     Widgets[i].gameObject.SetActive(false);
+            Submitted = Used;
         }
 
         void LateUpdate()
