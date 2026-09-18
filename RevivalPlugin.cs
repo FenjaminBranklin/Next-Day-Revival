@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.26.0";
+        public const string VERSION = "6.27.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -470,6 +470,7 @@ namespace NextDayRevival
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
             NpcWar.BindConfig(Config);           // NDR NPC-vs-NPC combat for troop squads
+            MapLabels.BindConfig(Config);        // NDR map names: fixed places for individual labels
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -2052,6 +2053,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
+            RevivalGroundEnemies.Tick();         // editor waiting/walking ground groups
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.Tick();                       // NDR settlement mortar (guns, aim mode, shells)
             ArtyBattery.Tick();                  // NDR settlement artillery (crew, recon drone, fire missions)

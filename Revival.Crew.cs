@@ -26,6 +26,12 @@ namespace NextDayRevival
         internal bool Ready;
         internal bool Initializing;
         internal bool QueueOverflow;
+        // Only hold messages back while a repair is actually running. Without
+        // this the queue is a trap: an NPC whose repair never started, or whose
+        // repair failed, would swallow every state, health and death message
+        // for the rest of its life and stand in a T-pose that cannot be shot.
+        internal bool RepairPending;
+        internal bool Abandoned;
         internal readonly List<MethodInfo> Methods = new List<MethodInfo>();
         internal readonly List<object[]> Arguments = new List<object[]>();
         void OnDestroy() { if (Root != null) UnityEngine.Object.Destroy(Root); }
@@ -620,7 +626,19 @@ namespace NextDayRevival
 
                 if (isMine) return;            // the rest only repairs a remote puppet
                 if (appearance == null) return;
-                Replica(ai);
+                CrewReplica replica = Replica(ai);
+                if (replica.Ready || replica.Abandoned) return;
+                // An owner on a different release sends the five vanilla values
+                // only. There is nothing to wait for, so do not arm the queue
+                // and do not burn six seconds of T-pose before finding out.
+                if (data.Length != 10 || !ReplicaSchema.Equals(data[5]))
+                {
+                    AbandonRemoteRepair(ai, replica, "the owner sent no crew "
+                        + "initialization data; both players need the same release");
+                    return;
+                }
+                // Arm the queue only now, with a repair guaranteed to follow.
+                replica.RepairPending = true;
                 CrewRemoteFix fix = ai.gameObject.GetComponent<CrewRemoteFix>();
                 if (fix == null) fix = ai.gameObject.AddComponent<CrewRemoteFix>();
                 fix.Begin(ai, appearance, weapon);
@@ -698,6 +716,8 @@ namespace NextDayRevival
         static string _spawningFraction;
         static Transform _spawningCar;
         static int _spawningCount;
+        static string _groundKey;
+        static Vector3[] _groundPositions;
 
         // Append the owner's construction data to the cached Photon spawn.
         // The first five vanilla entries stay byte-for-byte compatible.
@@ -734,13 +754,14 @@ namespace NextDayRevival
                     coordinates.Add(5); coordinates.Add(pos.x);
                     coordinates.Add(pos.y); coordinates.Add(pos.z);
                 }
-            object[] extended = new object[10];
+            object[] extended = new object[_groundKey == null ? 10 : 11];
             Array.Copy(data, extended, 5);
             extended[5] = ReplicaSchema;
             extended[6] = (int)GetNumber(spawn, "Health");
             extended[7] = (int)GetNumber(spawn, "Level");
             extended[8] = _spawningFraction;
             extended[9] = coordinates.ToArray();
+            if (_groundKey != null) extended[10] = "ndr-ground-1:" + _groundKey;
             __args[4] = extended;
         }
 
@@ -757,15 +778,20 @@ namespace NextDayRevival
             object[] data; bool mine;
             if (ai == null || !SpawnData(ai, out data, out mine) || mine) return true;
             CrewReplica replica = Replica(ai);
-            if (replica.Ready || replica.Initializing) return true;
+            if (replica.Ready || replica.Initializing || replica.Abandoned) return true;
+            // No repair in flight means nobody will ever drain this queue.
+            // Let the message through and leave the puppet on vanilla
+            // replication rather than freezing it for good.
+            if (!replica.RepairPending) return true;
             // Preserve order, including an early death after health/state.
-            // Do not silently discard gameplay state on queue overflow.
+            // Do not silently discard gameplay state on queue overflow: give up
+            // on the ordered replay instead and hand the NPC back to the game.
             if (replica.Methods.Count >= 128)
             {
-                if (!replica.QueueOverflow)
-                    RevivalPlugin.L.LogError("Crew: remote initialization message queue exceeded 128 for " + ai.name);
                 replica.QueueOverflow = true;
-                return false;
+                AbandonRemoteRepair(ai, replica,
+                    "more than 128 state messages arrived before the native context was ready");
+                return true;
             }
             replica.Methods.Add((MethodInfo)__originalMethod);
             replica.Arguments.Add((object[])__args.Clone());
@@ -806,7 +832,9 @@ namespace NextDayRevival
 
         static void InitializeRemote(Component ai, CrewReplica replica, object[] data)
         {
-            if (data.Length != 10 || !ReplicaSchema.Equals(data[5]))
+            if ((data.Length != 10 && (data.Length != 11 || !(data[10] is string)
+                || !((string)data[10]).StartsWith("ndr-ground-1:", StringComparison.Ordinal)))
+                || !ReplicaSchema.Equals(data[5]))
                 throw new InvalidOperationException("Owner did not send crew initialization data; both players need the updated launcher release");
             float[] coordinates = data[9] as float[];
             if (coordinates == null || coordinates.Length < 8 || coordinates.Length > 512
@@ -882,6 +910,10 @@ namespace NextDayRevival
                 if (!SpawnData(ai, out data, out mine) || mine)
                 { problem = "NPC is no longer a remote crew member"; return false; }
                 CrewReplica replica = Replica(ai);
+                // Abandoned is final: a repair that gave up must not come back
+                // and rebuild a context behind the vanilla replication that has
+                // meanwhile taken over.
+                if (replica.Abandoned) { problem = "repair already abandoned"; return true; }
                 if (!replica.Ready)
                 {
                     replica.Initializing = true;
@@ -894,8 +926,7 @@ namespace NextDayRevival
                     replica.Methods[0].Invoke(ai, replica.Arguments[0]);
                     replica.Methods.RemoveAt(0); replica.Arguments.RemoveAt(0);
                 }
-                if (replica.QueueOverflow)
-                    throw new InvalidOperationException("Crew state messages lost during initialization; reconnect required");
+                replica.RepairPending = false;
                 RevivalPlugin.L.LogInfo("Crew: remote native initialization complete for "
                     + ai.name + "; initialized=" + Bool(ai, "IsInitialized")
                     + ", enabled=" + Bool(ai, "EnabledAI") + ", state=" + GetNumber(ai, "MainState") + ".");
@@ -906,6 +937,92 @@ namespace NextDayRevival
                 problem = ex.InnerException == null
                     ? ex.Message : ex.InnerException.Message;
                 return false;
+            }
+        }
+
+        /// <summary>Give up for an NPC whose replica has to be looked up.</summary>
+        internal static void GiveUpRemoteRepair(Component ai, string reason)
+        {
+            if (ai == null) return;
+            CrewReplica replica = ai.GetComponent<CrewReplica>();
+            if (replica == null) return;
+            AbandonRemoteRepair(ai, replica, reason);
+        }
+
+        /// <summary>
+        /// Give up on the full native remote context without leaving the puppet
+        /// worse off than vanilla. This is the single most important guarantee
+        /// of the remote path: the other player must never end up watching a
+        /// silent T-pose he cannot shoot.
+        ///
+        /// Whatever went wrong - a peer on an older release that does not send
+        /// the extended instantiation data, a missing native field, a message
+        /// storm during setup - the NPC is handed back to the game: the held
+        /// messages are replayed in order, the queue is disarmed for good, and
+        /// the animation and collision switches are pushed on directly so the
+        /// body moves and can be hit even without the settlement context.
+        /// </summary>
+        internal static void AbandonRemoteRepair(Component ai, CrewReplica replica,
+                                                 string reason)
+        {
+            if (ai == null || replica == null || replica.Abandoned) return;
+            replica.Abandoned = true;
+            replica.RepairPending = false;
+            replica.Ready = false;
+            // Drop a half-built context. A remote crew NPC without a settlement
+            // is exactly the vanilla state (the runtime settlement has view id
+            // zero and never resolves on another client), while a settlement
+            // that was only partly wired is not.
+            if (replica.Root != null)
+            {
+                UnityEngine.Object.Destroy(replica.Root);
+                replica.Root = null;
+                Set(ai, "MySettlement", null);
+            }
+            int replayed = 0, lost = 0;
+            for (int i = 0; i < replica.Methods.Count; i++)
+            {
+                try { replica.Methods[i].Invoke(ai, replica.Arguments[i]); replayed++; }
+                catch { lost++; }
+            }
+            replica.Methods.Clear();
+            replica.Arguments.Clear();
+            string fallback = MinimalRemoteRepair(ai);
+            // The legacy Animation component is created by the prefab after the
+            // network spawn, so a single push during Start can land too early.
+            // Keep pushing for a few seconds.
+            CrewAnimationKeeper keeper = ai.gameObject.GetComponent<CrewAnimationKeeper>();
+            if (keeper == null) keeper = ai.gameObject.AddComponent<CrewAnimationKeeper>();
+            keeper.Begin(ai);
+            RevivalPlugin.L.LogWarning("Crew: remote native context gave up for "
+                + ai.name + " - " + reason + ". Replayed " + replayed
+                + " held message(s), " + lost + " failed; vanilla replication "
+                + "resumes. " + fallback);
+        }
+
+        /// <summary>
+        /// The degraded repair: animation and hittability only, no AI context.
+        /// Returns a short report for the log.
+        /// </summary>
+        internal static string MinimalRemoteRepair(Component ai)
+        {
+            try
+            {
+                MethodInfo visualization = AccessTools.Method(ai.GetType(),
+                    "SetPlayVisualizationValue", null, null);
+                MethodInfo active = AccessTools.Method(ai.GetType(), "SetActiveAI",
+                    null, null);
+                if (visualization == null || active == null)
+                    return "Animation fallback unavailable: native switches not found.";
+                Set(ai, "IsPlayVisualizationEnabled", false);
+                visualization.Invoke(ai, new object[] { true });
+                active.Invoke(ai, new object[] { true });
+                return "Animation and collision forced on; enabled="
+                    + Bool(ai, "EnabledAI") + ".";
+            }
+            catch (Exception ex)
+            {
+                return "Animation fallback failed - " + ex.Message + ".";
             }
         }
 
@@ -973,6 +1090,26 @@ namespace NextDayRevival
             finally { UnityEngine.Object.Destroy(anchor); }
         }
 
+        // The optional cached Photon field lets a new master adopt these men
+        // instead of spawning a second copy of the same editor group.
+        internal static string GroundKey(Component ai)
+        {
+            object[] data; bool mine;
+            if (!SpawnData(ai, out data, out mine) || data.Length != 11) return null;
+            string key = data[10] as string;
+            return key != null && key.StartsWith("ndr-ground-1:", StringComparison.Ordinal)
+                ? key.Substring(13) : null;
+        }
+
+        internal static GameObject DropGroundSquad(Vector3 home, Vector3[] positions,
+            string faction, List<RevivalComposition.CrewMan> loadout, string key)
+        {
+            _groundKey = key;
+            _groundPositions = positions;
+            try { return DropSquad(home, 0f, positions.Length, faction, loadout); }
+            finally { _groundKey = null; _groundPositions = null; }
+        }
+
         /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
         internal static Array Men(GameObject settlement)
         {
@@ -1005,7 +1142,7 @@ namespace NextDayRevival
                     return null;
                 }
 
-                Vector3[] wo = Ausstiege(car, vgs, count);
+                Vector3[] wo = _groundPositions ?? Ausstiege(car, vgs, count);
 
                 settlement = new GameObject(Name);
                 settlement.transform.position = car.transform.position;
@@ -2236,14 +2373,49 @@ namespace NextDayRevival
             if (Crew.ApplyRemoteAppearance(_ai, _appearance, _weapon,
                                            out _problem))
             {
-                RevivalPlugin.L.LogInfo("Crew: remote native context ready.");
+                // A true with a problem text means the repair was abandoned
+                // elsewhere and this component is simply finished.
+                if (_problem.Length == 0)
+                    RevivalPlugin.L.LogInfo("Crew: remote native context ready.");
                 UnityEngine.Object.Destroy(this);
                 return;
             }
             if (Time.time < _deadline) return;
-            RevivalPlugin.L.LogWarning("Crew: remote appearance repair timed out"
-                + (_problem.Length == 0 ? "." : " - " + _problem + "."));
+            // Never just disappear: the held messages must be released and the
+            // body must still animate, or the other player sees a T-pose.
+            Crew.GiveUpRemoteRepair(_ai, _problem.Length == 0
+                ? "native context was not ready within 6 s" : _problem);
             UnityEngine.Object.Destroy(this);
+        }
+    }
+
+    /// <summary>
+    /// The last line of defence against a silent T-pose on the other player's
+    /// machine. When the full native remote context could not be built, this
+    /// keeps re-asserting the two switches that decide whether the body moves
+    /// and can be hit, for long enough to cover the legacy Animation component
+    /// the NPC prefab creates some frames after its network spawn.
+    /// </summary>
+    public sealed class CrewAnimationKeeper : MonoBehaviour
+    {
+        Component _ai;
+        float _next;
+        float _deadline;
+
+        public void Begin(Component ai)
+        {
+            _ai = ai;
+            _next = Time.time + 0.5f;
+            _deadline = Time.time + 5f;
+        }
+
+        void Update()
+        {
+            if (_ai == null) { UnityEngine.Object.Destroy(this); return; }
+            if (Time.time < _next) return;
+            _next = Time.time + 0.5f;
+            Crew.MinimalRemoteRepair(_ai);
+            if (Time.time >= _deadline) UnityEngine.Object.Destroy(this);
         }
     }
 

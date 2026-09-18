@@ -5472,7 +5472,9 @@ namespace NextDayRevival
                             line.Add(MapArt(g, full, mapRect) - clip.position);
                         }
                         if (!lineOk || line.Count < 2) continue;
-                        if (labels != null) labels.BlockRoute(line, clip.position);
+                        // Reserves the ink AND hands the placement pass the line
+                        // this route's name belongs to.
+                        if (labels != null) labels.BlockRoute(route.Name, line, clip.position);
 
                         // Colour is the patrol's faction: looter and traitor
                         // red, civilian green, neutral white. A convoy route is
@@ -5516,9 +5518,12 @@ namespace NextDayRevival
                 }
                 finally { GUI.EndClip(); inkLayer.End(); MapInk.End(); }
 
-                // Place active convoys first. All lines and native markers are
-                // already reserved; every accepted name reserves its full bounds.
-                for (int labelPass = 0; labelPass < 2; labelPass++)
+                // THREE passes. Names the player placed by hand go down first,
+                // so every automatic name gives way to them; then the rare,
+                // time-limited convoys; then the standing patrols. All lines
+                // and native markers are already reserved; every accepted name
+                // reserves its full bounds.
+                for (int labelPass = 0; labelPass < 3; labelPass++)
                 for (int routeIndex = 0; routeIndex < _order.Count; routeIndex++)
                 {
                     Route route;
@@ -5526,12 +5531,19 @@ namespace NextDayRevival
                         || route == null || route.P.Count < 1) continue;
                     if (!route.Here) continue;          // same region gate as the ring loop
                     if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
-                    if (route.IsConvoy != (labelPass == 0)) continue;
+                    int wantedPass = labels != null && labels.Pinned(route.Name)
+                        ? 0 : (route.IsConvoy ? 1 : 2);
+                    if (wantedPass != labelPass) continue;
                     if (!FitsScene(WorldLine(route), world)) continue;
                     Vector2 label;
                     if (!MapTools.WorldToGui(PatrolMapRoads.Correct(route.P[0].Pos), texture, camera,
                                              world, map, out label)) continue;
                     label = MapArt(label, full, mapRect);
+                    // The start point is the FALLBACK anchor and the hover spot
+                    // only. A route whose road was drawn above gets its name
+                    // beside that road, wherever the road is open and straight,
+                    // and a route named in MapLabels/Places gets the place the
+                    // player picked for it instead.
                     string title = MapLabels.DisplayName(route.Name);
                     if (!route.Enabled) title += Loc.T(" (\u0412\u042b\u041a\u041b)", " (DISABLED)");
                     bool overName = labels != null && labels.Draw(route.Name, title, label,

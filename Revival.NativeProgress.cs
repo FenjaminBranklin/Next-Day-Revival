@@ -22,6 +22,7 @@ namespace NextDayRevival
     public static class NativeActionProgress
     {
         static string _owner;
+        static float _deadline;
         static GameObject _player;
         static object _hud;
         static MethodInfo _show;
@@ -32,6 +33,14 @@ namespace NextDayRevival
         static Coroutine _animation;
         static MethodInfo _setGlobal;
         static bool _globalActive;
+
+        // When the native animation routine that is currently playing restores
+        // the pose by itself. The game never stops these routines; their own
+        // tail puts the character back into an idle state and returns the
+        // weapon. Cancelling an action therefore must NOT kill the routine - it
+        // only releases the interaction lock and lets the clip play out. See
+        // ReleaseAnimation.
+        static float _animationEnds;
 
         static bool _hudWarning;
         static bool _animationWarning;
@@ -58,6 +67,7 @@ namespace NextDayRevival
             _player = MapTools.LocalPlayer();
             if (_player == null || !_player.activeInHierarchy) return false;
             _owner = owner;
+            _deadline = Time.time + Mathf.Max(0.05f, seconds) + 5f;
 
             if (!Show(label, Mathf.Max(0.05f, seconds)))
             {
@@ -75,13 +85,19 @@ namespace NextDayRevival
             return true;
         }
 
-        /// <summary>Reject completion after losing the local player or HUD.</summary>
+        /// <summary>Reject completion after losing the local player or HUD, or
+        /// once an action has outlived its own declared duration by five
+        /// seconds. Every action here is time-bounded, so an owner still
+        /// holding the presentation past that point has lost its own end
+        /// condition; releasing it beats leaving the HUD and the interaction
+        /// lock up for good.</summary>
         public static bool IsActive(string owner)
         {
             if (_owner == null || _owner != owner) return false;
             UnityEngine.Object hudObject = _hud as UnityEngine.Object;
             if (_player == null || !_player.activeInHierarchy
                 || _player != MapTools.LocalPlayer()
+                || Time.time > _deadline
                 || (_hud is UnityEngine.Object && hudObject == null))
             {
                 End(owner);
@@ -152,7 +168,9 @@ namespace NextDayRevival
                 new Type[] { typeof(string), typeof(float) }, null);
             _hide = ZeroArgumentMethod(hudType, new string[] {
                 "HideInteractingProgress", "StopInteractingProgress",
-                "HideInteractingProgressByTime", "HideProgress"
+                "HideInteractingProgressByTime", "HideProgress",
+                "HideInteractingProgressBar", "CloseInteractingProgress",
+                "StopProgress", "HideBar", "Hide"
             });
             if (_show == null)
             {
@@ -219,8 +237,25 @@ namespace NextDayRevival
                 if (_states == null)
                 { WarnAnimation("player states instance", null); return false; }
 
+                // A routine from a just-cancelled action may still be playing
+                // out its clip. Starting a second one on top of it would stack
+                // two interaction animations on the same character, and only
+                // the last one to finish would restore the pose. Reuse the
+                // running one: the interaction lock below is what this action
+                // actually needs.
+                if (Time.time < _animationEnds)
+                {
+                    if (!FindInteractions()) return false;
+                    if (!SetGlobalInteraction(stationary ? 1 : 2)) return false;
+                    RevivalPlugin.L.LogInfo("Native action animation: " + _owner
+                        + " -> reused the running interaction clip ("
+                        + (_animationEnds - Time.time).ToString("F1") + " s left).");
+                    return true;
+                }
+
                 IEnumerator routine = null;
                 string selected = null;
+                float length = 0f;
                 if (stationary)
                 {
                     string state = StationaryState(_states, interactionHint);
@@ -231,6 +266,7 @@ namespace NextDayRevival
                     {
                         routine = interact.Invoke(_states, new object[] { state }) as IEnumerator;
                         selected = "PlayerInteractingWithItem(" + state + ")";
+                        length = AnimationLength(_states, state);
                     }
                 }
 
@@ -243,6 +279,7 @@ namespace NextDayRevival
                         routine = use.Invoke(_states,
                             new object[] { useItemAnimation }) as IEnumerator;
                         selected = "PlayerUseItemAnim(" + useItemAnimation + ")";
+                        length = AnimationLength(_states, useItemAnimation);
                     }
                 }
                 if (routine == null)
@@ -253,8 +290,14 @@ namespace NextDayRevival
                 _animation = _states.StartCoroutine(routine);
                 if (_animation == null)
                 { WarnAnimation("animation coroutine", null); return false; }
+                // getAnimationLenght is the game's own clip length. A build that
+                // does not answer still needs a non-zero guard window, otherwise
+                // a cancel/restart pair could stack two clips.
+                if (length <= 0f) length = 5f;
+                _animationEnds = Time.time + length;
                 RevivalPlugin.L.LogInfo("Native action animation: " + _owner
-                    + " -> " + selected + ", stationary=" + stationary + ".");
+                    + " -> " + selected + ", stationary=" + stationary
+                    + ", clip=" + length.ToString("F1") + " s.");
                 return true;
             }
             catch (Exception ex)
@@ -315,7 +358,9 @@ namespace NextDayRevival
             catch { return 0f; }
         }
 
-        static bool RegisterAnimation(IEnumerator routine)
+        /// <summary>Resolve the player's PlayerInteractingManager into
+        /// <see cref="_interactions"/>.</summary>
+        static bool FindInteractions()
         {
             Type managerType = RevivalPlugin.TypeByName("PlayerInteractingManager");
             if (managerType == null || _states == null)
@@ -325,6 +370,13 @@ namespace NextDayRevival
                 _interactions = _states.transform.root.GetComponentInChildren(managerType);
             if (_interactions == null)
             { WarnAnimation("interaction manager instance", null); return false; }
+            return true;
+        }
+
+        static bool RegisterAnimation(IEnumerator routine)
+        {
+            if (!FindInteractions()) return false;
+            Type managerType = _interactions.GetType();
 
             MethodInfo[] methods = managerType.GetMethods(BindingFlags.Instance
                 | BindingFlags.Public | BindingFlags.NonPublic);
@@ -394,20 +446,74 @@ namespace NextDayRevival
             return Convert.ChangeType(value, type);
         }
 
+        /// <summary>
+        /// End the native presentation of a completed OR cancelled action.
+        ///
+        /// The interaction lock is released exactly as the game's own
+        /// interaction coroutines release it: SetGlobalIntercatingState(0, -1).
+        ///
+        /// The player animation routine is deliberately NOT stopped. It is a
+        /// native coroutine whose own tail restores the character state, the
+        /// pose and the hidden weapon; the game never stops one either.
+        /// Killing it mid-clip - which this bridge used to do on every cancel -
+        /// skipped that tail, so aborting a drone launch or an antenna deploy
+        /// left the player stuck in the interaction animation with no way out.
+        /// Letting the clip finish on its own returns the body a moment later,
+        /// which is what cancelling a native interaction looks like.
+        ///
+        /// If this build does expose an explicit native cancel, it is preferred
+        /// over waiting for the clip.
+        /// </summary>
         static void StopAnimation()
         {
             try { if (_globalActive) SetGlobalInteraction(0); }
             catch { }
-            try
-            {
-                if (_states != null && _animation != null)
-                    _states.StopCoroutine(_animation);
-            }
-            catch { }
+            ReleaseAnimation();
             _animation = null;
             _states = null;
             _interactions = null;
             _globalActive = false;
+        }
+
+        // An explicit native "stop interacting" entry point, if this build has
+        // one. Only ever called while one of our own actions owns the
+        // presentation, and our movement hook blocks CantInteractWithItem for
+        // that whole time, so no base-game interaction can be cut short by it.
+        static readonly string[] StatesRelease = new string[] {
+            "StopInteractingWithItem", "StopPlayerInteracting", "StopInteracting",
+            "BreakInteracting", "CancelInteracting", "ResetInteractState"
+        };
+        static readonly string[] ManagerRelease = new string[] {
+            "StopGlobalInteractingCoroutine", "StopGlobalInteractingCoroutines",
+            "StopAllGlobalInteractingCoroutines", "ClearGlobalInteractingCoroutine",
+            "BreakGlobalInteracting"
+        };
+
+        static void ReleaseAnimation()
+        {
+            bool released = false;
+            released |= InvokeRelease(_states, StatesRelease);
+            released |= InvokeRelease(_interactions, ManagerRelease);
+            // Without a native cancel the running clip restores the pose by
+            // itself; keep the guard window so a restart does not stack a
+            // second clip on top of it.
+            if (released) _animationEnds = 0f;
+        }
+
+        static bool InvokeRelease(Component target, string[] names)
+        {
+            if (target == null) return false;
+            try
+            {
+                MethodInfo method = ZeroArgumentMethod(target.GetType(), names);
+                if (method == null) return false;
+                method.Invoke(target, null);
+                RevivalPlugin.L.LogInfo("Native action animation: released via "
+                    + target.GetType().Name + "." + method.Name + ".");
+                return true;
+            }
+            catch (Exception ex) { WarnAnimation("release", ex); }
+            return false;
         }
 
         static void WarnAnimation(string stage, Exception ex)

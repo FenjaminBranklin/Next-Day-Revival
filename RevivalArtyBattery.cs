@@ -617,7 +617,10 @@ namespace NextDayRevival
                 loadout.Add(spotter);
 
                 string side = SideFor(template);
-                GameObject crew = Crew.DropSquad(at, gun.eulerAngles.y, 2, side, loadout);
+                // Facing the hull from the off, and from the LEVEL frame the
+                // stations are built in: a gun stood on a ground normal has a
+                // Y euler that is not its heading at all.
+                GameObject crew = Crew.DropSquad(at, StationYaw(gun), 2, side, loadout);
                 if (crew == null)
                 {
                     if (p.CrewTries >= 4)
@@ -786,23 +789,149 @@ namespace NextDayRevival
         /// 0.3 s.</summary>
         const float SettleSeconds = 0.6f;
 
-        /// <summary>One of the two stations at the vehicle, on the ground.</summary>
+        /// <summary>
+        /// One of the two stations at the vehicle, ON THE GROUND.
+        ///
+        /// FIELD 2026-09-18 ("die arty crew bugged rum, fliegt teilweise in der
+        /// luft, anstatt auf dem boden an dem fahrzeug dran zu stehen"). Two
+        /// separate reasons a posted man ended up in the air, and this takes
+        /// both away:
+        ///
+        ///   THE HULL IS TILTED. Mortar.Raise stands the vehicle on the ground
+        ///   NORMAL (transform.up = normal, the same way the anti-tank mine is
+        ///   laid). TransformPoint therefore carries the station up the slope
+        ///   with it, and 10.5 units out on a 20 degree bank is 3.6 units -
+        ///   over a metre - of height the man never had any ground under. The
+        ///   station is now built in a LEVEL frame: the hull's yaw only, from
+        ///   the hull's own position. A leaning gun no longer lifts its crew.
+        ///
+        ///   THE GROUND RAY HIT THE GUN. RevivalTroopInsertion.GroundY casts
+        ///   from 1500 units down and takes the FIRST collider, which next to a
+        ///   vehicle is the vehicle - and with a traversing turret the barrel
+        ///   sweeps over both stations, which is exactly the "sometimes" of the
+        ///   report. GunGround starts just over the deck, stops well under any
+        ///   roof, and skips anything that belongs to the gun or is a man.
+        ///
+        /// Finally the point is put on the NavMesh where there is one within
+        /// reach: that surface IS "where a man can stand", and the agent that
+        /// is warped onto it needs it anyway.
+        /// </summary>
         static Vector3 Station(Transform gun, bool gunner)
         {
-            Vector3 at = gun.TransformPoint(gunner ? GunnerPost : OperatorPost);
+            Vector3 post = gunner ? GunnerPost : OperatorPost;
+            float scale = Mathf.Abs(gun.lossyScale.x);
+            if (scale < 0.01f) scale = 1f;
+            Vector3 at = gun.position
+                       + Quaternion.Euler(0f, HullYaw(gun), 0f) * (post * scale);
             float y;
-            if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
+            if (GunGround(at, gun, out y)) at.y = y;
+
+            // The NavMesh is the game's own answer to "can a man stand here",
+            // and an agent warped off it keeps the position it was dropped at
+            // for good. Only a sample that is genuinely at this station is
+            // taken: a far or much higher one is the wrong ground.
+            try
+            {
+                NavMeshHit nav;
+                if (NavMesh.SamplePosition(at, out nav, 5f, NavMesh.AllAreas)
+                    && Flat(nav.position - at) <= 4f
+                    && Mathf.Abs(nav.position.y - at.y) <= 3f)
+                    at = nav.position;
+            }
+            catch { }
             return at;
         }
 
+        /// <summary>The ground under a point beside the gun, ignoring the gun
+        /// itself and anyone standing there. The cast starts just over the deck
+        /// rather than at 1500 units, so a roof or a branch overhead is not
+        /// mistaken for the floor either; with nothing below it the ordinary
+        /// terrain answer still applies.</summary>
+        static bool GunGround(Vector3 at, Transform gun, out float y)
+        {
+            y = at.y;
+            try
+            {
+                Vector3 from = new Vector3(at.x, at.y + DeckReach, at.z);
+                float rest = DeckReach + DigReach;
+                for (int i = 0; i < 4 && rest > 0f; i++)
+                {
+                    Vector3 hit;
+                    GameObject go = Turret.RaycastObject(from, Vector3.down, rest, out hit);
+                    if (go == null) break;
+                    if (!PartOfGun(go, gun) && !IsMan(go))
+                    {
+                        y = hit.y;
+                        return true;
+                    }
+                    rest -= Vector3.Distance(from, hit) + 0.25f;
+                    from = hit + Vector3.down * 0.25f;
+                }
+            }
+            catch { }
+            // No usable collider under the station: the height data still knows
+            // where the terrain is, and away from the player the whole-map
+            // TerrainColliders are off (E-059).
+            return RevivalTroopInsertion.TerrainHeight(at, out y);
+        }
+
+        /// <summary>How far above and below a station the ground is looked
+        /// for. Above: over the deck of the vehicle, so the cast starts clear
+        /// of it, but under any roof. Below: down a bank the gun is parked on
+        /// the edge of.</summary>
+        const float DeckReach = 14f;
+        const float DigReach = 40f;
+
+        /// <summary>Does that collider belong to the gun, turret or barrel?</summary>
+        static bool PartOfGun(GameObject go, Transform gun)
+        {
+            if (go == null || gun == null) return false;
+            Transform t = go.transform;
+            while (t != null)
+            {
+                if (t == gun) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        /// <summary>A man is not ground. His own capsule stands at the station
+        /// the moment the second crewman is planted next to him.</summary>
+        static bool IsMan(GameObject go)
+        {
+            if (go == null) return false;
+            Transform t = go.transform;
+            for (int i = 0; i < 4 && t != null; i++)
+            {
+                if (t.GetComponent<NavMeshAgent>() != null) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        /// <summary>The hull's heading with the lean taken out of it. Both the
+        /// stations and the way the men face are built from this, so a gun
+        /// standing on a slope still has its crew upright beside it.</summary>
+        static float HullYaw(Transform gun)
+        {
+            Vector3 ahead = gun.TransformDirection(Vector3.forward);
+            ahead.y = 0f;
+            // Only a hull standing on its nose or its tail has no flattened
+            // forward at all, which Mortar.Raise cannot produce from a ground
+            // normal. The Y euler is then as good an answer as any - the worst
+            // it costs is which side of the hull the two men work on, and they
+            // are still standing on the ground beside it.
+            if (ahead.sqrMagnitude < 0.0001f) return gun.eulerAngles.y;
+            return Mathf.Atan2(ahead.x, ahead.z) * Mathf.Rad2Deg;
+        }
+
         /// <summary>Which way both men look: at the side of the hull they are
-        /// working on, which is the vehicle's local +X from where they stand.</summary>
+        /// working on, which is the vehicle's local +X from where they stand -
+        /// a quarter turn off the hull's own heading, in the same level frame
+        /// the stations themselves are built in.</summary>
         static float StationYaw(Transform gun)
         {
-            Vector3 face = gun.TransformDirection(Vector3.right);
-            face.y = 0f;
-            if (face.sqrMagnitude < 0.0001f) return gun.eulerAngles.y;
-            return Mathf.Atan2(face.x, face.z) * Mathf.Rad2Deg;
+            return HullYaw(gun) + 90f;
         }
 
         /// <summary>
@@ -904,6 +1033,16 @@ namespace NextDayRevival
         const float StationSlack = 1.2f;
         const float WalkedOff = 4f;
 
+        /// <summary>Units off the station's own height before he is put back
+        /// down. This was three units - a whole metre of daylight under a man
+        /// who was then left standing in it, half of the 2026-09-18 report.
+        /// Half a metre is kept, not less: an agent carries a base offset of
+        /// its own and would be pushed down and resolve back up twice a second
+        /// under a tighter bound, which is a jitter, not a fix. A vertical
+        /// correction alone never counts as a walk - the settle timer is fed
+        /// from the FLAT distance - so this costs nothing but the drop.</summary>
+        const float StationRise = 1.5f;
+
         /// <summary>Master only: on the station, facing the hull, with the
         /// game's idle logic held off him. Returns how far he had to be
         /// carried.</summary>
@@ -912,7 +1051,7 @@ namespace NextDayRevival
             Quiet(ai);
             Transform t = ai.transform;
             float away = Flat(t.position - at);
-            bool sunk = Mathf.Abs(t.position.y - at.y) > 3f;
+            bool sunk = Mathf.Abs(t.position.y - at.y) > StationRise;
             bool turned = Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, yaw)) > 10f;
             if (away <= StationSlack && !sunk)
             {

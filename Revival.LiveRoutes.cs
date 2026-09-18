@@ -38,6 +38,14 @@ namespace NextDayRevival
         static string _troopFailure = "", _troopLastFailure = "";
         internal static string[] Troops;
         internal static string TroopsRevision = "";
+        static float _groundNext;
+        static bool _groundBusy;
+        static volatile bool _groundFinished;
+        static string[] _groundPending;
+        static string _groundPendingRevision;
+        static string _groundFailure = "", _groundLastFailure = "";
+        internal static string[] Ground;
+        internal static string GroundRevision = "";
         internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
@@ -77,6 +85,7 @@ namespace NextDayRevival
                 _pending = null;
             }
             TickTroops();
+            TickGround();
             if (_busy || Time.realtimeSinceStartup < _next || _url == null) return;
             _next = Time.realtimeSinceStartup + 3f;
             _busy = true;
@@ -152,6 +161,62 @@ namespace NextDayRevival
                 if (b > 127) throw new IOException("Troop snapshot is not ASCII");
             string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
             if (lines.Length > 4097) throw new IOException("Too many troop rows");
+            revision = envelope[1];
+            return lines;
+        }
+
+        static void TickGround()
+        {
+            if (_groundFinished)
+            {
+                _groundFinished = false; _groundBusy = false;
+                if (_groundPending != null && _groundPendingRevision != GroundRevision)
+                {
+                    Ground = _groundPending; GroundRevision = _groundPendingRevision;
+                    RevivalGroundEnemies.Load();
+                }
+                if (_groundFailure != _groundLastFailure)
+                {
+                    _groundLastFailure = _groundFailure;
+                    if (_groundFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes ground: "
+                        + _groundFailure + "; keeping the last verified ground groups.");
+                }
+                _groundPending = null;
+            }
+            if (_groundBusy || Time.realtimeSinceStartup < _groundNext || _url == null) return;
+            _groundNext = Time.realtimeSinceStartup + 10f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _groundBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/ground", pin = _pin.Value;
+            string revision = GroundRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _groundPending = null;
+                    else _groundPending = ParseGround(body, out _groundPendingRevision);
+                    _groundFailure = "";
+                }
+                catch (Exception ex) { _groundPending = null; _groundFailure = ex.Message; }
+                finally { _groundFinished = true; }
+            });
+        }
+
+        internal static string[] ParseGround(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-GROUND-1" || envelope[3] != ""
+                || !HexHash(envelope[1])) throw new IOException("Invalid ground envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 1000000 || Hash(tsv) != envelope[1])
+                throw new IOException("Ground snapshot hash mismatch");
+            foreach (byte b in tsv) if (b > 127) throw new IOException("Ground snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            // Reject the whole update before touching any live group if any
+            // value, repeated metadata or population limit is invalid.
+            RevivalGroundEnemies.Parse(lines);
             revision = envelope[1];
             return lines;
         }

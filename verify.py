@@ -242,6 +242,231 @@ def check_reflection_targets(a):
             bad("%s.%s wird per Reflexion gesucht, existiert aber nicht" % (cls, meth))
 
 
+def check_ground_enemies():
+    """[19] Editor ground enemies: random placement, crew loadouts and the one
+    promise about them that no screenshot can show.
+
+    The order was explicit on two points. A walking group WALKS - "und mit
+    laufen meine ich wirklich laufen und nicht rennen" - and it stays within a
+    few hundred metres of the point it was dropped at. Both rest on a handful
+    of lines that a later edit could quietly undo: the two movement orders in
+    RunGround carry MainWalk, and both the chosen waypoint AND every corner of
+    the NavMesh path to it must lie inside the group's radius around its home.
+    A single MainRun in that block turns the feature back into the sprinting
+    NPCs it was written to avoid, and a missing corner check lets a man walk a
+    legal-looking straight line around a lake and out of his area.
+
+    The rest guards the shape of the feature. Ground groups travel on their own
+    hash-verified /runtime/ground envelope, so an older client keeps its convoy
+    data; a bad snapshot is rejected as a whole before any live group is
+    touched. Only the Photon master spawns, and it ADOPTS men it finds by their
+    cached spawn key instead of spawning a second copy of the same group. The
+    limits have to agree between grounddef.py and the plugin, otherwise the
+    editor happily publishes a snapshot the game then refuses in full.
+
+    Movement on real terrain, the walking animation itself and the respawn
+    timer stay in-game acceptance items.
+    """
+    import re
+    print("[19] Editor-Bodengegner: Verteilen, Ausruestung, Gehen (statisch)")
+    ground_p = os.path.join(ROOT, "Revival.GroundEnemies.cs")
+    npc_p = os.path.join(ROOT, "Revival.NpcCombat.cs")
+    live_p = os.path.join(ROOT, "Revival.LiveRoutes.cs")
+    crew_p = os.path.join(ROOT, "Revival.Crew.cs")
+    plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
+    sync_p = os.path.join(ROOT, "sync_public.py")
+    if not os.path.exists(ground_p):
+        bad("Revival.GroundEnemies.cs fehlt")
+        return
+    raw = io.open(ground_p, "rb").read()
+    g = raw.decode("utf-8", "replace")
+    npc = io.open(npc_p, encoding="utf-8").read() if os.path.exists(npc_p) else ""
+    live = io.open(live_p, encoding="utf-8").read() if os.path.exists(live_p) else ""
+    crew = io.open(crew_p, encoding="utf-8").read() if os.path.exists(crew_p) else ""
+    plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
+    sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Ground: " + why)
+
+    # --- file rule: machine-read source, build.ps1 wants it BOM-less and ASCII.
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "Revival.GroundEnemies.cs beginnt mit einer BOM")
+    need(not [c for c in g if ord(c) > 126], "reines ASCII",
+         "Revival.GroundEnemies.cs enthaelt Zeichen ausserhalb ASCII")
+
+    # --- WALKING, not running. The whole point of the two behaviours.
+    start = npc.find("static void RunGround(Squad s, float now)")
+    stop = npc.find("static Vector3 Anchor(", start + 1) if start >= 0 else -1
+    block = npc[start:stop] if start >= 0 and stop > start else ""
+    need(block != "", "RunGround und GroundDestination liegen beieinander",
+         "RunGround fehlt in Revival.NpcCombat.cs - Bodengruppen haben kein "
+         "eigenes Verhalten mehr")
+    need("MainRun" not in block and "Stance.Bound" not in block,
+         "keine einzige Laufanweisung im Bodenverhalten",
+         "im Bodenverhalten steht wieder MainRun oder ein Sprung - die Gruppen "
+         "rennen dann, statt zu gehen")
+    need(block.count("MainWalk") >= 2,
+         "beide Bewegungsbefehle der Gehgruppe gehen im Schritt",
+         "ein Bewegungsbefehl der Gehgruppe traegt kein MainWalk mehr")
+    need("Go(f, dest, MainWalk, PoseStand, now, Stance.Advance);" in block,
+         "ein neues Ziel wird im Schritt angegangen",
+         "der Marschbefehl der Gehgruppe ist kein Schritt mehr")
+    need("Drive(f, MainWalk, AddNone, PoseStand, now, false);" in block,
+         "der Alarmzustand schaltet den Schritt nicht auf Lauf um",
+         "ohne die Schrittstuetze schaltet der native Alarm die Gruppe auf Lauf")
+    need("if (!s.GroundWalking) { Hold(f, null, now); continue; }" in block,
+         "wartende Gruppen bleiben stehen",
+         "wartende Bodengruppen bleiben nicht mehr auf ihrem Posten")
+
+    # --- and inside the radius around the drop point, path included.
+    need("Flat(dest - s.Lz) > s.GroundRadius" in block,
+         "das gewaehlte Ziel liegt im Umkreis um den Aussetzpunkt",
+         "das Wanderziel wird nicht mehr gegen den Umkreis geprueft")
+    need("if (Flat(corners[c] - s.Lz) > s.GroundRadius) { inside = false; break; }" in block,
+         "auch der Weg dorthin bleibt im Umkreis",
+         "nur das Ziel liegt im Umkreis - der Weg dorthin darf ihn verlassen")
+    need("NavMeshPathStatus.PathComplete" in block,
+         "nur vollstaendig begehbare Wege werden befohlen",
+         "die Gehgruppe bekommt auch unvollstaendige Wege befohlen")
+    need("Vector3 target = f.Squad != null && f.Squad.GroundGroup ? dest : Ground(dest);" in npc,
+         "die geprueften Bodenziele werden nicht noch einmal verschoben",
+         "eine zweite Projektion kann das gepruefte Ziel aus dem Umkreis tragen")
+
+    # --- the published channel: own envelope, hashed, all-or-nothing.
+    need('envelope[0] != "NDR-GROUND-1"' in live and "Hash(tsv) != envelope[1]" in live,
+         "eigener, hashgepruefter Umschlag fuer die Bodengruppen",
+         "der Bodenkanal hat keinen eigenen geprueften Umschlag mehr")
+    need("RevivalGroundEnemies.Parse(lines);" in live,
+         "ein fehlerhafter Stand wird vor jeder Uebernahme abgelehnt",
+         "ein fehlerhafter Bodenstand wird erst beim Setzen bemerkt")
+    need("keeping the last verified ground groups" in live,
+         "bei Ausfall bleibt der letzte gepruefte Stand stehen",
+         "ein Ausfall des Servers loescht die Bodengruppen")
+
+    # --- master only, and adoption instead of a second copy.
+    need("bool master = room != null && (bool)_masterGetter.Invoke(null, null);" in g
+         and "if (!master) { _wasMaster = false; return; }" in g,
+         "nur der Photon-Master setzt Bodengegner",
+         "auch ein Nicht-Master setzt Bodengegner - jeder Client spawnt dann "
+         "seine eigene Kopie")
+    need("_masterReady = Time.time + 5f;" in g,
+         "ein neuer Master wartet auf die uebertragenen Spawns",
+         "ein neuer Master raeumt auf, bevor die Spawns angekommen sind")
+    need("string key = Crew.GroundKey(ai);" in g and "men.ToArray()" in g,
+         "vorhandene Maenner werden uebernommen statt neu gesetzt",
+         "der Master uebernimmt keine vorhandenen Bodengegner mehr - er setzt "
+         "eine zweite Gruppe daneben")
+    need('extended[10] = "ndr-ground-1:" + _groundKey;' in crew
+         and "new object[_groundKey == null ? 10 : 11]" in crew,
+         "der Gruppenschluessel reist im zwischengespeicherten Spawn mit",
+         "ohne Schluessel im Spawn kann ein neuer Master nichts wiedererkennen")
+    need("Vector3[] wo = _groundPositions ?? Ausstiege(car, vgs, count);" in crew,
+         "die Bodengruppe setzt auf ihren eigenen geprueften Punkten auf",
+         "die Bodengruppe benutzt wieder die Ausstiegspunkte eines Fahrzeugs")
+    need("RevivalTroopInsertion.TerrainHeight(point, out y)" in g
+         and "NavMesh.SamplePosition(point, out hit, search, NavMesh.AllAreas)" in g,
+         "jeder Aussetzpunkt wird auf begehbaren Boden gezogen",
+         "ein zufaelliger Punkt wird ohne Boden- und NavMesh-Pruefung benutzt")
+
+    # --- bounded input, and limits that agree on both sides of the wire.
+    need("if (lines == null || lines.Length > 1025)" in g,
+         "die Zeilenzahl des Bodenstands ist begrenzt",
+         "ein Bodenstand darf beliebig viele Zeilen haben")
+    need('if (g.Behavior != "waiting" && g.Behavior != "walking")' in g,
+         "genau zwei Verhalten: warten oder gehen",
+         "das Verhalten einer Bodengruppe wird nicht mehr geprueft")
+    need("if (total > MaxTotal) throw new IOException" in g,
+         "die Gesamtstaerke ist im Plugin begrenzt",
+         "das Plugin nimmt beliebig viele Bodengegner an")
+    need("RevivalGroundEnemies.Tick();" in plug,
+         "Seam RevivalGroundEnemies.Tick in RevivalPlugin.cs",
+         "Seam fehlt in RevivalPlugin.cs: RevivalGroundEnemies.Tick")
+    need('"Revival.GroundEnemies.cs"' in sync,
+         "Revival.GroundEnemies.cs geht ins oeffentliche Repository",
+         "Revival.GroundEnemies.cs fehlt in sync_public.py - das oeffentliche "
+         "Repository laesst sich dann nicht uebersetzen")
+
+    cs = re.search(r"MaxGroups = (\d+), MaxGroupSize = (\d+), MaxTotal = (\d+)", g)
+    cs_radius = re.search(r"g\.Radius = Number\(c\[7\], (\d+)f, (\d+)f\)", g)
+    cs_columns = re.search(r"c\.Length != (\d+)", g)
+    need(cs is not None and cs_radius is not None and cs_columns is not None,
+         "die Grenzen des Plugins sind ablesbar",
+         "die Grenzen in Revival.GroundEnemies.cs haben ihre Form verloren")
+
+    # --- grounddef.py and the editor are private; the public copy stops here.
+    gdef_p = os.path.join(ROOT, "grounddef.py")
+    if cs is None or not os.path.exists(gdef_p):
+        return
+    gdef = io.open(gdef_p, encoding="utf-8").read()
+
+    def value(name):
+        m = re.search(r"^%s = (\d+)$" % name, gdef, re.M)
+        return m.group(1) if m else None
+
+    need([value("MAX_GROUPS"), value("MAX_GROUP_SIZE"), value("MAX_TOTAL")]
+         == list(cs.groups()),
+         "Gruppen-, Gruppengroessen- und Gesamtgrenze stimmen mit dem Plugin ueberein",
+         "grounddef.py und das Plugin nennen verschiedene Grenzen - der Editor "
+         "veroeffentlicht dann einen Stand, den das Spiel ganz ablehnt")
+    need(cs_radius is not None
+         and [value("MIN_RADIUS"), value("MAX_RADIUS")] == list(cs_radius.groups()),
+         "der erlaubte Umkreis stimmt mit dem Plugin ueberein",
+         "Editor und Plugin erlauben verschiedene Umkreise")
+    columns = re.search(r"TSV_COLUMNS = \[(.*?)\]", gdef, re.S)
+    need(columns is not None and cs_columns is not None
+         and len(re.findall(r'"[A-Za-z]+"', columns.group(1))) == int(cs_columns.group(1)),
+         "Editor und Plugin zaehlen dieselben Spalten",
+         "die Spaltenzahl von grounddef.py passt nicht zum Parser des Plugins")
+    need('BEHAVIORS = ["waiting", "walking"]' in gdef,
+         "der Editor bietet genau die beiden Verhalten an",
+         "der Editor bietet ein Verhalten an, das das Plugin nicht kennt")
+
+    comp_p = os.path.join(ROOT, "compdef.py")
+    comp = io.open(comp_p, encoding="utf-8").read() if os.path.exists(comp_p) else ""
+    need("grounddef.validate_groups(" in comp and "grounddef.migrate_groups(" in comp,
+         "das Speichern des Editors prueft die Bodengruppen mit",
+         "der Editor speichert Bodengruppen ungeprueft")
+
+    route_p = os.path.join(ROOT, "routeeditor.py")
+    route = io.open(route_p, encoding="utf-8").read() if os.path.exists(route_p) else ""
+    need('path == "/runtime/ground"' in route and 'path == "/ground.js"' in route,
+         "der Editorserver liefert Bodenstand und Bodenoberflaeche aus",
+         "der Editorserver kennt den Bodenkanal nicht")
+
+    editor_dir = os.path.join(ROOT, "editor")
+    if os.path.isdir(editor_dir):
+        def editor_file(name):
+            path = os.path.join(editor_dir, name)
+            return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+        gjs = editor_file("ground.js")
+        app = editor_file("app.js")
+        html = editor_file("index.html")
+        need("'Distribute random groups'" in gjs and "function scatter()" in gjs,
+             "der Editor verteilt Gruppen zufaellig auf der Karte",
+             "die Zufallsverteilung fehlt in editor/ground.js")
+        need("openPicker('weapon'" in gjs and "SLOTS.forEach" in gjs,
+             "Bodengruppen tragen dieselbe Ausruestungsauswahl wie die Besatzungen",
+             "die Ausruestungsauswahl der Bodengruppen fehlt")
+        need('<script src="ground.js"></script>' in html
+             and "NDRGround.init();" in app and "NDRGround.draw();" in app
+             and "NDRGround.mousedown(ev)" in app,
+             "die Bodenoberflaeche haengt in Seite, Zeichnung und Maus",
+             "editor/ground.js ist nicht vollstaendig eingehaengt")
+
+    # --- die beiden Regressionen zu diesem Feature muessen im Repository
+    # liegen. verify.py fuehrt sie nicht aus (es startet keine Unterprozesse).
+    if os.path.isdir(os.path.join(ROOT, "research")):
+        for check in ("ground_enemy_check.py", "ground_editor_check.js"):
+            need(os.path.exists(os.path.join(ROOT, "research", check)),
+                 "research/" + check + " liegt vor",
+                 "research/" + check + " fehlt - die Bodengegner sind unbelegt")
+
+
 def check_version():
     """VERSION-Datei und die Konstante im Quelltext muessen gleich sein.
 
@@ -1189,7 +1414,7 @@ def check_mortar():
 def check_arty_battery():
     """[16] The settlement artillery vehicle, its crew and the recon drone.
 
-    Six rules decide whether this feature is what was ordered rather than merely
+    The rules below decide whether this feature is what was ordered rather than merely
     present, and every one of them is a line or two that a later edit could undo
     without anything looking broken:
 
@@ -1215,6 +1440,10 @@ def check_arty_battery():
          a ring of walk points and the vanilla idle logic walks it; the hold is
          a pause refreshed twice a second plus a station warp, and without it
          the gunner is back to wandering nine metres from his gun.
+      8. And they must stand ON THE GROUND while they do it (field report
+         2026-09-18). The stations are built in a level frame, because the hull
+         itself is stood on the ground normal, and their ground ray walks past
+         the gun's own hierarchy, because the barrel sweeps over both of them.
     """
     print("[16] Artilleriefahrzeug, Besatzung und Aufklaerungsdrohne (statisch)")
     bat_p = os.path.join(ROOT, "RevivalArtyBattery.cs")
@@ -1385,6 +1614,33 @@ def check_arty_battery():
     need("now - since >= SettleSeconds" in b,
          "der Mann steht erst, dann arbeitet er",
          "ohne das Stehen davor bleibt der Ganzkoerper-Clip ein Laufclip")
+    # DIE BESATZUNG STEHT AUF DEM BODEN (Feldmeldung 2026-09-18: "fliegt
+    # teilweise in der luft"). Zwei Ursachen, und beide Gegenmittel sind je eine
+    # Zeile, die ein spaeterer Umbau lautlos wieder einsammeln koennte:
+    #   - Mortar.Raise stellt das Fahrzeug auf die Bodennormale (transform.up).
+    #     Ueber TransformPoint traegt diese Neigung die 10,5 Einheiten weit
+    #     aussen liegende Station mit in die Luft; die Station wird deshalb in
+    #     einem WAAGERECHTEN Rahmen aus HullYaw gebaut.
+    #   - Ein Strahl von oben trifft neben einem Fahrzeug das Fahrzeug, und das
+    #     schwenkende Rohr streicht ueber beide Stationen. GunGround geht an der
+    #     eigenen Hierarchie des Geschuetzes und an Maennern vorbei.
+    need("Quaternion.Euler(0f, HullYaw(gun), 0f)" in b
+         and "static float HullYaw(Transform gun)" in b,
+         "die Stationen werden waagerecht gebaut, nicht ueber die geneigte Wanne",
+         "die Station folgt der Neigung der Wanne - auf Hang steht die "
+         "Besatzung in der Luft")
+    need("static bool GunGround(Vector3 at, Transform gun, out float y)" in b
+         and "PartOfGun(go, gun)" in b and "IsMan(go)" in b,
+         "der Bodenstrahl der Station geht am Geschuetz und an Maennern vorbei",
+         "der Bodenstrahl nimmt den ersten Treffer - neben dem Fahrzeug ist das "
+         "das Fahrzeug, und das Rohr schwenkt darueber")
+    need("NavMesh.SamplePosition(at, out nav, 5f, NavMesh.AllAreas)" in b,
+         "die Station liegt auf dem NavMesh, wo es eines gibt",
+         "ohne NavMesh-Probe wird der Mann neben begehbaren Boden gewarpt")
+    need("const float StationRise" in b
+         and "Mathf.Abs(t.position.y - at.y) > StationRise" in b,
+         "ein Mann ueber seiner Station wird heruntergeholt",
+         "die Hoehentoleranz laesst einen schwebenden Mann schweben")
 
     # --- 4: the crew belongs to its settlement.
     # The hated list is COPIED, never shared: other parts of the toolkit
@@ -1394,7 +1650,7 @@ def check_arty_battery():
          and "_fHated.SetValue(opt, hated.Clone() as Array)" in b,
          "Besatzung uebernimmt die Fraktion der Siedlung (als Kopie)",
          "die Besatzung behaelt eine fremde Fraktion")
-    need("Crew.DropSquad(at, gun.eulerAngles.y, 2, side, loadout)" in b,
+    need("Crew.DropSquad(at, StationYaw(gun), 2, side, loadout)" in b,
          "zwei Mann je Geschuetz: Schuetze und Drohnenfuehrer",
          "die Besatzung wird nicht gesetzt")
     need("ArtyBattery.CrewHoldsGun" in s,
@@ -1461,10 +1717,21 @@ def check_native_action_progress():
 
     if ('SetGlobalInteraction(stationary ? 1 : 2)' in native
             and 'SetGlobalInteraction(0)' in native
-            and 'StopCoroutine(_animation)' in native):
-        ok("source includes native interaction and coroutine cleanup")
+            and 'ReleaseAnimation();' in native):
+        ok("source includes native interaction cleanup")
     else:
         bad("Native action progress: interaction cleanup missing")
+
+    # Cancelling an action must not kill the native animation coroutine: its
+    # own tail restores the pose, so a stopped routine left the player stuck
+    # in the interaction animation (task a9b39e9116).
+    if 'StopCoroutine(_animation)' in native:
+        bad("Native action progress: cancel still stops the native animation "
+            "coroutine, which strands the player in the interaction pose")
+    elif '_animationEnds' in native:
+        ok("cancel lets the native interaction clip restore the pose itself")
+    else:
+        bad("Native action progress: no cancel guard for the running clip")
 
     drone_wired = ('NativeActionProgress.Begin(_owner' in drone
                    and 'NativeActionProgress.Begin("antenna-deploy"' in drone
@@ -2028,6 +2295,7 @@ if __name__ == "__main__":
     check_native_action_progress()
     check_technical()
     check_arty_vehicle()
+    check_ground_enemies()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

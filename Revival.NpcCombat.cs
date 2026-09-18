@@ -469,6 +469,7 @@ namespace NextDayRevival
             public float NextDrone, DroneHoldUntil;
             public Transform DroneTarget;
             public float LastFullOrder;     // Time.time of the last full (RPC) move order
+            public float GroundPause;
 
             // 6.18: where he stood when he last covered ground, and when. A man
             // told to run who does not move is put back on his feet (Unstick).
@@ -508,6 +509,8 @@ namespace NextDayRevival
 
         class Squad
         {
+            public bool GroundGroup, GroundWalking;
+            public float GroundRadius;
             public string Tag;
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
@@ -932,6 +935,53 @@ namespace NextDayRevival
 
         internal static int ActiveCount { get { return _squads.Count; } }
 
+        internal static bool GroundOwned(Component ai)
+        {
+            return LookUp() && IsMine(ai);
+        }
+
+        internal static bool GroundAlive(Component ai) { return LookUp() && Alive(ai); }
+
+        internal static void RemoveGroundActor(Component ai)
+        {
+            if (ai != null && GroundOwned(ai)) NetDestroy(ai.gameObject);
+        }
+
+        internal static void StopGround(string tag)
+        {
+            for (int i = _squads.Count - 1; i >= 0; i--)
+                if (_squads[i].GroundGroup && _squads[i].Tag == tag)
+                    Remove(_squads[i], "ground definition changed");
+        }
+
+        internal static bool StartGround(string tag, GameObject settlement, Array npcs,
+            Vector3 home, bool walking, float radius, List<RevivalComposition.CrewMan> loadout)
+        {
+            if (!LookUp() || settlement == null || npcs == null || IsActive(tag)) return false;
+            Squad s = new Squad();
+            s.Tag = tag; s.Settlement = settlement; s.Lz = home;
+            s.GroundGroup = true; s.GroundWalking = walking; s.GroundRadius = radius;
+            s.Centre = home; s.Front = Vector3.forward;
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai == null || !IsMine(ai)) continue;
+                CrewSector sector = ai.GetComponent<CrewSector>();
+                if (sector != null) UnityEngine.Object.Destroy(sector);
+                Fighter f = NewFighter(ai, s);
+                f.GroundPause = Time.time + UnityEngine.Random.Range(1f, 4f);
+                RevivalComposition.CrewMan spec = loadout != null && loadout.Count > 0
+                    ? loadout[SpawnIndex(ai, i) % loadout.Count] : null;
+                Equip(f, spec);
+                s.Men.Add(f); _armoured[ai.GetInstanceID()] = f;
+            }
+            if (s.Men.Count == 0) return false;
+            EnsurePointsRoot(); _squads.Add(s);
+            RevivalPlugin.L.LogInfo("Ground enemies: " + tag + " controls " + s.Men.Count
+                + " men, " + (walking ? "walking" : "waiting") + ", radius " + radius + " m.");
+            return true;
+        }
+
         static Fighter NewFighter(Component ai, Squad squad)
         {
             Fighter f = new Fighter();
@@ -1123,6 +1173,7 @@ namespace NextDayRevival
 
         static void RunSquad(Squad s, float now)
         {
+            if (s.GroundGroup) { RunGround(s, now); return; }
             int alive = 0, inLine = 0;
             Vector3 centre = Vector3.zero, lineSum = Vector3.zero, front = Vector3.zero;
             for (int i = 0; i < s.Men.Count; i++)
@@ -1306,6 +1357,78 @@ namespace NextDayRevival
             }
 
             if (now >= s.NextReport) Report(s, now, alive);
+        }
+
+        // Ground groups share weapons, faction targeting, damage, replication
+        // and corpse cleanup with troop squads, but never issue assault orders.
+        static void RunGround(Squad s, float now)
+        {
+            if (s.Settlement == null) { Remove(s, "settlement gone"); return; }
+            int alive = 0;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                alive++;
+                if (!IsMine(f.Ai)) continue;
+                if (Regenerating(f, now)) continue;
+                EnsureArmed(f, now); Acquire(f, now); Planted(f, now);
+                if (Reloading(f)) { Quiet(f, true); continue; }
+                if (f.Target != null && f.Sees && f.Armed
+                    && Flat(f.Target.position - f.Tr.position) <= RangeOf(f))
+                {
+                    Fire(f, now);
+                    f.GroundPause = now + 2f;
+                    continue;
+                }
+                // Waiting men stand where placed. No target pursuit or running
+                // is allowed for either behavior, including during combat.
+                if (!s.GroundWalking) { Hold(f, null, now); continue; }
+                if (f.HasOrder)
+                {
+                    if (Flat(f.Tr.position - f.Ordered) <= 2f || now >= f.MoveDeadline)
+                    {
+                        f.HasOrder = false;
+                        f.GroundPause = now + UnityEngine.Random.Range(2f, 6f);
+                    }
+                    else
+                    {
+                        // Keep the native alarm from switching a walk to a run.
+                        Drive(f, MainWalk, AddNone, PoseStand, now, false);
+                        continue;
+                    }
+                }
+                if (now < f.GroundPause) { Hold(f, null, now); continue; }
+                f.GroundPause = now + 5f;
+                Vector3 dest;
+                if (!GroundDestination(f, s, out dest)) { Hold(f, null, now); continue; }
+                Go(f, dest, MainWalk, PoseStand, now, Stance.Advance);
+                f.MoveDeadline = now + 15f + Flat(dest - f.Tr.position) / 0.8f;
+            }
+            if (alive == 0) Remove(s, "ground group defeated");
+        }
+
+        static bool GroundDestination(Fighter f, Squad s, out Vector3 dest)
+        {
+            dest = s.Lz;
+            NavMeshAgent agent = Agent(f);
+            if (agent == null || !agent.isActiveAndEnabled || !agent.isOnNavMesh) return false;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                Vector2 offset = UnityEngine.Random.insideUnitCircle * (s.GroundRadius - 3f);
+                Vector3 candidate = s.Lz + new Vector3(offset.x, 0f, offset.y);
+                if (!RevivalGroundEnemies.TryGround(candidate, 6f, out dest)
+                    || Flat(dest - s.Lz) > s.GroundRadius || Flat(dest - f.Tr.position) < 5f) continue;
+                NavMeshPath path = new NavMeshPath();
+                if (!NavMesh.CalculatePath(f.Tr.position, dest, agent.areaMask, path)
+                    || path.status != NavMeshPathStatus.PathComplete) continue;
+                bool inside = true;
+                Vector3[] corners = path.corners;
+                for (int c = 0; c < corners.Length; c++)
+                    if (Flat(corners[c] - s.Lz) > s.GroundRadius) { inside = false; break; }
+                if (inside) return true;
+            }
+            return false;
         }
 
         /// <summary>The point the whole line runs at. Out of contact, and with
@@ -2908,7 +3031,9 @@ namespace NextDayRevival
                 || _fTempPoints == null || _wpTacticalValue == null) return;
             try
             {
-                Vector3 target = Ground(dest);
+                // Ground group destinations already passed the bounded path
+                // check. A second, wider projection could leave their radius.
+                Vector3 target = f.Squad != null && f.Squad.GroundGroup ? dest : Ground(dest);
                 if (f.Point == null)
                 {
                     f.Point = new GameObject("NpcWarPoint");

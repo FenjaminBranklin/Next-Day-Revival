@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Text;
+using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
 
@@ -11,8 +13,35 @@ namespace NextDayRevival
     // zooming. Baked place names are not UILabels, so they need explicit bounds.
     internal sealed class MapLabelLayout
     {
+        // Where a name sat last frame. A ROAD name remembers the arc FRACTION
+        // of its own line plus the offset from that point, because the line is
+        // re-projected every frame: a remembered artwork offset alone would
+        // walk away from the road as soon as the map is panned or zoomed.
+        sealed class Spot
+        {
+            internal bool OnRoad;
+            internal float T;
+            internal Vector2 Offset;
+        }
+
+        const float CellSize = 64f;
+
         readonly List<Rect> occupied = new List<Rect>();
-        readonly Dictionary<string, Vector2> offsets = new Dictionary<string, Vector2>();
+        // Coarse hash of the occupied rectangles. One route contributes a box
+        // per dash sample, so a linear scan would cost tens of thousands of
+        // overlap tests for every name in every frame the map is open.
+        readonly Dictionary<long, List<int>> cells = new Dictionary<long, List<int>>();
+        readonly Dictionary<string, Spot> spots = new Dictionary<string, Spot>();
+        // Places the PLAYER chose, in artwork coordinates. The search below is
+        // a guess about what reads well; a place given here is not, so it wins
+        // over the guess, over the remembered spot, and over any collision.
+        readonly Dictionary<string, Vector2> pins = new Dictionary<string, Vector2>();
+        // One uniform walk of the road currently being labelled. Reused, so the
+        // search allocates nothing per frame.
+        readonly List<Vector2> walk = new List<Vector2>();
+        float walkStep = 1f;
+        bool walkClosed;
+
         internal static readonly Rect[] PlaceNames = new Rect[] {
             new Rect(140, 90, 125, 34), new Rect(145, 160, 205, 38),
             new Rect(700, 94, 230, 38), new Rect(490, 230, 135, 38),
@@ -25,13 +54,37 @@ namespace NextDayRevival
         internal void Begin(bool overworld)
         {
             occupied.Clear();
+            cells.Clear();
             if (overworld)
                 for (int i = 0; i < PlaceNames.Length; i++) Block(PlaceNames[i]);
         }
 
+        // Nothing outside the artwork can block an in-bounds name, so a far
+        // panned marker is clamped into an edge cell instead of hashing a
+        // million rows of empty grid.
+        static int Cell(float value)
+        {
+            int index = (int)Mathf.Floor(value / CellSize);
+            return index < -1 ? -1 : (index > 16 ? 16 : index);
+        }
+
+        static long Key(int cx, int cy) { return ((long)(cx + 1024)) * 4096L + (cy + 1024); }
+
         internal void Block(Rect rect)
         {
-            if (rect.width > 0f && rect.height > 0f) occupied.Add(rect);
+            if (rect.width <= 0f || rect.height <= 0f) return;
+            int index = occupied.Count;
+            occupied.Add(rect);
+            int lastX = Cell(rect.xMax), lastY = Cell(rect.yMax);
+            for (int cx = Cell(rect.xMin); cx <= lastX; cx++)
+                for (int cy = Cell(rect.yMin); cy <= lastY; cy++)
+                {
+                    long key = Key(cx, cy);
+                    List<int> bucket;
+                    if (!cells.TryGetValue(key, out bucket))
+                    { bucket = new List<int>(); cells.Add(key, bucket); }
+                    bucket.Add(index);
+                }
         }
 
         internal void BlockLine(List<Vector2> points, float radius)
@@ -52,21 +105,187 @@ namespace NextDayRevival
             if (rect.xMin < 3f || rect.yMin < 3f || rect.xMax > 1021f || rect.yMax > 1021f)
                 return false;
             Rect padded = new Rect(rect.x - 4f, rect.y - 4f, rect.width + 8f, rect.height + 8f);
-            for (int i = 0; i < occupied.Count; i++)
-                if (padded.Overlaps(occupied[i])) return false;
+            int lastX = Cell(padded.xMax), lastY = Cell(padded.yMax);
+            for (int cx = Cell(padded.xMin); cx <= lastX; cx++)
+                for (int cy = Cell(padded.yMin); cy <= lastY; cy++)
+                {
+                    List<int> bucket;
+                    if (!cells.TryGetValue(Key(cx, cy), out bucket)) continue;
+                    for (int i = 0; i < bucket.Count; i++)
+                        if (padded.Overlaps(occupied[bucket[i]])) return false;
+                }
             return true;
         }
 
+        // How much open artwork surrounds a candidate, in three steps. A name
+        // standing in a clearing reads at a glance; one wedged into the gap
+        // between two roads does not, although both of them "fit".
+        int Clearance(Rect rect)
+        {
+            for (int level = 0; level < 3; level++)
+            {
+                float grow = 8f + level * 10f;
+                if (!Free(new Rect(rect.x - grow, rect.y - grow,
+                                   rect.width + grow * 2f, rect.height + grow * 2f)))
+                    return level;
+            }
+            return 3;
+        }
+
+        // Re-samples a road at one uniform spacing in artwork pixels, so every
+        // candidate below is index arithmetic instead of another pass over the
+        // thousand-odd dash points of a long route. At most 256 stations.
+        void Walk(List<Vector2> road)
+        {
+            walk.Clear();
+            float length = 0f;
+            for (int i = 1; i < road.Count; i++) length += (road[i] - road[i - 1]).magnitude;
+            if (length <= 0f) return;
+            walkClosed = (road[road.Count - 1] - road[0]).magnitude < 8f;
+            walkStep = Mathf.Max(6f, length / 255f);
+            walk.Add(road[0]);
+            float next = walkStep, walked = 0f;
+            for (int i = 1; i < road.Count; i++)
+            {
+                Vector2 a = road[i - 1], b = road[i];
+                float segment = (b - a).magnitude;
+                while (segment > 0f && next <= walked + segment)
+                {
+                    float f = (next - walked) / segment;
+                    walk.Add(new Vector2(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f));
+                    next += walkStep;
+                }
+                walked += segment;
+            }
+        }
+
+        // A closed road wraps, an open one stops at its end points.
+        Vector2 At(int index)
+        {
+            int last = walk.Count - 1;
+            if (last <= 0) return walk[0];
+            if (walkClosed)
+            {
+                index %= last;
+                return walk[index < 0 ? index + last : index];
+            }
+            return walk[index < 0 ? 0 : (index > last ? last : index)];
+        }
+
+        internal void ClearPins() { pins.Clear(); }
+
+        internal void SetPin(string key, Vector2 artwork)
+        { if (!string.IsNullOrEmpty(key)) pins[key] = artwork; }
+
+        internal bool HasPin(string key)
+        { return !string.IsNullOrEmpty(key) && pins.ContainsKey(key); }
+
+        // A pinned name keeps its full size and stays inside the artwork; the
+        // clamp is the only thing that may move it away from the given point.
+        static float Fit(float min, float extent)
+        { return Mathf.Max(3f, Mathf.Min(min, 1021f - extent)); }
+
         internal bool Place(string key, Vector2 anchor, Vector2 size, out Rect result)
+        { return Place(key, null, anchor, size, out result); }
+
+        /// <summary>Finds a spot for one name. <paramref name="road"/> is the
+        /// labelled line itself in artwork coordinates. With it the name is set
+        /// BESIDE the open, straight part of its own road, which is what a map
+        /// reader looks for, instead of clinging to the first waypoint - that
+        /// is merely where the recorder happened to press the button, and it is
+        /// as often as not in a town, on a marker, or in a hairpin.</summary>
+        internal bool Place(string key, List<Vector2> road, Vector2 anchor,
+                            Vector2 size, out Rect result)
         {
             result = new Rect();
             if (size.x <= 0f || size.y <= 0f || size.x > 1018f || size.y > 1018f) return false;
-            Vector2 previous;
-            if (offsets.TryGetValue(key, out previous))
+            Vector2 pin;
+            if (pins.TryGetValue(key, out pin))
             {
-                result = new Rect(anchor.x + previous.x, anchor.y + previous.y, size.x, size.y);
+                result = new Rect(Fit(pin.x - size.x * .5f, size.x),
+                                  Fit(pin.y - size.y * .5f, size.y), size.x, size.y);
+                Block(result);
+                return true;
+            }
+            walk.Clear();
+            walkClosed = false;
+            if (road != null && road.Count >= 2) Walk(road);
+            bool onRoad = walk.Count >= 2;
+
+            Spot previous;
+            if (spots.TryGetValue(key, out previous) && (onRoad || !previous.OnRoad))
+            {
+                Vector2 from = previous.OnRoad
+                    ? At((int)(previous.T * (walk.Count - 1) + .5f)) : anchor;
+                result = new Rect(from.x + previous.Offset.x, from.y + previous.Offset.y,
+                                  size.x, size.y);
                 if (Free(result)) { Block(result); return true; }
             }
+            if (onRoad && Beside(key, size, out result)) { Block(result); return true; }
+            return Around(key, anchor, size, out result);
+        }
+
+        // Stations down the whole length of the road, both sides, three
+        // distances - and the most open one wins. Every candidate stands clear
+        // of the line by the label's own extent in that direction, so the gap
+        // is a real gap on any bearing.
+        bool Beside(string key, Vector2 size, out Rect result)
+        {
+            result = new Rect();
+            int last = walk.Count - 1;
+            int stride = last / 24;
+            if (stride < 1) stride = 1;
+            int reach = (int)Mathf.Max(1f, 30f / walkStep);
+            bool found = false;
+            float best = 0f, bestT = 0f;
+            Vector2 bestFrom = new Vector2();
+            for (int index = 0; index <= last; index += stride)
+            {
+                Vector2 point = At(index);
+                Vector2 chord = At(index + reach) - At(index - reach);
+                float span = chord.magnitude;
+                if (span < .001f) continue;
+                float dirX = chord.x / span, dirY = chord.y / span;
+                // 1 along a straight stretch, 0 inside a hairpin: a name set
+                // beside a straight road reads as belonging to that road.
+                float straight = Mathf.Clamp01(span / (2f * reach * walkStep));
+                // The name belongs on the BODY of an open route, not at its
+                // tip. A closed ring has no tip, so every station is body.
+                float body = walkClosed ? 1f : 1f - Mathf.Abs(2f * index / (float)last - 1f);
+                for (int side = 0; side < 2; side++)
+                {
+                    float nx = side == 0 ? -dirY : dirY;
+                    float ny = side == 0 ? dirX : -dirX;
+                    float half = Mathf.Abs(nx) * size.x * .5f + Mathf.Abs(ny) * size.y * .5f;
+                    for (int ring = 0; ring < 3; ring++)
+                    {
+                        float gap = 9f + ring * 15f + half;
+                        Rect candidate = new Rect(point.x + nx * gap - size.x * .5f,
+                                                  point.y + ny * gap - size.y * .5f,
+                                                  size.x, size.y);
+                        if (!Free(candidate)) continue;
+                        float score = Clearance(candidate) * 4f + straight * 3f
+                                    + body * 2f - ring * 1.5f;
+                        if (found && score <= best) continue;
+                        found = true; best = score; result = candidate;
+                        bestFrom = point; bestT = last > 0 ? index / (float)last : 0f;
+                    }
+                }
+            }
+            if (!found) return false;
+            Spot spot = new Spot();
+            spot.OnRoad = true;
+            spot.T = bestT;
+            spot.Offset = new Vector2(result.x - bestFrom.x, result.y - bestFrom.y);
+            spots[key] = spot;
+            return true;
+        }
+
+        // The fallback for a name with no usable line: a route of one waypoint,
+        // or a road whose every station is taken. Unchanged from the first
+        // placement pass, so such a name never ends up worse than before.
+        bool Around(string key, Vector2 anchor, Vector2 size, out Rect result)
+        {
             for (int ring = 0; ring < 5; ring++)
             {
                 float gap = 10f + ring * 22f;
@@ -83,17 +302,20 @@ namespace NextDayRevival
                     }
                     result = new Rect(x, y, size.x, size.y);
                     if (!Free(result)) continue;
-                    offsets[key] = result.position - anchor;
+                    Spot spot = new Spot();
+                    spot.Offset = new Vector2(result.x - anchor.x, result.y - anchor.y);
+                    spots[key] = spot;
                     Block(result);
                     return true;
                 }
             }
             // Keep the name available through the route's hover note. Never
             // shrink it into the old tiny type or paint it over another name.
+            result = new Rect();
             return false;
         }
 
-        internal void Forget(string key) { offsets.Remove(key); }
+        internal void Forget(string key) { spots.Remove(key); }
     }
 
     // Native UILabel siblings share the map's panel and soft clipping, without
@@ -106,14 +328,21 @@ namespace NextDayRevival
         static UnityEngine.Object font;
         static float nextFontSearch;
         static bool warned;
+        static ConfigEntry<string> places;
         static readonly Dictionary<string, MemberInfo> members = new Dictionary<string, MemberInfo>();
         readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>();
+        // The displayed line of each labelled route, in artwork coordinates.
+        // Submitted with the ink, before any name is placed, so the placement
+        // pass can set a route's name beside the route's own road.
+        readonly Dictionary<string, List<Vector2>> roads = new Dictionary<string, List<Vector2>>();
         readonly List<string> stale = new List<string>();
         readonly MapLabelLayout layout = new MapLabelLayout();
         Component source;
         Rect full;
         Vector3 bottomLeft, topRight;
         int frame;
+        // The Places line this layer has already read into the layout.
+        string parsedPlaces;
 
         static MemberInfo Member(object target, string name)
         {
@@ -172,6 +401,55 @@ namespace NextDayRevival
             return font != null;
         }
 
+        /// <summary>The automatic placement below is a GUESS about what reads
+        /// well on a map it cannot see. Where that guess is wrong, this line
+        /// says where a name belongs, and it says so without a new build.</summary>
+        internal static void BindConfig(ConfigFile cfg)
+        {
+            places = cfg.Bind("MapLabels", "Places", "",
+                "Fixed places for individual map names, for wherever the "
+                + "automatic placement picks a poor spot. Semicolon-separated "
+                + "\"RouteName=x,y\" pairs in the map picture's own pixels: 0,0 "
+                + "is its top left corner, 1024,1024 its bottom right, and the "
+                + "name is centred on the point. A name listed here keeps that "
+                + "place whatever else stands there, and the automatic names "
+                + "give way to it. Empty = place every name automatically. "
+                + "Example: LocatorPatrol=430,560;CivPatrol=120,700");
+        }
+
+        internal bool Pinned(string key) { return layout.HasPin(key); }
+
+        // Re-read only when the line actually changed. The map is redrawn every
+        // frame it is open, and the .cfg can be edited while the game runs.
+        void ReadPlaces()
+        {
+            string text = places == null || places.Value == null ? "" : places.Value;
+            if (text == parsedPlaces) return;
+            parsedPlaces = text;
+            layout.ClearPins();
+            string[] entries = text.Split(new char[] { ';', '\n' });
+            for (int i = 0; i < entries.Length; i++)
+            {
+                string entry = entries[i].Trim();
+                if (entry.Length == 0) continue;
+                int eq = entry.IndexOf('=');
+                string[] pair = eq <= 0 ? new string[0]
+                    : entry.Substring(eq + 1).Split(new char[] { ',' });
+                float x = 0f, y = 0f;
+                if (pair.Length != 2
+                    || !float.TryParse(pair[0].Trim(), NumberStyles.Float,
+                                       CultureInfo.InvariantCulture, out x)
+                    || !float.TryParse(pair[1].Trim(), NumberStyles.Float,
+                                       CultureInfo.InvariantCulture, out y))
+                {
+                    RevivalPlugin.L.LogWarning("Map labels: cannot read the place \""
+                        + entry + "\". One entry is NAME=x,y in map pixels.");
+                    continue;
+                }
+                layout.SetPin(entry.Substring(0, eq).Trim(), new Vector2(x, y));
+            }
+        }
+
         internal static MapLabels Begin(Component texture, Camera camera, Rect mapRect, bool overworld)
         {
             if (!FindFont()) { Hide(); return null; }
@@ -188,9 +466,11 @@ namespace NextDayRevival
             Vector3[] corners = (Vector3[])Get(texture, "localCorners");
             layer.bottomLeft = corners[0]; layer.topRight = corners[2];
             layer.Follow();
+            layer.ReadPlaces();
             Texture artwork = Get(texture, "mainTexture") as Texture;
             layer.layout.Begin(overworld && artwork != null
                 && artwork.name.StartsWith("GW_Scene_1[", StringComparison.OrdinalIgnoreCase));
+            layer.roads.Clear();
             layer.ReserveWidgets(camera);
             return layer;
         }
@@ -208,11 +488,13 @@ namespace NextDayRevival
         internal Vector2 Artwork(Vector2 screen)
         { return new Vector2((screen.x - full.x) * 1024f / full.width, (screen.y - full.y) * 1024f / full.height); }
 
-        internal void BlockRoute(List<Vector2> localPoints, Vector2 screenOrigin)
+        internal void BlockRoute(string key, List<Vector2> localPoints, Vector2 screenOrigin)
         {
             List<Vector2> points = new List<Vector2>(localPoints.Count);
             for (int i = 0; i < localPoints.Count; i++) points.Add(Artwork(localPoints[i] + screenOrigin));
             layout.BlockLine(points, 3f);
+            // The same line guides the route's own name below.
+            if (!string.IsNullOrEmpty(key)) roads[key] = points;
         }
 
         internal void BlockScreen(Rect screen)
@@ -312,7 +594,9 @@ namespace NextDayRevival
             Set(widget, "text", text);
             Vector2 size = (Vector2)Get(widget, "printedSize");
             Rect bounds;
-            if (!layout.Place(key, Artwork(screenAnchor), size, out bounds))
+            List<Vector2> road;
+            roads.TryGetValue(key, out road);
+            if (!layout.Place(key, road, Artwork(screenAnchor), size, out bounds))
             { widget.gameObject.SetActive(false); return false; }
             float sx = (topRight.x - bottomLeft.x) / 1024f;
             float sy = (topRight.y - bottomLeft.y) / 1024f;
