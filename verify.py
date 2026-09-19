@@ -1453,6 +1453,15 @@ def check_arty_battery():
          the air (second field report 2026-09-18). Both stations are handed to
          Crew, so no ring is drawn around a single point with half of it on the
          vehicle, and Crew's own spawn ray walks past the carrier.
+     11. And it never climbs again (third field report 2026-09-19). No station
+         may be measured above the ground the vehicle itself stands on, a man
+         counts as a man whichever of his colliders is hit, and a height guard
+         runs every frame between two posting passes.
+     12. The two men work the side of the hull the target computer is on, close
+         enough to touch it, facing it - the gunner upright at the box, the
+         operator crouching beside him (order 2026-09-19). Both places, both
+         clips and the crouch pose are configuration, because where exactly the
+         box sits on the model cannot be read from here.
     """
     print("[16] Artilleriefahrzeug, Besatzung und Aufklaerungsdrohne (statisch)")
     bat_p = os.path.join(ROOT, "RevivalArtyBattery.cs")
@@ -1615,11 +1624,63 @@ def check_arty_battery():
          and "static readonly Vector3 OperatorPost" in b,
          "Schuetze und Drohnenfuehrer haben feste Plaetze am Fahrzeug",
          "die beiden Stationen am Fahrzeug fehlen")
+    # DIE RICHTIGE SEITE, UND DICHT DRAN (Feldmeldung 2026-09-19: "dort ist
+    # bereits der zusehende target computer angebracht, da soll der gunner bis
+    # ganz kurz vorm fahrzeug stehen, also richtig dran"). Beide Maenner stehen
+    # auf der +X-Seite - der Seite mit dem Zielrechner - und 8 statt 10,5
+    # Einheiten aussen; breiter als 7,3 wird das Modell nie. Wer die Seite
+    # wechselt, muss auch die Blickrichtung mitnehmen: eine feste
+    # Vierteldrehung liesse beide mit dem Ruecken zum Fahrzeug arbeiten.
+    need("static readonly Vector3 GunnerPost = new Vector3(8f, 0f, -8f);" in b
+         and "static readonly Vector3 OperatorPost = new Vector3(8f, 0f, -12f);" in b,
+         "beide Stationen liegen auf der Seite des Zielrechners, dicht am Rumpf",
+         "die Stationen liegen wieder auf der falschen Seite oder weit weg vom "
+         "Fahrzeug")
+    need("static float StationYaw(Transform gun, Vector3 post)" in b
+         and "post.x >= 0f ? -90f : 90f" in b,
+         "die Blickrichtung folgt der Seite, auf der der Mann steht",
+         "die feste Vierteldrehung dreht einen Mann auf der anderen Seite vom "
+         "Fahrzeug weg")
+    need('cfg.Bind("Artillery", "CrewGunnerPost"' in b
+         and 'cfg.Bind("Artillery", "CrewOperatorPost"' in b
+         and "static Vector3 PostOf(bool gunner)" in b,
+         "beide Plaetze sind Konfiguration - der Kasten laesst sich ohne "
+         "neuen Build treffen",
+         "die Stationen stehen nur im Quelltext - ein falsch sitzender Mann "
+         "braucht dann einen neuen Build")
+    # DER DROHNENFUEHRER HOCKT (Auftrag 2026-09-19: "der drone operator soll
+    # daneben dauerhaft hocken"). NPCPoseState.Crouch ist die Hocke des Spiels,
+    # und GetAnimationNameCrouchPose bildet sie auf crouch_idle ab (CONFIRMED
+    # IL) - das ist die Dauerhocke, ohne dass ein Clip geraten werden muss.
+    need("const int PoseCrouch = 1;" in b and "static int OperatorPose()" in b
+         and 'cfg.Bind("Artillery", "CrewOperatorPose"' in b,
+         "der Drohnenfuehrer wird in die Hocke des Spiels gesetzt",
+         "der Drohnenfuehrer steht wieder - die Hocke fehlt")
+    need("Arg(_mStateSync, 3, pose)" in b,
+         "die Haltung geht mit dem Zustand ueber die RPC des Spiels raus",
+         "die Haltung wird nicht mitgesendet - auf anderen Clients steht der "
+         "Mann")
+    # ... und der Schuetze arbeitet auf Brusthoehe, nicht am Boden ("sie muss
+    # zu der position des target computers passen, also nicht das er da unten
+    # irgendwo rumfummelt"). Die Beerenpflueck-Animation aus 6.26 ist ein Mann
+    # auf den Knien; sie ist jetzt Sache des hockenden Drohnenfuehrers.
+    need("static readonly string[] NotUpright = {" in b
+         and "if (upright)" in b and "NotUpright[i]" in b
+         and '"berr"' in b.split("static readonly string[] NotUpright = {")[1][:400],
+         "dem Schuetzen sind die Bodenclips verboten",
+         "der Schuetze kann wieder eine Animation am Boden bekommen - die "
+         "Beerenpflueckerei war genau die Klage")
+    need('cfg.Bind("Artillery", "CrewOperatorClip"' in b
+         and "sealed class ClipPick" in b,
+         "beide Maenner haben je einen eigenen Clip und einen eigenen Schluessel",
+         "ein einziger Clip muss fuer einen stehenden und einen hockenden Mann "
+         "zugleich passen")
     # Die Arbeitsanimation ist eine Kette von Rueckfallebenen, und jede einzelne
     # endet mit einem Mann, der sich nicht bewegt: Arbeitszustand, eigener Clip
     # aus dem Satz des Modells, sonst der Stand-Idle. Faellt eine davon weg,
     # steht am Ende ein laufender oder ein zuckender Mann.
-    need("static int WorkState()" in b and "_workStateHeld" in b,
+    need("static int WorkState()" in b and "hold.Held = true;" in b
+         and "hold.Broken = true;" in b,
          "ein Zustand, der nicht haelt, faellt auf den Stand-Idle zurueck",
          "ohne Rueckfallebene wird ein nicht gehaltener Zustand zum RPC-Sturm")
     need("now - since >= SettleSeconds" in b,
@@ -1671,6 +1732,42 @@ def check_arty_battery():
          "ein Rufer kann seine eigenen geprueften Plaetze uebergeben",
          "ohne diesen Weg wird jede Gruppe wieder auf einen Ring verteilt")
 
+    # 11: UND ER STEIGT AUCH NICHT WIEDER AUF (dritte Feldmeldung, 2026-09-19:
+    # "dann steigen sie in stufen wieder gen himmel auf, und werden wieder
+    # runter tp'd"). Eine Treppe im Takt der Postenrunde ist die Schleife, die
+    # sich selbst fuettert: der Strahl, der die Station misst, geht durch den
+    # Mann, der auf dieser Station steht. Wird sein Kopf als Boden genommen,
+    # steht er eine Kapsellaenge hoeher - und beim naechsten Mal noch eine,
+    # bis er ueber dem Startpunkt des Strahls ist und auf den echten Boden
+    # faellt. Drei Riegel, jeder fuer sich ausreichend:
+    #   - die Station darf nie hoeher liegen als StandMaxRise ueber dem Boden,
+    #     auf dem das Fahrzeug selbst steht. Ein Mann ist fuenf Einheiten hoch,
+    #     ein Deck mehr - darunter passt nichts, worauf man einen Mann stellen
+    #     kann.
+    #   - ein Mann wird als Mann erkannt, egal auf welchen seiner Collider der
+    #     Strahl trifft: die GANZE Ahnenkette wird gelaufen, nicht vier Glieder.
+    #   - und zwischen zwei Postenrunden haelt eine Hoehenwache je Frame fest,
+    #     was eine halbe Sekunde lang sonst sichtbar waere.
+    need("const float StandMaxRise" in b
+         and "static float StandCeiling(Vector3 at, Transform gun)" in b
+         and "if (at.y > ceiling) at.y = ceiling;" in b
+         and "hit.y <= ceiling" in b,
+         "keine Station ueber dem Boden des eigenen Fahrzeugs",
+         "ohne die Obergrenze kann der Bodenstrahl wieder einen Kopf, ein Deck "
+         "oder eine Kiste als Boden nehmen - das ist die Treppe nach oben")
+    for name, src in (("ArtyBattery", b), ("Crew", crew)):
+        need("if (ai != null && t.GetComponent(ai) != null) return true;" in src
+             and "for (int i = 0; i < 4 && t != null; i++)" not in src,
+             name + ": ein Mann wird an jedem seiner Collider erkannt",
+             name + ": IsMan laeuft wieder nur vier Glieder der Ahnenkette - "
+             "ein Treffer auf einen Knochen tief im Modell gilt dann als Boden")
+    need("Hold(p, master);" in b
+         and "static void KeepDown(Component ai, Vector3 at)" in b
+         and "if (now.y - at.y <= StationRise) return;" in b,
+         "zwischen zwei Postenrunden haelt eine Hoehenwache je Frame",
+         "ohne die Wache je Frame ist jeder Lift eine halbe Sekunde lang zu "
+         "sehen - genau der Sprung, der gemeldet wurde")
+
     # --- 4: the crew belongs to its settlement.
     # The hated list is COPIED, never shared: other parts of the toolkit
     # rewrite a settlement's list in place, and a shared reference would carry
@@ -1679,7 +1776,7 @@ def check_arty_battery():
          and "_fHated.SetValue(opt, hated.Clone() as Array)" in b,
          "Besatzung uebernimmt die Fraktion der Siedlung (als Kopie)",
          "die Besatzung behaelt eine fremde Fraktion")
-    need("Crew.DropSquadAt(at, posts, StationYaw(gun), side, loadout)" in b
+    need("StationYaw(gun, PostOf(true)), side, loadout)" in b
          and "new Vector3[] { Station(gun, true), Station(gun, false) }" in b,
          "zwei Mann je Geschuetz, jeder gleich auf seiner eigenen Station",
          "die Besatzung wird auf einen einzigen Punkt gesetzt - Crew legt dann "
@@ -1926,6 +2023,15 @@ def check_technical():
          and the gun has a BELT with a reload on the game's own progress bar.
          The same report: "man kann auf dem gunner sitz weder aimen noch
          schiessen noch nachladen".
+     11. The station stands on a FLOOR. The donor's rear bench is taken off the
+         truck before the deck is measured - nobody can sit on it anymore, and
+         while it is there it is the highest surface over the rear - and the
+         measured deck is held to one step above the floor the donor's own
+         passengers stand on. Field report of 2026-09-19: "das mg steht AUF der
+         sitzreihe drauf, und der spieler steht fast wie auf einem ausguck".
+         Each half fails on its own: without the bench removal the pintle is
+         bolted to a backrest, without the ceiling it climbs onto the roof of
+         any donor whose body is one closed collider.
 
     Plus the file rule: RevivalTechnical.cs is machine-written and build.ps1
     needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
@@ -2090,6 +2196,45 @@ def check_technical():
          "der Abstand des Schuetzen zum MG haengt nicht mehr an der Armlaenge "
          "- dann steht er im Geschuetz oder zu weit davon weg")
 
+    # --- 7e: die Ruecksitzbank ist weg, und die Standflaeche ist ein Fussboden.
+    #
+    # Der dritte Feldbericht zur selben Stelle (2026-09-19): "aktuell steht das
+    # mg AUF der sitzreihe drauf, und der spieler steht fast wie auf einem
+    # ausguck auf dem ding. Die hintere sitzreihe muss weg [...] dann den mg
+    # stand runter moven und dann ans mg". Eine GEMESSENE Oberflaeche ist das
+    # hoechste, was wirklich da ist - und das war die Bank. Beide Haelften der
+    # Abhilfe koennen einzeln verloren gehen, ohne dass etwas kaputt aussieht:
+    # ohne das Entfernen steht das MG wieder auf der Lehne, ohne die Obergrenze
+    # steht es auf dem Dach, sobald ein Spender einen geschlossenen
+    # Kollisionskoerper hat.
+    need("static int Ruecksitze(GameObject car, Transform seats, Vector3 min," in t
+         and "mf.gameObject.SetActive(false);" in t
+         and "Ruecksitze(car, seats, min, max, unitsPerMetre);" in t,
+         "die Ruecksitzbank des Spenders wird abgebaut",
+         "die Ruecksitzbank bleibt stehen - auf ihr landet die Lafette, und "
+         "der Schuetze steht auf der Lehne")
+    _bauen = t.find("static void Aufbauen(GameObject car)")
+    _bank = t.find("Ruecksitze(car, seats, min, max, unitsPerMetre);", _bauen)
+    _flaeche = t.find("Oberflaeche(car, min, max, x, mountZ, out deckY)", _bauen)
+    need(_bauen >= 0 and _bank > _bauen and _flaeche > _bank,
+         "erst die Bank abbauen, dann die Standflaeche messen",
+         "die Standflaeche wird gemessen, bevor die Bank weg ist - dann misst "
+         "der Strahl wieder die Lehne")
+    need("if (Drin(lo, hi, vorn[i], 0.05f * length)) return false;" in t,
+         "ein Teil mit einem Vordersitz darin bleibt unangetastet",
+         "der Schutz der Vordersitze fehlt - dann kann der Innenraum samt "
+         "Fahrersitz verschwinden")
+    need("static bool Sitzboden(Transform root, Transform seats, out float y)" in t
+         and "boden + CfgDeckStep.Value * height" in t,
+         "die Standflaeche wird auf Fussbodenhoehe begrenzt (DeckStep)",
+         "die Obergrenze ueber dem Fussboden des Spenders fehlt - dann steht "
+         "die Lafette wieder auf dem hoechsten Kollisionskoerper und der "
+         "Schuetze wie auf einem Ausguck")
+    step = _bind_number(t, "Technical", "DeckStep")
+    need(step is not None and 0.0 < step <= 0.30,
+         "DeckStep %s der Fahrzeughoehe, eine Stufe und kein Stockwerk" % step,
+         "DeckStep fehlt oder laesst wieder ein halbes Fahrzeug Hoehe zu")
+
     # --- 7c: the place IS the gun, and the gun has a belt.
     #
     # Both come from the same report: "man kann auf dem gunner sitz weder aimen
@@ -2191,10 +2336,20 @@ def check_technical():
     # finden - sonst ist der letzte Schritt wieder Handarbeit an der falschen
     # Stelle - und (b) das MG aus dem Modell herausloesen, denn ein MG, das im
     # selben Mesh wie der Rumpf steckt, kann sich im Spiel nicht drehen.
-    need("def source()" in build and "NAME_HINT" in build
+    need("def source()" in build and "NAME_HINTS" in build
          and "def search_dirs()" in build,
          "technical_build.py sucht das Quellmodell im Toolkit-Ordner",
          "technical_build.py findet ein geliefertes Modell nicht mehr selbst")
+    # Der Dateiname eines heruntergeladenen Modells ist der seines Autors. Das
+    # gelieferte heisst "pick-up_truck_improvised_fighting_vehicle.glb" und
+    # enthaelt das Wort "technical" nirgends - genau daran ist die Suche bisher
+    # vorbeigelaufen. Deshalb wird der Name entkernt (nur Buchstaben und
+    # Ziffern) und gegen mehrere Schreibweisen geprueft.
+    need("def says_technical(name)" in build and "def flat(name)" in build
+         and "pickuptruck" in build and "improvisedfighting" in build,
+         "der Dateiname wird entkernt und in mehreren Schreibweisen gesucht",
+         "technical_build.py sucht wieder nur nach dem Wort 'technical' - "
+         "das gelieferte Modell heisst anders und wird dann nicht gefunden")
     need("def guess(table)" in build and "GUN_WORDS" in build
          and '"technical_mg"' in build,
          "das MG wird als eigenes Mesh aus dem Modell geloest",

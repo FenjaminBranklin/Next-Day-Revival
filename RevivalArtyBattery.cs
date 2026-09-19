@@ -14,9 +14,9 @@
 //      are ordinary game NPCs, spawned once by the master client through
 //      Crew.DropSquad and wearing the FACTION OF THE SETTLEMENT they stand in,
 //      so they do not open fire on their own village. They are POSTED at the
-//      vehicle and do not walk anywhere: the gunner works the fire-control box
-//      on the side of the hull, the operator stands a pace behind him flying
-//      the drone (Posted, further down).
+//      vehicle and do not walk anywhere: the gunner works the target computer
+//      on the side of the hull, the operator squats beside him flying the
+//      drone (Posted, further down).
 //   3. The operator flies a real recon drone in a wide circle around the
 //      settlement. It is the same airframe the player's own surveillance drone
 //      uses, and it is drawn on the M map.
@@ -64,6 +64,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using BepInEx.Configuration;
@@ -92,6 +93,10 @@ namespace NextDayRevival
         static ConfigEntry<bool> _cfgCrewPosted;
         static ConfigEntry<int> _cfgWorkState;
         static ConfigEntry<string> _cfgWorkClip;
+        static ConfigEntry<string> _cfgGunnerPost;
+        static ConfigEntry<string> _cfgOperatorPost;
+        static ConfigEntry<int> _cfgOperatorPose;
+        static ConfigEntry<string> _cfgOperatorClip;
 
         static ConfigEntry<float> _cfgOrbitRadius;
         static ConfigEntry<float> _cfgOrbitHeight;
@@ -116,7 +121,7 @@ namespace NextDayRevival
 
         /// <summary>Metres around the gun in which a living man counts as its
         /// crew. Since 6.26 the two men are posted at the hull (Posted) and
-        /// stand 11 and 15 units off its centre, but this stays wide: the count
+        /// stand 8 and 14 units off its centre, but this stays wide: the count
         /// is also what a JOINED client goes by, and a settlement's own men
         /// standing at the vehicle are crew enough for it.</summary>
         internal static float GuardRadius { get { return Mathf.Max(4f, F(_cfgGuardRadius, 14f)); } }
@@ -157,22 +162,54 @@ namespace NextDayRevival
                 + "Gruppe einen M72 LAW - an einer Haubitze nicht erwuenscht. "
                 + "1001 ist das Sturmgewehr des Spiels; 1160 waere das MG42.");
             _cfgCrewPosted = cfg.Bind("Artillery", "CrewStandsAtTheGun", true,
-                "The gunner works the fire-control box on the side of the "
-                + "vehicle and the drone operator stands a pace behind him. "
+                "The gunner works the target computer on the side of the "
+                + "vehicle and the drone operator squats beside him. "
                 + "Neither of them walks anywhere: they are posted, not "
                 + "patrolling. false gives back the crew that wandered the "
                 + "nine-metre ring Crew.DropSquad lays out for every squad.");
             _cfgWorkState = cfg.Bind("Artillery", "CrewWorkState", 10,
-                "The NPCMainState the posted crew is held in. 10 is the game's "
+                "The NPCMainState the GUNNER is held in. 10 is the game's "
                 + "own Working state - what an NPC busy with something in front "
                 + "of him is in; 0 is a plain standing idle. A state the "
                 + "installed game does not animate simply leaves the men "
                 + "standing, which is still motionless.");
             _cfgWorkClip = cfg.Bind("Artillery", "CrewWorkClip", "",
-                "The animation clip the crew loops when the state above plays "
+                "The animation clip the GUNNER loops when the state above plays "
                 + "none. Empty picks the first clip of the model's own set "
-                + "whose name reads like work, and writes the choice to the "
-                + "log. \"-\" asks for no clip at all.");
+                + "whose name reads like work AT CHEST HEIGHT - a man at a "
+                + "console, not one kneeling in a berry bush - and writes the "
+                + "choice, and every clip the model carries, to the log. \"-\" "
+                + "asks for no clip at all.");
+            // THE TWO STATIONS ARE DATA, NOT CODE (field 2026-09-19: "auf
+            // crewrightside siehst du die ANDERE seite des fahrzeugs, dort ist
+            // bereits der zusehende target computer angebracht, da soll der
+            // gunner bis ganz kurz vorm fahrzeug stehen"). Where exactly that
+            // box sits on the model is something only a player standing at the
+            // vehicle can see, so the two posts are config: a man can be moved
+            // onto the console to the centimetre without a new build.
+            _cfgGunnerPost = cfg.Bind("Artillery", "CrewGunnerPost", "8,0,-8",
+                "Where the gunner stands, in the VEHICLE's own space: x,y,z, "
+                + "+z is the way the hull points and +x is its right side - the "
+                + "side the target computer is on. 8 is right at the hull (the "
+                + "widest point of the model, the deployed stabilizers, is 7.3 "
+                + "out), so he works the box instead of standing off it. The "
+                + "man always faces the hull, whichever side he is put on.");
+            _cfgOperatorPost = cfg.Bind("Artillery", "CrewOperatorPost", "8,0,-12",
+                "Where the drone operator crouches, same frame as above: beside "
+                + "the gunner on the same side of the vehicle, four units (a "
+                + "pace and a half) further back.");
+            _cfgOperatorPose = cfg.Bind("Artillery", "CrewOperatorPose", 1,
+                "The pose the drone operator is held in. 1 is the game's own "
+                + "Crouch - he squats over his controller and does not move "
+                + "(NPCPoseState: Normal 0, Crouch 1, Crawl 2; the crouch clips "
+                + "are the game's own, CONFIRMED IL). 0 leaves him standing.");
+            _cfgOperatorClip = cfg.Bind("Artillery", "CrewOperatorClip", "-",
+                "An animation clip looped over the operator's crouch. \"-\" "
+                + "keeps the game's own crouch idle, which is what the pose "
+                + "above already plays; a name here replaces it. Empty searches "
+                + "the model's set the way CrewWorkClip does - only useful when "
+                + "the crouch pose does not hold on this build, because a "
+                + "standing work clip stands the man back up.");
 
             _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 600f,
                 "Metres from the settlement centre the drone circles at. The "
@@ -285,6 +322,16 @@ namespace NextDayRevival
             public float NextPost;
             public float GunnerSince;
             public float OperatorSince;
+
+            // The two stations as Posted last measured them, and whether they
+            // have been measured at all. Held is what the per-frame Hold reads:
+            // it is not allowed to cast a ray or touch the AI, it only compares
+            // two heights (see Hold).
+            public Vector3 GunnerAt;
+            public Vector3 OperatorAt;
+            public bool StationsSet;
+            public bool GunnerLives;        // ... as of the last posting pass
+            public bool OperatorLives;
 
             // crew as every client sees it: living men standing at the gun
             public int MenNear;
@@ -516,6 +563,9 @@ namespace NextDayRevival
             p.CrewSettlement = null;
             p.Gunner = null;
             p.Operator = null;
+            p.StationsSet = false;
+            p.GunnerLives = false;
+            p.OperatorLives = false;
             p.DroneUp = false;
         }
 
@@ -579,6 +629,10 @@ namespace NextDayRevival
                     }
                     Manning(p, now, master);
                     Posted(p, now, master);
+                    // ... and every frame between two postings, the height
+                    // alone: a man who is lifted must not be seen to rise at
+                    // all, let alone climb (Hold).
+                    Hold(p, master);
                     Fly(p, now, me != null, mine);
                     Warn(p, now, me, mine);
                     if (master)
@@ -759,9 +813,10 @@ namespace NextDayRevival
                 string side = SideFor(template);
                 // Facing the hull from the off, and from the LEVEL frame the
                 // stations are built in: a gun stood on a ground normal has a
-                // Y euler that is not its heading at all.
-                GameObject crew =
-                    Crew.DropSquadAt(at, posts, StationYaw(gun), side, loadout);
+                // Y euler that is not its heading at all. Both men work the
+                // same side of the vehicle, so one yaw is both their yaws.
+                GameObject crew = Crew.DropSquadAt(at, posts,
+                    StationYaw(gun, PostOf(true)), side, loadout);
                 if (crew == null)
                 {
                     if (p.CrewTries >= 4)
@@ -775,16 +830,31 @@ namespace NextDayRevival
                 }
                 p.CrewSettlement = crew;
                 p.CrewAsked = true;
+                // The stations the men were BUILT on are what Hold measures
+                // against until the first Posted pass, 1.5 s from now: the
+                // height guard must not have a blind first second and a half,
+                // which is where the 2026-09-18 report lived.
+                p.GunnerAt = posts[0];
+                p.OperatorAt = posts[1];
+                p.StationsSet = true;
                 // The men are not posted in the frame they were made. NPC_AI2
                 // .Start still has FindMySpawnPointAndSet to run, which puts a
                 // man on his spawn point, and a station warp that raced it
                 // would simply be undone.
                 p.NextPost = now + 1.5f;
                 Resolve(p);
+                p.GunnerLives = p.Gunner != null;
+                p.OperatorLives = p.Operator != null;
                 if (p.Gunner != null) p.FactionSet = MatchFaction(p);
+                // The two stations go into the log with the crew: a report that
+                // a man stands in the wrong place, or over the ground, is read
+                // against these two numbers and the hull's own position.
                 RevivalPlugin.L.LogInfo("ArtyBattery: crew for \"" + p.Name
                     + "\" on its feet (gunner " + (p.Gunner != null)
-                    + ", operator " + (p.Operator != null) + ").");
+                    + ", operator " + (p.Operator != null) + ") - gunner at "
+                    + posts[0].ToString("0.0") + ", operator at "
+                    + posts[1].ToString("0.0") + ", hull at "
+                    + gun.position.ToString("0.0") + ".");
             }
             catch (Exception ex)
             {
@@ -906,20 +976,55 @@ namespace NextDayRevival
         // the hull faces, +X its right side. A man is five units tall and the
         // hull is 31.6 units long, so these are paces and not metres.
         //
-        // The gunner stands at the fire-control box on the LEFT side of the
-        // hull and faces it - that is the console the order asks for. The
-        // turret sits aft (ArtyModel.TurretAt is 10.4 units behind the hull's
-        // origin), so the side of the fighting compartment is around -6, well
-        // out of the muzzle's way; 10.5 units out clears the deployed
-        // stabilizers, which ArtyModel.UsePoint puts the player's own use point
-        // just inside at 8.5.
+        // FIELD 2026-09-19: "auf crewrightside siehst du die ANDERE seite des
+        // fahrzeugs, dort ist bereits der zusehende target computer angebracht,
+        // da soll der gunner bis ganz kurz vorm fahrzeug stehen, also richtig
+        // dran. der drone operator soll daneben dauerhaft hocken". Both men
+        // therefore move from the left side of the hull to the RIGHT one, the
+        // side that carries the target computer, and in from 10.5 to 8: the
+        // widest the model ever gets is 7.3 (14.579 units across with the
+        // stabilizers deployed, arty-appearance.md), so 8 is a hand's breadth
+        // off the vehicle - at the box, not beside it - and still outside the
+        // geometry, which matters because a man's own capsule is 0.75 wide.
         //
-        // The operator stands beside him, a couple of paces further back: he is
-        // flying the drone, not working the gun. The two stations straddle the
-        // use point at -10.5 rather than sitting on it, so the player who walks
-        // up to the gun stands BETWEEN his crew instead of inside one of them.
-        static readonly Vector3 GunnerPost = new Vector3(-10.5f, 0f, -6f);
-        static readonly Vector3 OperatorPost = new Vector3(-10.5f, 0f, -14f);
+        // The operator crouches beside him, four units further back: he is
+        // flying the drone, not working the gun, and a pace and a half is close
+        // enough to read as one crew and far enough not to share his mate's
+        // capsule. The two still STRADDLE the player's own use point
+        // (ArtyModel.UsePoint, z -10.5) rather than sitting on it, so a player
+        // who takes the sight from this side stands between his crew instead
+        // of inside one of them - and the other side of the hull is now
+        // completely free, which is the side UsePoint gives him if he walks up
+        // from there. Both are defaults only - Artillery/CrewGunnerPost and
+        // CrewOperatorPost move them without a new build, which is the only way
+        // a box whose exact place on the model nobody here can see gets its man
+        // standing squarely at it.
+        static readonly Vector3 GunnerPost = new Vector3(8f, 0f, -8f);
+        static readonly Vector3 OperatorPost = new Vector3(8f, 0f, -12f);
+
+        /// <summary>One of the two posts in the vehicle's own space, from the
+        /// config when it carries a readable "x,y,z" and from the defaults
+        /// above otherwise.</summary>
+        static Vector3 PostOf(bool gunner)
+        {
+            return ParseVec3(gunner ? _cfgGunnerPost : _cfgOperatorPost,
+                             gunner ? GunnerPost : OperatorPost);
+        }
+
+        static Vector3 ParseVec3(ConfigEntry<string> entry, Vector3 fallback)
+        {
+            if (entry == null || entry.Value == null) return fallback;
+            string[] parts = entry.Value.Split(',');
+            if (parts.Length != 3) return fallback;
+            float x, y, z;
+            if (!float.TryParse(parts[0].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out x)) return fallback;
+            if (!float.TryParse(parts[1].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out y)) return fallback;
+            if (!float.TryParse(parts[2].Trim(), NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out z)) return fallback;
+            return new Vector3(x, y, z);
+        }
 
         /// <summary>Seconds a man stands in the ordinary idle after he has been
         /// put on his station, before he goes to work. The shooting and working
@@ -934,9 +1039,9 @@ namespace NextDayRevival
         /// One of the two stations at the vehicle, ON THE GROUND.
         ///
         /// FIELD 2026-09-18 ("die arty crew bugged rum, fliegt teilweise in der
-        /// luft, anstatt auf dem boden an dem fahrzeug dran zu stehen"). Two
-        /// separate reasons a posted man ended up in the air, and this takes
-        /// both away:
+        /// luft, anstatt auf dem boden an dem fahrzeug dran zu stehen") and
+        /// 2026-09-19. Three separate reasons a posted man ended up in the air,
+        /// and this takes all three away:
         ///
         ///   THE HULL IS TILTED. Mortar.Raise stands the vehicle on the ground
         ///   NORMAL (transform.up = normal, the same way the anti-tank mine is
@@ -953,13 +1058,32 @@ namespace NextDayRevival
         ///   report. GunGround starts just over the deck, stops well under any
         ///   roof, and skips anything that belongs to the gun or is a man.
         ///
+        ///   THE STATION CANNOT BE OVER THE VEHICLE'S OWN FEET. FIELD
+        ///   2026-09-19: "der hochflieg bug ist immernoch nicht geloest, es
+        ///   dauert nur einfach paar sekunden, dann steigen sie in stufen
+        ///   wieder gen himmel auf, und werden wieder runter tp'd". A staircase
+        ///   with a period of half a second is the posting loop feeding itself:
+        ///   the ray that measures the station is cast straight down through
+        ///   the man who is standing ON that station, and every collider it
+        ///   accepts that is not the floor lifts him by its own height - his
+        ///   capsule is five units tall, so four passes carry him past
+        ///   DeckReach, the cast then starts BELOW him, finds the real ground,
+        ///   and he is dropped. That is the climb and the teleport, both.
+        ///   Rather than trusting a filter to recognise every kind of thing a
+        ///   man can be mistaken for (IsMan reads a NavMeshAgent off the
+        ///   collider's ancestors, and a hit on a bone deep in a skeleton, or
+        ///   on a model whose agent sits on a child, is not recognised at all),
+        ///   the station now takes the one fact that cannot be argued with: the
+        ///   GUN stands on the ground these men stand on. Nothing more than
+        ///   StandMaxRise over the hull's own base is their floor.
+        ///
         /// Finally the point is put on the NavMesh where there is one within
         /// reach: that surface IS "where a man can stand", and the agent that
         /// is warped onto it needs it anyway.
         /// </summary>
         static Vector3 Station(Transform gun, bool gunner)
         {
-            Vector3 post = gunner ? GunnerPost : OperatorPost;
+            Vector3 post = PostOf(gunner);
             float scale = Mathf.Abs(gun.lossyScale.x);
             if (scale < 0.01f) scale = 1f;
             Vector3 at = gun.position
@@ -980,27 +1104,54 @@ namespace NextDayRevival
                     at = nav.position;
             }
             catch { }
+            // The last word, over the ray and over the NavMesh both: a crewman
+            // does not stand above the vehicle he serves.
+            float ceiling = StandCeiling(at, gun);
+            if (at.y > ceiling) at.y = ceiling;
             return at;
         }
 
+        /// <summary>The highest a crewman's feet may be at that point: the
+        /// higher of the vehicle's own base and the terrain under the station,
+        /// plus StandMaxRise. The terrain is in it because an emplacement is
+        /// allowed to lean (Mortar.Clear takes a normal down to 0.80), and on
+        /// such a patch the ground eight units out really is above the hull's
+        /// origin; the hull is in it because a scene with no terrain data still
+        /// has to answer. Neither is a ray, so this costs nothing.</summary>
+        static float StandCeiling(Vector3 at, Transform gun)
+        {
+            float scale = Mathf.Abs(gun.lossyScale.x);
+            if (scale < 0.01f) scale = 1f;
+            float floor = gun.position.y;
+            float terrain;
+            if (RevivalTroopInsertion.TerrainHeight(at, out terrain) && terrain > floor)
+                floor = terrain;
+            return floor + StandMaxRise * scale;
+        }
+
         /// <summary>The ground under a point beside the gun, ignoring the gun
-        /// itself and anyone standing there. The cast starts just over the deck
-        /// rather than at 1500 units, so a roof or a branch overhead is not
-        /// mistaken for the floor either; with nothing below it the ordinary
-        /// terrain answer still applies.</summary>
+        /// itself, anyone standing there, and anything else that is above the
+        /// vehicle's own base - a deck, a crate, a man's head. The cast starts
+        /// just over the deck rather than at 1500 units, so a roof or a branch
+        /// overhead is not mistaken for the floor either; with nothing below it
+        /// the ordinary terrain answer still applies.</summary>
         static bool GunGround(Vector3 at, Transform gun, out float y)
         {
             y = at.y;
             try
             {
+                float ceiling = StandCeiling(at, gun);
                 Vector3 from = new Vector3(at.x, at.y + DeckReach, at.z);
                 float rest = DeckReach + DigReach;
-                for (int i = 0; i < 4 && rest > 0f; i++)
+                // Six, not four: everything between the start of the cast and
+                // the ceiling is now walked past, and beside a vehicle that can
+                // be the deck, a stabilizer, a man and his weapon in a row.
+                for (int i = 0; i < 6 && rest > 0f; i++)
                 {
                     Vector3 hit;
                     GameObject go = Turret.RaycastObject(from, Vector3.down, rest, out hit);
                     if (go == null) break;
-                    if (!PartOfGun(go, gun) && !IsMan(go))
+                    if (hit.y <= ceiling && !PartOfGun(go, gun) && !IsMan(go))
                     {
                         y = hit.y;
                         return true;
@@ -1023,6 +1174,13 @@ namespace NextDayRevival
         const float DeckReach = 14f;
         const float DigReach = 40f;
 
+        /// <summary>How far over the vehicle's own base a crewman's floor may
+        /// be. One unit is a third of a metre; three is the kerb the gun itself
+        /// could be standing on while his own feet are beside it. A man is five
+        /// units tall, a deck several more, so nothing a man can be stood ON
+        /// fits under this - which is the whole point.</summary>
+        const float StandMaxRise = 3f;
+
         /// <summary>Does that collider belong to the gun, turret or barrel?</summary>
         static bool PartOfGun(GameObject go, Transform gun)
         {
@@ -1037,14 +1195,24 @@ namespace NextDayRevival
         }
 
         /// <summary>A man is not ground. His own capsule stands at the station
-        /// the moment the second crewman is planted next to him.</summary>
+        /// from the frame he is planted on it, and the ray that measures the
+        /// station is cast straight down through him.
+        ///
+        /// The whole chain of ancestors is walked, not four of them: an NPC is
+        /// hit on whatever collider happens to be uppermost, and that can be a
+        /// bone six or eight levels below the root of the model. The AI
+        /// component is asked for as well as the agent, because which of the
+        /// two sits on which object is a property of the prefab and not
+        /// something this file may assume.</summary>
         static bool IsMan(GameObject go)
         {
             if (go == null) return false;
+            Type ai = Look() ? _npcType : null;
             Transform t = go.transform;
-            for (int i = 0; i < 4 && t != null; i++)
+            while (t != null)
             {
                 if (t.GetComponent<NavMeshAgent>() != null) return true;
+                if (ai != null && t.GetComponent(ai) != null) return true;
                 t = t.parent;
             }
             return false;
@@ -1066,13 +1234,15 @@ namespace NextDayRevival
             return Mathf.Atan2(ahead.x, ahead.z) * Mathf.Rad2Deg;
         }
 
-        /// <summary>Which way both men look: at the side of the hull they are
-        /// working on, which is the vehicle's local +X from where they stand -
-        /// a quarter turn off the hull's own heading, in the same level frame
-        /// the stations themselves are built in.</summary>
-        static float StationYaw(Transform gun)
+        /// <summary>Which way a man looks: AT the side of the hull he is
+        /// working on, in the same level frame the stations themselves are
+        /// built in. A quarter turn off the hull's heading, and which way round
+        /// follows the side he was put on - the crew moved from the hull's left
+        /// to its right in 6.29.1 and a fixed quarter turn would have left both
+        /// men working with their backs to the vehicle.</summary>
+        static float StationYaw(Transform gun, Vector3 post)
         {
-            return HullYaw(gun) + 90f;
+            return HullYaw(gun) + (post.x >= 0f ? -90f : 90f);
         }
 
         /// <summary>
@@ -1101,6 +1271,12 @@ namespace NextDayRevival
         ///   from any other NPC, so it takes whoever is standing on the
         ///   station - which, because the master holds them there, is the right
         ///   man.
+        ///
+        /// The two men are NOT held the same way (order 2026-09-19). The gunner
+        /// works the target computer standing, because that is where the box
+        /// is; the operator squats over his controller beside him and stays
+        /// squatting, which is the game's own Crouch pose and its own
+        /// crouch_idle clip (GetAnimationNameCrouchPose, CONFIRMED IL).
         /// </summary>
         static void Posted(Post p, float now, bool master)
         {
@@ -1110,19 +1286,62 @@ namespace NextDayRevival
             try
             {
                 Transform gun = p.Gun.transform;
-                float yaw = StationYaw(gun);
                 Vector3 gunnerAt = Station(gun, true);
                 Vector3 operatorAt = Station(gun, false);
-                p.GunnerSince = Stand(StationMan(p.Gunner, gunnerAt, master),
-                                      gunnerAt, yaw, master, p.GunnerSince, now, 0f);
-                p.OperatorSince = Stand(StationMan(p.Operator, operatorAt, master),
-                                        operatorAt, yaw, master, p.OperatorSince, now, 0.37f);
+                p.GunnerAt = gunnerAt;
+                p.OperatorAt = operatorAt;
+                p.StationsSet = true;
+                Component gunner = StationMan(p.Gunner, gunnerAt, master);
+                Component spotter = StationMan(p.Operator, operatorAt, master);
+                // Whether each man is alive is settled HERE, once every half
+                // second, because IsAlive is reflection - and the per-frame
+                // height guard must not pay for it, nor push a dead man's
+                // ragdoll around.
+                p.GunnerLives = gunner != null;
+                p.OperatorLives = spotter != null;
+                p.GunnerSince = Stand(gunner, gunnerAt,
+                                      StationYaw(gun, PostOf(true)), master,
+                                      p.GunnerSince, now, 0f, _gunnerHold);
+                p.OperatorSince = Stand(spotter, operatorAt,
+                                        StationYaw(gun, PostOf(false)), master,
+                                        p.OperatorSince, now, 0.37f, _operatorHold);
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("ArtyBattery: the crew of \"" + p.Name
                     + "\" could not be posted: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// EVERY FRAME, AND ONLY THE HEIGHT. Posted runs twice a second, which
+        /// is often enough to put a man back but not to keep anybody from
+        /// SEEING him leave: half a second of whatever lifted him is already a
+        /// jump, and the 2026-09-19 report is a staircase of them. This is the
+        /// backstop for anything that ever lifts a posted man again, whatever
+        /// it turns out to be - it costs two subtractions per battery per frame,
+        /// it never moves a man sideways, it never touches the AI or the agent,
+        /// and it only fires above the same tolerance Plant uses, so a man
+        /// standing where he belongs is not touched at all.
+        ///
+        /// Master only. On a joined client the man's position comes off the
+        /// wire, and a local correction would fight the replication that is
+        /// already carrying the master's answer.
+        /// </summary>
+        static void Hold(Post p, bool master)
+        {
+            if (!master || !p.StationsSet || p.Safe || !B(_cfgCrewPosted, true)) return;
+            if (p.GunnerLives) KeepDown(p.Gunner, p.GunnerAt);
+            if (p.OperatorLives) KeepDown(p.Operator, p.OperatorAt);
+        }
+
+        static void KeepDown(Component ai, Vector3 at)
+        {
+            if (ai == null) return;
+            Transform t = ai.transform;
+            Vector3 now = t.position;
+            if (now.y - at.y <= StationRise) return;
+            t.position = new Vector3(now.x, at.y, now.z);
         }
 
         /// <summary>The man on that station. The master knows his own two by
@@ -1150,11 +1369,12 @@ namespace NextDayRevival
             return best;
         }
 
-        /// <summary>One man, held on one station. Returns when he was last put
-        /// back on it, which is what decides whether he is still settling into
-        /// the standing clip or already at work.</summary>
+        /// <summary>One man, held on one station in the way his job asks for.
+        /// Returns when he was last put back on it, which is what decides
+        /// whether he is still settling into the standing clip or already at
+        /// work.</summary>
         static float Stand(Component ai, Vector3 at, float yaw, bool master,
-                           float since, float now, float phase)
+                           float since, float now, float phase, StateHold hold)
         {
             if (ai == null) return 0f;
             // Only a WALK costs him the standing clip. A man nudged half a pace
@@ -1164,8 +1384,13 @@ namespace NextDayRevival
             if (master && Plant(ai, at, yaw) > WalkedOff) since = 0f;
             if (since <= 0f) since = now;
             bool settled = now - since >= SettleSeconds;
-            if (master) Drive(ai, at, settled ? WorkState() : MainIdle, yaw);
-            if (settled) Loop(ai, phase);
+            // The settling second is the plain standing idle for BOTH men, the
+            // crouching one included: the crouch is a whole-body clip too, and
+            // crossing into it out of a walk is what the settle is for.
+            if (master)
+                Drive(ai, at, settled ? hold.Main() : MainIdle,
+                      settled ? hold.Pose() : PoseStand, yaw, hold);
+            if (settled) Loop(ai, phase, hold.Clip);
             return since;
         }
 
@@ -1231,7 +1456,7 @@ namespace NextDayRevival
             catch { }
         }
 
-        /// <summary>The state the crew works in. 10 is NPCMainState.Working -
+        /// <summary>The state the GUNNER works in. 10 is NPCMainState.Working -
         /// what an NPC busy with something in front of him is in. A number the
         /// installed game does not animate costs nothing: SwitchAnimationByStates
         /// skips a CrossFade whose clip does not exist (CONFIRMED IL), the man
@@ -1239,49 +1464,90 @@ namespace NextDayRevival
         /// move.</summary>
         static int WorkState()
         {
-            if (_workStateBroken) return MainIdle;
             return _cfgWorkState == null ? MainWorking
                 : Mathf.Clamp(_cfgWorkState.Value, 0, 12);
         }
 
-        // A state the game writes and then takes back is not a pose, it is a
-        // packet storm: every attempt is an RPC to every player in the room.
-        // Twelve in a row that do not stick and the crew keeps the plain
-        // standing idle for the rest of the session.
-        //
-        // ONCE IT HAS STUCK IT IS NEVER GIVEN UP AGAIN. The counter is there to
-        // catch a build whose NPCs do not know this state at all; a firefight at
-        // the battery also knocks a man out of it, over and over, and that must
-        // not be read as the same thing.
-        static int _workStateMisses;
-        static bool _workStateHeld;
-        static bool _workStateBroken;
+        /// <summary>The pose the OPERATOR is held in. 1 is NPCPoseState.Crouch,
+        /// and the crouch clips are the game's own: GetAnimationNameCrouchPose
+        /// maps Idle to "crouch_idle" (CONFIRMED IL, REVERSE_ENGINEERING). He
+        /// squats over his controller and stays squatting, which is the order
+        /// of 2026-09-19 ("der drone operator soll daneben dauerhaft
+        /// hocken").</summary>
+        static int OperatorPose()
+        {
+            return _cfgOperatorPose == null ? PoseCrouch
+                : Mathf.Clamp(_cfgOperatorPose.Value, 0, 2);
+        }
+
+        /// <summary>
+        /// How one of the two men is held, and what this build has shown about
+        /// it. A state the game writes and then takes back is not a pose, it is
+        /// a packet storm: every attempt is an RPC to every player in the room.
+        /// Twelve in a row that do not stick and THAT man keeps the plain
+        /// standing idle for the rest of the session.
+        ///
+        /// ONCE IT HAS STUCK IT IS NEVER GIVEN UP AGAIN. The counter is there to
+        /// catch a build whose NPCs do not know this state at all; a firefight
+        /// at the battery also knocks a man out of it, over and over, and that
+        /// must not be read as the same thing. The two men count separately -
+        /// the gunner asks for a main state and the operator for a pose, and a
+        /// build that refuses one may well hold the other.
+        /// </summary>
+        sealed class StateHold
+        {
+            public readonly string Who;
+            public readonly bool Gunner;
+            public readonly ClipPick Clip;
+            public int Misses;
+            public bool Held;
+            public bool Broken;
+
+            public StateHold(string who, bool gunner, ClipPick clip)
+            {
+                Who = who;
+                Gunner = gunner;
+                Clip = clip;
+            }
+
+            public int Main() { return Broken || !Gunner ? MainIdle : WorkState(); }
+            public int Pose() { return Broken || Gunner ? PoseStand : OperatorPose(); }
+        }
+
+        static readonly StateHold _gunnerHold =
+            new StateHold("gunner", true, new ClipPick("gunner", true));
+        static readonly StateHold _operatorHold =
+            new StateHold("drone operator", false, new ClipPick("drone operator", false));
 
         /// <summary>NPC_AI2.SetStateWithAnimAndSync(position, main, additional,
         /// pose, walk point index, use temporary points, temporary task, rotY)
         /// with the game's own enum types built from the numbers. Sent only
         /// when the man is not already in that state: every call is an RPC to
         /// every player in the room and restarts the clip.</summary>
-        static void Drive(Component ai, Vector3 at, int main, float yaw)
+        static void Drive(Component ai, Vector3 at, int main, int pose, float yaw,
+                          StateHold hold)
         {
             // Without MainState there is no way to tell whether the state took,
             // and a state re-sent every half second is an RPC storm. The man is
             // planted and paused either way, which is most of the order.
             if (!Look() || _mStateSync == null || _fMainState == null) return;
-            bool work = main != MainIdle;
+            // "Special" is anything that is not the plain standing idle - the
+            // gunner's working state, the operator's crouch, or both.
+            bool special = main != MainIdle || pose != PoseStand;
             if (IntField(ai, _fMainState, -1) == main
                 && IntField(ai, _fAddState, -1) == AddEmpty
-                && IntField(ai, _fPoseState, -1) == PoseStand)
+                && IntField(ai, _fPoseState, -1) == pose)
             {
-                if (work) { _workStateMisses = 0; _workStateHeld = true; }
+                if (special) { hold.Misses = 0; hold.Held = true; }
                 return;
             }
-            if (work && !_workStateHeld && ++_workStateMisses >= 12)
+            if (special && !hold.Held && ++hold.Misses >= 12)
             {
-                _workStateBroken = true;
-                RevivalPlugin.L.LogWarning("ArtyBattery: state " + main + " does not "
-                    + "hold on this build - the crew keeps the standing idle. It still "
-                    + "stands at the gun and still does not move.");
+                hold.Broken = true;
+                RevivalPlugin.L.LogWarning("ArtyBattery: state " + main + "/pose " + pose
+                    + " does not hold on this build - the " + hold.Who + " keeps the "
+                    + "standing idle. He still stands at the gun and still does not "
+                    + "move.");
                 return;
             }
             try
@@ -1291,7 +1557,7 @@ namespace NextDayRevival
                 int task = IntField(ai, _fTempTask, 2);
                 _mStateSync.Invoke(ai, new object[] {
                     at, Arg(_mStateSync, 1, main), Arg(_mStateSync, 2, AddEmpty),
-                    Arg(_mStateSync, 3, PoseStand), Arg(_mStateSync, 4, -1), useTemp,
+                    Arg(_mStateSync, 3, pose), Arg(_mStateSync, 4, -1), useTemp,
                     Arg(_mStateSync, 6, task), yaw });
             }
             catch (Exception ex)
@@ -1299,7 +1565,7 @@ namespace NextDayRevival
                 if (_stateWarned) return;
                 _stateWarned = true;
                 RevivalPlugin.L.LogWarning("ArtyBattery: a crewman could not be put "
-                    + "into state " + main + " ("
+                    + "into state " + main + "/pose " + pose + " ("
                     + (ex.InnerException == null ? ex.Message : ex.InnerException.Message)
                     + ") - the crew stands at the gun without the working pose.");
             }
@@ -1324,13 +1590,13 @@ namespace NextDayRevival
         /// The two men are given different phases of the same clip, or a
         /// battery would be two identical puppets working in lockstep.
         /// </summary>
-        static void Loop(Component ai, float phase)
+        static void Loop(Component ai, float phase, ClipPick pick)
         {
             try
             {
                 Component anim = AnimationOf(ai);
                 if (anim == null) return;
-                string clip = WorkClip(anim);
+                string clip = WorkClip(anim, pick);
                 if (clip == null) return;
                 object playing = _mIsPlaying == null ? null
                     : _mIsPlaying.Invoke(anim, new object[] { clip });
@@ -1352,57 +1618,123 @@ namespace NextDayRevival
             catch { }
         }
 
-        // The words a clip name is judged by, best first. The game's own NPCs
-        // do chores - NPCMainState has a Working state of its own - so the set
-        // carries something; which name it wears is data we cannot read from
-        // here, and the chosen one goes into the log.
+        // THE GUNNER'S WORDS, best first. FIELD 2026-09-19: "der gunner kann
+        // auch eine passende animation dauerhaft ausfuehren aber sie muss zu
+        // der position des target computers passen, also nicht das er da unten
+        // irgendwo rumfummelt". The target computer is a box on the side of the
+        // hull, at chest height, so a clip is only a candidate here if its name
+        // reads like a man working IN FRONT OF HIM - and the ground-level
+        // chores the first list was full of (berry picking was the order's own
+        // example in 6.26, and it is a man on his knees) are now the operator's
+        // business, not the gunner's.
         static readonly string[] WorkWords = {
-            "work", "repair", "craft", "hammer", "weld", "dig", "cook",
-            "gather", "berr", "bush", "harvest", "pick", "search", "loot"
+            "panel", "console", "comput", "terminal", "radio", "device",
+            "lever", "valve", "button", "repair", "fix", "weld",
+            "hammer", "craft", "work"
         };
 
-        // ... and what is never work, whatever else the name says. "die" is
-        // deliberately not in the list: it is a substring of "soldier".
+        // ... and the crouching man's, for the build where the crouch POSE does
+        // not hold and Artillery/CrewOperatorClip is left empty. Best first
+        // again: a real crouch clip beats a chore that merely happens near the
+        // ground.
+        static readonly string[] CrouchWords = {
+            "crouch", "squat", "kneel", "knee", "sit", "berr", "bush",
+            "gather", "harvest", "pick", "dig", "repair", "work"
+        };
+
+        // ... and what is never either of them, whatever else the name says.
+        // "die" is deliberately not in the list: it is a substring of
+        // "soldier".
         static readonly string[] NotWork = {
             "death", "dead", "hit", "shoot", "fire", "reload", "aim",
             "walk", "run", "crawl", "swim", "jump", "fall", "wound", "attack",
             "remove", "get_", "throw", "sleep", "guitar", "regen", "melee",
-            "punch", "kick", "hook", "jab", "butt", "cough", "door"
+            "punch", "kick", "hook", "jab", "butt", "cough", "door",
+            // Movement under another name: crouch_forward is a crouch-WALK and
+            // would have the operator creeping on the spot. And handling the
+            // rifle is not work either - "switch_weapon" would otherwise read
+            // as a man switching something on.
+            "forward", "backward", "strafe", "turn",
+            "weapon", "equip", "holster"
         };
 
-        static string _workClip;
-        static bool _workClipLooked;
+        // ... and what the GUNNER may never be given on top of that: a man at a
+        // console does not reach for the ground.
+        static readonly string[] NotUpright = {
+            "crouch", "squat", "kneel", "knee", "sit", "lay", "lie", "prone",
+            "berr", "bush", "gather", "harvest", "pick", "dig", "loot",
+            "search", "ground", "floor", "grass", "mushroom", "herb", "plant",
+            "seed", "water", "fish", "chop", "wood"
+        };
 
-        /// <summary>The clip the crew works in, decided once for the whole
-        /// session off the first animation set we are shown.</summary>
-        static string WorkClip(Component anim)
+        /// <summary>One man's looping clip: which words his name is judged by,
+        /// which config key names one by hand, and what was decided once for
+        /// the whole session. The two men keep SEPARATE answers - the gunner
+        /// works at chest height and the operator squats, and one clip cannot
+        /// be both.</summary>
+        sealed class ClipPick
         {
-            if (_workClipLooked)
-                return _workClip != null && Has(anim, _workClip) ? _workClip : null;
+            public readonly string Who;
+            public readonly bool Gunner;
+            public string Chosen;
+            public bool Looked;
 
-            string want = _cfgWorkClip == null ? "" : _cfgWorkClip.Value.Trim();
+            public ClipPick(string who, bool gunner) { Who = who; Gunner = gunner; }
+
+            public string Key { get { return Gunner ? "CrewWorkClip" : "CrewOperatorClip"; } }
+
+            public string Want
+            {
+                get
+                {
+                    ConfigEntry<string> c = Gunner ? _cfgWorkClip : _cfgOperatorClip;
+                    return c == null || c.Value == null ? "" : c.Value.Trim();
+                }
+            }
+
+            public string[] Words { get { return Gunner ? WorkWords : CrouchWords; } }
+        }
+
+        // Every clip the crew's model carries, written to the log ONCE. Which
+        // names this build uses is the one thing a sealed worktree cannot know
+        // and a player at the vehicle can read off in a second - and with the
+        // list in front of him, CrewWorkClip and CrewOperatorClip name the
+        // right one without a new build.
+        static bool _clipsLogged;
+
+        /// <summary>The clip one of the men loops, decided once for the whole
+        /// session off the first animation set we are shown.</summary>
+        static string WorkClip(Component anim, ClipPick pick)
+        {
+            if (pick.Looked)
+                return pick.Chosen != null && Has(anim, pick.Chosen) ? pick.Chosen : null;
+
+            string want = pick.Want;
             if (want == "-")
             {
-                _workClipLooked = true;
-                RevivalPlugin.L.LogInfo("ArtyBattery: CrewWorkClip is \"-\" - the crew "
-                    + "stands at the gun in whatever the work state gives it.");
+                pick.Looked = true;
+                RevivalPlugin.L.LogInfo("ArtyBattery: " + pick.Key + " is \"-\" - the "
+                    + pick.Who + " keeps whatever his state and pose give him.");
                 return null;
             }
             if (want.Length > 0)
             {
-                _workClipLooked = true;
-                _workClip = Has(anim, want) ? want : null;
-                if (_workClip == null)
+                pick.Looked = true;
+                pick.Chosen = Has(anim, want) ? want : null;
+                if (pick.Chosen == null)
                     RevivalPlugin.L.LogWarning("ArtyBattery: no clip \"" + want
-                        + "\" on the crew's model - the men stand still instead.");
-                return _workClip;
+                        + "\" on the crew's model - the " + pick.Who + " stands still "
+                        + "instead.");
+                return pick.Chosen;
             }
 
             System.Collections.IEnumerable states = anim as System.Collections.IEnumerable;
             if (states == null) return null;
-            int best = WorkWords.Length;
+            string[] words = pick.Words;
+            int best = words.Length;
             int seen = 0;
             bool readable = true;
+            string all = "";
             foreach (object state in states)
             {
                 LookAtState(state);
@@ -1410,40 +1742,52 @@ namespace NextDayRevival
                 string name = _pStateName.GetValue(state, null) as string;
                 if (name == null) continue;
                 seen++;
-                int rank = Rank(name);
+                if (!_clipsLogged && all.Length < 1800)
+                    all += (all.Length == 0 ? "" : ", ") + name;
+                int rank = Rank(name, words, pick.Gunner);
                 if (rank < 0 || rank >= best) continue;
                 best = rank;
-                _workClip = name;
+                pick.Chosen = name;
             }
             if (!readable)
             {
                 // The set is there but its states will not tell us their names:
                 // asking again every half second would only repeat that.
-                _workClipLooked = true;
-                _workClip = null;
+                pick.Looked = true;
+                pick.Chosen = null;
                 return null;
             }
             if (seen == 0) return null;          // an empty set: ask again later
-            _workClipLooked = true;
-            if (_workClip == null)
+            pick.Looked = true;
+            if (!_clipsLogged && all.Length > 0)
+            {
+                _clipsLogged = true;
+                RevivalPlugin.L.LogInfo("ArtyBattery: the crew's model carries these "
+                    + seen + " clips - " + all + ". Artillery/CrewWorkClip (gunner) and "
+                    + "CrewOperatorClip (drone operator) take one of these names.");
+            }
+            if (pick.Chosen == null)
                 RevivalPlugin.L.LogInfo("ArtyBattery: none of the " + seen + " clips on "
-                    + "the crew's model reads like work - the men stand still at the "
-                    + "gun. Artillery/CrewWorkClip names one by hand.");
+                    + "the crew's model suits the " + pick.Who + " - he stands still at "
+                    + "the gun. Artillery/" + pick.Key + " names one by hand.");
             else
-                RevivalPlugin.L.LogInfo("ArtyBattery: the crew works the clip \""
-                    + _workClip + "\" (" + seen + " clips on the model).");
-            return _workClip;
+                RevivalPlugin.L.LogInfo("ArtyBattery: the " + pick.Who + " loops the clip "
+                    + "\"" + pick.Chosen + "\" (" + seen + " clips on the model).");
+            return pick.Chosen;
         }
 
-        /// <summary>Where a clip name stands in <see cref="WorkWords"/>, or -1
-        /// when it is no kind of work at all.</summary>
-        static int Rank(string name)
+        /// <summary>Where a clip name stands in that man's word list, or -1
+        /// when it is nothing he could be doing.</summary>
+        static int Rank(string name, string[] words, bool upright)
         {
             string lower = name.ToLowerInvariant();
             for (int i = 0; i < NotWork.Length; i++)
                 if (lower.IndexOf(NotWork[i], StringComparison.Ordinal) >= 0) return -1;
-            for (int i = 0; i < WorkWords.Length; i++)
-                if (lower.IndexOf(WorkWords[i], StringComparison.Ordinal) >= 0) return i;
+            if (upright)
+                for (int i = 0; i < NotUpright.Length; i++)
+                    if (lower.IndexOf(NotUpright[i], StringComparison.Ordinal) >= 0) return -1;
+            for (int i = 0; i < words.Length; i++)
+                if (lower.IndexOf(words[i], StringComparison.Ordinal) >= 0) return i;
             return -1;
         }
 
@@ -2010,11 +2354,13 @@ namespace NextDayRevival
         static bool _looked;
 
         // The posted crew. NPCMainState: Idle 0 ... Working 10.
-        // NPCAdditionalState: Empty 0. NPCPoseState: Normal 0.
+        // NPCAdditionalState: Empty 0. NPCPoseState: Normal 0, Crouch 1,
+        // Crawl 2 (CONFIRMED IL, REVERSE_ENGINEERING).
         const int MainIdle = 0;
         const int MainWorking = 10;
         const int AddEmpty = 0;
         const int PoseStand = 0;
+        const int PoseCrouch = 1;
 
         static FieldInfo _fMainState, _fAddState, _fPoseState, _fUseTemp, _fTempTask;
         static FieldInfo _fNavAgent;

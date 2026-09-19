@@ -25,12 +25,23 @@ THE SHORT VERSION. With the model anywhere in the toolkit folder:
 WHERE THE MODEL MAY SIT. assets/src/technical.glb is the canonical place, but
 the file does not have to be moved there first: the search also covers the
 repository root and one level of subdirectories below it, and takes any .glb or
-.gltf whose name contains "technical". A path given on the command line beats
-the search. Every hit is printed, so there is never a doubt about which file was
+.gltf whose name SAYS technical. A path given on the command line beats the
+search. Every hit is printed, so there is never a doubt about which file was
 used. assets/src/*.glb is gitignored (large third-party binaries are kept
 locally, see CREDITS.md), so a fresh checkout normally has no model at all -
 this script then prints where it looked and exits 0, and a full make_assets.py
 run is not broken by it.
+
+WHAT "SAYS TECHNICAL" MEANS, and why it is not just the word. A downloaded
+model is called whatever its author called it, and the one delivered for this
+vehicle is "pick-up_truck_improvised_fighting_vehicle.glb" - which does not
+contain "technical" at all, so the search walked straight past it and the
+vehicle kept running on the donor UAZ. The names are therefore FLATTENED (lower
+case, every non-alphanumeric character dropped) and matched against several
+spellings of the same thing: technical, gun truck, pickup truck, improvised
+fighting vehicle. "pick-up_truck_improvised_fighting_vehicle" then matches on
+three of them at once. Adding a spelling to NAME_HINTS is how the next donation
+is found; renaming the file to technical.glb still works and still wins.
 
 HOW THE GUN IS SPLIT OFF. The gun must be its own mesh or it cannot swivel. The
 materials are therefore divided into gun / mount / shield / body, and the
@@ -73,13 +84,27 @@ CANDIDATES = [
     "technical.gltf",
     "technical_pickup.glb",
     "toyota_technical.glb",
+    "pick-up_truck_improvised_fighting_vehicle.glb",
 ]
 
-# The search that follows those names: any model file whose name contains this
-# word, in the directories below. One level deep only - a model is delivered
-# into a folder, not buried in a tree - and cheap enough to run every time.
+# The search that follows those names: any model file whose flattened name
+# contains one of these, in the directories below. One level deep only - a model
+# is delivered into a folder, not buried in a tree - and cheap enough to run
+# every time.
+#
+# FLATTENED means lower case with every non-alphanumeric character removed, so
+# one hint covers every spelling of the same name: "pick-up_truck", "pick up
+# truck" and "PickupTruck" all flatten to "pickuptruck". The word "technical"
+# alone was the whole test until 2026-09-19, and it is why the delivered
+# "pick-up_truck_improvised_fighting_vehicle.glb" was never found.
 MODEL_EXT = (".glb", ".gltf")
-NAME_HINT = "technical"
+NAME_HINTS = (
+    "technical",
+    "guntruck",
+    "pickuptruck",
+    "improvisedfighting",
+    "fightingvehicle",
+)
 SKIP_DIRS = ("build", "research", "docs", "orchestration", "backup_20260827")
 
 # Material indices, when the names cannot be trusted. Anything listed here is
@@ -149,6 +174,24 @@ def search_dirs():
     return out
 
 
+def flat(name):
+    """A file name with everything but its letters and digits taken out, so
+    "pick-up_truck", "pick up truck" and "PickupTruck" are one string."""
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+def says_technical(name):
+    """Does this file name name THIS vehicle? Any of the spellings, flattened."""
+    low = name.lower()
+    if not low.endswith(MODEL_EXT):
+        return False
+    f = flat(os.path.splitext(low)[0])
+    for hint in NAME_HINTS:
+        if hint in f:
+            return True
+    return False
+
+
 def found_models():
     """Every model file in the search path whose name says "technical"."""
     hits = []
@@ -158,8 +201,7 @@ def found_models():
         except OSError:
             continue
         for name in names:
-            low = name.lower()
-            if not low.endswith(MODEL_EXT) or NAME_HINT not in low:
+            if not says_technical(name):
                 continue
             hits.append(os.path.join(d, name))
     return hits
@@ -186,7 +228,8 @@ def no_source():
     print("technical_build: no source model found. Looked for:")
     for name in CANDIDATES:
         print("    " + os.path.join("assets", "src", name))
-    print("and for any *%s*%s in:" % (NAME_HINT, "/".join(MODEL_EXT)))
+    print("and for %s whose name says %s, in:"
+          % ("/".join(MODEL_EXT), " / ".join(NAME_HINTS)))
     for d in search_dirs():
         print("    " + (shown(d) or "."))
     print("Nothing built. The technical runs on generated geometry and the")

@@ -19,7 +19,10 @@
 //      and SitToPassengerPlace reads SeatPoints.GetChild(i) once (RE 18.1 and
 //      18.7), so the seat table IS the child list - the same fact the T-72 and
 //      the Ural already stand on. Tank.Sitze is the precedent for removing
-//      children; UralTruck.AddSeats for adding them.
+//      children; UralTruck.AddSeats for adding them. The BENCH those removed
+//      points belonged to leaves the truck with them (Ruecksitze): a seat nobody
+//      can take is furniture, and this piece of furniture was carrying the
+//      machine gun.
 //   2. THE GUN. A pintle mount is built on the rear deck as three nested
 //      transforms - base (frame correction and model scale), mount (yaw) and
 //      gun (elevation). The geometry is generated, and a shipped model wins
@@ -121,6 +124,31 @@
 // configured fraction. Which one was used is logged once per instance, together
 // with everything else that was derived.
 //
+// AND OVER ALL FOUR OF THEM, A CEILING (third correction, field report of
+// 2026-09-19: "aktuell steht das mg AUF der sitzreihe drauf, und der spieler
+// steht fast wie auf einem ausguck auf dem ding. Die hintere sitzreihe muss weg
+// [...] dann den mg stand runter moven und dann ans mg"). A measured surface is
+// the highest thing that is REALLY there, and on this donor the highest thing
+// over the rear was the rear BENCH: the pintle was bolted to its backrest and
+// the gunner stood on top of it. Two things follow from that report, and
+// together they are one fix:
+//
+//   * THE BENCH GOES (Ruecksitze). Nobody can sit on it anymore - the technical
+//     has the two front seats and the standing place at the gun - so it is
+//     furniture in the load area, and it is the furniture the station was
+//     standing on. Its parts are found through the seat points this rebuild is
+//     about to delete, never by name, and they are deactivated together with
+//     their own colliders, so the ray that measures the deck reaches the floor.
+//   * THE DECK IS A FLOOR, NOT A PERCH (DeckStep). Where the floor is, is
+//     derivable, and the game itself says it: the rearmost seat point plus
+//     FeetAboveSeat is where the game stands that passenger's feet. A load bed
+//     is that floor or a step above it; a roof, a bonnet or a backrest is half a
+//     man above it. So the measured surface is still used - it is the sharper
+//     number, and on a donor with a real bed it IS the bed - but never more than
+//     one step above the floor the donor's own passengers stand on. That is what
+//     keeps gun and gunner on the bed even on a donor whose body is one closed
+//     collider that no ray can see into.
+//
 // Distances that measure a PERSON (the arm, the pintle height) are metres and
 // are converted with the vehicle's own units-per-metre; distances that measure
 // the VEHICLE are fractions of its own measured size, because the vehicle models
@@ -210,12 +238,32 @@ namespace NextDayRevival
         /// </summary>
         const float FeetAboveSeat = 1.85f;
 
+        /// <summary>
+        /// How big a rear bench is, in METRES around its own seat point: half a
+        /// bench wide, a seat deep, the seat's own frame below and a backrest
+        /// with a headrest above. These are the bounds within which a mesh part
+        /// or a collider counts as part of the bench the rebuild takes away (see
+        /// Ruecksitze) - furniture is the same size on a jeep and on a lorry, so
+        /// it is metres here and not a fraction of the vehicle.
+        ///
+        /// Both vertical numbers are deliberately SHORT of the things a bench
+        /// stands between: the load floor is about half a metre under a seat
+        /// point and a roof about a metre over it, and neither may be mistaken
+        /// for furniture - the floor is what the gun is about to stand on.
+        /// </summary>
+        const float BenchSide = 0.60f;
+        const float BenchDepth = 0.70f;
+        const float BenchBelow = 0.35f;
+        const float BenchAbove = 0.70f;
+
         public static ConfigEntry<bool> CfgEnabled;
         public static ConfigEntry<string> CfgKey;
         public static ConfigEntry<float> CfgDistance;
         public static ConfigEntry<float> CfgDurability;
         public static ConfigEntry<float> CfgMountRear;
         public static ConfigEntry<float> CfgDeckHeight;
+        public static ConfigEntry<float> CfgDeckStep;
+        public static ConfigEntry<bool> CfgRearBench;
         public static ConfigEntry<float> CfgMountSide;
         public static ConfigEntry<float> CfgSeatBack;
         public static ConfigEntry<float> CfgSeatDrop;
@@ -273,7 +321,31 @@ namespace NextDayRevival
                 + "Spender einen Ruecksitz hat. 0.90 liegt knapp unter der "
                 + "Oberkante des Aufbaus, also auf dem Dach - dort steht die "
                 + "Lafette frei, waehrend sie auf dem Wagenboden durch die "
-                + "Scheiben ragt.");
+                + "Scheiben ragt. Auch dieser Wert wird von DeckStep wieder auf "
+                + "Fussbodenhoehe heruntergezogen.");
+            CfgDeckStep = cfg.Bind("Technical", "DeckStep", 0.15f,
+                "OBERGRENZE der Standflaeche: wie weit sie hoechstens ueber dem "
+                + "Fussboden des Spenders liegen darf, als Anteil der Fahrzeug"
+                + "hoehe. Der Fussboden ist der Sitzpunkt des hintersten Sitzes "
+                + "plus die gemessene Hoehe, in der das Spiel einen sitzenden "
+                + "Koerper darueber schweben laesst - also der Boden, auf dem "
+                + "die Insassen selbst stehen. Alles darueber ist eine Ladeflaeche "
+                + "ueber dem Radkasten, und alles viel darueber ist ein Dach. "
+                + "0.15 laesst eine knappe Stufe zu und verhindert, dass MG und "
+                + "Schuetze auf der Sitzbank oder auf dem Dach landen "
+                + "(Feldbericht 2026-09-19: 'das mg steht AUF der sitzreihe "
+                + "drauf, der spieler wie auf einem ausguck'). 0 oder weniger "
+                + "schaltet die Grenze ab.");
+            CfgRearBench = cfg.Bind("Technical", "HideRearBench", true,
+                "Die hintere Sitzbank des Spenders ausblenden. Auf der "
+                + "Technischen gibt es nur noch zwei Sitze vorn und den "
+                + "Stehplatz am MG - die Bank hinten ist also nur noch Mobiliar, "
+                + "und zwar genau das, auf dem bisher das MG stand und in dem "
+                + "der Schuetze steckte. Ausgeblendet "
+                + "werden nur Teile, die an einem entfernten Sitzpunkt haengen "
+                + "und zu klein fuer die Karosserie sind; ihre Kollisionskoerper "
+                + "werden mit abgeschaltet, damit die gemessene Standflaeche der "
+                + "Ladeboden ist und nicht die Lehne.");
             CfgMountSide = cfg.Bind("Technical", "MountSide", 0.00f,
                 "Seitenversatz der Lafette als Anteil der Fahrzeugbreite. "
                 + "0 heisst mittig.");
@@ -387,6 +459,15 @@ namespace NextDayRevival
             float unitsPerMetre = length / DonorLengthMetres;
             float centreX = (min.x + max.x) * 0.5f;
 
+            // FIRST take the donor's rear bench away, because the station is
+            // measured on what is left. Nobody sits on that bench anymore - the
+            // technical has the two front seats and the standing place at the
+            // gun - and as long as it is there, it is the highest thing over the
+            // rear: the pintle gets bolted to the backrest and the gunner ends up
+            // standing on it (field report 2026-09-19). Its seat POINTS are still
+            // in the list at this moment; Sitze removes them a few lines below.
+            Ruecksitze(car, seats, min, max, unitsPerMetre);
+
             // How far the man has to stand behind the pintle axis so that the
             // grips of the mounted gun land in his hands: the grips' own offset
             // (measured on a delivered model, built in on the generated one)
@@ -440,6 +521,38 @@ namespace NextDayRevival
                 deckY = min.y + CfgDeckHeight.Value * height;
                 herkunft = "aus dem Anteil DeckFallback (weder Oberflaeche noch "
                     + "Ruecksitz)";
+            }
+
+            // THE DECK IS A FLOOR, NOT A PERCH. Field report 2026-09-19: "das mg
+            // steht AUF der sitzreihe drauf, und der spieler steht fast wie auf
+            // einem ausguck auf dem ding". A measured surface is the highest
+            // thing that is REALLY there - and on this donor the highest thing
+            // over the rear was the bench (now gone) and, above that, whatever
+            // collider closes the body. Neither is a floor.
+            //
+            // The floor is derivable, and the game itself says where it is: the
+            // rearmost seat point plus the sit pose's own offset is the height
+            // the game stands that passenger's feet at. A cargo bed is that floor
+            // or a step above it; a roof is a metre above it. So the measured
+            // surface may still be used - it is the sharper number, and on a
+            // donor with a real bed it IS the bed - but only up to one step over
+            // the floor the donor's own passengers stand on.
+            float boden;
+            if (CfgDeckStep != null && CfgDeckStep.Value > 0f
+                && Sitzboden(car.transform, seats, out boden))
+            {
+                float grenze = boden + CfgDeckStep.Value * height;
+                if (deckY > grenze)
+                {
+                    RevivalPlugin.L.LogInfo("Technical: die Standflaeche lag "
+                        + (deckY - boden).ToString("0.00") + " Einheiten ueber dem "
+                        + "Fussboden des Spenders (" + boden.ToString("0.00")
+                        + ") - das ist ein Ausguck und keine Ladeflaeche. "
+                        + "Heruntergezogen auf " + grenze.ToString("0.00")
+                        + " (DeckStep " + CfgDeckStep.Value.ToString("0.00") + ").");
+                    deckY = grenze;
+                    herkunft = herkunft + ", auf Fussbodenhoehe heruntergezogen";
+                }
             }
 
             // Two clamps, so a donor that measures surprisingly can still only be
@@ -503,6 +616,22 @@ namespace NextDayRevival
                     + "also hindurch. Die Standflaeche ist die gemessene "
                     + "Oberflaeche des Spenders; ein Aufbau DARUEBER (Dachtraeger, "
                     + "Antenne) bleibt stehen, weil er nicht getragen wird.");
+            // The other way round, and the price of standing the gun on the load
+            // floor instead of on the roof: the cabin is then TALLER than the
+            // pintle, so the barrel cannot look over it and a shot straight
+            // ahead goes into the back of the cab. That is what the order "den
+            // mg stand runter moven" buys, it is what a machine gun on a pickup
+            // bed does in reality, and this line is the answer to the field
+            // report it may produce. DeckStep raises the station again, MountRear
+            // moves it back off the cabin.
+            else if (kopfraum >= braucht)
+                RevivalPlugin.L.LogInfo("Technical: die Lafette ist "
+                    + braucht.ToString("0.00") + " Einheiten hoch, ueber der "
+                    + "Standflaeche stehen aber " + kopfraum.ToString("0.00")
+                    + " Einheiten Fahrzeug (Kabine). Das MG steht damit auf der "
+                    + "Ladeflaeche UNTER der Kabinenoberkante und schiesst nicht "
+                    + "ueber sie hinweg - so gewollt (Feldbericht 2026-09-19). "
+                    + "Hoeher stellen: Technical/DeckStep.");
         }
 
         /// <summary>
@@ -584,6 +713,13 @@ namespace NextDayRevival
                 MeshFilter mf = all[i];
                 if (mf == null || mf.sharedMesh == null) continue;
                 if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
+                // A deck is something you can SEE. This drops the distance LODs
+                // (their renderers are off while LOD0 is drawn) and the rear
+                // bench, which Ruecksitze deactivated a moment ago - nothing may
+                // be bolted to a part that is not on the truck anymore.
+                Renderer rr = mf.GetComponent<Renderer>();
+                if (rr == null || !rr.enabled) continue;
+                if (!mf.gameObject.activeInHierarchy) continue;
 
                 Vector3 lo, hi;
                 if (!Huelle(root, mf, out lo, out hi)) continue;
@@ -666,6 +802,241 @@ namespace NextDayRevival
                 if (!any || p.z < point.z) { point = p; any = true; }
             }
             return any;
+        }
+
+        /// <summary>
+        /// The floor the donor's OWN passengers stand on, in the root's local
+        /// space: the rearmost seat point plus the sit pose's measured offset.
+        ///
+        /// This is not where the station goes - a seat answers no question about
+        /// where a weapon can stand, which is the whole lesson of the second pass
+        /// - but it is the one height on the vehicle the GAME itself guarantees a
+        /// man's feet come to rest at. A cargo bed is that floor or a step above
+        /// it, and a roof is a metre above it, so it is what the measured surface
+        /// is held against (DeckStep). Taken from the rearmost seat because that
+        /// is the one nearest the station: on a donor whose bench has already
+        /// been hidden the POINT is still in the list, and the floor under a
+        /// bench is the floor of the load area.
+        /// </summary>
+        static bool Sitzboden(Transform root, Transform seats, out float y)
+        {
+            y = 0f;
+            if (root == null || seats == null) return false;
+
+            bool any = false;
+            float hinten = 0f;
+            float sitz = 0f;
+            for (int i = 0; i < seats.childCount; i++)
+            {
+                Transform c = seats.GetChild(i);
+                if (c == null || c.name == SeatName) continue;
+                Vector3 p = root.InverseTransformPoint(c.position);
+                if (!any || p.z < hinten) { hinten = p.z; sitz = p.y; any = true; }
+            }
+            if (!any) return false;
+            y = sitz + FeetAboveSeat / Hoehenmass(root);
+            return true;
+        }
+
+        /// <summary>
+        /// The donor's seat points, split into the places that STAY (driver and
+        /// co-driver, by the same rule <see cref="Sitze"/> keeps them) and the
+        /// ones this rebuild throws away. Root-local, and read while the points
+        /// are all still there.
+        /// </summary>
+        static void Sitzpunkte(Transform root, Transform seats,
+                               List<Vector3> vorn, List<Vector3> hinten)
+        {
+            if (root == null || seats == null) return;
+            int keep = SeatTotal - 1;                 // driver + co-driver
+            int seen = 0;
+            for (int i = 0; i < seats.childCount; i++)
+            {
+                Transform c = seats.GetChild(i);
+                if (c == null || c.name == SeatName) continue;
+                seen++;
+                Vector3 p = root.InverseTransformPoint(c.position);
+                if (seen <= keep) vorn.Add(p); else hinten.Add(p);
+            }
+        }
+
+        /// <summary>
+        /// Take the donor's REAR BENCH off the truck: its parts are deactivated
+        /// and its own colliders are switched off with them.
+        ///
+        /// Field report 2026-09-19: "aktuell steht das mg AUF der sitzreihe
+        /// drauf, und der spieler steht fast wie auf einem ausguck auf dem ding.
+        /// Die hintere sitzreihe muss weg, gibt eh nur die 2 sitze vorne zum
+        /// auswaehlen und der mg spot hinten." Both halves of that are this
+        /// method and DeckStep: nobody can sit on the bench anymore - Sitze
+        /// deletes its seat points a few lines further down - so it is furniture
+        /// standing in the load area, and while it stands there it is the highest
+        /// surface over the rear, which is exactly what the measured deck finds.
+        ///
+        /// WHICH PARTS. The bench is not identified by name - the donor's mesh
+        /// names are the donor's business - but by the seat points that are about
+        /// to be removed: a part counts when its centre is within a bench of one
+        /// of them (BenchSide/Depth/Below/Above, in metres). Two guards keep the
+        /// truck itself: nothing longer than 0.45 of the vehicle or wider than
+        /// 0.95 of it can be furniture, and nothing that holds a FRONT seat point
+        /// as well is touched - that is the shared interior, and hiding it would
+        /// take the driver's seat with it.
+        ///
+        /// The COLLIDERS matter as much as the renderers: the deck is measured
+        /// with a ray (Oberflaeche), and a bench whose backrest is invisible but
+        /// still solid would still catch that ray. The same size and zone test
+        /// decides, so the body shell and the wheels are never switched off - a
+        /// technical that cannot be driven or hit would be a far worse bug than a
+        /// visible bench.
+        /// </summary>
+        static int Ruecksitze(GameObject car, Transform seats, Vector3 min,
+                              Vector3 max, float unitsPerMetre)
+        {
+            if (CfgRearBench != null && !CfgRearBench.Value) return 0;
+            if (car == null || seats == null) return 0;
+
+            Transform root = car.transform;
+            List<Vector3> vorn = new List<Vector3>();
+            List<Vector3> hinten = new List<Vector3>();
+            Sitzpunkte(root, seats, vorn, hinten);
+            if (hinten.Count == 0) return 0;          // a donor with two seats
+
+            float length = Mathf.Max(0.001f, max.z - min.z);
+            float width = Mathf.Max(0.001f, max.x - min.x);
+
+            int weg = 0;
+            int fest = 0;
+            List<string> namen = new List<string>();
+
+            // The colliders FIRST, while everything is still switched on: a
+            // collider on a deactivated object reports no bounds at all, so the
+            // other order would measure nothing.
+            Collider[] cols = car.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < cols.Length; i++)
+            {
+                Collider col = cols[i];
+                if (col == null || !col.enabled || col.isTrigger) continue;
+                if (IstRad(col.transform) || IstUnser(col.transform)) continue;
+
+                Vector3 lo, hi;
+                if (!Kasten(root, col, out lo, out hi)) continue;
+                if (!IstBank(lo, hi, vorn, hinten, length, width, unitsPerMetre))
+                    continue;
+
+                col.enabled = false;
+                fest++;
+            }
+
+            // The parts themselves are DEACTIVATED and not merely hidden. A
+            // LODGroup owns Renderer.enabled and rewrites it at every distance
+            // threshold (the same fact Karosse stands on), so a bench whose
+            // renderer is switched off is back as soon as the camera walks away
+            // - and the bench exists once per LOD stage. An inactive object is
+            // the last word for all of them, and it takes what hangs under it
+            // with it.
+            MeshFilter[] all = car.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                MeshFilter mf = all[i];
+                if (mf == null || mf.sharedMesh == null) continue;
+                if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
+                if (mf.GetComponent<Renderer>() == null) continue;
+                if (!mf.gameObject.activeSelf) continue;
+
+                Vector3 lo, hi;
+                if (!Huelle(root, mf, out lo, out hi)) continue;
+                if (!IstBank(lo, hi, vorn, hinten, length, width, unitsPerMetre))
+                    continue;
+
+                mf.gameObject.SetActive(false);
+                weg++;
+                if (namen.Count < 6) namen.Add(mf.name);
+            }
+
+            if (weg == 0 && fest == 0)
+            {
+                RevivalPlugin.L.LogInfo("Technical: an den " + hinten.Count
+                    + " entfernten Sitzpunkten haengt kein eigenes Teil - der "
+                    + "Spender hat keine abtrennbare Ruecksitzbank. Die "
+                    + "Standflaeche wird trotzdem auf Fussbodenhoehe begrenzt "
+                    + "(DeckStep).");
+                return 0;
+            }
+
+            RevivalPlugin.L.LogInfo("Technical: Ruecksitzbank entfernt - " + weg
+                + " Teile ausgeblendet" + (namen.Count > 0
+                    ? " (" + string.Join(", ", namen.ToArray()) + ")" : "")
+                + ", " + fest + " Kollisionskoerper abgeschaltet. Darauf stand "
+                + "sonst die Lafette.");
+            return weg + fest;
+        }
+
+        /// <summary>
+        /// Is this box a piece of the rear bench? Size first (a part of the
+        /// vehicle itself can never be), then the front seats (the shared
+        /// interior is not the bench), then the zone around a removed seat point.
+        /// </summary>
+        static bool IstBank(Vector3 lo, Vector3 hi, List<Vector3> vorn,
+                            List<Vector3> hinten, float length, float width,
+                            float unitsPerMetre)
+        {
+            if (hi.z - lo.z > 0.45f * length) return false;   // the body, not a seat
+            if (hi.x - lo.x > 0.95f * width) return false;    // spans the vehicle
+
+            for (int i = 0; i < vorn.Count; i++)
+                if (Drin(lo, hi, vorn[i], 0.05f * length)) return false;
+
+            Vector3 mitte = (lo + hi) * 0.5f;
+            for (int i = 0; i < hinten.Count; i++)
+            {
+                Vector3 d = mitte - hinten[i];
+                if (Mathf.Abs(d.x) <= BenchSide * unitsPerMetre
+                    && Mathf.Abs(d.z) <= BenchDepth * unitsPerMetre
+                    && d.y >= -BenchBelow * unitsPerMetre
+                    && d.y <= BenchAbove * unitsPerMetre)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Is the point inside the box, with a margin?</summary>
+        static bool Drin(Vector3 lo, Vector3 hi, Vector3 p, float m)
+        {
+            return p.x >= lo.x - m && p.x <= hi.x + m
+                && p.y >= lo.y - m && p.y <= hi.y + m
+                && p.z >= lo.z - m && p.z <= hi.z + m;
+        }
+
+        /// <summary>
+        /// A collider's box in the ROOT's local space. Collider.bounds is a world
+        /// AABB, so its eight corners are transformed back through the root the
+        /// same way <see cref="Huelle"/> transforms a mesh's - which makes the
+        /// measurement independent of where the vehicle stands and how it is
+        /// turned. It is a box around a box and therefore never too small, which
+        /// is the safe direction here: a part that measures too big fails the
+        /// size guard and simply stays.
+        /// </summary>
+        static bool Kasten(Transform root, Collider col, out Vector3 lo,
+                           out Vector3 hi)
+        {
+            lo = Vector3.zero;
+            hi = Vector3.zero;
+            if (root == null || col == null) return false;
+
+            Bounds b = col.bounds;
+            if (b.size.sqrMagnitude <= 0f) return false;
+            for (int c = 0; c < 8; c++)
+            {
+                Vector3 corner = new Vector3(
+                    (c & 1) == 0 ? b.min.x : b.max.x,
+                    (c & 2) == 0 ? b.min.y : b.max.y,
+                    (c & 4) == 0 ? b.min.z : b.max.z);
+                Vector3 p = root.InverseTransformPoint(corner);
+                if (c == 0) { lo = p; hi = p; continue; }
+                lo = Vector3.Min(lo, p);
+                hi = Vector3.Max(hi, p);
+            }
+            return true;
         }
 
         /// <summary>

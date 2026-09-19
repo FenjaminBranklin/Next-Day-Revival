@@ -1399,14 +1399,23 @@ namespace NextDayRevival
 
         /// <summary>A man is not ground either. The men of one squad are placed
         /// one after another, and a point over a capsule that is already there
-        /// would stand the next man on his mate's shoulders.</summary>
+        /// would stand the next man on his mate's shoulders.
+        ///
+        /// The WHOLE chain of ancestors is walked (2026-09-19). Four levels was
+        /// a guess about where the agent sits, and a ray hits whichever collider
+        /// of a man is uppermost - a helmet, a shoulder, a weapon - which on a
+        /// skinned model hangs six or eight levels under the root that carries
+        /// the NavMeshAgent. A man not recognised as one is used as a floor, and
+        /// the man placed on him is in the air.</summary>
         static bool IsMan(GameObject go)
         {
             if (go == null) return false;
+            Type ai = RevivalPlugin.TypeByName("NPC_AI2");
             Transform t = go.transform;
-            for (int i = 0; i < 4 && t != null; i++)
+            while (t != null)
             {
                 if (t.GetComponent<NavMeshAgent>() != null) return true;
+                if (ai != null && t.GetComponent(ai) != null) return true;
                 t = t.parent;
             }
             return false;
