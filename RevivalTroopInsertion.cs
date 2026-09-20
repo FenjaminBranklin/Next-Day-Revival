@@ -324,7 +324,21 @@ namespace NextDayRevival
             Vector3 rayPoint;
             if (Turret.RaycastObject(new Vector3(d.X, 1500f, d.Z), Vector3.down, 3000f, out rayPoint) == null)
                 LogGroundMiss(d, new Vector3(d.X, 0f, d.Z));
-            if (!FindLandingSpot(new Vector3(d.X, 0f, d.Z), yaw, out lz))
+            // A LANDING ZONE THAT FALLS ON AN AUTHORED PAD IS THAT PAD. The deck
+            // is flat by construction, so the ring search that hunts for level
+            // ground has nothing left to find - and the admin who placed the pad
+            // already decided both where the machine stands and which way it
+            // faces (Revival.Helipads.cs).
+            Vector3 padCentre;
+            float padHeading;
+            if (Helipads.Snap(new Vector3(d.X, 0f, d.Z), out padCentre, out padHeading))
+            {
+                lz = padCentre;
+                yaw = padHeading;
+                RevivalPlugin.L.LogInfo("Troops: landing " + d.Name + " uses helipad "
+                    + Helipads.NameAt(padCentre) + ".");
+            }
+            else if (!FindLandingSpot(new Vector3(d.X, 0f, d.Z), yaw, out lz))
             {
                 RevivalPlugin.L.LogWarning("Troops: landing " + d.Name + " has no ground "
                     + "under (" + d.X.ToString("0") + ", " + d.Z.ToString("0") + ") - skipped.");

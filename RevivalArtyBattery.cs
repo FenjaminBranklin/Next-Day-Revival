@@ -101,6 +101,8 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgOrbitRadius;
         static ConfigEntry<float> _cfgOrbitHeight;
         static ConfigEntry<float> _cfgOrbitSpeed;
+        static ConfigEntry<float> _cfgOrbitSweep;
+        static ConfigEntry<float> _cfgSweepLaps;
         static ConfigEntry<float> _cfgModelRange;
         static ConfigEntry<float> _cfgModelScale;
 
@@ -212,10 +214,12 @@ namespace NextDayRevival
                 + "standing work clip stands the man back up.");
 
             _cfgOrbitRadius = cfg.Bind("Artillery", "OrbitRadius", 600f,
-                "Metres from the settlement centre the drone circles at. The "
-                + "ring is the battery's warning line, not its reach: the gun "
-                + "itself carries to Mortar/MaxRange (1200 m), so a spotting at "
-                + "the far edge of the footprint is still a mission.");
+                "Metres from the settlement centre the drone circles at - the "
+                + "OUTER edge of its search, because OrbitSweep spirals it in "
+                + "from here and back out again. The band is the battery's "
+                + "warning line, not its reach: the gun itself carries to "
+                + "Mortar/MaxRange (1200 m), so a sighting at the far edge of "
+                + "the camera's circle is still a mission.");
             // Migrate BOTH released defaults; retain deliberate custom radii.
             // The order of 2026-09-18 was "der drohnen radius soll weiter
             // erweitert werden, 600m oder noch mehr" - and a default change
@@ -229,10 +233,32 @@ namespace NextDayRevival
             _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 16f,
                 "Metres per second along the circle. At 600 m radius one lap "
                 + "takes about 236 s. The speed is left alone by the wider "
-                + "orbit on purpose: how long a man stays inside the footprint "
-                + "under the drone - 220 m of it, about 14 s - is what decides "
-                + "a sighting, and that depends on this number, not on the "
-                + "radius.");
+                + "orbit on purpose: how long a man stays inside the camera's "
+                + "circle - 600 m across it at the default SpotRadius, some "
+                + "37 s - is what decides a sighting, and that depends on this "
+                + "number, not on the radius. With OrbitSweep on, it is the "
+                + "speed at the nominal radius: the angle turned per second is "
+                + "what stays fixed, so the drone runs slower the further in "
+                + "the spiral carries it.");
+            _cfgOrbitSweep = cfg.Bind("Artillery", "OrbitSweep", 0.55f,
+                "How far INSIDE OrbitRadius the drone spirals, as a fraction "
+                + "of it. 0 is the old fixed ring, which is why a man was only "
+                + "ever seen when he stood under one particular circle: a ring "
+                + "searches the ring and nothing else. 0.55 at a 600 m orbit "
+                + "works the band from 270 m out to 600 m, and with SpotRadius "
+                + "on top of it the search covers the settlement itself, its "
+                + "approaches and the ground the gun can reach beyond them.");
+            _cfgSweepLaps = cfg.Bind("Artillery", "OrbitSweepLaps", 1.618f,
+                "Laps of the circle per in-and-out of the spiral - about six "
+                + "and a half minutes at the default orbit and speed. NOT a "
+                + "whole number, and that is the whole point: at 2 the spiral "
+                + "reaches its inner edge at a = 2*pi*k, which is the same "
+                + "bearing every single time, and the settlement keeps "
+                + "permanent blind sectors between those passes. The golden "
+                + "ratio never lands twice on the same bearing and spreads the "
+                + "inner passes evenly round the centre (measured in "
+                + "research/arty_drone_orbit_check.py: 60 of 60 distinct, "
+                + "against 1 of 60 at OrbitSweepLaps 2).");
             _cfgModelRange = cfg.Bind("Artillery", "ModelRange", 1000f,
                 "Metres from the player at which the drone gets a visible model. "
                 + "Beyond it the orbit is still computed - only the GameObject is "
@@ -248,10 +274,18 @@ namespace NextDayRevival
                 "Size of the recon drone model. The player's own surveillance "
                 + "drone uses 12.");
 
-            _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 110f,
-                "Metres around the point under the drone in which it sees a man. "
-                + "The drone's camera looks straight down, so this is a footprint "
-                + "on the ground, not a view range.");
+            _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 300f,
+                "Metres around the point under the drone in which it sees a "
+                + "man. A gimbal camera is not a hole in the floor: from "
+                + "OrbitHeight, 300 m of ground is a 16 degree depression, "
+                + "which is what a recon drone actually searches. The old 110 m "
+                + "was a footprint, and a footprint is why the battery saw "
+                + "nobody but the man standing directly underneath.");
+            // FIELD 2026-09-20: "sie soll agressiver scannen nicht nur wenn man
+            // direkt unter ihr ist". Migrate the released default - Config.Bind
+            // takes the value out of an existing file, so a new default on its
+            // own reaches nobody who has already played (CLAUDE.md, point 4).
+            if (_cfgSpotRadius.Value == 110f) _cfgSpotRadius.Value = 300f;
             _cfgSpotSeconds = cfg.Bind("Artillery", "SpotSeconds", 3f,
                 "Seconds a man has to stay inside the footprint before the "
                 + "operator is sure of him. Running through the edge of a pass "
@@ -1805,6 +1839,37 @@ namespace NextDayRevival
 
         static float Orbit() { return Mathf.Clamp(F(_cfgOrbitRadius, 600f), 40f, 1500f); }
 
+        /// <summary>The radius the drone is working at this instant.
+        ///
+        /// FIELD 2026-09-20: "sie soll agressiver scannen nicht nur wenn man
+        /// direkt unter ihr ist". A fixed ring is the reason. Whatever the
+        /// camera's footprint is widened to, a drone that only ever flies one
+        /// circle only ever looks at that circle: at a 600 m orbit a man 200 m
+        /// from the settlement centre was never seen at all, and the gun can
+        /// reach him from 80 m out. So the ring breathes. The drone spirals in
+        /// to OrbitRadius * (1 - OrbitSweep), back out to OrbitRadius, and the
+        /// band it searches becomes the whole area the gun can shoot into.
+        ///
+        /// It stays a pure function of the shared clock and the settlement's
+        /// own phase, which is the one property the whole drone depends on:
+        /// every client computes the same aircraft without anybody sending
+        /// anything.
+        ///
+        /// OrbitSweepLaps is not a whole number on purpose - see its own
+        /// description. A rosette that closes is a rosette with permanent
+        /// holes in it.</summary>
+        static float OrbitAt(float angle)
+        {
+            float outer = Orbit();
+            float sweep = Mathf.Clamp01(F(_cfgOrbitSweep, 0.55f));
+            if (sweep <= 0.001f) return outer;
+            float laps = Mathf.Clamp(F(_cfgSweepLaps, 1.618f), 0.25f, 20f);
+            float half = outer * sweep * 0.5f;
+            // Cosine, so the sweep starts at the outer edge: the line the
+            // player learns to watch is where the drone is first seen.
+            return outer - half + half * Mathf.Cos(angle / laps);
+        }
+
         /// <summary>How far a bullet is allowed to reach the drone. It used to
         /// be a flat 600 m, which was a third again as far as the old 240-300 m
         /// ring; at a 600 m ring the same number would put the drone exactly on
@@ -1867,9 +1932,16 @@ namespace NextDayRevival
         /// the reported stutter.</summary>
         static Vector3 DronePoint(Post p, float now)
         {
+            // The ANGLE turns at the nominal radius, on the smoothed clock -
+            // verify.py reads this expression to prove the orbit never went
+            // back onto the raw network clock, so leave it as it stands. The
+            // radius the drone is actually at is then the swept one, which is
+            // why r is read twice: once as the circle the angle belongs to,
+            // once as the spiral the aircraft flies.
             float r = Orbit();
             float speed = Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f);
             float a = p.Phase + _flightClock * speed / r;
+            r = OrbitAt(a);
             Vector3 flat = new Vector3(p.Centre.x + Mathf.Cos(a) * r, 0f,
                                        p.Centre.z + Mathf.Sin(a) * r);
             if (!p.GroundSet || now - p.GroundAt > 0.25f)
@@ -2084,10 +2156,19 @@ namespace NextDayRevival
             if (double.IsNaN(age) || age < -0.1 || age > 0.75) return;
             // Rewind the deterministic orbit to the shooter's timestamp.
             // Keep the measured terrain height: only a sub-second correction.
-            float angle = (float)Math.Max(0.0, age) * Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f) / Orbit();
+            float speed = Mathf.Clamp(F(_cfgOrbitSpeed, 16f), 1f, 60f);
+            float angle = (float)Math.Max(0.0, age) * speed / Orbit();
+            // The sweep is part of where the drone was, not just the bearing:
+            // rewind the radius by the same age. It is under two metres over
+            // the 0.75 s this method accepts, but it costs one multiplication
+            // and the hit sphere is not much bigger than that.
+            float here = p.Phase + _flightClock * speed / Orbit();
+            float scale = OrbitAt(here - angle) / Mathf.Max(1f, OrbitAt(here));
             Vector3 radial = p.DroneAt - p.Centre;
-            Vector3 rewind = new Vector3(radial.x * Mathf.Cos(angle) + radial.z * Mathf.Sin(angle),
-                radial.y, -radial.x * Mathf.Sin(angle) + radial.z * Mathf.Cos(angle)) + p.Centre;
+            Vector3 rewind = new Vector3(
+                (radial.x * Mathf.Cos(angle) + radial.z * Mathf.Sin(angle)) * scale,
+                radial.y,
+                (-radial.x * Mathf.Sin(angle) + radial.z * Mathf.Cos(angle)) * scale) + p.Centre;
             if (!DroneRay(from, direction, rewind, out distance)) return;
             p.DroneHits--;
             if (p.DroneHits == 0)
@@ -2144,7 +2225,7 @@ namespace NextDayRevival
             Turret.Hinweis(Mortar.TextSpotted(), 3.5f);
         }
 
-        static float SpotRadius() { return Mathf.Clamp(F(_cfgSpotRadius, 110f), 20f, 400f); }
+        static float SpotRadius() { return Mathf.Clamp(F(_cfgSpotRadius, 300f), 20f, 600f); }
 
         /// <summary>Could the gun reach that point at all? Asked BEFORE the
         /// sighting rather than after it: a man the gun cannot touch is not a

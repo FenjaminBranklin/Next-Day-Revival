@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.34.0";
+        public const string VERSION = "6.35.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -462,6 +462,8 @@ namespace NextDayRevival
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
             RevivalTroopInsertion.BindConfig(Config); // NDR heli troop insertion
+            Helipads.BindConfig(Config);         // NDR editor helicopter landing pads
+            PlayerHeli.BindConfig(Config);       // NDR the Mi-8 a player flies himself
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.BindConfig(Config);           // NDR settlement mortar
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
@@ -497,6 +499,7 @@ namespace NextDayRevival
             SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
             RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
+            PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
             TankNetwork.Install(_harmony);
@@ -2060,6 +2063,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
             RevivalGroundEnemies.Tick();         // editor waiting/walking ground groups
+            Helipads.Tick();                     // editor helicopter landing pads (build on scene/data change)
+            PlayerHeli.Tick();                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.Tick();                       // NDR settlement mortar (guns, aim mode, shells)
             ArtyBattery.Tick();                  // NDR settlement artillery (crew, recon drone, fire missions)
@@ -2086,6 +2091,9 @@ namespace NextDayRevival
             // bones between Update and here, so a hand put on a grip earlier is
             // back at the man's side before anything is drawn.
             Technical.LateFrame();
+            // NDR player-flown Mi-8: everyone aboard is put in his place after
+            // the game's own animator and movement controller have written.
+            PlayerHeli.LateFrame();
         }
 
         void OnGUI()
@@ -2101,6 +2109,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             RevivalTroopInsertion.Draw();        // NDR heli troop insertion banner
+            Helipads.Draw();                     // NDR helicopter landing pads on the world map
+            PlayerHeli.Draw();                   // NDR player-flown Mi-8: readout and notices
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
             ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)

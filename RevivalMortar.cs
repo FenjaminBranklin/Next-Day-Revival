@@ -200,7 +200,7 @@ namespace NextDayRevival
         {
             get { return Mathf.Clamp(F(_cfgMinRange, 80f), 0f, MaxRange - 10f); }
         }
-        internal static float Radius { get { return Mathf.Max(1f, F(_cfgRadius, 16f)); } }
+        internal static float Radius { get { return Mathf.Max(1f, F(_cfgRadius, 45f)); } }
 
         /// <summary>Degrees per second the turret turns - and, because the
         /// crosshair may never outrun the gun, the rate the aim point walks
@@ -462,9 +462,19 @@ namespace NextDayRevival
                 "Minimum free-ground radius in game units. Placement also "
                 + "reserves the scaled Bohdana footprint (17 units at Scale=1).");
 
-            _cfgRadius = cfg.Bind("Mortar", "ExplosionRadius", 16f,
-                "Metres. The damage falls off to zero at the rim. The patrol "
-                + "tank gun already calls 16 m artillery.");
+            _cfgRadius = cfg.Bind("Mortar", "ExplosionRadius", 45f,
+                "Metres. The damage falls off to zero at the rim. 16 m was "
+                + "borrowed from the patrol tank gun and was always too small "
+                + "for this one: Dispersion alone scatters a salvo over 32 m at "
+                + "1200 m, so three rounds inside a 16 m blast beat empty "
+                + "ground beside the man they were laid on. At 45 m the beaten "
+                + "zone and the scatter are the same size, which is what makes "
+                + "a salvo an area weapon instead of three misses. It still "
+                + "clears the gun: MinRange is 80 m.");
+            // FIELD 2026-09-20: "der explo radius der artillery rounds muessen
+            // viel groesser werden". Migrate the released default, or the
+            // change reaches nobody who already has a config file.
+            if (_cfgRadius.Value == 16f) _cfgRadius.Value = 45f;
             _cfgDamage = cfg.Bind("Mortar", "Damage", 450f,
                 "Damage to an NPC at the centre of the impact, falling off to "
                 + "zero at ExplosionRadius. Applied through NPC_AI2.ApplyDamage "

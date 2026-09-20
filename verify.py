@@ -467,6 +467,173 @@ def check_ground_enemies():
                  "research/" + check + " fehlt - die Bodengegner sind unbelegt")
 
 
+def check_helipads():
+    """[21] Editor helicopter landing pads.
+
+    A pad is authored once and then has to survive four hand-offs: the editor
+    writes it, compdef derives it, the live channel carries it and the plugin
+    builds it. Every one of those has its own idea of how wide a row is and what
+    a surface is called, and nothing links them but the checks below.
+
+    The one promise that is not a format: a troop landing that falls on a pad
+    must USE the pad. A deck is flat by construction, so the ring search for
+    level ground has nothing left to find - but if the search still runs first,
+    the machine sets down beside the deck and the pad is decoration.
+    """
+    print("[21] Helipads (Editor)")
+    pad_p = os.path.join(ROOT, "Revival.Helipads.cs")
+    if not os.path.exists(pad_p):
+        bad("Revival.Helipads.cs fehlt - die Landeplaetze sind nicht gebaut")
+        return
+    import re
+    raw = io.open(pad_p, "rb").read()
+    pad = raw.decode("utf-8", "replace")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Helipads: " + why)
+
+    live = read("Revival.LiveRoutes.cs")
+    plug = read("RevivalPlugin.cs")
+    troop = read("RevivalTroopInsertion.cs")
+    sync = read("sync_public.py")
+
+    # --- file rule: build.ps1 reads it as UTF-8 without BOM, and the ONLY
+    # characters outside ASCII it may hold are the Cyrillic of the player-facing
+    # Loc.T line (AGENTS.md). Anything else is mojibake from a wrong code page.
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "Revival.Helipads.cs beginnt mit einer BOM")
+    strange = sorted(set(c for c in pad
+                         if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange,
+         "ausserhalb ASCII nur Kyrillisch (Spielertext)",
+         "Revival.Helipads.cs enthaelt Zeichen, die weder ASCII noch "
+         "Kyrillisch sind: " + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # --- the published channel: own envelope, hashed, all-or-nothing.
+    need('envelope[0] != "NDR-PADS-1"' in live and "Hash(tsv) != envelope[1]" in live,
+         "eigener, hashgepruefter Umschlag fuer die Landeplaetze",
+         "der Landeplatzkanal hat keinen eigenen geprueften Umschlag")
+    need("Helipads.Parse(lines);" in live,
+         "ein fehlerhafter Stand wird vor jedem Bau abgelehnt",
+         "ein fehlerhafter Landeplatzstand wird erst beim Bauen bemerkt")
+    need("keeping the last verified pads" in live,
+         "bei Ausfall bleibt der letzte gepruefte Stand stehen",
+         "ein Ausfall des Servers loescht die Landeplaetze")
+
+    # --- the deck is a PLATFORM: highest ground under it, skirt to the slope.
+    need("deck = best + DeckLift;" in pad and "if (y > best) best = y;" in pad,
+         "das Deck liegt ueber dem hoechsten Boden darunter",
+         "das Deck mittelt die Hoehen - dann ist es bergseitig vergraben")
+    need("Mathf.Min(y - SkirtBite, deck - SkirtBite) - deck" in pad,
+         "der Schuerze folgt dem Boden an jedem Randpunkt",
+         "die Schuerze steht auf einer festen Hoehe - am Hang klafft eine Luecke")
+    need("MeshCollider collider = surface.AddComponent<MeshCollider>();" in pad,
+         "das Deck traegt einen Collider",
+         "ohne Collider findet der Landeanflug das Deck nicht und der "
+         "Hubschrauber setzt im Hang auf")
+    need("RevivalTroopInsertion.TerrainHeight(xz, out y)" in pad,
+         "die Hoehe kommt aus den Hoehendaten, nicht aus einem Strahl",
+         "ein Strahl traefe ein schon stehendes Deck und stapelte das naechste "
+         "darauf")
+
+    # --- the landing zone asks the pads FIRST.
+    snap = troop.find("Helipads.Snap(")
+    search = troop.find("FindLandingSpot(new Vector3(d.X, 0f, d.Z), yaw, out lz)")
+    need(snap > 0 and search > snap,
+         "eine Landezone auf einem Platz benutzt den Platz",
+         "die Ringsuche laeuft vor der Platzabfrage - der Hubschrauber setzt "
+         "neben dem Deck auf")
+
+    # --- seams and the public repository.
+    need("Helipads.Tick();" in plug and "Helipads.Draw();" in plug
+         and "Helipads.BindConfig(Config);" in plug,
+         "Seams Helipads.BindConfig/Tick/Draw in RevivalPlugin.cs",
+         "ein Seam fehlt in RevivalPlugin.cs: Helipads")
+    need('"Revival.Helipads.cs"' in sync,
+         "Revival.Helipads.cs geht ins oeffentliche Repository",
+         "Revival.Helipads.cs fehlt in sync_public.py - das oeffentliche "
+         "Repository laesst sich dann nicht uebersetzen")
+
+    # --- limits that agree on both sides of the wire.
+    cs_pads = re.search(r"internal const int MaxPads = (\d+);", pad)
+    cs_radius = re.search(r"internal const float MinRadius = ([\d.]+)f, "
+                          r"MaxRadius = ([\d.]+)f;", pad)
+    cs_columns = re.search(r"c\.Length != (\d+) && c\.Length != (\d+)", pad)
+    need(cs_pads is not None and cs_radius is not None and cs_columns is not None,
+         "die Grenzen des Plugins sind ablesbar",
+         "die Grenzen in Revival.Helipads.cs haben ihre Form verloren")
+
+    hdef_p = os.path.join(ROOT, "helipaddef.py")
+    if cs_pads is None or not os.path.exists(hdef_p):
+        return
+    hdef = io.open(hdef_p, encoding="utf-8").read()
+
+    def value(name):
+        m = re.search(r"^%s = ([\d.]+)$" % name, hdef, re.M)
+        return m.group(1) if m else None
+
+    need(value("MAX_PADS") == cs_pads.group(1),
+         "die Platzgrenze stimmt mit dem Plugin ueberein",
+         "helipaddef.py und das Plugin nennen verschiedene Grenzen - der Editor "
+         "veroeffentlicht dann einen Stand, den das Spiel ganz ablehnt")
+    need(value("MIN_RADIUS") is not None and value("MAX_RADIUS") is not None
+         and float(value("MIN_RADIUS")) == float(cs_radius.group(1))
+         and float(value("MAX_RADIUS")) == float(cs_radius.group(2)),
+         "der erlaubte Radius stimmt mit dem Plugin ueberein",
+         "Editor und Plugin erlauben verschiedene Radien")
+    columns = re.search(r"TSV_COLUMNS = \[(.*?)\]", hdef, re.S)
+    need(columns is not None
+         and len(re.findall(r'"[A-Za-z]+"', columns.group(1))) == int(cs_columns.group(1)),
+         "Editor und Plugin zaehlen dieselben Spalten",
+         "die Spaltenzahl von helipaddef.py passt nicht zum Parser des Plugins")
+    need('SURFACES = ["concrete", "steel", "cleared"]' in hdef
+         and 'p.Surface != "concrete" && p.Surface != "steel"' in pad
+         and 'p.Surface != "cleared"' in pad,
+         "Editor und Plugin kennen dieselben Oberflaechen",
+         "der Editor bietet eine Oberflaeche an, die das Plugin nicht kennt")
+
+    comp = read("compdef.py")
+    need("helipaddef.validate_pads(" in comp and "helipaddef.to_helipads_tsv(" in comp,
+         "das Speichern des Editors prueft und leitet die Landeplaetze ab",
+         "der Editor speichert Landeplaetze ungeprueft oder leitet keine "
+         "Laufzeitdatei ab")
+
+    route = read("routeeditor.py")
+    need('path == "/runtime/helipads"' in route and 'path == "/helipads.js"' in route,
+         "der Editorserver liefert Landeplaetze und Oberflaeche aus",
+         "der Editorserver kennt den Landeplatzkanal nicht")
+
+    editor_dir = os.path.join(ROOT, "editor")
+    if os.path.isdir(editor_dir):
+        def editor_file(name):
+            path = os.path.join(editor_dir, name)
+            return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+        pjs = editor_file("helipads.js")
+        app = editor_file("app.js")
+        html = editor_file("index.html")
+        need("function nose(d, distance)" in pjs and "P.drag === 'centre'" in pjs,
+             "Mittelpunkt und Blickrichtung lassen sich auf der Karte ziehen",
+             "der Landeplatzeditor kennt keinen Ziehgriff fuer die Richtung")
+        need('<script src="helipads.js"></script>' in html
+             and "NDRPads.init();" in app and "NDRPads.draw();" in app
+             and "NDRPads.mousedown(ev)" in app,
+             "die Landeplatzoberflaeche haengt in Seite, Zeichnung und Maus",
+             "editor/helipads.js ist nicht vollstaendig eingehaengt")
+
+    if os.path.isdir(os.path.join(ROOT, "research")):
+        need(os.path.exists(os.path.join(ROOT, "research", "helipad_check.py")),
+             "research/helipad_check.py liegt vor",
+             "research/helipad_check.py fehlt - die Landeplaetze sind unbelegt")
+
+
 def check_version():
     """VERSION-Datei und die Konstante im Quelltext muessen gleich sein.
 
@@ -2651,6 +2818,194 @@ def check_arty_sync_authority():
          "wire identity uses the stable scene/centre key",
          "emplacement sync does not consistently use ArtyRoom.Key")
 
+def check_player_heli():
+    """[22] The Mi-8 a player flies.
+
+    The machine is the game's own aid helicopter, and that is the whole risk:
+    the same prefab is already flown by the scripted troop landings, owned by
+    the Photon master, moved by HelicopterDummy and watched by an orphan sweep
+    that removes every helicopter no flight is driving. A parked machine waiting
+    for a pilot has to survive all four of those, and a pilot who is not the
+    master has to be able to move an object he does not own.
+
+    Nothing here can be seen without the game; the rules below are the ones that
+    would fail silently, with a helicopter that vanishes, one that cannot be
+    moved, or a player who never gets his body back.
+    """
+    print("[22] Player-flown helicopter")
+    src_p = os.path.join(ROOT, "Revival.PlayerHeli.cs")
+    if not os.path.exists(src_p):
+        bad("Revival.PlayerHeli.cs is missing - nothing can be flown")
+        return
+    raw = io.open(src_p, "rb").read()
+    heli = raw.decode("utf-8", "replace")
+    code = _code(heli)
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("PlayerHeli: " + why)
+
+    plug = read("RevivalPlugin.cs")
+    cam = read("Revival.CameraTurret.cs")
+    troop = read("RevivalTroopInsertion.cs")
+    sync = read("sync_public.py")
+
+    # --- file rule: UTF-8 without BOM, and outside ASCII only the Cyrillic of
+    # the player-facing Loc.T lines (AGENTS.md).
+    need(not raw.startswith(b"\xef\xbb\xbf"), "no BOM",
+         "Revival.PlayerHeli.cs starts with a BOM")
+    strange = sorted(set(c for c in heli
+                         if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange,
+         "outside ASCII only Cyrillic (player text)",
+         "Revival.PlayerHeli.cs holds characters that are neither ASCII nor "
+         "Cyrillic: " + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # --- the marker. The troop insertion sweeps every helicopter carrying ITS
+    # marker that no scripted flight is driving, ten seconds after it appears -
+    # which is exactly what a machine parked for a pilot looks like.
+    need('Marker = "ndr-flyheli-1"' in code
+         and "ndr-troopheli-1" not in code,
+         "an own instantiation marker, not the troop one",
+         "the flyable machine carries the troop marker - the troop orphan "
+         "sweep removes it ten seconds after it is put down")
+    need("CleanOrphans" not in code, "the troop orphan sweep is not reused",
+         "the troop orphan sweep is called from here")
+
+    # --- the vanilla mover must never take over. HelicopterDummy's own
+    # movement returns at once while startPosition is zero.
+    need("_fStart.SetValue(mover, Vector3.zero);" in code,
+         "the game's own helicopter movement is left idle",
+         "startPosition is not zeroed - the game moves the machine too")
+    need("startPosition" in troop,
+         "the same rule the scripted flight relies on is still in place",
+         "RevivalTroopInsertion.cs no longer zeroes startPosition")
+
+    # --- the ground under a flying helicopter is never a downward ray: it would
+    # find the machine's own hull collider.
+    floor = _body(code, "static bool Floor(Vector3 at, out float y)")
+    fly = _body(code, "static void Fly()")
+    need(floor != "" and "RaycastObject" not in floor
+         and "RevivalTroopInsertion.TerrainHeight" in floor,
+         "the floor comes from height data and the pads, not from a ray",
+         "the flight casts a ray downwards - it finds its own hull and the "
+         "machine sits on itself")
+    need("RaycastObject" not in fly,
+         "no ray per frame of flight",
+         "the per-frame flight casts rays")
+    need("Helipads.Snap(" in floor,
+         "a helipad deck is a floor the machine can land on",
+         "a helicopter sinks through an authored helipad deck")
+
+    # --- authority. Photon lets only the master instantiate and destroy a scene
+    # object, and only the owner's transform is replicated.
+    spawn = _body(code, "static void Spawn()")
+    need("if (!RevivalTroopInsertion.MasterClient())" in spawn
+         and "Net.Send(Net.SpawnRequest," in spawn,
+         "a client who is not the master asks it for a machine",
+         "a client who is not the master calls InstantiateSceneObject itself")
+    remove = _body(code, "static void Remove(GameObject go, bool say)")
+    need("if (!RevivalTroopInsertion.MasterClient())" in remove
+         and "Net.Send(Net.RemoveRequest," in remove,
+         "removal goes through the master as well",
+         "a client who is not the master destroys a scene object itself")
+    event = _body(code, "public static void OnPhotonEvent(byte code, object content, int sender)")
+    need(event.count("if (!RevivalTroopInsertion.MasterClient()) return;") >= 3,
+         "spawn, pose and removal are acted on by the master only",
+         "a message that only the master may act on is acted on by everybody")
+    need("Interpolator(go, false);" in code and "Interpolator(go, true);" in code,
+         "a pilot who is not the master silences his own transform sync",
+         "a pilot who is not the master fights the interpolator - his own "
+         "machine is pulled back every frame")
+
+    # --- the body and the camera are BORROWED, and both have to come back.
+    leave = _body(code, "static void Leave(bool byKey)")
+    need("finally" in leave and "CameraOwner.Release(CameraOwner.Heli);" in leave,
+         "the view is given back on every way out",
+         "a way out of the machine keeps the camera - the player then looks "
+         "through a camera nobody moves")
+    need("if (PlayerHeli.Aboard) __result = true;" in code,
+         "the body is frozen through the game's own 'not now' predicates",
+         "the body is frozen by switching scripts off - then a flight that "
+         "ends badly leaves a player who cannot walk")
+    need("_hadBody" in code and "the flight ends" in heli,
+         "a body that dies or is replaced ends the flight",
+         "death or respawn leaves the player locked into a machine")
+
+    # --- the collective is what makes it a helicopter and not a drone.
+    need("if (!up && !down) vertical -= vertical" in code,
+         "with no collective input the machine holds its height",
+         "the machine sinks whenever nothing is pressed - that is a drone")
+
+    # --- the balance, read out of the config defaults.
+    thrust = _bind_number(heli, "PlayerHeli", "Thrust")
+    drag = _bind_number(heli, "PlayerHeli", "Drag")
+    top = _bind_number(heli, "PlayerHeli", "MaxSpeed")
+    if thrust is None or drag is None or top is None:
+        bad("PlayerHeli: Thrust, Drag or MaxSpeed is not a plain default any more")
+    else:
+        cruise = thrust / drag
+        need(0 < cruise < top,
+             "cruise %.0f m/s comes from Thrust/Drag and stays under the cap %.0f"
+             % (cruise, top),
+             "Thrust/Drag = %.0f m/s is at or above MaxSpeed %.0f - the hard cap "
+             "decides the handling instead of the air" % (cruise, top))
+
+    # --- the event window. Every feature of this plugin raises Photon events in
+    # its own band; two bands that overlap is a bug nobody sees until two
+    # features are used at once.
+    base = _bind_number(heli, "PlayerHeli", "NetworkEventCode")
+    if base is None:
+        bad("PlayerHeli: NetworkEventCode is not a plain default any more")
+    else:
+        taken = {}
+        known = [("Troops", _bind_number(troop, "Troops", "NetworkEventCode"), 3),
+                 ("Drone", _bind_number(plug, "Drone", "EventCode"), 5),
+                 ("Turret", _bind_number(plug, "Turret", "NetworkEventCode"), 1),
+                 ("Admin", _bind_number(plug, "Admin", "NetworkEventCode"), 1),
+                 ("CrewDrone", _bind_number(plug, "Patrol", "CrewDroneEventCode"), 1),
+                 ("SurvDrone", _bind_number(read("RevivalDroneGear.cs"),
+                                            "DroneGear", "SurveillanceEventCode"), 1),
+                 ("Mortar", _bind_number(read("RevivalMortar.cs"),
+                                         "Mortar", "NetworkEventCode"), 6)]
+        for name, start, span in known:
+            if start is None:
+                continue
+            for c in range(int(start), int(start) + span):
+                taken.setdefault(c, name)
+        clash = [(c, taken[c]) for c in range(int(base), int(base) + 4) if c in taken]
+        need(not clash,
+             "event codes %d-%d are free" % (base, base + 3),
+             "event codes collide with another feature: "
+             + ", ".join("%d is %s" % (c, who) for c, who in clash))
+
+    # --- seams outside this file.
+    need("PlayerHeli.BindConfig(Config);" in plug
+         and "PlayerHeli.Install(_harmony);" in plug
+         and "PlayerHeli.Tick();" in plug
+         and "PlayerHeli.Draw();" in plug
+         and "PlayerHeli.LateFrame();" in plug,
+         "seams BindConfig/Install/Tick/Draw/LateFrame in RevivalPlugin.cs",
+         "a seam is missing in RevivalPlugin.cs: PlayerHeli")
+    need("public const int Heli = 5;" in cam
+         and "else if (_owner == Heli) PlayerHeli.LateTick();" in cam,
+         "the pilot's view is an owner of the shared camera",
+         "the helicopter view is not dispatched by CameraOwner - two features "
+         "would write the camera in the same frame")
+    need("PlayerHeli.LateFrame();" in _body(plug, "void LateUpdate()"),
+         "everyone aboard is placed in LateUpdate, after the animator",
+         "the seat is written in Update - the animator puts the man back on "
+         "the ground before anything is drawn")
+    need('"Revival.PlayerHeli.cs"' in sync,
+         "Revival.PlayerHeli.cs goes into the public repository",
+         "Revival.PlayerHeli.cs is missing from sync_public.py - the public "
+         "repo does not build without it")
 
 if __name__ == "__main__":
     print("=" * 74)
@@ -2678,6 +3033,8 @@ if __name__ == "__main__":
     check_technical()
     check_arty_vehicle()
     check_ground_enemies()
+    check_helipads()
+    check_player_heli()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

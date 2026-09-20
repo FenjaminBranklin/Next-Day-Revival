@@ -1277,6 +1277,14 @@ namespace NextDayRevival
                 Melde(ArtyVehicle.SpawnInFront());
             GUILayout.Label("In front of you (drivable 122 mm howitzer)");
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // Same both-ways press as the [PlayerHeli] spawn key: with an empty
+            // machine of yours in reach it takes that one away again.
+            if (GUILayout.Button("Spawn helicopter", GUILayout.Width(190f)))
+                Melde(PlayerHeli.SpawnInFront());
+            GUILayout.Label("In front of you (Mi-8 you can fly - "
+                            + PlayerHeli.CfgBoardKey.Value + " to get in)");
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));

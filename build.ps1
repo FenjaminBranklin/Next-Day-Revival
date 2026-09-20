@@ -164,7 +164,10 @@ $assets = @(
     # Heli troop landings, same story: an editor-written runtime view the game
     # never edits. A default header-only file ships so the feature is dormant
     # until landings are authored (RevivalTroopInsertion.cs).
-    "ndr_troopdrops.tsv"
+    "ndr_troopdrops.tsv",
+    # Helicopter landing pads, the third editor-written runtime view. Header
+    # only until pads are authored, so Revival.Helipads.cs builds nothing.
+    "ndr_helipads.tsv"
 )
 
 # Alte Dateien, die es nicht mehr gibt - sonst liegt die Metallic-Map von 0.2.0

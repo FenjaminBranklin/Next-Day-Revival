@@ -1,0 +1,4 @@
+# ndr_helipads.tsv - written by the map editor (Helipads).
+# name	enabled	x	z	heading	radius	surface	marker
+# heading = degrees clockwise from +Z; radius = metres; surface one of concrete steel cleared.
+# A 9th column names the map when the pad is not on the default one.

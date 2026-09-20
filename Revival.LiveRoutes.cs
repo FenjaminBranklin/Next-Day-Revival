@@ -46,6 +46,17 @@ namespace NextDayRevival
         static string _groundFailure = "", _groundLastFailure = "";
         internal static string[] Ground;
         internal static string GroundRevision = "";
+        // Helicopter landing pads: map furniture on their own endpoint, so a
+        // client that predates them keeps validating the envelopes it knows.
+        // Every client builds pads; unlike ground groups this is not master-only.
+        static float _padNext;
+        static bool _padBusy;
+        static volatile bool _padFinished;
+        static string[] _padPending;
+        static string _padPendingRevision;
+        static string _padFailure = "", _padLastFailure = "";
+        internal static string[] Pads;
+        internal static string PadsRevision = "";
         internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
@@ -86,6 +97,7 @@ namespace NextDayRevival
             }
             TickTroops();
             TickGround();
+            TickPads();
             if (_busy || Time.realtimeSinceStartup < _next || _url == null) return;
             _next = Time.realtimeSinceStartup + 3f;
             _busy = true;
@@ -161,6 +173,62 @@ namespace NextDayRevival
                 if (b > 127) throw new IOException("Troop snapshot is not ASCII");
             string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
             if (lines.Length > 4097) throw new IOException("Too many troop rows");
+            revision = envelope[1];
+            return lines;
+        }
+
+        static void TickPads()
+        {
+            if (_padFinished)
+            {
+                _padFinished = false; _padBusy = false;
+                if (_padPending != null && _padPendingRevision != PadsRevision)
+                {
+                    Pads = _padPending; PadsRevision = _padPendingRevision;
+                    Helipads.Load(true);
+                }
+                if (_padFailure != _padLastFailure)
+                {
+                    _padLastFailure = _padFailure;
+                    if (_padFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes helipads: "
+                        + _padFailure + "; keeping the last verified pads.");
+                }
+                _padPending = null;
+            }
+            if (_padBusy || Time.realtimeSinceStartup < _padNext || _url == null) return;
+            _padNext = Time.realtimeSinceStartup + 10f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _padBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/helipads", pin = _pin.Value;
+            string revision = PadsRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _padPending = null;
+                    else _padPending = ParsePads(body, out _padPendingRevision);
+                    _padFailure = "";
+                }
+                catch (Exception ex) { _padPending = null; _padFailure = ex.Message; }
+                finally { _padFinished = true; }
+            });
+        }
+
+        internal static string[] ParsePads(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-PADS-1" || envelope[3] != ""
+                || !HexHash(envelope[1])) throw new IOException("Invalid helipad envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 200000 || Hash(tsv) != envelope[1])
+                throw new IOException("Helipad snapshot hash mismatch");
+            foreach (byte b in tsv) if (b > 127) throw new IOException("Helipad snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            // Reject the whole update before a single deck is moved if any value
+            // is invalid - the same fail-closed rule the ground channel follows.
+            Helipads.Parse(lines);
             revision = envelope[1];
             return lines;
         }
