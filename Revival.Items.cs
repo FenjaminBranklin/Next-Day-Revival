@@ -354,6 +354,9 @@ namespace NextDayRevival
     /// <summary>Baut Modell- und Inventarprefab fuer genau ein ItemDef.</summary>
     public class ItemFactory
     {
+        const int Tac50ItemId = 1161;
+        const float Tac50ScaleMultiplier = 1.12f;
+
         readonly ItemDef _def;
 
         GameObject _model;
@@ -778,6 +781,10 @@ namespace NextDayRevival
         {
             float s = RevivalPlugin.CfgScale.Value;
             if (s <= 0f) s = 0.01f;
+            // The TAC-50 mesh has the right proportions but still reads too
+            // small beside the player. Grow this item only; the M7 currently
+            // shares its artwork and must retain the common custom-item scale.
+            if (_def.Id == Tac50ItemId) s *= Tac50ScaleMultiplier;
             root.transform.localScale = new Vector3(s, s, s);
 
             Vector3 pos = Vector3.zero, euler = Vector3.zero;

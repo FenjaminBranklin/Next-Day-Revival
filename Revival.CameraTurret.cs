@@ -2130,6 +2130,23 @@ namespace NextDayRevival
                 }
             }
 
+            internal static void PublishTechnicalShot(Vector3 point)
+            {
+                if (!_hooked) return;
+                try
+                {
+                    // The second field used to be a boolean (tank/BTR). Keep
+                    // both old values intact and reserve -1 for the technical.
+                    Send(new float[] { -2f, -1f,
+                                       point.x, point.y, point.z }, false);
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Technical shot sound network send: "
+                        + ex.Message);
+                }
+            }
+
             static void Send(float[] data, bool reliable)
             {
                 object opts = _optType == null ? null : Activator.CreateInstance(_optType);
@@ -2159,8 +2176,11 @@ namespace NextDayRevival
                     int action = Mathf.RoundToInt(data[0]);
                     if (action == -2 && data.Length >= 5)
                     {
-                        VehicleShotSound.Play(new Vector3(data[2], data[3], data[4]),
-                                              data[1] > 0.5f);
+                        Vector3 point = new Vector3(data[2], data[3], data[4]);
+                        if (data[1] < -0.5f)
+                            VehicleShotSound.PlayTechnical(point);
+                        else
+                            VehicleShotSound.Play(point, data[1] > 0.5f);
                         return;
                     }
                     int viewId = Mathf.RoundToInt(data[0]);

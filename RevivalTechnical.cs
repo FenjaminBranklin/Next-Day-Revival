@@ -3521,8 +3521,10 @@ namespace NextDayRevival
             Vector3 origin = cam == null ? muzzle : cam.transform.position;
             Vector3 dir = cam == null ? _gun.forward : cam.transform.forward;
 
-            VehicleShotSound.Play(muzzle, false);
-            Turret.Net.PublishShot(muzzle, false);
+            // Keep the MG cadence, but give every report the game's own
+            // TAC-50/L96 sniper character instead of the synthetic BTR crack.
+            VehicleShotSound.PlayTechnical(muzzle);
+            Turret.Net.PublishTechnicalShot(muzzle);
 
             Vector3 impact;
             GameObject struck = RaycastPastVehicle(origin, dir,

@@ -15,14 +15,67 @@ namespace NextDayRevival
 {
 
     /// <summary>
-    /// A procedural spatial report for both vehicle guns. There is no donor
-    /// AudioClip in the runtime-built weapon, so the same deterministic clip
-    /// is generated on every client and only the tiny shot event is sent.
+    /// Spatial reports for the vehicle guns. The tank and BTR use deterministic
+    /// generated clips. The technical deliberately loads the game's TAC-50/L96
+    /// report, while the network still sends only the tiny shot event.
     /// </summary>
     public static class VehicleShotSound
     {
         static AudioClip _tank;
         static AudioClip _btr;
+        static AudioClip _technical;
+        static bool _technicalLookedUp;
+
+        /// <summary>
+        /// The technical is a machine gun, but each report must have the sharp
+        /// TAC-50/L96 character requested for it. Cadence remains the caller's
+        /// responsibility, so automatic fire becomes repeated sniper reports.
+        /// </summary>
+        public static void PlayTechnical(Vector3 point)
+        {
+            if (RevivalPlugin.CfgTurretSound == null
+                || !RevivalPlugin.CfgTurretSound.Value) return;
+            try
+            {
+                if (!_technicalLookedUp)
+                {
+                    _technicalLookedUp = true;
+                    _technical = Resources.Load<AudioClip>(
+                        "Sounds/Weapons/ASR/L96_Shot");
+                    if (_technical == null && RevivalPlugin.L != null)
+                        RevivalPlugin.L.LogWarning("Technical shot sound: TAC-50/L96 clip not found; using BTR fallback.");
+                }
+                if (_technical == null)
+                {
+                    Play(point, false);
+                    return;
+                }
+
+                GameObject go = new GameObject("NDR Technical TAC Shot Sound");
+                go.transform.position = point;
+                AudioSource source = go.AddComponent<AudioSource>();
+                source.clip = _technical;
+                source.loop = false;
+                source.playOnAwake = false;
+                source.spatialBlend = 1f;
+                source.rolloffMode = AudioRolloffMode.Logarithmic;
+                source.dopplerLevel = 0f;
+                source.minDistance = 10f;
+                source.maxDistance = RevivalPlugin.CfgTurretSoundRange == null
+                    ? 650f : Mathf.Max(50f,
+                        RevivalPlugin.CfgTurretSoundRange.Value);
+                source.volume = RevivalPlugin.CfgTurretSoundVolume == null
+                    ? 1f : Mathf.Clamp01(
+                        RevivalPlugin.CfgTurretSoundVolume.Value);
+                source.Play();
+                UnityEngine.Object.Destroy(go, source.clip.length + 1f);
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Technical shot sound: " + ex.Message);
+            }
+        }
 
         public static void Play(Vector3 point, bool tank)
         {
