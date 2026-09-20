@@ -86,12 +86,16 @@ namespace NextDayRevival
 
         // ============================================================= config
 
-        internal static ConfigEntry<bool> CfgEnabled, CfgPassengers, CfgBailOut;
-        internal static ConfigEntry<string> CfgSpawnKey, CfgBoardKey, CfgViewKey;
+        internal static ConfigEntry<bool> CfgEnabled, CfgPassengers, CfgBailOut,
+            CfgCrash;
+        internal static ConfigEntry<string> CfgSpawnKey, CfgBoardKey, CfgViewKey,
+            CfgEngineKey, CfgJumpKey;
         internal static ConfigEntry<float> CfgSize, CfgThrust, CfgSideThrust,
             CfgLift, CfgDrag, CfgMaxSpeed, CfgSensitivity, CfgCamDistance,
             CfgCamHeight, CfgFov, CfgNetHz, CfgBoardRange, CfgSeatSide,
-            CfgSeatUp, CfgSeatForward;
+            CfgSeatUp, CfgSeatForward, CfgClimbRate, CfgSinkRate, CfgYawRate,
+            CfgSpoolSeconds, CfgCrashSink, CfgCrashSpeed, CfgCrashDamage,
+            CfgWreckSeconds;
         internal static ConfigEntry<int> CfgEventCode, CfgMaxHelis;
 
         internal static void BindConfig(ConfigFile cfg)
@@ -109,24 +113,58 @@ namespace NextDayRevival
                 + "on the ground. The same key while flying.");
             CfgViewKey = cfg.Bind("PlayerHeli", "ViewKey", "V",
                 "Switch between the chase view and the cockpit.");
+            CfgEngineKey = cfg.Bind("PlayerHeli", "EngineKey", "G",
+                "Start and shut down the engine from the pilot's seat. A machine "
+                + "that has just been put down is cold and silent; it lifts "
+                + "nothing until the disc is up to speed. Leaving the machine "
+                + "shuts it down.");
+            CfgJumpKey = cfg.Bind("PlayerHeli", "JumpKey", "X",
+                "Jump out. Anyone aboard may press it, pilot and passengers "
+                + "alike. High enough and with a parachute in the pack the "
+                + "canopy opens by itself; without one it is a fall.");
             CfgSize = cfg.Bind("PlayerHeli", "Size", 1f,
                 "Size relative to the game's aid Mi-8 (0.5..2). 1 is the "
                 + "original, which matches players and vehicles.");
-            CfgMaxSpeed = cfg.Bind("PlayerHeli", "MaxSpeed", 50f,
-                "Top speed in metres per second, real scale (50 m/s = 180 km/h). "
-                + "Everything here is metric and multiplied by the world's 2.8.");
-            CfgThrust = cfg.Bind("PlayerHeli", "Thrust", 14f,
-                "Forward and backward acceleration (W/S) in m/s^2. Together with "
-                + "Drag this sets the cruising speed: Thrust/Drag.");
-            CfgSideThrust = cfg.Bind("PlayerHeli", "SideThrust", 8f,
-                "Sideways acceleration (A/D) in m/s^2.");
-            CfgLift = cfg.Bind("PlayerHeli", "Lift", 7f,
-                "Climb and sink rate change in m/s^2 (space and left control). "
-                + "With no collective input the machine holds its height by "
-                + "itself - that is what a helicopter does.");
-            CfgDrag = cfg.Bind("PlayerHeli", "Drag", 0.45f,
-                "Air resistance per second, proportional to speed. Larger is "
-                + "more sluggish and more stable.");
+            CfgMaxSpeed = cfg.Bind("PlayerHeli", "MaxSpeed", 62f,
+                "Top HORIZONTAL speed in metres per second, real scale "
+                + "(62 m/s = 223 km/h, the Mi-8's cruise). Climbing and sinking "
+                + "have their own limits below. Everything here is metric and "
+                + "multiplied by the world's 2.8.");
+            CfgThrust = cfg.Bind("PlayerHeli", "Thrust", 5.5f,
+                "Forward and backward acceleration (W/S) in m/s^2. A helicopter "
+                + "accelerates by tilting its disc, and 30 degrees of tilt is "
+                + "about 5.5 m/s^2 - it takes seconds, not an instant. Together "
+                + "with Drag this sets the cruising speed: Thrust/Drag.");
+            CfgSideThrust = cfg.Bind("PlayerHeli", "SideThrust", 2.6f,
+                "Sideways acceleration (A/D) in m/s^2. Half the forward figure: "
+                + "sideways flight is the slow, ugly way to move a helicopter.");
+            CfgLift = cfg.Bind("PlayerHeli", "Lift", 3.2f,
+                "How fast the vertical speed CHANGES, in m/s^2 (space and left "
+                + "control). It is not the climb rate - ClimbRate and SinkRate "
+                + "are - it is how long the machine takes to get there. With no "
+                + "collective input the machine holds its height by itself, "
+                + "which is what a helicopter does.");
+            CfgClimbRate = cfg.Bind("PlayerHeli", "ClimbRate", 7f,
+                "Largest climb rate in metres per second. The Mi-8 manages about "
+                + "8 at sea level; anything much above that is a lift, not a "
+                + "helicopter.");
+            CfgSinkRate = cfg.Bind("PlayerHeli", "SinkRate", 7f,
+                "Largest sink rate under power, in metres per second. With the "
+                + "engine off the machine falls faster than this - that is a "
+                + "crash, and it is meant to be.");
+            CfgDrag = cfg.Bind("PlayerHeli", "Drag", 0.12f,
+                "Air resistance per second, proportional to speed. It is also "
+                + "the machine's inertia: 1/Drag is roughly the number of "
+                + "seconds it takes to reach cruise, and the same to wash the "
+                + "speed off again. Larger is more sluggish and more stable.");
+            CfgYawRate = cfg.Bind("PlayerHeli", "YawRate", 55f,
+                "Largest heading change in degrees per second. The mouse asks "
+                + "for a rate here, it does not snap the nose around: the tail "
+                + "rotor needs a moment to swing eleven tonnes.");
+            CfgSpoolSeconds = cfg.Bind("PlayerHeli", "SpoolSeconds", 12f,
+                "Seconds from a cold rotor to full power and back. Nothing lifts "
+                + "before the disc is up to speed, and switching the engine off "
+                + "in the air does not stop it dead.");
             CfgSensitivity = cfg.Bind("PlayerHeli", "Sensitivity", 2.2f,
                 "Mouse sensitivity. Sideways is the tail rotor (heading), "
                 + "up and down is where the pilot looks.");
@@ -150,8 +188,9 @@ namespace NextDayRevival
             CfgPassengers = cfg.Bind("PlayerHeli", "Passengers", true,
                 "Let other players ride along in the cabin.");
             CfgBailOut = cfg.Bind("PlayerHeli", "BailOut", true,
-                "Shift and the board key jump out in flight. Without it you can "
-                + "only get out on the ground.");
+                "Jumping out in flight is allowed - the jump key, and shift with "
+                + "the board key. Without it the machine has to be landed first, "
+                + "and then a parachute never has anything to open over.");
             CfgSeatSide = cfg.Bind("PlayerHeli", "SeatSide", 0.9f,
                 "Pilot's seat across the fuselage, in metres from the model "
                 + "origin. The gear footprint's centre line is 0.9.");
@@ -159,6 +198,26 @@ namespace NextDayRevival
                 "Cabin floor over the gear, in metres.");
             CfgSeatForward = cfg.Bind("PlayerHeli", "SeatForward", 5f,
                 "Pilot's seat forward of the model origin, in metres.");
+            CfgCrash = cfg.Bind("PlayerHeli", "Crash", true,
+                "A machine flown into a tree, a building or a wall explodes and "
+                + "burns where it stands, exactly like a patrol wreck. Off: the "
+                + "old behaviour, where the hull rides through everything.");
+            CfgCrashSink = cfg.Bind("PlayerHeli", "CrashSinkRate", 9f,
+                "Touching down faster than this, in metres per second, breaks "
+                + "the machine. Landing softly is a skill; dropping onto the pad "
+                + "is not.");
+            CfgCrashSpeed = cfg.Bind("PlayerHeli", "CrashGroundSpeed", 22f,
+                "Ground contact with more horizontal speed than this, in metres "
+                + "per second, breaks the machine as well - that is a run-on "
+                + "landing that ends in a ball.");
+            CfgCrashDamage = cfg.Bind("PlayerHeli", "CrashDamage", 1000f,
+                "Damage everyone still aboard takes when the machine hits. It "
+                + "goes through the game's own damage gate, so admin god mode "
+                + "and armour still count. 0 means the crash costs no health.");
+            CfgWreckSeconds = cfg.Bind("PlayerHeli", "WreckSeconds", 120f,
+                "How long the burning wreck stands before the host takes it "
+                + "away. It is the same scene object, so it is one machine off "
+                + "the MaxHelicopters count the whole time.");
         }
 
         internal static bool Enabled
@@ -191,6 +250,9 @@ namespace NextDayRevival
         static float _look;                  // camera pitch, degrees
         static float _nose, _bank;           // drawn attitude, degrees
         static bool _onGround;
+        static bool _engine;                 // the pilot has asked for power
+        static float _yawRate;               // degrees per second, smoothed
+        static float _airborneSince;         // Time.time the skids last left the floor
         static float _boardedAt, _nextPose, _nextHeartbeat;
         static Transform _body;              // the local player's own transform
         static bool _hadBody;                // his body was found at least once
@@ -208,12 +270,31 @@ namespace NextDayRevival
         // of the game simply stops refreshing and the machine is free again.
         static readonly Dictionary<int, float> _busyUntil = new Dictionary<int, float>();
         static readonly List<int> _drop = new List<int>();
+        // Machine -> Time.time at which the burning wreck is taken away. Keyed
+        // by the object rather than the view id: a wreck has to burn in single
+        // player too, where there is no PhotonView at all.
+        static readonly Dictionary<GameObject, float> _burning =
+            new Dictionary<GameObject, float>();
+        static readonly List<GameObject> _gone = new List<GameObject>();
 
-        static KeyCode _spawnKey, _boardKey, _viewKey;
+        static KeyCode _spawnKey, _boardKey, _viewKey, _engineKey, _jumpKey;
         static bool _keysParsed;
 
         internal static bool Aboard { get { return _heli != null; } }
         internal static bool Flying { get { return _heli != null && _pilot; } }
+
+        /// <summary>Is this the machine the LOCAL pilot has the controls of? Its
+        /// engine is advanced by the flight, in the same frame the power is
+        /// used; every other machine advances itself.</summary>
+        internal static bool Flown(GameObject go)
+        {
+            return go != null && _pilot && ReferenceEquals(go, _heli);
+        }
+
+        internal static float SpoolTime()
+        {
+            return CfgSpoolSeconds == null ? 12f : Mathf.Max(0.5f, CfgSpoolSeconds.Value);
+        }
 
         // =============================================================== frame
 
@@ -224,6 +305,7 @@ namespace NextDayRevival
             {
                 Net.EnsureHooked();
                 Sweep();
+                Wrecks();
 
                 if (_heli == null)
                 {
@@ -248,8 +330,15 @@ namespace NextDayRevival
                     return;
                 }
 
+                // A machine that broke while he was in it does not wait for a
+                // key. Crash() has already thrown him out on this client; this
+                // catches the one somebody else's crash message broke.
+                if (Burning(_heli)) { Leave(false); return; }
+
                 if (Input.GetKeyDown(ViewKey())) _cockpit = !_cockpit;
+                if (Input.GetKeyDown(JumpKey())) { Jump(); return; }
                 if (Input.GetKeyDown(BoardKey())) { Leave(true); return; }
+                if (_pilot && Input.GetKeyDown(EngineKey())) SetEngine(!_engine);
 
                 if (_pilot)
                 {
@@ -555,7 +644,13 @@ namespace NextDayRevival
                 _vel = Vector3.zero;
                 _nose = 0f;
                 _bank = 0f;
+                _yawRate = 0f;
                 _onGround = true;
+                _airborneSince = Time.time;
+                // Whatever this machine is doing, the new pilot inherits it. A
+                // cold one stays cold until he starts it.
+                HeliEngine running = EngineOf(go);
+                _engine = running != null && running.Running;
                 // Our own interpolator must not fight our own writes. On the
                 // master it only sends, so it stays on.
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
@@ -583,7 +678,8 @@ namespace NextDayRevival
             GameObject go = _heli;
             if (go == null && !_pilot) { Reset(); return; }
 
-            if (byKey && go != null && (_pilot ? !_onGround : Airborne(go)))
+            if (byKey && go != null && !Burning(go)
+                && (_pilot ? !_onGround : Airborne(go)))
             {
                 bool bail = CfgBailOut != null && CfgBailOut.Value
                             && (Input.GetKey(KeyCode.LeftShift)
@@ -593,6 +689,10 @@ namespace NextDayRevival
                     Hint(Text.LandFirst(), 4f);
                     return;
                 }
+                // Shift and the board key is the old way out, and it is still a
+                // jump - so it gets the same canopy the jump key gets.
+                Jump();
+                return;
             }
 
             int view = ViewId(go);
@@ -603,6 +703,10 @@ namespace NextDayRevival
                     if (_pilot && !RevivalTroopInsertion.MasterClient())
                         Interpolator(go, true);
                     if (view != 0) Net.Send(Net.Aboard, new float[] { view, 0f, 0f }, true);
+                    // The engine does not keep running behind the last man out.
+                    // Whoever was flying it shuts it down on his way through the
+                    // door; a passenger leaves the pilot's machine alone.
+                    if (_pilot && !Burning(go)) SetEngine(false);
                     Ground(go);
                 }
             }
@@ -625,6 +729,8 @@ namespace NextDayRevival
             _vel = Vector3.zero;
             _nose = 0f;
             _bank = 0f;
+            _yawRate = 0f;
+            _engine = false;
         }
 
         /// <summary>Put the man who just got out beside the machine, on the
@@ -667,21 +773,57 @@ namespace NextDayRevival
 
         // ================================================================ fly
 
+        /// <summary>
+        /// The mouse asks for a TURN RATE, it does not set the heading. Writing
+        /// the heading straight from the mouse delta is what made the machine
+        /// read as a camera on a stick: eleven tonnes snapped round the moment
+        /// the hand moved, at whatever rate the hand moved. Here the sideways
+        /// axis is a pedal command, the tail rotor takes about a second to reach
+        /// the rate asked for, and it winds down the same way when the hand
+        /// stops. YawRate is the ceiling.
+        /// </summary>
         static void Steer()
         {
+            float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float sens = CfgSensitivity == null ? 2.2f : CfgSensitivity.Value;
-            _yaw += Input.GetAxis("Mouse X") * sens;
+            float ceiling = CfgYawRate == null ? 55f : Mathf.Max(8f, CfgYawRate.Value);
+
+            // 60 is the frame rate the old per-frame delta was written for, so
+            // the same hand movement still means the same thing.
+            float want = Mathf.Clamp(Input.GetAxis("Mouse X") * sens * 60f,
+                                     -ceiling, ceiling);
+            _yawRate = Mathf.Lerp(_yawRate, want, Mathf.Min(1f, 3.5f * dt));
+            _yaw += _yawRate * dt;
             if (_yaw > 180f) _yaw -= 360f;
             if (_yaw < -180f) _yaw += 360f;
             _look = Mathf.Clamp(_look - Input.GetAxis("Mouse Y") * sens, -60f, 70f);
         }
 
         /// <summary>
-        /// One frame of flight. Two rules make it a helicopter rather than a
-        /// drone: the collective HOLDS the height when nothing is pressed, and
-        /// the ground is a floor, not a wall - a machine flown into a hillside
-        /// rides up over it instead of exploding, because a crash model this
-        /// feature cannot show fairly on every client is worse than none.
+        /// One frame of flight. Three rules make it a helicopter rather than a
+        /// drone.
+        ///
+        /// THE COLLECTIVE HOLDS THE HEIGHT when nothing is pressed - press
+        /// nothing and the machine hangs where it is, which is the one thing a
+        /// helicopter does that nothing else does.
+        ///
+        /// EVERY AXIS HAS A RATE LIMIT AND A TIME CONSTANT. The old model gave
+        /// the collective a free hand: while space was held nothing damped the
+        /// vertical speed at all, so it ran up to the one shared MaxSpeed - 50
+        /// m/s straight up, 180 km/h of lift. Climb and sink now have their own
+        /// ceilings (ClimbRate, SinkRate), the acceleration towards them is
+        /// Lift, and the horizontal axis reaches cruise over 1/Drag seconds
+        /// instead of instantly. Nothing here snaps.
+        ///
+        /// THE DISC HAS TO BE TURNING. Power is the engine's spool state, not a
+        /// switch: lift, thrust and the sideways push are all multiplied by it,
+        /// so a cold machine sits there, one that has just been started
+        /// staggers, and one switched off in the air sinks with the rotor
+        /// windmilling down.
+        ///
+        /// The ground is still a floor rather than a wall, but it is no longer
+        /// free: touching it too fast is a crash (Touchdown), and so is flying
+        /// into anything that is not ground (Impact).
         /// </summary>
         static void Fly()
         {
@@ -690,16 +832,20 @@ namespace NextDayRevival
             float k = K;
             Transform tr = _heli.transform;
             Vector3 pos = tr.position;
+            Vector3 was = pos;
 
             Quaternion flat = Quaternion.Euler(0f, _yaw, 0f);
             Vector3 fwd = flat * Vector3.forward;
             Vector3 right = flat * Vector3.right;
 
-            float thrust = (CfgThrust == null ? 14f : CfgThrust.Value) * k;
-            float side = (CfgSideThrust == null ? 8f : CfgSideThrust.Value) * k;
-            float lift = (CfgLift == null ? 7f : CfgLift.Value) * k;
-            float drag = CfgDrag == null ? 0.45f : Mathf.Max(0.02f, CfgDrag.Value);
-            float max = (CfgMaxSpeed == null ? 50f : CfgMaxSpeed.Value) * k;
+            float power = Spool(dt);
+            float thrust = (CfgThrust == null ? 5.5f : CfgThrust.Value) * k * power;
+            float side = (CfgSideThrust == null ? 2.6f : CfgSideThrust.Value) * k * power;
+            float lift = (CfgLift == null ? 3.2f : CfgLift.Value) * k;
+            float drag = CfgDrag == null ? 0.12f : Mathf.Max(0.02f, CfgDrag.Value);
+            float max = (CfgMaxSpeed == null ? 62f : CfgMaxSpeed.Value) * k;
+            float climb = (CfgClimbRate == null ? 7f : Mathf.Max(0.5f, CfgClimbRate.Value)) * k;
+            float sink = (CfgSinkRate == null ? 7f : Mathf.Max(0.5f, CfgSinkRate.Value)) * k;
 
             Vector3 accel = Vector3.zero;
             if (Input.GetKey(KeyCode.W)) accel += fwd * thrust;
@@ -709,23 +855,45 @@ namespace NextDayRevival
 
             bool up = Input.GetKey(KeyCode.Space);
             bool down = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.C);
-            if (up) accel += Vector3.up * lift;
+            if (up) accel += Vector3.up * lift * power;
             else if (down) accel -= Vector3.up * lift;
+
+            // What the disc cannot carry, gravity takes. A turning rotor carries
+            // the machine from about three quarters of full power upwards, which
+            // is why the collective can hold the height at all; below that the
+            // weight comes back in proportion, and a cold disc carries nothing.
+            // So a machine has to be spooled up before it will leave the ground,
+            // and one switched off in the air sinks faster the further the rotor
+            // has wound down.
+            float carry = Mathf.InverseLerp(0.15f, 0.75f, power);
+            accel -= Vector3.up * ((1f - carry) * 9.81f * k);
 
             _vel += accel * dt;
 
-            // Horizontal drag is the pilot's brake; vertical damping is the
-            // collective holding the disc. Both are computed over dt, never as a
-            // per-frame factor - a fast machine would otherwise fly differently
-            // on a fast computer.
+            // Horizontal drag is the pilot's brake AND the machine's inertia;
+            // vertical damping is the collective holding the disc. Both are
+            // computed over dt, never as a per-frame factor - a fast machine
+            // would otherwise fly differently on a fast computer.
             Vector3 horizontal = new Vector3(_vel.x, 0f, _vel.z);
             horizontal -= horizontal * Mathf.Min(1f, drag * dt);
             float vertical = _vel.y;
             if (!up && !down) vertical -= vertical * Mathf.Min(1f, 1.6f * dt);
-            _vel = new Vector3(horizontal.x, vertical, horizontal.z);
-            if (_vel.magnitude > max) _vel = _vel.normalized * max;
+            if (horizontal.magnitude > max) horizontal = horizontal.normalized * max;
+            // Climb and sink have their own ceilings. Under power the sink rate
+            // is held to SinkRate; with the disc winding down the machine is
+            // allowed past it, and that is the fall it should be.
+            float floorSink = -sink / Mathf.Max(0.25f, power);
+            _vel = new Vector3(horizontal.x,
+                               Mathf.Clamp(vertical, floorSink, climb),
+                               horizontal.z);
 
             pos += _vel * dt;
+            // The speed the machine ARRIVES with. It has to be read here,
+            // before the floor clamp and the skid friction below take it away:
+            // by the end of this method the vertical speed of a machine that
+            // has just hit the ground is zero, and a hard landing measured
+            // there is always a soft one.
+            Vector3 arrival = _vel;
 
             // The floor: terrain height, and the deck of a helipad when the
             // machine stands over one. A downward ray is deliberately NOT used -
@@ -733,7 +901,9 @@ namespace NextDayRevival
             // why the scripted troop flight has none either.
             float floor;
             if (!Floor(pos, out floor)) floor = pos.y;
+            bool wasFlying = !_onGround;
             _onGround = pos.y <= floor + 0.4f * k;
+            if (!_onGround && !wasFlying) _airborneSince = Time.time;
             if (pos.y < floor)
             {
                 pos.y = floor;
@@ -747,20 +917,43 @@ namespace NextDayRevival
                 if (_vel.y < 0f) _vel.y = 0f;
             }
 
-            // Attitude is drawn from the speed, not from a key: a helicopter
-            // that moves forward has its nose down, one that drifts sideways
-            // hangs into the drift.
+            // Attitude is drawn from the speed and the turn, not from a key: a
+            // helicopter that moves forward has its nose down, one that drifts
+            // sideways hangs into the drift, and one that turns banks into the
+            // turn. It settles over about a second, not a fifth of one.
             Vector3 local = Quaternion.Inverse(flat) * _vel;
-            float wantNose = Mathf.Clamp(local.z / k * 0.35f, -14f, 14f);
-            float wantBank = Mathf.Clamp(local.x / k * 0.45f, -22f, 22f);
+            float wantNose = Mathf.Clamp(local.z / k * 0.22f, -12f, 12f);
+            float wantBank = Mathf.Clamp(local.x / k * 0.30f
+                                         + _yawRate * 0.22f, -20f, 20f);
             if (_onGround) { wantNose = 0f; wantBank = 0f; }
-            _nose = Mathf.Lerp(_nose, wantNose, Mathf.Min(1f, 2.5f * dt));
-            _bank = Mathf.Lerp(_bank, wantBank, Mathf.Min(1f, 2.5f * dt));
+            _nose = Mathf.Lerp(_nose, wantNose, Mathf.Min(1f, 1.2f * dt));
+            _bank = Mathf.Lerp(_bank, wantBank, Mathf.Min(1f, 1.2f * dt));
 
             tr.position = pos;
             tr.rotation = Quaternion.Euler(_nose, _yaw, -_bank);
 
+            // Two ways to break it, both after the move so the wreck stands
+            // where the machine actually got to.
+            if (Impact(was, pos)) return;
+            if (wasFlying && _onGround && Touchdown(arrival)) return;
+
             Pose(pos);
+        }
+
+        /// <summary>
+        /// The engine's power, 0 to 1, moved a little closer to what the pilot
+        /// asked for each frame. It is the rotor's own state as well: the
+        /// component on the machine reads it to turn the disc and to pitch the
+        /// sound, so the number that decides whether the machine can lift is the
+        /// same number the player hears and sees.
+        /// </summary>
+        static float Spool(float dt)
+        {
+            HeliEngine e = EngineOf(_heli);
+            if (e == null) return _engine ? 1f : 0f;
+            e.Running = _engine;
+            e.Advance(dt, SpoolTime());
+            return e.Power;
         }
 
         /// <summary>The height the gear rests at: the helipad deck under the
@@ -813,6 +1006,431 @@ namespace NextDayRevival
             int view = ViewId(_heli);
             if (view == 0) return;
             Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f }, false);
+        }
+
+
+        // ============================================================= engine
+
+        /// <summary>
+        /// Start or shut the engine down. A machine put down by the spawn key is
+        /// COLD: the aid helicopter's own prefab plays its rotor loop from
+        /// HelicopterDummy.Start and never stops, which is the "it stays on for
+        /// ever, even after you get out" the first flight found. The state is one
+        /// bit per machine and it is networked, because the rotor and the sound
+        /// are drawn on every client independently.
+        /// </summary>
+        static void SetEngine(bool on)
+        {
+            if (_heli == null) return;
+            _engine = on;
+            EngineApply(_heli, on);
+            int view = ViewId(_heli);
+            if (view != 0) Net.Send(Net.EngineState,
+                new float[] { view, on ? 1f : 0f }, true);
+            Hint(on ? Text.EngineOn() : Text.EngineOff(), 4f);
+            RevivalPlugin.L.LogInfo("PlayerHeli: engine " + (on ? "started" : "shut down")
+                + " on helicopter " + view + ".");
+        }
+
+        /// <summary>The rotor and sound state of one machine, created on demand.
+        /// Everything that can be missing - the mover, its speed fields, the
+        /// audio source - is missing inside the component, not here.</summary>
+        static HeliEngine EngineOf(GameObject go)
+        {
+            if (go == null) return null;
+            HeliEngine e = go.GetComponent<HeliEngine>();
+            if (e == null) e = go.AddComponent<HeliEngine>();
+            return e;
+        }
+
+        /// <summary>Put one machine's engine into a state, wherever the order
+        /// came from - the pilot's key here, or another client's message.</summary>
+        static void EngineApply(GameObject go, bool on)
+        {
+            HeliEngine e = EngineOf(go);
+            if (e != null) e.Running = on;
+        }
+
+        // ============================================================== crash
+
+        /// <summary>
+        /// Did the machine fly into something? The floor covers the ground; this
+        /// covers everything the ground is not - trees, houses, masts, vehicles,
+        /// and a cliff face steep enough that calling it ground would be a lie.
+        ///
+        /// A forward ray, not a downward one. The downward ray is the thing this
+        /// file has always refused, because it finds the machine's own hull; a
+        /// ray along the travel of the frame cannot, as long as what it does find
+        /// is checked against our own transform. The cast is the distance really
+        /// covered plus the nose ahead of the origin, so it is one ray per frame
+        /// of flight and it cannot be stepped over at speed.
+        /// </summary>
+        static bool Impact(Vector3 from, Vector3 to)
+        {
+            if (CfgCrash != null && !CfgCrash.Value) return false;
+            if (_heli == null || _onGround) return false;
+
+            Vector3 travel = to - from;
+            float k = K;
+            float speed = travel.magnitude;
+            if (speed < 0.001f) return false;
+            Vector3 dir = travel / speed;
+
+            // From the middle of the cabin, out past the nose, plus the ground
+            // actually covered this frame - so the test cannot be stepped over
+            // at speed. The two offsets are the hull box Prepare builds: its
+            // centre sits 2.5 model units across and 5.5 up (0.9 m and 2.0 m),
+            // and its front face is 22 units ahead of the origin, which is 7.9 m.
+            // The DISC is deliberately not included: rotors clip scenery at
+            // every landing, and a machine that explodes when a blade tip
+            // brushes a branch is not a helicopter, it is a mine.
+            Vector3 origin = _heli.transform.position
+                             + _heli.transform.rotation * (new Vector3(0.9f, 2.0f, 0f) * k);
+            origin -= travel;                       // where the cabin came from
+            float rest = speed + 7.9f * k;
+
+            // The ray leaves the middle of the cabin, and the people in the
+            // cabin are in front of it: the pilot sits five metres forward of
+            // the origin, the passengers behind it. A single cast would find one
+            // of them every frame and report the machine clear. So the cast
+            // steps PAST its own hits, the way the patrol driver steps past a
+            // vehicle's own colliders - three tries is more than there are
+            // bodies in the way.
+            for (int step = 0; step < 4 && rest > 0.1f; step++)
+            {
+                Vector3 point, normal;
+                GameObject hit = Turret.RaycastObject(origin, dir, rest, out point, out normal);
+                if (hit == null) return false;
+                if (Through(hit))
+                {
+                    float used = Mathf.Max(0.3f, Vector3.Distance(origin, point) + 0.3f);
+                    rest -= used;
+                    origin = point + dir * 0.3f;
+                    continue;
+                }
+
+                // Ground is the floor's business. Only a face steep enough to be
+                // a wall counts here, and only when there is speed behind it.
+                if (IsGround(hit))
+                {
+                    if (normal.y > 0.55f) return false;
+                    if (speed / Mathf.Max(0.0001f, Time.deltaTime) < 6f * k) return false;
+                }
+
+                RevivalPlugin.L.LogInfo("PlayerHeli: hit " + hit.name + " at "
+                    + point + " - the machine is down.");
+                Crash(_heli, point);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>The other way to break it: arriving at the ground faster
+        /// than the gear can take, or sliding onto it with the speed of a
+        /// vehicle. Read once, at the moment of contact.</summary>
+        static bool Touchdown(Vector3 arrival)
+        {
+            if (CfgCrash != null && !CfgCrash.Value) return false;
+            // A moment in the air first. Spawn places the machine with a ray
+            // (GroundY), the flight reads the floor from height data, and where
+            // the two disagree by a metre a machine that has never flown sinks
+            // onto its own floor the moment a pilot sits down. That is not a
+            // crash, and it must not be read as one.
+            if (Time.time - _airborneSince < 1.2f) return false;
+            float k = K;
+            float sinkLimit = (CfgCrashSink == null ? 9f : CfgCrashSink.Value) * k;
+            float runLimit = (CfgCrashSpeed == null ? 22f : CfgCrashSpeed.Value) * k;
+            float sink = -arrival.y;
+            float run = new Vector3(arrival.x, 0f, arrival.z).magnitude;
+            if (sink < sinkLimit && run < runLimit) return false;
+            RevivalPlugin.L.LogInfo("PlayerHeli: hard arrival - sink "
+                + (sink / k).ToString("0.0") + " m/s, ground speed "
+                + (run / k).ToString("0.0") + " m/s.");
+            Crash(_heli, _heli.transform.position);
+            return true;
+        }
+
+        /// <summary>
+        /// The machine is destroyed: the bang, then the fire that stands there
+        /// afterwards, which is the patrol wreck's own fire - FireEffect.Spawn
+        /// and FireEffect.SpawnWreck, the same two calls a burnt-out convoy
+        /// vehicle gets, so a downed helicopter looks like every other wreck in
+        /// the world instead of like a second, private effect.
+        ///
+        /// Everyone still aboard pays for it, through the game's own damage gate
+        /// so admin god mode and armour keep working. The hull is left standing
+        /// and burning until the host takes it away; it is a scene object and
+        /// only the master may destroy it.
+        /// </summary>
+        static void Crash(GameObject go, Vector3 where)
+        {
+            if (go == null) return;
+            int view = ViewId(go);
+            if (Burning(go)) return;
+
+            bool aboard = ReferenceEquals(go, _heli);
+            Burn(go, where);
+            if (view != 0) Net.Send(Net.Crashed,
+                new float[] { view, where.x, where.y, where.z }, true);
+
+            if (aboard)
+            {
+                float damage = CfgCrashDamage == null ? 1000f : CfgCrashDamage.Value;
+                bool wasPilot = _pilot;
+                _engine = false;
+                Leave(false);
+                if (damage > 0f) Hurt(damage);
+                Hint(Text.Wrecked(), 6f);
+                RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
+                    + " destroyed with the local player aboard (pilot: "
+                    + wasPilot + ").");
+            }
+        }
+
+        /// <summary>The visible half of a crash, run on EVERY client: the
+        /// explosion, the wreck fire, a silent rotor, and the hull set down on
+        /// the ground so it burns where it lies rather than hanging in the
+        /// air.</summary>
+        static void Burn(GameObject go, Vector3 where)
+        {
+            if (go == null || Burning(go)) return;
+            try
+            {
+                _burning[go] = Time.time + WreckLife();
+                EngineApply(go, false);
+                HeliEngine e = EngineOf(go);
+                if (e != null) e.Kill();
+
+                float k = K;
+                Transform tr = go.transform;
+                Vector3 rest = tr.position;
+                float floor;
+                if (Floor(rest, out floor)) rest.y = floor;
+                tr.position = rest;
+                Vector3 flat = tr.forward;
+                flat.y = 0f;
+                if (flat.sqrMagnitude > 0.000001f)
+                    tr.rotation = Quaternion.LookRotation(flat.normalized, Vector3.up)
+                                  * Quaternion.Euler(6f, 0f, 11f);
+
+                FireEffect.Spawn(where, 9f);
+                FireEffect.SpawnWreck(go, false);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli burn: " + ex.Message);
+            }
+        }
+
+        static bool Burning(GameObject go)
+        {
+            return go != null && _burning.ContainsKey(go);
+        }
+
+        static float WreckLife()
+        {
+            return CfgWreckSeconds == null ? 120f : Mathf.Max(5f, CfgWreckSeconds.Value);
+        }
+
+        /// <summary>Wrecks time out. Only the master destroys the scene object;
+        /// everyone else just forgets it, and the object goes away under them
+        /// when the master's Destroy arrives.</summary>
+        static void Wrecks()
+        {
+            if (_burning.Count == 0) return;
+            bool master = RevivalTroopInsertion.MasterClient();
+            _gone.Clear();
+            foreach (KeyValuePair<GameObject, float> e in _burning)
+            {
+                // A destroyed object always leaves the list. A wreck whose time
+                // is up leaves it only on the master, which is the client that
+                // takes the object away - everybody else keeps it marked until
+                // the master's Destroy actually arrives, so nobody climbs into
+                // a burning hull in the seconds in between.
+                if (e.Key == null || (master && Time.time > e.Value))
+                    _gone.Add(e.Key);
+            }
+            for (int i = 0; i < _gone.Count; i++)
+            {
+                GameObject go = _gone[i];
+                _burning.Remove(go);
+                if (go == null || !master) continue;
+                Forget(go);
+                HeliFlight.NetDestroy(go);
+                RevivalPlugin.L.LogInfo("PlayerHeli: a burnt-out wreck was cleared away.");
+            }
+            _gone.Clear();
+        }
+
+        /// <summary>
+        /// Things the cast goes through rather than breaks on.
+        ///
+        /// The machine itself and the man at the controls, obviously - but also
+        /// everything ALIVE, and that is not politeness. The ray leaves the
+        /// middle of the cabin and the crew are sitting in it: the pilot five
+        /// metres forward, the passengers behind. Without this a helicopter with
+        /// anybody aboard would explode on its own crew in the first frame of
+        /// flight. A dropped item on the ground is in the list for the same
+        /// reason a man is - eleven tonnes are not stopped by a rucksack.
+        ///
+        /// A VEHICLE is deliberately NOT in the list. Flying into a truck is a
+        /// crash, and it should be.
+        /// </summary>
+        static bool Through(GameObject hit)
+        {
+            if (hit == null) return true;
+            Transform t = hit.transform;
+            for (int up = 0; up < 8 && t != null; up++)
+            {
+                if (_heli != null && ReferenceEquals(t.gameObject, _heli)) return true;
+                if (_body != null && ReferenceEquals(t, _body)) return true;
+                Type[] alive = Living();
+                for (int i = 0; i < alive.Length; i++)
+                    if (alive[i] != null && t.GetComponent(alive[i]) != null) return true;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        static Type[] _alive;
+
+        /// <summary>Types whose objects a helicopter never breaks on. Names, not
+        /// types: the plugin references no Assembly-CSharp. Same list the patrol
+        /// driver refuses to crush, minus the vehicle.</summary>
+        static readonly string[] AliveNames = new string[] {
+            "PlayerMovementController", "PlayerNetworkController",
+            "NPC_AI2", "Animal_AI", "ItemSpawned",
+        };
+
+        static Type[] Living()
+        {
+            if (_alive != null) return _alive;
+            _alive = new Type[AliveNames.Length];
+            for (int i = 0; i < AliveNames.Length; i++)
+                _alive[i] = RevivalPlugin.TypeByName(AliveNames[i]);
+            return _alive;
+        }
+
+        static Type _tTerrain;
+        static bool _terrainLooked;
+
+        /// <summary>Terrain and mesh roads. Both are the floor's business, not
+        /// the crash test's.</summary>
+        static bool IsGround(GameObject go)
+        {
+            if (go == null) return false;
+            if (!_terrainLooked)
+            {
+                _terrainLooked = true;
+                _tTerrain = RevivalPlugin.TypeByName("UnityEngine.Terrain");
+            }
+            if (_tTerrain != null && go.GetComponent(_tTerrain) != null) return true;
+            string name = go.name;
+            return name.IndexOf("errain") >= 0 || name.IndexOf("Road") >= 0
+                   || name.IndexOf("road") >= 0;
+        }
+
+        static Component _life;
+        static float _lifeUntil;
+        static bool _hurtWarned;
+
+        /// <summary>Health off the local player through the game's OWN gate:
+        /// PlayerLifeDataManager.PlayerApplyDamage consults CanApplyDamage, so
+        /// admin god mode and armour keep working and nothing here has to know
+        /// how health is stored. Same seam the gas cloud uses.</summary>
+        static void Hurt(float damage)
+        {
+            if (damage <= 0f || _hurtWarned) return;
+            try
+            {
+                if (_life == null || Time.time > _lifeUntil)
+                {
+                    _lifeUntil = Time.time + 2f;
+                    Type t = RevivalPlugin.TypeByName("PlayerLifeDataManager");
+                    Transform root = LocalPlayerRoot();
+                    _life = (t == null || root == null)
+                        ? null : root.GetComponentInChildren(t);
+                }
+                if (_life == null) return;
+                MethodInfo m = AccessTools.Method(_life.GetType(), "PlayerApplyDamage", null, null);
+                if (m == null)
+                {
+                    _hurtWarned = true;
+                    RevivalPlugin.L.LogWarning("PlayerHeli: PlayerApplyDamage not found "
+                        + "- the machine burns, the crash costs no health.");
+                    return;
+                }
+                ParameterInfo[] ps = m.GetParameters();
+                object[] args = new object[ps.Length];
+                bool placed = false;
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    Type pt = ps[i].ParameterType;
+                    if (!placed && pt == typeof(float)) { args[i] = damage; placed = true; }
+                    else if (pt == typeof(string)) args[i] = string.Empty;
+                    else if (pt.IsValueType) args[i] = Activator.CreateInstance(pt);
+                    else args[i] = null;
+                }
+                m.Invoke(_life, args);
+            }
+            catch (Exception ex)
+            {
+                _hurtWarned = true;
+                RevivalPlugin.L.LogWarning("PlayerHeli crash damage: " + ex.Message);
+            }
+        }
+
+        // =============================================================== jump
+
+        /// <summary>
+        /// Out of the door. Anyone aboard may press it, pilot and passengers
+        /// alike; on the ground it is the ordinary way out, in the air it is a
+        /// jump. What happens after the jump is not this file's business:
+        /// Parachute.Jump either opens a canopy on the man's back or reports
+        /// why it did not, and the fall is the game's own.
+        /// </summary>
+        static void Jump()
+        {
+            GameObject go = _heli;
+            if (go == null) return;
+            bool flying = _pilot ? !_onGround : Airborne(go);
+            if (!flying) { Leave(true); return; }
+            // BailOut governs BOTH ways out in flight - this key and the old
+            // shift-and-board-key. Switched off, the machine has to be landed,
+            // and then the parachute has nothing to open over.
+            if (CfgBailOut != null && !CfgBailOut.Value)
+            {
+                Hint(Text.LandFirst(), 4f);
+                return;
+            }
+
+            float k = K;
+            bool wasPilot = _pilot;
+            Transform tr = go.transform;
+            Vector3 door = tr.position + tr.rotation * (new Vector3(-8f, 0f, 2f) * k);
+            float floor;
+            float height = Floor(tr.position, out floor)
+                ? (tr.position.y - floor) / k : 0f;
+
+            // Out first, canopy second. Leave puts the man at the door and gives
+            // the camera and his own legs back; the parachute state then writes
+            // his position itself, and nothing of this file's is left to write
+            // it again afterwards.
+            Leave(false);
+
+            string why;
+            bool canopy = Parachute.Jump(door, height, out why);
+            if (!string.IsNullOrEmpty(why)) Hint(why, 5f);
+            RevivalPlugin.L.LogInfo("PlayerHeli: jumped at "
+                + Mathf.RoundToInt(height) + " m, canopy " + canopy + ".");
+
+            // A machine the PILOT has just left in the air is a machine nobody
+            // is flying: the flight loop that integrated its speed went out of
+            // the door with him, and without this it would hang there for ever.
+            // So it goes down - which is what an abandoned helicopter does, and
+            // it is the reason to be wearing the canopy that just opened.
+            if (wasPilot && (CfgCrash == null || CfgCrash.Value))
+                Crash(go, go.transform.position);
         }
 
         // ========================================================== the object
@@ -939,10 +1557,16 @@ namespace NextDayRevival
                     if (_pBoxSize != null) _pBoxSize.SetValue(box, new Vector3(7f, 11f, 38f), null);
                 }
 
+                // Cold on arrival, on every client. The prefab's own Start plays
+                // the rotor loop and never stops it, so without this a machine
+                // parked for a pilot roars to itself for ever - and so does one
+                // its pilot has long since walked away from.
+                EngineApply(go, false);
+
                 int view = ViewId(go);
                 if (view != 0) _byView[view] = go;
                 RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
-                    + " prepared, scale " + s.ToString("0.00") + ".");
+                    + " prepared, scale " + s.ToString("0.00") + ", engine cold.");
             }
             catch (Exception ex)
             {
@@ -991,7 +1615,7 @@ namespace NextDayRevival
             for (int i = 0; i < _all.Count; i++)
             {
                 GameObject go = _all[i];
-                if (go == null) continue;
+                if (go == null || Burning(go)) continue;   // nobody gets into a wreck
                 float d = Vector3.Distance(p, go.transform.position);
                 if (d > nearest) continue;
                 nearest = d;
@@ -1176,6 +1800,8 @@ namespace NextDayRevival
             _spawnKey = Parse(CfgSpawnKey, KeyCode.F3, "SpawnKey");
             _boardKey = Parse(CfgBoardKey, KeyCode.F, "BoardKey");
             _viewKey = Parse(CfgViewKey, KeyCode.V, "ViewKey");
+            _engineKey = Parse(CfgEngineKey, KeyCode.G, "EngineKey");
+            _jumpKey = Parse(CfgJumpKey, KeyCode.X, "JumpKey");
         }
 
         static KeyCode Parse(ConfigEntry<string> entry, KeyCode fallback, string what)
@@ -1193,6 +1819,8 @@ namespace NextDayRevival
         static KeyCode SpawnKey() { ParseKeys(); return _spawnKey; }
         static KeyCode BoardKey() { ParseKeys(); return _boardKey; }
         static KeyCode ViewKey() { ParseKeys(); return _viewKey; }
+        static KeyCode EngineKey() { ParseKeys(); return _engineKey; }
+        static KeyCode JumpKey() { ParseKeys(); return _jumpKey; }
 
         // ================================================================= HUD
 
@@ -1223,8 +1851,19 @@ namespace NextDayRevival
                 Line(Text.Readout(Mathf.RoundToInt(speed), Mathf.RoundToInt(alt),
                                   _onGround), cx, cy + 150f,
                      new Color(0.92f, 0.92f, 0.86f, 1f), 15);
+
+                HeliEngine e = EngineOf(_heli);
+                float power = e == null ? (_engine ? 1f : 0f) : e.Power;
+                Line(Text.Power(Mathf.RoundToInt(power * 100f),
+                                Mathf.RoundToInt(_vel.y / k)),
+                     cx, cy + 172f,
+                     power < 0.5f ? new Color(1f, 0.55f, 0.35f, 1f)
+                                  : new Color(0.72f, 0.80f, 0.72f, 1f), 13);
+
                 if (Time.time - _boardedAt < 14f)
-                    Line(Text.Controls(), cx, cy + 176f,
+                    Line(Text.Controls(EngineKey().ToString(), ViewKey().ToString(),
+                                       JumpKey().ToString(), BoardKey().ToString()),
+                         cx, cy + 194f,
                          new Color(0.80f, 0.85f, 0.90f, 1f), 13);
             }
 
@@ -1330,11 +1969,17 @@ namespace NextDayRevival
         // ============================================================ network
 
         /// <summary>
-        /// Four messages, all of them small. base+0 asks the master for a
+        /// Six messages, all of them small. base+0 asks the master for a
         /// machine, base+1 is the pose of a pilot who is not the master, base+2
         /// says who is aboard which machine, base+3 asks the master to take one
-        /// away. Everything else - the machine itself, its position for everyone
-        /// who is not flying it - is the prefab's own Photon replication.
+        /// away, base+4 is the engine of one machine going on or off, base+5 is
+        /// one machine that has just been destroyed. Everything else - the
+        /// machine itself, its position for everyone who is not flying it - is
+        /// the prefab's own Photon replication.
+        ///
+        /// The last two are HERE and not derived locally for the same reason the
+        /// pose is: the rotor spin, the engine sound and the fire are drawn by
+        /// every client for itself, so every client has to be told.
         /// </summary>
         internal static class Net
         {
@@ -1342,6 +1987,8 @@ namespace NextDayRevival
             internal const int PoseUpdate = 1;
             internal const int Aboard = 2;
             internal const int RemoveRequest = 3;
+            internal const int EngineState = 4;
+            internal const int Crashed = 5;
 
             static bool _hooked, _failed;
             static MethodInfo _raise;
@@ -1406,7 +2053,7 @@ namespace NextDayRevival
                 try
                 {
                     int kind = code - Base();
-                    if (kind < 0 || kind > 3) return;
+                    if (kind < 0 || kind > 5) return;
                     float[] f = content as float[];
                     if (f == null) return;
 
@@ -1441,6 +2088,24 @@ namespace NextDayRevival
                         int view = (int)f[0];
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
+                        return;
+                    }
+
+                    if (kind == EngineState)
+                    {
+                        if (f.Length < 2) return;
+                        GameObject go = ByView((int)f[0]);
+                        if (go != null) EngineApply(go, f[1] > 0.5f);
+                        return;
+                    }
+
+                    if (kind == Crashed)
+                    {
+                        if (f.Length < 4) return;
+                        GameObject wreck = ByView((int)f[0]);
+                        if (wreck == null) return;
+                        _busyUntil.Remove((int)f[0]);
+                        Burn(wreck, new Vector3(f[1], f[2], f[3]));
                         return;
                     }
 
@@ -1519,6 +2184,22 @@ namespace NextDayRevival
                 return Loc.T("Ты за штурвалом", "You have the controls");
             }
 
+            internal static string EngineOn()
+            {
+                return Loc.T("Запуск двигателя - винт раскручивается",
+                             "Starting up - the rotor is winding up");
+            }
+
+            internal static string EngineOff()
+            {
+                return Loc.T("Двигатель остановлен", "Engine shut down");
+            }
+
+            internal static string Wrecked()
+            {
+                return Loc.T("Машина разбита", "The machine is wrecked");
+            }
+
             internal static string Seated()
             {
                 return Loc.T("Ты в грузовой кабине", "You are in the cabin");
@@ -1538,12 +2219,197 @@ namespace NextDayRevival
                 return kmh + Loc.T(" км/ч", " km/h") + "   " + state;
             }
 
-            internal static string Controls()
+            /// <summary>The second line of the readout: what the engine is
+            /// doing, and how fast the machine is going up or down. Both are
+            /// there because both were invisible before - a pilot could not tell
+            /// a cold machine from a stalled one, nor a descent from a fall.</summary>
+            internal static string Power(int percent, int climb)
+            {
+                string engine = percent <= 0
+                    ? Loc.T("двигатель выключен", "engine off")
+                    : (Loc.T("тяга ", "power ") + percent + "%");
+                string vertical = climb == 0 ? "" : ("   "
+                    + (climb > 0 ? "+" : "") + climb + Loc.T(" м/с", " m/s"));
+                return engine + vertical;
+            }
+
+            /// <summary>The keys are passed in rather than written out: five of
+            /// them are configurable now, and a help line that names the
+            /// defaults while the config says something else is worse than no
+            /// help line at all.</summary>
+            internal static string Controls(string engine, string view,
+                                            string jump, string board)
             {
                 return Loc.T(
-                    "W/S/A/D - движение, мышь - курс, пробел/Ctrl - высота, V - вид, F - выйти",
-                    "W/S/A/D move, mouse steers, space/ctrl climb and sink, V view, F out");
+                    "W/S/A/D - движение, мышь - курс, пробел/Ctrl - высота, "
+                    + engine + " - двигатель, " + view + " - вид, "
+                    + jump + " - прыжок, " + board + " - выйти",
+                    "W/S/A/D move, mouse steers, space/ctrl climb and sink, "
+                    + engine + " engine, " + view + " view, "
+                    + jump + " jump, " + board + " out");
             }
+        }
+    }
+
+    /// <summary>
+    /// The engine of ONE machine: the rotor speed, the sound and the spool
+    /// state, as a component sitting on the helicopter itself.
+    ///
+    /// WHY A COMPONENT AND NOT A TABLE. Rotor spin and engine sound are drawn by
+    /// every client for itself - HelicopterDummy.Update turns the disc
+    /// everywhere, and its Start plays the loop everywhere - so the state has to
+    /// live next to the object on every client, including those that never had a
+    /// pilot in it. The object is also the only key that works in single player,
+    /// where there is no PhotonView and therefore no view id.
+    ///
+    /// WHAT IT TOUCHES. Two public fields of the game's own mover
+    /// (rotor_flight_speed, rotor_rear_speed) and its AudioSource. Both originals
+    /// are read once and kept, and full power restores them exactly - so a
+    /// machine that this file never switches off is a machine the game still
+    /// flies the way it always did.
+    ///
+    /// Sound and rotor follow POWER, not the switch: that is the whole point of
+    /// the spool. A cold start winds the disc up over SpoolSeconds and the pitch
+    /// comes up with it; a shutdown in the air winds both down while the machine
+    /// sinks.
+    /// </summary>
+    public sealed class HeliEngine : MonoBehaviour
+    {
+        Component _mover;
+        FieldInfo _fMain, _fTail;
+        float _mainFull, _tailFull;
+        AudioSource _audio;
+        float _volumeFull = 1f, _pitchFull = 1f;
+        bool _read, _dead;
+        int _tries;
+        float _power;
+        bool _running;
+        float _lastApplied = -1f;
+
+        /// <summary>What the pilot (or another client's message) asked for.
+        /// Setting it does not move anything by itself - Advance does.</summary>
+        public bool Running
+        {
+            get { return _running; }
+            set { _running = value; }
+        }
+
+        public float Power { get { return _power; } }
+
+        /// <summary>Move the spool one frame closer to what was asked for, and
+        /// put the result on the rotor and the sound. Called by the pilot's own
+        /// flight; Update does the same for every machine nobody is flying, so a
+        /// helicopter left running across the map still winds down when its
+        /// pilot shuts it off.</summary>
+        public void Advance(float dt, float seconds)
+        {
+            if (_dead) { Write(0f); return; }
+            float step = dt / Mathf.Max(0.5f, seconds);
+            _power = Mathf.Clamp01(_power + (_running ? step : -step));
+            Write(_power);
+        }
+
+        /// <summary>A wreck: the engine is not shut down, it is gone. Nothing
+        /// starts it again.</summary>
+        public void Kill()
+        {
+            _dead = true;
+            _running = false;
+            _power = 0f;
+            Write(0f);
+            if (_audio != null)
+            {
+                try { _audio.Stop(); } catch { }
+            }
+        }
+
+        void Update()
+        {
+            // The pilot's own machine is advanced by the flight, at the same
+            // moment the power is used. This is for all the others.
+            if (PlayerHeli.Flown(gameObject)) return;
+            Advance(Time.deltaTime, PlayerHeli.SpoolTime());
+        }
+
+        void Write(float power)
+        {
+            if (!Read()) return;
+
+            // The rotor speeds go through reflection, so they are written only
+            // when the number actually moved. The SOUND is checked every time,
+            // and that is not laziness: HelicopterDummy.Start calls
+            // _audioSrc.Play() itself, and on a machine we silenced BEFORE its
+            // Start ran - which is every machine, because Prepare is a Start
+            // prefix - the loop would come back a frame later and stay. Two
+            // property reads a frame is the price of a silent parked machine.
+            if (Mathf.Abs(power - _lastApplied) >= 0.002f)
+            {
+                _lastApplied = power;
+                try
+                {
+                    if (_fMain != null) _fMain.SetValue(_mover, _mainFull * power);
+                    if (_fTail != null) _fTail.SetValue(_mover, _tailFull * power);
+                }
+                catch { }
+            }
+
+            if (_audio == null) return;
+            try
+            {
+                if (power <= 0.001f)
+                {
+                    if (_audio.isPlaying) _audio.Stop();
+                    return;
+                }
+                _audio.volume = _volumeFull * power;
+                // The loop was recorded at full speed, so a winding disc has to
+                // be played slower or it sounds like a machine at full power
+                // that is merely quiet.
+                _audio.pitch = _pitchFull * (0.35f + 0.65f * power);
+                if (!_audio.isPlaying) _audio.Play();
+            }
+            catch { }
+        }
+
+        /// <summary>Find the mover, its two speed fields and the audio source
+        /// once. HelicopterDummy.Start may not have run yet when the first order
+        /// arrives, so a failed read is retried - but not for ever: a prefab
+        /// that never fills those fields would otherwise be a reflection lookup
+        /// every frame of the session.</summary>
+        bool Read()
+        {
+            if (_read) return _mover != null;
+            if (_tries > 240) { _read = true; return false; }
+            _tries++;
+
+            Type t = RevivalPlugin.TypeByName("HelicopterDummy");
+            if (t == null) { _read = true; return false; }
+            _mover = GetComponent(t);
+            if (_mover == null) return false;
+            _fMain = AccessTools.Field(t, "rotor_flight_speed");
+            _fTail = AccessTools.Field(t, "rotor_rear_speed");
+            try
+            {
+                if (_fMain != null) _mainFull = Convert.ToSingle(_fMain.GetValue(_mover));
+                if (_fTail != null) _tailFull = Convert.ToSingle(_fTail.GetValue(_mover));
+            }
+            catch { }
+            // A zero here would be a machine that can never spin again. It means
+            // the field was read before Start filled it, so wait for the retry.
+            if (_mainFull == 0f && _tailFull == 0f) return false;
+
+            _audio = GetComponentInChildren<AudioSource>();
+            if (_audio != null)
+            {
+                _volumeFull = _audio.volume;
+                _pitchFull = _audio.pitch == 0f ? 1f : _audio.pitch;
+            }
+            _read = true;
+            _lastApplied = -1f;                 // the first real write is due
+            RevivalPlugin.L.LogInfo("PlayerHeli engine: rotor " + _mainFull
+                + "/" + _tailFull + ", sound "
+                + (_audio == null ? "none" : "found") + ".");
+            return true;
         }
     }
 

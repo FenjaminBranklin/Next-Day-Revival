@@ -45,6 +45,10 @@ GROUPS = [
     # replacing the jammer/ammo-tin/FPV-drone placeholders. The DEPLOYED mast
     # head stays antenna_head.py in the "antenna" group below.
     ("dronegear", ["drone_gear_build.py"]),
+    # Parachute (2067): the PACKED chute the item shows in the backpack. What
+    # opens over a man who jumps out of a helicopter is the game's own canopy
+    # (PlayerDataPrefabs/Other/Parachute_Pref) and is not built here.
+    ("parachute", ["parachute_build.py"]),
     # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
     # The technical (gun truck): body, machine gun, pintle and shield from a

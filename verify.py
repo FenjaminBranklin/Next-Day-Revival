@@ -110,6 +110,10 @@ ASSET_FILES = [
     "battery_icon.png",
     "survdrone.ndmesh", "survdrone_diffuse.png", "survdrone_normal.png",
     "survdrone_icon.png",
+    # Parachute (2067) - own art (parachute_build.py): the packed chute the item
+    # shows in the backpack. The canopy in the air is the game's own prefab.
+    "parachute.ndmesh", "parachute_diffuse.png", "parachute_normal.png",
+    "parachute_icon.png",
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
@@ -154,7 +158,7 @@ MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
           "shell125.ndmesh", "thermal.ndmesh", "nvmodule.ndmesh",
           "jammod.ndmesh", "antenna_pack.ndmesh", "battery.ndmesh",
-          "survdrone.ndmesh"]
+          "survdrone.ndmesh", "parachute.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
@@ -170,6 +174,7 @@ ICON_SIZES = {
     "thermal_icon.png": (300, 300), "nvmodule_icon.png": (300, 300),
     "jammod_icon.png": (300, 300), "antenna_pack_icon.png": (300, 300),
     "battery_icon.png": (300, 300), "survdrone_icon.png": (300, 300),
+    "parachute_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
@@ -2957,6 +2962,61 @@ def check_player_heli():
              "Thrust/Drag = %.0f m/s is at or above MaxSpeed %.0f - the hard cap "
              "decides the handling instead of the air" % (cruise, top))
 
+    # --- the flight has a rate limit on every axis. The first version gave the
+    # collective a free hand: nothing damped the vertical speed while space was
+    # held, so it ran up to the ONE shared MaxSpeed - 50 m/s straight up. Climb
+    # and sink need their own ceilings, and they have to be helicopter numbers.
+    climb = _bind_number(heli, "PlayerHeli", "ClimbRate")
+    sinkrate = _bind_number(heli, "PlayerHeli", "SinkRate")
+    if climb is None or sinkrate is None:
+        bad("PlayerHeli: ClimbRate or SinkRate is not a plain default any more")
+    elif top is None:
+        pass                      # already reported above
+    else:
+        need(0 < climb <= 15 and 0 < sinkrate <= 15,
+             "climb %.0f m/s and sink %.0f m/s are helicopter rates"
+             % (climb, sinkrate),
+             "climb %.0f / sink %.0f m/s is a lift, not a helicopter" % (climb, sinkrate))
+        need("Mathf.Clamp(vertical, floorSink, climb)" in code,
+             "the vertical speed is clamped to those two, not to MaxSpeed",
+             "the vertical speed is not clamped separately - the horizontal cap "
+             "decides how fast the machine climbs again")
+    need("_yawRate = Mathf.Lerp(_yawRate, want" in code,
+         "the mouse asks for a turn RATE, it does not snap the heading",
+         "Steer writes the heading straight from the mouse delta - eleven "
+         "tonnes then turn as fast as the hand moves")
+
+    # --- no downward ray anywhere in the flight. The floor is height data; the
+    # crash test is a FORWARD cast, and it has to stay one, because a ray cast
+    # downwards finds the machine's own hull.
+    impact = _body(code, "static bool Impact(Vector3 from, Vector3 to)")
+    need(impact != "" and "Vector3.down" not in impact
+         and "Vector3.down" not in fly,
+         "the crash test casts forward; nothing in the flight casts down",
+         "the flight or the crash test casts downwards - it finds its own hull")
+
+    # --- the engine. The prefab's own Start plays the rotor loop and never
+    # stops it, which is why a parked machine used to roar to itself for ever.
+    prepare = _body(code, "internal static void Prepare(GameObject go)")
+    need("EngineApply(go, false);" in prepare,
+         "a machine arrives cold on every client",
+         "a machine put down is not silenced - the prefab's own rotor loop "
+         "runs for ever")
+    need("if (_pilot && !Burning(go)) SetEngine(false);" in leave,
+         "the engine does not keep running behind the last man out",
+         "leaving the machine leaves the engine on")
+
+    # --- the crash is the patrol wreck's own fire, not a second private effect.
+    burn = _body(code, "static void Burn(GameObject go, Vector3 where)")
+    need("FireEffect.Spawn(" in burn and "FireEffect.SpawnWreck(" in burn,
+         "a downed machine explodes and burns like every other wreck",
+         "the helicopter wreck does not use FireEffect - it would look like "
+         "nothing else in the world")
+    need("Net.Send(Net.Crashed," in code and "Net.Send(Net.EngineState," in code,
+         "engine and crash are told to every client",
+         "the rotor, the sound or the fire is decided locally - every other "
+         "client then sees a machine that is still flying")
+
     # --- the event window. Every feature of this plugin raises Photon events in
     # its own band; two bands that overlap is a bug nobody sees until two
     # features are used at once.
@@ -2979,9 +3039,9 @@ def check_player_heli():
                 continue
             for c in range(int(start), int(start) + span):
                 taken.setdefault(c, name)
-        clash = [(c, taken[c]) for c in range(int(base), int(base) + 4) if c in taken]
+        clash = [(c, taken[c]) for c in range(int(base), int(base) + 6) if c in taken]
         need(not clash,
-             "event codes %d-%d are free" % (base, base + 3),
+             "event codes %d-%d are free" % (base, base + 5),
              "event codes collide with another feature: "
              + ", ".join("%d is %s" % (c, who) for c, who in clash))
 
@@ -3006,6 +3066,109 @@ def check_player_heli():
          "Revival.PlayerHeli.cs goes into the public repository",
          "Revival.PlayerHeli.cs is missing from sync_public.py - the public "
          "repo does not build without it")
+
+def check_parachute():
+    """[23] The parachute.
+
+    The whole feature is two calls into the game's own parachute, and the pair
+    is the point: PlayerMovementController.FixedUpdate gives a man in character
+    state 5 who reaches the ground with the canopy CLOSED 1000 damage. So a
+    state entered without uncovering it in the same breath is not a parachute,
+    it is a scripted death - and nothing in the game would say so.
+
+    The rest is the id band and the seams, both of which fail silently: an id
+    outside 2001..3000 lands in another category, and a missing seam means the
+    item simply never exists.
+    """
+    print("[23] Parachute")
+    src_p = os.path.join(ROOT, "Revival.Parachute.cs")
+    if not os.path.exists(src_p):
+        bad("Revival.Parachute.cs is missing - nothing opens over a jumper")
+        return
+    raw = io.open(src_p, "rb").read()
+    para = raw.decode("utf-8", "replace")
+    code = _code(para)
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Parachute: " + why)
+
+    plug = read("RevivalPlugin.cs")
+    sync = read("sync_public.py")
+    heli = _code(read("Revival.PlayerHeli.cs"))
+
+    # --- file rule: UTF-8 without BOM, and outside ASCII only the Cyrillic of
+    # the player-facing Loc.T lines (AGENTS.md).
+    need(not raw.startswith(b"\xef\xbb\xbf"), "no BOM",
+         "Revival.Parachute.cs starts with a BOM")
+    strange = sorted(set(c for c in para
+                         if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange,
+         "outside ASCII only Cyrillic (player text)",
+         "Revival.Parachute.cs holds characters that are neither ASCII nor "
+         "Cyrillic: " + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # --- the pair. Both calls, in one method, in this order.
+    open_body = _body(code, "static bool Open(Vector3 at)")
+    fly_at = open_body.find("_mFly.Invoke")
+    cover_at = open_body.find("_mUncover.Invoke")
+    need(fly_at >= 0 and cover_at > fly_at,
+         "the state is entered and the canopy opened in the same move",
+         "SetPlayerParashuteFlyState and PlayerParashuteUncover are not called "
+         "together - a state without a canopy is 1000 damage on landing")
+    need('"SetPlayerParashuteFlyState"' in code
+         and '"PlayerParashuteUncover"' in code,
+         "both moves are the game's own methods, resolved by name",
+         "the descent is reimplemented instead of using the game's parachute")
+    need("Parachute_Pref" not in code and "InstanceParachute" not in code,
+         "the canopy model is left to the game",
+         "this file instantiates a canopy itself - PlayerObjectsManager already "
+         "does it, from the RPC, on every client")
+
+    # --- the id band. 2001..3000 is the game's ammunition band: right for
+    # something CARRIED, wrong for anything that has to go into a weapon slot.
+    # That distinction is the anti-tank mine's lesson (see check_mine).
+    import re
+    m = re.search(r"public const int ItemId = (\d+);", code)
+    item_id = None if m is None else int(m.group(1))
+    need(item_id is not None and 2001 <= item_id <= 3000,
+         "item id %s is in the carried band 2001-3000" % item_id,
+         "the parachute's item id is outside 2001..3000 - it would be read as "
+         "another category")
+    need(item_id is not None and ("%d" % item_id) not in
+         _code(read("RevivalM7Rifle.cs")) + _code(read("RevivalDroneGear.cs"))
+         + _code(read("RevivalConvoyRepair.cs")),
+         "the id is not already taken by another item file",
+         "the parachute's item id is used by another feature as well")
+
+    # --- the height gate, and the one that matters: no canopy, no free ride.
+    jump = _body(code, "public static bool Jump(Vector3 at, float height, out string say)")
+    need("height < MinHeight" in jump and "if (!Have())" in jump,
+         "too low or no chute in the pack is a fall, not a canopy",
+         "the jump opens a canopy without checking the height or the pack")
+
+    # --- the caller. The helicopter is what puts a man in the air.
+    need("Parachute.Jump(door, height, out why)" in heli,
+         "the helicopter's jump key asks the parachute for a canopy",
+         "Revival.PlayerHeli.cs no longer calls Parachute.Jump - the jump key "
+         "is a fall again")
+
+    # --- seams outside this file.
+    need("Parachute.BindConfig(Config);" in plug
+         and "Parachute.AddItems(Items);" in plug,
+         "seams BindConfig/AddItems in RevivalPlugin.cs",
+         "a seam is missing in RevivalPlugin.cs: Parachute")
+    need('"Revival.Parachute.cs"' in sync and '"parachute_build.py"' in sync,
+         "source and asset generator go into the public repository",
+         "Revival.Parachute.cs or parachute_build.py is missing from "
+         "sync_public.py - the public repo does not build without them")
+
 
 if __name__ == "__main__":
     print("=" * 74)
@@ -3035,6 +3198,7 @@ if __name__ == "__main__":
     check_ground_enemies()
     check_helipads()
     check_player_heli()
+    check_parachute()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

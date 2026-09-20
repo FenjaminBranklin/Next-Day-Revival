@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.35.0";
+        public const string VERSION = "6.36.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -464,6 +464,7 @@ namespace NextDayRevival
             RevivalTroopInsertion.BindConfig(Config); // NDR heli troop insertion
             Helipads.BindConfig(Config);         // NDR editor helicopter landing pads
             PlayerHeli.BindConfig(Config);       // NDR the Mi-8 a player flies himself
+            Parachute.BindConfig(Config);         // NDR parachute item and the jump out of a helicopter
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
             Mortar.BindConfig(Config);           // NDR settlement mortar
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
@@ -1614,6 +1615,9 @@ namespace NextDayRevival
 
             // The 122 mm shell for the settlement gun (own file).
             Mortar.AddItems(Items);
+
+            // The parachute a man jumps out of a helicopter with (own file).
+            Parachute.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
             for (int i = 0; i < Items.Count; i++)
