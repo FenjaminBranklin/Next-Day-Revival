@@ -170,7 +170,10 @@ namespace NextDayRevival
         static Material _tracerMat;
         static readonly Color TracerFarbe = new Color(1.0f, 0.88f, 0.42f, 1.0f);
 
-        static Material TracerMaterial()
+        /// <summary>Shared with <c>TechnicalTracerStreak</c> (RevivalTechnical.cs),
+        /// so the MG's travelling tracer uses the same one material instead of
+        /// growing its own cache.</summary>
+        internal static Material TracerMaterial()
         {
             if (_tracerMat != null) return _tracerMat;
 

@@ -2032,6 +2032,16 @@ def check_technical():
          Each half fails on its own: without the bench removal the pintle is
          bolted to a backrest, without the ceiling it climbs onto the roof of
          any donor whose body is one closed collider.
+     12. The FLOOR TOLERANCE from rule 11 is EARNED, not assumed. Ruecksitze
+         can legitimately find nothing to remove - a donor whose interior is
+         one mesh shared with the front seats fails both the size cap and the
+         front-seat guard on purpose - and until this rule, DeckStep granted
+         its one-step tolerance anyway, which is enough on its own to read as
+         "elevated over the last row of seats" when the measured surface was
+         the still-standing bench. A confirmed-zero removal now collapses the
+         tolerance to zero. Field report of 2026-09-20 (screenshots
+         anothertechnicalbug/anothertechnicalbug2): the same symptom rule 11
+         was meant to close, still present.
 
     Plus the file rule: RevivalTechnical.cs is machine-written and build.ps1
     needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
@@ -2048,6 +2058,7 @@ def check_technical():
     ural_p = os.path.join(ROOT, "RevivalUralTruck.cs")
     plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
     cam_p = os.path.join(ROOT, "Revival.CameraTurret.cs")
+    cch_p = os.path.join(ROOT, "Revival.CombatHooks.cs")
     sync_p = os.path.join(ROOT, "sync_public.py")
     build_p = os.path.join(ROOT, "technical_build.py")
     if not os.path.exists(tech_p):
@@ -2059,6 +2070,7 @@ def check_technical():
     u = io.open(ural_p, encoding="utf-8").read() if os.path.exists(ural_p) else ""
     plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
     cam = io.open(cam_p, encoding="utf-8").read() if os.path.exists(cam_p) else ""
+    cch = io.open(cch_p, encoding="utf-8").read() if os.path.exists(cch_p) else ""
     sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
     build = io.open(build_p, encoding="utf-8").read() if os.path.exists(build_p) else ""
 
@@ -2225,7 +2237,8 @@ def check_technical():
          "der Schutz der Vordersitze fehlt - dann kann der Innenraum samt "
          "Fahrersitz verschwinden")
     need("static bool Sitzboden(Transform root, Transform seats, out float y)" in t
-         and "boden + CfgDeckStep.Value * height" in t,
+         and "boden + step" in t
+         and "CfgDeckStep.Value * height" in t,
          "die Standflaeche wird auf Fussbodenhoehe begrenzt (DeckStep)",
          "die Obergrenze ueber dem Fussboden des Spenders fehlt - dann steht "
          "die Lafette wieder auf dem hoechsten Kollisionskoerper und der "
@@ -2234,6 +2247,23 @@ def check_technical():
     need(step is not None and 0.0 < step <= 0.30,
          "DeckStep %s der Fahrzeughoehe, eine Stufe und kein Stockwerk" % step,
          "DeckStep fehlt oder laesst wieder ein halbes Fahrzeug Hoehe zu")
+
+    # --- 7f: the fifth field report on the same spot (2026-09-20, screenshots
+    # anothertechnicalbug/anothertechnicalbug2): the gunner still elevated over
+    # the last row of seats. Ruecksitze can fail to find a separable bench (a
+    # donor whose interior is one mesh shared with the front seats fails both
+    # the size cap and the front-seat guard on purpose) and still return 0 -
+    # and until this pass, DeckStep granted its knee-height tolerance anyway,
+    # which is enough on its own to read as "elevated" when the surface it
+    # measured was the still-standing bench and not a real load bed. The
+    # tolerance is now EARNED: zero when removal was not confirmed.
+    need("int ruecksitzeEntfernt = Ruecksitze(car, seats, min, max, unitsPerMetre);" in t
+         and "float step = ruecksitzeEntfernt > 0 ? CfgDeckStep.Value * height : 0f;" in t,
+         "die DeckStep-Toleranz gilt nur bei bestaetigt entfernter Ruecksitzbank",
+         "eine nicht bestaetigt entfernte Ruecksitzbank bekommt wieder einen "
+         "Toleranzschritt - der Schuetze kann wieder ueber der letzten "
+         "Sitzreihe stehen (Feldbericht anothertechnicalbug/"
+         "anothertechnicalbug2, 2026-09-20)")
 
     # --- 7c: the place IS the gun, and the gun has a belt.
     #
@@ -2307,6 +2337,35 @@ def check_technical():
          "Blick in der dritten Person, Bildwinkel unveraendert",
          "die Kamera zielt nicht in der dritten Person oder schreibt den "
          "Bildwinkel um, was wie ein Zielfernrohr aussieht")
+
+    # --- 9: the tracer FLIES instead of materialising as a static line.
+    #
+    # Field report 2026-09-20: "aktuell sind die schuesse diese langweiligen
+    # raytraces, ich will das die schuesse aussehen so wie die schuesse aus
+    # der dragunov aber halt mit hohem frequenz". TechnicalTracerStreak moves
+    # its LineRenderer's two endpoints every frame instead of drawing the
+    # whole muzzle-to-impact line in one go, and a hard timeout keeps a
+    # misconfigured TracerSpeed from leaking the GameObject forever.
+    need("internal sealed class TechnicalTracerStreak : MonoBehaviour" in t
+         and "TechnicalTracerStreak.Spawn(von, bis, tempo, laenge" in t
+         and "_line.SetPosition(0, ende);" in t
+         and "_line.SetPosition(1, spitze);" in t,
+         "die MG-Leuchtspur fliegt zum Ziel statt sofort als Linie zu stehen",
+         "die fliegende Leuchtspur fehlt - der Schuss ist wieder eine sofort "
+         "erscheinende Linie (Feldbericht anothertechnicalbug/"
+         "anothertechnicalbug2, 2026-09-20)")
+    need("if (_t > Timeout) { Destroy(gameObject); return; }" in t,
+         "eine haengengebliebene Leuchtspur raeumt sich selbst ab",
+         "der Sicherheits-Timeout der fliegenden Leuchtspur fehlt - eine sehr "
+         "kleine TracerSpeed wuerde das Objekt fuer immer stehen lassen")
+    need("CfgTracerSpeed = cfg.Bind(\"TechnicalGun\", \"TracerSpeed\"" in t
+         and "CfgTracerLength = cfg.Bind(\"TechnicalGun\", \"TracerLength\"" in t,
+         "Fluggeschwindigkeit und Laenge der Leuchtspur sind einstellbar",
+         "TracerSpeed/TracerLength fehlen in der Konfiguration")
+    need("internal static Material TracerMaterial()" in cch,
+         "das Leuchtspur-Material wird geteilt statt neu erzeugt",
+         "RocketHook.TracerMaterial ist nicht mehr internal - "
+         "TechnicalTracerStreak kann das Material dann nicht mehr teilen")
 
     # --- seams.
     for seam in ("Technical.BindConfig", "TechnicalGun.BindConfig",

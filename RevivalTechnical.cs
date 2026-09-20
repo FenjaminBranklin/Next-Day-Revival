@@ -149,6 +149,28 @@
 //     keeps gun and gunner on the bed even on a donor whose body is one closed
 //     collider that no ray can see into.
 //
+// THE BENCH IS CUT OUT WHEN IT CANNOT BE SWITCHED OFF, AND THE STEP IS EARNED
+// (fifth pass, docs/ai/tasks/technical-elevation-fix.md, field report of
+// 2026-09-20, screenshots anothertechnicalbug and anothertechnicalbug2: the
+// gunner still standing above the last row of seats). Two things follow:
+//
+//   * A donor whose cabin is ONE mesh - dashboard, front seats and rear bench
+//     together - fails both guards above on purpose, and until this pass that
+//     meant the bench simply stayed. It is now cut OUT of that shared mesh at
+//     triangle level (BankSchnitt): every triangle whose centre stands in the
+//     bench zone goes, every triangle that also stands in the same zone around
+//     a FRONT seat point stays, and the result is a NEW mesh on that one
+//     MeshFilter - the donor's own shared asset is never written to, or every
+//     UAZ in the world would lose its back seat. Each LOD stage is cut the
+//     same way, so the bench cannot come back with camera distance.
+//   * Only a VISIBLE removal counts as confirmed - a whole part deactivated or
+//     a mesh cut, never a collider on its own. When even the cut cannot run
+//     (a mesh the engine refuses to read out), the surface DeckStep measures
+//     is most likely the still-standing bench, not a genuine raised bed, so
+//     the knee-height tolerance is not granted: the station is pulled all the
+//     way down to the floor instead of one step above it. A confirmed removal
+//     keeps the normal tolerance unchanged.
+//
 // Distances that measure a PERSON (the arm, the pintle height) are metres and
 // are converted with the vehicle's own units-per-metre; distances that measure
 // the VEHICLE are fractions of its own measured size, because the vehicle models
@@ -239,22 +261,40 @@ namespace NextDayRevival
         const float FeetAboveSeat = 1.85f;
 
         /// <summary>
-        /// How big a rear bench is, in METRES around its own seat point: half a
-        /// bench wide, a seat deep, the seat's own frame below and a backrest
-        /// with a headrest above. These are the bounds within which a mesh part
-        /// or a collider counts as part of the bench the rebuild takes away (see
+        /// How wide and deep a rear bench is, in METRES around its own seat
+        /// point. These are the horizontal bounds within which a mesh part or a
+        /// collider counts as part of the bench the rebuild takes away (see
         /// Ruecksitze) - furniture is the same size on a jeep and on a lorry, so
-        /// it is metres here and not a fraction of the vehicle.
-        ///
-        /// Both vertical numbers are deliberately SHORT of the things a bench
-        /// stands between: the load floor is about half a metre under a seat
-        /// point and a roof about a metre over it, and neither may be mistaken
-        /// for furniture - the floor is what the gun is about to stand on.
+        /// it is metres here and not a fraction of the vehicle. The vertical
+        /// bounds start from the implied floor below.
         /// </summary>
         const float BenchSide = 0.60f;
         const float BenchDepth = 0.70f;
-        const float BenchBelow = 0.35f;
-        const float BenchAbove = 0.70f;
+
+        /// <summary>
+        /// The bench once more, but measured from the FLOOR the seat point
+        /// implies instead of from the seat point itself - metres above
+        /// (seat point + FeetAboveSeat). This is the band BankSchnitt cuts.
+        ///
+        /// WHY A SECOND PAIR OF NUMBERS. A seat point is NOT the cushion: the
+        /// game's sit clip floats the whole body above the root it is given
+        /// (research/tank_crew_check.py, "the root is not the seat cushion"),
+        /// and on the UAZ-3151 it measures root 0, body underside +0.90, feet
+        /// +1.85, seated head +5.95, cabin roof +5.92 units. So the bench
+        /// stands ABOVE the seat point by more than the height of a seated
+        /// man's knees - the old zone over the seat point ended below the floor
+        /// and could not hold a
+        /// single triangle of the bench. That is why the whole-part test never
+        /// found one on this donor and why the bench was still standing in the
+        /// field report of 2026-09-20.
+        ///
+        /// Above the floor the same bench is plain: the cushion is about 0.30 m
+        /// up, the backrest and its headrest reach about 1 m, and the cabin
+        /// roof is a good 0.6 m higher still. The band starts just clear of the
+        /// floor so the load floor itself is never cut.
+        /// </summary>
+        const float BenchFloorClear = 0.06f;
+        const float BenchTopAboveFloor = 0.95f;
 
         public static ConfigEntry<bool> CfgEnabled;
         public static ConfigEntry<string> CfgKey;
@@ -466,7 +506,12 @@ namespace NextDayRevival
             // rear: the pintle gets bolted to the backrest and the gunner ends up
             // standing on it (field report 2026-09-19). Its seat POINTS are still
             // in the list at this moment; Sitze removes them a few lines below.
-            Ruecksitze(car, seats, min, max, unitsPerMetre);
+            // The RETURN VALUE matters further down (DeckStep): a removal that
+            // found nothing did not confirm the measured surface is a floor and
+            // not the bench itself, so the tolerance built for a genuine raised
+            // load bed must not be granted to it (field report
+            // anothertechnicalbug/anothertechnicalbug2, 2026-09-20).
+            int ruecksitzeEntfernt = Ruecksitze(car, seats, min, max, unitsPerMetre);
 
             // How far the man has to stand behind the pintle axis so that the
             // grips of the mounted gun land in his hands: the grips' own offset
@@ -537,19 +582,38 @@ namespace NextDayRevival
             // surface may still be used - it is the sharper number, and on a
             // donor with a real bed it IS the bed - but only up to one step over
             // the floor the donor's own passengers stand on.
+            //
+            // THAT STEP IS EARNED, NOT ASSUMED. A follow-up field report (screen-
+            // shots anothertechnicalbug/anothertechnicalbug2, 2026-09-20) showed
+            // the same symptom the fourth pass was meant to close: the gunner
+            // still standing above the rear seats. Ruecksitze already tells the
+            // caller when it could not confirm the bench was actually taken off
+            // (a donor whose interior is one mesh shared with the front seats
+            // fails both the size cap and the front-seat guard on purpose - see
+            // its own header). In that case the "surface" just measured is most
+            // likely the bench itself, not a genuine raised load bed, so the
+            // knee-height tolerance a real bed would deserve is not granted: the
+            // station is pulled all the way down to the floor instead, exactly
+            // "das mg mit standfuss auf den boden des fahrzeuges" from the
+            // report. A confirmed removal still keeps the normal tolerance.
             float boden;
             if (CfgDeckStep != null && CfgDeckStep.Value > 0f
                 && Sitzboden(car.transform, seats, out boden))
             {
-                float grenze = boden + CfgDeckStep.Value * height;
+                float step = ruecksitzeEntfernt > 0 ? CfgDeckStep.Value * height : 0f;
+                float grenze = boden + step;
                 if (deckY > grenze)
                 {
                     RevivalPlugin.L.LogInfo("Technical: die Standflaeche lag "
                         + (deckY - boden).ToString("0.00") + " Einheiten ueber dem "
-                        + "Fussboden des Spenders (" + boden.ToString("0.00")
-                        + ") - das ist ein Ausguck und keine Ladeflaeche. "
-                        + "Heruntergezogen auf " + grenze.ToString("0.00")
-                        + " (DeckStep " + CfgDeckStep.Value.ToString("0.00") + ").");
+                        + "Fussboden des Spenders (" + boden.ToString("0.00") + ") - "
+                        + (ruecksitzeEntfernt > 0
+                            ? "das ist ein Ausguck und keine Ladeflaeche."
+                            : "die Ruecksitzbank konnte nicht bestaetigt entfernt "
+                              + "werden, also KEIN Toleranzschritt.")
+                        + " Heruntergezogen auf " + grenze.ToString("0.00")
+                        + " (DeckStep " + CfgDeckStep.Value.ToString("0.00")
+                        + (ruecksitzeEntfernt > 0 ? "" : ", hier 0 wirksam") + ").");
                     deckY = grenze;
                     herkunft = herkunft + ", auf Fussbodenhoehe heruntergezogen";
                 }
@@ -864,6 +928,16 @@ namespace NextDayRevival
         /// Take the donor's REAR BENCH off the truck: its parts are deactivated
         /// and its own colliders are switched off with them.
         ///
+        /// Returns how many VISIBLE bench parts were actually removed - whole
+        /// parts deactivated, plus meshes the bench was cut out of
+        /// (BankSchnitt). Colliders deliberately do NOT count: a collider
+        /// switched off behind a bench that is still drawn removes nothing a
+        /// player can see. 0 therefore means removal could not be CONFIRMED
+        /// (see the "nothing found" branch below), and the caller (Aufbauen)
+        /// reads that to decide whether the DeckStep tolerance is earned: a
+        /// surface measured over a bench that might still be standing there is
+        /// not a raised load bed and gets no step at all.
+        ///
         /// Field report 2026-09-19: "aktuell steht das mg AUF der sitzreihe
         /// drauf, und der spieler steht fast wie auf einem ausguck auf dem ding.
         /// Die hintere sitzreihe muss weg, gibt eh nur die 2 sitze vorne zum
@@ -876,11 +950,18 @@ namespace NextDayRevival
         /// WHICH PARTS. The bench is not identified by name - the donor's mesh
         /// names are the donor's business - but by the seat points that are about
         /// to be removed: a part counts when its centre is within a bench of one
-        /// of them (BenchSide/Depth/Below/Above, in metres). Two guards keep the
+        /// of them (BenchSide/Depth and the implied-floor height, in metres). Two guards keep the
         /// truck itself: nothing longer than 0.45 of the vehicle or wider than
         /// 0.95 of it can be furniture, and nothing that holds a FRONT seat point
         /// as well is touched - that is the shared interior, and hiding it would
         /// take the driver's seat with it.
+        ///
+        /// AND WHEN THERE IS NO SUCH PART. On a donor whose cabin is ONE mesh,
+        /// those two guards refuse everything and the bench stays standing -
+        /// which is what the field report of 2026-09-20 came back with. The
+        /// bench is then cut out of the shared mesh at triangle level instead
+        /// (BankSchnitt), so "die letzte sitzreihe MUSS WEG" holds on that donor
+        /// too while the front seats stay whole.
         ///
         /// The COLLIDERS matter as much as the renderers: the deck is measured
         /// with a ray (Oberflaeche), and a bench whose backrest is invisible but
@@ -920,7 +1001,7 @@ namespace NextDayRevival
 
                 Vector3 lo, hi;
                 if (!Kasten(root, col, out lo, out hi)) continue;
-                if (!IstBank(lo, hi, vorn, hinten, length, width, unitsPerMetre))
+                if (!IstBank(root, lo, hi, vorn, hinten, length, width, unitsPerMetre))
                     continue;
 
                 col.enabled = false;
@@ -945,7 +1026,7 @@ namespace NextDayRevival
 
                 Vector3 lo, hi;
                 if (!Huelle(root, mf, out lo, out hi)) continue;
-                if (!IstBank(lo, hi, vorn, hinten, length, width, unitsPerMetre))
+                if (!IstBank(root, lo, hi, vorn, hinten, length, width, unitsPerMetre))
                     continue;
 
                 mf.gameObject.SetActive(false);
@@ -953,22 +1034,267 @@ namespace NextDayRevival
                 if (namen.Count < 6) namen.Add(mf.name);
             }
 
-            if (weg == 0 && fest == 0)
+            // NOTHING TO HIDE IS NOT NOTHING TO REMOVE. If no whole part could
+            // be taken off, the bench is not a part: on this donor it is
+            // geometry inside a mesh it SHARES with the rest of the interior,
+            // which fails the size cap and the front-seat guard above on
+            // purpose - hiding that whole mesh would take the driver's seat and
+            // the dashboard with it. The bench is then cut OUT of that mesh,
+            // triangle by triangle, and only the triangles standing in the
+            // bench zone go (BankSchnitt). "Die letzte sitzreihe MUSS WEG"
+            // (field report 2026-09-20) is not satisfied by a lower gun alone.
+            int geschnitten = 0;
+            if (weg == 0)
+                geschnitten = BankSchnitt(car, root, vorn, hinten, unitsPerMetre, namen);
+            weg += geschnitten;
+
+            if (weg == 0)
             {
-                RevivalPlugin.L.LogInfo("Technical: an den " + hinten.Count
-                    + " entfernten Sitzpunkten haengt kein eigenes Teil - der "
-                    + "Spender hat keine abtrennbare Ruecksitzbank. Die "
-                    + "Standflaeche wird trotzdem auf Fussbodenhoehe begrenzt "
-                    + "(DeckStep).");
+                // Diagnostic only, so a repeat report does not need another blind
+                // pass: how many mesh parts sit in the bench ZONE at all, before
+                // the size cap and the front-seat guard get to reject any of
+                // them. Zero here means the zone itself missed the bench (retune
+                // BenchSide/Depth/FloorClear/TopAboveFloor); a positive count here means a
+                // candidate existed but was too big or shared with a front seat
+                // - the donor's interior is most likely one merged mesh, and
+                // then not even the cut could read it (see BankSchnitt's own
+                // warning), which is the case DeckStep trusts with zero
+                // tolerance (see the caller).
+                int inZoneUngeprueft = 0;
+                for (int i = 0; i < all.Length; i++)
+                {
+                    MeshFilter mf = all[i];
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
+                    Vector3 lo, hi;
+                    if (!Huelle(root, mf, out lo, out hi)) continue;
+                    if (ZoneBeruehrt(root, lo, hi, hinten, unitsPerMetre))
+                        inZoneUngeprueft++;
+                }
+
+                RevivalPlugin.L.LogWarning("Technical: an den " + hinten.Count
+                    + " entfernten Sitzpunkten haengt kein eigenes Teil (" + inZoneUngeprueft
+                    + " Teile liegen in der Bankzone, wurden aber von der Groessen- "
+                    + "oder Vordersitz-Pruefung verworfen), und auch aus dem "
+                    + "gemeinsamen Innenraum-Mesh konnte nichts herausgeschnitten "
+                    + "werden - die Sitzreihe bleibt SICHTBAR. " + fest
+                    + " Kollisionskoerper sind trotzdem abgeschaltet. Die "
+                    + "Standflaeche wird deshalb HART auf Fussbodenhoehe begrenzt, "
+                    + "ohne DeckStep-Toleranz.");
                 return 0;
             }
 
-            RevivalPlugin.L.LogInfo("Technical: Ruecksitzbank entfernt - " + weg
-                + " Teile ausgeblendet" + (namen.Count > 0
+            RevivalPlugin.L.LogInfo("Technical: Ruecksitzbank entfernt - "
+                + (weg - geschnitten) + " Teile ausgeblendet, " + geschnitten
+                + " Meshes beschnitten" + (namen.Count > 0
                     ? " (" + string.Join(", ", namen.ToArray()) + ")" : "")
                 + ", " + fest + " Kollisionskoerper abgeschaltet. Darauf stand "
                 + "sonst die Lafette.");
-            return weg + fest;
+            // ONLY the visible bench counts as a confirmed removal. A collider
+            // switched off behind a bench that is still drawn is not the thing
+            // the report asked for, and it must not buy the DeckStep tolerance
+            // in the caller either.
+            return weg;
+        }
+
+        /// <summary>
+        /// Cut the rear bench OUT OF THE MESH it shares with the rest of the
+        /// interior. Returns the number of meshes that lost geometry.
+        ///
+        /// This is the answer to the donor the whole-part pass above cannot
+        /// serve: a cabin modelled as ONE mesh - dashboard, front seats and
+        /// rear bench together - is both too big for the size cap and holds a
+        /// front seat point, so it is refused there on purpose, and refusing it
+        /// leaves the bench standing. Geometry does not care about object
+        /// boundaries, so the bench is taken out at TRIANGLE level instead: a
+        /// triangle goes when its centre stands in the bench zone of a seat
+        /// point this rebuild is about to delete (BenchSide/Depth and the
+        /// implied-floor height, the same zone the whole-part test uses), and it stays when it also
+        /// stands in the same zone around a FRONT seat point - between two rows
+        /// the front seat wins, because a driver's seat with a hole in it is a
+        /// worse bug than a bench remnant.
+        ///
+        /// THE DONOR'S OWN MESH IS NEVER TOUCHED. A Mesh asset is shared by
+        /// every vehicle of that kind in the scene (and by the next one the
+        /// game loads), so writing into it would cut the bench out of every UAZ
+        /// in the world. A NEW mesh is built with the same vertices and the
+        /// surviving triangles, and only this MeshFilter is pointed at it.
+        ///
+        /// Every LOD stage is its own mesh and is cut with the same test, so
+        /// the bench cannot come back when the camera walks away.
+        ///
+        /// THE FRONT-SEAT GUARD. A triangle in the zone of a front seat stays,
+        /// even when it also reaches the rear zone. A mesh the engine will not
+        /// read out (model importers commonly ship with Read/Write disabled) is
+        /// skipped rather than guessed at - the caller then reports the bench as
+        /// NOT removed, which is what keeps the DeckStep tolerance at zero.
+        /// </summary>
+        static int BankSchnitt(GameObject car, Transform root, List<Vector3> vorn,
+                               List<Vector3> hinten, float unitsPerMetre,
+                               List<string> namen)
+        {
+            if (car == null || root == null || hinten == null || hinten.Count == 0)
+                return 0;
+
+            int geschnitten = 0;
+            bool lesefehler = false;
+            MeshFilter[] all = car.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                MeshFilter mf = all[i];
+                if (mf == null || mf.sharedMesh == null) continue;
+                if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
+                if (mf.GetComponent<Renderer>() == null) continue;
+                if (!mf.gameObject.activeSelf) continue;
+
+                Vector3 lo, hi;
+                if (!Huelle(root, mf, out lo, out hi)) continue;
+                if (!ZoneBeruehrt(root, lo, hi, hinten, unitsPerMetre)) continue;
+
+                try
+                {
+                    if (Schneiden(mf, root, vorn, hinten, unitsPerMetre))
+                    {
+                        geschnitten++;
+                        if (namen.Count < 6) namen.Add(mf.name + " (Schnitt)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!lesefehler)
+                    {
+                        lesefehler = true;
+                        RevivalPlugin.L.LogWarning("Technical: das Mesh \""
+                            + mf.name + "\" laesst sich nicht auslesen ("
+                            + ex.Message + ") - aus einem solchen Mesh kann die "
+                            + "Ruecksitzbank nicht herausgeschnitten werden.");
+                    }
+                }
+            }
+            return geschnitten;
+        }
+
+        /// <summary>
+        /// One mesh: build the same mesh without the triangles standing in the
+        /// bench zone, and point this MeshFilter at it. Returns false when
+        /// nothing was in the zone after all.
+        /// </summary>
+        static bool Schneiden(MeshFilter mf, Transform root, List<Vector3> vorn,
+                              List<Vector3> hinten, float unitsPerMetre)
+        {
+            Mesh alt = mf.sharedMesh;
+            int sub = alt.subMeshCount;
+            if (sub <= 0) return false;
+
+            Vector3[] ecken = alt.vertices;      // throws on an unreadable mesh
+            if (ecken == null || ecken.Length == 0) return false;
+
+            // Mesh-local to ROOT-local in one matrix, so a rotated or scaled
+            // part measures the same as one standing at the origin - the same
+            // reason Huelle transforms its corners through the root.
+            Matrix4x4 m = root.worldToLocalMatrix * mf.transform.localToWorldMatrix;
+            Vector3[] lokal = new Vector3[ecken.Length];
+            for (int v = 0; v < ecken.Length; v++)
+                lokal[v] = m.MultiplyPoint3x4(ecken[v]);
+
+            int[][] behalten = new int[sub][];
+            int raus = 0;
+            int gesamt = 0;
+            for (int s = 0; s < sub; s++)
+            {
+                int[] tri = alt.GetTriangles(s);
+                if (tri == null) { behalten[s] = new int[0]; continue; }
+
+                List<int> keep = new List<int>(tri.Length);
+                for (int k = 0; k + 2 < tri.Length; k += 3)
+                {
+                    gesamt++;
+                    Vector3 mitte = (lokal[tri[k]] + lokal[tri[k + 1]]
+                                     + lokal[tri[k + 2]]) / 3f;
+                    if (InBankZone(root, mitte, hinten, unitsPerMetre)
+                        && !InBankZone(root, mitte, vorn, unitsPerMetre))
+                    {
+                        raus++;
+                        continue;
+                    }
+                    keep.Add(tri[k]);
+                    keep.Add(tri[k + 1]);
+                    keep.Add(tri[k + 2]);
+                }
+                behalten[s] = keep.ToArray();
+            }
+
+            if (raus == 0 || gesamt == 0) return false;
+
+            Mesh neu = new Mesh();
+            neu.name = alt.name + "_NDR_ohneBank";
+            neu.vertices = ecken;
+
+            Vector3[] normalen = alt.normals;
+            if (normalen != null && normalen.Length == ecken.Length) neu.normals = normalen;
+            Vector4[] tangenten = alt.tangents;
+            if (tangenten != null && tangenten.Length == ecken.Length) neu.tangents = tangenten;
+            Vector2[] uv = alt.uv;
+            if (uv != null && uv.Length == ecken.Length) neu.uv = uv;
+            Vector2[] uv2 = alt.uv2;
+            if (uv2 != null && uv2.Length == ecken.Length) neu.uv2 = uv2;
+            Color[] farben = alt.colors;
+            if (farben != null && farben.Length == ecken.Length) neu.colors = farben;
+
+            neu.subMeshCount = sub;
+            for (int s = 0; s < sub; s++)
+                neu.SetTriangles(behalten[s] == null ? new int[0] : behalten[s], s);
+            neu.RecalculateBounds();
+
+            // sharedMesh and not mesh: this points THIS filter at the new mesh.
+            // The donor's own asset is not written to at all - see the header.
+            mf.sharedMesh = neu;
+            RevivalPlugin.L.LogInfo("Technical: aus \"" + mf.name + "\" "
+                + raus + " von " + gesamt + " Dreiecken herausgeschnitten - das "
+                + "ist die Ruecksitzbank im gemeinsamen Innenraum-Mesh.");
+            return true;
+        }
+
+        /// <summary>Does this point stand in the bench zone of one of those
+        /// seat points? The same box the whole-part test uses, but around a
+        /// POINT instead of around a part's centre.</summary>
+        static bool InBankZone(Transform root, Vector3 p, List<Vector3> punkte,
+                               float unitsPerMetre)
+        {
+            if (root == null || punkte == null) return false;
+            float floor = FeetAboveSeat / Hoehenmass(root);
+            for (int i = 0; i < punkte.Count; i++)
+            {
+                Vector3 d = p - punkte[i];
+                if (Mathf.Abs(d.x) <= BenchSide * unitsPerMetre
+                    && Mathf.Abs(d.z) <= BenchDepth * unitsPerMetre
+                    && d.y >= floor + BenchFloorClear * unitsPerMetre
+                    && d.y <= floor + BenchTopAboveFloor * unitsPerMetre)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Does this box reach into the bench zone of one of those
+        /// seat points at all? The cheap test that keeps the triangle walk off
+        /// every mesh on the vehicle.</summary>
+        static bool ZoneBeruehrt(Transform root, Vector3 lo, Vector3 hi,
+                                 List<Vector3> punkte, float unitsPerMetre)
+        {
+            if (root == null || punkte == null) return false;
+            float floor = FeetAboveSeat / Hoehenmass(root);
+            for (int i = 0; i < punkte.Count; i++)
+            {
+                Vector3 p = punkte[i];
+                if (hi.x < p.x - BenchSide * unitsPerMetre) continue;
+                if (lo.x > p.x + BenchSide * unitsPerMetre) continue;
+                if (hi.z < p.z - BenchDepth * unitsPerMetre) continue;
+                if (lo.z > p.z + BenchDepth * unitsPerMetre) continue;
+                if (hi.y < p.y + floor + BenchFloorClear * unitsPerMetre) continue;
+                if (lo.y > p.y + floor + BenchTopAboveFloor * unitsPerMetre) continue;
+                return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -976,24 +1302,26 @@ namespace NextDayRevival
         /// vehicle itself can never be), then the front seats (the shared
         /// interior is not the bench), then the zone around a removed seat point.
         /// </summary>
-        static bool IstBank(Vector3 lo, Vector3 hi, List<Vector3> vorn,
+        static bool IstBank(Transform root, Vector3 lo, Vector3 hi, List<Vector3> vorn,
                             List<Vector3> hinten, float length, float width,
                             float unitsPerMetre)
         {
+            if (root == null) return false;
             if (hi.z - lo.z > 0.45f * length) return false;   // the body, not a seat
             if (hi.x - lo.x > 0.95f * width) return false;    // spans the vehicle
 
             for (int i = 0; i < vorn.Count; i++)
                 if (Drin(lo, hi, vorn[i], 0.05f * length)) return false;
 
+            float floor = FeetAboveSeat / Hoehenmass(root);
             Vector3 mitte = (lo + hi) * 0.5f;
             for (int i = 0; i < hinten.Count; i++)
             {
                 Vector3 d = mitte - hinten[i];
                 if (Mathf.Abs(d.x) <= BenchSide * unitsPerMetre
                     && Mathf.Abs(d.z) <= BenchDepth * unitsPerMetre
-                    && d.y >= -BenchBelow * unitsPerMetre
-                    && d.y <= BenchAbove * unitsPerMetre)
+                    && d.y >= floor + BenchFloorClear * unitsPerMetre
+                    && d.y <= floor + BenchTopAboveFloor * unitsPerMetre)
                     return true;
             }
             return false;
@@ -1691,6 +2019,8 @@ namespace NextDayRevival
         public static ConfigEntry<float> CfgDelay;
         public static ConfigEntry<float> CfgRange;
         public static ConfigEntry<float> CfgRecoil;
+        public static ConfigEntry<float> CfgTracerSpeed;
+        public static ConfigEntry<float> CfgTracerLength;
         public static ConfigEntry<float> CfgSensitivity;
         public static ConfigEntry<float> CfgTurnSpeed;
         public static ConfigEntry<float> CfgPitchMin;
@@ -1737,6 +2067,24 @@ namespace NextDayRevival
                 + "gefordert: die Waffe haengt in einer Lafette und nicht in "
                 + "den Haenden. Bei neun Schuss je Sekunde sind auch 0.04 Grad "
                 + "noch gut ein Drittel Grad Wanderung in der Sekunde.");
+            CfgTracerSpeed = cfg.Bind("TechnicalGun", "TracerSpeed", 700f,
+                "Welteinheiten je Sekunde, mit denen die Leuchtspur sichtbar "
+                + "vom Lauf zum Ziel FLIEGT, statt die ganze Strecke in einem "
+                + "Bild zu zeichnen. Feldbericht 2026-09-20 "
+                + "(anothertechnicalbug/anothertechnicalbug2): \"aktuell sind "
+                + "die schuesse diese langweiligen raytraces, ich will das die "
+                + "schuesse aussehen so wie die schuesse aus der dragunov aber "
+                + "halt mit hohem frequenz\". Die Feuerrate selbst ist schon "
+                + "hoch (FireDelay, neun Schuss je Sekunde); dieser Wert macht "
+                + "aus jedem einzelnen Schuss ein fliegendes Geschoss statt "
+                + "einer sofort erscheinenden Linie. Bei mehreren Schuss "
+                + "gleichzeitig in der Luft entsteht so der Strom aus "
+                + "Leuchtspurgeschossen, den ein MG im Dauerfeuer zeigt.");
+            CfgTracerLength = cfg.Bind("TechnicalGun", "TracerLength", 6f,
+                "Laenge des fliegenden Leuchtspur-Streifens in Welteinheiten. "
+                + "Kuerzer als die Reichweite: es ist ein Streifen, der ueber "
+                + "die Strecke wandert, keine durchgezogene Linie vom Lauf bis "
+                + "zum Ziel.");
             CfgSensitivity = cfg.Bind("TechnicalGun", "Sensitivity", 2.2f,
                 "Grad Schwenk je Einheit Mausbewegung.");
             CfgTurnSpeed = cfg.Bind("TechnicalGun", "TurnSpeed", 260f,
@@ -3188,27 +3536,43 @@ namespace NextDayRevival
         /// <summary>
         /// Tracer from the MUZZLE to the impact, not from the eye: in third
         /// person the gunner watches his own weapon, and a burst that starts in
-        /// mid-air beside him reads as a bug. Thinner than the BTR's - nine
-        /// rounds a second must not fill the screen.
+        /// mid-air beside him reads as a bug.
+        ///
+        /// UNTIL the field report of 2026-09-20 (screenshots
+        /// anothertechnicalbug/anothertechnicalbug2) this drew the halo and the
+        /// core as ONE static line spanning the whole muzzle-to-impact distance,
+        /// visible for a fixed lifetime - correct for an instant
+        /// Physics.RaycastAll, but "diese langweiligen raytraces" (these boring
+        /// raytraces) is exactly what a line that snaps into existence looks
+        /// like. Both now travel instead: <see cref="TechnicalTracerStreak"/>
+        /// is a short glowing segment whose head advances from the muzzle at
+        /// TracerSpeed and whose tail follows TracerLength behind it, the way a
+        /// rifle's own tracer round is drawn - the report asked for the
+        /// Dragunov's look. The rate of fire was already high (FireDelay, nine
+        /// rounds a second); several streaks in flight together at once is what
+        /// "mit hohem frequenz" asked for on top of that, not a faster streak by
+        /// itself. Thinner than the BTR's - nine rounds a second must not fill
+        /// the screen.
         /// </summary>
         static void Tracer(Vector3 von, Vector3 bis)
         {
             try
             {
-                List<Vector3> bahn = new List<Vector3>();
-                bahn.Add(von);
-                bahn.Add(bis);
-                RocketHook.SpawnTracer(bahn, 0.30f, 0.12f, SpurHof, SpurHof, 0.09f);
-                RocketHook.SpawnTracer(bahn, 0.11f, 0.04f, SpurKern, SpurEnde, 0.16f);
+                float tempo = CfgTracerSpeed == null ? 700f : CfgTracerSpeed.Value;
+                float laenge = CfgTracerLength == null ? 6f : CfgTracerLength.Value;
+                TechnicalTracerStreak.Spawn(von, bis, tempo, laenge * 1.6f,
+                                            0.24f, 0.10f, SpurHof, SpurHof);
+                TechnicalTracerStreak.Spawn(von, bis, tempo, laenge,
+                                            0.11f, 0.04f, SpurKern, SpurEnde);
 
                 Vector3 achse = bis - von;
-                float laenge = achse.magnitude;
-                if (laenge > 0.01f)
+                float distanz = achse.magnitude;
+                if (distanz > 0.01f)
                 {
-                    float feuer = Mathf.Min(2.5f, laenge);
+                    float feuer = Mathf.Min(2.5f, distanz);
                     List<Vector3> muendung = new List<Vector3>();
                     muendung.Add(von);
-                    muendung.Add(von + achse / laenge * feuer);
+                    muendung.Add(von + achse / distanz * feuer);
                     RocketHook.SpawnTracer(muendung, 0.80f, 0.05f,
                                            Color.white, SpurHof, 0.05f);
                 }
@@ -3369,6 +3733,103 @@ namespace NextDayRevival
         {
             object v = Field(owner, name);
             return v is int ? (int)v : -1;
+        }
+    }
+
+    /// <summary>
+    /// A short glowing segment that visibly FLIES from the muzzle to the
+    /// impact point instead of the whole line materialising in one frame -
+    /// the fix for "diese langweiligen raytraces" (field report of
+    /// 2026-09-20, screenshots anothertechnicalbug/anothertechnicalbug2). The
+    /// head advances at TracerGeschwindigkeit; the tail follows
+    /// TracerLaenge behind it, so the visible part is a moving streak and not
+    /// a static line - the way the game's own rifle tracers, the Dragunov's
+    /// included, read as a round in flight rather than a drawn line.
+    ///
+    /// One instance per line per shot (TechnicalGun.Tracer spawns two, halo
+    /// and core). At the MG's own high rate of fire several are in the air
+    /// together, which is the "hohe Frequenz" half of the same report - the
+    /// travel speed makes ONE shot look right, the existing FireDelay makes
+    /// MANY of them look like a stream.
+    ///
+    /// A HARD TIMEOUT guards a misconfigured TracerSpeed: without it, a value
+    /// of 0 or a very small one would leave the segment stuck at the muzzle
+    /// forever - a leaked GameObject that never reaches its target and never
+    /// self-destroys.
+    /// </summary>
+    internal sealed class TechnicalTracerStreak : MonoBehaviour
+    {
+        const float Timeout = 3f;
+        const float Nachleuchten = 0.04f;
+
+        Vector3 _von, _bis;
+        float _tempo;
+        float _laenge;
+        float _t;
+        bool _fertig;
+        LineRenderer _line;
+
+        /// <summary>Creates the streak and starts it flying. Silently does
+        /// nothing if the shared tracer material cannot be found - the same
+        /// fail-open RocketHook.SpawnTracer already uses, so a missing shader
+        /// costs a visual and not a shot.</summary>
+        internal static void Spawn(Vector3 von, Vector3 bis, float tempo,
+                                   float laenge, float startWidth, float endWidth,
+                                   Color vorn, Color hinten)
+        {
+            try
+            {
+                Material mat = RocketHook.TracerMaterial();
+                if (mat == null) return;
+
+                GameObject go = new GameObject("NDR MG Leuchtspur");
+                LineRenderer line = go.AddComponent<LineRenderer>();
+                line.sharedMaterial = mat;
+                line.useWorldSpace = true;
+                line.positionCount = 2;
+                line.startWidth = startWidth;
+                line.endWidth = endWidth;
+                line.startColor = vorn;
+                line.endColor = hinten;
+                line.SetPosition(0, von);
+                line.SetPosition(1, von);
+
+                TechnicalTracerStreak s = go.AddComponent<TechnicalTracerStreak>();
+                s._von = von;
+                s._bis = bis;
+                s._tempo = Mathf.Max(50f, tempo);
+                s._laenge = Mathf.Max(0.05f, laenge);
+                s._line = line;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Technical-MG: fliegende Leuchtspur - " + ex.Message);
+            }
+        }
+
+        void Update()
+        {
+            if (_fertig) return;
+            _t += Time.deltaTime;
+            if (_t > Timeout) { Destroy(gameObject); return; }
+            if (_line == null) { Destroy(gameObject); return; }
+
+            Vector3 achse = _bis - _von;
+            float distanz = achse.magnitude;
+            if (distanz < 0.001f) { Destroy(gameObject); return; }
+
+            Vector3 richtung = achse / distanz;
+            float kopf = Mathf.Min(distanz, _t * _tempo);
+            Vector3 spitze = _von + richtung * kopf;
+            Vector3 ende = _von + richtung * Mathf.Max(0f, kopf - _laenge);
+            _line.SetPosition(0, ende);
+            _line.SetPosition(1, spitze);
+
+            if (kopf >= distanz)
+            {
+                _fertig = true;
+                Destroy(gameObject, Nachleuchten);
+            }
         }
     }
 
