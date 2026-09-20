@@ -523,6 +523,93 @@ namespace NextDayRevival
 
         // ------------------------------------------------------- emplacements
 
+        sealed class Emplacement
+        {
+            public Vector3 Spot;
+            public Vector3 Normal;
+        }
+
+        // Network placements are keyed by scene plus settlement centre. They
+        // deliberately outlive one local placement attempt: a client may hear
+        // the master's answer before its own terrain is close enough to build,
+        // or after its local search has already exhausted its retries.
+        static readonly Dictionary<string, Emplacement> _emplacements =
+            new Dictionary<string, Emplacement>();
+        static readonly Dictionary<string, float> _nextEmplacementSend =
+            new Dictionary<string, float>();
+        const float EmplacementRepeat = 10f;
+
+        static bool HasTube(int settlementId)
+        {
+            for (int i = 0; i < _tubes.Count; i++)
+                if (_tubes[i].SettlementId == settlementId && _tubes[i].Go != null)
+                    return true;
+            return false;
+        }
+
+        static void PublishEmplacement(int settlementId, bool force)
+        {
+            if (!Master()) return;
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (t.SettlementId != settlementId || t.Go == null) continue;
+                string key = ArtyRoom.Key(t.Centre);
+                float next;
+                if (!force && _nextEmplacementSend.TryGetValue(key, out next)
+                    && Time.time < next) return;
+                _nextEmplacementSend[key] = Time.time + EmplacementRepeat;
+                Vector3 normal = t.Go.transform.up;
+                Vector3 spot = t.Go.transform.position - normal * 0.02f;
+                Net.SendEmplacement(key, spot, normal);
+                RevivalPlugin.L.LogInfo("Mortar: master emplacement " + key + " at "
+                    + spot.ToString("0.0") + " sent.");
+                return;
+            }
+        }
+
+        static bool PutAt(Tube t, Vector3 spot, Vector3 normal)
+        {
+            if (t == null || t.Go == null) return false;
+            normal.Normalize();
+            Vector3 position = spot + normal * 0.02f;
+            bool moved = (t.Go.transform.position - position).sqrMagnitude > 0.0001f
+                || Vector3.Dot(t.Go.transform.up, normal) < 0.9999f;
+            if (!moved) return false;
+
+            Vector3 out3 = spot - t.Centre;
+            out3.y = 0f;
+            if (out3.sqrMagnitude < 0.01f) out3 = Vector3.forward;
+            t.Go.transform.position = position;
+            t.Go.transform.rotation = Quaternion.LookRotation(out3.normalized, Vector3.up);
+            t.Go.transform.up = normal;
+            t.Yaw = t.Go.transform.eulerAngles.y;
+            t.WantYaw = t.Yaw;
+            Point(t);
+            return true;
+        }
+
+        static void ReceiveEmplacement(string key, Vector3 spot, Vector3 normal)
+        {
+            Emplacement place = new Emplacement();
+            place.Spot = spot;
+            place.Normal = normal.normalized;
+            _emplacements[key] = place;
+
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (t.Go == null || ArtyRoom.Key(t.Centre) != key) continue;
+                bool moved = PutAt(t, place.Spot, place.Normal);
+                RevivalPlugin.L.LogInfo("Mortar: received emplacement " + key + " at "
+                    + place.Spot.ToString("0.0") + (moved
+                        ? " moved the local gun." : " already matches the local gun."));
+                return;
+            }
+            RevivalPlugin.L.LogInfo("Mortar: received emplacement " + key + " at "
+                + place.Spot.ToString("0.0") + " remembered until the local gun is raised.");
+        }
+
         /// <summary>Gives every settlement near the player its gun. The scan is
         /// a full FindObjectsOfType, so it runs every second while a settlement
         /// in range is still without one and every five otherwise.
@@ -589,7 +676,26 @@ namespace NextDayRevival
                 if (s.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)
                     && !IsMarkedSite(s)) continue;
                 int id = s.gameObject.GetInstanceID();
-                if (_placed.ContainsKey(id)) continue;
+                Vector3 centre = s.transform.position;
+                if (_placed.ContainsKey(id))
+                {
+                    if (HasTube(id))
+                    {
+                        PublishEmplacement(id, false);
+                        continue;
+                    }
+                    // A late master answer reopens a client-local search that
+                    // had been written off after MaxTries. Applying a received
+                    // pose needs no terrain collider, so it cannot fail for the
+                    // reason the old local search did.
+                    if (_emplacements.ContainsKey(ArtyRoom.Key(centre)))
+                    {
+                        _placed.Remove(id);
+                        _tries.Remove(id);
+                        _closest.Remove(id);
+                    }
+                    else continue;
+                }
                 // A PLACE, not a group of men. Asked before the distance test and
                 // remembered, so a quest camp is looked at once per scene and
                 // never again.
@@ -601,7 +707,6 @@ namespace NextDayRevival
                         + "\" - " + no + ".");
                     continue;
                 }
-                Vector3 centre = s.transform.position;
                 float away = Vector3.Distance(new Vector3(centre.x, 0f, centre.z),
                                               new Vector3(me.x, 0f, me.z));
                 if (away > reach)
@@ -857,9 +962,10 @@ namespace NextDayRevival
             catch { return -1; }
         }
 
-        /// <summary>Builds one emplacement at the first free, flat patch at or
-        /// around the settlement centre. False when there was no ground to
-        /// measure - the caller tries again from closer up.</summary>
+        /// <summary>Builds one emplacement at the master's received pose, or at
+        /// the best local free patch while no pose has arrived. False when the
+        /// fallback had no ground to measure - the caller tries again from
+        /// closer up.</summary>
         static bool Raise(Component settlement, Vector3 centre, int id)
         {
             // Keep the allocation idempotent even if battery setup or logging
@@ -867,7 +973,22 @@ namespace NextDayRevival
             for (int i = 0; i < _tubes.Count; i++)
                 if (_tubes[i].SettlementId == id && _tubes[i].Go != null) return true;
             Vector3 spot, normal;
-            if (!FreeGround(settlement, centre, out spot, out normal)) return false;
+            string key = ArtyRoom.Key(centre);
+            Emplacement received;
+            if (_emplacements.TryGetValue(key, out received))
+            {
+                spot = received.Spot;
+                normal = received.Normal;
+                RevivalPlugin.L.LogInfo("Mortar: received emplacement " + key + " at "
+                    + spot.ToString("0.0") + " used to raise the local gun.");
+            }
+            else
+            {
+                if (!FreeGround(settlement, centre, out spot, out normal)) return false;
+                RevivalPlugin.L.LogInfo("Mortar: " + (Master()
+                    ? "master chose emplacement " : "local fallback chose emplacement ")
+                    + key + " at " + spot.ToString("0.0") + ".");
+            }
 
             // Park the vehicle facing away from the settlement centre, so it
             // looks like it was driven into position facing outwards rather than
@@ -916,18 +1037,21 @@ namespace NextDayRevival
             // inheriting one from this file's ordering.
             ArtyBattery.GunRaised(id, go, centre, t.Name, SafeSettlement(settlement));
 
+            // Scene objects are local by design; only this compact pose crosses
+            // the wire. The periodic scan repeats it for clients that join after
+            // the first reliable event.
+            PublishEmplacement(id, true);
+
             RevivalPlugin.L.LogInfo("Mortar: gun raised for settlement \"" + t.Name
                 + "\" at " + spot.ToString("0") + " (centre " + centre.ToString("0")
                 + ", " + Vector3.Distance(centre, spot).ToString("0.0") + " m off).");
             return true;
         }
 
-        // The emplacement search. Fixed offsets walked in a fixed order, so two
-        // clients that search the same loaded terrain agree; they may still
-        // differ by a few metres when one of them searched while less of the
-        // world was streamed in, and that is harmless - the gun is a local
-        // object, only the impact point travels over the wire, and nothing
-        // about a fire mission is derived from where the other client drew it.
+        // The fail-open emplacement search. Fixed offsets are walked in a fixed
+        // order, but streamed colliders and local config may still differ. The
+        // master's result therefore travels as kind 3; a client uses this search
+        // only while it has not heard that result.
         const int PlaceRings = 8;      // rings between the centre and the rim
         const int PlacePerRing = 12;   // candidates on each of them
         const int RoomRays = 12;       // directions the room around a patch is measured in
@@ -2897,11 +3021,11 @@ namespace NextDayRevival
 
         // -------------------------------------------------------- the network
 
-        /// <summary>One event, two directions: "a shell went off here, apply it
-        /// to what you own" from a joined client to the master, and the same
-        /// event with a fourth float from the master to everybody when the NPC
-        /// crew fired it. Built exactly like Admin.Net, including its refusal to
-        /// hook when the configured code collides with another channel.</summary>
+        /// <summary>One event carries player impacts to the master, NPC impacts
+        /// and emplacement poses from the master, plus the artillery battery's
+        /// tagged control messages. Built exactly like Admin.Net, including its
+        /// refusal to hook when the configured code collides with another
+        /// channel.</summary>
         internal static class Net
         {
             static bool _hooked, _failed;
@@ -3007,6 +3131,35 @@ namespace NextDayRevival
                 catch (Exception ex) { RevivalPlugin.L.LogWarning("Artillery event: " + ex.Message); }
             }
 
+            internal static void SendEmplacement(string key, Vector3 spot, Vector3 normal)
+            {
+                SendArty(new object[] { "arty-v1", 3, key,
+                    new float[] { spot.x, spot.y, spot.z,
+                                  normal.x, normal.y, normal.z } });
+            }
+
+            static bool Finite(float value)
+            {
+                return !float.IsNaN(value) && !float.IsInfinity(value);
+            }
+
+            static bool ValidEmplacement(string key, float[] pose)
+            {
+                if (key == null || pose == null || pose.Length != 6) return false;
+                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                const string prefix = "ndr.arty.";
+                int zDot = key.LastIndexOf('.');
+                int xDot = zDot <= 0 ? -1 : key.LastIndexOf('.', zDot - 1);
+                if (!key.StartsWith(prefix, StringComparison.Ordinal) || xDot <= prefix.Length
+                    || !string.Equals(key.Substring(prefix.Length, xDot - prefix.Length),
+                                      scene, StringComparison.Ordinal))
+                    return false;
+                for (int i = 0; i < pose.Length; i++)
+                    if (!Finite(pose[i])) return false;
+                Vector3 normal = new Vector3(pose[3], pose[4], pose[5]);
+                return normal.sqrMagnitude > 0.0001f;
+            }
+
             public static void OnPhotonEvent(byte code, object content, int sender)
             {
                 if (_cfgEventCode == null || code != (byte)_cfgEventCode.Value) return;
@@ -3019,6 +3172,19 @@ namespace NextDayRevival
                             || !(arty[1] is int)) return;
                         int kind = (int)arty[1];
                         if (kind == 2 && arty.Length == 3) RemoteShot(arty[2] as float[]);
+                        if (kind == 3)
+                        {
+                            string key = arty.Length == 4 ? arty[2] as string : null;
+                            float[] pose = arty.Length == 4 ? arty[3] as float[] : null;
+                            if (!ValidEmplacement(key, pose)) return;
+                            // Only the master sends kind 3, so seeing it while we
+                            // are master is the reliable event's own echo.
+                            if (Master()) return;
+                            ReceiveEmplacement(key,
+                                new Vector3(pose[0], pose[1], pose[2]),
+                                new Vector3(pose[3], pose[4], pose[5]));
+                            return;
+                        }
                         if (kind == 1 && arty.Length == 6 && Master()
                             && arty[2] is string && arty[4] is double && arty[5] is double)
                         {

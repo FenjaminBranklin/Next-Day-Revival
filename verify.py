@@ -2524,6 +2524,75 @@ def check_arty_vehicle():
          "gibt es nicht mehr")
 
 
+def check_arty_sync_authority():
+    """[20] Master-authoritative settlement artillery emplacement sync."""
+    print("[20] Artillery emplacement sync authority (static)")
+    mortar_p = os.path.join(ROOT, "RevivalMortar.cs")
+    if not os.path.exists(mortar_p):
+        bad("RevivalMortar.cs missing")
+        return
+    s = io.open(mortar_p, encoding="utf-8").read()
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Arty sync: " + why)
+
+    kind3_at = s.find("if (kind == 3)")
+    kind3_end = s.find("if (kind == 1", kind3_at)
+    kind3 = s[kind3_at:kind3_end] if kind3_at >= 0 and kind3_end > kind3_at else ""
+
+    need('new object[] { "arty-v1", 3, key' in s
+         and "spot.x, spot.y, spot.z" in s
+         and "normal.x, normal.y, normal.z" in s,
+         "kind 3 carries key, position and normal",
+         "kind 3 payload is not the required key plus float[6]")
+    need("arty.Length == 4" in kind3 and "pose.Length != 6" in s,
+         "kind 3 rejects wrong envelope and pose lengths",
+         "kind 3 length guard is incomplete")
+    need("float.IsNaN(value)" in s and "float.IsInfinity(value)" in s,
+         "kind 3 rejects non-finite floats",
+         "kind 3 accepts NaN or infinity")
+    need('const string prefix = "ndr.arty."' in s
+         and "key.Substring(prefix.Length, xDot - prefix.Length)" in s
+         and "SceneManager.GetActiveScene().name" in s,
+         "kind 3 key is restricted to the complete active scene name",
+         "kind 3 does not reject a key from another scene")
+    need("if (Master()) return;" in kind3,
+         "master ignores its own kind 3 echo",
+         "master can apply its own kind 3 echo")
+
+    need("_emplacements[key] = place;" in s
+         and "_emplacements.TryGetValue(key, out received)" in s,
+         "an early placement is remembered and consumed by Raise",
+         "a placement received before Raise is not retained")
+    need("bool moved = PutAt(t, place.Spot, place.Normal);" in s
+         and "t.Go.transform.position = position;" in s,
+         "a late placement moves an already raised local gun",
+         "a late placement cannot move an existing gun")
+    need("_placed.Remove(id);" in s
+         and "_emplacements.ContainsKey(ArtyRoom.Key(centre))" in s,
+         "a late placement reopens an exhausted local attempt",
+         "a placement arriving after MaxTries can remain permanently unused")
+
+    need("if (!Master()) return;" in s
+         and "PublishEmplacement(id, true);" in s,
+         "only the master publishes a successful placement",
+         "successful placements are not published by the master only")
+    need("PublishEmplacement(id, false);" in s
+         and "const float EmplacementRepeat" in s,
+         "the existing scan repeats placements with a rate limit",
+         "late joiners receive no rate-limited placement repeat")
+    need("if (!FreeGround(settlement, centre, out spot, out normal)) return false;" in s
+         and "local fallback chose emplacement" in s,
+         "missing network data falls open to the local search",
+         "the previous local emplacement fallback is missing")
+    need("ArtyRoom.Key(t.Centre)" in s and "ArtyRoom.Key(centre)" in s,
+         "wire identity uses the stable scene/centre key",
+         "emplacement sync does not consistently use ArtyRoom.Key")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -2544,6 +2613,7 @@ if __name__ == "__main__":
     check_convoy_column()
     check_patrol_fall()
     check_mortar()
+    check_arty_sync_authority()
     check_arty_battery()
     check_native_action_progress()
     check_technical()

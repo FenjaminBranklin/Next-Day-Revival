@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.30.0";
+        public const string VERSION = "6.31.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -488,6 +488,7 @@ namespace NextDayRevival
             PatchDroneShot();
             PatchCustomDrop();
             PatchFire();
+            NativeActionProgress.Install(_harmony); // NDR interaction bar: ending an action switches it off
             VehicleWreck.Install(_harmony);
             Turret.Install(_harmony);
             ColdHook.Install(_harmony);
@@ -2021,6 +2022,11 @@ namespace NextDayRevival
         {
             LiveRoutes.Tick();
             ClientIntegrity.Tick();
+            // Before the features run: an action whose own loop stopped gets
+            // the interaction bar taken from it here, and a bar that survived
+            // its hide is swept off the HUD. Without this a cancelled action
+            // could leave an empty bar standing for the rest of the session.
+            NativeActionProgress.Tick();
             // First in the frame: FrameProf.NewFrame folds the previous frame's
             // measured spans into the overlay averages and tracks the frame rate;
             // then everything below is measured against this frame's gap. The S/E

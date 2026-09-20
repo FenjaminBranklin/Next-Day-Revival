@@ -64,6 +64,7 @@ namespace NextDayRevival
         static PropertyInfo _inRoom;
         static PropertyInfo _playerList;
         static PropertyInfo _localPlayer;
+        static PropertyInfo _roomProp;    // room / CurrentRoom, for its name
 
         static bool _playerResolved;
         static PropertyInfo _pProps;      // customProperties
@@ -77,6 +78,7 @@ namespace NextDayRevival
         // Recomputed on a slow clock in Tick, read every frame by Draw.
         static float _nextTick;
         static string _ownPublished = "";       // what we last pushed to Photon
+        static string _publishedIn = "";        // the room we last pushed it INTO
         static readonly List<string> _mismatch = new List<string>();
 
         static GUIStyle _badgeStyle;
@@ -123,21 +125,35 @@ namespace NextDayRevival
                 Look();
                 if (_photon == null || _inRoom == null) return;
                 object inRoom = _inRoom.GetValue(null, null);
-                if (!(inRoom is bool) || !(bool)inRoom) { _ownPublished = ""; return; }
+                if (!(inRoom is bool) || !(bool)inRoom) { _ownPublished = ""; _publishedIn = ""; return; }
                 _exchangeProblem = "";
 
                 // Publish ours. Read-back is optimistic in PUN, so once it has
                 // taken we stop writing; a rejoin clears the property and we
                 // publish again on the next tick.
+                // THE ROOM, NOT ONLY THE VALUE. PhotonPlayer.customProperties
+                // is a local cache that survives leaving a room, so after a map
+                // change the read-back still says 6.30.0 while the NEW room was
+                // never told. The colleague's 2026-09-19 log shows exactly that:
+                // one "published version" line, then two map changes and never
+                // another - and both players spend the rest of the evening
+                // looking at a red banner about versions that are identical.
+                // Publishing again into a room we have not published into is a
+                // single property write, so it is cheap to be sure.
+                string room = RoomName();
                 object local = _localPlayer == null ? null : _localPlayer.GetValue(null, null);
                 if (local != null)
                 {
                     ResolvePlayer(local);
                     string mine = ReadVersion(local);
-                    if (mine != RevivalPlugin.VERSION)
+                    if (mine != RevivalPlugin.VERSION || _publishedIn != room)
                     {
                         _ownPublished = "";
-                        if (Publish(local)) _ownPublished = RevivalPlugin.VERSION;
+                        if (Publish(local))
+                        {
+                            _ownPublished = RevivalPlugin.VERSION;
+                            _publishedIn = room;
+                        }
                     }
                     else _ownPublished = RevivalPlugin.VERSION;
                 }
@@ -202,6 +218,25 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>The current room's name, or an empty string. Used only to
+        /// notice that we have moved into a room we never published into.
+        /// </summary>
+        static string RoomName()
+        {
+            try
+            {
+                if (_roomProp == null) return "";
+                object room = _roomProp.GetValue(null, null);
+                if (room == null) return "";
+                PropertyInfo name = AccessTools.Property(room.GetType(), "name");
+                if (name == null) name = AccessTools.Property(room.GetType(), "Name");
+                if (name == null) return room.GetHashCode().ToString();
+                object v = name.GetValue(room, null);
+                return v == null ? "" : v.ToString();
+            }
+            catch { return ""; }
+        }
+
         static string ReadVersion(object player)
         {
             try
@@ -263,6 +298,8 @@ namespace NextDayRevival
             if (_playerList == null) _playerList = AccessTools.Property(_photon, "PlayerList");
             _localPlayer = AccessTools.Property(_photon, "player");
             if (_localPlayer == null) _localPlayer = AccessTools.Property(_photon, "LocalPlayer");
+            _roomProp = AccessTools.Property(_photon, "room");
+            if (_roomProp == null) _roomProp = AccessTools.Property(_photon, "CurrentRoom");
         }
 
         /// <summary>Learn the PhotonPlayer members from a live instance, once.
@@ -370,16 +407,36 @@ namespace NextDayRevival
                 _lineStyle.wordWrap = true;
             }
 
-            string title = Loc.T(
-                "РАЗНЫЕ ВЕРСИИ МОДА",
-                "MOD VERSION MISMATCH");
-            string hint = Loc.T(
-                "У них ломается крю и техника (T-поза). Обновите через лаунчер.",
-                "They see broken crew and vehicles (T-pose). Update them via the launcher.");
+            string title, hint;
             string you = Loc.T("Ты: ", "You: ") + RevivalPlugin.VERSION;
-            title = _exchangeProblem.Length > 0 ? "VERSION CHECK UNAVAILABLE" : "MOD VERSION CHECK";
-            hint = _exchangeProblem.Length > 0 ? _exchangeProblem
-                : "Compare launcher versions. A missing version does not prove missing assets.";
+            // SAY WHICH OF THE TWO IT IS. The old text overwrote its own title
+            // unconditionally and read like a verdict on the other player's
+            // install, which sent this team version-hunting for weeks while
+            // both clients ran the same release.
+            bool reported = false;
+            for (int i = 0; i < _mismatch.Count; i++)
+                if (_mismatch[i].IndexOf(Loc.T("не подтверждён", "not received"),
+                        StringComparison.Ordinal) < 0) reported = true;
+            if (_exchangeProblem.Length > 0)
+            {
+                title = Loc.T("ПРОВЕРКА ВЕРСИЙ НЕВОЗМОЖНА", "VERSION CHECK UNAVAILABLE");
+                hint = _exchangeProblem;
+            }
+            else if (reported)
+            {
+                title = Loc.T("РАЗНЫЕ ВЕРСИИ МОДА", "MOD VERSION MISMATCH");
+                hint = Loc.T(
+                    "Обновите через лаунчер до одной версии.",
+                    "Update through the launcher so both run the same release.");
+            }
+            else
+            {
+                title = Loc.T("ВЕРСИЯ НЕ ПОЛУЧЕНА", "VERSION NOT RECEIVED");
+                hint = Loc.T(
+                    "Это НЕ доказывает разные версии - обмен мог не дойти. Сверьте значки версий.",
+                    "This does NOT prove different versions - the exchange may simply "
+                    + "not have arrived. Compare the version badges in the corner.");
+            }
 
             float w = Mathf.Min(Screen.width - 20f, 760f);
             float x = (Screen.width - w) * 0.5f;

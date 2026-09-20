@@ -28,6 +28,21 @@ namespace NextDayRevival
         static MethodInfo _show;
         static MethodInfo _hide;
 
+        // The object the bar lives on, kept across ClearHud so a bar that is
+        // still standing can be taken down later. See Hide and Sweep.
+        static GameObject _hudObject;
+        static bool _ourShow;        // our own Show is inside the HUD method
+        static float _showAt;        // Time.time of our last show
+        static float _foreignShow;   // ... of the last show we did not start
+        static float _hideAt;        // ... of our last hide
+        static float _sweepAt;       // when to check that the bar really went
+        static bool _sweepLogged;
+
+        // Half a second is long enough for a hide that works to have taken the
+        // bar off screen, and short enough that a bar which stayed is gone
+        // before the player looks at the HUD again.
+        const float SweepDelay = 0.5f;
+
         static MonoBehaviour _states;
         static Component _interactions;
         static Coroutine _animation;
@@ -44,6 +59,140 @@ namespace NextDayRevival
 
         static bool _hudWarning;
         static bool _animationWarning;
+
+        static Harmony _harmony;
+        static bool _patched;
+        static bool _patchWarned;
+
+        // ------------------------------------------------------ HUD lifetime
+
+        /// <summary>
+        /// Hook the original show method. Hide takes the bar off screen by
+        /// switching the HUD object off (see Hide), and a switched-off object
+        /// would swallow the game's own interaction bars. This prefix switches
+        /// it back on before ANY show - the game's as well as ours - runs its
+        /// body, so a show can always start its own coroutine on a live object.
+        /// Installing is not fatal: without the patch Hide keeps the object on
+        /// and falls back to the old behaviour.
+        /// </summary>
+        public static void Install(Harmony harmony)
+        {
+            _harmony = harmony;
+            EnsureShowPatch();
+        }
+
+        static bool EnsureShowPatch()
+        {
+            if (_patched) return true;
+            if (_harmony == null) return false;
+            try
+            {
+                Type hudType = RevivalPlugin.TypeByName("HUD_InteractingProgress");
+                MethodInfo show = hudType == null ? null
+                    : AccessTools.Method(hudType, "ShowInteractingProgressByTime",
+                        new Type[] { typeof(string), typeof(float) }, null);
+                if (show == null) { WarnPatch(null); return false; }
+                _harmony.Patch(show, new HarmonyMethod(
+                    typeof(NativeActionProgress).GetMethod("ShowPrefix")),
+                    null, null, null, null);
+                _patched = true;
+                RevivalPlugin.L.LogInfo("Native action progress: the interaction "
+                    + "HUD show is patched - ending an action switches the bar off.");
+                return true;
+            }
+            catch (Exception ex) { WarnPatch(ex); }
+            return false;
+        }
+
+        static void WarnPatch(Exception ex)
+        {
+            if (_patchWarned) return;
+            _patchWarned = true;
+            RevivalPlugin.L.LogWarning("Native action progress: the interaction HUD "
+                + "show could not be patched"
+                + (ex == null ? "." : ": " + ex.Message)
+                + " A cancelled action can only ask the HUD to count a short bar down.");
+        }
+
+        /// <summary>
+        /// Runs before every interaction bar, the game's own included. Hide may
+        /// have switched the HUD object off; switching it on here is what makes
+        /// that safe, and it has to happen before the original body so the
+        /// method can start its coroutine.
+        /// </summary>
+        public static void ShowPrefix(object __instance)
+        {
+            try
+            {
+                Component hud = __instance as Component;
+                if (hud == null) return;
+                GameObject go = hud.gameObject;
+                if (go == null) return;
+                if (!go.activeSelf) go.SetActive(true);
+                if (_ourShow) return;
+                // The game is putting up its own bar. It is not ours to take
+                // down, and it ends the pending check on our own last one.
+                _foreignShow = Time.time;
+                _sweepAt = 0f;
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// The safety net, once per frame from the plugin's Update.
+        ///
+        /// Two things can leave a bar standing for good. An owner whose own
+        /// update loop stops running - the vehicle is gone, the feature was
+        /// switched off, the player died - never calls End again; the action's
+        /// declared duration plus five seconds is the point where the bar is
+        /// taken from it. And a hide that did not actually remove the bar
+        /// leaves it on screen with nobody left to notice: the sweep checks
+        /// half a second later and switches the HUD off itself.
+        /// </summary>
+        public static void Tick()
+        {
+            try
+            {
+                if (_owner != null && Time.time > _deadline)
+                {
+                    string owner = _owner;
+                    RevivalPlugin.L.LogWarning("Native action progress: " + owner
+                        + " outlived its own duration without ending - "
+                        + "releasing the HUD.");
+                    End(owner);
+                }
+                if (_sweepAt > 0f && Time.time >= _sweepAt) Sweep();
+            }
+            catch { }
+        }
+
+        /// <summary>The second half of Hide, one check later.</summary>
+        static void Sweep()
+        {
+            _sweepAt = 0f;
+            if (_owner != null) return;                 // a new action owns it
+            if (_showAt > _hideAt || _foreignShow > _hideAt) return;  // a newer bar
+            if (_hudObject == null || !_hudObject.activeInHierarchy) return;
+            if (!SwitchOff()) return;
+            if (_sweepLogged) return;
+            _sweepLogged = true;
+            RevivalPlugin.L.LogWarning("Native action progress: the interaction bar "
+                + "was still up after the end of an action - switched it off.");
+        }
+
+        /// <summary>
+        /// Take the bar off screen for certain. Only allowed with the show
+        /// patch in place, because that patch is what switches the object back
+        /// on for the next bar, ours or the game's.
+        /// </summary>
+        static bool SwitchOff()
+        {
+            if (!EnsureShowPatch()) return false;
+            GameObject go = _hudObject;
+            if (go == null) return false;
+            if (go.activeSelf) go.SetActive(false);
+            return true;
+        }
 
         /// <summary>
         /// Show the original interaction progress and play one of the original
@@ -123,7 +272,13 @@ namespace NextDayRevival
             try
             {
                 if (!FindHud()) return false;
-                _show.Invoke(_hud, new object[] { label, seconds });
+                // The show patch runs on this invocation too - _ourShow keeps
+                // it from reading our own bar as one of the game's.
+                _ourShow = true;
+                try { _show.Invoke(_hud, new object[] { label, seconds }); }
+                finally { _ourShow = false; }
+                _showAt = Time.time;
+                _sweepAt = 0f;
                 return true;
             }
             catch (Exception ex)
@@ -162,6 +317,8 @@ namespace NextDayRevival
                 WarnHud("instance", null);
                 return false;
             }
+            Component hudComponent = _hud as Component;
+            _hudObject = hudComponent == null ? null : hudComponent.gameObject;
 
             hudType = _hud.GetType();
             _show = AccessTools.Method(hudType, "ShowInteractingProgressByTime",
@@ -181,13 +338,38 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>
+        /// Take our bar off the HUD.
+        ///
+        /// This used to END an action by STARTING one more bar: an empty label
+        /// for 0.01 seconds, in the hope that the HUD counts it down and
+        /// removes itself, which is the only way the game ever ends one of its
+        /// own (its callers pad the duration and never hide anything). That is
+        /// not a hide. When the cancel arrives together with a seat change -
+        /// letting go of the technical's MG mid-reload, leaving the vehicle -
+        /// the fresh bar was put up while the HUD was not counting anything
+        /// down any more, so it stood there at 0% with no text until the next
+        /// restart. Every action that ends early could hit it.
+        ///
+        /// So: use a real hide method if this build has one, otherwise switch
+        /// the HUD object off. ShowPrefix switches it back on for the next bar.
+        /// </summary>
         static void Hide()
         {
             try
             {
                 if (_hud == null || _show == null) return;
-                if (_hide != null) _hide.Invoke(_hud, null);
-                else _show.Invoke(_hud, new object[] { string.Empty, 0.01f });
+                _hideAt = Time.time;
+                _sweepAt = _hideAt + SweepDelay;
+                // A bar that the game put up after ours is the game's business.
+                if (_foreignShow > _showAt) { _sweepAt = 0f; return; }
+                if (_hide != null) { _hide.Invoke(_hud, null); return; }
+                if (SwitchOff()) return;
+                // No hide method and no show patch: the old attempt is still
+                // better than leaving a full-length bar running.
+                _ourShow = true;
+                try { _show.Invoke(_hud, new object[] { string.Empty, 0.01f }); }
+                finally { _ourShow = false; }
             }
             catch (Exception ex)
             {

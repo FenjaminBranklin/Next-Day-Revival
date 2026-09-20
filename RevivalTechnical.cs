@@ -2094,6 +2094,13 @@ namespace NextDayRevival
         /// </summary>
         static bool SetManning(bool on)
         {
+            // Before the "nothing changes" exit, and not after it: whoever is
+            // NOT on the gun must not have a reload bar, no matter what the
+            // flag already said. The gun is let go on more paths than it is
+            // taken (camera lost, vehicle gone, an exception in Tick), and one
+            // of them arriving with _manning already false used to leave the
+            // bar standing on the HUD. Same order as Turret.SetManning.
+            if (!on) Ladeabbruch();
             if (_manning == on) return true;
             if (on)
             {
@@ -2106,9 +2113,6 @@ namespace NextDayRevival
             }
             _manning = false;
             ReleasePose();
-            // A reload that is still running has to give the game's progress bar
-            // back with the gun, or it hangs on the HUD for good.
-            Ladeabbruch();
             CameraOwner.Release(CameraOwner.GunTruck);
             return true;
         }

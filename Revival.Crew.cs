@@ -321,55 +321,49 @@ namespace NextDayRevival
             }
             try
             {
-                MethodInfo start = AccessTools.Method(npc, "Start", null, null);
-                MethodInfo visualization = AccessTools.Method(npc,
-                    "SetPlayVisualizationValue", null, null);
-                MethodInfo setActive = AccessTools.Method(npc, "SetActiveAI",
-                    null, null);
-                if (start != null)
-                    harmony.Patch(start, null,
-                        new HarmonyMethod(typeof(Crew).GetMethod("NpcStartPostfix")),
-                        null, null, null);
-                if (visualization != null)
-                    harmony.Patch(visualization,
-                        new HarmonyMethod(typeof(Crew).GetMethod(
-                            "NpcVisualizationPrefix")), null, null, null, null);
-                if (setActive != null)
-                    harmony.Patch(setActive,
-                        new HarmonyMethod(typeof(Crew).GetMethod(
-                            "NpcActiveAiPrefix")), null, null, null, null);
+                // ONE BAD LOOKUP MUST NOT TAKE THE REST WITH IT. Every hook
+                // below used to share this single try. NPC_AI2 declares TWO
+                // SetCustomization overloads - one int[], one string[] - so the
+                // parameterless lookup added in 6.17.2 threw
+                // AmbiguousMatchException on every machine, BEFORE the
+                // owner-side CrewInstantiatePrefix and the four
+                // RemoteMessagePrefix hooks were reached. From that release on
+                // the owner sent only the five vanilla spawn values and the peer
+                // had nothing to repair: naked, contextless NPCs on the other
+                // machine, and invisible to the owner, whose own crew is never
+                // a puppet. Every hook now reports on its own.
+                int installed = 0;
+                if (Hook(harmony, Look(npc, "Start", null),
+                         "NPC_AI2.Start", null, "NpcStartPostfix")) installed++;
+                if (Hook(harmony, Look(npc, "SetPlayVisualizationValue", null),
+                         "NPC_AI2.SetPlayVisualizationValue",
+                         "NpcVisualizationPrefix", null)) installed++;
+                if (Hook(harmony, Look(npc, "SetActiveAI", null),
+                         "NPC_AI2.SetActiveAI", "NpcActiveAiPrefix", null)) installed++;
                 // The gear meshes (ghillie, L-1 suit) the game's own NPC
-                // customization never switches on - see WearGear.
-                MethodInfo customization = AccessTools.Method(npc, "SetCustomization",
-                    null, null);
-                if (customization == null)
-                    RevivalPlugin.L.LogWarning("Crew: NPC_AI2.SetCustomization not found - "
-                        + "a ghillie or L-1 suit chosen in the editor stays invisible.");
-                else
-                    harmony.Patch(customization, null,
-                        new HarmonyMethod(typeof(Crew).GetMethod("GearCustomizationPostfix")),
-                        null, null, null);
-                MethodInfo walkPoints = AccessTools.Method(npc, "SetTemporaryWalkPoints", null, null);
-                if (walkPoints == null) throw new MissingMethodException("NPC_AI2.SetTemporaryWalkPoints");
-                harmony.Patch(walkPoints, new HarmonyMethod(typeof(Crew).GetMethod(
-                    "SectorWalkPointsPrefix")), null, null, null, null);
-                MethodInfo instantiate = AccessTools.Method(
-                    RevivalPlugin.TypeByName("PhotonNetwork"), "InstantiateSceneObject",
-                    new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion),
-                        typeof(byte), typeof(object[]) }, null);
-                if (instantiate == null) throw new MissingMethodException("PhotonNetwork.InstantiateSceneObject");
-                harmony.Patch(instantiate, new HarmonyMethod(typeof(Crew).GetMethod(
-                    "CrewInstantiatePrefix")), null, null, null, null);
+                // customization never switches on - see WearGear. The int[]
+                // overload is the one GearCustomizationPostfix reads; the
+                // string[] one is what made the old lookup ambiguous.
+                if (Hook(harmony, Look(npc, "SetCustomization", new Type[] { typeof(int[]) }),
+                         "NPC_AI2.SetCustomization(int[])",
+                         null, "GearCustomizationPostfix")) installed++;
+                if (Hook(harmony, Look(npc, "SetTemporaryWalkPoints", null),
+                         "NPC_AI2.SetTemporaryWalkPoints",
+                         "SectorWalkPointsPrefix", null)) installed++;
+                // The OWNER side. Without this one no peer ever receives the
+                // extended spawn block, whatever the peer's own code does.
+                if (Hook(harmony, Look(RevivalPlugin.TypeByName("PhotonNetwork"),
+                             "InstantiateSceneObject",
+                             new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion),
+                                 typeof(byte), typeof(object[]) }),
+                         "PhotonNetwork.InstantiateSceneObject",
+                         "CrewInstantiatePrefix", null)) installed++;
                 foreach (string method in new string[] { "SetStateWithAnimAndSync",
                     "NetworkSendPointsStatesData", "SetHealthValue", "DeathAction" })
-                {
-                    MethodInfo receive = AccessTools.Method(npc, method, null, null);
-                    if (receive == null) throw new MissingMethodException("NPC_AI2." + method);
-                    harmony.Patch(receive, new HarmonyMethod(typeof(Crew).GetMethod(
-                        "RemoteMessagePrefix")), null, null, null, null);
-                }
+                    if (Hook(harmony, Look(npc, method, null), "NPC_AI2." + method,
+                             "RemoteMessagePrefix", null)) installed++;
                 RevivalPlugin.L.LogInfo("Crew: remote NPC appearance and animation "
-                    + "repair hooks installed.");
+                    + "repair hooks installed: " + installed + " of 10.");
             }
             catch (Exception ex)
             {
@@ -632,10 +626,11 @@ namespace NextDayRevival
                 // An owner on a different release sends the five vanilla values
                 // only. There is nothing to wait for, so do not arm the queue
                 // and do not burn six seconds of T-pose before finding out.
-                if (data.Length != 10 || !ReplicaSchema.Equals(data[5]))
+                if (!ExtendedSpawnData(data))
                 {
                     AbandonRemoteRepair(ai, replica, "the owner sent no crew "
-                        + "initialization data; both players need the same release");
+                        + "initialization data (" + data.Length + " spawn values); "
+                        + "both players need the same release");
                     return;
                 }
                 // Arm the queue only now, with a repair guaranteed to follow.
@@ -767,6 +762,84 @@ namespace NextDayRevival
             __args[4] = extended;
         }
 
+        /// <summary>Installs one crew hook. Reports and carries on instead of
+        /// throwing, so a single renamed or overloaded game method can never
+        /// again silently take the whole remote crew path out of service.
+        /// </summary>
+        static bool Hook(Harmony harmony, MethodInfo target, string label,
+                         string prefix, string postfix)
+        {
+            try
+            {
+                if (target == null) throw new MissingMethodException(label);
+                harmony.Patch(target,
+                    prefix == null ? null : new HarmonyMethod(typeof(Crew).GetMethod(prefix)),
+                    postfix == null ? null : new HarmonyMethod(typeof(Crew).GetMethod(postfix)),
+                    null, null, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("Crew: hook " + label + " NOT installed - "
+                    + ex.Message + ". The remote crew path runs without it.");
+                return false;
+            }
+        }
+
+        /// <summary>A method lookup that survives overloads. AccessTools.Method
+        /// with no parameter list ends in Type.GetMethod(name, flags), which
+        /// throws AmbiguousMatchException as soon as the game declares a second
+        /// overload of that name. Never throws: falls back to a declared-only
+        /// walk up the hierarchy.</summary>
+        static MethodInfo Look(Type type, string name, Type[] parameters)
+        {
+            if (type == null) return null;
+            try
+            {
+                MethodInfo hit = AccessTools.Method(type, name, parameters, null);
+                if (hit != null) return hit;
+            }
+            catch (Exception) { }
+            for (Type t = type; t != null; t = t.BaseType)
+            {
+                MethodInfo[] all = t.GetMethods(BindingFlags.Instance | BindingFlags.Static
+                    | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                foreach (MethodInfo m in all)
+                {
+                    if (m.Name != name) continue;
+                    ParameterInfo[] ps = m.GetParameters();
+                    if (parameters == null) return m;
+                    if (ps.Length != parameters.Length) continue;
+                    bool ok = true;
+                    for (int i = 0; i < ps.Length; i++)
+                        if (ps[i].ParameterType != parameters[i]) { ok = false; break; }
+                    if (ok) return m;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>True when the owner's Photon instantiation data carries the
+        /// extended crew block. Ten entries for a settlement or convoy crew,
+        /// eleven for an editor ground group, whose eleventh entry is the spawn
+        /// key. BOTH remote call sites must ask here. The ground group's
+        /// eleventh entry was added to the sender and to InitializeRemote but
+        /// not to the Start gate, so every editor ground enemy was abandoned on
+        /// the peer as if the two players ran different releases.</summary>
+        internal static bool ExtendedSpawnData(object[] data)
+        {
+            if (data == null || !ReplicaSchema.Equals(GetAt(data, 5))) return false;
+            if (data.Length == 10) return true;
+            if (data.Length != 11) return false;
+            string key = data[10] as string;
+            return key != null && key.StartsWith("ndr-ground-1:", StringComparison.Ordinal);
+        }
+
+        static object GetAt(object[] data, int index)
+        {
+            return data.Length > index ? data[index] : null;
+        }
+
         static CrewReplica Replica(Component ai)
         {
             CrewReplica replica = ai.GetComponent<CrewReplica>();
@@ -834,9 +907,7 @@ namespace NextDayRevival
 
         static void InitializeRemote(Component ai, CrewReplica replica, object[] data)
         {
-            if ((data.Length != 10 && (data.Length != 11 || !(data[10] is string)
-                || !((string)data[10]).StartsWith("ndr-ground-1:", StringComparison.Ordinal)))
-                || !ReplicaSchema.Equals(data[5]))
+            if (!ExtendedSpawnData(data))
                 throw new InvalidOperationException("Owner did not send crew initialization data; both players need the updated launcher release");
             float[] coordinates = data[9] as float[];
             if (coordinates == null || coordinates.Length < 8 || coordinates.Length > 512
