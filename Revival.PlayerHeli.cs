@@ -258,7 +258,7 @@ namespace NextDayRevival
         static bool _hadBody;                // his body was found at least once
         static string _hint = "";
         static float _hintUntil;
-        static bool _poseWarned, _bodyWarned, _interpWarned;
+        static bool _poseWarned, _bodyWarned, _interpWarned, _floorWarned;
 
         // Every machine of ours this client knows about, in the order they were
         // built. Filled by the Start hook, which runs on every client - the
@@ -326,7 +326,22 @@ namespace NextDayRevival
                 {
                     RevivalPlugin.L.LogInfo("PlayerHeli: the pilot's body is gone "
                         + "(death, respawn or a scene change) - the flight ends.");
+                    // What is left of the flight has to be decided BEFORE Leave,
+                    // which clears all of it.
+                    GameObject left = _heli;
+                    bool wasPilot = _pilot;
+                    bool inAir = _pilot ? !_onGround : Airborne(left);
                     Leave(false);
+                    // The same rule the jump has, for the same reason: a machine
+                    // the PILOT is no longer in, in the air, is a machine nobody
+                    // is flying. The flight loop that moved it died with him, so
+                    // without this the hull hangs at the height and the heading
+                    // of the moment he died, silent, for the rest of the session
+                    // - which is what the field found after every death in the
+                    // air. A helicopter whose pilot is dead goes down.
+                    if (wasPilot && inAir && left != null
+                        && (CfgCrash == null || CfgCrash.Value))
+                        Crash(left, left.transform.position);
                     return;
                 }
 
@@ -899,12 +914,31 @@ namespace NextDayRevival
             // machine stands over one. A downward ray is deliberately NOT used -
             // it would find the helicopter's own hull collider, which is exactly
             // why the scripted troop flight has none either.
+            //
+            // Past the edge of the terrain there is no floor to read, and the
+            // machine used to take ITS OWN HEIGHT for one - which made it stand
+            // on the ground at four hundred metres, the instant it crossed the
+            // boundary, and a machine that arrives on the ground at cruising
+            // speed is a machine that has just crashed. No floor means no
+            // ground: it keeps flying, and there is nothing out there to land
+            // on.
             float floor;
-            if (!Floor(pos, out floor)) floor = pos.y;
+            bool solid = Floor(pos, out floor);
+            if (!solid)
+            {
+                floor = pos.y;
+                if (!_floorWarned)
+                {
+                    _floorWarned = true;
+                    RevivalPlugin.L.LogWarning("PlayerHeli: no floor at "
+                        + pos.ToString("0") + " - past the edge of the terrain. "
+                        + "The machine flies on, it cannot land out here.");
+                }
+            }
             bool wasFlying = !_onGround;
-            _onGround = pos.y <= floor + 0.4f * k;
+            _onGround = solid && pos.y <= floor + 0.4f * k;
             if (!_onGround && !wasFlying) _airborneSince = Time.time;
-            if (pos.y < floor)
+            if (solid && pos.y < floor)
             {
                 pos.y = floor;
                 if (_vel.y < 0f) _vel.y = 0f;
@@ -1076,27 +1110,42 @@ namespace NextDayRevival
             if (speed < 0.001f) return false;
             Vector3 dir = travel / speed;
 
-            // From the middle of the cabin, out past the nose, plus the ground
-            // actually covered this frame - so the test cannot be stepped over
-            // at speed. The two offsets are the hull box Prepare builds: its
-            // centre sits 2.5 model units across and 5.5 up (0.9 m and 2.0 m),
-            // and its front face is 22 units ahead of the origin, which is 7.9 m.
+            // From the middle of the cabin, out to the HULL'S OWN SURFACE in the
+            // direction of travel, plus the ground actually covered this frame -
+            // so the test cannot be stepped over at speed. The offsets are the
+            // hull box Prepare builds: its centre sits 2.5 model units across
+            // and 5.5 up (0.9 m and 2.0 m), three units ahead of the cast, and
+            // it measures 7 by 11 by 38.
+            //
+            // The reach is measured per direction rather than taken as the
+            // nose's 22 units, because the machine is not 22 units wide. A cast
+            // that used the nose's reach sideways broke the machine on a tree it
+            // was flying PAST, seven metres clear, and downwards it found the
+            // roof of a house two storeys before the skids were near it. A box
+            // gives its own surface distance exactly: the offset of its centre
+            // along the ray, plus each half-size weighted by that axis.
+            //
             // The DISC is deliberately not included: rotors clip scenery at
             // every landing, and a machine that explodes when a blade tip
             // brushes a branch is not a helicopter, it is a mine.
             Vector3 origin = _heli.transform.position
                              + _heli.transform.rotation * (new Vector3(0.9f, 2.0f, 0f) * k);
             origin -= travel;                       // where the cabin came from
-            float rest = speed + 7.9f * k;
+            Vector3 axis = Quaternion.Inverse(_heli.transform.rotation) * dir;
+            float reach = axis.z * 3f + Mathf.Abs(axis.x) * 3.5f
+                          + Mathf.Abs(axis.y) * 5.5f + Mathf.Abs(axis.z) * 19f;
+            float rest = speed + Mathf.Max(1f, reach) * 0.36f * k;
 
             // The ray leaves the middle of the cabin, and the people in the
             // cabin are in front of it: the pilot sits five metres forward of
             // the origin, the passengers behind it. A single cast would find one
             // of them every frame and report the machine clear. So the cast
             // steps PAST its own hits, the way the patrol driver steps past a
-            // vehicle's own colliders - three tries is more than there are
-            // bodies in the way.
-            for (int step = 0; step < 4 && rest > 0.1f; step++)
+            // vehicle's own colliders. The budget is ten and not three, because
+            // a man is not one collider: a body hands the ray a bone at a time,
+            // and a step that ran out of tries inside the cabin used to report
+            // the pilot's own arm as the thing the machine flew into.
+            for (int step = 0; step < 10 && rest > 0.1f; step++)
             {
                 Vector3 point, normal;
                 GameObject hit = Turret.RaycastObject(origin, dir, rest, out point, out normal);
@@ -1117,8 +1166,14 @@ namespace NextDayRevival
                     if (speed / Mathf.Max(0.0001f, Time.deltaTime) < 6f * k) return false;
                 }
 
+                // The distance is in the line because it is the one number that
+                // tells a false crash from a real one: anything the machine is
+                // supposed to break on is met at the hull, and a hit reported
+                // five metres INSIDE the cabin is a passenger, not a mast.
                 RevivalPlugin.L.LogInfo("PlayerHeli: hit " + hit.name + " at "
-                    + point + " - the machine is down.");
+                    + point + ", "
+                    + (Vector3.Distance(_heli.transform.position, point) / k).ToString("0.0")
+                    + " m from the machine - the machine is down.");
                 Crash(_heli, point);
                 return true;
             }
@@ -1148,6 +1203,39 @@ namespace NextDayRevival
                 + (run / k).ToString("0.0") + " m/s.");
             Crash(_heli, _heli.transform.position);
             return true;
+        }
+
+        // Stinger calls this only after the master validates a missile impact.
+        // Every peer runs it once, so remote passengers use their own damage
+        // gate too. Do not rebroadcast the ordinary crash event from here.
+        internal static void MissileImpact(int view, Vector3 where)
+        {
+            GameObject go = MissileTarget(view);
+            if (go == null) return;
+            bool aboard = ReferenceEquals(go, _heli);
+            Burn(go, where);
+            _busyUntil.Remove(view);
+            if (!aboard) return;
+            _engine = false;
+            Leave(false);
+            float damage = CfgCrashDamage == null ? 1000f : CfgCrashDamage.Value;
+            if (damage > 0f) Hurt(damage);
+            Hint(Text.Wrecked(), 6f);
+        }
+
+        internal static GameObject MissileTarget(int view)
+        {
+            if (view <= 0) return null;
+            GameObject go = ByView(view);
+            return go != null && _all.Contains(go) && !Burning(go) ? go : null;
+        }
+
+        internal static int MissileView(GameObject go) { return ViewId(go); }
+
+        internal static void MissileTargets(List<GameObject> targets)
+        {
+            for (int i = 0; i < _all.Count; i++)
+                if (_all[i] != null && !Burning(_all[i])) targets.Add(_all[i]);
         }
 
         /// <summary>
@@ -1280,10 +1368,28 @@ namespace NextDayRevival
         {
             if (hit == null) return true;
             Transform t = hit.transform;
-            for (int up = 0; up < 8 && t != null; up++)
+
+            // FIELD 2026-09-20: "hit MainChar_Upper_arm.R at (1209, 930, 1560) -
+            // the machine is down", forty-five seconds into a flight at four
+            // hundred metres with nothing in the sky but the pilot. The ray had
+            // found the pilot's own right arm, and the walk below did not
+            // recognise it: what the cast gets handed is a BONE, and a bone sits
+            // ten or more parents under the object the movement controller is
+            // on, while the walk gave up after eight. So the two certain
+            // answers are asked FIRST, and they are asked of the whole chain -
+            // IsChildOf climbs to the root, not to a fixed depth.
+            if (_heli != null && t.IsChildOf(_heli.transform)) return true;
+            if (_body != null && t.IsChildOf(_body)) return true;
+
+            // Every man in this game wears the same rig, the player and every
+            // NPC alike (NPC_AI2 aims through _playerObjectsManager.MainChar_*).
+            // A collider called MainChar_something is therefore a limb, whoever
+            // it belongs to and wherever it hangs in the scene - and a limb is
+            // never the thing an eleven tonne machine breaks on.
+            if (hit.name.StartsWith("MainChar")) return true;
+
+            for (int up = 0; up < 24 && t != null; up++)
             {
-                if (_heli != null && ReferenceEquals(t.gameObject, _heli)) return true;
-                if (_body != null && ReferenceEquals(t, _body)) return true;
                 Type[] alive = Living();
                 for (int i = 0; i < alive.Length; i++)
                     if (alive[i] != null && t.GetComponent(alive[i]) != null) return true;

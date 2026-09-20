@@ -115,6 +115,10 @@ $assetDst = Join-Path $plugins "assets"
 New-Item -ItemType Directory -Force -Path $assetDst | Out-Null
 
 $assets = @(
+    "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
+    "stinger_metal.png", "stinger_rough.png", "stinger_icon.png",
+    "stinger_weapon_icon.png", "stinger_missile.ndmesh", "stinger_missile_diffuse.png",
+    "stinger_missile_normal.png", "stinger_missile_metal.png", "stinger_missile_rough.png",
     "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_recoil.ndmesh",
     "arty_diffuse.png", "arty_metal.png", "arty_normal.png",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png", "mg42_metal.png",

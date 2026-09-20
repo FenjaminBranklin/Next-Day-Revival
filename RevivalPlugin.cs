@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.36.0";
+        public const string VERSION = "6.37.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -457,6 +457,7 @@ namespace NextDayRevival
             Technical.BindConfig(Config);        // NDR technical (gun truck)
             TechnicalGun.BindConfig(Config);     // NDR technical: the man at the MG
             AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
+            Stinger.BindConfig(Config);
             GasLauncher.BindConfig(Config);      // NDR gas launcher
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
@@ -510,6 +511,7 @@ namespace NextDayRevival
             Technical.Install(_harmony);         // NDR technical (gun truck)
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
+            Stinger.Install(_harmony);
             GasLauncher.Install(_harmony);       // NDR gas launcher
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
 
@@ -1607,7 +1609,16 @@ namespace NextDayRevival
             ConvoyRepair.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
-            // Single-shot chemical launcher and its 30-minute gas cloud (own file).
+            // Stinger shares the LAW donor and its single-use ammunition setup.
+            Items.Add(new ItemDef(
+                1165, 1010, true,
+                "FIM-92 Stinger", "FIM-92 Stinger",
+                "Однозарядная управляемая ракета. Удерживайте прицел в квадрате цели до захвата, затем стреляйте.",
+                "Single-shot guided missile. Hold the reticle inside a target square until locked, then fire.",
+                "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
+                "stinger_icon.png", "stinger_weapon_icon.png",
+                1, 0, 15.2f));
+            // Single-shot chemical launcher and its 30-minute gas cloud.
             GasLauncher.AddItems(Items);
 
             // The M7 (XM7) rifle and its 6.8x51mm magazines (own file).
@@ -2061,6 +2072,7 @@ namespace NextDayRevival
             Technical.Tick();                    // NDR technical: spawn key, durability cap, the MG
             ArtyVehicle.Tick();                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
+            Stinger.Tick();
             GasLauncher.Tick();                  // NDR gas launcher (optional keys, cloud list)
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
             FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
@@ -2110,7 +2122,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.AdminDraw);   Admin.Draw();            FrameProf.E(FrameProf.AdminDraw);
             FrameProf.S(FrameProf.PatrolDraw);  Patrol.Draw();           FrameProf.E(FrameProf.PatrolDraw);
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
-            FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); FrameProf.E(FrameProf.OtherDraw);
+            FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); Stinger.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             RevivalTroopInsertion.Draw();        // NDR heli troop insertion banner
             Helipads.Draw();                     // NDR helicopter landing pads on the world map

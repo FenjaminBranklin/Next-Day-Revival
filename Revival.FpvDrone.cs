@@ -2387,6 +2387,7 @@ namespace NextDayRevival
                     && RevivalPlugin.CfgPatrolCrewDrone.Value;
                 if (!playerDrone && !crewDrone && !ArtyBattery.Shootable) return;
                 if (__instance == null) return;
+                if (Stinger.IsStinger(__instance)) return; // Damage arrives with the missile.
                 // While flying, the body cannot shoot at all (DroneInputHook).
                 // If it ever could, a pilot must not be able to shoot his own
                 // drone down through his own camera.

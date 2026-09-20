@@ -74,6 +74,10 @@ GAME = _spielpfad()
 GAME_PLUGINS = os.path.join(GAME, "BepInEx", "plugins") if GAME else ""
 
 ASSET_FILES = [
+    "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
+    "stinger_metal.png", "stinger_rough.png", "stinger_icon.png",
+    "stinger_weapon_icon.png", "stinger_missile.ndmesh", "stinger_missile_diffuse.png",
+    "stinger_missile_normal.png", "stinger_missile_metal.png", "stinger_missile_rough.png",
     "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh",
     "arty_recoil.ndmesh", "arty_diffuse.png", "arty_metal.png", "arty_normal.png",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
@@ -178,6 +182,7 @@ ICON_SIZES = {
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
+    "stinger_icon.png": (300, 300), "stinger_weapon_icon.png": (317, 183),
     "scope50.png": (1920, 1920),
     "t72_scope.png": (1920, 1920),
     "apc_scope.png": (1920, 1920),
@@ -218,7 +223,7 @@ def check_dll():
     want_types = ["RevivalPlugin", "ItemDef", "ItemFactory", "ResourceHook",
                   "LocalizationHook", "CursorTracker", "CursorGuard", "Assets",
                    "Registry", "WeaponData", "Diag", "Research", "Regions",
-                   "RocketHook", "Turret", "Arena"]
+                   "RocketHook", "Turret", "Arena", "Stinger"]
     for t in want_types:
         if t in types:
             ok("Typ " + t)
@@ -235,6 +240,7 @@ def check_reflection_targets(a):
     """
     print("[2] Reflexionsziele aus dem Quelltext")
     src = io.open(SRC, encoding="utf-8").read()
+    src += io.open(os.path.join(ROOT, "Revival.Stinger.cs"), encoding="utf-8").read()
     import re
     pairs = re.findall(r'typeof\((\w+)\)\.GetMethod\("(\w+)"\)', src)
     if not pairs:

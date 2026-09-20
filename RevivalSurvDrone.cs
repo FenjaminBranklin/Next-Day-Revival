@@ -761,6 +761,7 @@ namespace NextDayRevival
             {
                 if (DroneGear.CfgSurvEnabled != null && !DroneGear.CfgSurvEnabled.Value) return;
                 if (__instance == null) return;
+                if (Stinger.IsStinger(__instance)) return; // Damage arrives with the missile.
                 // The pilot cannot shoot his own drone: while viewing, the body
                 // cannot fire at all (DroneInputHook); this is only for shooting
                 // OTHER players' surveillance drones, which are the ghosts.

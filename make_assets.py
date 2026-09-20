@@ -21,6 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 GROUPS = [
+    ("stinger", ["stinger_build.py"]),
     # arty_texture.py MUSS vor arty_import.py laufen: der Import liest den
     # fertigen Atlas fuer die UV-Pruefung und fuer beide Vorschaubilder.
     ("arty", ["arty_texture.py", "arty_import.py"]),
