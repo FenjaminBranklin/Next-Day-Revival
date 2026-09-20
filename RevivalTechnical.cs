@@ -619,6 +619,13 @@ namespace NextDayRevival
                 }
             }
 
+            float meshFloor;
+            if (HullFloor(car, x, mountZ, out meshFloor))
+            {
+                deckY = meshFloor;
+                herkunft = "from the UAZ hull floor mesh";
+            }
+
             // Two clamps, so a donor that measures surprisingly can still only be
             // wrong by a little: the deck stays inside the measured body - up to
             // its very top, because that is where a deck belongs on a closed
@@ -998,6 +1005,8 @@ namespace NextDayRevival
                 Collider col = cols[i];
                 if (col == null || !col.enabled || col.isTrigger) continue;
                 if (IstRad(col.transform) || IstUnser(col.transform)) continue;
+                MeshFilter furniture = col.GetComponent<MeshFilter>();
+                if (furniture == null || furniture.name != "interior") continue;
 
                 Vector3 lo, hi;
                 if (!Kasten(root, col, out lo, out hi)) continue;
@@ -1020,6 +1029,8 @@ namespace NextDayRevival
             {
                 MeshFilter mf = all[i];
                 if (mf == null || mf.sharedMesh == null) continue;
+                // The UAZ seats share interior; doors and hull are not furniture.
+                if (mf.name != "interior") continue;
                 if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
                 if (mf.GetComponent<Renderer>() == null) continue;
                 if (!mf.gameObject.activeSelf) continue;
@@ -1065,6 +1076,8 @@ namespace NextDayRevival
                 {
                     MeshFilter mf = all[i];
                     if (mf == null || mf.sharedMesh == null) continue;
+                    // The UAZ seats share interior; doors and hull are not furniture.
+                    if (mf.name != "interior") continue;
                     if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
                     Vector3 lo, hi;
                     if (!Huelle(root, mf, out lo, out hi)) continue;
@@ -1143,6 +1156,8 @@ namespace NextDayRevival
             {
                 MeshFilter mf = all[i];
                 if (mf == null || mf.sharedMesh == null) continue;
+                // The UAZ seats share interior; doors and hull are not furniture.
+                if (mf.name != "interior") continue;
                 if (IstRad(mf.transform) || IstUnser(mf.transform)) continue;
                 if (mf.GetComponent<Renderer>() == null) continue;
                 if (!mf.gameObject.activeSelf) continue;
@@ -1209,10 +1224,10 @@ namespace NextDayRevival
                 for (int k = 0; k + 2 < tri.Length; k += 3)
                 {
                     gesamt++;
-                    Vector3 mitte = (lokal[tri[k]] + lokal[tri[k + 1]]
-                                     + lokal[tri[k + 2]]) / 3f;
-                    if (InBankZone(root, mitte, hinten, unitsPerMetre)
-                        && !InBankZone(root, mitte, vorn, unitsPerMetre))
+                    // Only the interior mesh reaches here. The midpoint between
+                    // the two seat rows separates its rear bench from front seats.
+                    if (RearInteriorTriangle(lokal[tri[k]], lokal[tri[k + 1]],
+                                             lokal[tri[k + 2]], vorn, hinten))
                     {
                         raus++;
                         continue;
@@ -1253,6 +1268,60 @@ namespace NextDayRevival
                 + raus + " von " + gesamt + " Dreiecken herausgeschnitten - das "
                 + "ist die Ruecksitzbank im gemeinsamen Innenraum-Mesh.");
             return true;
+        }
+
+        // The open UAZ hull has a double-sided rear floor. Use its upper
+        // surface, not the bounding collider, seat root, or seat cushions.
+        static bool HullFloor(GameObject car, float x, float z, out float y)
+        {
+            y = float.MinValue;
+            MeshFilter[] filters = car.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < filters.Length; i++)
+            {
+                MeshFilter mf = filters[i];
+                if (mf == null || mf.sharedMesh == null
+                    || mf.sharedMesh.name != "hull") continue;
+                try
+                {
+                    Vector3[] vertices = mf.sharedMesh.vertices;
+                    int[] triangles = mf.sharedMesh.triangles;
+                    for (int k = 0; k < vertices.Length; k++)
+                        vertices[k] = car.transform.InverseTransformPoint(
+                            mf.transform.TransformPoint(vertices[k]));
+                    for (int k = 0; k + 2 < triangles.Length; k += 3)
+                    {
+                        Vector3 a = vertices[triangles[k]];
+                        Vector3 b = vertices[triangles[k + 1]] - a;
+                        Vector3 c = vertices[triangles[k + 2]] - a;
+                        float det = b.x * c.z - c.x * b.z;
+                        if (Mathf.Abs(det) < 0.000001f) continue;
+                        float u = ((x - a.x) * c.z - (z - a.z) * c.x) / det;
+                        float v = (b.x * (z - a.z) - b.z * (x - a.x)) / det;
+                        if (u < 0f || v < 0f || u + v > 1f) continue;
+                        y = Mathf.Max(y, a.y + u * b.y + v * c.y);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Technical: hull floor unavailable: " + ex.Message);
+                }
+            }
+            return y != float.MinValue;
+        }
+
+        static bool RearInteriorTriangle(Vector3 a, Vector3 b, Vector3 c,
+                                         List<Vector3> front, List<Vector3> rear)
+        {
+            if (front.Count == 0 || rear.Count == 0) return false;
+            float backOfFront = float.MaxValue;
+            float frontOfRear = float.MinValue;
+            for (int i = 0; i < front.Count; i++)
+                backOfFront = Mathf.Min(backOfFront, front[i].z);
+            for (int i = 0; i < rear.Count; i++)
+                frontOfRear = Mathf.Max(frontOfRear, rear[i].z);
+            if (frontOfRear >= backOfFront) return false;
+            float split = (backOfFront + frontOfRear) * 0.5f;
+            return a.z < split && b.z < split && c.z < split;
         }
 
         /// <summary>Does this point stand in the bench zone of one of those
@@ -1312,6 +1381,11 @@ namespace NextDayRevival
 
             for (int i = 0; i < vorn.Count; i++)
                 if (Drin(lo, hi, vorn[i], 0.05f * length)) return false;
+                else if (lo.x <= vorn[i].x + BenchSide * unitsPerMetre
+                    && hi.x >= vorn[i].x - BenchSide * unitsPerMetre
+                    && lo.z <= vorn[i].z + BenchDepth * unitsPerMetre
+                    && hi.z >= vorn[i].z - BenchDepth * unitsPerMetre)
+                    return false; // Seat roots lie BELOW the cushions.
 
             float floor = FeetAboveSeat / Hoehenmass(root);
             Vector3 mitte = (lo + hi) * 0.5f;
@@ -2114,17 +2188,11 @@ namespace NextDayRevival
                 "Fadenkreuz in der Bildmitte. Getroffen wird, worauf die "
                 + "Bildmitte steht.");
             CfgStandPose = cfg.Bind("TechnicalGun", "StandPose", true,
-                "Den Schuetzen STEHEN lassen statt sitzen. "
-                + "PlayerVehicleManager::SitToVehicle setzt _inVehiclePose auf "
-                + "1 fuer den Fahrer und 2 fuer jeden Mitfahrer; solange das MG "
-                + "bedient wird, wird stattdessen StandPoseValue gesetzt. Wenn "
-                + "die Figur im Spiel dadurch seltsam steht, hier abschalten - "
-                + "dann sitzt der Schuetze wieder, das MG dreht sich aber "
-                + "genauso.");
+                "Sample the native standing idle pose before arm IK for every gunner. "
+                + "Vehicle controls and passenger state remain owned by the game.");
             CfgStandPoseValue = cfg.Bind("TechnicalGun", "StandPoseValue", 0,
-                "Der Wert, den _inVehiclePose waehrend des Schiessens bekommt. "
-                + "0 ist die Haltung ausserhalb eines Fahrzeugs, also die "
-                + "normale Fusshaltung.");
+                "Legacy setting, retained for compatibility; no longer used. "
+                + "Standing now samples idle_alert instead of changing vehicle state.");
             CfgHands = cfg.Bind("TechnicalGun", "HandsOnGun", true,
                 "Die Haende des Schuetzen auf die Griffe des MG legen. Das "
                 + "Spiel hat fuer eine Lafette keine eigene Animation, deshalb "
@@ -2201,11 +2269,7 @@ namespace NextDayRevival
         static string _hinweis;
         static float _hinweisBis;
         static bool _camLogged;
-        static bool _poseHeld;
-        static object _poseOwner;
-        static FieldInfo _poseField;
-        static object _poseBack;
-        static bool _poseWarned;
+
 
         public static bool Manning { get { return _manning; } }
 
@@ -2260,8 +2324,7 @@ namespace NextDayRevival
                 // is measured for exactly that (Technical.Aufbauen), so a
                 // gunner who only stands there must not sit down and float.
                 _atGun = InSeat(Technical.GunnerSeat);
-                if (_atGun) HoldPose();
-                else
+                if (!_atGun)
                 {
                     ReleasePose();
                     _standDown = false;
@@ -2480,7 +2543,10 @@ namespace NextDayRevival
 
         static bool ChangeSeat(int index)
         {
-            object pvm = Field(_vgs, "_playerVehicleManager");
+            GameObject passenger = PassengerAt(_vgs, IntField(_vgs, "_localPlayerPassengerId"));
+            Type managerType = RevivalPlugin.TypeByName("PlayerVehicleManager");
+            object pvm = passenger == null || managerType == null ? null
+                : passenger.GetComponent(managerType);
             if (pvm == null)
             {
                 RevivalPlugin.L.LogWarning("Technical-MG: _playerVehicleManager ist "
@@ -2641,6 +2707,10 @@ namespace NextDayRevival
             public Transform LUpper, LFore, LHand;
             public Transform RUpper, RFore, RHand;
             public bool BonesTried;
+            public GameObject PoseBody, AnimationObject;
+            public object StandClip;
+            public MethodInfo SampleStand;
+            public bool PoseTried;
             public float Blend;              // 0 = the game's animation, 1 = at the grips
         }
 
@@ -2726,6 +2796,7 @@ namespace NextDayRevival
                 // and it is HIS bearing the mount is following.
                 bool losgelassen = !selbst && _atGun
                                    && ReferenceEquals(st.Vgs, _vgs);
+                StandingPose(st, body);
                 if (!losgelassen) Stellung(st, body, selbst);
 
                 Hands(st, body, dt);
@@ -2925,10 +2996,9 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Find the gunner's arm bones ONCE per body. The hand is the anchor:
-        /// in every humanoid rig the forearm is its parent and the upper arm
-        /// its grandparent, so finding one transform per side is enough and no
-        /// guess about the game's bone names beyond "hand" is needed.
+        /// Find anatomical arm joints once per body. This rig has four twist
+        /// helpers between elbow and hand; the hand's parents are not its elbow
+        /// and shoulder. PlayerObjectsManager names the real joints.
         /// </summary>
         static void Bones(Station st)
         {
@@ -2941,7 +3011,10 @@ namespace NextDayRevival
             string why = null;
             if (lh == null || rh == null) why = "keine Handknochen gefunden";
             else if (ReferenceEquals(lh, rh)) why = "links und rechts sind derselbe Knochen";
-            else if (!Chain(lh) || !Chain(rh)) why = "ueber der Hand fehlen Unterarm und Oberarm";
+            Transform lu, lf, ru, rf;
+            bool leftArm = ArmJoints(body, lh, true, out lu, out lf);
+            bool rightArm = ArmJoints(body, rh, false, out ru, out rf);
+            if (!leftArm || !rightArm) why = "anatomical arm joints missing";
 
             if (why != null)
             {
@@ -2957,8 +3030,8 @@ namespace NextDayRevival
                 return;
             }
 
-            st.LHand = lh; st.LFore = lh.parent; st.LUpper = lh.parent.parent;
-            st.RHand = rh; st.RFore = rh.parent; st.RUpper = rh.parent.parent;
+            st.LHand = lh; st.LFore = lf; st.LUpper = lu;
+            st.RHand = rh; st.RFore = rf; st.RUpper = ru;
             RevivalPlugin.L.LogInfo("Technical-MG: Arme des Schuetzen gefunden - "
                 + st.LUpper.name + " / " + st.LFore.name + " / " + lh.name
                 + " und " + st.RUpper.name + " / " + st.RFore.name + " / "
@@ -3005,6 +3078,20 @@ namespace NextDayRevival
 
         /// <summary>Is there a forearm and an upper arm above this hand, and are
         /// the two bones long enough and similar enough to be an arm?</summary>
+        static bool ArmJoints(GameObject body, Transform hand, bool left,
+                              out Transform upper, out Transform fore)
+        {
+            upper = null; fore = null;
+            Type type = RevivalPlugin.TypeByName("PlayerObjectsManager");
+            Component pom = type == null ? null : body.GetComponentInChildren(type, true);
+            if (pom == null || hand == null) return false;
+            upper = AsTransform(Field(pom, left ? "MainChar_Upper_armL" : "MainChar_Upper_armR"));
+            fore = AsTransform(Field(pom, left ? "MainChar_ForearmL1" : "MainChar_ForearmR1"));
+            return upper != null && fore != null && Under(upper, fore) && Under(fore, hand)
+                && Vector3.Distance(upper.position, fore.position) > 0.0001f
+                && Vector3.Distance(fore.position, hand.position) > 0.0001f;
+        }
+
         static bool Chain(Transform hand)
         {
             Transform fore = hand.parent;
@@ -3120,72 +3207,47 @@ namespace NextDayRevival
 
         // -------------------------------------------------------------- Haltung
 
-        /// <summary>
-        /// Stand the gunner up. `_inVehiclePose` is the field
-        /// PlayerVehicleManager::SitToVehicle writes (1 for the driver, 2 for a
-        /// passenger; RE "The T-72 crew"); holding it at the on-foot value for
-        /// as long as the local player is IN the gunner's place is what turns
-        /// the bench pose into a man on his feet - the place is what he stands
-        /// in, the gun is only what he does there, so this does not wait for the
-        /// trigger. It is written every frame because the game writes it too,
-        /// and it is restored exactly once on release. Everything here is
-        /// optional: without the field the gunner simply sits, and the gun still
-        /// turns with him.
-        /// </summary>
-        static void HoldPose()
+        // _inVehiclePose is gameplay state, not an animation selector. In
+        // SetPlayerVehicleState every value except driver (1) selects sitting.
+        // Sample the native standing clip after animation and before arm IK.
+        static void StandingPose(Station st, GameObject body)
         {
-            if (CfgStandPose == null || !CfgStandPose.Value) return;
+            if (CfgStandPose == null || !CfgStandPose.Value || body == null) return;
             try
             {
-                if (!_poseHeld)
+                if (st.PoseBody != body)
                 {
-                    object pvm = Field(_vgs, "_playerVehicleManager");
-                    if (pvm == null) return;
-                    FieldInfo f = AccessTools.Field(pvm.GetType(), "_inVehiclePose");
-                    if (f == null)
-                    {
-                        if (!_poseWarned)
-                        {
-                            _poseWarned = true;
-                            RevivalPlugin.L.LogWarning("Technical-MG: "
-                                + "PlayerVehicleManager._inVehiclePose fehlt - der "
-                                + "Schuetze bleibt in der Sitzhaltung.");
-                        }
-                        return;
-                    }
-                    _poseOwner = pvm;
-                    _poseField = f;
-                    _poseBack = f.GetValue(pvm);
-                    _poseHeld = true;
-                    RevivalPlugin.L.LogInfo("Technical-MG: Haltung " + _poseBack
-                        + " -> " + CfgStandPoseValue.Value + " (Schuetze steht).");
+                    st.PoseBody = body;
+                    st.PoseTried = false;
+                    st.StandClip = null;
+                    st.SampleStand = null;
                 }
-                if (_poseField == null || _poseOwner == null) return;
-                _poseField.SetValue(_poseOwner, PoseValue(_poseField.FieldType,
-                                                          CfgStandPoseValue.Value));
+                if (!st.PoseTried)
+                {
+                    st.PoseTried = true;
+                    Type statesType = RevivalPlugin.TypeByName("PlayerStatesController");
+                    Component states = statesType == null ? null
+                        : body.GetComponentInChildren(statesType, true);
+                    Component animation = Field(states, "_anim") as Component;
+                    if (animation == null) throw new InvalidOperationException("Player animation missing");
+                    PropertyInfo item = animation.GetType().GetProperty("Item", new Type[] { typeof(string) });
+                    object idle = item == null ? null : item.GetValue(animation, new object[] { "idle_alert" });
+                    if (idle == null) throw new InvalidOperationException("idle_alert clip missing");
+                    st.StandClip = idle.GetType().GetProperty("clip").GetValue(idle, null);
+                    st.SampleStand = st.StandClip.GetType().GetMethod("SampleAnimation",
+                        new Type[] { typeof(GameObject), typeof(float) });
+                    st.AnimationObject = animation.gameObject;
+                    if (st.SampleStand == null) throw new InvalidOperationException("SampleAnimation missing");
+                    RevivalPlugin.L.LogInfo("Technical-MG: standing idle_alert pose for " + body.name);
+                }
+                if (st.SampleStand != null)
+                    st.SampleStand.Invoke(st.StandClip, new object[] { st.AnimationObject, 0f });
             }
             catch (Exception ex)
             {
-                _poseHeld = false;
-                _poseField = null;
-                _poseOwner = null;
-                if (!_poseWarned)
-                {
-                    _poseWarned = true;
-                    RevivalPlugin.L.LogWarning("Technical-MG: Stehhaltung nicht "
-                        + "moeglich (" + ex.Message + ") - der Schuetze sitzt.");
-                }
+                st.SampleStand = null;
+                RevivalPlugin.L.LogWarning("Technical-MG: standing pose unavailable: " + ex.Message);
             }
-        }
-
-        /// <summary>The configured pose number in whatever type the field is -
-        /// the game may declare it as an int or as a small enum, and boxing the
-        /// wrong one throws inside SetValue.</summary>
-        static object PoseValue(Type fieldType, int value)
-        {
-            if (fieldType == null) return value;
-            if (fieldType.IsEnum) return Enum.ToObject(fieldType, value);
-            return Convert.ChangeType(value, fieldType);
         }
 
         /// <summary>Is the local player in this place of our technical?</summary>
@@ -3197,30 +3259,15 @@ namespace NextDayRevival
 
         static void ReleasePose()
         {
-            if (!_poseHeld) return;
-            try
-            {
-                // Give the pose back only while the man is still IN the
-                // vehicle. Once he has climbed out, PlayerVehicleManager has
-                // written the on-foot pose itself, and putting the seated value
-                // we remembered back over it would sit him down in the road.
-                if (_poseField != null && _poseOwner != null && _poseBack != null
-                    && _vgs != null
-                    && IntField(_vgs, "_localPlayerPassengerId") >= 0)
-                    _poseField.SetValue(_poseOwner, _poseBack);
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Technical-MG: Haltung nicht "
-                    + "zurueckgesetzt: " + ex.Message);
-            }
-            finally
-            {
-                _poseHeld = false;
-                _poseField = null;
-                _poseOwner = null;
-                _poseBack = null;
-            }
+            // Native animation resumes when the body leaves the gunner slot.
+            // Release cached references too, without rewriting vehicle state.
+            Station st = Find(_vgs);
+            if (st == null) return;
+            st.PoseBody = null;
+            st.AnimationObject = null;
+            st.StandClip = null;
+            st.SampleStand = null;
+            st.PoseTried = false;
         }
 
         // --------------------------------------------------------------- Bild
@@ -3862,11 +3909,11 @@ namespace NextDayRevival
         /// Height of the elevation pivot above the pintle foot, in metres. It
         /// is the ERGONOMIC number of the whole feature: the pintle stands on
         /// the same deck the gunner stands on, so this plus the grips' own
-        /// small offset is exactly how high his hands end up. 1.10 m puts them
-        /// where a standing man holds a spade grip; at the old 0.95 m he
-        /// stooped for it.
+        /// small offset sets grip height. The sampled idle_alert skeleton needs
+        /// 1.40 m to reach the grips across the full -12..55 degree pitch range;
+        /// at 1.10 m the lowered rear grips exceed the standing arm length.
         /// </summary>
-        internal const float PivotHeight = 1.10f;
+        internal const float PivotHeight = 1.40f;
 
         /// <summary>The barrel axis height in the GUN's own space, and the two
         /// lengths the muzzle is built from.</summary>
@@ -3910,7 +3957,10 @@ namespace NextDayRevival
         /// here beside them and not in the vehicle: it is a measurement of the
         /// PERSON.
         /// </summary>
-        const float ArmForward = 0.42f;
+        // The sampled idle_alert rig reaches 1.42 world units with these joints.
+        // At the 1.40 m pintle, 0.25 m forward keeps both elbows bent at every
+        // supported elevation (research/technical_standing_check.py).
+        const float ArmForward = 0.25f;
 
         /// <summary>
         /// How far BEHIND the pintle axis the gunner's own root belongs, in
