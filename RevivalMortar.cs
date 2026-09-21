@@ -1411,11 +1411,16 @@ namespace NextDayRevival
                          "Its crew is at the gun");
         }
 
-        /// <summary>A drone is overhead and this player is under it.</summary>
+        /// <summary>A drone is overhead and this player is under it.
+        /// Short, and it says what to do: it goes out on the game's own
+        /// warning line (NativeMessage) the moment the camera has the
+        /// player, which is SpotSeconds plus ReportSeconds plus the
+        /// turret's travel before the first shell - the seconds this line
+        /// exists to spend. "Move" was too mild for what it buys.</summary>
         internal static string TextSpotted()
         {
-            return Loc.T("Разведдрон над вами - уходите",
-                         "A recon drone is above you - move");
+            return Loc.T("Вас засекли с воздуха - БЕГИТЕ!",
+                         "You have been spotted - RUN!");
         }
 
         static void Load(Tube t, int cap)

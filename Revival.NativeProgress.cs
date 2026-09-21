@@ -1,8 +1,10 @@
 // Next Day: Survival - Revival Toolkit
 //
-// Native action progress bridge. Custom long-running player actions use the
-// same HUD and character-state entry points as the base game's item and world
-// interactions instead of drawing a second, unrelated IMGUI progress bar.
+// Native HUD bridges. Custom long-running player actions use the same HUD and
+// character-state entry points as the base game's item and world interactions
+// instead of drawing a second, unrelated IMGUI progress bar, and a warning the
+// player did not ask for goes out on the game's own message line rather than
+// as a label of our own above the crosshair (NativeMessage).
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments or modern syntax.
 
@@ -704,6 +706,128 @@ namespace NextDayRevival
             _animationWarning = true;
             RevivalPlugin.L.LogWarning("Native action animation unavailable at " + stage
                 + (ex == null ? "." : ": " + ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// The base game's OWN message line - the short notice that slides in at
+    /// the bottom left with a form icon beside it, which the game uses for
+    /// "you cannot drop that", an air drop, a kill and everything else it has
+    /// to say in one sentence.
+    ///
+    /// WHY THIS AND NOT Turret.Hinweis. The toolkit's own hint is an IMGUI
+    /// label above the crosshair. It is fine for a hint the player asked for -
+    /// he pressed a key and the answer appears where he is already looking -
+    /// and it is wrong for a warning he did not ask for: it carries no icon,
+    /// it is not where this game puts messages, and a player who is running
+    /// reads it as part of the scenery. The game's own line has the warning
+    /// form beside it and sits where every other message of the session has
+    /// sat, so it is recognised before it is read.
+    ///
+    /// THE PATH, CONFIRMED IN IL. UIController.ShowHUDMessage(string,
+    /// MessageType, bool ignoreSound, bool localize) hands the text to
+    /// HUD_MessageUI.AddHUDMessageQueue, which picks formTextures[(int)type]
+    /// as the icon and queues the line; the same four arguments are what
+    /// ItemSlotUI.CantDropItem and two dozen other call sites push. The
+    /// localize flag runs the string through LocalizationManager, which is for
+    /// the game's own "$HUD_Msg_..." keys - our text is already in the
+    /// player's language through Loc.T, so it is passed false.
+    ///
+    /// Two things the game does here and we do not fight:
+    ///   - a Warning is SILENT. AddHUDMessageQueue forces IgnoreSound for
+    ///     Inventory and Warning whatever the caller asked for.
+    ///   - the same text is not queued twice (CantAddSameMessage), and nothing
+    ///     is shown at all while _UI_General is 2 or 3.
+    /// </summary>
+    public static class NativeMessage
+    {
+        // MessageType as the enum's own constants read in Assembly-CSharp:
+        // Inventory 0, Warning 1, Weapon 2, AirDrop 3, Skill 4, Group 5,
+        // Kill 6, Stats 7, Quest 8, QuestDone 9, QuestFailed 10.
+        public const int Warning = 1;
+
+        static MethodInfo _instance;
+        static MethodInfo _show;
+        static Type _messageType;
+        static bool _looked;
+        static bool _warned;
+
+        /// <summary>The warning line, with the game's warning form beside it.
+        /// False when the game's own message path is not there - the caller
+        /// then still has its own hint to fall back on.</summary>
+        public static bool Warn(string text)
+        {
+            return Show(text, Warning);
+        }
+
+        public static bool Show(string text, int type)
+        {
+            if (text == null || text.Length == 0) return false;
+            try
+            {
+                if (!Look()) return false;
+                object ui = _instance.Invoke(null, null);
+                if (ui == null) return false;
+                object kind = _messageType == null
+                    ? (object)type : Enum.ToObject(_messageType, type);
+                _show.Invoke(ui, new object[] { text, kind, false, false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Unavailable("show", ex);
+                // One broken call is enough: the next warning takes the
+                // caller's own fallback instead of throwing again every time.
+                _show = null;
+            }
+            return false;
+        }
+
+        static bool Look()
+        {
+            if (_show != null && _instance != null) return true;
+            if (_looked) return false;
+            _looked = true;
+
+            Type ui = RevivalPlugin.TypeByName("UIController");
+            if (ui == null) { Unavailable("lookup", null); return false; }
+            _instance = AccessTools.PropertyGetter(ui, "Instance");
+            if (_instance == null || !_instance.IsStatic)
+            {
+                _instance = null;
+                Unavailable("instance", null);
+                return false;
+            }
+
+            // By shape, not by an assumed signature: the text first, the type
+            // second, two flags after it. MessageType is an enum in the game's
+            // own assembly and cannot be named from here.
+            MethodInfo[] all = ui.GetMethods(BindingFlags.Public
+                | BindingFlags.NonPublic | BindingFlags.Instance);
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i].Name != "ShowHUDMessage") continue;
+                ParameterInfo[] ps = all[i].GetParameters();
+                if (ps.Length != 4) continue;
+                if (ps[0].ParameterType != typeof(string)) continue;
+                if (!ps[1].ParameterType.IsEnum) continue;
+                if (ps[2].ParameterType != typeof(bool)) continue;
+                if (ps[3].ParameterType != typeof(bool)) continue;
+                _show = all[i];
+                _messageType = ps[1].ParameterType;
+                break;
+            }
+            if (_show == null) { Unavailable("method", null); return false; }
+            return true;
+        }
+
+        static void Unavailable(string stage, Exception ex)
+        {
+            if (_warned) return;
+            _warned = true;
+            RevivalPlugin.L.LogWarning("Native HUD message unavailable at " + stage
+                + (ex == null ? "." : ": " + ex.Message)
+                + " Warnings fall back to the toolkit's own hint.");
         }
     }
 }

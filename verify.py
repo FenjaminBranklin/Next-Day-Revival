@@ -612,11 +612,27 @@ def check_helipads():
          "jede Aenderung an der Welt wird zurueckgenommen",
          "die Welt bleibt veraendert, wenn die Plaetze verschwinden")
     need("if (Networked(t)) return null;" in pad
-         and "box.size.x <= MaxProp && box.size.z <= MaxProp" in pad
+         and "box.size.x <= cap && box.size.z <= cap" in pad
          and "if (hit is TerrainCollider) return null;" in pad,
          "nur kleine, eigene Objekte werden geraeumt",
-         "der Platz koennte ein Haus, das Terrain oder ein Netzobjekt "
-         "abschalten")
+         "der Platz koennte das Terrain oder ein Netzobjekt abschalten")
+    # --- 6.40: the clearing is authored, and only an authored one takes a
+    # structure. Without one the old limit has to stand unchanged.
+    need("static float Cap(Pad p)" in pad
+         and "Sited(p) && p.Radius > MaxProp ? p.Radius : MaxProp" in pad
+         and "const float MaxProp = 14f;" in pad,
+         "ohne gezeichnete Raeumung bleibt die alte Grenze stehen",
+         "ein Platz ohne Raeumungsradius koennte ein Haus abschalten")
+    need("static float Footprint(Pad p)" in pad
+         and "return p.Clear > deck ? p.Clear : deck;" in pad,
+         "die Raeumung vergroessert die Flaeche nur, sie verkleinert sie nie",
+         "ein zu kleiner Raeumungsradius wuerde den Boden unter dem Deck "
+         "stehen lassen")
+    need("Transform group = Group(t);" in pad
+         and "LODGroup group = t.GetComponentInParent<LODGroup>();" in pad,
+         "geraeumt wird die ganze LOD-Gruppe, nie ein Einzelteil davon",
+         "der Platz koennte einzelne Pfosten aus einem Zaun schalten, der als "
+         "ganzes Objekt viel zu gross zum Raeumen ist")
     need("hull.enabled = false;" in pad and "terrain.Flush();" in pad,
          "der gefaellte Baum verliert auch seinen Collider",
          "ein gefaellter Baum bleibt unsichtbar im Weg stehen")
@@ -657,7 +673,8 @@ def check_helipads():
     cs_pads = re.search(r"internal const int MaxPads = (\d+);", pad)
     cs_radius = re.search(r"internal const float MinRadius = ([\d.]+)f, "
                           r"MaxRadius = ([\d.]+)f;", pad)
-    cs_columns = re.search(r"c\.Length != (\d+) && c\.Length != (\d+)", pad)
+    cs_columns = re.search(r"c\.Length < (\d+) \|\| c\.Length > (\d+)", pad)
+    cs_clear = re.search(r"internal const float MaxClear = ([\d.]+)f;", pad)
     need(cs_pads is not None and cs_radius is not None and cs_columns is not None,
          "die Grenzen des Plugins sind ablesbar",
          "die Grenzen in Revival.Helipads.cs haben ihre Form verloren")
@@ -680,6 +697,11 @@ def check_helipads():
          and float(value("MAX_RADIUS")) == float(cs_radius.group(2)),
          "der erlaubte Radius stimmt mit dem Plugin ueberein",
          "Editor und Plugin erlauben verschiedene Radien")
+    need(cs_clear is not None and value("MAX_CLEAR") is not None
+         and float(value("MAX_CLEAR")) == float(cs_clear.group(1)),
+         "die erlaubte Raeumung stimmt mit dem Plugin ueberein",
+         "der Editor laesst eine Raeumung zu, die das Plugin ablehnt - es "
+         "verwirft dann die ganze Platztabelle")
     columns = re.search(r"TSV_COLUMNS = \[(.*?)\]", hdef, re.S)
     need(columns is not None
          and len(re.findall(r'"[A-Za-z]+"', columns.group(1))) == int(cs_columns.group(1)),
@@ -3384,6 +3406,34 @@ def check_player_heli():
          "engine and crash are told to every client",
          "the rotor, the sound or the fire is decided locally - every other "
          "client then sees a machine that is still flying")
+
+    # --- leaving in the air is a descent, not an explosion at altitude. The
+    # model has to remain visible until the floor, carry a world-space trail,
+    # and only then hand the hull to the ordinary wreck visuals and a spatial
+    # impact sound. The same reliable start event makes all peers see it.
+    abandon = _body(code, "static void Abandon(GameObject go, Vector3 drift, bool broadcast)")
+    fall = _body(code, "public sealed class HeliCrashFall : MonoBehaviour")
+    finish = _body(code, "internal static void FinishAbandonedCrash(GameObject go, Vector3 where)")
+    jump = _body(code, "static void Jump()")
+    need("Abandon(go, drift, true);" in jump and "Crash(go, go.transform.position);" not in jump,
+         "an abandoned machine descends instead of exploding in the air",
+         "Jump still turns the helicopter into a wreck at its airborne position")
+    need(abandon != "" and "Net.Send(Net.Crashed," in abandon
+         and "go.AddComponent<HeliCrashFall>()" in abandon,
+         "the fall starts reliably on every client",
+         "the abandoned-helicopter fall is local to one client")
+    need(fall != "" and "Gravity * k * dt" in fall
+         and "transform.Rotate(" in fall and "CrashFloor(" in fall,
+         "the airframe falls, drifts and rolls until it reaches the floor",
+         "the crash descent has no gravity, visible attitude or ground test")
+    need("FireEffect.SpawnDroneFire(_trail, true);" in fall
+         and "FireEffect.StopEmitting(_trail);" in fall,
+         "the descent carries a smoke and fire trail that ends on impact",
+         "the falling helicopter has no bounded trail effect")
+    need(finish != "" and "Burn(go, where);" in finish
+         and "HeliCrashSound.Play(where);" in finish,
+         "impact produces the wreck visual and a spatial crash sound",
+         "the delayed impact is silent or does not become the normal wreck")
 
     # --- the event window. Every feature of this plugin raises Photon events in
     # its own band; two bands that overlap is a bug nobody sees until two

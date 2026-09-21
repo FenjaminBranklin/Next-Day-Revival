@@ -418,11 +418,14 @@ namespace NextDayRevival
             // non-colliding, so each obstacle is handled at most once. Ghosts
             // counts them and GhostLog rate-limits the report: a convoy is one
             // event and can name every prop it goes through, a patrol drives all
-            // session and would write a line per tree.
+            // session and would write a line per tree. GhostSweep is the clock
+            // of the hull sweep (GhostAround), the answer to every obstacle the
+            // three feeler rays cannot see.
             public Component[] Cols;
             public Dictionary<int, bool> Ghosted;
             public int Ghosts;
             public float GhostLog;
+            public float GhostSweep;
 
             // NDR convoy column (Columns(), ColumnLock). While Column is true
             // this vehicle is NOT driven by RCC at all: it is placed on the
@@ -4019,6 +4022,7 @@ namespace NextDayRevival
                 // spacing checks above. Waypoint recovery must not warp a free
                 // driver through a defender or into another APC.
                 GhostAhead(u, t, vel.magnitude);
+                GhostAround(u, t, vel.magnitude, groundKmh < 3f);
                 if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
                 // Free checks the destination and intervening convoy lanes.
                 if (Escalate(u, pos)) return;
@@ -4036,6 +4040,12 @@ namespace NextDayRevival
                 // still run a man over. Avoid runs anyway: passing through
                 // scenery is the safety net, not the normal way to drive.
                 GhostAhead(u, t, vel.magnitude);
+                // And the same thing again for everything the rays miss: what
+                // is lower than they are, what the hull catches at the flank,
+                // and what the nose is already inside. Faster while the vehicle
+                // is not moving, because then it is standing on an obstacle
+                // that has already won.
+                GhostAround(u, t, vel.magnitude, groundKmh < 3f);
                 float dodge = Avoid(u, t, vel.magnitude);
                 if (dodge != 0f)
                 {
@@ -4616,6 +4626,242 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Patrol: a vehicle on " + u.Route.Name
                 + " is ghosting through \"" + go.name + "\" (" + u.Ghosts
                 + " obstacle(s) so far).");
+        }
+
+        /// <summary>Seconds between two hull sweeps while the vehicle is moving,
+        /// and while it is not. Ghosting a prop is permanent for this vehicle,
+        /// so a sweep only ever looks for NEW obstacles: half a second is one
+        /// sweep every six metres at patrol speed, and a hull that is already
+        /// standing against something is asked five times a second.</summary>
+        const float SweepEvery = 0.5f;
+        const float SweepStuckEvery = 0.2f;
+
+        /// <summary>How far past the hull one sweep reaches: a fixed margin plus
+        /// the ground the vehicle covers in SweepLead seconds, so two sweeps in
+        /// a row overlap at road speed instead of leaving a gap between them.</summary>
+        const float SweepMargin = 2.5f;
+        const float SweepLead = 0.4f;
+
+        /// <summary>The band of height, measured from the bottom of the hull, in
+        /// which a prop can stop this vehicle.
+        ///
+        /// It is not a nicety, it is the safety rail. The road under the wheels
+        /// is a collider like any other, and a vehicle that ignores the road
+        /// falls out of the world. Anything whose top is below SweepFloor is
+        /// driven over - a kerb, a rail, a road edge - and anything whose bottom
+        /// is above SweepRoof is a canopy, a wire or a balcony the hull passes
+        /// under. Only what stands in between is in the way.</summary>
+        const float SweepFloor = 0.35f;
+        const float SweepRoof = 4.5f;
+
+        /// <summary>Metres across, above which a collider is scenery rather than
+        /// an obstacle: a ground plate, a hillside, a whole streamed chunk.
+        /// Nothing that size is what a patrol is snagged on, and driving through
+        /// one is how a vehicle leaves the map.</summary>
+        const float SweepBiggest = 60f;
+
+        /// <summary>Metres across, below which a thing UNDER the hull may be
+        /// passed through after all - but only for a vehicle that has stopped
+        /// moving. A block, a barrier, a pile of tyres is something a hull can
+        /// climb onto and then sit on with its wheels in the air, and while it
+        /// sits there nothing in front of it is the problem. A surface the size
+        /// of a yard is not that; it is what the vehicle drives on, whatever the
+        /// map happens to call it, and it stays solid.</summary>
+        const float SweepStuckSmall = 6f;
+
+        /// <summary>Props one sweep may hand to Physics.IgnoreCollision. Each
+        /// costs a reflected call per collider of this vehicle, and a yard full
+        /// of scenery would otherwise be paid for in a single frame. What is
+        /// left over is not recorded as decided, so the next sweep - two tenths
+        /// of a second later - takes the rest.</summary>
+        const int SweepAtOnce = 24;
+
+        /// <summary>The collector of one sweep, and the props it decided to pass
+        /// through. Both are reused: a sweep runs twice a second per vehicle and
+        /// must not hand the garbage collector an array each time.</summary>
+        static readonly Collider[] _sweepHits = new Collider[256];
+        static readonly List<Component> _sweepThrough = new List<Component>();
+
+        /// <summary>
+        /// The obstacles the three feeler rays cannot see.
+        ///
+        /// A ray finds what stands in front of the NOSE, at 1.2 m, along one of
+        /// three lines. Three things it therefore never finds, and all three are
+        /// how a patrol vehicle actually comes to a stop:
+        ///
+        ///   - a prop lower than the ray. A concrete block, a bollard, a pile of
+        ///     tyres: the hull catches it, the rays pass over it.
+        ///   - a prop at the flank. The rays leave the nose; the corner of a
+        ///     seven-metre hull does not follow them.
+        ///   - a prop the nose is ALREADY inside. A ray that starts inside a
+        ///     collider reports no hit at all, so the one obstacle that has
+        ///     certainly stopped the vehicle is the one obstacle the ghosting
+        ///     never hears about. That is the stop that lasts all session, and
+        ///     it is the one the user keeps reporting.
+        ///
+        /// So the hull sweeps for itself instead of waiting to be pointed at
+        /// something: everything solid within reach is made to ignore this
+        /// vehicle. The ray's rules still hold - terrain, mesh roads, tunnel
+        /// floors and everything alive stay solid - and two more are added,
+        /// because a sphere drawn around a vehicle contains the road it stands
+        /// on: the height band above, and the surface the vehicle is resting on,
+        /// which stays solid whatever it happens to be called.
+        ///
+        /// The one exception to "alive stays solid" is another vehicle of this
+        /// class, and only once this one has STOPPED. Two hulls that are both
+        /// driving are traffic: physics shoves them past each other and it looks
+        /// like a road with vehicles on it. Two that have come to a halt nose to
+        /// nose, one patrol against another, are the one pair on the map that
+        /// nothing separates - PatrolSeparate eases apart mates of the same
+        /// group, and neither driver will ever give way - so at that point they
+        /// pass through each other instead of holding the road.
+        /// </summary>
+        static void GhostAround(Unit u, Transform t, float speed, bool stuck)
+        {
+            if (u.Cols == null || !PhysLookUp() || !IgnoreLookUp()) return;
+            if (Time.time < u.GhostSweep) return;
+            u.GhostSweep = Time.time + (stuck ? SweepStuckEvery : SweepEvery);
+
+            if (u.ColumnLift <= 0f) ColumnFootprint(u);
+            float hull = Mathf.Sqrt(u.ColumnHalfLength * u.ColumnHalfLength
+                                    + u.ColumnHalfWidth * u.ColumnHalfWidth);
+            float reach = hull + SweepMargin + Mathf.Max(0f, speed) * SweepLead;
+            float bottom = t.position.y - u.ColumnLift;
+
+            int found;
+            try
+            {
+                // Every layer, not the raycast default: a prop on IgnoreRaycast
+                // is invisible to the feeler rays and still perfectly solid to
+                // the hull, which is precisely the case this sweep is for.
+                // Triggers stay out - a zone volume is not an obstacle, and
+                // ignoring one would cost the game the event it fires.
+                found = Physics.OverlapSphereNonAlloc(t.position, reach,
+                    _sweepHits, Physics.AllLayers,
+                    QueryTriggerInteraction.Ignore);
+            }
+            catch (Exception ex)
+            {
+                // A physics call that throws is not worth retrying every step.
+                u.GhostSweep = Time.time + 30f;
+                RevivalPlugin.L.LogWarning("Patrol: the hull sweep on "
+                    + u.Route.Name + " failed - " + ex.Message);
+                return;
+            }
+            if (found <= 0) return;
+            if (found > _sweepHits.Length) found = _sweepHits.Length;
+
+            // Whatever the vehicle is standing on is never an obstacle, whatever
+            // it is called. Deliberately NOT written down as decided: twenty
+            // metres on, the same object can be the wall beside the road.
+            Vector3 hit;
+            GameObject floor = Turret.RaycastObject(t.position + Vector3.up * 0.5f,
+                Vector3.down, u.ColumnLift + 2f, out hit);
+            if (floor != null && u.Car != null
+                && floor.transform.IsChildOf(u.Car.transform)) floor = null;
+
+            if (u.Ghosted == null) u.Ghosted = new Dictionary<int, bool>();
+            if (u.Ghosted.Count > 4096) u.Ghosted.Clear();
+
+            _sweepThrough.Clear();
+            for (int i = 0; i < found; i++)
+            {
+                // Stop BEFORE recording anything: what this sweep does not get
+                // to must stay undecided, or it would never be looked at again.
+                if (_sweepThrough.Count >= SweepAtOnce) break;
+                Collider c = _sweepHits[i];
+                _sweepHits[i] = null;                 // hold nothing between sweeps
+                if (c == null) continue;
+                Transform ct = c.transform;
+                if (u.Car != null && ct.IsChildOf(u.Car.transform)) continue;
+                if (floor != null && ct.IsChildOf(floor.transform)) continue;
+                int id = c.GetInstanceID();
+                if (u.Ghosted.ContainsKey(id)) continue;
+
+                // Cheap, and true only for where the vehicle stands right now,
+                // so it is asked every sweep and never recorded.
+                Bounds b = c.bounds;
+                if (b.min.y > bottom + SweepRoof) continue;
+                if (b.size.x > SweepBiggest || b.size.z > SweepBiggest) continue;
+                if (b.max.y < bottom + SweepFloor
+                    && (!stuck || b.size.x > SweepStuckSmall
+                        || b.size.z > SweepStuckSmall)) continue;
+
+                // One of ours? Asked first, and the answer is never written
+                // down: two vehicles that are only passing each other must be
+                // able to meet again later as two that have stopped.
+                Unit mate = DrivenByUs(ct);
+                if (mate != null)
+                {
+                    if (stuck) Mates(u, mate);
+                    continue;
+                }
+                u.Ghosted[id] = true;                 // decided once, either way
+                if (Lebendig(ct)) continue;           // player, NPC, animal
+                if (IsDriveSurface(c.gameObject, Vector3.zero)) continue;
+                _sweepThrough.Add(c);
+            }
+            if (_sweepThrough.Count == 0) return;
+
+            GhostPair(u.Cols, _sweepThrough.ToArray());
+            u.Ghosts += _sweepThrough.Count;
+            string first = _sweepThrough[0] == null ? "?" : _sweepThrough[0].name;
+            int n = _sweepThrough.Count;
+            _sweepThrough.Clear();
+
+            // One line a minute per vehicle, same clock and same reason as the
+            // ray: a sweep can pass through a whole yard at once, and naming
+            // every piece of it would be the entire log.
+            if (Time.time < u.GhostLog) return;
+            u.GhostLog = Time.time + 60f;
+            RevivalPlugin.L.LogInfo((u.ConvoyId != 0
+                    ? "Convoy " + u.ConvoyId : "Patrol: a vehicle")
+                + " on " + u.Route.Name + " swept " + n + " obstacle(s) out of "
+                + "its way, \"" + first + "\" among them (" + u.Ghosts
+                + " so far).");
+        }
+
+        /// <summary>The unit this collider belongs to, or null when the thing is
+        /// alive but none of ours - the player, his vehicle, an NPC, an animal.
+        /// Walked with IsChildOf rather than by root, so it holds however the
+        /// game parents a spawned car.</summary>
+        static Unit DrivenByUs(Transform t)
+        {
+            for (int i = 0; i < _units.Count; i++)
+            {
+                GameObject car = _units[i].Car;
+                if (car != null && t.IsChildOf(car.transform)) return _units[i];
+            }
+            return null;
+        }
+
+        /// <summary>Two vehicles of this class pass through each other from here
+        /// on. Line-mates are paired at spawn already; this is the pair that
+        /// meets by accident and then stops - two patrols of different groups on
+        /// one road, nose to nose, with nothing on either side that ever gives
+        /// way. Their whole collider sets are paired, not only the parts in
+        /// reach, and every one of them is recorded so the sweep does not ask
+        /// again.</summary>
+        static void Mates(Unit u, Unit mate)
+        {
+            if (mate.Cols == null) return;
+            // A convoy's burning mate belongs to StartBypass, which drives AROUND
+            // it and looks like a convoy doing so. That layer exists, it works,
+            // and a wreck is the one obstacle worth the detour.
+            if (mate.Died > 0f && u.ConvoyId != 0) return;
+            bool known = (u.ConvoyId != 0 && mate.ConvoyId == u.ConvoyId)
+                || (u.PatrolGroupId != 0
+                    && mate.PatrolGroupId == u.PatrolGroupId);
+            GhostPair(u.Cols, mate.Cols);
+            for (int i = 0; i < mate.Cols.Length; i++)
+                if (mate.Cols[i] != null)
+                    u.Ghosted[mate.Cols[i].GetInstanceID()] = true;
+            // Line-mates were paired at spawn; pairing them again is free and
+            // saying so every time they touch is not.
+            if (known) return;
+            RevivalPlugin.L.LogInfo("Patrol: the vehicle on " + u.Route.Name
+                + " and the one on " + mate.Route.Name + " met on the same road "
+                + "- they pass through each other instead of holding it.");
         }
 
         // =====================================================================

@@ -242,10 +242,10 @@ namespace NextDayRevival
                 + "236 s, and a warning line the drone crosses once every "
                 + "four minutes warns late. At 600 m a lap is now about "
                 + "145 s. What it costs is dwell, and only dwell: a man "
-                + "under the middle of the camera's circle has some 23 s of "
-                + "it instead of 37, against the 3 s of SpotSeconds, so the "
-                + "footprint a sighting can come from shrinks from 299 m to "
-                + "297 of SpotRadius' 300. With OrbitSweep on, it is the "
+                + "under the middle of the camera's circle has some 73 s of "
+                + "it instead of 119, against the 3 s of SpotSeconds, so the "
+                + "footprint a sighting can come from is 949 m of "
+                + "SpotRadius' 950 either way. With OrbitSweep on, it is the "
                 + "speed at the nominal radius: the angle turned per second "
                 + "is what stays fixed, so the drone runs slower the further "
                 + "in the spiral carries it.");
@@ -298,18 +298,31 @@ namespace NextDayRevival
                 + "down without a ground fire and leaves the burning fall "
                 + "alone; Effects/Fire switches off both.");
 
-            _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 300f,
+            _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 950f,
                 "Metres around the point under the drone in which it sees a "
-                + "man. A gimbal camera is not a hole in the floor: from "
-                + "OrbitHeight, 300 m of ground is a 16 degree depression, "
-                + "which is what a recon drone actually searches. The old 110 m "
-                + "was a footprint, and a footprint is why the battery saw "
-                + "nobody but the man standing directly underneath.");
+                + "man. This is the camera's reach, and it has to be bigger "
+                + "than the circle the aircraft flies or the drone cannot see "
+                + "its own settlement: at OrbitRadius 600 the 300 m of 6.39 "
+                + "left the inner ground blind unless the spiral happened to "
+                + "be at its innermost, and stopped 900 m out while the gun "
+                + "reaches 1200. 950 is Mortar's MaxRange measured from the "
+                + "INNER point of the spiral (600 * (1 - OrbitSweep) = 270), "
+                + "so the whole of the ground the gun can shoot into is "
+                + "searched from anywhere on the orbit. Measured over two "
+                + "sweeps: never blind within 350 m of the settlement, at "
+                + "most 116 s unlooked-at anywhere out to 1200 m - under one "
+                + "145 s lap - and a cliff past 1220 m, where the gun cannot "
+                + "reach either. Which way the drone is flying still decides "
+                + "WHEN a man is seen, only no longer whether.");
             // FIELD 2026-09-20: "sie soll agressiver scannen nicht nur wenn man
-            // direkt unter ihr ist". Migrate the released default - Config.Bind
-            // takes the value out of an existing file, so a new default on its
-            // own reaches nobody who has already played (CLAUDE.md, point 4).
-            if (_cfgSpotRadius.Value == 110f) _cfgSpotRadius.Value = 300f;
+            // direkt unter ihr ist", and 2026-09-21: "wenn man nicht direkt auf
+            // der linie der drohne steht, wird man nicht gespottet". Migrate
+            // both released defaults - Config.Bind takes the value out of an
+            // existing file, so a new default on its own reaches nobody who has
+            // already played (CLAUDE.md, point 4). A deliberate custom radius
+            // is left alone.
+            if (_cfgSpotRadius.Value == 110f || _cfgSpotRadius.Value == 300f)
+                _cfgSpotRadius.Value = 950f;
             _cfgSpotSeconds = cfg.Bind("Artillery", "SpotSeconds", 3f,
                 "Seconds a man has to stay inside the footprint before the "
                 + "operator is sure of him. Running through the edge of a pass "
@@ -390,6 +403,13 @@ namespace NextDayRevival
             public bool StationsSet;
             public bool GunnerLives;        // ... as of the last posting pass
             public bool OperatorLives;
+
+            // The battery's own side and its hated list, as the last living
+            // man of it answered them. Read fresh whenever there is a man to
+            // read; kept only so that a client whose scene no longer holds the
+            // village still knows who the battery shoots at (HostileToBattery).
+            public object OwnFaction;
+            public Array OwnHated;
 
             // crew as every client sees it: living men standing at the gun
             public int MenNear;
@@ -2276,7 +2296,23 @@ namespace NextDayRevival
         /// <summary>The local player's own warning. Every client runs this for
         /// ITSELF - it needs no authority, it is the only way a joined client
         /// learns that it is being watched, and it is what puts the mark on his
-        /// map.</summary>
+        /// map.
+        ///
+        /// FIELD 2026-09-21: "wenn ein spieler gespottet wurde ... eine native
+        /// meldung unten links". It went out on Turret.Hinweis, which is an
+        /// IMGUI label above the crosshair with no icon on it - the same line
+        /// the toolkit answers a keypress with. A warning nobody asked for has
+        /// to look like the game's warnings or it is not read at all, so it
+        /// goes through the game's own message queue with the warning form
+        /// beside it (NativeMessage). The hint stays as the fallback for the
+        /// case where that queue cannot be reached.
+        ///
+        /// The warning is the SIGHTING, not the fire mission: it fires the
+        /// moment the drone has the player, with no SpotSeconds dwell and no
+        /// InReach test in front of it. That is deliberate and it is what
+        /// makes the warning worth anything - the gun needs SpotSeconds plus
+        /// ReportSeconds plus the turret's travel after this line appears, and
+        /// those seconds are what the player is being given.</summary>
         static void Warn(Post p, float now, GameObject me, Vector3 mine)
         {
             if (me == null || !p.DroneUp) return;
@@ -2286,10 +2322,53 @@ namespace NextDayRevival
             p.LocalSpotPoint = mine;
             if (now < p.NextWarn) return;
             p.NextWarn = now + 25f;
-            Turret.Hinweis(Mortar.TextSpotted(), 3.5f);
+            string line = Mortar.TextSpotted();
+            if (!NativeMessage.Warn(line)) Turret.Hinweis(line, 3.5f);
+            RevivalPlugin.L.LogInfo("ArtyBattery: \"" + p.Name + "\" drone has us at "
+                + mine.ToString("0") + " - " + Flat(p.DroneAt - mine).ToString("0")
+                + " m from the aircraft, " + Flat(p.Centre - mine).ToString("0")
+                + " m from the settlement.");
         }
 
-        static float SpotRadius() { return Mathf.Clamp(F(_cfgSpotRadius, 300f), 20f, 600f); }
+        /// <summary>Metres from the drone in which it sees a man.
+        ///
+        /// FIELD 2026-09-21: "wenn man nicht direkt auf der linie der drohne
+        /// steht, wird man nicht gespottet ... die drohne sollte MINDESTENS
+        /// den inneren, wo die eigene base ist, aufklaeren koennen ... gegner
+        /// sollen auch hinter der drohnen linie noch gespottet werden".
+        ///
+        /// The 300 m of 6.39 was smaller than the circle the aircraft flies,
+        /// and that is the whole of the complaint: with the drone between 270
+        /// and 600 m out, a footprint of 300 could not see its own settlement
+        /// unless the spiral happened to be at its innermost, and it stopped
+        /// 900 m out while the gun reaches 1200. What was left was a moving
+        /// disc the player had to be standing in - the drone's line.
+        ///
+        /// So the number comes off the job instead of off the aircraft: the
+        /// drone searches the ground its gun can shoot into, and it has to be
+        /// able to do that from ANYWHERE on its spiral. That fixes it by
+        /// arithmetic rather than by feel - the spiral's inner point is
+        /// OrbitRadius * (1 - OrbitSweep), so the radius that reaches
+        /// Mortar.MaxRange from there is 1200 - 270, and 950 is that with a
+        /// little over. Three things follow from it, all three measured in
+        /// research/arty_drone_orbit_check.py over two whole sweeps:
+        ///
+        ///   - within 350 m of the settlement - SpotRadius less the orbit -
+        ///     the ground is NEVER out of the camera, whatever the drone is
+        ///     doing. That is the inner circle the report asked for.
+        ///   - out to 1200 m, the whole of the gun's reach and twice the
+        ///     orbit line, the longest a man goes unlooked-at is 116 s,
+        ///     under one 145 s lap, and the look he then gets is 39 s against
+        ///     the 3 s of SpotSeconds.
+        ///   - past 1220 m - the inner point plus this radius - it falls off a
+        ///     cliff to 253 s, because only the outer half of the spiral
+        ///     reaches that far. The gun cannot shoot there either.
+        ///
+        /// So the bearing still decides WHEN somebody is seen; it no longer
+        /// decides WHETHER. The ceiling is 1600 rather than 600 for the same
+        /// reason the default moved: at OrbitRadius 1500 the old one was less
+        /// than half the circle the aircraft flies.</summary>
+        static float SpotRadius() { return Mathf.Clamp(F(_cfgSpotRadius, 950f), 20f, 1600f); }
 
         /// <summary>Could the gun reach that point at all? Asked BEFORE the
         /// sighting rather than after it: a man the gun cannot touch is not a
@@ -2473,12 +2552,42 @@ namespace NextDayRevival
 
         /// <summary>Is this faction one the battery shoots at? The battery's own
         /// hated list is the gunner's. Unknown identities are never targets,
-        /// and an explicit own-side match wins over even a malformed hated list.</summary>
+        /// and an explicit own-side match wins over even a malformed hated list.
+        ///
+        /// THE ANSWER IS REMEMBERED, and that is the second half of the
+        /// 2026-09-21 report about spotting being inconsistent. The side comes
+        /// off a living man: the gun's own crew where there is one, otherwise
+        /// any of the settlement's men within 120 m of its centre. On the
+        /// master that always lands, because the master spawned the crew and
+        /// holds it in Gunner/Operator. On a JOINED CLIENT both of those are
+        /// null by construction - it never spawned them - so the question goes
+        /// to SettlementMan, and a player far enough out for the village's own
+        /// men to be gone from his scene got "not hostile" back: no warning,
+        /// while the master went right on spotting him and laying the gun. A
+        /// warning that depends on how much of a village happens to be loaded
+        /// is exactly the inconsistency that was reported.
+        ///
+        /// A settlement does not change sides, so the last side that WAS read
+        /// is the answer when none can be read now. Nothing is latched while a
+        /// man can still be found: the crew wears an opening bid for its first
+        /// seconds and MatchFaction corrects it (Manning), and that correction
+        /// has to keep coming through.</summary>
         static bool HostileToBattery(Post p, object faction, bool isPlayer)
         {
             Component owner = p.Gunner != null ? p.Gunner : p.Operator;
             if (owner == null) owner = SettlementMan(p);
-            return EnemyFaction(FactionOf(owner), HatedOf(owner), faction);
+            if (owner != null)
+            {
+                object own = FactionOf(owner);
+                Array hated = HatedOf(owner);
+                if (own != null && hated != null)
+                {
+                    p.OwnFaction = own;
+                    p.OwnHated = hated;
+                    return EnemyFaction(own, hated, faction);
+                }
+            }
+            return EnemyFaction(p.OwnFaction, p.OwnHated, faction);
         }
 
         internal static bool EnemyFaction(object own, Array hated, object target)

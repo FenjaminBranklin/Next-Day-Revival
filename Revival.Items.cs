@@ -1375,6 +1375,49 @@ namespace NextDayRevival
             5000, 100000, 50000, 2500, 25000,
             12000, 20000 };
 
+        // The OTHER side of the counter, and it is deliberately complete.
+        //
+        // The sell tab is `MarketplaceObject.RecalculateMarketItemsCategory`
+        // with CurrentCategory 7 (RE 30): it walks the player's backpack, asks
+        // `GenerateSellItemPrice` for every id and DROPS every item the answer
+        // is zero for - and the answer is zero for every id that is not in
+        // MarketItemsPriceDictionary. `ShowInMarket` is not consulted on that
+        // tab, and the sale itself (`HUD_MarketplaceUI::BuyItem`, sell branch)
+        // has no further gate. So one dictionary entry is the whole difference
+        // between an item a trader takes and an item that is stuck in the pack
+        // for good.
+        //
+        // What an item is WORTH and whether a trader also OFFERS it are two
+        // questions, and only the second one has a feature reason to say no:
+        // the mine, the repair gear and the modules are things a player is
+        // meant to find, not to order by the crate. Being unable to turn one
+        // back into money was never that decision - it was the price list
+        // following the shop list. Every custom item is therefore priced here;
+        // `ShopItemIds` above stays the list of what is for sale.
+        //
+        // The numbers are anchored to the shop table so both sides read on one
+        // scale: 1164 sits between the MG42 (18000) and the TAC-50 (30000);
+        // 1490 under the LAW (25000) because it has to be driven over; 1491
+        // likewise, since the cloud denies ground rather than killing armour.
+        // 2052 fits no launcher that exists, so it is worth its scrap. 2058 is
+        // twenty rifle rounds against the MG belt's two hundred for 4000, and
+        // 2059 is five of those magazines. 2060/2061 rank against the mast
+        // antenna (50000), 2062 against the portable jammer (100000) with a
+        // vehicle's power behind it. 2066 is the 125 mm round's price (5000),
+        // because it is the same class of shell.
+        static readonly int[] SellOnlyIds = new int[] {
+            1164, 1490, 1491, 2052, 2058, 2059, 2060, 2061, 2062, 2063, 2064,
+            2066 };
+        static readonly int[] SellOnlyPrices = new int[] {
+            26000, 15000, 20000, 1000, 1500, 6000, 60000, 35000, 130000, 1500,
+            8000, 5000 };
+
+        // A custom item whose id is in neither table still has to be sellable -
+        // that is the promise of this file, not a property of the list above.
+        // It gets this and says so in the log, so the next release can give it
+        // a price of its own instead of the item quietly being worth nothing.
+        const int SellFallbackPrice = 5000;
+
         public static void RegisterAll()
         {
             try
@@ -1443,6 +1486,12 @@ namespace NextDayRevival
         /// dictionary is what GenerateSellItemPrice reads before multiplying by
         /// this trader's BuyPlayerItemsPercent and converting the positive float
         /// to int (therefore truncating/flooring it).
+        ///
+        /// Two passes, because the two sides of the counter are two questions.
+        /// The first puts the `ShopItemIds` into a rank list, which is what a
+        /// trader offers. The second (<see cref="RegisterSellPrices"/>) prices
+        /// EVERY remaining custom item, which is what a trader takes - no
+        /// custom item is left without a price, whatever the shop list says.
         /// </summary>
         public static void RegisterMarketplace()
         {
@@ -1472,23 +1521,9 @@ namespace NextDayRevival
                     return;
                 }
 
-                // 2052 is a display/unused round. Remove stale registrations as
-                // well as declining to add it, so it cannot be bought or sold.
-                ItemDef display = FindUniqueDefinition(2052);
-                if (display != null)
-                    SetSpawnMarketData(display.Factory.MySpawned, false, 0);
-                int excluded = RemoveMarketItem(categories, 2052, null);
-                if (prices.Contains(2052))
-                {
-                    prices.Remove(2052);
-                    excluded++;
-                }
-                if (excluded > 0)
-                    RevivalPlugin.L.LogWarning("Marketplace: " + excluded
-                        + " alte Registrierung(en) fuer ausgeschlossene 2052 entfernt.");
-
                 int registered = 0;
                 int pending = 0;
+                int sellOnlyFallback = 0;
                 for (int i = 0; i < ShopItemIds.Length; i++)
                 {
                     int id = ShopItemIds[i];
@@ -1502,6 +1537,11 @@ namespace NextDayRevival
                         continue;
                     }
 
+                    // A shop item whose CATEGORY cannot be found is still an
+                    // item in somebody's backpack. Buying needs a rank list,
+                    // selling needs the price dictionary and nothing else, so
+                    // the two failures below fall back to the sell side instead
+                    // of leaving the item unsellable for the whole session.
                     object categoryKey;
                     object template;
                     bool existing = FindMarketItem(categories, id,
@@ -1509,9 +1549,13 @@ namespace NextDayRevival
                     if (!existing && !FindMarketItem(categories, def.DonorId,
                                                      out categoryKey, out template))
                     {
+                        prices[id] = buyPrice;
+                        SetSpawnMarketData(def.Factory.MySpawned, false, buyPrice);
+                        sellOnlyFallback++;
                         RevivalPlugin.L.LogWarning("Marketplace: weder " + id
                             + " noch Spende " + def.DonorId
-                            + " in einer Haendlerkategorie gefunden.");
+                            + " in einer Haendlerkategorie gefunden; nur"
+                            + " verkaeufbar fuer " + buyPrice + ".");
                         continue;
                     }
 
@@ -1520,8 +1564,12 @@ namespace NextDayRevival
                         template, id, buyPrice, icon);
                     if (!placed)
                     {
+                        prices[id] = buyPrice;
+                        SetSpawnMarketData(def.Factory.MySpawned, false, buyPrice);
+                        sellOnlyFallback++;
                         RevivalPlugin.L.LogWarning("Marketplace: " + id
-                            + " konnte nicht in Rang A eingetragen werden.");
+                            + " konnte nicht in Rang A eingetragen werden; nur"
+                            + " verkaeufbar fuer " + buyPrice + ".");
                         continue;
                     }
 
@@ -1536,12 +1584,80 @@ namespace NextDayRevival
 
                 RevivalPlugin.L.LogInfo("Marketplace: " + registered + "/"
                     + ShopItemIds.Length + " Shop-Items registriert, " + pending
-                    + " Definition(en) noch nicht integriert; 2052 ausgeschlossen.");
+                    + " Definition(en) noch nicht integriert.");
+
+                int sellOnly = RegisterSellPrices(categories, prices)
+                    + sellOnlyFallback;
+                RevivalPlugin.L.LogInfo("Marketplace: " + (registered + sellOnly)
+                    + " von " + RevivalPlugin.Items.Count
+                    + " eigenen Items sind beim Haendler verkaeufbar ("
+                    + sellOnly + " nur verkaeufbar, nicht kaufbar).");
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("Marketplace-Registrierung: " + ex);
             }
+        }
+
+        /// <summary>
+        /// Gives every custom item that the shop loop did not already price a
+        /// base price of its own, so a trader takes it off the player.
+        ///
+        /// Walks `RevivalPlugin.Items` rather than a second id list: the module
+        /// items only exist when `VehicleModules` is enabled, and their ids -
+        /// like the repair gear's - come from the config file, so a fixed list
+        /// would miss exactly the items a player changed. The table above still
+        /// sets the price wherever it names an id.
+        ///
+        /// These ids are NOT put into a rank list and are stripped from every
+        /// one they might still be in from an earlier run, which is what keeps
+        /// them off the buy tab: the sell tab reads the price dictionary alone.
+        /// Returns how many were priced.
+        /// </summary>
+        static int RegisterSellPrices(IDictionary categories, IDictionary prices)
+        {
+            List<int> done = new List<int>();
+            List<ItemDef> items = RevivalPlugin.Items;
+            int priced = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                ItemDef def = items[i];
+                int id = def.Id;
+                if (Contains(ShopItemIds, id)) continue;   // already on both sides
+                if (done.Contains(id)) continue;           // doubled definition
+                done.Add(id);
+
+                int price = SellFallbackPrice;
+                bool known = false;
+                for (int k = 0; k < SellOnlyIds.Length; k++)
+                {
+                    if (SellOnlyIds[k] != id) continue;
+                    price = SellOnlyPrices[k];
+                    known = true;
+                    break;
+                }
+                if (!known)
+                    RevivalPlugin.L.LogWarning("Marketplace: " + id
+                        + " hat keinen eigenen Verkaufspreis; " + price
+                        + " verwendet. Gehoert nach SellOnlyPrices.");
+
+                int stale = RemoveMarketItem(categories, id, null);
+                prices[id] = price;
+                SetSpawnMarketData(def.Factory.MySpawned, false, price);
+                priced++;
+                RevivalPlugin.L.LogInfo("Marketplace: " + id + " fuer "
+                    + price + " nur verkaeufbar registriert"
+                    + (stale > 0 ? " (" + stale + " alte Haendlereintraege entfernt)."
+                                 : "."));
+            }
+            return priced;
+        }
+
+        static bool Contains(int[] ids, int id)
+        {
+            for (int i = 0; i < ids.Length; i++)
+                if (ids[i] == id) return true;
+            return false;
         }
 
         static ItemDef FindUniqueDefinition(int id)

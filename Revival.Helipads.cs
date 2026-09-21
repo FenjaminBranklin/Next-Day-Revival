@@ -49,6 +49,25 @@
 // trees and grass are three different systems and each is taken out its own
 // way, all of it in memory and all of it restored when the pads change.
 //
+// WHY THE CLEARING IS AUTHORED SEPARATELY FROM THE DECK (6.40).
+// A deck is as wide as the machine needs. The SITE around it is a different
+// question, and at the safe-zone village it was measured rather than guessed:
+// the deck of the 20 m pad there reaches 25.4 m, and the bench stands at 18 m,
+// the parked Moskvich at 19, the bath house at 28, the well at 34, the power
+// pole at 35 and the UAZ at 42. Clearing to the deck alone therefore takes the
+// bench and the car and leaves a yard full of furniture standing around the
+// pad. So a pad carries an optional CLEARING RADIUS, authored in the editor
+// beside the deck radius. It only ever GROWS the site: a value under the
+// deck's own footprint changes nothing, because the ground the deck stands on
+// is cleared in any case.
+//
+// An authored clearing also raises the size limit, and that is deliberate.
+// Without one the rule stays what it was - a tree, a bush, a rock, never a
+// house - because a pad dropped on the map must not punch a hole in a village.
+// Authoring a clearing is the admin saying "this is a building site", so the
+// pad may then take anything narrower than the DECK HE DREW: one structure
+// goes, the container of half a district does not.
+//
 // The pad is also the LZ: a troop landing whose marked zone falls inside a pad
 // is snapped onto the pad centre and lands with the pad's heading, so an admin
 // places a pad once and every drop authored near it uses it (Snap, called from
@@ -72,6 +91,12 @@ namespace NextDayRevival
     {
         internal const int MaxPads = 64;
         internal const float MinRadius = 8f, MaxRadius = 60f;
+
+        /// <summary>The widest site an admin may author around a pad. Well past
+        /// anything a landing needs - it is there so a pad can also be the
+        /// order to clear the yard it stands in - and still far short of the
+        /// 5000 m map, so a mistyped number cannot strip a region.</summary>
+        internal const float MaxClear = 150f;
 
         /// <summary>Segments around the deck. A pad is a disc, and a disc with
         /// too few sides is a cog: 32 is smooth at walking distance on a small
@@ -117,6 +142,9 @@ namespace NextDayRevival
             internal string Name, Scene, Surface, Key;
             internal bool Enabled, Marker;
             internal float X, Z, Heading, Radius;
+            /// <summary>The authored site around the pad in metres, 0 for none.
+            /// Never shrinks the clearing: see Footprint.</summary>
+            internal float Clear;
             /// <summary>Deck height once the pad has been built; 0 before.</summary>
             internal float Deck;
             internal GameObject Go;
@@ -152,7 +180,7 @@ namespace NextDayRevival
         // ================================================================ data
 
         /// <summary>One line per pad:
-        /// name enabled x z heading radius surface marker [scene].
+        /// name enabled x z heading radius surface marker [scene [clear]].
         /// Throws on anything it does not fully understand - a half-read pad
         /// table would put a deck in the wrong place, and the caller keeps the
         /// last table it verified.</summary>
@@ -169,7 +197,7 @@ namespace NextDayRevival
                 string raw = line.TrimEnd('\r');
                 if (raw.Trim().Length == 0 || raw[0] == '#') continue;
                 string[] c = raw.Split('\t');
-                if (c.Length != 8 && c.Length != 9) throw new IOException("Invalid pad row");
+                if (c.Length < 8 || c.Length > 10) throw new IOException("Invalid pad row");
                 if (!Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
                     throw new IOException("Invalid pad name");
                 if (result.Count >= MaxPads) throw new IOException("Too many pads");
@@ -192,7 +220,12 @@ namespace NextDayRevival
                 p.Marker = c[7] == "1";
                 // No scene column means the home map - the same rule every other
                 // authored item follows (Revival.MapScene.cs).
-                p.Scene = c.Length == 9 ? MapScene.Clean(c[8]) : "";
+                p.Scene = c.Length >= 9 ? MapScene.Clean(c[8]) : "";
+                // The clearing is the last column and it is written only when
+                // there is one, so the eight-column row an older editor wrote
+                // still means exactly what it meant. A value under the deck's
+                // own footprint is not an error - it simply does nothing.
+                p.Clear = c.Length == 10 ? Number(c[9], 0f, MaxClear) : 0f;
                 result.Add(p);
                 key.Append(raw).Append('\n');
             }
@@ -625,9 +658,12 @@ namespace NextDayRevival
         // Nothing here touches a file: all three live in memory for the session,
         // and Restore() puts every one of them back when the pad table changes,
         // when the pads are switched off and when the scene changes. What it
-        // will NOT do is remove a building the pad happens to clip, anything
-        // with a body, a character or a PhotonView, or the terrain itself - a
-        // pad may clear a site, it may not punch a hole in the world.
+        // will NOT do, whatever is authored, is take anything with a body, a
+        // character or a PhotonView, anything wider than the pad's own deck, or
+        // the terrain itself - a pad may clear a site, it may not punch a hole
+        // in the world. Without an authored clearing it will not take a
+        // building either; with one it may, which is the whole point of
+        // authoring it.
 
         /// <summary>One thing taken out of the world, and everything needed to
         /// put it back: a list of tree instances OR one detail patch.</summary>
@@ -641,8 +677,10 @@ namespace NextDayRevival
             internal int[,] Detail;
         }
 
-        /// <summary>The widest thing a pad is allowed to remove, in metres. A
-        /// tree, a bush, a rock, a fence segment - yes. A house - never.</summary>
+        /// <summary>The widest thing a pad with no authored clearing may
+        /// remove, in metres. A tree, a bush, a rock - yes. A house - never.
+        /// Cap() raises it to the deck's own width for a pad whose site the
+        /// admin authored.</summary>
         const float MaxProp = 14f;
 
         static List<GameObject> _hidden = new List<GameObject>();
@@ -658,11 +696,38 @@ namespace NextDayRevival
 
         static bool ClearOn { get { return _cfgClear == null || _cfgClear.Value; } }
 
-        /// <summary>Everything a pad covers: the deck, the apron around it and a
-        /// metre beyond, so a trunk standing on the very edge goes too.</summary>
-        static float Footprint(Pad p)
+        /// <summary>The ground the deck itself stands on: the deck, the apron
+        /// around it and a metre beyond, so a trunk standing on the very edge
+        /// goes too.</summary>
+        static float Deckprint(Pad p)
         {
             return p.Radius + ApronWidth(p.Radius) + 1f;
+        }
+
+        /// <summary>Everything a pad clears: the deck's own ground, or the site
+        /// the admin authored around it when that is wider. A clearing can only
+        /// grow the site - the ground under the deck is cleared in any
+        /// case.</summary>
+        static float Footprint(Pad p)
+        {
+            float deck = Deckprint(p);
+            return p.Clear > deck ? p.Clear : deck;
+        }
+
+        /// <summary>Was a site authored around this pad, or is it only the
+        /// ground the deck needs?</summary>
+        static bool Sited(Pad p)
+        {
+            return p.Clear > Deckprint(p);
+        }
+
+        /// <summary>The widest thing THIS pad may remove. Without an authored
+        /// clearing it is MaxProp and nothing has changed. With one it is the
+        /// deck the admin drew: a structure that would fit on his pad goes, and
+        /// anything wider than the pad itself stays.</summary>
+        static float Cap(Pad p)
+        {
+            return Sited(p) && p.Radius > MaxProp ? p.Radius : MaxProp;
         }
 
         /// <summary>Is this point inside any pad of the map that is loaded?</summary>
@@ -699,7 +764,9 @@ namespace NextDayRevival
                 }
                 if (gone > 0)
                     RevivalPlugin.L.LogInfo("Helipads: " + gone
-                        + " prop(s) cleared off pad " + p.Name + ".");
+                        + " prop(s) cleared within "
+                        + reach.ToString("0.#", CultureInfo.InvariantCulture)
+                        + " m of pad " + p.Name + ".");
             }
             catch (Exception ex)
             {
@@ -718,18 +785,36 @@ namespace NextDayRevival
             if (hit.GetComponentInParent<Rigidbody>() != null) return null;
             if (hit.GetComponentInParent<CharacterController>() != null) return null;
             if (Networked(t)) return null;
+            // A prop in these scenes is a LOD GROUP: every LOD level, the
+            // trunk, the crown, the doors and the colliders hang under one node
+            // that carries the LODGroup component. That node is the prop, and
+            // the size test belongs to IT - not to the part that happened to be
+            // hit. The settlement fence is why: it is ONE object with fifty
+            // posts over 164 m, so post by post it looks like fifty small loose
+            // props and as a whole it is far too big to touch. Measuring the
+            // group is what refuses the fence instead of nibbling gaps in it.
+            Transform group = Group(t);
+            if (group != null)
+                return Loose(group, p, reach) ? group.gameObject : null;
             if (!Loose(t, p, reach)) return null;
-            // Take the whole prop, not the one collider that was hit: a tree's
-            // trunk is a child of the tree, and switching off the trunk alone
-            // leaves the crown standing in the air. Climbing stops at the first
-            // parent that is too big or reaches outside the pad, which is what
-            // keeps a chunk's prop container from being switched off as a whole.
+            // Nothing above it is a LOD group, so fall back to taking the whole
+            // prop rather than the one collider that was hit. Climbing stops at
+            // the first parent that is too big or reaches outside the pad,
+            // which keeps a chunk's prop container from going as a whole.
             Transform prop = t;
             // childCount is free and settles most of it: a thing with dozens of
             // children is a container of props, not a prop.
             while (prop.parent != null && prop.parent.childCount <= 64
                    && Loose(prop.parent, p, reach)) prop = prop.parent;
             return prop.gameObject;
+        }
+
+        /// <summary>The LOD group this collider belongs to, or null when nothing
+        /// above it carries one.</summary>
+        static Transform Group(Transform t)
+        {
+            LODGroup group = t.GetComponentInParent<LODGroup>();
+            return group == null ? null : group.transform;
         }
 
         /// <summary>Small enough to be scenery, and standing INSIDE the pad -
@@ -740,9 +825,10 @@ namespace NextDayRevival
             bool known;
             if (_looseCache.TryGetValue(id, out known)) return known;
             bool answer = false;
+            float cap = Cap(p);
             Bounds box;
             if (WorldBounds(t, out box)
-                && box.size.x <= MaxProp && box.size.z <= MaxProp)
+                && box.size.x <= cap && box.size.z <= cap)
             {
                 float dx = box.center.x - p.X, dz = box.center.z - p.Z;
                 answer = dx * dx + dz * dz <= reach * reach;
