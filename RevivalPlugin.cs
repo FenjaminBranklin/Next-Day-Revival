@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.38.0";
+        public const string VERSION = "6.39.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -433,6 +433,12 @@ namespace NextDayRevival
             return null;
         }
         internal const string ScopePath = "WeaponElements/Scopes/NDR_Scope50";
+        // The Stinger's own sight. Same trick, second image: weapons_db.xml
+        // names this path in the Scope attribute, xmlItemsDataManager loads it
+        // through Resources.Load and ResourceHook answers with
+        // assets/stinger_scope.png. A path that does not exist in the game is
+        // the point - see REVERSE_ENGINEERING.md 8.
+        internal const string StingerScopePath = "WeaponElements/Scopes/NDR_ScopeStinger";
         internal static bool SetupDone;
 
         private Harmony _harmony;
@@ -1610,15 +1616,45 @@ namespace NextDayRevival
             ConvoyRepair.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
-            // Stinger shares the LAW donor and its single-use ammunition setup.
+            // The Stinger shares the LAW's donor but NOT its ammunition setup.
+            // The LAW above is a factory-sealed tube: clip 0, and once the
+            // rocket is gone the launcher is scrap. The Stinger is a reusable
+            // gripstock - the tube is the round - so it carries one missile
+            // (2068) and takes another, which is the whole difference between
+            // the two weapons in the field.
             Items.Add(new ItemDef(
                 1165, 1010, true,
                 "FIM-92 Stinger", "FIM-92 Stinger",
-                "Однозарядная управляемая ракета. Удерживайте прицел в квадрате цели до захвата, затем стреляйте.",
-                "Single-shot guided missile. Hold the reticle inside a target square until locked, then fire.",
+                "Переносной ЗРК с управляемой ракетой. Наводится через прицел: "
+                + "держите точку прицеливания на цели, пока захват не станет "
+                + "постоянным, затем стреляйте. В трубе одна ракета; пусковой "
+                + "механизм остаётся, и на него ставится новая труба (2068). "
+                + "Всё, во что попадает ракета, уничтожается одним попаданием.",
+                "Shoulder-fired guided missile. Aimed through the sight: hold "
+                + "the aiming point on the target until the lock goes solid, "
+                + "then fire. One missile in the tube; the gripstock stays and "
+                + "takes a fresh tube (2068). Whatever the missile hits is "
+                + "destroyed by that one hit.",
                 "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
                 "stinger_icon.png", "stinger_weapon_icon.png",
-                1, 0, 15.2f));
+                1, 2068, 15.2f));
+
+            // The reload. One missile in its launch tube - what a Stinger
+            // gunner actually carries as a second shot. Art is the launcher's
+            // own separate missile mesh (stinger_build.py); 10.1 kg is the
+            // real round in its tube, and it is meant to be felt: a second and
+            // a third shot cost as much carried weight as a rifle each.
+            Items.Add(new ItemDef(
+                2068, 2030, false,
+                "Ракета FIM-92 (1)", "FIM-92 missile (1)",
+                "Одна ракета FIM-92 в транспортно-пусковой трубе. Ставится на "
+                + "пусковой механизм взамен отстрелянной.",
+                "A single FIM-92 missile in its launch tube. Goes onto the "
+                + "gripstock in place of the one that has been fired.",
+                "stinger_missile.ndmesh", "stinger_missile_diffuse.png",
+                "stinger_missile_normal.png",
+                "stinger_missile_icon.png", null,
+                1, 0, 10.1f));
             // Single-shot chemical launcher and its 30-minute gas cloud.
             GasLauncher.AddItems(Items);
 

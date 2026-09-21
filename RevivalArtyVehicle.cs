@@ -62,6 +62,16 @@
 // values are logged once per instance so the log answers "why does it sit like
 // that" without a debugger.
 //
+// THE TRAVEL LOCK. A self-propelled gun does not drive with its barrel out over
+// the road, and this one may not either. The gun half is in RevivalMortar.cs
+// (Mortar.Travel): the moment somebody takes the driver's seat the tube is
+// dropped into its own cradle, and once it is there its lay is written straight
+// off the hull instead of slewed, so it cannot move a degree while the truck
+// rolls. The driving half is ArtyVehicleTravel below: until the gun is home the
+// throttle is held at zero and the handbrake on, so the howitzer cannot start
+// driving with its gun out. It is one rule cut in two because it is two
+// subjects - the gun belongs to the fire control, the throttle to the vehicle.
+//
 // KNOWN AND DELIBERATE. The Bohdana's six wheels are part of its hull mesh (the
 // import bakes the native BTR wheel into it, arty_import.append_wheels), so they
 // do not turn or steer. Separating them would need a new mesh out of the asset
@@ -78,7 +88,9 @@
 //   RevivalPlugin.cs      BindConfig / Install / Update(Tick) - three lines.
 //   RevivalUralTruck.cs   VehicleRegistry entry "arty" + ArtyVehicleText.
 //   RevivalMortar.cs      Mortar.AttachMobile / ReleaseMobile - the fire
-//                         control seam, and Tube.Mobile beside it.
+//                         control seam, Tube.Mobile beside it, and
+//                         Mortar.TravelLocked, which says whether this
+//                         vehicle's own gun is still out.
 //   Revival.Admin.cs      one button, because every F-key is already taken.
 //   Revival.Tank.cs       CarSpawn.SpawnPrefab - used unchanged.
 
@@ -713,6 +725,7 @@ namespace NextDayRevival
             }
             VehicleRegistry.EnsureBuilt();
             ArtyVehicleNetwork.Install(harmony);
+            ArtyVehicleTravel.Install(harmony);
             RevivalPlugin.L.LogInfo("ArtyVehicle: drivable howitzer registered (key "
                 + (CfgKey == null ? "None" : CfgKey.Value) + ", prefab " + Prefab
                 + ", " + SeatTotal + " seats, "
@@ -881,6 +894,94 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("ArtyVehicle network, spawn marker: " + ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// THE TRAVEL LOCK, driving half: a howitzer whose gun is not in its cradle
+    /// does not move.
+    ///
+    /// WHERE THE THROTTLE IS INTERCEPTED. VehicleNetworkController::Update ends
+    /// every frame, for every vehicle, on
+    /// VehicleGameSystem::InputAxis(vertical, horizontal, handbrake), and that
+    /// method is the ONLY way a player's pedals reach a car: it writes
+    /// VerticalAxis through RCCCarControllerV2::SetInputAxis and the handbrake
+    /// straight onto handbrakeInput (docs/ai/REVERSE_ENGINEERING.md 20.1, and
+    /// the two are the only writers of either). The wish is then lerped into
+    /// gasInput at 10 per second by RCCCarControllerV2::KeyboardControlling.
+    ///
+    /// So the lock is a prefix on that one method, and it changes two numbers:
+    /// the vertical axis becomes 0 and the handbrake becomes on. Zeroing the
+    /// WISH instead of the input is what makes this immune to the lerp - there
+    /// is nothing left for it to lerp towards - and the handbrake is what keeps
+    /// a truck that is standing on a slope standing
+    /// (RCCCarControllerV2::Braking brakes all four wheels above 0.1). Steering
+    /// is left alone: a vehicle that cannot move cannot be steered either, and
+    /// taking the wheel away from the player's hand would only feel broken.
+    ///
+    /// WHY NOT canControl, and why not IsMine. `canControl` gates nothing that
+    /// drives (20.3), and `IsMine = false` returns out of RCC's FixedUpdate
+    /// before the brakes are applied (20.4) - the truck would coast downhill
+    /// with no engine braking and no way to stop it. Holding the pedals is the
+    /// only version in which a locked howitzer behaves like a parked one.
+    ///
+    /// WHAT IT COSTS. The prefix runs for every vehicle in the scene on every
+    /// frame, so its first line is a single static bool that is false whenever
+    /// no howitzer in the world is stowing its gun - which is nearly always.
+    /// </summary>
+    public static class ArtyVehicleTravel
+    {
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type vgs = RevivalPlugin.TypeByName("VehicleGameSystem");
+                if (vgs == null)
+                {
+                    RevivalPlugin.L.LogWarning("ArtyVehicle travel lock: "
+                        + "VehicleGameSystem missing - a howitzer can be driven "
+                        + "with its gun out.");
+                    return;
+                }
+                MethodInfo input = AccessTools.Method(vgs, "InputAxis",
+                    new Type[] { typeof(float), typeof(float), typeof(bool) }, null);
+                if (input == null)
+                {
+                    RevivalPlugin.L.LogWarning("ArtyVehicle travel lock: "
+                        + "VehicleGameSystem.InputAxis(float,float,bool) missing - a "
+                        + "howitzer can be driven with its gun out.");
+                    return;
+                }
+                harmony.Patch(input,
+                    new HarmonyMethod(typeof(ArtyVehicleTravel).GetMethod("Prefix")),
+                    null, null, null, null);
+                RevivalPlugin.L.LogInfo("ArtyVehicle travel lock: active - a howitzer "
+                    + "stands still until its gun is in its cradle.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("ArtyVehicle travel lock: " + ex);
+            }
+        }
+
+        /// <summary>Prefix on VehicleGameSystem::InputAxis. Never skips the
+        /// original - it only takes the driver's foot off the pedal and pulls
+        /// the handbrake, and only on a howitzer whose gun is still out.</summary>
+        public static void Prefix(object __instance, ref float __0, ref bool __2)
+        {
+            try
+            {
+                if (!Mortar.AnyTravelLock) return;
+                Component vgs = __instance as Component;
+                if (vgs == null || !ArtyVehicle.IstArty(vgs.transform)) return;
+                if (!Mortar.TravelLocked(vgs.gameObject)) return;
+                __0 = 0f;      // no throttle and no brake pedal: nothing to lerp to
+                __2 = true;    // handbrake on, so a slope cannot start it rolling
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("ArtyVehicle travel lock, input: " + ex);
             }
         }
     }

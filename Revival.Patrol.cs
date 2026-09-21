@@ -121,6 +121,29 @@ namespace NextDayRevival
         /// ground under it before it gives up on the route.</summary>
         const int GroundTries = 12;
 
+        /// <summary>
+        /// Metres of recorded line that same walk covers before it gives up, and
+        /// the hard cap on the waypoints it may probe to get there.
+        ///
+        /// WHY THIS EXISTS. A COUNT of waypoints is the wrong budget, because
+        /// the recordings differ by a factor of four in density. Measured on the
+        /// live snapshot of 2026-09-21: the looter route averages 11.5 m per
+        /// waypoint, the civilian and traitor routes 3.7 m and 3.3 m. Twelve
+        /// waypoints are therefore 138 m of the looter's road and 44 m of the
+        /// civilians' - and 44 m is not enough to get past the hull a vehicle is
+        /// standing nose to nose with, which is why the looter patrol recovered
+        /// from every stop in that session's log and the civilian patrol logged
+        /// "no waypoint ... has ground under it" every ten seconds for the whole
+        /// session without ever moving again.
+        ///
+        /// Metres give every route the same second chance. The waypoint cap
+        /// keeps the cost bounded on a dense recording: each probe that finds
+        /// nothing is a handful of raycasts, and this runs at most once every
+        /// ten seconds per stopped vehicle.
+        /// </summary>
+        const float GroundReach = 150f;
+        const int GroundWalk = 48;
+
         // ------------------------------------------------------------- the file
 
         class Point
@@ -268,6 +291,13 @@ namespace NextDayRevival
             public int Frees;
             public int Reported;         // last lap written to the log
 
+            // Refusals to warp in a row (FreeHold), cleared by the first warp
+            // that happens (Free). A single refusal is a sensible answer; the
+            // same refusal over and over is a vehicle that has been parked for
+            // the rest of the session, which is what the civilian patrol's pair
+            // did. See HoldsBeforeForce.
+            public int Refusals;
+
             // Ground guard (GroundGuard, Supported, Recover). A hull with
             // nothing under it is not driving, it is falling - and falling is
             // vertical, so the stuck timer above reads it as standing still and
@@ -380,14 +410,19 @@ namespace NextDayRevival
             // Advance when the end is reached and consumed by FixedTick.
             public bool OneWay;
             public bool Arrived;
-            // Colliders of this convoy car, cached for "ghost through": convoy
-            // vehicles pass through world props and each other via
+            // Colliders of this car, cached for "ghost through": a convoy AND an
+            // ordinary patrol pass through world props and their own mates via
             // Physics.IgnoreCollision, so they never crash, snag, or shove one
             // another off the road. Their own body collider stays live, so
             // bullets still hit and kill them. Ghosted holds the ids already made
-            // non-colliding, so each obstacle is handled at most once.
+            // non-colliding, so each obstacle is handled at most once. Ghosts
+            // counts them and GhostLog rate-limits the report: a convoy is one
+            // event and can name every prop it goes through, a patrol drives all
+            // session and would write a line per tree.
             public Component[] Cols;
             public Dictionary<int, bool> Ghosted;
+            public int Ghosts;
+            public float GhostLog;
 
             // NDR convoy column (Columns(), ColumnLock). While Column is true
             // this vehicle is NOT driven by RCC at all: it is placed on the
@@ -1380,6 +1415,31 @@ namespace NextDayRevival
         //  had neither, which is the reported bug: a tank standing INSIDE the
         //  APC it patrols with, the pair unable to drive and unable to see a
         //  target past each other's plate. These five numbers are that price.
+        //
+        //  THE SECOND ROUND (6.39.0). That fix held the hulls apart but the pair
+        //  still stood on the road, because the RECOVERY refused to run. The log
+        //  of 2026-09-21 has the proof, twice every ten seconds for a whole
+        //  session and never anything else: "no waypoint from 559 on has ground
+        //  under it". Three faults behind one message, all of them fixed above:
+        //
+        //    - The search budget was twelve WAYPOINTS. The live recordings
+        //      average 11.5 m per waypoint on the looter route and 3.7 m on the
+        //      civilian one, so the same twelve waypoints are 138 m of one road
+        //      and 44 m of the other - and the looter patrol recovered from
+        //      every stop in that log while the civilian patrol never moved
+        //      again. GroundReach makes the budget metres.
+        //    - Two vehicles of one composition meet head on - an out-and-back
+        //      route guarantees it - and each then refuses to warp because the
+        //      other is standing on every free waypoint. HoldsBeforeForce ends
+        //      that standoff; landing on a mate cannot weld the pair, because
+        //      they ignore each other's colliders.
+        //    - The message named the wrong reason. A spot held by a VEHICLE was
+        //      reported as a spot with no GROUND, which is why the first round
+        //      looked at the hulls and not at the recovery.
+        //
+        //  And an ordinary patrol now ghosts through world props like a convoy
+        //  (GhostAhead in Drive): steering is the first answer, but a dirt road
+        //  between two rows of trees has nowhere to steer to.
 
         /// <summary>Metres of clear air between two hulls of one patrol group,
         /// on top of both measured footprints. Small on purpose: this is an
@@ -1423,6 +1483,21 @@ namespace NextDayRevival
         /// way to weld two vehicles together there is.</summary>
         const float FreeClear = 15f;
         const float FreeRoom = 12f;
+
+        /// <summary>Refusals to warp in a row after which a MATE of this
+        /// vehicle's own composition stops counting as an occupied spot.
+        ///
+        /// WHY THIS EXISTS. An out-and-back route carries both directions on one
+        /// road, so the two vehicles of one composition are guaranteed to meet
+        /// head on somewhere on it. When they stop there, each one refuses to
+        /// warp because the other is standing on every free waypoint - and then
+        /// NEITHER of them ever moves again. That is the deadlock in the log of
+        /// 2026-09-21: two civilian-patrol hulls, the same two warnings every ten
+        /// seconds, for the whole session. Landing on a mate cannot weld the pair
+        /// - they ignore each other's colliders and PatrolSeparate eases them
+        /// apart within a second - so after three refusals it is the better
+        /// outcome. A FOREIGN hull is solid and still never landed on.</summary>
+        const int HoldsBeforeForce = 3;
 
         /// <summary>Metres a patrol may be from its own recorded line, and the
         /// seconds it may stay there, before it is put back on the road. The
@@ -1895,6 +1970,29 @@ namespace NextDayRevival
             {
                 Unit other = _units[i];
                 if (other == self || other.Car == null || other.Arrived) continue;
+                if (FlatDistance(target, other.Car.transform.position) < room)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>The same question as <see cref="SpotTaken"/>, asked only of
+        /// the hulls this vehicle CANNOT drive through. A mate of its own
+        /// composition ignores its colliders and is eased back out of it by
+        /// <see cref="PatrolSeparate"/> within a second, so landing on one is a
+        /// state that resolves itself; landing on a foreign hull is the weld the
+        /// whole section exists to prevent. Used once the ordinary answer has
+        /// refused <see cref="HoldsBeforeForce"/> times running.</summary>
+        static bool SpotBlocked(Unit self, Vector3 target, float room)
+        {
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.Car == null || other.Arrived) continue;
+                bool mate = self.ConvoyId == 0 && other.ConvoyId == 0
+                            && self.PatrolGroupId != 0
+                            && other.PatrolGroupId == self.PatrolGroupId;
+                if (mate) continue;
                 if (FlatDistance(target, other.Car.transform.position) < room)
                     return true;
             }
@@ -3356,11 +3454,17 @@ namespace NextDayRevival
         }
 
         /// <summary>The first waypoint at or after <paramref name="start"/> with
-        /// ground under it, and where a vehicle stands on it; -1 when none of
-        /// the next <see cref="GroundTries"/> waypoints has any. Far from every
-        /// player the colliders around a route are not necessarily loaded, and
-        /// then the honest answer is "not here" - not a vehicle dropped into
-        /// nothing.
+        /// ground under it, and where a vehicle stands on it; -1 when neither the
+        /// next <see cref="GroundTries"/> waypoints nor the next
+        /// <see cref="GroundReach"/> metres of the recorded line have any. Far
+        /// from every player the colliders around a route are not necessarily
+        /// loaded, and then the honest answer is "not here" - not a vehicle
+        /// dropped into nothing.
+        ///
+        /// THE BUDGET IS METRES, not waypoints, for the reason written at
+        /// <see cref="GroundReach"/>: a count punishes a densely recorded route
+        /// for being densely recorded. The waypoint count stays as the FLOOR, so
+        /// a sparse route never gets a shorter search than it had before.
         ///
         /// <paramref name="wrap"/> is false for a one-way convoy: past the last
         /// waypoint there is nothing farther along, and waypoint 0 is the start
@@ -3372,7 +3476,9 @@ namespace NextDayRevival
             int n = r.P.Count;
             if (n <= 0) return -1;
             start = ((start % n) + n) % n;
-            int tries = GroundTries < n ? GroundTries : n;
+            int tries = GroundWalk < n ? GroundWalk : n;
+            float walked = 0f;
+            int last = start;
             for (int step = 0; step < tries; step++)
             {
                 int at = start + step;
@@ -3381,6 +3487,14 @@ namespace NextDayRevival
                     if (!wrap) return -1;
                     at -= n;
                 }
+                if (step > 0)
+                {
+                    walked += FlatDistance(r.P[last].Pos, r.P[at].Pos);
+                    // Both budgets have to be spent. Whichever of the two is the
+                    // generous one for THIS recording is the one that decides.
+                    if (step >= GroundTries && walked >= GroundReach) return -1;
+                }
+                last = at;
                 if (GroundSpot(r.P[at].Pos, null, lift, out placed)) return at;
             }
             return -1;
@@ -3911,6 +4025,17 @@ namespace NextDayRevival
             }
             else
             {
+                // The same "ghost through" the convoy has had since
+                // feature/convoy-oneway-drive, and for the same reason: steering
+                // is the first answer and a good one, but a dirt road between two
+                // rows of trees has nowhere to steer TO, and a patrol that snags
+                // on the wreck parked across it stands there for the rest of the
+                // session. The prop stays solid for everyone else, terrain, mesh
+                // roads and tunnel floors are never ghosted, and anything alive -
+                // player, NPC, animal, vehicle - stays solid, so a patrol can
+                // still run a man over. Avoid runs anyway: passing through
+                // scenery is the safety net, not the normal way to drive.
+                GhostAhead(u, t, vel.magnitude);
                 float dodge = Avoid(u, t, vel.magnitude);
                 if (dodge != 0f)
                 {
@@ -4464,6 +4589,9 @@ namespace NextDayRevival
 
             int id = go.GetInstanceID();
             if (u.Ghosted == null) u.Ghosted = new Dictionary<int, bool>();
+            // A convoy is one event; a patrol drives all session and meets
+            // thousands of props. Same cap and same reason as _klein.
+            if (u.Ghosted.Count > 4096) u.Ghosted.Clear();
             if (u.Ghosted.ContainsKey(id)) return;
             u.Ghosted[id] = true;                 // decided once, either way
 
@@ -4473,8 +4601,21 @@ namespace NextDayRevival
 
             Component[] cols = go.GetComponentsInChildren(_colliderType, true);
             GhostPair(u.Cols, cols);
-            RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": ghosting through \""
-                + go.name + "\" on " + u.Route.Name + ".");
+            u.Ghosts++;
+            if (u.ConvoyId != 0)
+            {
+                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId
+                    + ": ghosting through \"" + go.name + "\" on "
+                    + u.Route.Name + ".");
+                return;
+            }
+            // One line a minute per vehicle, with the running count. Naming
+            // every prop a patrol passes through would be the whole log.
+            if (Time.time < u.GhostLog) return;
+            u.GhostLog = Time.time + 60f;
+            RevivalPlugin.L.LogInfo("Patrol: a vehicle on " + u.Route.Name
+                + " is ghosting through \"" + go.name + "\" (" + u.Ghosts
+                + " obstacle(s) so far).");
         }
 
         // =====================================================================
@@ -4525,6 +4666,11 @@ namespace NextDayRevival
             if (FlatDistance(pos, u.ProgressPos) > ProgressMetres)
             {
                 MadeProgress(u, pos);
+                // Ten metres of real ground ends the refusal streak. Deliberately
+                // NOT the speedometer: two hulls inside each other shake, so a
+                // speed test would clear the streak every step and the deadlock
+                // break below would never be reached.
+                u.Refusals = 0;
                 return false;
             }
             return Time.time - u.ProgressAt >= ProgressSeconds;
@@ -4682,18 +4828,49 @@ namespace NextDayRevival
             // up inside each other, which neither of them can drive out of.
             Vector3 target;
             int landed = GroundedWaypoint(r, to, 1.5f, !u.OneWay, out target);
+            // WHICH of the two requirements was never met. The retry below
+            // overwrites `landed` with -1 as soon as it walks off the end of the
+            // search, so the old code reported a spot held by another VEHICLE as
+            // a spot with no GROUND. Those are different faults with different
+            // fixes, and the one the civilian patrol actually had was the second
+            // reported as the first - which is why the log never named it.
+            bool anyGround = landed >= 0;
             if (u.ConvoyId == 0)
                 for (int tries = 0; landed >= 0 && tries < GroundTries
                                     && SpotTaken(u, target, FreeRoom); tries++)
                     landed = GroundedWaypoint(r, landed + 1, 1.5f, !u.OneWay,
                                               out target);
+            // The deadlock: every candidate is free ground held by a MATE, and
+            // the mate is refusing for the same reason. See HoldsBeforeForce.
+            bool forced = false;
+            if (landed < 0 && anyGround && u.ConvoyId == 0
+                && u.Refusals >= HoldsBeforeForce)
+            {
+                landed = GroundedWaypoint(r, to, 1.5f, !u.OneWay, out target);
+                for (int tries = 0; landed >= 0 && tries < GroundTries
+                                    && SpotBlocked(u, target, FreeRoom); tries++)
+                    landed = GroundedWaypoint(r, landed + 1, 1.5f, !u.OneWay,
+                                              out target);
+                if (landed >= 0 && !SpotBlocked(u, target, FreeRoom))
+                {
+                    forced = true;
+                    RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name
+                        + " was held " + u.Refusals + " times running by a mate "
+                        + "standing on every free waypoint - warping onto one of "
+                        + "them, the two ignore each other's colliders.");
+                }
+                else landed = -1;
+            }
             if (landed < 0)
             {
-                FreeHold(u, from, to, "has ground under it - holding where it "
-                    + "stands instead of warping into nothing");
+                FreeHold(u, from, to, anyGround
+                    ? "is free of other vehicles - holding where it stands "
+                      + "instead of warping into one of them"
+                    : "has ground under it - holding where it stands instead of "
+                      + "warping into nothing");
                 return;
             }
-            if (u.ConvoyId == 0 && SpotTaken(u, target, FreeRoom))
+            if (u.ConvoyId == 0 && !forced && SpotTaken(u, target, FreeRoom))
             {
                 FreeHold(u, from, to, "is free of other vehicles - holding where "
                     + "it stands instead of warping into one of them");
@@ -4722,6 +4899,7 @@ namespace NextDayRevival
             u.Next = to;
             u.Stuck = 0f;
             u.Queued = 0f;
+            u.Refusals = 0;
             u.OffRouteSince = 0f;
             MadeProgress(u, target);
 
@@ -4740,6 +4918,9 @@ namespace NextDayRevival
             HoldStill(u);
             Roll(u.Body, Vector3.zero);
             u.Stuck = 0f;
+            // Counted, not just logged: the same refusal over and over is the
+            // deadlock, and Free needs to know how deep in it this vehicle is.
+            u.Refusals++;
             if (Time.time < u.FallLog) return;
             u.FallLog = Time.time + 10f;
             RevivalPlugin.L.LogWarning("Patrol: stuck on " + u.Route.Name

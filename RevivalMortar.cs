@@ -180,6 +180,7 @@ namespace NextDayRevival
 
         static ConfigEntry<float> _cfgTraverse;
         static ConfigEntry<float> _cfgElevate;
+        static ConfigEntry<float> _cfgStowRate;
         static ConfigEntry<float> _cfgClearance;
 
         static ConfigEntry<float> _cfgRadius;
@@ -211,6 +212,17 @@ namespace NextDayRevival
         /// how fast the aim point may move TOWARDS or AWAY from the gun, because
         /// range is elevation on a howitzer.</summary>
         internal static float Elevate { get { return Mathf.Clamp(F(_cfgElevate, 5f), 0.5f, 60f); } }
+
+        /// <summary>Multiplier on both rates while a drivable howitzer is being
+        /// STOWED for travel. Laying a gun on a target and dropping it into its
+        /// travel cradle are not the same job and never took the same time: the
+        /// first is aimed, the second is not. It is a multiplier and not its own
+        /// pair of degrees per second so that a change to the laying rates keeps
+        /// its proportion to them.</summary>
+        internal static float StowRate
+        {
+            get { return Mathf.Clamp(F(_cfgStowRate, 3f), 1f, 20f); }
+        }
 
         // The barrel's working arc. The gun is laid by range: MaxRange sits at
         // the bottom of it and MinRange at the top, the way a high-angle weapon
@@ -258,6 +270,17 @@ namespace NextDayRevival
             /// Everything else about it - the reach, the dispersion, the flight
             /// time, the loading, the aim mode - is this file's, unchanged.</summary>
             public bool Mobile;
+            /// <summary>The mobile gun lies in its own travel cradle right now:
+            /// dead ahead over the cab, barrel down. While it holds, the lay is
+            /// not slewed at all but written straight off the hull's heading,
+            /// so the gun cannot move by as much as a degree relative to the
+            /// truck it rides on. See <see cref="Travel"/>.</summary>
+            public bool Stowed;
+            /// <summary>The driver's seat is taken and the gun is NOT in its
+            /// cradle yet. This is what holds the throttle at zero - the
+            /// prefix on VehicleGameSystem::InputAxis in RevivalArtyVehicle.cs
+            /// reads it through <see cref="TravelLocked"/>.</summary>
+            public bool Holding;
         }
 
         /// <summary>Elevation the drivable howitzer's barrel rests at while it
@@ -272,6 +295,14 @@ namespace NextDayRevival
         /// turret rests at while travelling: dead ahead, over the cab, which is
         /// where the model's cradle sits.</summary>
         internal const float TravelYaw = 0f;
+
+        /// <summary>How close to that pose counts as arrived, in degrees.
+        /// MoveTowardsAngle never overshoots, so the last stow step lands
+        /// exactly on the cradle whatever the frame rate; the slack is only
+        /// there for the hull that turned a little in the same frame. Nothing
+        /// is ever left standing at it: the frame that reports "arrived"
+        /// assigns the exact pose.</summary>
+        internal const float TravelSlack = 0.5f;
 
         /// <summary>A shell between the gun and the ground. Nothing is modelled
         /// in flight: a howitzer round is invisible on the way up, and a tracer
@@ -327,6 +358,8 @@ namespace NextDayRevival
         static float _firedAt;           // Time.time of the last fire order
         static float _nextPlaceScan;
         static string _prompt;
+        static string _travel;           // the stowing line, for the driver only
+        static int _travelHolds;         // guns holding their truck still
         static string _status;
         static float _statusUntil;
 
@@ -471,6 +504,13 @@ namespace NextDayRevival
                 "How fast the barrel rises and falls. Range is elevation on a "
                 + "howitzer, so this is also how fast the crosshair may be pushed "
                 + "away from or pulled towards the gun.");
+            _cfgStowRate = cfg.Bind("Mortar", "TravelStowRate", 3f,
+                "How much faster than laying a DRIVABLE howitzer drops its "
+                + "barrel into its travel cradle. The gun is stowed the moment "
+                + "somebody takes the driver's seat, and the vehicle cannot be "
+                + "driven until it is there - at 3 the worst case, a gun laid "
+                + "straight backwards, is about seven seconds. 1 uses the "
+                + "laying rates, which is over twenty.");
             _cfgClearance = cfg.Bind("Mortar", "VehicleClearance", 5.6f,
                 "Minimum free-ground radius in game units. Placement also "
                 + "reserves the scaled Bohdana footprint (17 units at Scale=1).");
@@ -525,7 +565,10 @@ namespace NextDayRevival
 
         public static void Tick()
         {
-            if (!Enabled) return;
+            // Switched off mid-session, and the count Slew keeps would freeze
+            // with a howitzer still held: clear it here, or a fire control
+            // nobody asked for any more would leave a truck standing for good.
+            if (!Enabled) { _travelHolds = 0; _travel = null; return; }
             try
             {
                 Net.EnsureHooked();
@@ -1305,6 +1348,17 @@ namespace NextDayRevival
             if (t == null) return;
 
             int cap = Mathf.Clamp(I(_cfgMagazine, 6), 1, 30);
+            if (t.Mobile && DriverAboard(t.Go))             // NDR drivable howitzer
+            {
+                // The seat is taken, so the gun is stowed or on its way there.
+                // Neither key may be offered: aiming would unstow a gun that is
+                // about to be driven, and the travel lock would then hold the
+                // truck for as long as the aim lasted.
+                _prompt = Name() + "   " + TextTravelling();
+                if (Input.GetKeyDown(Key(true)) || Input.GetKeyDown(Key(false)))
+                    Say(TextTravelling());
+                return;
+            }
             if (ArtyBattery.CrewHoldsGun(t.SettlementId))   // NDR settlement artillery
             {
                 _prompt = Name() + "   " + TextCrewAtGun();
@@ -1332,6 +1386,22 @@ namespace NextDayRevival
         internal static string Name()
         {
             return Loc.T("Гаубица", "Howitzer");
+        }
+
+        /// <summary>The gun is being dropped into its travel cradle, and the
+        /// truck under it will not pull away until it is there.</summary>
+        internal static string TextStowing()
+        {
+            return Loc.T("Орудие переводится в походное положение",
+                         "Stowing the gun for travel");
+        }
+
+        /// <summary>Somebody is in the driver's seat: the gun belongs to the
+        /// journey, not to the fire mission.</summary>
+        internal static string TextTravelling()
+        {
+            return Loc.T("Походное положение - за рулём водитель",
+                         "Stowed for travel - somebody is at the wheel");
         }
 
         /// <summary>The sight is taken: a living crew is standing at it.</summary>
@@ -1680,6 +1750,8 @@ namespace NextDayRevival
         static void Slew()
         {
             float dt = Mathf.Clamp(Time.deltaTime, 0f, 0.25f);
+            _travel = null;
+            _travelHolds = 0;
             for (int i = 0; i < _tubes.Count; i++)
             {
                 Tube t = _tubes[i];
@@ -1690,26 +1762,131 @@ namespace NextDayRevival
                 if (t.Mobile)
                 {
                     t.Centre = t.Go.transform.position;
-                    // Nobody is laying this gun right now, and the truck under
-                    // it is running: rest the barrel on the vehicle's own
-                    // cradle instead of holding a world bearing while the hull
-                    // turns under it, which is what made the gun appear to
-                    // swing across the road on every corner. The turn itself
-                    // still goes through the ordinary Traverse/Elevate rates
-                    // below, so coming out of a hard turn - or the engine
-                    // starting with the gun laid somewhere else - takes the
-                    // same few seconds a real traverse would.
-                    if (t != _aiming && EngineRunning(t.Go))
-                    {
-                        float hull = t.Go.transform.eulerAngles.y;
-                        t.WantYaw = hull + TravelYaw;
-                        t.WantPitch = TravelPitch;
-                    }
+                    // The travel lock writes the lay itself when it is on, and
+                    // then nothing below may touch it again this frame.
+                    if (Travel(t, dt)) continue;
                 }
                 t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
                 t.Pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
                 Point(t);
             }
+        }
+
+        // ------------------------------------------------------- travel lock
+        //
+        // A self-propelled gun does not drive with its barrel out over the
+        // road. It drops the tube into its own cradle first, and only then is
+        // the driver allowed to move. Both halves of that are here.
+
+        /// <summary>
+        /// The travel lock of ONE drivable howitzer, and the whole of its gun
+        /// half. Returns true when the lay has been written here, i.e. when
+        /// <see cref="Slew"/> must leave this gun alone for the rest of the
+        /// frame.
+        ///
+        /// STOWING. The moment the driver's seat is taken the gun is laid on
+        /// its cradle - dead ahead over the cab, barrel down - at
+        /// <see cref="StowRate"/> times the laying rates. While it is on its
+        /// way <see cref="Holding"/> is set, and that is what keeps the truck
+        /// standing: the prefix on VehicleGameSystem::InputAxis in
+        /// RevivalArtyVehicle.cs holds the throttle at zero and the handbrake
+        /// on until the gun is home. The howitzer cannot start driving with its
+        /// gun out, which is the whole point.
+        ///
+        /// STOWED. Once it is there the lay is not slewed any more, it is
+        /// ASSIGNED: yaw is the hull's own heading, pitch is the cradle angle,
+        /// and <see cref="Point"/> writes the same local rotation on every
+        /// frame. The gun is part of the hull while the truck drives - it does
+        /// not lag round a corner, it does not creep back, it does not move at
+        /// all. Slewing it towards the hull, however fast, could never do that:
+        /// a rate always lags a hull that turns quicker than it does, and a
+        /// truck turns much quicker than a 122 mm turret. The cure is not to
+        /// slew.
+        ///
+        /// FREE. With the seat empty the gun is an ordinary tube again and the
+        /// caller lays it as usual. Leaving the engine running does not lock
+        /// it: a gun in action is allowed to keep its engine on.
+        /// </summary>
+        static bool Travel(Tube t, float dt)
+        {
+            float hull = t.Go.transform.eulerAngles.y;
+            float rest = hull + TravelYaw;
+            bool cradled = Mathf.Abs(Mathf.DeltaAngle(t.Yaw, rest)) <= TravelSlack
+                && Mathf.Abs(t.Pitch - TravelPitch) <= TravelSlack;
+
+            if (!DriverAboard(t.Go))
+            {
+                if (t.Holding)
+                    RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" - the driver's "
+                        + "seat is empty again, the gun is free.");
+                t.Holding = false;
+                t.Stowed = cradled;
+                return false;
+            }
+
+            // Aiming and travelling are not two things a gun does at once, and
+            // letting them overlap would strand the truck: a tube somebody is
+            // laying never reaches its cradle, so the lock would never lift.
+            if (_aiming == t) LeaveAim("the driver's seat is taken");
+
+            t.WantYaw = rest;
+            t.WantPitch = TravelPitch;
+
+            if (cradled)
+            {
+                t.Yaw = rest;                 // ASSIGNED, not slewed - see above
+                t.Pitch = TravelPitch;
+                if (t.Holding)
+                    RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" is stowed for "
+                        + "travel - the gun rides the hull and the truck may drive.");
+                t.Holding = false;
+                t.Stowed = true;
+            }
+            else
+            {
+                float traverse = Traverse * StowRate;
+                float elevate = Elevate * StowRate;
+                if (!t.Holding)
+                    RevivalPlugin.L.LogInfo("Mortar: \"" + t.Name + "\" - driver aboard, "
+                        + "stowing the gun for travel; the truck stands until it is "
+                        + "home.");
+                t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, rest, traverse * dt);
+                t.Pitch = Mathf.MoveTowards(t.Pitch, TravelPitch, elevate * dt);
+                t.Holding = true;
+                t.Stowed = false;
+                _travelHolds++;
+                if (LocalDrives(t.Go))
+                {
+                    float secs = Mathf.Max(
+                        Mathf.Abs(Mathf.DeltaAngle(t.Yaw, rest)) / traverse,
+                        Mathf.Abs(t.Pitch - TravelPitch) / elevate);
+                    _travel = Name() + "   " + TextStowing()
+                        + "   " + Mathf.CeilToInt(secs) + " s";
+                }
+            }
+            Point(t);
+            return true;
+        }
+
+        /// <summary>Is any drivable howitzer holding its truck still right now?
+        /// One bool for the whole scene, so the input prefix - which runs for
+        /// EVERY vehicle on EVERY frame - can leave again on a single test.</summary>
+        internal static bool AnyTravelLock { get { return _travelHolds > 0; } }
+
+        /// <summary>Must this vehicle stand still because its own gun is not in
+        /// its cradle yet? The seam RevivalArtyVehicle.cs holds the throttle
+        /// with.</summary>
+        internal static bool TravelLocked(GameObject car)
+        {
+            if (_travelHolds <= 0 || car == null) return false;
+            Transform root = car.transform;
+            for (int i = 0; i < _tubes.Count; i++)
+            {
+                Tube t = _tubes[i];
+                if (!t.Mobile || !t.Holding || t.Go == null) continue;
+                if (t.Go.transform.root == root) return true;
+            }
+            return false;
         }
 
         /// <summary>Write the current lay onto the model. The turret's angle is
@@ -1788,13 +1965,14 @@ namespace NextDayRevival
             t.Rounds = 0;
             t.ReadyAt = 0f;
             // Starts resting on its own cradle, dead ahead over the cab - the
-            // travel pose Slew keeps it in whenever nobody is aiming it and the
-            // truck's engine is running - so nothing swings anywhere on the
-            // first frame.
+            // travel pose Travel holds it in whenever somebody is in the
+            // driver's seat - so nothing swings anywhere on the first frame and
+            // a freshly spawned howitzer drives off without a wait.
             t.Yaw = body.transform.eulerAngles.y + TravelYaw;
             t.WantYaw = t.Yaw;
             t.Pitch = TravelPitch;
             t.WantPitch = t.Pitch;
+            t.Stowed = true;
             Point(t);
             _tubes.Add(t);
 
@@ -1805,39 +1983,67 @@ namespace NextDayRevival
             return t;
         }
 
-        static Type _rccType;
-        static FieldInfo _rccEngine;
-        static bool _rccLooked;
-        static bool _rccWarned;
+        static Type _vgsType;
+        static FieldInfo _vgsSeats;
+        static bool _vgsLooked;
+        static bool _vgsWarned;
 
-        /// <summary>Is the drivable howitzer's own engine running? Read off
-        /// RCCCarControllerV2.engineRunning (docs/ai/REVERSE_ENGINEERING.md
-        /// 20.4) on the vehicle the gun body sits under. Defaults to true when
-        /// the field cannot be found, because a howitzer whose engine state is
-        /// unknown should rest on its cradle, not swing on a world bearing.</summary>
-        static bool EngineRunning(GameObject body)
+        /// <summary>
+        /// Is somebody sitting in the driver's seat of the vehicle this gun
+        /// rides on? That - not the engine, not the speed - is what "this
+        /// howitzer is about to drive" means: the seat is taken before the
+        /// engine starts, so the gun is already stowing while the driver is
+        /// still reaching for the ignition, and a gun crew that leaves the
+        /// engine idling beside its own gun keeps the gun.
+        ///
+        /// VehicleGameSystem.Passengers[0] is the driver: InputAxis and Update
+        /// both test exactly that element before they let a vehicle be steered
+        /// (docs/ai/REVERSE_ENGINEERING.md 20.1), and SitToPassengerPlace
+        /// writes the player's own GameObject into it. Read through GameObject
+        /// and not object, because Unity reports a destroyed instance as null
+        /// only through its own operator.
+        ///
+        /// Defaults to FALSE when the field cannot be found: a gun that cannot
+        /// tell whether anybody is driving must stay usable as a gun.
+        /// </summary>
+        static bool DriverAboard(GameObject body)
         {
-            if (!_rccLooked)
+            if (!_vgsLooked)
             {
-                _rccLooked = true;
-                _rccType = RevivalPlugin.TypeByName("RCCCarControllerV2");
-                _rccEngine = _rccType == null ? null
-                    : AccessTools.Field(_rccType, "engineRunning");
-                if (_rccEngine == null && !_rccWarned)
+                _vgsLooked = true;
+                _vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
+                _vgsSeats = _vgsType == null ? null
+                    : AccessTools.Field(_vgsType, "Passengers");
+                if (_vgsSeats == null && !_vgsWarned)
                 {
-                    _rccWarned = true;
-                    RevivalPlugin.L.LogWarning("Mortar: RCCCarControllerV2.engineRunning "
-                        + "not found - a drivable howitzer's gun always rests on its "
-                        + "cradle instead of following the engine state.");
+                    _vgsWarned = true;
+                    RevivalPlugin.L.LogWarning("Mortar: VehicleGameSystem.Passengers "
+                        + "not found - a drivable howitzer never stows its gun for "
+                        + "travel and its truck is never held back.");
                 }
             }
-            if (_rccEngine == null || body == null) return true;
+            return Driver(body) != null;
+        }
+
+        /// <summary>The player in the driver's seat, or null.</summary>
+        static GameObject Driver(GameObject body)
+        {
+            if (_vgsSeats == null || body == null) return null;
             Transform root = body.transform.root;
-            if (root == null) return true;
-            Component rcc = root.GetComponent(_rccType);
-            if (rcc == null) return true;
-            object v = _rccEngine.GetValue(rcc);
-            return !(v is bool) || (bool)v;
+            if (root == null) return null;
+            Component vgs = root.GetComponent(_vgsType);
+            if (vgs == null) return null;
+            Array seats = _vgsSeats.GetValue(vgs) as Array;
+            if (seats == null || seats.Length == 0) return null;
+            return seats.GetValue(0) as GameObject;
+        }
+
+        /// <summary>Is the LOCAL player the one in that driver's seat? Only he
+        /// gets told on screen why his howitzer will not pull away.</summary>
+        static bool LocalDrives(GameObject body)
+        {
+            GameObject driver = Driver(body);
+            return driver != null && driver == MapTools.LocalPlayer();
         }
 
         /// <summary>Give a mobile gun back. Safe with null, safe twice, and safe
@@ -2626,6 +2832,10 @@ namespace NextDayRevival
             try
             {
                 if (_aiming != null) { DrawMap(); return; }
+                // The driver's own line wins: he is sitting in a truck that
+                // will not move, and the reason for that is not on the gun he
+                // may or may not be standing next to.
+                if (!string.IsNullOrEmpty(_travel)) { DrawPlate(_travel, 0.62f); return; }
                 if (!string.IsNullOrEmpty(_prompt)) DrawPlate(_prompt, 0.62f);
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Mortar.Draw: " + ex); }

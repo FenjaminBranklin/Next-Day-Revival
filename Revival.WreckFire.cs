@@ -442,6 +442,184 @@ namespace NextDayRevival
             light.shadows = LightShadows.None;
         }
 
+        /// <summary>
+        /// A SMALL fire, for something that is not a vehicle: the recon drone
+        /// after it has been shot down (order of 2026-09-21, "EIN BISCHEN
+        /// brennen und qalmen am boden, aber nicht so dicht und viel wie
+        /// fahrzeuge").
+        ///
+        /// The whole point of this method is that it is not SpawnWreck with a
+        /// smaller number in front of it. A burning truck is a landmark, and it
+        /// is built that way on purpose - three flame systems, a smoke column
+        /// that climbs 140 to 300 m, and a light that reaches 38 m. Hang any of
+        /// that on a four-metre airframe and the crash reads as a second
+        /// vehicle, which is exactly the thing that was reported. So this is
+        /// one flame, one thin smoke and one ember light, and the numbers are
+        /// roughly a tenth of the wreck's: 9 flame particles per second against
+        /// 94, smoke that fades out some twenty metres up instead of three
+        /// hundred, a peak smoke alpha of 0.34 against 0.86, and 75 particles
+        /// of budget against 730.
+        ///
+        /// <paramref name="falling"/> is the same fire in the air: it emits
+        /// faster, because the airframe is moving and the particles have to
+        /// join up into a trail, and it lives in world space, because a trail
+        /// parented to a falling object would fall with it instead of staying
+        /// where it was made.
+        /// </summary>
+        public static bool SpawnDroneFire(GameObject root, bool falling)
+        {
+            if (root == null || _noShader) return false;
+            if (RevivalPlugin.CfgFire != null && !RevivalPlugin.CfgFire.Value) return false;
+
+            Material add = Additive();
+            Material blend = Blended();
+            if (add == null || blend == null)
+            {
+                _noShader = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Drohnenfeuer: kein Partikelshader im "
+                        + "Build gefunden - die Drohne faellt ohne Feuer.");
+                return false;
+            }
+
+            DroneFlame(root, add, falling);
+            DroneSmoke(root, blend, falling);
+            DroneEmber(root, falling);
+            return true;
+        }
+
+        /// <summary>Stops every emitter under an object without killing the
+        /// particles that are already in the air. Used when the falling drone
+        /// touches down: the trail has to stop being made, but the metres of it
+        /// hanging over the crash site are the visible part of the fall and
+        /// must be allowed to drift and fade on their own.</summary>
+        public static void StopEmitting(GameObject root)
+        {
+            if (root == null) return;
+            ParticleSystem[] all = root.GetComponentsInChildren<ParticleSystem>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                ParticleSystem.EmissionModule em = all[i].emission;
+                em.rateOverTime = new ParticleSystem.MinMaxCurve(0f);
+            }
+        }
+
+        /// <summary>The flame. Half a metre of it, and the reason the ground
+        /// fire is not simply the falling one with the rate turned down is
+        /// gravityModifier: in the air the fire is dragged along behind the
+        /// airframe, on the ground it stands up.</summary>
+        static void DroneFlame(GameObject root, Material mat, bool falling)
+        {
+            ParticleSystem ps = Neu(root, "NDR Drohnenflamme", mat, true);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 2f;
+            main.loop = true;
+            main.startLifetime = falling
+                ? new ParticleSystem.MinMaxCurve(0.22f, 0.50f)
+                : new ParticleSystem.MinMaxCurve(0.40f, 0.90f);
+            main.startSpeed = falling
+                ? new ParticleSystem.MinMaxCurve(0.4f, 1.3f)
+                : new ParticleSystem.MinMaxCurve(0.5f, 1.5f);
+            main.startSize = falling
+                ? new ParticleSystem.MinMaxCurve(0.45f, 1.05f)
+                : new ParticleSystem.MinMaxCurve(0.35f, 0.85f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.90f, 0.45f, 1f),
+                new Color(1.00f, 0.34f, 0.05f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(falling ? 0.04f : -0.06f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = falling ? 40 : 30;
+
+            Kegel(ps, falling ? 0.30f : 0.38f, falling ? 26f : 20f);
+            Dauer(ps, falling ? 22f : 9f);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.80f, 0.06f);
+            ps.Play();
+        }
+
+        /// <summary>
+        /// The smoke, and the one number the order was actually about. A wreck
+        /// puts up 18 to 28 s of lifetime at 7.5 to 11 m/s, which is the column
+        /// you can see from the next valley. This is 5.5 to 8.5 s at 1.6 to
+        /// 2.8 m/s - roughly fifteen to twenty metres before it is gone - and
+        /// it never reaches the wreck's opacity: the gradient tops out at 0.34.
+        /// A thin wisp over a dead quadcopter, not a burning truck.
+        /// </summary>
+        static void DroneSmoke(GameObject root, Material mat, bool falling)
+        {
+            ParticleSystem ps = Neu(root, "NDR Drohnenqualm", mat, false);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 6f;
+            main.loop = true;
+            main.startLifetime = falling
+                ? new ParticleSystem.MinMaxCurve(1.6f, 2.9f)
+                : new ParticleSystem.MinMaxCurve(5.5f, 8.5f);
+            main.startSpeed = falling
+                ? new ParticleSystem.MinMaxCurve(0.6f, 1.4f)
+                : new ParticleSystem.MinMaxCurve(1.6f, 2.8f);
+            main.startSize = falling
+                ? new ParticleSystem.MinMaxCurve(0.60f, 1.30f)
+                : new ParticleSystem.MinMaxCurve(0.55f, 1.20f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.16f, 0.15f, 0.14f, 0.85f),
+                new Color(0.30f, 0.29f, 0.27f, 0.75f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.01f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = falling ? 60 : 45;
+
+            Kegel(ps, falling ? 0.35f : 0.45f, falling ? 12f : 9f);
+            Dauer(ps, falling ? 14f : 4f);
+            DroneSmokeColour(ps);
+            Groesse(ps, 0.55f, falling ? 2.10f : 2.60f);
+
+            ParticleSystem.RotationOverLifetimeModule rot = ps.rotationOverLifetime;
+            rot.enabled = true;
+            rot.z = new ParticleSystem.MinMaxCurve(-0.30f, 0.30f);
+            ps.Play();
+        }
+
+        /// <summary>Grey, and never opaque. WrackRauchFarbe holds 0.86 for two
+        /// thirds of a particle's life so the column reads as solid; this peaks
+        /// at 0.34 and is already thinning by the middle.</summary>
+        static void DroneSmokeColour(ParticleSystem ps)
+        {
+            ParticleSystem.ColorOverLifetimeModule col = ps.colorOverLifetime;
+            col.enabled = true;
+            Gradient g = new Gradient();
+            g.SetKeys(
+                new GradientColorKey[] {
+                    new GradientColorKey(new Color(0.14f, 0.13f, 0.12f), 0.00f),
+                    new GradientColorKey(new Color(0.22f, 0.21f, 0.20f), 0.40f),
+                    new GradientColorKey(new Color(0.38f, 0.37f, 0.36f), 1.00f) },
+                new GradientAlphaKey[] {
+                    new GradientAlphaKey(0.00f, 0.00f),
+                    new GradientAlphaKey(0.34f, 0.12f),
+                    new GradientAlphaKey(0.20f, 0.55f),
+                    new GradientAlphaKey(0.00f, 1.00f) });
+            col.color = new ParticleSystem.MinMaxGradient(g);
+        }
+
+        /// <summary>An ember, not a floodlight: range 8 against the wreck's 38,
+        /// intensity 1.1 against 4.0. Enough to put a glow on the grass around
+        /// the airframe at night and nothing more.</summary>
+        static void DroneEmber(GameObject root, bool falling)
+        {
+            GameObject go = new GameObject("NDR Drohnenglut");
+            go.transform.parent = root.transform;
+            go.transform.localPosition = Vector3.up * 0.25f;
+
+            Light light = go.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.color = new Color(1f, 0.46f, 0.14f, 1f);
+            light.range = falling ? 10f : 8f;
+            light.intensity = falling ? 1.4f : 1.1f;
+            light.shadows = LightShadows.None;
+        }
+
         // -------------------------------------------------- die fuenf Teile
 
         /// <summary>The bang itself: bright, fast, gone in half a second.</summary>

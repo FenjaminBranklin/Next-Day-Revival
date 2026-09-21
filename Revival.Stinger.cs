@@ -1,5 +1,30 @@
 // Stinger: LAW inventory/pose, continuous visual lock, guided physical flight.
 // C# 3.0. Network authority follows LAW: shooter owns the blast; host owns helis.
+//
+// THREE THINGS THIS WEAPON IS NOT, EACH ONE A FIELD REPORT
+// --------------------------------------------------------
+// 1. NOT A HUD WEAPON. It used to be aimed over four pixels of GUI cross with
+//    white squares floating on the open screen. A MANPADS is aimed through the
+//    sight clamped to the tube. The sight is the game's own scope path now -
+//    weapons_db.xml `Scope` -> Resources.Load -> ResourceHook -> the image
+//    stinger_scope.py builds - and this file only draws the live part inside
+//    its lens: which target the seeker has, and how far the tone has come.
+//    `ScopeUp` says whether the server's weapon record really carries it; if
+//    it does not, the old open reticle stays rather than the weapon becoming
+//    unaimable, and the log says so once.
+// 2. NOT A FIREWORK. "Neither vehicles nor the little drones die from one
+//    missile." The blast alone was never the whole answer: a hit on the
+//    ARTILLERY RECON DRONE went through ArtyBattery.Shoot, which removes ONE
+//    of its three hit points, so three Stingers were needed for a quadcopter.
+//    `Kill` no longer asks a shared damage path to be generous - it destroys
+//    the bound target outright, one kind at a time, and the blast that follows
+//    is only what is left over for anything standing next to it.
+// 3. NOT SINGLE USE. That is the LAW (1162), whose tube is scrap after the
+//    shot and stays that way. The Stinger is a gripstock: clip item 2068, one
+//    missile in the tube, ReloadTime out of weapons_db.xml. Nothing in this
+//    file implements the reload - the game does it, once the weapon record
+//    names a magazine - which is why the change is three numbers in
+//    mods/revival.json and one id in the item table.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -19,8 +44,14 @@ namespace NextDayRevival
             "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
             "stinger_metal.png", "stinger_rough.png", "stinger_icon.png", "stinger_weapon_icon.png",
             "stinger_missile.ndmesh", "stinger_missile_diffuse.png", "stinger_missile_normal.png",
-            "stinger_missile_metal.png", "stinger_missile_rough.png" };
-        static ConfigEntry<float> _lockSeconds, _range;
+            "stinger_missile_metal.png", "stinger_missile_rough.png",
+            // The reload round's inventory icon and the gunner's sight. Listed
+            // with the rest on purpose: an install that is missing one Stinger
+            // file is a broken install, and one loud line at startup beats a
+            // weapon that is quietly half there.
+            "stinger_missile_icon.png", "stinger_scope.png" };
+        public const int RoundId = 2068;     // the reload, item table in RevivalPlugin.cs
+        static ConfigEntry<float> _lockSeconds, _range, _warhead;
         static readonly List<Target> _targets = new List<Target>();
         static readonly List<GameObject> _helis = new List<GameObject>();
         static readonly List<Flight> _flights = new List<Flight>();
@@ -72,6 +103,13 @@ namespace NextDayRevival
                 "Continuous time with the reticle inside the target square before firing.");
             _range = cfg.Bind("Stinger", "LockRange", 1200f,
                 "Maximum acquisition distance in game world units.");
+            _warhead = cfg.Bind("Stinger", "Warhead", 1400f,
+                "Blast damage at the impact point. The LOCKED target does not "
+                + "depend on this number - a missile that reaches what it was "
+                + "aimed at destroys it outright - so this is what is left over "
+                + "for whatever stands next to the impact. Deliberately not the "
+                + "LAW's 900: VehicleArmor reads that value as a LAW hit and "
+                + "gives a tank two of them.");
         }
 
         public static void Install(Harmony harmony)
@@ -192,6 +230,50 @@ namespace NextDayRevival
 
         static float LockTime() { return Mathf.Clamp(_lockSeconds.Value, 0.2f, 10f); }
         static float Range() { return Mathf.Clamp(_range.Value, 20f, 1200f); }
+        static float Warhead() { return Mathf.Clamp(_warhead == null ? 1400f : _warhead.Value, 1f, 100000f); }
+
+        // ------------------------------------------------------------- sight
+        // stinger_scope.py builds a 1920 square whose lens radius is 524, and
+        // ScopeCameraEffect::OnGUI draws it with ScaleMode 1 (ScaleAndCrop):
+        // the image is scaled by max(width, height) / 1920 and centred, so the
+        // lens on screen is that same factor times 524. Both numbers live in
+        // the generator; changing one without the other puts the target boxes
+        // outside the glass.
+        const float ScopeImage = 1920f;
+        const float ScopeLens = 524f;
+        static bool _noScopeLogged;
+
+        /// <summary>
+        /// True while the player is looking through the Stinger's own sight.
+        ///
+        /// `CameraSwitch::CantRenderScope` refuses the scope when
+        /// `_weaponFirearmData.Scope` is null, and that field is whatever
+        /// `Resources.Load` returned for the `Scope` attribute of this weapon's
+        /// weapons_db.xml record. A server whose record predates the sight
+        /// therefore hands out a Stinger with no glass - and the SERVER wins
+        /// that argument, not the plugin. Rather than leave the weapon
+        /// unaimable, the old open reticle is drawn instead and the log names
+        /// the reason once.
+        /// </summary>
+        static bool ScopeUp(object ctrl)
+        {
+            object data = Field(ctrl, "_weaponFirearmData");
+            if (data == null) return false;
+            bool has = Field(data, "Scope") as Texture != null;
+            if (!has && !_noScopeLogged)
+            {
+                _noScopeLogged = true;
+                RevivalPlugin.L.LogWarning("Stinger: the weapon record on this server "
+                    + "carries no Scope - the sight cannot be drawn and the plain "
+                    + "reticle is used. weapons_db.xml 1165 needs Scope=\""
+                    + RevivalPlugin.StingerScopePath + "\".");
+            }
+            return has;
+        }
+
+        static float LensRadius()
+        { return Mathf.Max(Screen.width, Screen.height) / ScopeImage * ScopeLens; }
+
         public static void Tick()
         {
             try
@@ -309,10 +391,23 @@ namespace NextDayRevival
             Collection(typeof(ArtyBattery), "_ghosts", "DroneModel", 5);
         }
 
+        /// <summary>
+        /// The live half of the sight picture. The fixed half - lens, mount,
+        /// aiming point, lead scale - is the texture the game itself draws, so
+        /// nothing here repeats it: only the boxes over the targets the seeker
+        /// can see, the tone bar under the one it has, and one line of text.
+        ///
+        /// Inside the lens, and nowhere else. A box painted over the mount is
+        /// a box the gunner cannot be looking at.
+        /// </summary>
         public static void Draw()
         {
             if (Event.current != null && Event.current.type != EventType.Repaint) return;
             if (_camera == null || _controller == null || !Aiming(_controller)) return;
+            bool sight = ScopeUp(_controller);
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
+            // Keep the whole box inside the glass, not just its centre.
+            float lens = sight ? LensRadius() - HalfBox() - 6f : float.MaxValue;
             Color old = GUI.color;
             for (int i = 0; i < _targets.Count; i++)
             {
@@ -320,6 +415,7 @@ namespace NextDayRevival
                 if (t.Go == null || !Visible(t)) continue;
                 Vector3 p = _camera.WorldToScreenPoint(t.Point);
                 if (p.z <= 0 || p.x < 0 || p.x > Screen.width || p.y < 0 || p.y > Screen.height) continue;
+                if (new Vector2(p.x - cx, p.y - cy).magnitude > lens) continue;
                 bool selected = _locked != null && _locked.Go == t.Go;
                 GUI.color = selected ? (_held >= LockTime() ? Color.green : Color.yellow) : Color.white;
                 float h = HalfBox(), x = p.x - h, y = Screen.height - p.y - h;
@@ -327,13 +423,40 @@ namespace NextDayRevival
                 if (selected) Line(x, y + h * 2 + 5, h * 2 * _held / LockTime(), 4);
             }
             GUI.color = Color.white;
-            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
-            Line(cx-7,cy,14,1); Line(cx,cy-7,1,14);
-            string text = _held >= LockTime() ? Loc.T("ЦЕЛЬ ЗАХВАЧЕНА", "TARGET LOCKED")
+            // The sight brings its own aiming point; a second cross on top of
+            // it is two crosses. Without a sight this is the only one there is.
+            if (!sight) { Line(cx-7,cy,14,1); Line(cx,cy-7,1,14); }
+            // == 0, not <= 0: Loaded returns -1 when the count could not be
+            // read, and an unreadable count is not an empty tube.
+            string text = Loaded() == 0
+                ? Loc.T("ТРУБА ПУСТА - ПЕРЕЗАРЯДИТЕ", "TUBE EMPTY - RELOAD")
+                : _held >= LockTime() ? Loc.T("ЦЕЛЬ ЗАХВАЧЕНА", "TARGET LOCKED")
                 : _held > 0 ? Loc.T("ЗАХВАТ ЦЕЛИ", "ACQUIRING")
-                : Loc.T("Удерживайте прицел в квадрате", "Hold the reticle inside a target square");
-            GUI.Label(new Rect(cx-160,cy+75,360,30), text);
+                : Loc.T("Удерживайте точку прицеливания на цели",
+                        "Hold the aiming point on a target");
+            // Under the lens when there is one, so the line never sits across
+            // the glass the gunner is searching through.
+            float ty = sight ? cy + LensRadius() * 0.62f : cy + 75f;
+            GUI.Label(new Rect(cx - 180f, Mathf.Min(ty, Screen.height - 40f), 360f, 30f), text);
             GUI.color = old;
+        }
+
+        /// <summary>Missiles in the tube, or -1 when that cannot be read. The
+        /// weapon is reloadable now, so "empty" is a state the gunner stands
+        /// in and has to act on, not the end of the weapon.</summary>
+        static int Loaded()
+        {
+            try
+            {
+                object weapons = Field(Field(_controller, "_plrInventoryManager"), "_weaponsData");
+                Array bullets = Field(weapons, "Bullets") as Array;
+                object slotValue = Field(weapons, "CurrentSlotID");
+                if (bullets == null || slotValue == null) return -1;
+                int slot = Int(slotValue);
+                if (slot < 0 || slot >= bullets.Length) return -1;
+                return Int(bullets.GetValue(slot));
+            }
+            catch { return -1; }
         }
         static void Line(float x,float y,float w,float h)
         { GUI.DrawTexture(new Rect(x,y,w,h), Texture2D.whiteTexture); }
@@ -466,18 +589,66 @@ namespace NextDayRevival
             try
             {
                 Send(f, targetHit && f.Heli != 0 ? 3 : 2);
-                if (targetHit && f.Target.Go != null)
-                {
-                    if (f.Heli != 0 && RevivalTroopInsertion.MasterClient()) ApproveHeli(f.Heli, f.Position);
-                    else if (f.Target.Kind == 2) Drone.Net.Send(Drone.Net.Treffer,f.Target.Point,new Vector3(f.Target.Actor,0,0),100f,true);
-                    else if (f.Target.Kind == 3) SurvNet.Send(SurvNet.Treffer,f.Target.Point,new Vector3(f.Target.Actor,0,0),100f,true);
-                    else if (f.Target.Kind == 4) CrewDrone.Beschuss(f.Target.Point-f.Direction*4f,f.Direction,8f,100f);
-                    else if (f.Target.Kind == 5) ArtyBattery.Shoot(f.Target.Point-f.Direction*4f,f.Direction);
-                }
-                if (impact) RocketHook.Detonate(f.Position,900f,12f,3f);
+                if (targetHit && f.Target.Go != null) Kill(f);
+                if (impact) RocketHook.Detonate(f.Position, Warhead(), 12f, 3f);
             }
             catch (Exception ex) { Warn(ex); }
             finally { if (f.Model != null) UnityEngine.Object.Destroy(f.Model); }
+        }
+
+        /// <summary>
+        /// The missile reached what it was locked onto. That target dies here,
+        /// with no help from the blast that follows.
+        ///
+        /// The old version handed every kind a number and hoped it was enough,
+        /// and for two of the five it was not:
+        ///
+        ///   * A VEHICLE got nothing of its own at all - only the blast, at the
+        ///     LAW's 900, which `VehicleArmor` reads back as a LAW hit and
+        ///     halves against a tank. Two Stingers for one tank.
+        ///   * The ARTILLERY RECON DRONE went through `ArtyBattery.Shoot`,
+        ///     which is the entry point for a RIFLE ROUND: it takes one of the
+        ///     three hit points that drone carries. Three Stingers for a
+        ///     quadcopter.
+        ///
+        /// The FPV drone (3 hp), the recon drone (4) and a crew drone all died
+        /// to the flat 100 already; they are raised to Lethal anyway so that no
+        /// future hit-point change quietly makes the missile survivable again.
+        /// </summary>
+        static void Kill(Flight f)
+        {
+            // Whatever hit points a thing has, one missile is more than all of
+            // them. Not float.MaxValue: these numbers travel over Photon as
+            // floats and are subtracted from, and an infinity in a packet is
+            // the kind of value a receiver rejects.
+            const float Lethal = 100000f;
+            if (f.Heli != 0)
+            {
+                // The helicopter path is unchanged and is already one shot:
+                // MissileImpact burns the machine. Only the master may say so.
+                if (RevivalTroopInsertion.MasterClient()) ApproveHeli(f.Heli, f.Position);
+                return;
+            }
+            if (f.Target.Kind == 1) VehicleArmor.MissileKill(f.Target.Vehicle);
+            else if (f.Target.Kind == 2)
+                Drone.Net.Send(Drone.Net.Treffer, f.Target.Point,
+                               new Vector3(f.Target.Actor, 0, 0), Lethal, true);
+            else if (f.Target.Kind == 3)
+                SurvNet.Send(SurvNet.Treffer, f.Target.Point,
+                             new Vector3(f.Target.Actor, 0, 0), Lethal, true);
+            else if (f.Target.Kind == 4)
+                CrewDrone.Beschuss(f.Target.Point - f.Direction * 4f, f.Direction, 8f, Lethal);
+            else if (f.Target.Kind == 5)
+            {
+                // ArtyBattery.Shoot removes ONE of Post.DroneHits (3) and
+                // ignores a drone already at zero, so the same shot line is
+                // offered until there is nothing left to take. Four passes is
+                // the three it has plus one that finds nothing - cheaper and
+                // far more honest than a second entry point in a file this
+                // feature does not own.
+                for (int i = 0; i < 4; i++)
+                    ArtyBattery.Shoot(f.Target.Point - f.Direction * 4f, f.Direction);
+            }
         }
 
         static void ApproveHeli(int view, Vector3 point)

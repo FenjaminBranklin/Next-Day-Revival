@@ -124,6 +124,14 @@ namespace NextDayRevival
                 __result = scope;
                 return false;
             }
+            if (path.Equals(RevivalPlugin.StingerScopePath, StringComparison.OrdinalIgnoreCase))
+            {
+                Texture2D scope = Assets.Texture("stinger_scope.png", false, false);
+                if (scope == null) return true;
+                Log(path, "Zielfernrohr Stinger");
+                __result = scope;
+                return false;
+            }
 
             List<ItemDef> items = RevivalPlugin.Items;
             if (_built != items.Count) Build(items);
@@ -1353,13 +1361,19 @@ namespace NextDayRevival
         // feature and not about the price list: a parachute is spent on the jump
         // that uses it, so a player who cannot buy one has the helicopter's bail
         // out exactly once, and then never again.
+        // 2068 is the Stinger's reload round. It has to be buyable for the
+        // same reason the parachute is: the launcher (45000) is a gripstock
+        // that keeps working, so without a source of tubes it would still be
+        // the one-shot weapon it stopped being. Priced at 20000 - well under
+        // half the launcher, so the second shot is affordable and the third
+        // one hurts.
         static readonly int[] ShopItemIds = new int[] {
             1160, 1161, 1162, 1163, 1165, 2050, 2051, 2053, 2054, 2055, 2056, 2057,
-            2067 };
+            2067, 2068 };
         static readonly int[] ShopBuyPrices = new int[] {
             18000, 30000, 25000, 10000, 45000, 4000, 4500,
             5000, 100000, 50000, 2500, 25000,
-            12000 };
+            12000, 20000 };
 
         public static void RegisterAll()
         {

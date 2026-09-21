@@ -105,6 +105,7 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgSweepLaps;
         static ConfigEntry<float> _cfgModelRange;
         static ConfigEntry<float> _cfgModelScale;
+        static ConfigEntry<float> _cfgWreckBurn;
 
         static ConfigEntry<float> _cfgSpotRadius;
         static ConfigEntry<float> _cfgSpotSeconds;
@@ -230,16 +231,31 @@ namespace NextDayRevival
             _cfgOrbitHeight = cfg.Bind("Artillery", "OrbitHeight", 85f,
                 "Metres above the ground under it. High enough to be a dot, low "
                 + "enough to be seen against the sky.");
-            _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 16f,
-                "Metres per second along the circle. At 600 m radius one lap "
-                + "takes about 236 s. The speed is left alone by the wider "
-                + "orbit on purpose: how long a man stays inside the camera's "
-                + "circle - 600 m across it at the default SpotRadius, some "
-                + "37 s - is what decides a sighting, and that depends on this "
-                + "number, not on the radius. With OrbitSweep on, it is the "
-                + "speed at the nominal radius: the angle turned per second is "
-                + "what stays fixed, so the drone runs slower the further in "
-                + "the spiral carries it.");
+            _cfgOrbitSpeed = cfg.Bind("Artillery", "OrbitSpeed", 26f,
+                "Metres per second along the circle. 26 is the flat-out speed "
+                + "of the player's own surveillance drone "
+                + "(DroneGear's SurvDrone.MaxSpeed), which is the same "
+                + "airframe, so this is the machine flown out and not a "
+                + "number picked to feel quick. 16 was measured against the "
+                + "old 240 m ring, where it was a 95 s lap, and was left "
+                + "alone when the ring went to 600 m - which made the lap "
+                + "236 s, and a warning line the drone crosses once every "
+                + "four minutes warns late. At 600 m a lap is now about "
+                + "145 s. What it costs is dwell, and only dwell: a man "
+                + "under the middle of the camera's circle has some 23 s of "
+                + "it instead of 37, against the 3 s of SpotSeconds, so the "
+                + "footprint a sighting can come from shrinks from 299 m to "
+                + "297 of SpotRadius' 300. With OrbitSweep on, it is the "
+                + "speed at the nominal radius: the angle turned per second "
+                + "is what stays fixed, so the drone runs slower the further "
+                + "in the spiral carries it.");
+            // FIELD 2026-09-21: "die NPC recon drohne soll schneller
+            // fliegen". Migrate the released default, for the same reason
+            // the radius above is migrated: Config.Bind takes the value out
+            // of an existing file, so a new default on its own reaches
+            // nobody who has already played. A deliberate custom speed is
+            // left as it is.
+            if (_cfgOrbitSpeed.Value == 16f) _cfgOrbitSpeed.Value = 26f;
             _cfgOrbitSweep = cfg.Bind("Artillery", "OrbitSweep", 0.55f,
                 "How far INSIDE OrbitRadius the drone spirals, as a fraction "
                 + "of it. 0 is the old fixed ring, which is why a man was only "
@@ -249,8 +265,8 @@ namespace NextDayRevival
                 + "on top of it the search covers the settlement itself, its "
                 + "approaches and the ground the gun can reach beyond them.");
             _cfgSweepLaps = cfg.Bind("Artillery", "OrbitSweepLaps", 1.618f,
-                "Laps of the circle per in-and-out of the spiral - about six "
-                + "and a half minutes at the default orbit and speed. NOT a "
+                "Laps of the circle per in-and-out of the spiral - just "
+                + "under four minutes at the default orbit and speed. NOT a "
                 + "whole number, and that is the whole point: at 2 the spiral "
                 + "reaches its inner edge at a = 2*pi*k, which is the same "
                 + "bearing every single time, and the settlement keeps "
@@ -273,6 +289,14 @@ namespace NextDayRevival
             _cfgModelScale = cfg.Bind("Artillery", "ModelScale", 10f,
                 "Size of the recon drone model. The player's own surveillance "
                 + "drone uses 12.");
+            _cfgWreckBurn = cfg.Bind("Artillery", "WreckBurnSeconds", 90f,
+                "How long a shot-down recon drone lies burning and smoking "
+                + "where it fell, before the airframe and the fire go away "
+                + "together (order of 2026-09-21). A thin flame and a wisp of "
+                + "smoke, NOT the vehicle wreck's column: the sizes are set "
+                + "and argued in FireEffect.SpawnDroneFire. 0 puts the drone "
+                + "down without a ground fire and leaves the burning fall "
+                + "alone; Effects/Fire switches off both.");
 
             _cfgSpotRadius = cfg.Bind("Artillery", "SpotRadius", 300f,
                 "Metres around the point under the drone in which it sees a "
@@ -382,6 +406,7 @@ namespace NextDayRevival
             public float GroundAt;          // Time.time it was last sampled
             public int DroneHits = 3;
             public double DroneReadyAt;
+            public bool DroneCrashing;      // the last hit point just went: Fly owes a crash
             public float NextDroneState;
             public string DroneKey;
 
@@ -1901,8 +1926,9 @@ namespace NextDayRevival
         ///      shared clock is used at all is that two clients must agree on
         ///      where the drone is. They still do: this clock is advanced by the
         ///      frame time and pulled back towards the shared one continuously,
-        ///      so it tracks it to a few milliseconds - under a centimetre of
-        ///      orbit at 16 m/s, against an aim error measured in tens of metres.
+        ///      so it tracks it to a few milliseconds - the worst the
+        ///      harness measures is 8 ms, a fifth of a metre of orbit at
+        ///      26 m/s, against an aim error measured in tens of metres.
         ///
         /// A difference above a second is not drift, it is the room clock's own
         /// wrap at 100000 s or a client that was paused, and is taken in one step.
@@ -1978,11 +2004,35 @@ namespace NextDayRevival
             {
                 if (p.DroneModel != null)
                 {
-                    UnityEngine.Object.Destroy(p.DroneModel);
+                    // SHOT DOWN IS NOT DESPAWNED (order of 2026-09-21). Only a
+                    // kill hands the model to ArtyDroneCrash, and DroneCrashing
+                    // is set by the one transition that means a kill: the last
+                    // hit point going. An operator who dies, a drone switched
+                    // off in the config and a model culled by range all still
+                    // simply stop being drawn, which is what they are.
+                    if (p.DroneCrashing)
+                    {
+                        // The tangent it was flying on, at orbit speed: the
+                        // wreck carries it forward and loses it over the fall.
+                        Vector3 spoke = p.DroneAt - p.Centre;
+                        spoke.y = 0f;
+                        Vector3 drift = new Vector3(-spoke.z, 0f, spoke.x);
+                        drift = drift.sqrMagnitude > 0.01f
+                              ? drift.normalized * Mathf.Clamp(F(_cfgOrbitSpeed, 26f), 1f, 60f)
+                              : Vector3.zero;
+                        ArtyDroneCrash.Begin(p.DroneModel, p.DroneAt, drift,
+                                             p.Ground, p.Phase, F(_cfgWreckBurn, 90f));
+                        RevivalPlugin.L.LogInfo("ArtyBattery: recon drone of \""
+                            + p.Name + "\" is coming down burning at "
+                            + p.DroneAt.ToString("0") + ".");
+                    }
+                    else UnityEngine.Object.Destroy(p.DroneModel);
                     p.DroneModel = null;
                 }
+                p.DroneCrashing = false;
                 return;
             }
+            p.DroneCrashing = false;
 
             p.DroneAt = DronePoint(p, now);
 
@@ -2065,7 +2115,19 @@ namespace NextDayRevival
                 p.DroneHits = 3;
                 ArtyRoom.Write(p.DroneKey, p.DroneHits, p.DroneReadyAt);
             }
-            if (p.DroneHits <= 0 && previousHits > 0) CancelRecon(p);
+            if (p.DroneHits <= 0 && previousHits > 0)
+            {
+                CancelRecon(p);
+                // AND THE KILL ITSELF, for everybody who did not fire the shot.
+                // The master sets DroneCrashing in HitDrone; every other client
+                // learns of the hit right here, out of the room property.
+                // DroneUp is still what the last frame left it, which is the
+                // guard that matters: a post created after the fact - a late
+                // join, or a settlement that only now became a battery - reads
+                // a drone that was shot down an hour ago and has never flown,
+                // and must not drop a burning wreck out of a clear sky.
+                if (p.DroneUp) p.DroneCrashing = true;
+            }
         }
 
         internal static bool ReplacementDue(int hits, double readyAt, double now)
@@ -2175,6 +2237,7 @@ namespace NextDayRevival
             if (p.DroneHits == 0)
             {
                 p.DroneReadyAt = ArtyRoom.Now() + 1800.0;
+                p.DroneCrashing = true;     // the shooter's own client: Fly drops it
                 p.DroneUp = false;
                 CancelRecon(p);
                 RevivalPlugin.L.LogInfo("ArtyBattery: recon down at " + p.Name
@@ -2292,9 +2355,11 @@ namespace NextDayRevival
             }
 
             // FIELD 2026-09-21: "erkennt immer noch nicht zuverlaessig, teilweise
-            // sogar regression". A drone circles at 16 m/s: it swings its own
-            // footprint across a stationary man in a couple of scans, a rise in
-            // the ground can drop him off a single 0.5 s sample, and the NPC
+            // sogar regression". A drone circles at 26 m/s - it was 16 when
+            // this was written, and every one of these reasons only got
+            // stronger: it swings its own footprint across a stationary man
+            // in a couple of scans, a rise in the ground can drop him off a
+            // single 0.5 s sample, and the NPC
             // scan list is walked in the same order every tick, so a single
             // frame where a closer hostile briefly wins the "one candidate"
             // slot used to zero the timer outright. A camera does not forget a
@@ -3159,6 +3224,210 @@ namespace NextDayRevival
             _warned = true;
             RevivalPlugin.L.LogError("Artillery room state unavailable: " + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// THE RECON DRONE ON ITS WAY DOWN (order of 2026-09-21: "die recon drohne
+    /// soll nach dem sie abgeschossen wurde eine KLEINE brenn, runterfall
+    /// animation haben, und dann EIN BISCHEN brennen und qalmen am boden, aber
+    /// nicht so dicht und viel wie fahrzeuge").
+    ///
+    /// Until now a drone that lost its last hit point simply stopped existing:
+    /// Fly saw DroneHits at zero, destroyed the model and returned. The dot in
+    /// the sky the player had just hit blinked out, which reads as a despawn
+    /// and not as a kill - there was nothing to tell him he had done it.
+    ///
+    /// So the model is not destroyed any more, it is HANDED OVER. This object
+    /// takes it, carries the tangent it was flying on, adds gravity and a slow
+    /// tumble, and puts a small trailing fire on it; when it reaches the
+    /// terrain it lies down and keeps a thin fire and a wisp of smoke going for
+    /// WreckBurnSeconds before everything goes away together.
+    ///
+    /// Four things this deliberately does NOT do:
+    ///
+    ///   - No physics. A Rigidbody on a plugin-built object in this game is a
+    ///     collider search waiting to go wrong, and the fall is four seconds of
+    ///     arithmetic: one gravity term, a drift that decays, a terminal speed.
+    ///   - No network traffic. Every client already learns the hit from the
+    ///     room property (DroneState polls it twice a second), and the fall is
+    ///     a pure function of where the drone was plus the settlement's own
+    ///     phase - so two clients watch the same wreck land in the same place
+    ///     without a byte being sent. The tumble is derived from that phase for
+    ///     the same reason, which is also why UnityEngine.Random appears
+    ///     nowhere in here.
+    ///   - No wreck left behind. The airframe goes with the fire. A permanent
+    ///     hull would be local litter nobody else can see, and the battery
+    ///     flies a replacement 1800 s later anyway.
+    ///   - No damage, no collider, no loot. It is scenery.
+    ///
+    /// The fire is FireEffect.SpawnDroneFire, not SpawnWreck: the size
+    /// difference between a burning truck and a burning quadcopter is the
+    /// whole content of the order, and it is argued in that method.
+    /// </summary>
+    public sealed class ArtyDroneCrash : MonoBehaviour
+    {
+        const float Gravity = 9.81f;
+        const float Terminal = 32f;      // m/s down; a light airframe, not a bomb
+        const float MaxFall = 25f;       // s, the watchdog for terrain that never answers
+
+        Vector3 _drift;                  // the tangent it still carries, decaying
+        float _down;                     // m/s, positive downwards
+        Vector3 _tumble;                 // deg/s, deterministic from the phase
+        float _rest;                     // half the airframe's height
+        float _ground;
+        float _groundAt;
+        float _life;
+        bool _landed;
+        float _landedAt;
+        float _burnFor;
+        GameObject _trail;
+        GameObject _fire;
+        Transform _model;
+
+        /// <summary>
+        /// Takes the model off the battery and starts the fall. The caller must
+        /// drop its own reference: from here on the model belongs to this
+        /// object and is destroyed with it.
+        ///
+        /// The model is reparented into an UNSCALED root on purpose. It carries
+        /// ModelScale (10 by default) in its own localScale, and a fire made as
+        /// its child would come out ten times the size - which is precisely the
+        /// vehicle-sized fire the order rules out.
+        /// </summary>
+        internal static void Begin(GameObject model, Vector3 at, Vector3 drift,
+                                   float ground, float phase, float burnFor)
+        {
+            if (model == null) return;
+            GameObject root = new GameObject("NDR_ArtyDroneCrash");
+            root.transform.position = at;
+            root.transform.rotation = Quaternion.identity;
+
+            model.transform.parent = root.transform;   // keeps its world pose and scale
+
+            ArtyDroneCrash c = root.AddComponent<ArtyDroneCrash>();
+            c._model = model.transform;
+            c._drift = drift;
+            c._ground = ground;
+            c._groundAt = Time.time;
+            c._burnFor = Mathf.Clamp(burnFor, 0f, 900f);
+
+            // Half the airframe, so it comes to rest ON the ground instead of
+            // half inside it. Measured from the renderer because the mesh comes
+            // out of drone.ndmesh and its height is not a number this file
+            // gets to assume.
+            Renderer r = model.GetComponentInChildren<Renderer>();
+            c._rest = r == null ? 0.4f : Mathf.Clamp(r.bounds.extents.y, 0.15f, 3f);
+
+            // The tumble, and later the attitude it lies in, come out of the
+            // settlement's own phase. Every client computes the same phase from
+            // the same settlement centre, so every client watches the same
+            // wreck spin the same way - and it costs three sines.
+            c._tumble = new Vector3(
+                50f + 90f * Mathf.Abs(Mathf.Sin(phase * 1.7f)),
+                30f + 140f * Mathf.Abs(Mathf.Sin(phase * 2.9f)),
+                40f + 90f * Mathf.Abs(Mathf.Sin(phase * 4.3f)));
+            if (Mathf.Sin(phase * 3.1f) < 0f) c._tumble.x = -c._tumble.x;
+            if (Mathf.Sin(phase * 5.7f) < 0f) c._tumble.z = -c._tumble.z;
+
+            c._trail = new GameObject("NDR_ArtyDroneTrail");
+            c._trail.transform.parent = root.transform;
+            c._trail.transform.localPosition = Vector3.zero;
+            FireEffect.SpawnDroneFire(c._trail, true);
+        }
+
+        void Update()
+        {
+            float dt = Mathf.Min(Time.deltaTime, 0.1f);
+            if (_landed) { Burn(); return; }
+            _life += dt;
+
+            // Gravity towards a terminal speed, and a forward drift that bleeds
+            // off: a quadcopter with no rotors keeps very little of the 26 m/s
+            // it was orbiting at.
+            _down = Mathf.Min(Terminal, _down + Gravity * dt);
+            _drift = Vector3.Lerp(_drift, Vector3.zero, Mathf.Clamp01(dt * 0.9f));
+
+            Vector3 at = transform.position + _drift * dt + Vector3.down * (_down * dt);
+
+            // The terrain four times a second, the same rate and the same two
+            // calls DronePoint uses: the height data first, a ray only where
+            // there is no terrain. The drone drifts while it falls, so this
+            // cannot be measured once at the top.
+            if (Time.time - _groundAt > 0.25f)
+            {
+                _groundAt = Time.time;
+                float y;
+                if (RevivalTroopInsertion.TerrainHeight(at, out y)
+                    || RevivalTroopInsertion.GroundY(at, out y)) _ground = y;
+            }
+
+            transform.position = at;
+            if (_model != null) _model.Rotate(_tumble * dt, Space.Self);
+
+            if (at.y <= _ground + _rest || _life > MaxFall) Land();
+        }
+
+        /// <summary>Down. The trail stops being made but is left to drift and
+        /// fade where it was, the airframe is laid over on its side, and the
+        /// small ground fire takes over.</summary>
+        void Land()
+        {
+            _landed = true;
+            _landedAt = Time.time;
+
+            Vector3 at = transform.position;
+            at.y = _ground + _rest;
+            transform.position = at;
+
+            if (_model != null)
+            {
+                // On its side, keeping the heading it fell with. The two angles
+                // are the same deterministic phase the tumble came from.
+                Vector3 e = _model.eulerAngles;
+                _model.rotation = Quaternion.Euler(
+                    _tumble.x * 0.12f, e.y, 55f + _tumble.z * 0.10f);
+            }
+
+            if (_trail != null)
+            {
+                FireEffect.StopEmitting(_trail);
+                Douse(_trail);
+                UnityEngine.Object.Destroy(_trail, 5f);
+                _trail = null;
+            }
+
+            if (_burnFor <= 0f) { UnityEngine.Object.Destroy(gameObject, 6f); return; }
+
+            _fire = new GameObject("NDR_ArtyDroneGroundFire");
+            _fire.transform.parent = transform;
+            _fire.transform.localPosition = Vector3.zero;
+            FireEffect.SpawnDroneFire(_fire, false);
+        }
+
+        /// <summary>Burns for WreckBurnSeconds, then stops making fire and
+        /// gives the last particles ten seconds to clear before the airframe
+        /// goes with them.</summary>
+        void Burn()
+        {
+            if (_fire == null) return;
+            if (Time.time - _landedAt < _burnFor) return;
+            FireEffect.StopEmitting(_fire);
+            Douse(_fire);
+            _fire = null;
+            UnityEngine.Object.Destroy(gameObject, 10f);
+        }
+
+        /// <summary>Out with the ember light. StopEmitting is about particles;
+        /// a point light left burning over dead smoke is the one part of a
+        /// stopped fire that still looks lit.</summary>
+        static void Douse(GameObject root)
+        {
+            if (root == null) return;
+            Light[] lights = root.GetComponentsInChildren<Light>(true);
+            for (int i = 0; i < lights.Length; i++)
+                UnityEngine.Object.Destroy(lights[i].gameObject);
+        }
+
     }
 
     /// <summary>Fast hydraulic recoil, slower return and a delayed powder cloud.</summary>

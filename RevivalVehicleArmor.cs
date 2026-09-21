@@ -93,6 +93,10 @@ namespace NextDayRevival
 
         static MethodInfo _applyDamage;
         static bool _lookedUp;
+        // Set for the length of one MissileKill call, read by Prefix. Not a
+        // lock and not re-entrant on purpose: ApplyDamage is synchronous and
+        // the finally below always clears it.
+        static bool _missileKill;
 
         // ----------------------------------------------------------- install
         public static void Install(Harmony harmony)
@@ -141,6 +145,12 @@ namespace NextDayRevival
         {
             try
             {
+                // A Stinger kill has already done this arithmetic against the
+                // vehicle's OWN durability (MissileKill). Re-deriving it from a
+                // hit count would undo an exact number with a guessed one, and
+                // the value it passes is computed, so HitsForExplosion could
+                // match it by accident on a config the player edited.
+                if (_missileKill) return true;
                 if (__1 != PART_EXPLOSION) return true;
 
                 Component vgs = __instance as Component;
@@ -233,6 +243,65 @@ namespace NextDayRevival
             {
                 if (RevivalPlugin.L != null)
                     RevivalPlugin.L.LogError("VehicleArmor.GunHit: " + ex);
+                return false;
+            }
+        }
+
+        // ------------------------------------------------------- missile kill
+        /// <summary>
+        /// One missile, one wreck: whatever this vehicle is, it does not
+        /// survive this call.
+        ///
+        /// Written here and not in Revival.Stinger.cs because this file is the
+        /// one place that knows the two facts the arithmetic needs: that
+        /// ApplyDamage with partType 14 removes `damage * 9` from Durability,
+        /// and that the tank re-balance above sits in front of it. Both were
+        /// read from IL once and are not worth measuring twice.
+        ///
+        /// The damage is derived from the vehicle's CURRENT Durability, not
+        /// from a weapon constant, so it works on a tank (2000), on the
+        /// technical's capped 150, on the drivable howitzer's 900 and on
+        /// anything a later feature spawns with a number nobody here knows.
+        /// `_missileKill` keeps the tank re-balance out of the way for exactly
+        /// this one call - a hit count would turn an exact number back into a
+        /// fraction of a pool that may not be this vehicle's pool at all.
+        ///
+        /// Returns true when the damage was applied.
+        /// </summary>
+        public static bool MissileKill(Component vehicle)
+        {
+            try
+            {
+                if (vehicle == null || !LookUp()) return false;
+                float before = GetFloat(vehicle, "Durability", -1f);
+                // A vehicle already at zero is a wreck; hitting it again is
+                // not a kill, and SetDamage returns on that case anyway.
+                if (before == 0f) return false;
+                // Unreadable is not the same as gone: fall back to the pool
+                // every mod vehicle spawns with rather than let a missile
+                // bounce off a field this build could not find.
+                if (before < 0f)
+                {
+                    RevivalPlugin.L.LogWarning("VehicleArmor: Durability unreadable on "
+                        + vehicle.name + " - the missile uses the pool instead.");
+                    before = Mathf.Max(1f, CfgPool == null ? 2000f : CfgPool.Value);
+                }
+                // +1 so rounding can never leave a sliver of durability, and
+                // /9 because the game multiplies an explosion by that.
+                float damage = (before + 1f) / EXPLOSION_MULT;
+                _missileKill = true;
+                try { _applyDamage.Invoke(vehicle, new object[] { damage, PART_EXPLOSION }); }
+                finally { _missileKill = false; }
+                float after = GetFloat(vehicle, "Durability", before);
+                RevivalPlugin.L.LogInfo("VehicleArmor: missile kill "
+                    + vehicle.transform.root.name + " " + before.ToString("0")
+                    + " -> " + after.ToString("0") + ".");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogError("VehicleArmor.MissileKill: " + ex);
                 return false;
             }
         }

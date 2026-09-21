@@ -73,7 +73,11 @@ GROUPS = [
     ("t72", ["t72_import.py", "t72_track_texture.py", "t72_scope.py",
              "shell125_mesh.py", "shell125_texture.py", "shell125_icon.py",
              "mesh_preview.py t72"]),
-    ("scope", ["scope50.py", "apc_scope.py"]),
+    ("scope", ["scope50.py", "apc_scope.py", "stinger_scope.py"]),
+    # Helipad decks: one painted texture per built surface, mapped
+    # radius-relative over the whole pad (Revival.Helipads.cs). Without them a
+    # pad still stands, in flat colour.
+    ("helipad", ["helipad_texture.py"]),
     ("preview", ["mesh_preview.py"]),
 ]
 

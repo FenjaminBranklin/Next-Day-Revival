@@ -8,7 +8,7 @@ Run: python stinger_build.py
 import os
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 import gltf_read
 import iconlib
@@ -171,6 +171,52 @@ def main():
     texture = iconlib.load_texture(os.path.join(ASSETS, "stinger_missile_diffuse.png"))
     iconlib.render(v, n, indices, uv, texture, 1000, 350, yaw=0.2, pitch=0.05).save(
         os.path.join(ASSETS, "stinger_missile_preview.png"))
+    missile_icon(v, n, indices, uv, texture)
+
+
+def dense_box(image):
+    """The box around the SOLID part of a render, without the fin tips.
+
+    iconlib.fit centres on getbbox(), and getbbox counts a pixel of alpha 1.
+    The rear third of this missile is the sustainer's thin wings, and at the
+    icon camera they are edge on: measured over the 1200 px render they leave
+    42 stray pixels across 337 columns - a picture the eye cannot see, and a
+    third of the bounding box. Fitting on it shrank the round to a stick sat
+    off centre. Blurring the alpha by six pixels drops a line that thin below
+    the threshold while the tube stays above 200, so the box lands on the body
+    and the image itself is untouched.
+    """
+    mask = image.split()[3].filter(ImageFilter.GaussianBlur(6)).point(
+        lambda a: 255 if a >= 40 else 0)
+    box = mask.getbbox()
+    return box if box is not None else (0, 0, image.width, image.height)
+
+
+def missile_icon(v, n, indices, uv, texture):
+    """300x300 inventory icon for the reload round (item 2068).
+
+    iconlib.item_icon cannot be used: it loads the mesh from the file, and the
+    stored asset is nose +Z while the icon renderer wants the long axis on -Y
+    (iconlib.render). The caller has already turned the arrays, so the render
+    happens here on the turned copy.
+
+    The camera is the LAW rocket's (rocket_icon.py: yaw 0.65, pitch 0.34), not
+    item_icon's diagonal weapon pose. A missile is a smooth tube with no grip
+    and no receiver: tilted to 49 degrees it became a thin stick filling eight
+    percent of the frame, against the rocket pack's twenty-five. Seen nearly
+    from the side and a little from above it fills the icon the way the other
+    ammunition items do.
+    """
+    icon = iconlib.render(v, n, indices, uv, texture,
+                          300 * iconlib.SS, 300 * iconlib.SS,
+                          yaw=0.65, pitch=0.34, fill=0.96)
+    icon = icon.crop(dense_box(icon))
+    icon = iconlib.fit(icon, 300, 300, margin=0.90)
+    icon = iconlib.drop_shadow(icon, offset=(4, 6), blur=6, strength=0.5)
+    out = os.path.join(ASSETS, "stinger_missile_icon.png")
+    icon.save(out)
+    print("missile icon: %s" % out)
+    iconlib.report(out)
 
 
 if __name__ == "__main__":

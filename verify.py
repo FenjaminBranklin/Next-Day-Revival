@@ -183,9 +183,11 @@ ICON_SIZES = {
     "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
     "stinger_icon.png": (300, 300), "stinger_weapon_icon.png": (317, 183),
+    "stinger_missile_icon.png": (300, 300),
     "scope50.png": (1920, 1920),
     "t72_scope.png": (1920, 1920),
     "apc_scope.png": (1920, 1920),
+    "stinger_scope.png": (1920, 1920),
 }
 
 fails = []
@@ -554,6 +556,85 @@ def check_helipads():
          "ein Strahl traefe ein schon stehendes Deck und stapelte das naechste "
          "darauf")
 
+    # --- 6.39: the pad is raised, and the ramp around it is what makes the
+    # raising bearable. A lift without an apron is a kerb; an apron whose
+    # profile is linear still leaves an edge at the top and a step at the
+    # bottom, which is exactly what "smooth" was asked NOT to be.
+    need("static float ApronWidth(float radius)" in pad and "ApronRings" in pad,
+         "das Deck hat eine abgeschraegte Rampe ausserhalb des Radius",
+         "das Deck endet an einer senkrechten Kante - der Uebergang zum Boden "
+         "ist eine Stufe")
+    need("float profile = rim * (t * t * (3f - 2f * t));" in pad,
+         "das Rampenprofil ist eine Smoothstep-Kurve, oben und unten flach",
+         "die Rampe ist eine schiefe Ebene - oben und unten bleibt eine Kante")
+    need("Mathf.Min(Mathf.Max(profile, here - deck + 0.02f), 0f)" in pad,
+         "die Rampe liegt ueber dem Boden, den sie ueberquert, und nie ueber "
+         "dem Deck",
+         "die Rampe schneidet in den Hang oder steigt ueber das Deck")
+
+    # --- 6.39: one mesh, one texture. Three flat colours on three meshes is
+    # what made the pad look like plastic with a poster on it.
+    need("const float DeckUv" in pad and "0.5f + cos * tex * 0.5f" in pad,
+         "die Deckstextur ist radiusbezogen aufgespannt",
+         "die UV des Decks haengen an Metern - dann traegt ein 60-m-Platz ein "
+         "anderes Bild als ein 8-m-Platz")
+    need('Tex("helipad_" + kind + ".png", false)' in pad
+         and 'mat.EnableKeyword("_NORMALMAP")' in pad
+         and 'mat.EnableKeyword("_METALLICGLOSSMAP")' in pad,
+         "Deck, Normalen- und Metallkarte haengen am Material",
+         "eine der drei Karten wird gesetzt, aber ohne Keyword nie gelesen")
+
+    tex_p = os.path.join(ROOT, "helipad_texture.py")
+    need(os.path.exists(tex_p),
+         "helipad_texture.py liegt vor",
+         "helipad_texture.py fehlt - die Deckstexturen lassen sich nicht neu "
+         "bauen")
+    if os.path.exists(tex_p):
+        tex = io.open(tex_p, encoding="utf-8").read()
+        cs_uv = re.search(r"const float DeckUv = ([\d.]+)f;", pad)
+        py_uv = re.search(r"^DECK = ([\d.]+)", tex, re.M)
+        need(cs_uv is not None and py_uv is not None
+             and float(cs_uv.group(1)) == float(py_uv.group(1)),
+             "Plugin und Texturgenerator teilen denselben Deckradius",
+             "helipad_texture.py malt den Rand woanders hin, als das Plugin ihn "
+             "aufspannt - Rand, H und Rampe sitzen dann verschoben")
+
+    # --- 6.39: a pad clears the site it is built on, and gives it back.
+    need("static void ClearProps(Pad p, float deck)" in pad
+         and "static void ClearTerrain()" in pad,
+         "der Platz raeumt Requisiten, Baeume und Gras aus seiner Flaeche",
+         "ein Baum waechst durch das Deck")
+    need("data.treeInstances = keep.ToArray();" in pad
+         and "take.Data.treeInstances = all;" in pad,
+         "entnommene Baeume werden aufbewahrt und wieder eingesetzt",
+         "ein verschobener Platz laesst die Baeume geloescht zurueck")
+    need("static void Restore()" in pad and "Restore();" in pad,
+         "jede Aenderung an der Welt wird zurueckgenommen",
+         "die Welt bleibt veraendert, wenn die Plaetze verschwinden")
+    need("if (Networked(t)) return null;" in pad
+         and "box.size.x <= MaxProp && box.size.z <= MaxProp" in pad
+         and "if (hit is TerrainCollider) return null;" in pad,
+         "nur kleine, eigene Objekte werden geraeumt",
+         "der Platz koennte ein Haus, das Terrain oder ein Netzobjekt "
+         "abschalten")
+    need("hull.enabled = false;" in pad and "terrain.Flush();" in pad,
+         "der gefaellte Baum verliert auch seinen Collider",
+         "ein gefaellter Baum bleibt unsichtbar im Weg stehen")
+
+    # --- the terrain API is only reachable with its two references, and the
+    # file does not compile without them. A missing reference is a build error
+    # in every OTHER file too, so it is worth naming here.
+    build = read("build.ps1")
+    need("UnityEngine.TerrainModule.dll" in build
+         and "UnityEngine.TerrainPhysicsModule.dll" in build,
+         "build.ps1 referenziert Terrain und TerrainPhysics",
+         "ohne diese Referenzen kennt der Compiler Terrain, TerrainData, "
+         "TreeInstance und TerrainCollider nicht")
+    need('"helipad_concrete.png"' in build and '"helipad_steel.png"' in build,
+         "die Deckstexturen werden mitinstalliert",
+         "die Deckstexturen fehlen in der Asset-Liste von build.ps1 - im Spiel "
+         "faellt der Platz auf Farbflaechen zurueck")
+
     # --- the landing zone asks the pads FIRST.
     snap = troop.find("Helipads.Snap(")
     search = troop.find("FindLandingSpot(new Vector3(d.X, 0f, d.Z), yaw, out lz)")
@@ -817,8 +898,9 @@ def check_images():
         a = np.asarray(im.convert("RGBA"))
         alpha = a[..., 3]
         filled = 100.0 * (alpha > 8).mean()
-        if f in ("scope50.png", "t72_scope.png", "apc_scope.png"):
-            # Alle drei sind Zielfernrohrblenden: aussen deckend, in der Mitte
+        if f in ("scope50.png", "t72_scope.png", "apc_scope.png",
+                 "stinger_scope.png"):
+            # Alle vier sind Zielfernrohrblenden: aussen deckend, in der Mitte
             # ein Loch. Panzerglas und BTR-Optik haben zusaetzlich eine Vignette
             # zum Rand hin, deshalb ist "voellig frei" dort kleiner - 8 Prozent
             # reichen als Nachweis, dass ueberhaupt noch durchgesehen werden kann.
@@ -1281,6 +1363,14 @@ def check_patrol_traffic():
          the shoulder rays of the obstacle avoidance answered every tree of a
          forest road with a fifth of a turn.
 
+    Guards 8 to 11 are the second round (6.39.0). The hulls were held apart, but
+    the pair still stood on the road all session, because the stuck RECOVERY
+    refused to run: its search budget was a fixed count of waypoints on routes
+    that differ threefold in density, two vehicles that met head on each refused
+    to move because the other was there, an ordinary patrol could not pass
+    through the prop it had no room to steer around, and the log reported all of
+    it as "no ground" whatever the real reason had been.
+
     One guard per mistake. The driving itself stays an in-game acceptance item;
     research/patrol_traffic_check.py compiles the decisions below and runs them
     against a synthetic world (verify.py starts no subprocesses).
@@ -1387,6 +1477,55 @@ def check_patrol_traffic():
          "its own bow plate",
          "a hull standing in another one blinds its gun - the pair then "
          "neither moves nor shoots")
+
+    # 8. The ordinary patrol passes through what it cannot steer around, the
+    #    way the convoy has since feature/convoy-oneway-drive. BOTH branches of
+    #    the driver call it now, which is why this counts instead of searching.
+    drive = _body(code, "static void Drive(Unit u)")
+    ray = _body(code, "static void GhostRay(")
+    need(drive.count("GhostAhead(u, t, vel.magnitude);") == 2
+         and "if (Lebendig(go.transform)) return;" in ray
+         and "if (IsDriveSurface(go, normal)) return;" in ray,
+         "a patrol drives through the prop it cannot steer around, and never "
+         "through the ground or through anything alive",
+         "only the convoy ghosts through obstacles - an ordinary patrol then "
+         "snags on the wreck parked across a dirt road, where there is nowhere "
+         "to steer, and stands there for the rest of the session")
+
+    # 9. The recovery's search budget is METRES. A count of waypoints punishes a
+    #    densely recorded route for being densely recorded, and the two live
+    #    recordings of 2026-09-21 differ by a factor of three.
+    ground = _body(code, "static int GroundedWaypoint(")
+    need("walked += FlatDistance(r.P[last].Pos, r.P[at].Pos);" in ground
+         and "step >= GroundTries && walked >= GroundReach" in ground,
+         "the stuck recovery searches a fixed number of METRES down the road",
+         "the search is back on a fixed waypoint COUNT - twelve waypoints are "
+         "138 m of the looter's recording and 44 m of the civilians', and 44 m "
+         "is not enough to get past the hull a vehicle is stopped against")
+
+    # 10. Two hulls that each refuse to move because the other one is there. An
+    #     out-and-back route guarantees the pair meets head on somewhere.
+    free = _body(code, "static void Free(Unit u, Vector3 pos)")
+    hold = _body(code, "static void FreeHold(")
+    blocked = _body(code, "static bool SpotBlocked(")
+    need("u.Refusals >= HoldsBeforeForce" in free
+         and "u.Refusals++;" in hold
+         and "u.Refusals = 0;" in free
+         and "if (mate) continue;" in blocked,
+         "a patrol held again and again by its own mate is finally moved past "
+         "it, and never onto a hull it cannot drive through",
+         "nothing breaks the deadlock of two hulls that meet head on - each "
+         "one refuses to warp because the other is standing there, and then "
+         "neither of them ever moves again")
+
+    # 11. The log has to name WHICH of the two requirements failed. Reporting a
+    #     spot held by a vehicle as a spot with no ground is what pointed the
+    #     previous fix round at the wrong half of the problem.
+    need("bool anyGround = landed >= 0;" in free
+         and "FreeHold(u, from, to, anyGround" in free,
+         "a refusal says whether the ground or another vehicle was the reason",
+         "both refusals read \"no ground\" again - the log then cannot tell an "
+         "unloaded area from a deadlocked pair of hulls")
 
     # verify.py runs no subprocesses, so the executable proof only has to be
     # in the repository (like research/patrol_fall_check.py for [18]).
@@ -1781,12 +1920,14 @@ def check_arty_battery():
     plug_p = os.path.join(ROOT, "RevivalPlugin.cs")
     sync_p = os.path.join(ROOT, "sync_public.py")
     crew_p = os.path.join(ROOT, "Revival.Crew.cs")
+    gear_p = os.path.join(ROOT, "RevivalDroneGear.cs")
     if not os.path.exists(bat_p):
         bad("RevivalArtyBattery.cs fehlt")
         return
     raw = io.open(bat_p, "rb").read()
     b = raw.decode("utf-8", "replace")
     crew = io.open(crew_p, encoding="utf-8").read() if os.path.exists(crew_p) else ""
+    gear = io.open(gear_p, encoding="utf-8").read() if os.path.exists(gear_p) else ""
     s = io.open(mortar_p, encoding="utf-8").read() if os.path.exists(mortar_p) else ""
     plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
     sync = io.open(sync_p, encoding="utf-8").read() if os.path.exists(sync_p) else ""
@@ -1886,6 +2027,30 @@ def check_arty_battery():
     need("RevivalTroopInsertion.TerrainHeight(flat, out y)" in b,
          "die Drohne fliegt ueber das Gelaende, nicht ueber Daecher",
          "die Flughoehe kommt wieder aus einem Strahl ohne Layer-Maske")
+
+    # --- 3b-2: THE SPEED, AND THE CONFIG FILE THAT WOULD SWALLOW IT.
+    # FIELD 2026-09-21: "die NPC recon drohne soll schneller fliegen". 16 m/s
+    # was measured against the old 240 m ring - a 95 s lap - and stayed when
+    # the ring went to 600 m, which made the lap 236 s. 26 is the flat-out
+    # speed of the player's own surveillance drone, and that is the same
+    # airframe (SurvDrone.MaxSpeed in RevivalDroneGear.cs), so the number is
+    # the machine and not a feel. The migration is the half that actually
+    # reaches a player: Config.Bind reads an existing file, so a new default
+    # on its own changes nothing for anybody who has already played.
+    need('"OrbitSpeed", 26f' in b,
+         "the recon drone flies at the airframe's own speed, 26 m/s",
+         "OrbitSpeed is not 26 - a 600 m ring at 16 m/s is a 236 s lap, and a "
+         "warning line crossed once every four minutes warns late")
+    need("if (_cfgOrbitSpeed.Value == 16f) _cfgOrbitSpeed.Value = 26f;" in b,
+         "the released 16 m/s is migrated out of an existing config file",
+         "the old speed is not migrated - every player who already has a "
+         "nextday.revival.toolkit.cfg keeps the slow drone and the change "
+         "reaches nobody")
+    need("MaxSpeed = 26f" in gear,
+         "and the surveillance drone that number was taken from still flies "
+         "at 26",
+         "SurvDrone.MaxSpeed moved - OrbitSpeed's justification in "
+         "RevivalArtyBattery.cs now points at a number that is not there")
 
     # --- 3c: die Karte darf keine Kreise einer Ebene behalten, die weg ist.
     need("if (_marks.Count > 0) _marks.Clear();" in b and "_mapOpen = false;" in b,
@@ -2756,6 +2921,18 @@ def check_arty_vehicle():
       6. NO SETTLEMENT BOOKKEEPING. A gun that drives belongs to no village, so
          it must never reach the battery's crew/drone path, and losing it must
          not take the settlements' shells or their placement state with it.
+      7. THE TRAVEL LOCK, both halves (6.39.0). A self-propelled gun drives
+         with its tube in its cradle and not otherwise. The field report was a
+         gun that "slowly makes its way straight ahead" while the truck is
+         already rolling, and that is one bug with two ends: the stowing was
+         SLEWED at a rate, and driving was never held back until it finished.
+         So: the driver's SEAT starts the stowing, not the engine and not the
+         speed; a stowed gun's lay is ASSIGNED off the hull and never slewed,
+         because any rate lags a hull that turns quicker than it does; aiming
+         and travelling may not overlap, or a gun somebody keeps laying strands
+         its own truck; and the throttle is held at the game's ONLY input seam,
+         VehicleGameSystem::InputAxis, with the handbrake on rather than by
+         switching the physics off.
 
     Plus the file rule: RevivalArtyVehicle.cs is machine-written and build.ps1
     needs BOM-less sources, so it is ASCII and its Russian lives in the UTF-8
@@ -2880,6 +3057,57 @@ def check_arty_vehicle():
          "eine verlorene fahrende Haubitze raeumt nur ihre eigenen Granaten",
          "der Verlust einer fahrenden Haubitze greift in die Buchfuehrung der "
          "Siedlungsgeschuetze ein")
+
+    # --- 7: the travel lock, the gun half (RevivalMortar.cs).
+    travel = _body(mort, "static bool Travel(Tube t, float dt)")
+    slew = _body(mort, "static void Slew()")
+    need(travel and "if (Travel(t, dt)) continue;" in slew,
+         "the travel lock is the only thing that lays a howitzer somebody is "
+         "driving",
+         "Slew has no travel lock, or it does not take the gun out of the "
+         "ordinary rate-limited slewing while the truck is being driven")
+    need("static bool DriverAboard(GameObject body)" in mort
+         and "DriverAboard(t.Go)" in travel
+         and "EngineRunning" not in mort,
+         "the driver's SEAT starts the stowing, not a running engine",
+         "the stowing does not hang on the driver's seat - a crew at its own "
+         "gun would lose the tube the moment somebody left the engine idling")
+    need("t.Yaw = rest;" in travel and "t.Pitch = TravelPitch;" in travel
+         and "public bool Stowed;" in mort,
+         "a stowed gun's lay is ASSIGNED off the hull - it stands still "
+         "relative to the truck",
+         "the stowed gun is slewed towards the hull instead of written off it "
+         "- every rate lags a hull that turns quicker than the turret, and "
+         "that lag IS the reported swing")
+    need("if (_aiming == t) LeaveAim(" in travel,
+         "aiming and travelling exclude each other",
+         "a gun can be kept laid while somebody drives - then it never "
+         "reaches its cradle and the truck is held for good")
+    need("internal static bool TravelLocked(GameObject car)" in mort
+         and "internal static bool AnyTravelLock" in mort,
+         "seam Mortar.TravelLocked / Mortar.AnyTravelLock",
+         "the fire control does not tell the vehicle whether its gun is still "
+         "out")
+
+    # --- 7: the travel lock, the driving half (RevivalArtyVehicle.cs).
+    prefix = _body(ac, "public static void Prefix(object __instance, ref float __0, ref bool __2)")
+    need("ArtyVehicleTravel.Install(harmony);" in ac
+         and '"InputAxis"' in ac
+         and "typeof(float), typeof(float), typeof(bool)" in ac,
+         "the lock sits on VehicleGameSystem::InputAxis, the one way a pedal "
+         "reaches a vehicle",
+         "the travel lock is not on the game's own input seam")
+    need("__0 = 0f;" in prefix and "__2 = true;" in prefix
+         and "Mortar.TravelLocked(" in prefix
+         and "Mortar.AnyTravelLock" in prefix,
+         "no throttle and the handbrake on while the gun is out of its cradle",
+         "the lock takes no throttle away, pulls no handbrake, or does not ask "
+         "the fire control whose gun is still out")
+    need("IsMine" not in ac and "canControl" not in ac,
+         "the lock holds the pedals, it does not switch the physics off",
+         "the lock reaches for IsMine or canControl - RCC returns out of "
+         "FixedUpdate before it brakes, so a locked howitzer would coast down "
+         "a slope with nothing to stop it")
 
     # --- seams.
     for seam in ("ArtyVehicle.BindConfig", "ArtyVehicle.Install",
@@ -3310,6 +3538,225 @@ def check_parachute():
          "sync_public.py - the public repo does not build without them")
 
 
+def check_stinger():
+    """[24] The Stinger: the sight, the kill, and the second shot.
+
+    Three field reports, three rules that a later edit could silently undo.
+
+    THE SIGHT is not drawn by this plugin. `xmlItemsDataManager` passes the
+    weapons_db.xml `Scope` attribute to `Resources.Load` and casts the result
+    to Texture2D, `CameraSwitch::CantRenderScope` refuses the whole scope mode
+    when that field is null, and `ScopeCameraEffect::OnGUI` paints it. So the
+    sight exists only while THREE things agree: mods/revival.json names the
+    path, ResourceHook answers that exact path, and the lens numbers in
+    Revival.Stinger.cs match the ones stinger_scope.py drew. Break any one and
+    the weapon still works - it just quietly stops having a sight.
+
+    THE KILL must not go back through a shared damage number. 900 is the LAW's
+    blast and RevivalVehicleArmor reads it back AS a LAW hit, which halves it
+    against a tank; ArtyBattery.Shoot is a rifle round and takes one of the
+    recon drone's three hit points. Both were the reason "the missiles do not
+    one-shot vehicles or the little drones", and both come back the moment
+    Kill() starts trusting a constant again.
+
+    THE SECOND SHOT is the game's own reload, and the two weapons that share
+    the LAW donor now differ in exactly one thing: 1165 names a magazine and
+    1162 does not. That difference lives in two files at once - the item table
+    and the weapon record - and serversync.py only compares the magazine ID, so
+    a ReloadTime left at the LAW's 99 would pass the release gate and still be
+    a weapon nobody can reload.
+    """
+    print("[24] Stinger")
+    src_p = os.path.join(ROOT, "Revival.Stinger.cs")
+    if not os.path.exists(src_p):
+        bad("Revival.Stinger.cs is missing")
+        return
+    raw = io.open(src_p, "rb").read()
+    text = raw.decode("utf-8", "replace")
+    code = _code(text)
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Stinger: " + why)
+
+    import re
+    import json as _json
+    plug = read("RevivalPlugin.cs")
+    items = read("Revival.Items.cs")
+    armor = _code(read("RevivalVehicleArmor.cs"))
+    gen = read("stinger_scope.py")
+    sync = read("sync_public.py")
+    build = read("build.ps1")
+    assets_py = read("make_assets.py")
+
+    # --- file rule: UTF-8 without BOM, and outside ASCII only the Cyrillic of
+    # the player-facing Loc.T lines (AGENTS.md).
+    need(not raw.startswith(b"\xef\xbb\xbf"), "no BOM",
+         "Revival.Stinger.cs starts with a BOM")
+    strange = sorted(set(c for c in text
+                         if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange,
+         "outside ASCII only Cyrillic (player text)",
+         "Revival.Stinger.cs holds characters that are neither ASCII nor "
+         "Cyrillic: " + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # --- the weapon record. This is the half of the feature that lives on the
+    # master server, and the server wins every argument about weapon data.
+    weapons = {}
+    mods_p = os.path.join(ROOT, "mods", "revival.json")
+    if os.path.exists(mods_p):
+        try:
+            for w in _json.load(io.open(mods_p, encoding="utf-8"))["newWeapons"]:
+                weapons[str(w.get("ItemID"))] = w
+        except Exception as ex:
+            bad("Stinger: mods/revival.json cannot be read: %s" % ex)
+    sting = weapons.get("1165", {})
+    law = weapons.get("1162", {})
+
+    m = re.search(r'StingerScopePath\s*=\s*"([^"]+)"', plug)
+    scope_path = None if m is None else m.group(1)
+    need(scope_path is not None and sting.get("Scope") == scope_path,
+         "the weapon record names the sight the plugin serves",
+         "mods/revival.json 1165 Scope is %r, RevivalPlugin.StingerScopePath is "
+         "%r - the game would load nothing and CantRenderScope refuses the "
+         "whole scope mode" % (sting.get("Scope"), scope_path))
+    try:
+        fov = int(sting.get("ScopeFOV", "0"))
+    except (TypeError, ValueError):
+        fov = 0
+    need(0 < fov < 60,
+         "ScopeFOV %d is an aimed field of view" % fov,
+         "mods/revival.json 1165 ScopeFOV is %r - ScopeFOV is an ObscuredInt "
+         "and 0 is the same as having no sight" % sting.get("ScopeFOV"))
+    need(scope_path is not None
+         and "RevivalPlugin.StingerScopePath" in items
+         and '"stinger_scope.png"' in items,
+         "ResourceHook answers that path with stinger_scope.png",
+         "Revival.Items.cs does not serve stinger_scope.png for the Stinger "
+         "scope path - Resources.Load returns null and there is no sight")
+
+    # --- lens geometry. Two numbers in two files that must be the same one.
+    def number(src, pattern):
+        # MULTILINE: the generator's constants sit at the start of their own
+        # line, the C# ones do not.
+        mm = re.search(pattern, src, re.M)
+        return None if mm is None else float(mm.group(1))
+
+    need(number(code, r"ScopeImage\s*=\s*([0-9.]+)f") == number(gen, r"^S\s*=\s*([0-9]+)")
+         and number(code, r"ScopeLens\s*=\s*([0-9.]+)f") == number(gen, r"^R_LENS\s*=\s*([0-9.]+)"),
+         "the lens the code clips to is the lens the generator drew",
+         "ScopeImage/ScopeLens in Revival.Stinger.cs and S/R_LENS in "
+         "stinger_scope.py disagree - the target boxes land on the mount")
+    draw = _body(code, "public static void Draw()")
+    need("if (!sight) {" in draw and "> lens) continue;" in draw,
+         "no second cross over the sight, no box outside the glass",
+         "Draw() no longer clips to the lens or still paints its own crosshair "
+         "on top of the sight's aiming point")
+
+    # --- the kill. One missile, one wreck, whatever was hit.
+    kill = _body(code, "static void Kill(Flight f)")
+    need(kill != "" and "VehicleArmor.MissileKill" in kill,
+         "a vehicle is destroyed outright, not left to the blast",
+         "Kill() does not call VehicleArmor.MissileKill - a vehicle is back to "
+         "depending on the blast, and a tank survives it")
+    need("ArtyBattery.Shoot" in kill and "for (int i = 0; i < 4; i++)" in kill,
+         "the recon drone loses every hit it has, not one of three",
+         "Kill() takes a single ArtyBattery.Shoot for the recon drone again - "
+         "that is one of its three hit points, so three missiles per drone")
+    need(re.search(r"Drone\.Net\.Send\(Drone\.Net\.Treffer[^;]*?100f", kill) is None
+         and re.search(r"SurvNet\.Send\(SurvNet\.Treffer[^;]*?100f", kill) is None,
+         "no drone is handed a flat hundred any more",
+         "Kill() hands a drone a fixed 100 again - a hit-point change makes the "
+         "missile survivable without anything here saying so")
+    finish = _body(code, "static void Finish(Flight f, bool targetHit, bool impact)")
+    need("Warhead()" in finish and "900f" not in finish,
+         "the blast is the Stinger's own number, not the LAW's 900",
+         "Finish() detonates with the LAW's literal 900 - VehicleArmor reads "
+         "that back as a LAW hit and gives a tank two of them")
+    missile_kill = _body(armor, "public static bool MissileKill(Component vehicle)")
+    need(missile_kill != ""
+         and 'GetFloat(vehicle, "Durability"' in missile_kill
+         and "_missileKill = true;" in missile_kill,
+         "the damage is read off the vehicle in front of the missile",
+         "VehicleArmor.MissileKill no longer derives its damage from the "
+         "vehicle's own Durability, or no longer holds the tank re-balance off")
+    need("if (_missileKill) return true;" in _body(armor,
+         "public static bool Prefix(object __instance, ref float __0, int __1)"),
+         "the tank re-balance stands aside for that one call",
+         "VehicleArmor.Prefix does not check _missileKill - an exact number is "
+         "rewritten into a fraction of a pool that may not be this vehicle's")
+
+    # --- the second shot, and the LAW that must not get one.
+    def item_ints(src, item_id):
+        mm = re.search(r"new ItemDef\(\s*%d\s*,(.*?)\)\s*\)" % item_id, src, re.S)
+        if mm is None:
+            return []
+        block = re.sub(r'"[^"]*"', '""', mm.group(1))
+        return [int(z) for z in re.findall(r"(?<![\w.])(\d+)(?![\w.])", block)]
+
+    sting_ints = item_ints(plug, 1165)
+    law_ints = item_ints(plug, 1162)
+    need(len(sting_ints) >= 3 and sting_ints[2] == 2068,
+         "the item table gives 1165 the magazine 2068",
+         "the Stinger's ItemDef does not carry clip 2068 - the game has no "
+         "magazine to reload from")
+    need(len(law_ints) >= 3 and law_ints[2] == 0,
+         "the item table leaves 1162 without one",
+         "the M72 LAW's ItemDef carries a magazine - the LAW is a sealed tube "
+         "and stays single shot")
+    need(item_ints(plug, 2068) != [],
+         "the reload round 2068 exists as an item",
+         "item 2068 is not in the item table - the magazine the Stinger names "
+         "cannot be carried, bought or loaded")
+    need(sting.get("ClipItemID") == "2068" and law.get("ClipItemID") == "0",
+         "the weapon record agrees: 1165 has a magazine, 1162 has none",
+         "mods/revival.json disagrees with the item table about the magazines "
+         "(1165 %r, 1162 %r) - the server wins and the reload is refused"
+         % (sting.get("ClipItemID"), law.get("ClipItemID")))
+    try:
+        reload_s = float(sting.get("ReloadTime", "99"))
+    except (TypeError, ValueError):
+        reload_s = 99.0
+    need(0 < reload_s < 30,
+         "1165 reloads in %.1f s" % reload_s,
+         "mods/revival.json 1165 ReloadTime is %r - 99 is the LAW's way of "
+         "saying never" % sting.get("ReloadTime"))
+    need(law.get("ReloadTime") == "99.0",
+         "1162 still never reloads",
+         "the M72 LAW's ReloadTime is no longer 99 - it is meant to stay a "
+         "one-shot tube")
+
+    # --- the round has to be obtainable, or the launcher is single shot again.
+    shop = re.search(r"ShopItemIds = new int\[\] \{(.*?)\};", items, re.S)
+    prices = re.search(r"ShopBuyPrices = new int\[\] \{(.*?)\};", items, re.S)
+    shop_ids = [] if shop is None else [int(z) for z in re.findall(r"\d+", shop.group(1))]
+    price_list = [] if prices is None else [int(z) for z in re.findall(r"\d+", prices.group(1))]
+    need(2068 in shop_ids,
+         "the reload round is on sale",
+         "item 2068 is not in ShopItemIds - a player who fires the Stinger has "
+         "no way to get another tube")
+    need(len(shop_ids) == len(price_list),
+         "every shop id has a price (%d of them)" % len(shop_ids),
+         "ShopItemIds has %d entries and ShopBuyPrices %d - the prices are "
+         "read by index" % (len(shop_ids), len(price_list)))
+
+    # --- the sight image has to travel with the rest.
+    need('"stinger_scope.png"' in build and '"stinger_missile_icon.png"' in build,
+         "build.ps1 installs the sight and the round's icon",
+         "build.ps1 does not copy stinger_scope.png or stinger_missile_icon.png "
+         "into the game's assets folder")
+    need('"stinger_scope.py"' in sync and "stinger_scope.py" in assets_py,
+         "the generator runs with make_assets and goes into the public repo",
+         "stinger_scope.py is missing from make_assets.py or sync_public.py - "
+         "the public repo cannot rebuild the sight")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -3340,6 +3787,7 @@ if __name__ == "__main__":
     check_helipads()
     check_player_heli()
     check_parachute()
+    check_stinger()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))
