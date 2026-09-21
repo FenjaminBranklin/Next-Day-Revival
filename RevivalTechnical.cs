@@ -421,6 +421,10 @@ namespace NextDayRevival
             CfgShield = cfg.Bind("Technical", "GunShield", true,
                 "Ein Schutzschild vor dem MG. Rein optisch - es haelt nichts "
                 + "auf, die Technische ist absichtlich ungepanzert.");
+            // NDR technical crew: the men who ride one on a convoy or patrol
+            // route. Bound from here and not from RevivalPlugin, because the
+            // crew is part of the technical and the plugin already calls this.
+            TechnicalCrew.BindConfig(cfg);
         }
 
         public static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
@@ -1912,6 +1916,13 @@ namespace NextDayRevival
             try
             {
                 if (!Enabled) return;
+                // The riding crew FIRST: it puts the men where the truck is and
+                // lays the gun, and TechnicalGun.LateAll below then walks the
+                // gunner around the pintle it has just aimed and solves his
+                // hands onto the grips. The other order leaves one of the three
+                // a frame behind the other two, which is what a turning gunner
+                // looks wrong from.
+                TechnicalCrew.LateFrame();
                 TechnicalGun.LateAll();
                 // The gunner's view a SECOND time, from the plugin's own
                 // LateUpdate. CameraOwner.LateTick drives it from a postfix on
@@ -1949,6 +1960,10 @@ namespace NextDayRevival
                 Deckel(vgs);
             }
             TechnicalGun.Stations(all);
+            // NDR technical crew: which technicals are manned, who their men
+            // are and - on the master - putting them there. Same 5 Hz pass and
+            // the same shared scan, for the same reason.
+            TechnicalCrew.Scan(all);
         }
 
         internal static string SpawnInFront()
@@ -2241,6 +2256,34 @@ namespace NextDayRevival
             CfgReloadKey = cfg.Bind("TechnicalGun", "ReloadKey", "R",
                 "Taste zum Nachladen von Hand, auch wenn der Gurt noch nicht "
                 + "leer ist. Dieselbe Taste wie beim Nachladen zu Fuss.");
+        }
+
+        /// <summary>
+        /// The body at this vehicle's gun: the player in the gunner's place if
+        /// there is one, and otherwise the NPC riding there
+        /// (RevivalTechnicalCrew.cs). Everything in this class that used to ask
+        /// PassengerAt for the gunner asks here instead, so the standing place,
+        /// the walk around the pintle, the hands on the grips and the remote
+        /// slew all work on a crew NPC without knowing it is one.
+        ///
+        /// A PLAYER ALWAYS WINS. He is the one the seat system knows about, and
+        /// two bodies claiming one station would fight over it every frame.
+        /// </summary>
+        static GameObject GunnerBody(Component vgs)
+        {
+            GameObject body = PassengerAt(vgs, Technical.GunnerSeat);
+            if (body != null) return body;
+            return TechnicalCrew.GunnerBody(vgs);
+        }
+
+        /// <summary>True when this vehicle's gun is laid by its own crew and not
+        /// by a player. The NPC gunner's own code writes the mount, so the slew
+        /// that follows a body's bearing must keep its hands off it: the two
+        /// would take turns overwriting each other in the same frame.</summary>
+        static bool NpcManned(Component vgs)
+        {
+            return PassengerAt(vgs, Technical.GunnerSeat) == null
+                && TechnicalCrew.GunnerBody(vgs) != null;
         }
 
         // ------------------------------------------------------------- Zustand
@@ -2662,8 +2705,15 @@ namespace NextDayRevival
                 if (vgs == null) return;
                 if (_manning && ReferenceEquals(vgs, _vgs)) return;   // ours
 
-                GameObject body = PassengerAt(vgs, Technical.GunnerSeat);
+                GameObject body = GunnerBody(vgs);
                 if (body == null) return;
+                // A gun the riding crew is laying itself: its own aim is the
+                // truth on this machine, and reading the bearing back off the
+                // gunner would only undo it. On every OTHER machine the man's
+                // replicated rotation is the only bearing there is, so the slew
+                // below is exactly what carries it - see the header of
+                // RevivalTechnicalCrew.cs.
+                if (NpcManned(vgs) && TechnicalCrew.Aiming(vgs)) return;
                 Station st = Find(vgs);
                 Transform mount = st != null ? st.Mount : Technical.MountOf(vgs.transform);
                 if (mount == null || mount.parent == null) return;
@@ -2784,7 +2834,7 @@ namespace NextDayRevival
                 // order leaves one of the three a frame behind the other two,
                 // which is what a turning gunner looks wrong from.
                 SlewRemote(st.Vgs);                       // returns at once for our own
-                GameObject body = PassengerAt(st.Vgs, Technical.GunnerSeat);
+                GameObject body = GunnerBody(st.Vgs);
 
                 // Who owns the bearing here? We do while WE man this gun - the
                 // mouse turns the mount and the man is turned with it. Otherwise
@@ -2841,7 +2891,15 @@ namespace NextDayRevival
                 // that died, got out, or was moved by the game belongs to the
                 // game. Three radii is far more than the place is wide, and a
                 // man who has just been seated is at its centre-most point.
-                if (Vector3.Distance(body.transform.position, mitte) > 3f * radius)
+                //
+                // A RIDING CREW'S GUNNER IS EXEMPT. He was named as this gun's
+                // gunner by the key he carries, not by where he happens to
+                // stand, and on a machine that is not the master his replicated
+                // position trails the moving truck by whatever the last sync
+                // cost. Disowning him for that is precisely the lag this whole
+                // arrangement exists to remove.
+                if (!TechnicalCrew.IsRider(st.Vgs, body)
+                    && Vector3.Distance(body.transform.position, mitte) > 3f * radius)
                     return;
 
                 body.transform.position = stand;

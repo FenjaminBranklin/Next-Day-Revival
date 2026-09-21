@@ -3617,7 +3617,7 @@ namespace NextDayRevival
                 return a >= 0 && b >= 0 && a == b;
             }
 
-            static int FactionOf(GameObject player)
+            internal static int FactionOf(GameObject player)
             {
                 object info = Info(player);
                 if (info == null) return -1;

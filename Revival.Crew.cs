@@ -1139,7 +1139,13 @@ namespace NextDayRevival
         {
             if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
             if (car == null) return;
-            Absetzen(car, vgs, count, tank ? "tank" : "BTR", fraktion, composition);
+            GameObject settlement = Absetzen(car, vgs, count, tank ? "tank" : "BTR",
+                                             fraktion, composition);
+            if (settlement != null
+                && !NpcWar.StartGround("patrol-crew-" + settlement.GetInstanceID(), settlement,
+                    Men(settlement), settlement.transform.position, false, 0f, composition))
+                RevivalPlugin.L.LogWarning("Crew: NPC combat registration failed for "
+                    + settlement.GetInstanceID() + "; native player combat remains active.");
         }
 
         /// <summary>A squad set down at a point with no vehicle: the heli troop

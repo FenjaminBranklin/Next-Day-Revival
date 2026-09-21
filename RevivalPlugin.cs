@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.40.0";
+        public const string VERSION = "6.41.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -313,6 +313,8 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgPatrolRespawn;
         internal static ConfigEntry<bool> CfgPatrolGun;
         internal static ConfigEntry<float> CfgPatrolGunRange;
+        internal static ConfigEntry<float> CfgPatrolCombatRange;
+        internal static ConfigEntry<float> CfgPatrolTankCombatRange;
         internal static ConfigEntry<float> CfgPatrolGunEffective;
         internal static ConfigEntry<float> CfgPatrolGunNotice;
         internal static ConfigEntry<float> CfgPatrolGunForget;
@@ -1246,20 +1248,21 @@ namespace NextDayRevival
                 + "means the replacement is already driving while the wreck "
                 + "still burns. 0 fills the road once and never again.");
             CfgPatrolGun = Config.Bind("Patrol", "Gun", true,
-                "The gun on a patrol vehicle looks for players by itself and "
-                + "shoots at them. Off leaves the turret pointing forward.");
+                "Vehicle guns engage hostile players, NPC crews and occupied "
+                + "vehicles. The own faction is protected. Off parks the turret.");
             CfgPatrolGunRange = Config.Bind("Patrol", "GunRange", 120f,
-                "Metres. Beyond this a player is not a target at all. Also "
-                + "the range at which the hit chance has fallen to zero. It "
-                + "was 220 until 2026-08-30, which is further than a man can "
-                + "make out a BTR against a treeline - being shot from there "
-                + "is being shot by nothing.");
+                "Legacy minimum detection range in metres. CombatRange or "
+                + "TankCombatRange extends it, capped by the weapon's Range.");
+            CfgPatrolCombatRange = Config.Bind("Patrol", "CombatRange", 450f,
+                "BTR detection range for hostile players, NPCs and vehicles, "
+                + "in metres. Requires sight and a clear firing line.");
+            CfgPatrolTankCombatRange = Config.Bind("Patrol", "TankCombatRange", 800f,
+                "Tank detection range for hostile players, NPCs and vehicles, "
+                + "in metres. Requires sight and a clear firing line.");
             CfgPatrolGunEffective = Config.Bind("Patrol", "GunEffectiveRange", 30f,
-                "Metres. Inside this the gun shoots as well as it can; between "
-                + "here and GunRange the hit chance falls off along a cosine, "
-                + "the same shape NPC_FirearmWeaponController uses. At 30 m the "
-                + "whole middle distance becomes a falling chance instead of a "
-                + "certainty.");
+                "Minimum effective range in metres. At least half the current "
+                + "combat range stays effective; accuracy then falls along a "
+                + "cosine toward the detection limit.");
             CfgPatrolGunPointBlank = Config.Bind("Patrol", "GunPointBlank", 12f,
                 "Metres under which a shot is displaced by a hand's width "
                 + "whatever the roll says. The game's own NPCs use 30 m for "
@@ -1379,10 +1382,9 @@ namespace NextDayRevival
             // ------------------------------------------ routes and factions
             CfgPatrolFraction = Config.Bind("Patrol", "Fraction", "looter",
                 "Which side a patrol is on when its route does not say. One "
-                + "of civilian, looter, traitor, neutral. civilian attacks "
-                + "everyone but civilians, looter everyone but looters, "
-                + "traitor attacks EVERYONE including other traitors, and "
-                + "neutral attacks traitors only. A route carries its own "
+                + "of civilian, looter, traitor, neutral. Every side attacks "
+                + "the other factions and protects its own, including traitor "
+                + "and neutral. A route carries its own "
                 + "choice in the flags of its first waypoint "
                 + "(fraction=looter); the route editor writes that for you.");
             CfgPatrolEditorKey = Config.Bind("Patrol", "EditorKey", "F4",

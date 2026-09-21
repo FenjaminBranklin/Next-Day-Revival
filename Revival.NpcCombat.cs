@@ -942,6 +942,36 @@ namespace NextDayRevival
 
         internal static bool GroundAlive(Component ai) { return LookUp() && Alive(ai); }
 
+        // One shared scene scan for infantry and vehicle guns, including when
+        // no helicopter operation is active. Never walk the scene per vehicle.
+        internal static List<Component> PatrolTargets()
+        {
+            if (!LookUp()) return _scene;
+            if (Time.time >= _nextSceneScan)
+            {
+                _nextSceneScan = Time.time + 2f;
+                _scene = LiveNpcs();
+            }
+            return _scene;
+        }
+
+        internal static bool PatrolTarget(Component ai)
+        {
+            return LookUp() && ai != null && ai.gameObject.activeInHierarchy
+                && Alive(ai) && Targetable(ai);
+        }
+
+        internal static string PatrolFaction(Component ai)
+        {
+            object faction = LookUp() ? FactionOf(ai) : null;
+            return faction == null ? null : faction.ToString();
+        }
+
+        internal static bool PatrolVehicleAlive(Component vehicle)
+        {
+            return VehicleAlive(vehicle);
+        }
+
         internal static void RemoveGroundActor(Component ai)
         {
             if (ai != null && GroundOwned(ai)) NetDestroy(ai.gameObject);
@@ -1116,11 +1146,7 @@ namespace NextDayRevival
             float now = Time.time;
             if (_graves.Count > 0) TickGraves(now);
             _searchBudget = 1;
-            if (now >= _nextSceneScan)
-            {
-                _nextSceneScan = now + 2f;
-                _scene = LiveNpcs();
-            }
+            PatrolTargets();
 
             for (int q = _squads.Count - 1; q >= 0; q--)
             {
@@ -1364,6 +1390,11 @@ namespace NextDayRevival
         static void RunGround(Squad s, float now)
         {
             if (s.Settlement == null) { Remove(s, "settlement gone"); return; }
+            if (now >= s.NextVehicleScan)
+            {
+                s.NextVehicleScan = now + 0.5f;
+                s.Vehicle = HostileVehicle(s, s.Settlement.transform.position);
+            }
             int alive = 0;
             for (int i = 0; i < s.Men.Count; i++)
             {
@@ -2331,7 +2362,10 @@ namespace NextDayRevival
                 // (6.17.1 field report); that far out he walks on instead.
                 Squad sq = f.Squad;
                 float hull = Mathf.Min(range, VehicleStandoff() * 1.5f);
-                if (sq != null && sq.Vehicle != null && f.Class != SquadClass.AntiTank
+                if (sq != null && sq.GroundGroup && CurrentItem(f) == LawId)
+                    hull = Mathf.Min(range, CfgAntiTankLawRange == null ? 90f : CfgAntiTankLawRange.Value);
+                if (sq != null && sq.Vehicle != null
+                    && (f.Class != SquadClass.AntiTank || sq.GroundGroup)
                     && (sq.Vehicle.transform.position - p).sqrMagnitude < hull * hull)
                 {
                     float height;
@@ -2411,6 +2445,7 @@ namespace NextDayRevival
             {
                 Component cur = f.Target.GetComponent(_npcType);
                 if (cur != null && Alive(cur)
+                    && OtherFaction(f.Faction, FactionOf(cur))
                     && Vector3.Distance(f.Tr.position, f.Target.position) <= sight * 1.2f
                     && (f.Sees || now - f.LastSeen < 0.8f))
                     return false;
@@ -2421,6 +2456,7 @@ namespace NextDayRevival
                 {
                     Fighter m = _squads[q].Men[i];
                     if (m.Ai == null || m.Tr == null || !Alive(m.Ai)) continue;
+                    if (!OtherFaction(f.Faction, FactionOf(m.Ai))) continue;
                     float d = Vector3.Distance(m.Tr.position, f.Tr.position);
                     if (d > sight) continue;
                     // Every OTHER defender already shooting at him counts as
@@ -2483,6 +2519,7 @@ namespace NextDayRevival
                 {
                     Fighter m = _squads[q].Men[i];
                     if (m.Ai == null || m.Tr == null || !Alive(m.Ai)) continue;
+                    if (!OtherFaction(f.Faction, FactionOf(m.Ai))) continue;
                     float d = (m.Tr.position - f.Tr.position).sqrMagnitude;
                     if (d < bestSqr) { best = m; bestSqr = d; }
                 }
@@ -2611,10 +2648,10 @@ namespace NextDayRevival
             if (hitAi == null || !Alive(hitAi)) return true;
             Fighter hurt = FighterOf(hitAi);
             if (hurt != null && hurt.Squad != null && hurt.Squad == f.Squad) return true;
-            bool enemy = f.Squad == null
+            bool enemy = OtherFaction(f.Faction, FactionOf(hitAi)) && (f.Squad == null
                 ? hurt != null && hurt.Squad != null
                 : Hostile(f.Hated, FactionOf(hitAi))
-                  && ((hurt != null && hurt.Squad != null) || Targetable(hitAi));
+                  && ((hurt != null && hurt.Squad != null) || Targetable(hitAi)));
             if (!enemy) return true;
             if (hurt == null && f.Squad != null) Enlist(hitAi);
 
@@ -4320,6 +4357,11 @@ namespace NextDayRevival
         }
 
         // ----------------------------------------------------- faction helpers
+
+        static bool OtherFaction(object own, object other)
+        {
+            return own != null && other != null && !own.Equals(other);
+        }
 
         static object FactionOf(Component ai)
         {

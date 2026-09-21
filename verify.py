@@ -15,6 +15,7 @@ auffallen und dort nur als stilles Nichtstun erscheinen:
 
 import io
 import os
+import re
 import struct
 import sys
 
@@ -1292,6 +1293,43 @@ def _body(src, signature):
             if depth == 0:
                 return src[brace:i + 1]
     return ""
+
+
+def _code(src):
+    """The source with its comments taken out. A rule that forbids a call has to
+    read code: a file that explains at its top WHY it never touches
+    `Passengers` names it twice in prose, and a plain substring test then fails
+    the very file whose comment proves it is right."""
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c == '"':
+            out.append(c)
+            i += 1
+            while i < n:
+                out.append(src[i])
+                if src[i] == "\\" and i + 1 < n:
+                    out.append(src[i + 1])
+                    i += 2
+                    continue
+                if src[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def check_patrol_fall():
@@ -2915,6 +2953,205 @@ def check_technical():
          "es sich im Spiel nicht mit dem Schuetzen drehen")
 
 
+def check_technical_crew():
+    """[17b] The men who ride the technical, and the editor kind that puts them
+    on a route.
+
+    A technical is the first vehicle of this toolkit whose crew has to be SEEN
+    while it drives. Every rule below is one or two lines that a later edit
+    could undo with nothing looking broken until somebody is in the game.
+
+      1. THE EDITOR AND THE RUNTIME MUST AGREE ON THE KINDS. The route editor
+         offers whatever compdef.VEHICLE_TYPES lists and the plugin spawns
+         whatever VehicleRegistry registers. A kind in one and not the other is
+         a column that silently spawns BTRs instead of what was drawn, which is
+         exactly what the technical did before this change.
+      2. THE SEATS MUST AGREE TOO. compdef.VEHICLE_SEATS names the technical's
+         three places in order and the editor writes one crew line per place;
+         Technical.SeatTotal/GunnerSeat decide which of them ends up at the gun.
+         Disagree and the man the admin dressed as the gunner drives instead.
+      3. NO NPC IN `Passengers`. VehicleGameSystem::SetDamageToAllPassengers
+         walks that array and calls GetComponent<PlayerNetworkController>()
+         .GetPhotonPlayer on every entry; on an NPC that throws, and it runs at
+         the one moment that must not fail - the vehicle's destruction. This is
+         the reason Revival.Crew.cs kept patrol crews a number in the first
+         place, and it is not undone here.
+      4. THE MEN ARE PLACED FROM THE TRUCK, EVERY FRAME, ON EVERY CLIENT. The
+         other half of that same class comment: a body parented on the host
+         alone leaves every other client watching the crew trail the truck down
+         the road. Their place is derived from the vehicle's own transform in a
+         LATE frame instead, which is what makes them ride it rather than
+         follow it.
+      5. THE GUNNER IS NAMED BY A KEY, NOT BY WHERE HE STANDS. He is spawned as
+         a squad of one with his own Photon spawn key, so he is still the man at
+         the pintle after one of the other two has been shot. "Whoever stands
+         furthest back" would hand the gun to a driver at that moment.
+      6. THAT KEY MUST CARRY A SLASH, and Revival.GroundEnemies.cs must skip
+         keys that have one. It reconciles by key and DESTROYS every keyed NPC
+         that is not in its desired set - without the guard it would clear every
+         rider on the map as a stale ground group.
+      7. A DRIVER, ALWAYS. The cab is filled before the gun, so a crew too small
+         for three men is a driver and then a gunner, never a gunner alone in a
+         truck that drives itself.
+      8. THE RIDERS ARE THE WRECK CREW. Patrol.UnloadCrew must ask before it
+         spawns, or a three-seat truck puts six men on the ground and the three
+         who were visible a frame earlier have to vanish to do it.
+      9. THE GUN IS AIMED THROUGH THE GUNNER'S BODY, which the game already
+         synchronizes - the same rule check_technical() keeps for the player's
+         gun (rule 6 there), for the same reason: a private Photon channel for a
+         bearing is a bug this repository has already paid for once.
+     10. THE GUN STAYS ANTI-PERSONNEL. No VehicleArmor hit from the NPC's fire
+         either, or the crew would quietly give the machine gun the autocannon's
+         anti-vehicle rate that check_technical() rule 5 forbids the player.
+    """
+    print("[17b] Technical crew: the men who ride it (statisch)")
+    crew_p = os.path.join(ROOT, "RevivalTechnicalCrew.cs")
+    tech_p = os.path.join(ROOT, "RevivalTechnical.cs")
+    patrol_p = os.path.join(ROOT, "Revival.Patrol.cs")
+    ground_p = os.path.join(ROOT, "Revival.GroundEnemies.cs")
+    ural_p = os.path.join(ROOT, "RevivalUralTruck.cs")
+    for path in (crew_p, tech_p, patrol_p, ground_p, ural_p):
+        if not os.path.exists(path):
+            bad("Technical crew: %s missing" % os.path.basename(path))
+            return
+    crew = io.open(crew_p, encoding="utf-8").read()
+    tech = io.open(tech_p, encoding="utf-8").read()
+    patrol = io.open(patrol_p, encoding="utf-8").read()
+    ground = io.open(ground_p, encoding="utf-8").read()
+    ural = io.open(ural_p, encoding="utf-8").read()
+
+    # 1 - the editor's kinds and the registry's kinds are the same set
+    try:
+        import compdef
+        editor_kinds = set(compdef.VEHICLE_TYPES)
+    except Exception as ex:
+        editor_kinds = None
+        bad("Technical crew: compdef could not be imported (%s)" % ex)
+    registry = set(re.findall(r'Add\(Make\("([a-z0-9_]+)"', ural))
+    if editor_kinds is not None:
+        missing = editor_kinds - registry
+        if missing:
+            bad("Technical crew: the editor offers %s, which VehicleRegistry "
+                "does not register - those columns would spawn BTRs"
+                % sorted(missing))
+        else:
+            ok("every editor vehicle kind is a registered runtime kind (%s)"
+               % ", ".join(sorted(editor_kinds)))
+        if "technical" not in editor_kinds:
+            bad("Technical crew: the editor no longer offers the technical")
+
+    # 2 - the seat table and the runtime seats agree
+    seats = None
+    try:
+        import compdef as _cd
+        seats = _cd.VEHICLE_SEATS.get("technical")
+    except Exception:
+        pass
+    total = re.search(r"SeatTotal\s*=\s*(\d+)", tech)
+    gunner = re.search(r"GunnerSeat\s*=\s*(\d+)", tech)
+    if seats and total and gunner:
+        if (len(seats) == int(total.group(1))
+                and int(gunner.group(1)) == len(seats) - 1
+                and seats[int(gunner.group(1))] == "gunner"
+                and seats[0] == "driver"):
+            ok("the editor's three places match SeatTotal/GunnerSeat, gunner last")
+        else:
+            bad("Technical crew: compdef.VEHICLE_SEATS %s disagrees with "
+                "SeatTotal=%s GunnerSeat=%s"
+                % (seats, total.group(1), gunner.group(1)))
+    else:
+        bad("Technical crew: the seat table or SeatTotal/GunnerSeat is missing")
+
+    # 3 - no NPC is ever written into the game's passenger array
+    crew_code = _code(crew)
+    if "Passengers" in crew_code:
+        bad("Technical crew: RevivalTechnicalCrew.cs touches `Passengers` - "
+            "SetDamageToAllPassengers throws on an NPC entry")
+    else:
+        ok("no NPC reaches the game's Passengers array")
+
+    # 4 - placed from the truck, in a late frame, on every client
+    late = _body(crew, "internal static void LateFrame()")
+    if ("TechnicalCrew.LateFrame();" in tech
+            and tech.find("TechnicalCrew.LateFrame();")
+                < tech.find("TechnicalGun.LateAll();")
+            and "Halten(t)" in late):
+        ok("the riders are placed from the truck in LateUpdate, before the gun work")
+    else:
+        bad("Technical crew: the per-frame placement is gone or runs after "
+            "TechnicalGun.LateAll - the men would trail the truck")
+    if "SetParent" in crew_code:
+        bad("Technical crew: a rider is parented - that is host-only and is "
+            "precisely what makes the crew lag on every other client")
+
+    # 5 + 6 - the key names the job, and ground enemies leave it alone
+    if ('KeyPrefix = "tech/"' in crew and 'KeyGunner = "/g"' in crew
+            and 'KeyCab = "/c"' in crew and "t.Key + KeyGunner" in crew):
+        ok("the gunner is spawned as his own squad and named by his own key")
+    else:
+        bad("Technical crew: the gunner is no longer named by a spawn key - "
+            "a geometric rule hands the gun to a driver when he dies")
+    guard = _body(ground, "static void Reconcile(")
+    if not guard:
+        guard = ground
+    if "key.IndexOf('/') >= 0" in guard:
+        ok("ground enemies skip the riding crew's keys")
+    else:
+        bad("Technical crew: Revival.GroundEnemies.cs would destroy every rider "
+            "as a stale ground group")
+
+    # 7 - the cab is filled before the gun
+    manned = _body(crew, "static void Bemannen(Truck t)")
+    if ("int cab = Mathf.Max(1, count - 1);" in manned
+            and "bool gunner = count >= 2;" in manned):
+        ok("the driver is the first man on, the gunner the last")
+    else:
+        bad("Technical crew: a crew too small for three men could leave the "
+            "truck driving itself")
+
+    # 8 - the riders ARE the wreck crew
+    unload = _body(patrol, "static void UnloadCrew(Unit u)")
+    if "TechnicalCrew.ReleaseRiders(u.Car, u.Seite)" in unload:
+        ok("a wrecked technical releases its riders instead of doubling them")
+    else:
+        bad("Technical crew: Patrol.UnloadCrew spawns a second crew beside the "
+            "men already standing on the truck")
+    if ("Patrol.CrewedList" in crew and "Patrol.CrewedCount" in crew):
+        ok("the riders wear the editor's uniform and carry its weapon")
+    else:
+        bad("Technical crew: the riders no longer read the editor loadout - "
+            "the men would change clothes when the truck burns")
+
+    # 9 - the bearing crosses the wire as the man's own rotation
+    aim = _body(crew, "static void Zielen(Truck t)")
+    if ("t.Gunner.transform.rotation" in aim
+            and "Quaternion.LookRotation(face.normalized, Vector3.up)" in aim):
+        ok("the master turns the gunner and the existing slew carries the bearing")
+    else:
+        bad("Technical crew: the aim no longer travels through the gunner's body")
+    if "RaiseEvent" in crew_code or "PublishTurret" in crew_code:
+        bad("Technical crew: a private network channel for the gun's bearing")
+
+    # 10 - still anti-personnel
+    if "VehicleArmor" in crew_code:
+        bad("Technical crew: the NPC's machine gun damages armour - the player's "
+            "does not (check_technical rule 5)")
+    else:
+        ok("the NPC gunner's fire stays anti-personnel, as the player's is")
+
+    # the file rule the rest of the feature follows
+    raw = io.open(crew_p, "rb").read()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        bad("Technical crew: RevivalTechnicalCrew.cs has a BOM - build.ps1 "
+            "needs BOM-less sources")
+    try:
+        raw.decode("ascii")
+        ok("RevivalTechnicalCrew.cs is ASCII without a BOM")
+    except UnicodeDecodeError:
+        bad("Technical crew: RevivalTechnicalCrew.cs is not ASCII - its "
+            "player-facing lines belong in RevivalUralTruck.cs")
+
+
 def check_arty_vehicle():
     """[18] The drivable howitzer: the settlement gun, on wheels.
 
@@ -3396,12 +3633,70 @@ def check_player_heli():
          "the engine does not keep running behind the last man out",
          "leaving the machine leaves the engine on")
 
-    # --- the crash is the patrol wreck's own fire, not a second private effect.
+    # --- the crash is FireEffect's, not a second private effect, and since
+    # 2026-09-21 it is FireEffect's biggest size: a burning aircraft that looked
+    # like a burning car was the complaint. The vehicle wreck stays behind it as
+    # the fallback for a build with no aircraft fire.
     burn = _body(code, "static void Burn(GameObject go, Vector3 where)")
-    need("FireEffect.Spawn(" in burn and "FireEffect.SpawnWreck(" in burn,
-         "a downed machine explodes and burns like every other wreck",
+    need("FireEffect.SpawnHeliBlast(" in burn
+         and "FireEffect.SpawnHeliFire(" in burn
+         and "FireEffect.SpawnWreck(" in burn,
+         "a downed machine gets the aircraft blast and fire, vehicle fire as "
+         "the fallback",
          "the helicopter wreck does not use FireEffect - it would look like "
          "nothing else in the world")
+    fire = _code(read("Revival.WreckFire.cs"))
+    need("public static bool SpawnHeliFire(" in fire
+         and "static void HeliRauchstoss(" in fire,
+         "the aircraft fire exists and opens with a one-shot smoke burst",
+         "the aircraft fire is missing, or its column has no opening burst - "
+         "the smoke then needs twenty seconds to arrive and the fire reads as "
+         "starting long after the bang")
+    need("Ausbruch(ps, " in _body(fire, "static void HeliRauchstoss(GameObject root, Material mat)"),
+         "that burst is a burst and not another continuous rate",
+         "the opening smoke is emitted over time - it is not instant")
+    heli_fire = _body(fire, "public static bool SpawnHeliFire(GameObject heli)")
+    need(heli_fire.count("HeliFlammen(root,") >= 3,
+         "the fire is laid out along the airframe, not in one spot",
+         "the aircraft burns from a single point - a 38-unit hull then shows "
+         "one bonfire in the middle of it")
+
+    # --- the attitude. Burn used to rebuild the rotation from the heading with
+    # a fixed nose and bank, which stood a machine that came down on its side
+    # upright in one frame. Nothing here may reconstruct a rotation again.
+    need("Quaternion.LookRotation" not in burn,
+         "the wreck keeps the attitude it arrived with",
+         "Burn rebuilds the rotation - a machine that comes down across the "
+         "ground stands itself up the instant it touches")
+    need("go.AddComponent<HeliWreckSettle>()" in burn
+         and "Interpolator(go, false);" in burn,
+         "the wreck settles further over and is taken off the transform sync",
+         "the wreck is not settled, or it is left on the interpolator and the "
+         "host's last flying pose pulls it upright again")
+    settle = _body(code, "public sealed class HeliWreckSettle : MonoBehaviour")
+    need(settle != "" and "internal static float Lift(" in settle
+         and "static float Slump(" in settle,
+         "the rest height is the hull's lowest corner and the lean only grows",
+         "the settle has no corner height or no one-way lean - a hull on its "
+         "flank is then buried or stands back up")
+    need("&& !Burning(go)" in leave and "Interpolator(go, true);" in leave,
+         "leaving a WRECK does not switch the interpolator back on",
+         "Leave hands the wreck back to the transform sync a moment after "
+         "Burn took it off")
+
+    # --- the broken model, out of the game's own assets.
+    model = _body(code, "internal static class HeliWreckModel")
+    need('"mi-8_rusty"' in model,
+         "the wreck is the game's own broken Mi-8 (mi-8_rusty_int)",
+         "the crash does not reach for the game's broken helicopter model")
+    need('"mchs"' in model and '"military"' in model,
+         "only the two intact hulls are swapped, everything else is hidden",
+         "the model swap matches more than the hull - the interior would be "
+         "drawn as a second airframe inside the first")
+    need("r.material" in model and "r.sharedMaterial =" not in model,
+         "the scorch fallback edits a renderer copy, never a shared material",
+         "the fallback writes to a shared material - every Mi-8 in the world "
+         "would be scorched with it")
     need("Net.Send(Net.Crashed," in code and "Net.Send(Net.EngineState," in code,
          "engine and crash are told to every client",
          "the rotor, the sound or the fire is decided locally - every other "
@@ -3430,10 +3725,22 @@ def check_player_heli():
          and "FireEffect.StopEmitting(_trail);" in fall,
          "the descent carries a smoke and fire trail that ends on impact",
          "the falling helicopter has no bounded trail effect")
-    need(finish != "" and "Burn(go, where);" in finish
-         and "HeliCrashSound.Play(where);" in finish,
-         "impact produces the wreck visual and a spatial crash sound",
-         "the delayed impact is silent or does not become the normal wreck")
+    # The bang used to be played here, and ONLY here - so a machine flown into
+    # a mast made no sound at all. It moved into Burn, which every crash path
+    # runs exactly once on every peer.
+    need(finish != "" and "Burn(go, where);" in finish,
+         "the delayed impact becomes the normal wreck",
+         "the delayed impact does not become the normal wreck")
+    need("HeliCrashSound.Play(where);" in burn
+         and "HeliCrashSound.Play(" not in finish,
+         "every crash bangs, because the sound sits in Burn and only there",
+         "the crash sound is not in Burn - a machine flown into something is "
+         "then silent, or the abandoned fall plays it twice")
+    sound = _body(code, "internal static class HeliCrashSound")
+    need(sound.count("Source(at,") >= 2,
+         "the bang is two summed sources - one AudioSource is already at full "
+         "volume",
+         "the crash plays one source - it cannot be made louder than it was")
 
     # --- the event window. Every feature of this plugin raises Photon events in
     # its own band; two bands that overlap is a bug nobody sees until two
@@ -3832,6 +4139,7 @@ if __name__ == "__main__":
     check_arty_battery()
     check_native_action_progress()
     check_technical()
+    check_technical_crew()
     check_arty_vehicle()
     check_ground_enemies()
     check_helipads()

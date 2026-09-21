@@ -217,11 +217,11 @@ namespace NextDayRevival
                 get
                 {
                     string v = Vehicle == null ? "" : Vehicle.Trim().ToLowerInvariant();
-                    if (v == "btr" || v == "tank" || v == "mixed" || v == "ural") return v;
+                    if (v == "mixed" || VehicleRegistry.Contains(v)) return v;
                     v = RevivalPlugin.CfgPatrolVehicle.Value;
                     if (v == null) return "mixed";
                     v = v.Trim().ToLowerInvariant();
-                    return (v == "btr" || v == "tank" || v == "ural") ? v : "mixed";
+                    return VehicleRegistry.Contains(v) ? v : "mixed";
                 }
             }
 
@@ -321,7 +321,8 @@ namespace NextDayRevival
             public Quaternion GunWorldRotation;
             public bool GunStabilized;
             public float Yaw, Pitch;     // where the barrel is being sent
-            public Transform Target;     // the player being engaged
+            public Transform Target;     // hostile player, NPC or occupied vehicle
+            public CombatTarget GunTarget;
             public float Held;           // seconds this target has been held
             public float Lost;           // seconds since it was last seen
             public float NextShot;       // Time.time the gun may fire again
@@ -1013,6 +1014,10 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("Patrol: " + _units.Count + " vehicle(s) taken off the road.");
             _units.Clear();
             Crew.StopAll();
+            // NDR technical crew: the trucks are gone, so the men riding them
+            // are no longer anybody's. Crew.StopAll has just taken their
+            // settlements; this only drops the book-keeping that pointed at them.
+            TechnicalCrew.StopAll();
         }
 
         // =====================================================================
@@ -2346,6 +2351,18 @@ namespace NextDayRevival
         static void UnloadCrew(Unit u)
         {
             if (u.CrewOut || u.CrewSize <= 0) return;
+            // The men of a technical are already ON it, and have been since it
+            // was armed (RevivalTechnicalCrew.cs). They are released where they
+            // stand instead of being replaced: spawning the wreck crew here as
+            // well would put six men on the ground beside a three-seat truck,
+            // and the three who were visible a frame earlier would have to
+            // vanish to do it. Marking the vehicle empty keeps the rest of the
+            // crew logic - Besetzt, CrewedSide - honest about it.
+            if (TechnicalCrew.ReleaseRiders(u.Car, u.Seite))
+            {
+                u.CrewOut = true;
+                return;
+            }
             u.CrewOut = true;
             List<RevivalComposition.CrewMan> crew = u.CrewSnapshot;
             Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew);
@@ -2954,8 +2971,8 @@ namespace NextDayRevival
 
         /// <summary>
         /// The side (Fraktion name) of a patrol or convoy vehicle whose crew is
-        /// still aboard, or null for anything else. Read-only; NpcWar asks it
-        /// whether a heli squad attacks the vehicle.
+        /// still aboard, or null for anything else. An active AI vehicle keeps
+        /// its side when dismounted crew spawning is disabled in the config.
         /// </summary>
         internal static string CrewedSide(Component vgs)
         {
@@ -2965,9 +2982,54 @@ namespace NextDayRevival
             {
                 Unit u = _units[i];
                 if (u.Vgs == null || u.Vgs.GetInstanceID() != id) continue;
-                return !u.CrewOut && u.CrewSize > 0 ? u.Seite : null;
+                return u.Died <= 0f && !u.CrewOut && (u.Armed || u.CrewSize > 0)
+                    ? u.Seite : null;
             }
             return null;
+        }
+
+        /// <summary>
+        /// The EDITOR LOADOUT of the men this vehicle carries - one entry per
+        /// role, with the main weapon and the uniform the admin chose - or null
+        /// when the route has no composition and the men are dressed by the
+        /// config instead. The head count is NOT this list's length: a vehicle
+        /// is manned by its seats and the roles repeat around them (Besatzung).
+        ///
+        /// The sibling of <see cref="CrewedSide"/>, and there for the same
+        /// reason: a feature that puts this vehicle's men somewhere other than
+        /// on the ground at its wreck - the technical's riding crew
+        /// (RevivalTechnicalCrew.cs) - has to dress them the way the wreck crew
+        /// would have been dressed, or the same men change clothes when the
+        /// truck burns.
+        /// </summary>
+        internal static List<RevivalComposition.CrewMan> CrewedList(Component vgs)
+        {
+            if (vgs == null || _units.Count == 0) return null;
+            int id = vgs.GetInstanceID();
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.Vgs == null || u.Vgs.GetInstanceID() != id) continue;
+                return u.CrewSnapshot;
+            }
+            return null;
+        }
+
+        /// <summary>How many men this vehicle is manned by right now, or 0 when
+        /// it is not one of ours or its crew is already on the ground. The
+        /// riding crew asks, so it puts exactly as many men on a technical as
+        /// would otherwise have climbed out of it.</summary>
+        internal static int CrewedCount(Component vgs)
+        {
+            if (vgs == null || _units.Count == 0) return 0;
+            int id = vgs.GetInstanceID();
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit u = _units[i];
+                if (u.Vgs == null || u.Vgs.GetInstanceID() != id) continue;
+                return u.CrewOut ? 0 : u.CrewSize;
+            }
+            return 0;
         }
 
         static MethodInfo _photonDestroy;
@@ -3341,33 +3403,45 @@ namespace NextDayRevival
         {
             string want = r.Wagen;
             if (want == "tank") return true;
-            if (want == "btr") return false;
-            if (want == "ural") return false;
+            if (want != "mixed") return false;
             return (_spawned % 2) == 1;
         }
 
-        /// <summary>The registry kind a route spawns: "ural" for a truck route,
-        /// otherwise "tank"/"btr" resolved through <see cref="TankThisTime"/>
-        /// (so "mixed" still alternates). This is the single place patrol maps a
-        /// route's Vehicle flag to a registry kind.</summary>
+        /// <summary>A route's Vehicle flag when it NAMES a registered kind that
+        /// the tank/BTR pair cannot express - a truck route, a technical route.
+        /// Empty for "tank", "btr", "mixed" and anything unreadable, which are
+        /// the cases TankThisTime settles.</summary>
+        static string NamedKind(Route r)
+        {
+            string w = r == null ? "mixed" : r.Wagen;
+            if (w == "mixed" || w == "tank" || w == "btr") return "";
+            return VehicleRegistry.Contains(w) ? w : "";
+        }
+
+        /// <summary>The registry kind a route spawns: the kind the route names
+        /// when it names one - a truck route spawns Urals, a technical route gun
+        /// trucks - and otherwise "tank"/"btr" resolved through
+        /// <see cref="TankThisTime"/>, so "mixed" still alternates. This is the
+        /// single place patrol maps a route's Vehicle flag to a registry kind,
+        /// and it is the FALLBACK: a route with an editor composition is driven
+        /// by that composition's per-vehicle kinds instead.</summary>
         static string WagenKind(Route r)
         {
-            if (r != null && r.Wagen == "ural") return "ural";
+            string named = NamedKind(r);
+            if (named.Length > 0) return named;
             return TankThisTime(r) ? "tank" : "btr";
         }
 
         /// <summary>The vehicle kind a NAMED route requests, for the convoy event
-        /// to honour (a "ural" route becomes a truck convoy). Empty when the
-        /// route is unknown or uses the default composition.</summary>
+        /// to honour (a "ural" route becomes a truck convoy, a "technical" route
+        /// a column of gun trucks). Empty when the route is unknown or leaves the
+        /// choice to the composition.</summary>
         internal static string RouteVehicle(string routeName)
         {
             Load(false);
             Route r;
             if (routeName != null && _routes.TryGetValue(routeName, out r) && r != null)
-            {
-                string w = r.Wagen;
-                if (w == "ural") return "ural";
-            }
+                return NamedKind(r);
             return "";
         }
 
@@ -5253,13 +5327,17 @@ namespace NextDayRevival
         ///   fight, and inside that ring the gun was perfect no matter what
         ///   GunAccuracy said.
         ///
-        /// COST. A patrol with no player within GunRange does nothing at all
-        /// beyond one square distance per player per half second, and that
-        /// player list is fetched once for every vehicle on the road. The line
-        /// of sight ray is cast for ONE candidate, not for all of them, and
-        /// only twice a second. The turret is turned only while there is a
-        /// target or the barrel is not yet back at rest.
+        /// COST. Player, vehicle and NPC candidates are shared by all guns.
+        /// NPC scene discovery is shared with NpcWar every two seconds; target
+        /// scans are staggered at half-second intervals. Distance and faction
+        /// are tested before sight. Every fired round rechecks its firing line.
         /// </summary>
+        sealed class CombatTarget
+        {
+            public Transform Tr;
+            public Component States, Npc, Vehicle;
+        }
+
         static class Gun
         {
             /// <summary>Degrees between barrel and target inside which the
@@ -5280,6 +5358,90 @@ namespace NextDayRevival
 
             static List<Spieler> _players = new List<Spieler>();
             static float _nextRefresh;
+            static readonly List<CombatTarget> _targets = new List<CombatTarget>();
+            static float _nextTargets;
+
+            static void RefreshTargets()
+            {
+                if (Time.time < _nextTargets) return;
+                _nextTargets = Time.time + ScanEvery;
+                _targets.Clear();
+                for (int i = 0; i < _players.Count; i++)
+                {
+                    Spieler s = _players[i];
+                    if (s.Tr == null) continue;
+                    CombatTarget c = new CombatTarget();
+                    c.Tr = s.Tr; c.States = s.States;
+                    _targets.Add(c);
+                }
+                List<Component> npcs = NpcWar.PatrolTargets();
+                for (int i = 0; i < npcs.Count; i++)
+                {
+                    Component npc = npcs[i];
+                    if (npc == null) continue;
+                    CombatTarget c = new CombatTarget();
+                    c.Tr = npc.transform; c.Npc = npc;
+                    _targets.Add(c);
+                }
+                Component[] vehicles = VehicleScan.All();
+                for (int i = 0; i < vehicles.Length; i++)
+                {
+                    Component v = vehicles[i];
+                    if (v == null) continue;
+                    CombatTarget c = new CombatTarget();
+                    c.Tr = v.transform; c.Vehicle = v;
+                    _targets.Add(c);
+                }
+            }
+
+            static bool Lebt(CombatTarget c)
+            {
+                if (c == null || c.Tr == null || !c.Tr.gameObject.activeInHierarchy) return false;
+                if (c.Npc != null) return NpcWar.PatrolTarget(c.Npc);
+                if (c.Vehicle != null) return NpcWar.PatrolVehicleAlive(c.Vehicle);
+                return c.States == null || _stateField == null || _death == null
+                    || !_death.Equals(_stateField.GetValue(c.States));
+            }
+
+            static bool Feind(Unit u, CombatTarget c)
+            {
+                if (!Lebt(c) || c.Tr.IsChildOf(u.Car.transform)) return false;
+                if (c.Npc != null) return Fraktion.Feind(u.Seite, NpcWar.PatrolFaction(c.Npc));
+                if (c.Vehicle == null)
+                    return Fraktion.Feind(u.Seite, Fraktion.Spielerseite(c.Tr.gameObject));
+
+                string side = CrewedSide(c.Vehicle);
+                if (side != null) return Fraktion.Feind(u.Seite, Fraktion.Eigene(side));
+                // A parked empty hull is not a combatant. A friendly occupant
+                // vetoes a shot even when an enemy shares that vehicle.
+                FieldInfo f = AccessTools.Field(c.Vehicle.GetType(), "Passengers");
+                Array seats = f == null ? null : f.GetValue(c.Vehicle) as Array;
+                bool enemy = false;
+                if (seats == null) return false;
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    object seat = seats.GetValue(i);
+                    GameObject go = seat as GameObject;
+                    Component passenger = seat as Component;
+                    if (go == null && passenger != null) go = passenger.gameObject;
+                    if (go == null) continue;
+                    string faction = Fraktion.Spielerseite(go);
+                    if (!Fraktion.Feind(u.Seite, faction)) return false;
+                    enemy = true;
+                }
+                return enemy;
+            }
+
+            static CombatTarget AmTreffer(GameObject go)
+            {
+                if (go == null) return null;
+                for (int i = 0; i < _targets.Count; i++)
+                {
+                    CombatTarget c = _targets[i];
+                    if (c.Tr != null && go.transform.IsChildOf(c.Tr)) return c;
+                }
+                return null;
+            }
 
             // Rolling phase so the per-vehicle target scans (the half that can
             // cast a ray) do not all fall on the same frame. Each vehicle gets
@@ -5396,6 +5558,7 @@ namespace NextDayRevival
                 if (!RevivalPlugin.CfgPatrolGun.Value) return;
                 if (units.Count == 0) return;
                 Refresh();
+                RefreshTargets();
 
                 for (int i = 0; i < units.Count; i++)
                 {
@@ -5442,14 +5605,17 @@ namespace NextDayRevival
                     Suchen(u);
                 }
 
-                if (u.Target == null)
+                if (u.Target == null || !Feind(u, u.GunTarget))
                 {
+                    u.Target = null;
+                    u.GunTarget = null;
+                    u.Held = 0f;
                     u.GunStabilized = false;
                     Ruhen(u, dt);
                     return;
                 }
 
-                u.Held += dt;
+                if (u.Lost <= 0f) u.Held += dt;
 
                 Vector3 ziel = Zielpunkt(u.Target);
                 if (!Winkel(u, ziel, out u.Yaw, out u.Pitch)) return;
@@ -5458,9 +5624,10 @@ namespace NextDayRevival
                 if (u.Held < RevivalPlugin.CfgPatrolGunNotice.Value) return;
                 if (Time.time < u.NextShot) return;
                 if (Vector3.Angle(Rohrrichtung(u), ziel - Muendung(u)) > FireWithin) return;
+                if (Vector3.Distance(Muendung(u), ziel) > Suchweite(u)) return;
+                if (!Sicht(u, u.Target)) return;
 
-                Nachladen(u);
-                Schiessen(u, ziel);
+                if (Schiessen(u, ziel)) Nachladen(u);
             }
 
             /// <summary>
@@ -5500,19 +5667,19 @@ namespace NextDayRevival
             // -------------------------------------------------------- target
 
             /// <summary>
-            /// Pick a target, or keep the one we have. Cheap test first:
-            /// distance, then the line of sight, and the ray is cast for one
-            /// candidate only.
+            /// Pick the nearest visible hostile, or keep a living hostile
+            /// already tracked. Distance and faction precede the sight ray.
             /// </summary>
             static void Suchen(Unit u)
             {
-                float range = RevivalPlugin.CfgPatrolGunRange.Value;
+                float range = Suchweite(u);
                 Vector3 from = Muendung(u);
 
                 // Keep the current target while it is alive, near and visible.
                 if (u.Target != null)
                 {
-                    bool weg = Flat(u.Target.position - from) > range * 1.15f;
+                    bool weg = !Feind(u, u.GunTarget)
+                        || Vector3.Distance(Zielpunkt(u.Target), from) > range;
                     if (!weg && Sicht(u, u.Target))
                     {
                         u.Lost = 0f;
@@ -5524,32 +5691,36 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("Patrol gun: target lost on " + u.Route.Name
                         + " after " + u.Held.ToString("0.0") + " s.");
                     u.Target = null;
+                    u.GunTarget = null;
                     u.Held = 0f;
                     u.Lost = 0f;
                     u.Burst = 0;
                 }
 
-                Transform best = null;
+                CombatTarget best = null;
                 float bestDist = 0f;
-                for (int i = 0; i < _players.Count; i++)
+                for (int i = 0; i < _targets.Count; i++)
                 {
-                    Spieler s = _players[i];
+                    CombatTarget s = _targets[i];
                     if (s.Tr == null) continue;
-                    float d = Flat(s.Tr.position - from);
+                    float d = Vector3.Distance(Zielpunkt(s.Tr), from);
                     if (d > range) continue;
-                    if (!Lebt(s)) continue;
                     if (best != null && d >= bestDist) continue;
+                    if (!Feind(u, s)) continue;
                     if (!Sicht(u, s.Tr)) continue;
-                    best = s.Tr;
+                    best = s;
                     bestDist = d;
                 }
                 if (best == null) return;
 
-                u.Target = best;
+                u.GunTarget = best;
+                u.Target = best.Tr;
                 u.Held = 0f;
                 u.Lost = 0f;
                 RevivalPlugin.L.LogInfo("Patrol gun: " + (u.Tank ? "tank" : "BTR")
-                    + " on " + u.Route.Name + " has a target at "
+                    + " on " + u.Route.Name + " engages "
+                    + (best.Vehicle != null ? "vehicle" : best.Npc != null ? "NPC" : "player")
+                    + " at "
                     + bestDist.ToString("0") + " m.");
             }
 
@@ -5570,7 +5741,7 @@ namespace NextDayRevival
                 if (hit == null) return true;           // nothing in between
                 // The target itself is allowed to be in the way of itself.
                 if (hit.transform.IsChildOf(ziel)) return true;
-                return (to - point).sqrMagnitude < 2.25f;
+                return false;
             }
 
             /// <summary>Chest height. The transform of a player sits at his
@@ -5667,27 +5838,31 @@ namespace NextDayRevival
 
             // -------------------------------------------------------- firing
 
-            static void Schiessen(Unit u, Vector3 ziel)
+            static bool Schiessen(Unit u, Vector3 ziel)
             {
                 Vector3 from = Muendung(u);
                 float dist = Vector3.Distance(from, ziel);
                 Vector3 aim = ziel + Streuung(u, dist);
 
                 Vector3 dir = aim - from;
-                if (dir.sqrMagnitude < 0.0001f) return;
+                if (dir.sqrMagnitude < 0.0001f) return false;
                 dir.Normalize();
-
-                VehicleShotSound.Play(from, u.Tank);
-                Turret.Net.PublishShot(from, u.Tank);
 
                 float range = Reichweite(u);
                 Vector3 impact;
                 GameObject struck = Strahl(u, from, dir, range, out impact);
                 Vector3 ende = struck == null ? from + dir * range : impact;
 
+                // Check the actual dispersed round, too. A friendly crossing
+                // the muzzle must not be hit by a nominally hostile shot.
+                CombatTarget hit = AmTreffer(struck);
+                if (hit != null && !Feind(u, hit)) return false;
+                VehicleShotSound.Play(from, u.Tank);
+                Turret.Net.PublishShot(from, u.Tank);
+
                 Spur(u, from + dir * 2f, ende);
                 u.Shots++;
-                if (struck == null) return;
+                if (struck == null) return true;
 
                 if (u.Tank && RevivalPlugin.CfgTankExplosion.Value)
                 {
@@ -5704,13 +5879,18 @@ namespace NextDayRevival
                         float rad = RevivalPlugin.CfgPatrolShellRadius.Value;
                         if (scha <= 0f) scha = RevivalPlugin.CfgTankExplosionDamage.Value;
                         if (rad <= 0f) rad = RevivalPlugin.CfgTankExplosionRadius.Value;
-                        RocketHook.Detonate(impact - dir * 0.15f, scha, rad, 3f);
+                        // Native blast damage has no faction filter. Keep its
+                        // networked effect and apply each hostile victim once.
+                        Vector3 blast = impact - dir * 0.15f;
+                        RocketHook.Detonate(blast, 0f, rad, 3f);
+                        Sprengschaden(u, hit, blast, scha, rad, from);
                     }
                     catch (Exception ex)
                     {
                         RevivalPlugin.L.LogError("Patrol gun: impact without explosion - "
                             + ex.Message);
                     }
+                    return true;
                 }
 
                 if (Schaden(u, struck, Schadenswert(u), impact, from))
@@ -5719,6 +5899,57 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("Patrol gun: hit at "
                         + dist.ToString("0") + " m (" + u.Hits + " of " + u.Shots + ").");
                 }
+                return true;
+            }
+
+            static void Sprengschaden(Unit u, CombatTarget direct, Vector3 point,
+                                       float damage, float radius, Vector3 from)
+            {
+                int before = u.Hits;
+                for (int i = 0; i < _targets.Count; i++)
+                {
+                    CombatTarget c = _targets[i];
+                    if (!Feind(u, c)) continue;
+                    Vector3 to = Zielpunkt(c.Tr);
+                    if (c != direct && Vector3.Distance(point, to) > radius + 20f) continue;
+                    Collider[] hull = c.Tr.GetComponentsInChildren<Collider>();
+                    float dist = Vector3.Distance(point, to);
+                    for (int k = 0; k < hull.Length; k++)
+                    {
+                        if (!hull[k].enabled || hull[k].isTrigger) continue;
+                        Vector3 near = hull[k].ClosestPointOnBounds(point);
+                        float d = Vector3.Distance(point, near);
+                        if (d < dist) { dist = d; to = near; }
+                    }
+                    if (c == direct) dist = 0f;
+                    if (dist > radius) continue;
+                    if (c != direct && dist > 0.2f)
+                    {
+                        Vector3 ignored;
+                        GameObject cover = Strahl(u, point, (to - point).normalized,
+                                                   dist, out ignored);
+                        if (cover != null && !cover.transform.IsChildOf(c.Tr)) continue;
+                    }
+                    float amount = damage * (1f - Mathf.Clamp01(dist / Mathf.Max(0.1f, radius)));
+                    if (amount <= 0f) continue;
+                    bool hurt;
+                    if (c.Vehicle != null) hurt = FahrzeugSchaden(c.Vehicle, amount, 14);
+                    else if (c.Npc != null)
+                        hurt = Turret.TryDamage(c.Tr.gameObject, "NPC_AI2", "ApplyDamage", amount / 3f);
+                    else hurt = SpielerSchaden(c.Tr.gameObject, amount, point, from);
+                    if (hurt) u.Hits++;
+                }
+                RevivalPlugin.L.LogInfo("Patrol gun: " + u.Seite + " shell hit "
+                    + (u.Hits - before) + " hostile actor(s) at " + point + ".");
+            }
+
+            static bool FahrzeugSchaden(Component vehicle, float damage, int part)
+            {
+                MethodInfo apply = AccessTools.Method(vehicle.GetType(), "ApplyDamage",
+                    new Type[] { typeof(float), typeof(int) }, null);
+                if (apply == null) return false;
+                apply.Invoke(vehicle, new object[] { damage, part });
+                return true;
             }
 
             /// <summary>
@@ -5739,8 +5970,9 @@ namespace NextDayRevival
             /// </summary>
             static Vector3 Streuung(Unit u, float dist)
             {
-                float weit = Mathf.Max(1f, RevivalPlugin.CfgPatrolGunRange.Value);
-                float nah = Mathf.Clamp(RevivalPlugin.CfgPatrolGunEffective.Value, 1f, weit);
+                float weit = Mathf.Max(1f, Suchweite(u));
+                float nah = Mathf.Clamp(Mathf.Max(RevivalPlugin.CfgPatrolGunEffective.Value,
+                                                  weit * 0.5f), 1f, weit);
 
                 float loss;
                 if (dist <= nah) loss = 0f;
@@ -5869,7 +6101,12 @@ namespace NextDayRevival
             static bool Schaden(Unit shooter, GameObject struck, float damage,
                                 Vector3 point, Vector3 from)
             {
+                CombatTarget c = AmTreffer(struck);
+                if (c == null || !Feind(shooter, c)) return false;
                 if (PanzerSchaden(shooter, struck)) return true;
+                if (c.Vehicle != null)
+                    return FahrzeugSchaden(c.Vehicle,
+                        RevivalPlugin.CfgPatrolGunTankDamage.Value, 10);
                 if (SpielerSchaden(struck, damage, point, from)) return true;
                 if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return true;
                 if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return true;
@@ -5887,10 +6124,8 @@ namespace NextDayRevival
             static bool PanzerSchaden(Unit shooter, GameObject struck)
             {
                 if (shooter == null) return false;
-                // Unified with the mounted turret in VehicleArmor.GunHit: the
-                // BTR autocannon eats a tank OR another APC on the game's armour
-                // path. A tank SHOOTER fired an explosive shell above, so GunHit
-                // no-ops for it and returns false.
+                // Use the mounted BTR's armour profile. Tank blast damage goes
+                // through Sprengschaden; non-explosive hits use the fallback.
                 return VehicleArmor.GunHit(struck, shooter.Tank);
             }
 
@@ -5975,6 +6210,14 @@ namespace NextDayRevival
             {
                 return u.Tank ? RevivalPlugin.CfgTankRange.Value
                               : RevivalPlugin.CfgTurretRange.Value;
+            }
+
+            static float Suchweite(Unit u)
+            {
+                float combat = u.Tank ? RevivalPlugin.CfgPatrolTankCombatRange.Value
+                                      : RevivalPlugin.CfgPatrolCombatRange.Value;
+                return Mathf.Max(0f, Mathf.Min(Reichweite(u),
+                    Mathf.Max(RevivalPlugin.CfgPatrolGunRange.Value, combat)));
             }
 
             static float Ladezeit(Unit u)
@@ -8063,13 +8306,12 @@ namespace NextDayRevival
     ///
     ///     civilian  Peace     hates all seven others - everyone but civilians
     ///     looter    Marauder  hates all seven others - everyone but looters
-    ///     traitor   Traitor   hates all EIGHT, itself included
-    ///     neutral   Neutral   hates Traitor only
+    ///     traitor   Traitor   hates all seven others, never its own faction
+    ///     neutral   Neutral   hates all seven others, never its own faction
     ///
     /// The hated arrays are written out in full rather than taken from the
-    /// game's own table, because the user's rule and the game's table differ
-    /// in one place that matters: the game's Peace tolerates Hermits and
-    /// Wildmen, and "attacks everyone but civilians" does not.
+    /// game's own table: every mod side now attacks all other factions and
+    /// never itself. This includes neutral and traitor patrols and crews.
     /// </summary>
     public static class Fraktion
     {
@@ -8096,8 +8338,8 @@ namespace NextDayRevival
             {
                 case "civilian": return Loc.T("бьёт всех, кроме civilian", "attacks everyone but civilians");
                 case "looter": return Loc.T("бьёт всех, кроме looter", "attacks everyone but looters");
-                case "traitor": return Loc.T("бьёт ВСЕХ, включая traitor", "attacks EVERYONE, traitors included");
-                default: return Loc.T("бьёт только traitor", "attacks traitors only");
+                case "traitor": return Loc.T("бьёт всех, кроме traitor", "attacks everyone but traitors");
+                default: return Loc.T("бьёт всех, кроме neutral", "attacks everyone but neutrals");
             }
         }
 
@@ -8114,7 +8356,7 @@ namespace NextDayRevival
         }
 
         /// <summary>The game's own enum value this side is.</summary>
-        static string Eigene(string name)
+        internal static string Eigene(string name)
         {
             switch (name)
             {
@@ -8138,11 +8380,31 @@ namespace NextDayRevival
                                           Military, Traitor, MilitaryNeutral };
                 case "traitor":
                     return new string[] { Neutral, Marauder, Peace, Hermit,
-                                          Wildman, Military, Traitor,
+                                          Wildman, Military,
                                           MilitaryNeutral };
                 default:
-                    return new string[] { Traitor };
+                    return new string[] { Marauder, Peace, Hermit, Wildman,
+                                          Military, Traitor, MilitaryNeutral };
             }
+        }
+
+        /// <summary>Unknown factions are not permission to open fire.</summary>
+        internal static bool Feind(string side, string faction)
+        {
+            string name = Sauber(side);
+            if (name.Length == 0 || string.IsNullOrEmpty(faction)) return false;
+            if (Eigene(name) == faction) return false;
+            return faction == Neutral || faction == Marauder || faction == Peace
+                || faction == Hermit || faction == Wildman || faction == Military
+                || faction == Traitor || faction == MilitaryNeutral;
+        }
+
+        internal static string Spielerseite(GameObject player)
+        {
+            int faction = Mortar.FactionShield.FactionOf(player);
+            Type type = RevivalPlugin.TypeByName("Fraction");
+            return faction < 0 || type == null || !type.IsEnum
+                ? null : Enum.GetName(type, faction);
         }
 
         /// <summary>

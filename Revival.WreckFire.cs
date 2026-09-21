@@ -245,12 +245,28 @@ namespace NextDayRevival
 
         public static void Spawn(Vector3 point, float radius)
         {
+            Blast(point, Mathf.Clamp(radius, 1.5f, 20f));
+        }
+
+        /// <summary>
+        /// The same ball, with the twenty-metre ceiling lifted. A grenade and a
+        /// 125 mm shell both belong under that ceiling, which is why Spawn keeps
+        /// it; eleven tonnes of airframe with its tanks aboard do not. Only the
+        /// helicopter crash calls this, so nothing else grows by it.
+        /// </summary>
+        public static void SpawnHeliBlast(Vector3 point, float radius)
+        {
+            Blast(point, Mathf.Clamp(radius, 6f, 60f));
+        }
+
+        static void Blast(Vector3 point, float radius)
+        {
             if (RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value) return;
             if (_noShader) return;
 
             float scale = RevivalPlugin.CfgFireScale == null
                 ? 1f : Mathf.Max(0.1f, RevivalPlugin.CfgFireScale.Value);
-            float r = Mathf.Clamp(radius, 1.5f, 20f) * scale;
+            float r = radius * scale;
 
             Material add = Additive();
             Material blend = Blended();
@@ -617,6 +633,249 @@ namespace NextDayRevival
             light.color = new Color(1f, 0.46f, 0.14f, 1f);
             light.range = falling ? 10f : 8f;
             light.intensity = falling ? 1.4f : 1.1f;
+            light.shadows = LightShadows.None;
+        }
+
+        // ------------------------------------------- the burning helicopter
+
+        internal const string HeliName = "NDR Helikopterfeuer";
+
+        /// <summary>
+        /// The BIG one, and the third size in this file on purpose. The drone
+        /// fire is a tenth of a vehicle's; this is roughly three times it,
+        /// because a downed helicopter is not a burning car and was reported as
+        /// looking like one (order of 2026-09-21: "das ist ein fluggeraet das
+        /// muss richtig richtig gross brennen").
+        ///
+        /// Two things make it the size it is. FIRST, the fire is laid out along
+        /// the AIRFRAME instead of sitting in one spot: the hull the flight
+        /// model uses is 38 world units long (7 wide, 11 tall, centred 3 ahead
+        /// of the origin), so four separate beds burn from the tail boom to the
+        /// nose and the machine burns end to end rather than showing one bonfire
+        /// in the middle of a long hull. SECOND, every number that a vehicle
+        /// wreck sets is raised: flames 2.4x the size at three times the rate,
+        /// a crown that throws tongues 2.5x higher, a smoke column half again
+        /// as wide and twice as opaque low down, and a light that reaches 95
+        /// units against the vehicle's 38.
+        ///
+        /// INSTANT, not "it gets there". The continuous emitters are fast enough
+        /// to stand up inside the first tenth of a second, and the column - which
+        /// on a vehicle needs some twenty seconds of 10 particles a second before
+        /// it reads as a column - is given a one-shot puff of its own so there
+        /// is a body of black smoke over the wreck in the frame of the bang.
+        /// That puff is a separate, NON-LOOPING system and not a burst on the
+        /// column, because a burst on a looping system fires again every cycle
+        /// and the column would pulse for as long as it burns.
+        ///
+        /// The root is parented to the machine with no timer of its own;
+        /// PlayerHeli.Wrecks takes the hull away and the fire goes with it.
+        /// </summary>
+        public static bool SpawnHeliFire(GameObject heli)
+        {
+            if (heli == null || _noShader) return false;
+            if (heli.transform.Find(HeliName) != null) return true;
+
+            Material add = Additive();
+            Material blend = Blended();
+            if (add == null || blend == null)
+            {
+                _noShader = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Helikopterfeuer: kein Partikelshader "
+                        + "im Build gefunden - der Wrack bleibt ohne Flammen.");
+                return false;
+            }
+
+            GameObject root = new GameObject(HeliName);
+            root.transform.position = heli.transform.position + Vector3.up * 2.2f;
+            root.transform.rotation = Quaternion.identity;
+            root.transform.parent = heli.transform;
+
+            // Along the fuselage: tail boom, rear cabin, front cabin, nose. The
+            // hull's own centre is 3 ahead of the origin, so the spread is not
+            // symmetric about zero.
+            HeliFlammen(root, add, new Vector3(-1.8f, 0f, -12.0f), 2.1f);
+            HeliFlammen(root, add, new Vector3( 1.9f, 0f,  -3.5f), 3.2f);
+            HeliFlammen(root, add, new Vector3(-2.0f, 0f,   5.5f), 3.2f);
+            HeliFlammen(root, add, new Vector3( 1.6f, 0f,  12.5f), 2.4f);
+            HeliFeuerkrone(root, add);
+            HeliRauchsaule(root, blend);
+            HeliRauchstoss(root, blend);
+            HeliGlut(root);
+
+            if (RevivalPlugin.L != null)
+                RevivalPlugin.L.LogInfo("PlayerHeli: aircraft fire attached to the "
+                    + "wreck - four flame beds, crown, column and opening puff.");
+            return true;
+        }
+
+        /// <summary>One burning bed on the airframe. The vehicle's version is
+        /// 0.94 to 2.06 units of flame at 28 a second; this is up to 7.7 at 84,
+        /// and it does not float upwards - gravityModifier stays slightly
+        /// negative so the flame stands on the hull instead of drifting off
+        /// it.</summary>
+        static void HeliFlammen(GameObject root, Material mat, Vector3 at, float r)
+        {
+            ParticleSystem ps = Neu(root, "Helikopterflammen", mat, true);
+            ps.transform.localPosition = at;
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 2f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.75f, 1.70f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(1.4f, 4.6f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.85f, r * 2.40f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.90f, 0.42f, 1f),
+                new Color(1.00f, 0.28f, 0.02f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.12f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 220;
+
+            Kegel(ps, r * 0.70f, 26f);
+            Dauer(ps, 84f);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.80f, 0.10f);
+            ps.Play();
+        }
+
+        /// <summary>The tall part. A vehicle throws tongues 2.8 to 6.2 units a
+        /// second off a 1.5 radius; this throws them 6 to 14 off a 4.2, which is
+        /// what puts fire above the rotor head instead of level with the
+        /// doors.</summary>
+        static void HeliFeuerkrone(GameObject root, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Helikopterfeuerkrone", mat, true);
+            ps.transform.localPosition = new Vector3(0.5f, 1.4f, 1.5f);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 3f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(2.6f, 5.2f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(6.0f, 14.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(4.2f, 8.8f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(1.00f, 0.96f, 0.62f, 1f),
+                new Color(1.00f, 0.22f, 0.02f, 1f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.22f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 420;
+
+            Kegel(ps, 3.2f, 19f);
+            Dauer(ps, 96f);
+            Farbverlauf(ps, false);
+            Groesse(ps, 0.85f, 0.07f);
+            ps.Play();
+        }
+
+        /// <summary>The landmark, a size up from the vehicle's: wider, blacker
+        /// and rising faster, so the column is readable across the map and not
+        /// only across the valley.</summary>
+        static void HeliRauchsaule(GameObject root, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Helikopterrauchsaule", mat, false);
+            ps.transform.localPosition = new Vector3(0.5f, 1.0f, 1.5f);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 16f;
+            main.loop = true;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(22f, 34f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(9.5f, 14f);
+            main.startSize = new ParticleSystem.MinMaxCurve(7.0f, 14.0f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.04f, 0.037f, 0.034f, 1f),
+                new Color(0.14f, 0.13f, 0.12f, 0.96f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.02f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 520;
+
+            Kegel(ps, 3.6f, 8f);
+            Dauer(ps, 17f);
+            HeliRauchFarbe(ps);
+            Groesse(ps, 0.55f, 3.40f);
+
+            ParticleSystem.RotationOverLifetimeModule rot = ps.rotationOverLifetime;
+            rot.enabled = true;
+            rot.z = new ParticleSystem.MinMaxCurve(-0.16f, 0.16f);
+            ps.Play();
+        }
+
+        /// <summary>
+        /// The reason the smoke is there in the first second and not in the
+        /// twentieth. One shot of 90 slow, long-lived particles at the moment of
+        /// the bang: the column above is still only seventeen particles a second
+        /// and needs half a minute to be a column, and the order was that the
+        /// fire arrives WITH the explosion, not after it.
+        /// </summary>
+        static void HeliRauchstoss(GameObject root, Material mat)
+        {
+            ParticleSystem ps = Neu(root, "Helikopterrauchstoss", mat, false);
+            ps.transform.localPosition = new Vector3(0.5f, 1.0f, 1.5f);
+
+            ParticleSystem.MainModule main = ps.main;
+            main.duration = 1.0f;
+            main.loop = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(14f, 26f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(4.0f, 13.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(8.0f, 16.0f);
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.05f, 0.045f, 0.04f, 1f),
+                new Color(0.16f, 0.15f, 0.14f, 0.96f));
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.03f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 120;
+
+            Kegel(ps, 4.5f, 26f);
+            Ausbruch(ps, 90);
+            HeliRauchFarbe(ps);
+            Groesse(ps, 0.70f, 3.00f);
+
+            ParticleSystem.RotationOverLifetimeModule rot = ps.rotationOverLifetime;
+            rot.enabled = true;
+            rot.z = new ParticleSystem.MinMaxCurve(-0.22f, 0.22f);
+            ps.Play();
+        }
+
+        /// <summary>Black for longer than the vehicle's, which starts greying at
+        /// 0.18 of a particle's life: kerosene soot stays dark most of the way
+        /// up, and the peak alpha is 0.97 against 0.86.</summary>
+        static void HeliRauchFarbe(ParticleSystem ps)
+        {
+            ParticleSystem.ColorOverLifetimeModule col = ps.colorOverLifetime;
+            col.enabled = true;
+            Gradient g = new Gradient();
+            g.SetKeys(
+                new GradientColorKey[] {
+                    new GradientColorKey(new Color(0.04f, 0.035f, 0.032f), 0.00f),
+                    new GradientColorKey(new Color(0.07f, 0.062f, 0.056f), 0.34f),
+                    new GradientColorKey(new Color(0.14f, 0.13f, 0.12f), 0.74f),
+                    new GradientColorKey(new Color(0.28f, 0.27f, 0.26f), 1.00f) },
+                new GradientAlphaKey[] {
+                    new GradientAlphaKey(0.00f, 0.00f),
+                    new GradientAlphaKey(0.97f, 0.03f),
+                    new GradientAlphaKey(0.84f, 0.74f),
+                    new GradientAlphaKey(0.00f, 1.00f) });
+            col.color = new ParticleSystem.MinMaxGradient(g);
+        }
+
+        /// <summary>The wreck lights its own crash site. 95 units of range
+        /// against a vehicle's 38 - at night the fire, not the moon, is what
+        /// shows where the machine came down.</summary>
+        static void HeliGlut(GameObject root)
+        {
+            GameObject go = new GameObject("Helikopterglut");
+            go.transform.parent = root.transform;
+            go.transform.localPosition = new Vector3(0.5f, 1.2f, 1.5f);
+
+            Light light = go.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.color = new Color(1f, 0.44f, 0.12f, 1f);
+            light.range = 95f;
+            light.intensity = 6.5f;
             light.shadows = LightShadows.None;
         }
 

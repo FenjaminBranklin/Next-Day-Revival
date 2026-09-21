@@ -87,7 +87,7 @@ namespace NextDayRevival
         // ============================================================= config
 
         internal static ConfigEntry<bool> CfgEnabled, CfgPassengers, CfgBailOut,
-            CfgCrash;
+            CfgCrash, CfgWreckModel;
         internal static ConfigEntry<string> CfgSpawnKey, CfgBoardKey, CfgViewKey,
             CfgEngineKey, CfgJumpKey;
         internal static ConfigEntry<float> CfgSize, CfgThrust, CfgSideThrust,
@@ -218,6 +218,12 @@ namespace NextDayRevival
                 "How long the burning wreck stands before the host takes it "
                 + "away. It is the same scene object, so it is one machine off "
                 + "the MaxHelicopters count the whole time.");
+            CfgWreckModel = cfg.Bind("PlayerHeli", "WreckModel", true,
+                "A machine that has hit the ground swaps to the game's own "
+                + "broken Mi-8 (the rusted hulk, mesh mi-8_rusty_int) and loses "
+                + "its glass and rotor. Off: the intact model stays and is only "
+                + "scorched. It also stays if that model is not loaded on this "
+                + "map - the log says which of the two happened.");
         }
 
         internal static bool Enabled
@@ -717,7 +723,13 @@ namespace NextDayRevival
             {
                 if (go != null)
                 {
-                    if (_pilot && !RevivalTroopInsertion.MasterClient())
+                    // Not on a wreck. Burn switches the interpolator off on
+                    // every peer so the pose it settles into is left alone, and
+                    // a crash leaves through here a moment later - switching it
+                    // back on would hand the wreck to the host's last piloted
+                    // picture of the machine and stand it up again.
+                    if (_pilot && !RevivalTroopInsertion.MasterClient()
+                        && !Burning(go))
                         Interpolator(go, true);
                     if (view != 0) Net.Send(Net.Aboard, new float[] { view, 0f, 0f }, true);
                     // The engine does not keep running behind the last man out.
@@ -1150,8 +1162,9 @@ namespace NextDayRevival
         internal static void FinishAbandonedCrash(GameObject go, Vector3 where)
         {
             if (go == null || Burning(go)) return;
+            // Burn plays the bang itself now. It used to be played here, which
+            // meant only the pilotless fall ever made a sound.
             Burn(go, where);
-            HeliCrashSound.Play(where);
             RevivalPlugin.L.LogInfo("PlayerHeli: abandoned helicopter "
                 + ViewId(go) + " struck the ground at " + where.ToString("0") + ".");
         }
@@ -1346,10 +1359,37 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>The visible half of a crash, run on EVERY client: the
-        /// explosion, the wreck fire, a silent rotor, and the hull set down on
-        /// the ground so it burns where it lies rather than hanging in the
-        /// air.</summary>
+        /// <summary>
+        /// The visible half of a crash, run on EVERY client: the bang, the
+        /// fire, a silent rotor, the broken airframe, and the hull put down ON
+        /// THE ATTITUDE IT ARRIVED WITH.
+        ///
+        /// THE ATTITUDE IS THE POINT (order of 2026-09-21). Until now this
+        /// method threw the arrival away: it read the heading, rebuilt the
+        /// rotation from it with a fixed six degrees of nose and eleven of bank,
+        /// and wrote that in one frame. So a machine that came down inverted, on
+        /// its side or nose first stood itself up the instant it touched - which
+        /// is the glitch that was reported, and it was in one line. The
+        /// rotation is now left exactly as the fall or the flight left it, and
+        /// HeliWreckSettle carries it the rest of the way over in the direction
+        /// it was ALREADY leaning. A machine that arrives across the ground ends
+        /// up lying across the ground.
+        ///
+        /// Two consequences follow from keeping the attitude. First, the origin
+        /// is no longer the lowest point of the hull: a machine on its flank
+        /// hangs half its width below its own transform, so the height comes
+        /// from the hull box's lowest CORNER (Settle.Rest) instead of from the
+        /// floor alone. Second, the pose must be left alone from here on, so the
+        /// Photon interpolator is switched off on every peer - a wreck is not
+        /// streamed, and without this the host's last piloted pose would pull a
+        /// remote client's wreck upright again a moment after it lands, which
+        /// would look exactly like the bug this change removes.
+        ///
+        /// The bang is louder than a vehicle's and the fire is bigger, and both
+        /// start in THIS frame - the crash sound moved here from the abandoned
+        /// fall, which was the only path that ever played it, so a machine flown
+        /// into a mast is no longer silent.
+        /// </summary>
         static void Burn(GameObject go, Vector3 where)
         {
             if (go == null || Burning(go)) return;
@@ -1359,21 +1399,22 @@ namespace NextDayRevival
                 EngineApply(go, false);
                 HeliEngine e = EngineOf(go);
                 if (e != null) e.Kill();
+                Interpolator(go, false);
 
-                float k = K;
                 Transform tr = go.transform;
-                Vector3 rest = tr.position;
                 float floor;
-                if (Floor(rest, out floor)) rest.y = floor;
-                tr.position = rest;
-                Vector3 flat = tr.forward;
-                flat.y = 0f;
-                if (flat.sqrMagnitude > 0.000001f)
-                    tr.rotation = Quaternion.LookRotation(flat.normalized, Vector3.up)
-                                  * Quaternion.Euler(6f, 0f, 11f);
+                if (!Floor(tr.position, out floor)) floor = tr.position.y;
+                HeliWreckSettle settle = go.AddComponent<HeliWreckSettle>();
+                settle.Begin(floor);
 
-                FireEffect.Spawn(where, 9f);
-                FireEffect.SpawnWreck(go, false);
+                HeliWreckModel.Apply(go);
+
+                // The ball is thrown from the middle of the cabin rather than
+                // from the contact point: a 22-unit fireball centred on the
+                // skids buries half of itself in the ground.
+                FireEffect.SpawnHeliBlast(where + Vector3.up * (1.5f * K), 22f);
+                if (!FireEffect.SpawnHeliFire(go)) FireEffect.SpawnWreck(go, false);
+                HeliCrashSound.Play(where);
             }
             catch (Exception ex)
             {
@@ -2553,31 +2594,363 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>A spatial crash report for the impact. The engine loop is not
-    /// an impact sound and FireEffect is deliberately visual-only, so the clip
-    /// is synthesized once: a short metal crack over a low, decaying boom.</summary>
+    /// <summary>
+    /// How a wreck comes to rest, and the answer to the oldest complaint about
+    /// this feature: the fall looked right and the landing did not, because the
+    /// landing threw the fall away and rebuilt a level pose from the heading.
+    ///
+    /// This component never levels anything. It takes the rotation the machine
+    /// arrived with and moves it FURTHER in the direction it was already
+    /// leaning, by at most thirty-two degrees of bank and fourteen of nose, over
+    /// eight tenths of a second. Eleven tonnes that touch down banked do not
+    /// stand up; they go over onto that side, and then they stop. Three cases
+    /// are left exactly as they arrived: a machine that arrived level (under six
+    /// degrees - there is nothing to slump), one already past a hundred and
+    /// fifty degrees (it came down inverted and it stays inverted), and one
+    /// already lying flatter than the hundred-and-eighteen-degree stop.
+    ///
+    /// The height cannot come from the floor alone once the attitude is kept. A
+    /// hull on its flank hangs half its width below its own transform origin,
+    /// which sits near the gear plane, so the lift is read from the LOWEST
+    /// CORNER of the same hull box Prepare builds - eight corners through the
+    /// current rotation, and the deepest one is put on the floor. Level, that
+    /// corner is the gear plane and the lift is zero, so an ordinary wreck sits
+    /// exactly where it always did.
+    /// </summary>
+    public sealed class HeliWreckSettle : MonoBehaviour
+    {
+        const float Seconds = 0.8f;
+
+        // The hull box of Prepare, in the machine's own units: centre and half
+        // size of the 7 x 11 x 38 cabin whose centre sits 2.5 across, 5.5 up
+        // and 3 ahead of the origin.
+        static readonly Vector3 Centre = new Vector3(2.5f, 5.5f, 3f);
+        static readonly Vector3 Half = new Vector3(3.5f, 5.5f, 19f);
+
+        Quaternion _from, _to;
+        float _floor, _t;
+        bool _begun;
+
+        internal void Begin(float floor)
+        {
+            if (_begun) return;
+            _begun = true;
+            _floor = floor;
+            _from = transform.rotation;
+
+            Quaternion heading;
+            float pitch, roll, spin;
+            Lean(_from, out heading, out pitch, out roll, out spin);
+            _to = heading * Quaternion.Euler(
+                Slump(pitch, 0.30f, 14f), spin, Slump(roll, 0.55f, 32f));
+            Rest();
+
+            if (RevivalPlugin.L != null)
+                RevivalPlugin.L.LogInfo("PlayerHeli: wreck came to rest at "
+                    + pitch.ToString("0") + " deg nose, " + roll.ToString("0")
+                    + " deg bank - the attitude it arrived with, settling to "
+                    + Slump(roll, 0.55f, 32f).ToString("0") + " deg.");
+        }
+
+        void Update()
+        {
+            if (!_begun) return;
+            _t += Mathf.Min(Time.deltaTime, 0.1f);
+            float u = Mathf.Clamp01(_t / Seconds);
+            transform.rotation = Quaternion.Slerp(_from, _to, 1f - (1f - u) * (1f - u));
+            Rest();
+            if (u >= 1f) UnityEngine.Object.Destroy(this);
+        }
+
+        /// <summary>Put the deepest corner of the hull on the floor, leaving the
+        /// ground track alone: a wreck settles, it does not slide.</summary>
+        void Rest()
+        {
+            Vector3 at = transform.position;
+            at.y = _floor + Lift(transform.rotation, transform.lossyScale);
+            transform.position = at;
+        }
+
+        internal static float Lift(Quaternion rot, Vector3 scale)
+        {
+            float lowest = 0f;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 corner = new Vector3(
+                    Centre.x + ((i & 1) == 0 ? -Half.x : Half.x),
+                    Centre.y + ((i & 2) == 0 ? -Half.y : Half.y),
+                    Centre.z + ((i & 4) == 0 ? -Half.z : Half.z));
+                float y = (rot * Vector3.Scale(corner, scale)).y;
+                if (y < lowest) lowest = y;
+            }
+            return -lowest;
+        }
+
+        /// <summary>Nose and bank in a frame that has the heading taken out of
+        /// it, so "how far over is it" is one number. The spin is the leftover
+        /// yaw the euler decomposition produces near the poles; it is handed
+        /// back and put in again unchanged, because dropping it would turn a
+        /// machine standing on its nose.</summary>
+        static void Lean(Quaternion rot, out Quaternion heading,
+                         out float pitch, out float roll, out float spin)
+        {
+            Vector3 f = rot * Vector3.forward;
+            Vector3 flat = new Vector3(f.x, 0f, f.z);
+            if (flat.sqrMagnitude < 0.000001f)
+            {
+                // Nose straight up or straight down - the heading is then
+                // carried by the roof, not by the nose.
+                Vector3 up = rot * Vector3.up;
+                flat = new Vector3(up.x, 0f, up.z);
+                if (flat.sqrMagnitude < 0.000001f) flat = Vector3.forward;
+            }
+            heading = Quaternion.LookRotation(flat.normalized, Vector3.up);
+            Vector3 e = (Quaternion.Inverse(heading) * rot).eulerAngles;
+            pitch = Wrap(e.x);
+            roll = Wrap(e.z);
+            spin = Wrap(e.y);
+        }
+
+        /// <summary>Further over, never back. Whatever this returns has the sign
+        /// of what went in and is never smaller in size.</summary>
+        static float Slump(float deg, float share, float most)
+        {
+            float a = Mathf.Abs(deg);
+            if (a < 6f || a > 150f) return deg;
+            float extra = Mathf.Min(most, a * share);
+            if (a + extra > 118f) extra = Mathf.Max(0f, 118f - a);
+            return deg < 0f ? -(a + extra) : a + extra;
+        }
+
+        static float Wrap(float deg)
+        {
+            deg %= 360f;
+            if (deg > 180f) deg -= 360f;
+            if (deg < -180f) deg += 360f;
+            return deg;
+        }
+    }
+
+    /// <summary>
+    /// The broken airframe, out of the game's own asset list rather than out of
+    /// a modelling tool (order of 2026-09-21: "Es gibt im game bereits models
+    /// von kaputten helis, einfach so eins benutzen").
+    ///
+    /// WHICH MODEL. The asset index knows three Mi-8s: `mi-8_mchs` is the intact
+    /// aid machine this feature flies, `mi-8_military` is the intact green one,
+    /// and `mi-8_rusty_int` is the rusted, gutted hulk that stands on the map as
+    /// scenery - mesh, material, texture and three LODs of its own
+    /// (research/index_resources_assets.tsv, index_sharedassets1/5/9). That
+    /// third one is the wreck, and it is the one taken here.
+    ///
+    /// WHY IT IS NOT LOADED BY PATH. It has no entry in
+    /// research/resource_paths.tsv: only `gameplayobjects/helicopters/mi-8_mchs`
+    /// and the airdrop container are addressable that way. So it is picked up
+    /// the way Revival.WindSound.cs picks up the game's own wind clip - from the
+    /// objects already in memory - and that is also the one thing that can fail:
+    /// on a map with no rusted Mi-8 standing on it the asset was never loaded.
+    /// That is not an error, it is the fallback, and the log says which of the
+    /// two happened.
+    ///
+    /// WHAT IT DOES TO THE MACHINE. Every hull mesh under the object becomes the
+    /// rusty one, the glass goes (a wreck has no windows), and every other
+    /// renderer - rotor, interior fittings - is switched off, so exactly one
+    /// broken hull is drawn at any distance and no stopped rotor hangs over it.
+    /// Meshes and materials are only ASSIGNED, never edited: writing to a shared
+    /// material would rust every Mi-8 in the world.
+    ///
+    /// The fallback scorches instead, and it goes through `material` and not
+    /// `sharedMaterial` for exactly that reason - the copy belongs to the
+    /// renderer and dies with the wreck.
+    /// </summary>
+    internal static class HeliWreckModel
+    {
+        static int _tries;
+        static Mesh _hull;
+        static Mesh[] _lod = new Mesh[4];
+        static Material _skin;
+
+        internal static void Apply(GameObject go)
+        {
+            if (go == null) return;
+            try
+            {
+                bool want = PlayerHeli.CfgWreckModel == null
+                            || PlayerHeli.CfgWreckModel.Value;
+                if (want) Look();
+                bool swap = want && _hull != null;
+
+                int changed = 0, hidden = 0, scorched = 0;
+                MeshFilter[] filters = go.GetComponentsInChildren<MeshFilter>(true);
+                for (int i = 0; i < filters.Length; i++)
+                {
+                    MeshFilter mf = filters[i];
+                    if (mf == null) continue;
+                    Renderer r = mf.GetComponent<Renderer>();
+                    Mesh mesh = mf.sharedMesh;
+                    string name = mesh == null ? "" : mesh.name.ToLowerInvariant();
+
+                    if (!swap)
+                    {
+                        if (Scorch(r)) scorched++;
+                        continue;
+                    }
+
+                    // Only the two INTACT HULLS become the wreck: mi-8_mchs is
+                    // the aid machine this feature flies and mi-8_military the
+                    // green one. Everything else under the object is switched
+                    // off - glass, rotor, and in particular mi-8_interior, which
+                    // matches "mi-8" and would otherwise be given the rusty hull
+                    // as well and draw a second airframe inside the first.
+                    if (name.IndexOf("mchs") < 0 && name.IndexOf("military") < 0)
+                    {
+                        if (r != null && r.enabled) { r.enabled = false; hidden++; }
+                        continue;
+                    }
+
+                    Mesh rusty = Pick(name);
+                    mf.sharedMesh = rusty;
+                    if (r != null && _skin != null)
+                    {
+                        Material[] mats = new Material[Mathf.Max(1, rusty.subMeshCount)];
+                        for (int m = 0; m < mats.Length; m++) mats[m] = _skin;
+                        r.sharedMaterials = mats;
+                    }
+                    changed++;
+                }
+
+                if (swap)
+                    RevivalPlugin.L.LogInfo("PlayerHeli: wreck model - "
+                        + changed + " hull mesh(es) swapped to mi-8_rusty_int, "
+                        + hidden + " renderer(s) switched off (glass, rotor).");
+                else
+                    RevivalPlugin.L.LogInfo("PlayerHeli: wreck model - the broken "
+                        + "Mi-8 is " + (want ? "not loaded on this map" : "switched "
+                        + "off in the config") + ", " + scorched + " renderer(s) "
+                        + "scorched on the intact hull instead.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli wreck model: " + ex.Message);
+            }
+        }
+
+        /// <summary>The rusty mesh at the same level of detail as the one it
+        /// replaces, so an LOD group that swaps at distance keeps swapping
+        /// between wrecks and not back to an intact machine.</summary>
+        static Mesh Pick(string name)
+        {
+            int at = name.IndexOf("_lod");
+            if (at >= 0 && at + 4 < name.Length)
+            {
+                int level = name[at + 4] - '0';
+                if (level >= 1 && level <= 3 && _lod[level] != null) return _lod[level];
+            }
+            return _hull;
+        }
+
+        /// <summary>Looked up once and then remembered, the way the wind clip
+        /// is. Three tries and not one, because the asset is loaded when a
+        /// rusted Mi-8 stands on the map and a player who crashes on one map
+        /// and flies on another would otherwise be told for ever that the
+        /// model does not exist.</summary>
+        static void Look()
+        {
+            if (_hull != null || _tries >= 3) return;
+            _tries++;
+            try
+            {
+                UnityEngine.Object[] meshes =
+                    Resources.FindObjectsOfTypeAll(typeof(Mesh));
+                for (int i = 0; i < meshes.Length; i++)
+                {
+                    Mesh m = meshes[i] as Mesh;
+                    if (m == null || string.IsNullOrEmpty(m.name)) continue;
+                    string n = m.name.ToLowerInvariant();
+                    if (n.IndexOf("mi-8_rusty") < 0) continue;
+                    int at = n.IndexOf("_lod");
+                    if (at < 0) { if (_hull == null) _hull = m; continue; }
+                    if (at + 4 >= n.Length) continue;
+                    int level = n[at + 4] - '0';
+                    if (level >= 1 && level <= 3 && _lod[level] == null) _lod[level] = m;
+                }
+                if (_hull == null) _hull = _lod[1] != null ? _lod[1] : _lod[2];
+
+                UnityEngine.Object[] mats =
+                    Resources.FindObjectsOfTypeAll(typeof(Material));
+                for (int i = 0; i < mats.Length; i++)
+                {
+                    Material m = mats[i] as Material;
+                    if (m == null || string.IsNullOrEmpty(m.name)) continue;
+                    string n = m.name.ToLowerInvariant();
+                    if (n.IndexOf("mi-8_rusty") < 0 || n.IndexOf("_lod") >= 0) continue;
+                    _skin = m;
+                    break;
+                }
+                RevivalPlugin.L.LogInfo("PlayerHeli: broken Mi-8 lookup - hull "
+                    + (_hull == null ? "NOT found" : _hull.name) + ", material "
+                    + (_skin == null ? "NOT found" : _skin.name) + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli wreck lookup: " + ex.Message);
+            }
+        }
+
+        /// <summary>Burnt paint on the intact hull: the fallback when the broken
+        /// model is not in memory. `material` and not `sharedMaterial` - the
+        /// instance belongs to this renderer and is destroyed with it.</summary>
+        static bool Scorch(Renderer r)
+        {
+            if (r == null || !r.enabled) return false;
+            Material m = r.material;
+            if (m == null) return false;
+            if (m.HasProperty("_Color"))
+                m.SetColor("_Color", new Color(0.13f, 0.12f, 0.11f, 1f));
+            if (m.HasProperty("_EmissionColor"))
+                m.SetColor("_EmissionColor", Color.black);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The bang, and it is meant to be heard (order of 2026-09-21: "gerne einen
+    /// ganz lauten aufknall sound mit explosion").
+    ///
+    /// TWO SOURCES, NOT ONE, because one is as loud as an AudioSource goes:
+    /// volume is capped at 1 and the cap was already reached. So the game's OWN
+    /// explosion is played over a synthesized sub-boom at the same point in the
+    /// same frame, and the two sum. The game clip gives the crack anyone playing
+    /// this game recognises as an explosion; the boom underneath is the weight
+    /// eleven tonnes of airframe should have and that a gas cylinder does not.
+    ///
+    /// The game clip is `Sounds/Gameplay/Explosions/Gas_Balon_Explode_01` from
+    /// research/resource_paths.tsv - the only explosion in the game that IS at a
+    /// resource path. `frag_explode-1` is in the asset list but not addressable,
+    /// so it is the second try, out of what is already in memory, the way
+    /// Revival.WindSound.cs finds the wind. Neither of the two is required: the
+    /// synthesized boom alone still plays.
+    ///
+    /// The rolloff carries much further than the old one. Nineteen metres of
+    /// full volume (minDistance) against the old six, and 900 units of reach
+    /// against 520: a helicopter going in is a thing the next valley hears.
+    /// </summary>
     internal static class HeliCrashSound
     {
-        static AudioClip _clip;
+        static AudioClip _boom;
+        static AudioClip _bang;
+        static bool _lookedUpBang;
 
         internal static void Play(Vector3 at)
         {
             try
             {
-                AudioClip clip = Clip();
-                if (clip == null) return;
-                GameObject go = new GameObject("NDR PlayerHeli Crash Sound");
-                go.transform.position = at;
-                AudioSource source = go.AddComponent<AudioSource>();
-                source.clip = clip;
-                source.loop = false;
-                source.spatialBlend = 1f;
-                source.minDistance = 18f;
-                source.maxDistance = 520f;
-                source.rolloffMode = AudioRolloffMode.Logarithmic;
-                source.volume = 1f;
-                source.Play();
-                UnityEngine.Object.Destroy(go, clip.length + 1f);
+                float k = PlayerHeli.K;
+                bool any = Source(at, Bang(), 1f, 52f * k, 1f);
+                any |= Source(at, Boom(), 1f, 60f * k, 0.92f);
+                if (!any && RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("PlayerHeli: no crash sound could "
+                        + "be built - the impact is silent.");
             }
             catch (Exception ex)
             {
@@ -2586,28 +2959,120 @@ namespace NextDayRevival
             }
         }
 
-        static AudioClip Clip()
+        static bool Source(Vector3 at, AudioClip clip, float volume,
+                           float full, float pitch)
         {
-            if (_clip != null) return _clip;
+            if (clip == null) return false;
+            GameObject go = new GameObject("NDR PlayerHeli Crash Sound");
+            go.transform.position = at;
+            AudioSource source = go.AddComponent<AudioSource>();
+            source.clip = clip;
+            source.loop = false;
+            source.spatialBlend = 1f;
+            source.minDistance = full;
+            source.maxDistance = 900f * PlayerHeli.K;
+            source.rolloffMode = AudioRolloffMode.Logarithmic;
+            source.dopplerLevel = 0f;
+            source.pitch = pitch;
+            source.volume = volume;
+            source.Play();
+            UnityEngine.Object.Destroy(go, clip.length / Mathf.Max(0.1f, pitch) + 1f);
+            return true;
+        }
+
+        /// <summary>The game's own explosion if it can be had.</summary>
+        static AudioClip Bang()
+        {
+            if (_bang != null || _lookedUpBang) return _bang;
+            _lookedUpBang = true;
+            try
+            {
+                _bang = Resources.Load(
+                    "Sounds/Gameplay/Explosions/Gas_Balon_Explode_01",
+                    typeof(AudioClip)) as AudioClip;
+                if (_bang == null)
+                {
+                    UnityEngine.Object[] all =
+                        Resources.FindObjectsOfTypeAll(typeof(AudioClip));
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        AudioClip c = all[i] as AudioClip;
+                        if (c == null || string.IsNullOrEmpty(c.name)) continue;
+                        string n = c.name.ToLowerInvariant();
+                        if (n.IndexOf("explode") < 0 && n.IndexOf("explosion") < 0)
+                            continue;
+                        if (n.IndexOf("underwater") >= 0 || n.IndexOf("blood") >= 0)
+                            continue;
+                        _bang = c;
+                        break;
+                    }
+                }
+                RevivalPlugin.L.LogInfo("PlayerHeli: crash bang - "
+                    + (_bang == null ? "no game explosion clip found, the "
+                       + "synthesized boom carries it alone" : "using " + _bang.name)
+                    + ".");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli bang lookup: " + ex.Message);
+            }
+            return _bang;
+        }
+
+        /// <summary>
+        /// The weight under the crack: four seconds, and everything in it is
+        /// lower and longer than the clip it replaces. The old one decayed at
+        /// 1.55 and started at 42 Hz; this starts at 33, sweeps down, decays at
+        /// 0.85, and carries a rumble tail that is still audible at two seconds
+        /// - which is what makes the difference between a bang and an aircraft
+        /// going in.
+        /// </summary>
+        static AudioClip Boom()
+        {
+            if (_boom != null) return _boom;
             const int rate = 22050;
-            int count = rate * 3;
+            int count = rate * 4;
             float[] data = new float[count];
             System.Random random = new System.Random(81731);
+            float rumble = 0f;
             for (int i = 0; i < count; i++)
             {
                 float t = (float)i / rate;
                 float noise = (float)(random.NextDouble() * 2.0 - 1.0);
-                float crack = noise * Mathf.Exp(-t * 18f);
-                float boom = Mathf.Sin(2f * Mathf.PI * (42f - 7f * t) * t)
-                           * Mathf.Exp(-t * 1.55f);
-                float metal = Mathf.Sin(2f * Mathf.PI * 173f * t)
-                            * Mathf.Exp(-t * 5.2f);
-                data[i] = Mathf.Clamp((crack * 0.58f + boom * 0.72f
-                                      + metal * 0.16f) * 0.82f, -1f, 1f);
+
+                // The transient: the first fortieth of a second, and the only
+                // part that is allowed to be white.
+                float crack = noise * Mathf.Exp(-t * 26f);
+
+                // The body: a falling sine from 33 Hz, and the slow decay is the
+                // whole point.
+                float body = Mathf.Sin(2f * Mathf.PI * (33f - 5.5f * t) * t)
+                           * Mathf.Exp(-t * 0.85f);
+
+                // Tearing metal over the top of it, gone in half a second.
+                float metal = Mathf.Sin(2f * Mathf.PI * 146f * t)
+                            * Mathf.Exp(-t * 4.4f) * (0.6f + 0.4f * noise);
+
+                // The tail: noise dragged through a one-pole low pass, so what
+                // is left after a second is rumble and not hiss.
+                rumble += (noise - rumble) * 0.020f;
+                float tail = rumble * Mathf.Exp(-t * 0.55f) * 3.4f;
+
+                data[i] = Soft(crack * 0.62f + body * 1.00f
+                               + metal * 0.20f + tail * 0.75f);
             }
-            _clip = AudioClip.Create("NDR_PlayerHeliCrash", count, 1, rate, false);
-            _clip.SetData(data, 0);
-            return _clip;
+            _boom = AudioClip.Create("NDR_PlayerHeliCrash", count, 1, rate, false);
+            _boom.SetData(data, 0);
+            return _boom;
+        }
+
+        /// <summary>Clipping a sum this hot at plus and minus one buzzes. A
+        /// tanh-shaped knee keeps the loudness and loses the buzz.</summary>
+        static float Soft(float x)
+        {
+            if (x > 3f) return 1f;
+            if (x < -3f) return -1f;
+            return x * (27f + x * x) / (27f + 9f * x * x);
         }
     }
 

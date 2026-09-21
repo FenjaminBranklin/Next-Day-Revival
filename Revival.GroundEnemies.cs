@@ -187,7 +187,15 @@ namespace NextDayRevival
                 Component ai = actor as Component;
                 if (ai == null) continue;
                 string key = Crew.GroundKey(ai);
-                if (key == null) continue;
+                if (key == null || key.IndexOf('/') >= 0) continue;
+                // A key with a slash belongs to a DIFFERENT feature that uses
+                // the same spawn-data channel to name its men across clients -
+                // the technical's riding crew writes "tech/<view id>". A ground
+                // group cannot produce one: grounddef.py restricts a group name
+                // to [A-Za-z0-9_.-] and the rest of the key is a hex digest. Not
+                // skipping them would have this reconcile destroy every rider on
+                // the map as a stale ground group, because it is not in the
+                // desired set and never will be.
                 if (!desired.ContainsKey(key))
                 {
                     // Corpses already belong to NpcWar's loot cleanup queue.

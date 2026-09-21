@@ -90,12 +90,31 @@ namespace NextDayRevival
         /// <summary>One vehicle in a route's column, front to tail.</summary>
         internal sealed class Vehicle
         {
-            public string Type = "btr";          // "tank", "btr" or "ural"
+            public string Type = "btr";          // a VehicleRegistry kind key
             public List<CrewMan> Crew = new List<CrewMan>();
             public bool IsTank { get { return Type == "tank"; } }
             // The VehicleRegistry kind key this vehicle spawns as. The editor
             // labels the Ural a "truck"; the runtime registry key is "ural".
             public string Kind { get { return Type; } }
+        }
+
+        /// <summary>
+        /// The kind key of one composition line, as the vehicle registry spells
+        /// it. VehicleRegistry is the authority on which kinds exist - it is the
+        /// same list the admin menu offers and the same list Spawn resolves -
+        /// so a kind that is registered can be put in a column without this
+        /// file learning its name. An unknown one becomes a BTR, which is what
+        /// a column of an older definition on a newer plugin needs.
+        ///
+        /// The editor named the 15-seat Ural a "truck" before the key settled
+        /// on "ural"; both spellings are still read.
+        /// </summary>
+        static string KindKey(string vtype)
+        {
+            if (vtype == null) return "btr";
+            string t = vtype.Trim().ToLowerInvariant();
+            if (t == "truck") t = "ural";
+            return VehicleRegistry.Contains(t) ? t : "btr";
         }
 
         /// <summary>A route's whole composition, vehicles in column order.</summary>
@@ -154,12 +173,7 @@ namespace NextDayRevival
                         || !int.TryParse(c[1].Trim(), NumberStyles.Integer,
                                          CultureInfo.InvariantCulture, out vindex))
                     { bad++; continue; }
-                    string vtype = c[2].Trim().ToLowerInvariant();
-                    // The editor names the 15-seat Ural a "truck"; the runtime
-                    // registry key is "ural". Accept both spellings.
-                    if (vtype == "truck") vtype = "ural";
-                    if (vtype != "tank" && vtype != "btr" && vtype != "ural")
-                        vtype = "btr";
+                    string vtype = KindKey(c[2]);
 
                     SortedDictionary<int, Vehicle> col;
                     if (!stage.TryGetValue(route, out col))
@@ -174,7 +188,7 @@ namespace NextDayRevival
                         v.Type = vtype;
                         col[vindex] = v;
                     }
-                    else if (vtype == "tank" || vtype == "ural")
+                    else if (vtype != "btr")
                     {
                         // Any explicit non-btr line fixes the vehicle's kind (a
                         // crewless placeholder line may have defaulted it to btr).
@@ -274,10 +288,10 @@ namespace NextDayRevival
         }
 
         /// <summary>The per-vehicle registry kind order of a convoy route as the
-        /// editor defined it ("tank"/"btr"/"ural", front to tail), or null when
-        /// the route has no editor composition. Unlike <see cref="VehicleKinds"/>
-        /// this carries the 15-seat Ural (truck) too, so a mixed column drives the
-        /// exact vehicles the admin placed.</summary>
+        /// editor defined it (front to tail), or null when the route has no
+        /// editor composition. Unlike <see cref="VehicleKinds"/> this carries
+        /// every registered kind - the 15-seat Ural and the technical included -
+        /// so a mixed column drives the exact vehicles the admin placed.</summary>
         internal static string[] VehicleKindStrings(string route)
         {
             if (!Enabled || route == null) return null;

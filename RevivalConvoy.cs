@@ -430,11 +430,11 @@ namespace NextDayRevival
             // Members are added front first, so index 0 is the front and the last
             // is the tail (the route order the behaviour reaction relies on), and
             // that index IS the column slot for the formation lock.
-            // A route flagged vehicle=ural forces a truck convoy: every member is
-            // a 15-seat Ural regardless of the composition. The one-way behaviour
-            // is unchanged (it lives in the Unit, not the prefab).
+            // A route that NAMES a kind forces it on every member regardless of
+            // the composition: vehicle=ural is a truck convoy, vehicle=technical
+            // a column of gun trucks. The one-way behaviour is unchanged either
+            // way - it lives in the Unit, not in the prefab.
             string forced = Patrol.RouteVehicle(routeName);
-            bool ural = forced == "ural";
             float gap = LineupGap;
             // A short route must not push the head past its own end: the whole
             // line-up gets at most half the route, so even a 200 m road still
@@ -447,7 +447,7 @@ namespace NextDayRevival
             for (int k = 0; k < kinds.Length; k++)
             {
                 float back = gap * k;              // 0 = front of the column
-                string kind = ural ? "ural" : kinds[k];
+                string kind = forced.Length > 0 ? forced : kinds[k];
                 object h = Patrol.SpawnConvoyUnit(routeName, kind, headArc, back,
                                                   id, k);
                 if (h == null)
