@@ -260,6 +260,19 @@ namespace NextDayRevival
             public bool Mobile;
         }
 
+        /// <summary>Elevation the drivable howitzer's barrel rests at while it
+        /// is travelling, i.e. resting on the vehicle's own barrel cradle
+        /// instead of standing up ready to fire. Below <see cref="ElevLow"/> on
+        /// purpose - a travelling gun is not laid, it is stowed. NOT PROVEN
+        /// without the game: the exact rest angle the model's own cradle wants
+        /// is an in-game acceptance item; this is the working assumption.</summary>
+        internal const float TravelPitch = 4f;
+
+        /// <summary>Local yaw (relative to the hull) the drivable howitzer's
+        /// turret rests at while travelling: dead ahead, over the cab, which is
+        /// where the model's cradle sits.</summary>
+        internal const float TravelYaw = 0f;
+
         /// <summary>A shell between the gun and the ground. Nothing is modelled
         /// in flight: a howitzer round is invisible on the way up, and a tracer
         /// would be both wrong and a networked object per round.</summary>
@@ -1674,7 +1687,25 @@ namespace NextDayRevival
                 // A gun that drives carries its own "centre" with it: it is what
                 // the shot report is keyed on (see RemoteShot), and a vehicle is
                 // at the same synchronized place on every client.
-                if (t.Mobile) t.Centre = t.Go.transform.position;
+                if (t.Mobile)
+                {
+                    t.Centre = t.Go.transform.position;
+                    // Nobody is laying this gun right now, and the truck under
+                    // it is running: rest the barrel on the vehicle's own
+                    // cradle instead of holding a world bearing while the hull
+                    // turns under it, which is what made the gun appear to
+                    // swing across the road on every corner. The turn itself
+                    // still goes through the ordinary Traverse/Elevate rates
+                    // below, so coming out of a hard turn - or the engine
+                    // starting with the gun laid somewhere else - takes the
+                    // same few seconds a real traverse would.
+                    if (t != _aiming && EngineRunning(t.Go))
+                    {
+                        float hull = t.Go.transform.eulerAngles.y;
+                        t.WantYaw = hull + TravelYaw;
+                        t.WantPitch = TravelPitch;
+                    }
+                }
                 t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
                 t.Pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
                 Point(t);
@@ -1756,11 +1787,13 @@ namespace NextDayRevival
             t.Centre = body.transform.position;
             t.Rounds = 0;
             t.ReadyAt = 0f;
-            // Laid straight ahead at half reach, exactly as a gun that is raised
-            // in a settlement: nothing swings anywhere on the first frame.
-            t.Yaw = body.transform.eulerAngles.y;
+            // Starts resting on its own cradle, dead ahead over the cab - the
+            // travel pose Slew keeps it in whenever nobody is aiming it and the
+            // truck's engine is running - so nothing swings anywhere on the
+            // first frame.
+            t.Yaw = body.transform.eulerAngles.y + TravelYaw;
             t.WantYaw = t.Yaw;
-            t.Pitch = PitchFor((MinRange + MaxRange) * 0.5f);
+            t.Pitch = TravelPitch;
             t.WantPitch = t.Pitch;
             Point(t);
             _tubes.Add(t);
@@ -1770,6 +1803,41 @@ namespace NextDayRevival
                 + MaxRange.ToString("0") + " m), same shell, no crew and no "
                 + "settlement behind it.");
             return t;
+        }
+
+        static Type _rccType;
+        static FieldInfo _rccEngine;
+        static bool _rccLooked;
+        static bool _rccWarned;
+
+        /// <summary>Is the drivable howitzer's own engine running? Read off
+        /// RCCCarControllerV2.engineRunning (docs/ai/REVERSE_ENGINEERING.md
+        /// 20.4) on the vehicle the gun body sits under. Defaults to true when
+        /// the field cannot be found, because a howitzer whose engine state is
+        /// unknown should rest on its cradle, not swing on a world bearing.</summary>
+        static bool EngineRunning(GameObject body)
+        {
+            if (!_rccLooked)
+            {
+                _rccLooked = true;
+                _rccType = RevivalPlugin.TypeByName("RCCCarControllerV2");
+                _rccEngine = _rccType == null ? null
+                    : AccessTools.Field(_rccType, "engineRunning");
+                if (_rccEngine == null && !_rccWarned)
+                {
+                    _rccWarned = true;
+                    RevivalPlugin.L.LogWarning("Mortar: RCCCarControllerV2.engineRunning "
+                        + "not found - a drivable howitzer's gun always rests on its "
+                        + "cradle instead of following the engine state.");
+                }
+            }
+            if (_rccEngine == null || body == null) return true;
+            Transform root = body.transform.root;
+            if (root == null) return true;
+            Component rcc = root.GetComponent(_rccType);
+            if (rcc == null) return true;
+            object v = _rccEngine.GetValue(rcc);
+            return !(v is bool) || (bool)v;
         }
 
         /// <summary>Give a mobile gun back. Safe with null, safe twice, and safe

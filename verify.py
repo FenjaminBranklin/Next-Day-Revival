@@ -1264,6 +1264,140 @@ def check_patrol_fall():
         bad("Patrol ground guard: a fallen vehicle can be recovered without limit")
 
 
+def check_patrol_traffic():
+    """[24] Ordinary patrol traffic and route discipline (static).
+
+    The reported defect had two halves, both about a patrol that is put down as
+    ONE editor composition, whose vehicles ignore each other's colliders:
+
+      1. The civilian patrol stood on the road with the tank INSIDE the APC it
+         drives with, and the pair neither moved nor fired. Nothing physical
+         pushed the hulls apart; an interpenetrating pair SHAKES, so the
+         speedometer read "moving" and the stuck timer never filled; and every
+         line of sight ended on the other hull, so no gun ever took a target.
+      2. The looter patrol's tank drove around in a wood its route does not go
+         near. Its line-up slot was measured on a straight line drawn BACKWARDS
+         from the head waypoint - which leaves the road at the first bend - and
+         the shoulder rays of the obstacle avoidance answered every tree of a
+         forest road with a fifth of a turn.
+
+    One guard per mistake. The driving itself stays an in-game acceptance item;
+    research/patrol_traffic_check.py compiles the decisions below and runs them
+    against a synthetic world (verify.py starts no subprocesses).
+    """
+    print("[24] Patrol traffic and route discipline (static)")
+    patrol_p = os.path.join(ROOT, "Revival.Patrol.cs")
+    if not os.path.exists(patrol_p):
+        bad("Patrol traffic: source file missing")
+        return
+    code = _code(io.open(patrol_p, encoding="utf-8").read())
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Patrol traffic: " + why)
+
+    # 1. Two hulls of ONE composition are eased apart - and no other pair,
+    #    because every other pair on the road is solid and is physics' business.
+    sep = _body(code, "static void PatrolSeparate(Unit u)")
+    need("other.PatrolGroupId != u.PatrolGroupId" in sep
+         and "Reach(u, away) + Reach(other, away) + PatrolOverlapGap" in sep
+         and "RoadUnder(want, t, out y, out normal)" in sep
+         and "PatrolSeparate(u);" in code,
+         "two overlapping hulls of one patrol are eased apart onto found ground",
+         "PatrolSeparate is gone or no longer separates the pair - a tank can "
+         "stand inside its own APC again")
+
+    # 2. The gap to the mate ahead is kept by the driver, because the hulls
+    #    cannot keep it themselves. Never behind a wreck, never head on, and
+    #    never for the rest of the session.
+    queue = _body(code, "static float QueueBehind(Unit u, Transform t, "
+                        "float want, float dt)")
+    need("if (ahead <= 0f || ahead > QueueLook) continue;" in queue
+         and "Vector3.Dot(forward, hers.normalized) < QueueSameWay" in queue
+         and "if (other.Died > 0f) continue;" in queue
+         and "u.Queued < QueuePatience" in queue
+         and "want = QueueBehind(u, t, want, dt);" in code,
+         "a patrol brakes for the mate ahead, but not for a wreck, not for "
+         "oncoming traffic and not forever",
+         "the driver no longer keeps the gap to its own composition mate")
+
+    # 3. Shaking in place is not driving. This is the test the speedometer
+    #    cannot do, and the one an interpenetrating pair fails.
+    prog = _body(code, "static bool NoProgress(Unit u, Vector3 pos)")
+    esc = _body(code, "static bool Escalate(Unit u, Vector3 pos)")
+    hold = _body(code, "static void HoldStill(Unit u)")
+    need("FlatDistance(pos, u.ProgressPos) > ProgressMetres" in prog
+         and "Time.time - u.ProgressAt >= ProgressSeconds" in prog
+         and "!slow && (u.ConvoyId != 0 || !NoProgress(u, pos))" in esc
+         and "MadeProgress(u, u.Car.transform.position)" in hold,
+         "ground covered, not the speedometer, decides that a patrol is stuck",
+         "the stuck escalation is back on the speedometer alone - a shaking "
+         "pair of hulls then holds a road for the whole session")
+
+    # 4. A warp target nothing is standing on. Dropping a stuck hull onto a
+    #    mate is the shortest way to weld two vehicles together there is.
+    free = _body(code, "static void Free(Unit u, Vector3 pos)")
+    back = _body(code, "static bool BackOnRoute(Unit u, Vector3 pos, float off)")
+    need("SpotTaken(u, target, FreeRoom)" in free
+         and "FlatDistance(r.P[to].Pos, pos) < clearOf" in free
+         and "SpotTaken(u, target, FreeRoom)" in back,
+         "no recovery warps a hull onto the spot another vehicle stands on",
+         "a stuck patrol can be warped into a mate, or straight back onto the "
+         "obstacle it was stuck against")
+
+    # 5. Off the recorded line for good - the leash - and a line-up measured
+    #    ALONG the road instead of across the country beside it.
+    leash = _body(code, "static bool Leashed(Unit u, Vector3 pos)")
+    slot = _body(code, "static bool LineupSlot(Route r, int start, float back, "
+                       "out Vector3 point,")
+    spawn = _body(code, "static void Spawn(Route src, bool auto)")
+    need("OffRoute(u.Route, u.Next, pos)" in leash
+         and "Time.time - u.OffRouteSince < LeashSeconds" in leash
+         and "BackOnRoute(u, pos, off)" in leash
+         and "if (Leashed(u, pos)) return;" in code,
+         "a patrol that has left its own recorded line is put back on it",
+         "nothing brings a patrol back out of the wood - driving off the route "
+         "is not being stuck, so no other timer would ever notice")
+    need("point = r.P[at].Pos - leg * (rest / len);" in slot
+         and "LineupSlot(r, start, RevivalConvoy.LineupGap * k," in spawn
+         and "firstWaypoint = nextWaypoint;" in spawn,
+         "the vehicles of one composition line up along the recorded road",
+         "the line-up is drawn as a straight line again - the tail of a "
+         "composition is then put down wherever that line leaves the road")
+
+    # 6. The shoulder rays. A forest road grazes them with every tree.
+    avoid = _body(code, "static float Avoid(Unit u, Transform t, float speed)")
+    need("if (near >= SideDodgeAt) return 0f;" in avoid
+         and "SideDodge * urgency" in avoid,
+         "only something the hull is about to scrape moves the wheel, gently",
+         "a shoulder ray answers every passing tree with a fixed turn again - "
+         "that is what walks a patrol off the road and into the wood")
+
+    # 7. The half of the report that outlives the driving fix: they did not
+    #    FIRE, because the other hull sat over the muzzle.
+    strahl = _body(code, "static GameObject Strahl(Unit u, Vector3 from, "
+                         "Vector3 dir, float range,")
+    welded = _body(code, "static bool Welded(Unit u, GameObject go)")
+    need("&& !Welded(u, go)" in strahl
+         and ">= WeldedWithin) continue;" in welded
+         and "go.transform.IsChildOf(other.Car.transform)" in welded,
+         "a gun looks through a hull it is standing inside, as it does through "
+         "its own bow plate",
+         "a hull standing in another one blinds its gun - the pair then "
+         "neither moves nor shoots")
+
+    # verify.py runs no subprocesses, so the executable proof only has to be
+    # in the repository (like research/patrol_fall_check.py for [18]).
+    if os.path.isdir(os.path.join(ROOT, "research")):
+        need(os.path.exists(os.path.join(ROOT, "research",
+                                         "patrol_traffic_check.py")),
+             "research/patrol_traffic_check.py is present",
+             "research/patrol_traffic_check.py is missing - the traffic "
+             "decisions of a patrol are unproven")
+
+
 def check_gas_launcher():
     """[14] Chemical launcher RG-Kh and its 30-minute gas cloud (static).
 
@@ -3195,6 +3329,7 @@ if __name__ == "__main__":
     check_convoy_ground_and_exit()
     check_convoy_column()
     check_patrol_fall()
+    check_patrol_traffic()
     check_mortar()
     check_arty_sync_authority()
     check_arty_battery()

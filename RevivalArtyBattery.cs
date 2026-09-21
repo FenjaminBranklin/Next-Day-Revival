@@ -387,6 +387,7 @@ namespace NextDayRevival
 
             // spotting and the mission
             public float SeenSince;         // when the current candidate came into view
+            public float LastSeenAt;        // last scan the candidate was actually found on
             public Vector3 SeenAt;
             public bool Sighting;
             public Vector3 Point;           // the reported point
@@ -2290,7 +2291,25 @@ namespace NextDayRevival
                 have = true;
             }
 
-            if (!have) { p.SeenSince = 0f; p.Candidate = null; return; }
+            // FIELD 2026-09-21: "erkennt immer noch nicht zuverlaessig, teilweise
+            // sogar regression". A drone circles at 16 m/s: it swings its own
+            // footprint across a stationary man in a couple of scans, a rise in
+            // the ground can drop him off a single 0.5 s sample, and the NPC
+            // scan list is walked in the same order every tick, so a single
+            // frame where a closer hostile briefly wins the "one candidate"
+            // slot used to zero the timer outright. A camera does not forget a
+            // man it saw half a second ago, so losing him for one scan is not
+            // losing him - only losing him for a real interval is.
+            const float ContactGrace = 1.5f;      // three scans at the 0.5 s cadence
+            if (!have)
+            {
+                if (p.LastSeenAt > 0f && now - p.LastSeenAt <= ContactGrace) return;
+                p.SeenSince = 0f;
+                p.Candidate = null;
+                p.LastSeenAt = 0f;
+                return;
+            }
+            p.LastSeenAt = now;
 
             // A man has to stay under the drone before the operator is sure of
             // him. Somebody who crosses the edge of the footprint is not a

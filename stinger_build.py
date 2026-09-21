@@ -20,8 +20,28 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(ROOT, "assets")
 SOURCE = os.path.join(ASSETS, "src", "fim-92_stinger.glb")
 CELL = 1024
-LAUNCHER_LENGTH = 1520.0 / 393.5
+# The real 1520 mm tube read as "viel zu riesig" once held: next to the LAW's
+# 890 mm (law_mesh.py, LAUNCHER_LENGTH's own former sibling constant) it stuck
+# out both ends of the grip pose. Held size now tracks the LAW instead of the
+# real-world tube; a Stinger reads as "about as big as the LAW", not 1.7x it.
+LAUNCHER_LENGTH = 950.0 / 393.5
 GRIP_TARGET = np.array([0.0, 0.624, -0.090])
+# The supplied glTF paints the launcher in a saturated toy green. Re-tint it
+# to the same cool gunmetal family as the TAC-50 (sniper50_texture.py's
+# receiver quarter, RGB ~81,83,87) instead of hue-shifting: keep the source's
+# shading/detail (baked ambient occlusion, panel lines) but replace its base
+# colour so the Stinger reads as the same weapon family as the TAC-50.
+GUNMETAL_BASE = np.array([80.0, 82.0, 88.0])
+
+
+def recolor_gunmetal(path, base=GUNMETAL_BASE):
+    image = Image.open(path).convert("RGB")
+    arr = np.asarray(image, np.float32) / 255.0
+    luma = arr[..., 0] * 0.299 + arr[..., 1] * 0.587 + arr[..., 2] * 0.114
+    detail = luma - float(luma.mean())
+    shade = np.clip(0.55 + detail * 1.35, 0.12, 1.35)
+    out = np.clip(base[None, None, :] / 255.0 * shade[..., None], 0.0, 1.0)
+    Image.fromarray((out * 255.0 + 0.5).astype(np.uint8), "RGB").save(path)
 
 
 def atlas(js, buffers, material_ids, name):
@@ -98,6 +118,7 @@ def main():
     js, buffers = gltf_read._load_glb(SOURCE)
     data = gltf_read.read(SOURCE, with_materials=True)
     launcher = part(data, [0, 1, 2], atlas(js, buffers, [0, 1, 2], "stinger"))
+    recolor_gunmetal(os.path.join(ASSETS, "stinger_diffuse.png"))
     positions = np.asarray(launcher.V)
     # The deep, narrow grip is spatially distinct from the forward battery.
     # Anchor its bounding-box centre, not the mesh box or the dense-face mean.

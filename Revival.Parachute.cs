@@ -68,6 +68,12 @@ namespace NextDayRevival
         public static ConfigEntry<bool> CfgEnabled, CfgConsume;
         public static ConfigEntry<float> CfgMinHeight;
 
+        /// <summary>True from the moment the canopy opens until WindSound sees
+        /// the player back near the ground. Read by WindSound, which is the
+        /// only thing outside this file that needs it - it decides whether the
+        /// high-altitude wind stays on for a man under a canopy.</summary>
+        internal static bool Falling;
+
         public static void BindConfig(ConfigFile cfg)
         {
             CfgEnabled = cfg.Bind("Parachute", "Enabled", true,
@@ -164,6 +170,7 @@ namespace NextDayRevival
             }
             if (CfgConsume == null || CfgConsume.Value)
                 Turret.TakeItem(ItemId, "Parachute");
+            Falling = true;
             say = Text.Open();
             RevivalPlugin.L.LogInfo("Parachute: canopy open at "
                 + Mathf.RoundToInt(height) + " m.");

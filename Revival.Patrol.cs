@@ -337,6 +337,28 @@ namespace NextDayRevival
             public Vector3 BypassPoint;
             public float BypassUntil;
 
+            // Seconds an ORDINARY patrol has been queueing behind a mate of its
+            // own composition (QueueBehind). Its own field, not Blocked: the
+            // convoy brake above clears Blocked on every step in which it does
+            // not fire, which for a patrol is every step there is.
+            public float Queued;
+
+            // Where this vehicle had got to, and when (MadeProgress/NoProgress).
+            // The stuck timer above counts seconds under 3 km/h, and two hulls
+            // that interpenetrate do not stand still - they SHAKE, because the
+            // physics engine pushes them apart every step. The speedometer
+            // therefore reads "moving" while the vehicle has not left the spot
+            // for minutes, which is how a welded pair held a road for a whole
+            // session. Ground covered is the honest measure.
+            public Vector3 ProgressPos;
+            public float ProgressAt;
+
+            // Time.time this vehicle was first found off its own recorded line,
+            // or 0 while it is on it (Leashed). Being off the road is not being
+            // stuck - a tank driving through a wood is moving perfectly well -
+            // so nothing else in this class would ever bring it back.
+            public float OffRouteSince;
+
             public float Died;           // Time.time the vehicle was killed
             public int CompositionVehicle = -1; // editor vehicle index, or legacy
             public List<RevivalComposition.CrewMan> CrewSnapshot;
@@ -611,6 +633,10 @@ namespace NextDayRevival
                     // other's colliders, so once the column is gone nothing
                     // physical keeps two hulls apart. This does.
                     ConvoySeparate(u);
+                    // The vehicles of one patrol composition ignore each other's
+                    // colliders too, and had nothing that did this for them -
+                    // which is how a tank came to stand inside its own APC.
+                    PatrolSeparate(u);
                     if (u.Deploy) { DeployStep(u); continue; }
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     Drive(u);
@@ -1343,6 +1369,80 @@ namespace NextDayRevival
         /// <summary>Seconds a remembered threat position is still worth facing.</summary>
         const float ThreatMemory = 90f;
 
+        // ------------------------------------------------- ordinary patrol traffic
+        //
+        //  The vehicles of one editor composition ignore each other's colliders
+        //  from the moment they are put down (see Spawn), exactly as a convoy
+        //  does, and for the same reason: a line-up must not explode and a
+        //  faster mate must not shove the one ahead off the road. The convoy
+        //  pays the price of that - physics can no longer separate two hulls
+        //  either - with ConvoyBlocked and ConvoySeparate. An ordinary patrol
+        //  had neither, which is the reported bug: a tank standing INSIDE the
+        //  APC it patrols with, the pair unable to drive and unable to see a
+        //  target past each other's plate. These five numbers are that price.
+
+        /// <summary>Metres of clear air between two hulls of one patrol group,
+        /// on top of both measured footprints. Small on purpose: this is an
+        /// overlap test, not a comfort distance, and a vehicle squeezing past
+        /// its own wreck must not be shoved off the road for it.</summary>
+        const float PatrolOverlapGap = 0.5f;
+
+        /// <summary>Metres ahead a patrol looks for the mate it is driving
+        /// behind, and the distance at which it stops closing up.</summary>
+        const float QueueLook = 26f;
+        const float QueueGap = 14f;
+
+        /// <summary>Metres a mate may be off this vehicle's nose line and still
+        /// count as the vehicle ahead rather than as passing traffic.</summary>
+        const float QueueLateral = 5f;
+
+        /// <summary>How much of one nose direction has to point the way of the
+        /// other for the two to be driving the SAME way. An out-and-back route
+        /// carries both directions on one road, and two vehicles that brake for
+        /// each other head on never move again.</summary>
+        const float QueueSameWay = 0.3f;
+
+        /// <summary>Seconds a patrol queues behind a mate before the ordinary
+        /// stuck escalation is allowed to treat the queue as a blocked road.
+        /// Without a limit, one vehicle that never moves again stops the whole
+        /// group for the rest of the session.</summary>
+        const float QueuePatience = 20f;
+
+        /// <summary>Metres a patrol has to cover inside
+        /// <see cref="ProgressSeconds"/> to count as driving. 10 m in 10 s is
+        /// 3.6 km/h - well under anything a working patrol does, and the one
+        /// test a pair of shaking, interpenetrating hulls cannot pass.</summary>
+        const float ProgressMetres = 10f;
+        const float ProgressSeconds = 10f;
+
+        /// <summary>Metres of clear air a stuck vehicle's warp target keeps from
+        /// the place it got stuck, and from every other hull on the road. The
+        /// first stops the warp dropping the hull straight back onto the vehicle
+        /// it is stuck against; the second stops two mates stuck at the same
+        /// obstacle being warped onto the same waypoint, which is the shortest
+        /// way to weld two vehicles together there is.</summary>
+        const float FreeClear = 15f;
+        const float FreeRoom = 12f;
+
+        /// <summary>Metres a patrol may be from its own recorded line, and the
+        /// seconds it may stay there, before it is put back on the road. The
+        /// recording IS the road: 35 m off it is a field or a wood.</summary>
+        const float LeashMetres = 35f;
+        const float LeashSeconds = 8f;
+
+        /// <summary>Metres inside which something the SHOULDER rays find - and
+        /// the centre ray does not - is worth steering away from, and how much
+        /// lock that is worth at contact. A forest road grazes those rays with
+        /// every tree; swerving a fifth of a turn for each one is what walked
+        /// patrols off the road and into the wood.</summary>
+        const float SideDodgeAt = 6f;
+        const float SideDodge = 0.35f;
+
+        /// <summary>Metres between two hull centres that mean "the same piece of
+        /// road", not "cover". Two patrol vehicles cannot stand this close
+        /// without overlapping; see Gun.Welded.</summary>
+        const float WeldedWithin = 6f;
+
         /// <summary>
         /// Send this convoy vehicle to a firing position and keep it there.
         ///
@@ -1697,6 +1797,179 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": slot "
                     + u.ColumnIndex + " eased out of an overlapping hull.");
             }
+        }
+
+        /// <summary>
+        /// The same for two hulls of one ORDINARY patrol, which is where the
+        /// user found them welded together.
+        ///
+        /// Only a pair that ignores each other's colliders is this method's
+        /// business - the vehicles of ONE editor composition, ghosted to each
+        /// other in <see cref="Spawn"/>. Any other pair on the road is solid and
+        /// is pushed apart by the physics engine itself; shoving those would
+        /// only steer them into the ditch.
+        ///
+        /// The clearance is an OVERLAP test and nothing more. Two hulls lie
+        /// inside each other when their centres are closer than the two
+        /// footprints measured in the direction that joins them - nose to tail
+        /// that is both half lengths, side by side both half widths - so a
+        /// vehicle squeezing past its own wreck is left alone while a tank
+        /// standing in an APC is eased out at walking pace, and only onto ground
+        /// a raycast actually found.
+        /// </summary>
+        static void PatrolSeparate(Unit u)
+        {
+            if (u.ConvoyId != 0 || u.Car == null || u.Column
+                || u.Died > 0f || u.Arrived || u.PatrolGroupId == 0) return;
+            if (u.ColumnLift <= 0f) ColumnFootprint(u);
+            Transform t = u.Car.transform;
+            Vector3 push = Vector3.zero;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == u || other.Car == null || other.Arrived) continue;
+                if (other.ConvoyId != 0 || other.PatrolGroupId != u.PatrolGroupId)
+                    continue;
+                // Exactly one of a pair gives way, or the two shove each other
+                // back and forth forever. A wreck never gives way at all, and
+                // the instance id is a stable order for as long as both hulls
+                // exist - which is exactly as long as this pair can overlap.
+                if (other.Died <= 0f
+                    && u.Car.GetInstanceID() < other.Car.GetInstanceID()) continue;
+                if (other.ColumnLift <= 0f) ColumnFootprint(other);
+                Vector3 delta = t.position - other.Car.transform.position;
+                delta.y = 0f;
+                float gap = delta.magnitude;
+                Vector3 away = gap > 0.05f ? delta * (1f / gap) : t.right;
+                away.y = 0f;
+                if (away.sqrMagnitude < 0.0001f) away = Vector3.forward;
+                away = away.normalized;
+                float clear = Reach(u, away) + Reach(other, away) + PatrolOverlapGap;
+                if (gap >= clear) continue;
+                push += away * (clear - gap);
+            }
+            if (push.sqrMagnitude < 0.0001f) return;
+
+            float step = Mathf.Min(push.magnitude, SeparateStep * Time.fixedDeltaTime);
+            Vector3 want = t.position + push.normalized * step;
+            float y;
+            Vector3 normal;
+            if (!RoadUnder(want, t, out y, out normal)) return;
+            Vector3 bottom = t.rotation * new Vector3(0f, -u.ColumnLift, 0f);
+            want.y = y - bottom.y + 0.15f;
+            t.position = want;
+            // Deliberately NOT progress: being eased out of another hull takes a
+            // second or two, and a pair this cannot free - one on ground the
+            // lookup refuses, say - must still reach the stuck escalation.
+            if (Time.time >= u.ColumnGroundLog)
+            {
+                u.ColumnGroundLog = Time.time + 10f;
+                RevivalPlugin.L.LogInfo("Patrol: a vehicle on " + u.Route.Name
+                    + " was eased out of a mate's hull.");
+            }
+        }
+
+        /// <summary>How far this hull reaches from its own centre in one flat
+        /// direction: half its width across, half its length along the nose, and
+        /// the honest mixture of the two in between. Enough to tell two hulls
+        /// that overlap from two that merely drive close.</summary>
+        static float Reach(Unit u, Vector3 direction)
+        {
+            if (u.Car == null) return 0f;
+            Vector3 nose = u.Car.transform.forward;
+            nose.y = 0f;
+            if (nose.sqrMagnitude < 0.0001f) return u.ColumnHalfLength;
+            float along = Mathf.Abs(Vector3.Dot(nose.normalized, direction));
+            return u.ColumnHalfWidth
+                 + (u.ColumnHalfLength - u.ColumnHalfWidth) * along;
+        }
+
+        /// <summary>Is any other vehicle this class knows standing at this point?
+        /// A warp target that is not is the whole difference between a patrol
+        /// that gets going again and a pair of hulls welded into each other.
+        /// Convoy vehicles count too: a patrol warped into a passing convoy is
+        /// the same bug with a different owner.</summary>
+        static bool SpotTaken(Unit self, Vector3 target, float room)
+        {
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == self || other.Car == null || other.Arrived) continue;
+                if (FlatDistance(target, other.Car.transform.position) < room)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Drive behind a group mate, not into it.
+        ///
+        /// The hulls of one patrol group pass through each other, so nothing
+        /// physical stops the second vehicle of a composition from ending up
+        /// inside the first the moment the first slows for a corner. This is
+        /// the brake that would have been unnecessary if they were solid: the
+        /// speed of the mate ahead while it is inside <see cref="QueueLook"/>,
+        /// and a stop once the gap is down to <see cref="QueueGap"/>.
+        ///
+        /// Only a mate driving the SAME way counts. On an out-and-back route the
+        /// other direction uses the same road, and two vehicles braking for each
+        /// other head on would stand there until the session ended.
+        ///
+        /// Waiting in a queue is not being stuck, so the timers are held back
+        /// while it lasts - but only for <see cref="QueuePatience"/> seconds.
+        /// After that the vehicle ahead is treated as what it has proved to be,
+        /// a blocked road, and the ordinary escalation may move this one past it.
+        /// </summary>
+        static float QueueBehind(Unit u, Transform t, float want, float dt)
+        {
+            if (u.ConvoyId != 0 || u.PatrolGroupId == 0) return want;
+            Vector3 forward = t.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) return want;
+            forward = forward.normalized;
+            Vector3 pos = t.position;
+
+            float slowest = -1f;
+            for (int i = 0; i < _units.Count; i++)
+            {
+                Unit other = _units[i];
+                if (other == u || other.Car == null || other.Arrived) continue;
+                if (other.ConvoyId != 0 || other.PatrolGroupId != u.PatrolGroupId)
+                    continue;
+                // A burning mate never moves again. Queueing behind that is
+                // standing still for nothing; the avoider steers round it and
+                // the hulls ignore each other anyway.
+                if (other.Died > 0f) continue;
+                Transform ot = other.Car.transform;
+                Vector3 delta = ot.position - pos;
+                delta.y = 0f;
+                float ahead = Vector3.Dot(delta, forward);
+                if (ahead <= 0f || ahead > QueueLook) continue;
+                Vector3 lateral = delta - forward * ahead;
+                if (lateral.sqrMagnitude > QueueLateral * QueueLateral) continue;
+                Vector3 hers = ot.forward;
+                hers.y = 0f;
+                if (hers.sqrMagnitude < 0.0001f) continue;
+                if (Vector3.Dot(forward, hers.normalized) < QueueSameWay) continue;
+
+                float allow = ahead <= QueueGap
+                    ? 0f
+                    : Mathf.Min(want, Velocity(other.Body).magnitude * 3.6f);
+                if (slowest < 0f || allow < slowest) slowest = allow;
+            }
+
+            if (slowest < 0f)
+            {
+                u.Queued = 0f;
+                return want;
+            }
+            u.Queued += dt;
+            if (u.Queued < QueuePatience)
+            {
+                u.Stuck = 0f;
+                MadeProgress(u, pos);
+            }
+            return slowest;
         }
 
         /// <summary>A firing position is clear of every other hull of this convoy
@@ -2774,9 +3047,37 @@ namespace NextDayRevival
                 string kind = composition == null
                     ? WagenKind(r) : composition.Vehicles[k].Kind;
                 // A configured patrol is a small road column. It keeps the
-                // ordinary patrol route behavior, but starts front-to-tail on
-                // the first-leg centreline instead of stacking vehicles.
-                Vector3 spot = r.P[start].Pos - ahead * (RevivalConvoy.LineupGap * k);
+                // ordinary patrol route behaviour, but starts front-to-tail
+                // BACK ALONG THE RECORDED ROUTE instead of on a straight line
+                // drawn backwards from the head: that line leaves the road at
+                // the first bend, and at 45 m a slot the third vehicle of a
+                // composition was put down ninety metres into whatever happened
+                // to be there - a field, a yard, a wood. Every slot also drives
+                // to the waypoint at the far end of ITS OWN leg, or the ones at
+                // the back would aim straight at the head's next corner and cut
+                // the road between.
+                Vector3 spot = r.P[start].Pos;
+                Vector3 face = ahead;
+                int firstWaypoint = (start + 1) % r.P.Count;
+                if (k > 0)
+                {
+                    Vector3 back;
+                    Vector3 dir;
+                    int nextWaypoint;
+                    if (LineupSlot(r, start, RevivalConvoy.LineupGap * k,
+                                   out back, out dir, out nextWaypoint))
+                    {
+                        spot = back;
+                        face = dir;
+                        firstWaypoint = nextWaypoint;
+                    }
+                    else
+                    {
+                        // A route too short to walk back that far. The straight
+                        // line is all there is; the driver closes the gap.
+                        spot = r.P[start].Pos - ahead * (RevivalConvoy.LineupGap * k);
+                    }
+                }
                 Vector3 pos;
                 if (!GroundSpot(spot, null, 1.6f, out pos))
                 {
@@ -2791,7 +3092,7 @@ namespace NextDayRevival
                 }
                 bool tank;
                 GameObject car = VehicleRegistry.Spawn(kind,
-                    pos, Quaternion.LookRotation(ahead, Vector3.up), out tank);
+                    pos, Quaternion.LookRotation(face, Vector3.up), out tank);
                 if (car == null)
                 {
                     for (int q = made.Count - 1; q >= 0; q--)
@@ -2810,7 +3111,8 @@ namespace NextDayRevival
                 u.Route = r;
                 u.Tank = tank;
                 u.Seite = r.Seite;
-                u.Next = (start + 1) % r.P.Count;
+                u.Next = firstWaypoint;
+                MadeProgress(u, pos);
                 u.CompositionVehicle = composition == null ? -1 : k;
                 u.CrewSnapshot = composition == null ? null : RevivalComposition.CrewOf(r.Name, k);
                 u.PatrolGroupId = groupId;
@@ -2834,6 +3136,52 @@ namespace NextDayRevival
                   + away.ToString("0") + Loc.T(" м от игрока", " m away")
                 : Loc.T("Патруль ", "Patrol ") + r.Name + " (" + r.Seite + ")"
                   + Loc.T(" запущен", " started"), 4f);
+        }
+
+        /// <summary>
+        /// The point <paramref name="back"/> metres BACK ALONG THE ROUTE from a
+        /// waypoint, the direction the road runs there, and the waypoint a
+        /// vehicle standing there drives to first.
+        ///
+        /// This is where the second and third vehicle of one composition line
+        /// up. Measured in metres along the recorded legs, so the spacing is
+        /// exact however the waypoints are distributed, and never off the road,
+        /// which a straight line drawn backwards from the head is as soon as the
+        /// road bends.
+        ///
+        /// False when the route is shorter than the distance asked for. It walks
+        /// at most one lap; a looping route wraps, and so does the mirrored
+        /// out-and-back one, because both are closed lines by the time a patrol
+        /// drives them.
+        /// </summary>
+        static bool LineupSlot(Route r, int start, float back, out Vector3 point,
+                               out Vector3 forward, out int next)
+        {
+            point = Vector3.zero;
+            forward = Vector3.forward;
+            next = start;
+            int n = r.P.Count;
+            if (n < 2 || back <= 0f) return false;
+            int at = ((start % n) + n) % n;
+            float rest = back;
+            for (int step = 0; step < n - 1; step++)
+            {
+                int prev = (at - 1 + n) % n;
+                Vector3 leg = r.P[at].Pos - r.P[prev].Pos;
+                leg.y = 0f;
+                float len = leg.magnitude;
+                if (len < 0.01f) { at = prev; continue; }
+                if (len >= rest)
+                {
+                    point = r.P[at].Pos - leg * (rest / len);
+                    forward = leg / len;
+                    next = at;
+                    return true;
+                }
+                rest -= len;
+                at = prev;
+            }
+            return false;
         }
 
         /// <summary>
@@ -3401,8 +3749,17 @@ namespace NextDayRevival
 
             u.Next = at;
             u.Stuck = 0f;
+            u.Queued = 0f;
+            u.OffRouteSince = 0f;
             u.Airborne = false;
             u.FallSince = 0f;
+            // The hull did not drive here, it was carried. Every clock that
+            // measures where it has got to starts again from this waypoint,
+            // exactly as after the two other recoveries (Free, BackOnRoute) -
+            // otherwise a hull that sank through the road next to its own
+            // waypoint is put back within ProgressMetres of where it fell and
+            // reads as "has not moved for ten seconds" on arrival.
+            MadeProgress(u, target);
             // Let it settle on the road before the guard judges it again.
             u.NextGround = Time.time + FallSeconds;
 
@@ -3446,6 +3803,10 @@ namespace NextDayRevival
         /// behaviour agent's hold-and-search.</summary>
         static void HoldStill(Unit u)
         {
+            // Waiting on purpose is not failing to get anywhere. Every
+            // legitimate standstill goes through here, so this is the one place
+            // the progress clock has to be told.
+            if (u.Car != null) MadeProgress(u, u.Car.transform.position);
             if (u.Rcc == null) return;
             SetFloat(u.Rcc, "gasInput", 0f);
             SetFloat(u.Rcc, "brakeInput", 1f);
@@ -3528,6 +3889,9 @@ namespace NextDayRevival
                 if (want <= 0f) want = RevivalPlugin.CfgPatrolSpeed.Value;
                 want *= CornerFactor(r, u.Next);
                 want = Mathf.Max(want, 12f);
+                // The mates of one composition pass through each other, so the
+                // gap to the vehicle ahead is kept by the driver or not at all.
+                want = QueueBehind(u, t, want, dt);
             }
 
             float steer = Mathf.Clamp(angle / FullLockAt, -1f, 1f);
@@ -3559,6 +3923,12 @@ namespace NextDayRevival
                 // the throttle happens to say. The old throttle condition let the
                 // obstacle avoidance reset this timer indefinitely.
                 if (groundKmh < 3f) u.Stuck += dt; else u.Stuck = 0f;
+                // --- still on its own road? -----------------------------------
+                // A vehicle in the woods is not stuck, so nothing above would
+                // ever bring it back. This does, and it runs first: the nearest
+                // waypoint is a better answer for a lost vehicle than the next
+                // one along from wherever its index happens to stand.
+                if (Leashed(u, pos)) return;
                 if (Escalate(u, pos)) return;
             }
 
@@ -3701,12 +4071,30 @@ namespace NextDayRevival
 
             if (wide < 0f && left < 0f && right < 0f) return 0f;
 
-            // Steer towards whichever side has more room. Both blocked and the
+            if (wide < 0f)
+            {
+                // Nothing in the PATH: only the shoulder rays found something.
+                // A forest road grazes those rays with every tree it passes,
+                // and the old answer was a fifth of a turn away from whichever
+                // side hit - held for as long as the trees lasted, which is the
+                // whole road. That is how a patrol ends up driving around in a
+                // wood its route never goes near. Now only something the hull
+                // is about to scrape counts, and it counts gently.
+                float nearLeft = left < 0f ? range : left;
+                float nearRight = right < 0f ? range : right;
+                float near = Mathf.Min(nearLeft, nearRight);
+                if (near >= SideDodgeAt) return 0f;
+                float urgency = 1f - near / SideDodgeAt;
+                return (nearLeft <= nearRight ? 1f : -1f) * SideDodge * urgency;
+            }
+
+            // Something IS in the path. Steer towards whichever side has more
+            // room, harder the closer it is. Both sides blocked and the
             // escalation takes over on its own, because we will stop moving.
             float freeLeft = left < 0f ? range : left;
             float freeRight = right < 0f ? range : right;
             float push = freeLeft > freeRight ? -0.6f : 0.6f;
-            if (wide >= 0f) push *= Mathf.Clamp01(1f - wide / range) + 0.4f;
+            push *= Mathf.Clamp01(1f - wide / range) + 0.4f;
             return push;
         }
 
@@ -4095,18 +4483,170 @@ namespace NextDayRevival
 
         /// <summary>A confirmed stop has one outcome: move forward along the
         /// route. There is deliberately no reverse or ramming stage. A blocked
-        /// patrol is worse for the game than a vehicle passing through scenery.</summary>
+        /// patrol is worse for the game than a vehicle passing through scenery.
+        ///
+        /// TWO things count as a confirmed stop. The speedometer under 3 km/h
+        /// for StuckSeconds is the old one and catches a vehicle against a wall.
+        /// <see cref="NoProgress"/> is the second, and it exists because the
+        /// first misses the case the user reported: hulls that lie inside each
+        /// other are shoved apart by the physics engine every step, so they
+        /// SHAKE, read as moving, and hold a road for as long as the session
+        /// lasts without the timer ever filling.</summary>
         static bool Escalate(Unit u, Vector3 pos)
         {
             float stuckFor = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolStuck.Value);
-            if (u.Stuck < stuckFor) return false;
+            bool slow = u.Stuck >= stuckFor;
+            // The convoy has its own spacing, braking and separation layer and
+            // its own reasons to stand still; this second test is the patrol's.
+            if (!slow && (u.ConvoyId != 0 || !NoProgress(u, pos))) return false;
             Free(u, pos);
             return true;
         }
 
+        /// <summary>This is where the vehicle has got to, as of now.</summary>
+        static void MadeProgress(Unit u, Vector3 pos)
+        {
+            u.ProgressPos = pos;
+            u.ProgressAt = Time.time;
+        }
+
+        /// <summary>Has this vehicle failed to get anywhere at all? True once it
+        /// has stayed inside <see cref="ProgressMetres"/> of the same spot for
+        /// <see cref="ProgressSeconds"/> while the driver was driving. Anything
+        /// that stands still on purpose goes through <see cref="HoldStill"/>,
+        /// which resets the clock, so waiting never reads as failing.</summary>
+        static bool NoProgress(Unit u, Vector3 pos)
+        {
+            if (u.ProgressAt <= 0f)
+            {
+                MadeProgress(u, pos);
+                return false;
+            }
+            if (FlatDistance(pos, u.ProgressPos) > ProgressMetres)
+            {
+                MadeProgress(u, pos);
+                return false;
+            }
+            return Time.time - u.ProgressAt >= ProgressSeconds;
+        }
+
+        /// <summary>
+        /// The leash: a patrol that has left its own recorded line for good.
+        ///
+        /// Everything else in this class measures whether the vehicle is MOVING.
+        /// A tank driving through a wood is moving perfectly well - it is simply
+        /// nowhere near the road it is supposed to patrol, and once the avoider
+        /// has walked it off the line nothing used to walk it back. It is put
+        /// back on the nearest waypoint that has ground and no other vehicle
+        /// standing on it; the log says how far out it was, because a patrol
+        /// that needs this often has a route with a bad stretch in it.
+        ///
+        /// Returns true when the vehicle was moved and the driver must stop for
+        /// this step.
+        /// </summary>
+        static bool Leashed(Unit u, Vector3 pos)
+        {
+            float off = OffRoute(u.Route, u.Next, pos);
+            if (off <= LeashMetres)
+            {
+                u.OffRouteSince = 0f;
+                return false;
+            }
+            if (u.OffRouteSince <= 0f)
+            {
+                u.OffRouteSince = Time.time;
+                return false;
+            }
+            if (Time.time - u.OffRouteSince < LeashSeconds) return false;
+            u.OffRouteSince = 0f;
+            return BackOnRoute(u, pos, off);
+        }
+
+        /// <summary>Flat distance from a position to the stretch of route the
+        /// vehicle is driving: the leg it is on and the one after it. Two legs
+        /// are enough - the driver never aims past the next corner - and it is
+        /// two dot products, which is what a per-step test may cost.</summary>
+        static float OffRoute(Route r, int next, Vector3 pos)
+        {
+            int n = r.P.Count;
+            if (n < 2) return 0f;
+            next = ((next % n) + n) % n;
+            float here = LegDistance(r.P[(next - 1 + n) % n].Pos, r.P[next].Pos, pos);
+            float after = LegDistance(r.P[next].Pos, r.P[(next + 1) % n].Pos, pos);
+            return Mathf.Min(here, after);
+        }
+
+        /// <summary>Flat distance from a point to one leg of a route.</summary>
+        static float LegDistance(Vector3 from, Vector3 to, Vector3 pos)
+        {
+            Vector3 leg = to - from;
+            leg.y = 0f;
+            Vector3 rel = pos - from;
+            rel.y = 0f;
+            float len = leg.sqrMagnitude;
+            if (len < 0.01f) return rel.magnitude;
+            float along = Mathf.Clamp01(Vector3.Dot(rel, leg) / len);
+            return (rel - leg * along).magnitude;
+        }
+
+        /// <summary>Put a lost vehicle back on the nearest waypoint of its own
+        /// route that has ground under it and room for a hull. False when the
+        /// route has no such waypoint near it right now - then the vehicle keeps
+        /// driving and the leash asks again in <see cref="LeashSeconds"/>, which
+        /// is better than warping it into whatever is standing there.</summary>
+        static bool BackOnRoute(Unit u, Vector3 pos, float off)
+        {
+            Route r = u.Route;
+            Vector3 target;
+            int at = GroundedWaypoint(r, Nearest(r, pos), 1.5f, !u.OneWay, out target);
+            for (int tries = 0; at >= 0 && tries < GroundTries
+                                && SpotTaken(u, target, FreeRoom); tries++)
+                at = GroundedWaypoint(r, at + 1, 1.5f, !u.OneWay, out target);
+            if (at < 0 || SpotTaken(u, target, FreeRoom))
+            {
+                if (Time.time >= u.FallLog)
+                {
+                    u.FallLog = Time.time + 10f;
+                    RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name
+                        + " is " + off.ToString("0") + " m off its route, but no "
+                        + "waypoint near it has free ground - it keeps driving.");
+                }
+                return false;
+            }
+
+            Stop(u.Body);
+            SetFloat(u.Rcc, "gasInput", 0f);
+            SetFloat(u.Rcc, "brakeInput", 0f);
+            SetFloat(u.Rcc, "steerInput", 0f);
+            SetFloat(u.Rcc, "handbrakeInput", 0f);
+            u.Car.transform.position = target;
+            u.Car.transform.rotation = Quaternion.LookRotation(
+                RouteDirection(r, at, u.OneWay).normalized, Vector3.up);
+
+            u.Next = at;
+            u.Stuck = 0f;
+            u.Queued = 0f;
+            MadeProgress(u, target);
+
+            RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name + " was "
+                + off.ToString("0") + " m off its own route for "
+                + LeashSeconds.ToString("0") + " s - put back on waypoint " + at
+                + ".");
+            return true;
+        }
+
         /// <summary>Put the vehicle on the first waypoint at least five metres
-        /// farther along the route, then face it down the following leg. Dense
-        /// recordings may need several points to cover those five metres.</summary>
+        /// farther along the route AND <see cref="FreeClear"/> metres from the
+        /// place it got stuck, then face it down the following leg. Dense
+        /// recordings may need several points to cover that distance.
+        ///
+        /// THE SECOND CONDITION IS THE FIX FOR "stuck on a vehicle". Whatever
+        /// stopped the hull is within a few metres of it, and a car parked on
+        /// the road stands ON the recorded line: five metres along that line is
+        /// the middle of the obstacle, so the warp used to drop the patrol
+        /// INSIDE the thing it was stuck against, every StuckSeconds, for the
+        /// rest of the session. Fifteen metres is past anything that is parked
+        /// there.</summary>
         static void Free(Unit u, Vector3 pos)
         {
             Route r = u.Route;
@@ -4115,7 +4655,13 @@ namespace NextDayRevival
             int to = from;
             float advanced = 0f;
             int steps = 0;
-            while (advanced < 5f && steps < n - 1)
+            // The clearance is the ordinary patrol's. A convoy keeps the five
+            // metres it always had: its own spacing, braking and firing-position
+            // layer (ConvoyBlocked, DeployRoom, DeployLane) already decides what
+            // a convoy vehicle may be moved onto.
+            float clearOf = u.ConvoyId == 0 ? FreeClear : 0f;
+            while (steps < n - 1
+                   && (advanced < 5f || FlatDistance(r.P[to].Pos, pos) < clearOf))
             {
                 // A one-way convoy never wraps back to waypoint 0: if it is stuck
                 // near the end there is nothing farther along, so it clamps to the
@@ -4128,25 +4674,29 @@ namespace NextDayRevival
                 steps++;
             }
 
-            // Only onto a waypoint that HAS ground. Warping the hull onto an
-            // authored point with nothing under it is what turned one stuck
-            // vehicle into a vehicle that falls, is warped up, and falls again
-            // every StuckSeconds for the rest of the session.
+            // Only onto a waypoint that HAS ground, and that nothing is standing
+            // on. Warping the hull onto an authored point with nothing under it
+            // is what turned one stuck vehicle into a vehicle that falls, is
+            // warped up, and falls again every StuckSeconds; warping it onto a
+            // point another vehicle occupies is how two hulls of one patrol end
+            // up inside each other, which neither of them can drive out of.
             Vector3 target;
             int landed = GroundedWaypoint(r, to, 1.5f, !u.OneWay, out target);
+            if (u.ConvoyId == 0)
+                for (int tries = 0; landed >= 0 && tries < GroundTries
+                                    && SpotTaken(u, target, FreeRoom); tries++)
+                    landed = GroundedWaypoint(r, landed + 1, 1.5f, !u.OneWay,
+                                              out target);
             if (landed < 0)
             {
-                HoldStill(u);
-                Roll(u.Body, Vector3.zero);
-                u.Stuck = 0f;
-                if (Time.time >= u.FallLog)
-                {
-                    u.FallLog = Time.time + 10f;
-                    RevivalPlugin.L.LogWarning("Patrol: stuck on " + r.Name
-                        + " near waypoint " + from + ", but no waypoint from "
-                        + to + " on has ground under it - holding where it "
-                        + "stands instead of warping into nothing.");
-                }
+                FreeHold(u, from, to, "has ground under it - holding where it "
+                    + "stands instead of warping into nothing");
+                return;
+            }
+            if (u.ConvoyId == 0 && SpotTaken(u, target, FreeRoom))
+            {
+                FreeHold(u, from, to, "is free of other vehicles - holding where "
+                    + "it stands instead of warping into one of them");
                 return;
             }
             to = landed;
@@ -4171,11 +4721,30 @@ namespace NextDayRevival
             u.Frees++;
             u.Next = to;
             u.Stuck = 0f;
+            u.Queued = 0f;
+            u.OffRouteSince = 0f;
+            MadeProgress(u, target);
 
             RevivalPlugin.L.LogWarning("Patrol: FREE on " + r.Name + " - stuck at "
                 + pos + " near waypoint " + from + ", moved "
                 + advanced.ToString("0.0") + " m forward onto waypoint " + to
                 + ". (" + u.Frees + " so far)");
+        }
+
+        /// <summary>The stuck recovery found nowhere to put the hull: hold it
+        /// where it stands and say why, at most once every ten seconds. Standing
+        /// still is a bad outcome; warping into nothing, or into another
+        /// vehicle, is a worse one and lasts the rest of the session.</summary>
+        static void FreeHold(Unit u, int from, int to, string why)
+        {
+            HoldStill(u);
+            Roll(u.Body, Vector3.zero);
+            u.Stuck = 0f;
+            if (Time.time < u.FallLog) return;
+            u.FallLog = Time.time + 10f;
+            RevivalPlugin.L.LogWarning("Patrol: stuck on " + u.Route.Name
+                + " near waypoint " + from + ", but no waypoint from " + to
+                + " on " + why + ".");
         }
 
         static float FlatDistance(Vector3 a, Vector3 b)
@@ -4784,7 +5353,9 @@ namespace NextDayRevival
                     Vector3 hit;
                     GameObject go = Turret.RaycastObject(start, dir, rest, out hit);
                     if (go == null) return null;
-                    if (u.Car == null || !go.transform.IsChildOf(u.Car.transform))
+                    if (u.Car == null
+                        || (!go.transform.IsChildOf(u.Car.transform)
+                            && !Welded(u, go)))
                     {
                         point = hit;
                         return go;
@@ -4793,6 +5364,34 @@ namespace NextDayRevival
                     start = hit + dir * 0.25f;
                 }
                 return null;
+            }
+
+            /// <summary>
+            /// Is this hit the hull of a vehicle this one is standing INSIDE?
+            ///
+            /// PatrolSeparate pulls an overlapping pair apart within a second or
+            /// two, but while they do overlap the other hull sits over the muzzle
+            /// and every line of sight ends on it: no target is ever taken and
+            /// the gun never fires. That was half of the reported bug - "they do
+            /// not move and they do not shoot" - and the half that outlives the
+            /// driving fix, because any warp can still put two hulls together for
+            /// a moment. A hull whose centre is inside <see cref="WeldedWithin"/>
+            /// metres of our own is not cover, it is the same piece of road, and
+            /// it is stepped over exactly like this vehicle's own bow plate.
+            /// </summary>
+            static bool Welded(Unit u, GameObject go)
+            {
+                if (u.Car == null || go == null) return false;
+                Vector3 mine = u.Car.transform.position;
+                for (int i = 0; i < _units.Count; i++)
+                {
+                    Unit other = _units[i];
+                    if (other == u || other.Car == null) continue;
+                    if (FlatDistance(mine, other.Car.transform.position)
+                        >= WeldedWithin) continue;
+                    if (go.transform.IsChildOf(other.Car.transform)) return true;
+                }
+                return false;
             }
 
             static void Spur(Unit u, Vector3 von, Vector3 bis)

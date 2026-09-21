@@ -346,7 +346,20 @@ namespace NextDayRevival
                     + "turned. That belongs in arty_import.py (BODY_FRAME), not here.");
             float donorLength = Mathf.Max(0.0001f, max.z - min.z);
             float donorHeight = Mathf.Max(0.0001f, max.y - min.y);
-            float scale = donorLength / modelLength
+            float scale = donorLength / modelLength;
+
+            // THE ROOF, NOT ONLY THE LENGTH. Scaling by length alone can leave
+            // the model's cab lower than the donor's - and the seats (Sitze)
+            // stay exactly where the donor put them, at the donor's own cab
+            // height, so a model that is too short there puts the driver's
+            // head above the visible roof: he looks straight out through it.
+            // The donor's own cab always cleared its own seats, so holding the
+            // model at least as tall as the donor's measured box is the cheap
+            // guarantee that its roof clears them too. Field report
+            // howitzer.png: the player's view through the roof while riding.
+            float modelHeight = Mathf.Max(0.0001f, b.size.y);
+            float heightScale = donorHeight / modelHeight;
+            scale = Mathf.Max(scale, heightScale)
                 * Mathf.Clamp(CfgFit == null ? 1f : CfgFit.Value, 0.2f, 5f);
 
             modell.transform.SetParent(parent, false);
@@ -368,7 +381,8 @@ namespace NextDayRevival
                 + min.z.ToString("0.00") + ".." + max.z.ToString("0.00") + " (L "
                 + donorLength.ToString("0.00") + ", H " + donorHeight.ToString("0.00")
                 + "); hull mesh " + b.size + ", factor " + scale.ToString("0.0000")
-                + "; " + hidden + " donor renderers hidden, " + groups
+                + " (height " + heightScale.ToString("0.0000") + "); " + hidden
+                + " donor renderers hidden, " + groups
                 + " LODGroups switched off. Turret "
                 + (turret == null ? "MISSING" : turret.name) + ", barrel "
                 + (barrel == null ? "MISSING" : barrel.name) + ".");

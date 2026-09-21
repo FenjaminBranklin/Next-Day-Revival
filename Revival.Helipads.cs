@@ -54,6 +54,10 @@ namespace NextDayRevival
         /// <summary>How far the skirt is driven into the slope at the rim, so
         /// no gap opens between the deck and the ground behind it.</summary>
         const float SkirtBite = 0.6f;
+        /// <summary>The black field the H sits on, as a fraction of the pad
+        /// radius. Sized to clear the H's own extent (see PaintMesh) with
+        /// margin, and to stay well inside the rim band.</summary>
+        const float FieldRadiusFactor = 0.55f;
 
         internal sealed class Pad
         {
@@ -334,6 +338,15 @@ namespace NextDayRevival
             MeshCollider collider = surface.AddComponent<MeshCollider>();
             collider.sharedMesh = body;
 
+            // The black field the H reads against - a real helipad marking,
+            // not a plain patch of concrete. Sits below the H/rim layer so the
+            // two never fight for the same depth.
+            GameObject field = new GameObject("field");
+            field.transform.SetParent(go.transform, false);
+            field.transform.localPosition = new Vector3(0f, 0.025f, 0f);
+            field.AddComponent<MeshFilter>().sharedMesh = FieldMesh(p.Radius * FieldRadiusFactor);
+            field.AddComponent<MeshRenderer>().sharedMaterial = FieldMaterial();
+
             // The paint sits a finger over the deck and carries no collider, so
             // nothing stands on the markings instead of on the pad.
             GameObject paint = new GameObject("markings");
@@ -379,6 +392,36 @@ namespace NextDayRevival
             mesh.uv = uvs;
             mesh.triangles = tris;
             mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        /// <summary>A plain filled disc, the black field the H is painted on.
+        /// Its own mesh and material so it can sit a hair below the H/rim
+        /// layer instead of fighting it for depth.</summary>
+        static Mesh FieldMesh(float radius)
+        {
+            int n = Segments;
+            Vector3[] verts = new Vector3[1 + n];
+            verts[0] = Vector3.zero;
+            for (int i = 0; i < n; i++)
+            {
+                float a = i * Mathf.PI * 2f / n;
+                verts[1 + i] = new Vector3(Mathf.Cos(a) * radius, 0f, Mathf.Sin(a) * radius);
+            }
+            int[] tris = new int[n * 3];
+            int t = 0;
+            for (int i = 0; i < n; i++)
+            {
+                tris[t++] = 0; tris[t++] = 1 + (i + 1) % n; tris[t++] = 1 + i;
+            }
+            Mesh mesh = new Mesh();
+            mesh.name = "NDR_HelipadField";
+            mesh.vertices = verts;
+            mesh.triangles = tris;
+            Vector3[] normals = new Vector3[verts.Length];
+            for (int i = 0; i < normals.Length; i++) normals[i] = Vector3.up;
+            mesh.normals = normals;
             mesh.RecalculateBounds();
             return mesh;
         }
@@ -432,7 +475,7 @@ namespace NextDayRevival
             tris.Add(b); tris.Add(b + 2); tris.Add(b + 3);
         }
 
-        static Material _concrete, _steel, _paint;
+        static Material _concrete, _steel, _paint, _field;
 
         static Material SurfaceMaterial(string kind)
         {
@@ -452,6 +495,13 @@ namespace NextDayRevival
             if (_paint == null) _paint = Make("NDR_HelipadPaint",
                 new Color(0.86f, 0.87f, 0.83f), 0f, 0.20f);
             return _paint;
+        }
+
+        static Material FieldMaterial()
+        {
+            if (_field == null) _field = Make("NDR_HelipadField",
+                new Color(0.04f, 0.04f, 0.045f), 0f, 0.05f);
+            return _field;
         }
 
         /// <summary>Same shader chain as ItemFactory.MakeMaterial and Arena: a
