@@ -245,21 +245,32 @@ namespace NextDayRevival
 
         public static void Spawn(Vector3 point, float radius)
         {
-            Blast(point, Mathf.Clamp(radius, 1.5f, 20f));
+            Blast(point, Mathf.Clamp(radius, 1.5f, 20f), 1f, 1f);
         }
 
         /// <summary>
-        /// The same ball, with the twenty-metre ceiling lifted. A grenade and a
-        /// 125 mm shell both belong under that ceiling, which is why Spawn keeps
-        /// it; eleven tonnes of airframe with its tanks aboard do not. Only the
-        /// helicopter crash calls this, so nothing else grows by it.
+        /// The same ball, with the twenty-metre ceiling lifted and the mixture
+        /// changed. A grenade and a 125 mm shell both belong under that ceiling,
+        /// which is why Spawn keeps it; eleven tonnes of airframe with its tanks
+        /// aboard do not.
+        ///
+        /// The two numbers are the order of 2026-09-22, "mehr feuer weniger
+        /// rauch", and they are arguments rather than edits to Ball and Rauch
+        /// for one reason: FireHook puts every explosion in the game through
+        /// Spawn, and a kerosene fire is not what a grenade should look like.
+        /// Only the helicopter crash calls this, so only the helicopter crash
+        /// gets half the smoke and half again the fire.
         /// </summary>
         public static void SpawnHeliBlast(Vector3 point, float radius)
         {
-            Blast(point, Mathf.Clamp(radius, 6f, 60f));
+            Blast(point, Mathf.Clamp(radius, 6f, 60f), 1.55f, 0.40f);
         }
 
-        static void Blast(Vector3 point, float radius)
+        /// <summary>The ball. `flame` and `smoke` weight the two halves of
+        /// it against each other: 1 and 1 is the mixture every explosion in the
+        /// game has always had, and the helicopter crash is the one caller that
+        /// passes anything else.</summary>
+        static void Blast(Vector3 point, float radius, float flame, float smoke)
         {
             if (RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value) return;
             if (_noShader) return;
@@ -282,10 +293,10 @@ namespace NextDayRevival
             GameObject root = new GameObject("NDR Feuerball");
             root.transform.position = point;
 
-            Ball(root, r, add);
-            Zungen(root, r, add);
-            Funken(root, r, add);
-            Rauch(root, r, blend);
+            Ball(root, r, add, flame);
+            Zungen(root, r, add, flame);
+            Funken(root, r, add, flame);
+            Rauch(root, r, blend, smoke);
             Blitz(root, r);
 
             UnityEngine.Object.Destroy(root, 8f);
@@ -647,25 +658,38 @@ namespace NextDayRevival
         /// looking like one (order of 2026-09-21: "das ist ein fluggeraet das
         /// muss richtig richtig gross brennen").
         ///
-        /// Two things make it the size it is. FIRST, the fire is laid out along
-        /// the AIRFRAME instead of sitting in one spot: the hull the flight
-        /// model uses is 38 world units long (7 wide, 11 tall, centred 3 ahead
-        /// of the origin), so four separate beds burn from the tail boom to the
-        /// nose and the machine burns end to end rather than showing one bonfire
-        /// in the middle of a long hull. SECOND, every number that a vehicle
-        /// wreck sets is raised: flames 2.4x the size at three times the rate,
-        /// a crown that throws tongues 2.5x higher, a smoke column half again
-        /// as wide and twice as opaque low down, and a light that reaches 95
-        /// units against the vehicle's 38.
+        /// FIRE, NOT SMOKE (order of 2026-09-22: "mehr feuer weniger rauch").
+        /// The first version of this had the ratio the wrong way round. Its
+        /// smoke was up to fourteen units wide at 0.97 alpha, seventeen
+        /// particles a second for twenty-two to thirty-four seconds of life -
+        /// a black wall that the flames underneath it were simply behind. The
+        /// column is now a column and not a lid: less than half the particles,
+        /// two thirds the size, a peak alpha of 0.60, and a life short enough
+        /// that it thins out instead of stacking up. The flames took the room
+        /// that freed: five beds instead of four, at 112 a second instead of
+        /// 84, and a crown a third bigger again.
+        ///
+        /// IT BURNS ALONG THE AIRFRAME, AND IT BURNS UPWARDS. Two different
+        /// frames, and they used to be the same one, which is why the fire and
+        /// the wreck never quite lined up. WHERE a bed sits is the machine's
+        /// business - the hull the flight model uses is 38 world units long, 7
+        /// wide and 11 tall with its centre 2.5 across, 5.5 up and 3 ahead of
+        /// the origin, and the five beds are placed in THAT frame, from the
+        /// tail boom to the nose, so they lie along the fuselage whichever way
+        /// the wreck is pointing and wherever on it the machine came to rest.
+        /// WHICH WAY a bed throws is not: fire goes up, so every emitter is
+        /// turned back to world upright after it is placed. Without that second
+        /// half a machine lying on its roof would fire its flames into the
+        /// ground, because a cone belongs to the object it is on.
         ///
         /// INSTANT, not "it gets there". The continuous emitters are fast enough
         /// to stand up inside the first tenth of a second, and the column - which
         /// on a vehicle needs some twenty seconds of 10 particles a second before
         /// it reads as a column - is given a one-shot puff of its own so there
-        /// is a body of black smoke over the wreck in the frame of the bang.
-        /// That puff is a separate, NON-LOOPING system and not a burst on the
-        /// column, because a burst on a looping system fires again every cycle
-        /// and the column would pulse for as long as it burns.
+        /// is a body of smoke over the wreck in the frame of the bang. That puff
+        /// is a separate, NON-LOOPING system and not a burst on the column,
+        /// because a burst on a looping system fires again every cycle and the
+        /// column would pulse for as long as it burns.
         ///
         /// The root is parented to the machine with no timer of its own;
         /// PlayerHeli.Wrecks takes the hull away and the fire goes with it.
@@ -686,18 +710,23 @@ namespace NextDayRevival
                 return false;
             }
 
+            // The machine's own frame, and nothing else: local position zero,
+            // local rotation none. Every offset below is therefore measured in
+            // the hull the flight model uses, and the fire lies on the wreck in
+            // any attitude instead of across it.
             GameObject root = new GameObject(HeliName);
-            root.transform.position = heli.transform.position + Vector3.up * 2.2f;
-            root.transform.rotation = Quaternion.identity;
             root.transform.parent = heli.transform;
+            root.transform.localPosition = Vector3.zero;
+            root.transform.localRotation = Quaternion.identity;
+            root.transform.localScale = Vector3.one;
 
-            // Along the fuselage: tail boom, rear cabin, front cabin, nose. The
-            // hull's own centre is 3 ahead of the origin, so the spread is not
-            // symmetric about zero.
-            HeliFlammen(root, add, new Vector3(-1.8f, 0f, -12.0f), 2.1f);
-            HeliFlammen(root, add, new Vector3( 1.9f, 0f,  -3.5f), 3.2f);
-            HeliFlammen(root, add, new Vector3(-2.0f, 0f,   5.5f), 3.2f);
-            HeliFlammen(root, add, new Vector3( 1.6f, 0f,  12.5f), 2.4f);
+            // Along the fuselage, at the height of its middle: tail boom, rear
+            // cabin, centre, front cabin, nose.
+            HeliFlammen(root, add, new Vector3(1.2f, 5.0f, -13.0f), 2.1f);
+            HeliFlammen(root, add, new Vector3(3.8f, 5.5f,  -5.0f), 3.2f);
+            HeliFlammen(root, add, new Vector3(1.4f, 5.5f,   2.0f), 3.4f);
+            HeliFlammen(root, add, new Vector3(3.4f, 5.5f,   9.0f), 3.2f);
+            HeliFlammen(root, add, new Vector3(2.0f, 5.0f,  16.0f), 2.3f);
             HeliFeuerkrone(root, add);
             HeliRauchsaule(root, blend);
             HeliRauchstoss(root, blend);
@@ -705,12 +734,13 @@ namespace NextDayRevival
 
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("PlayerHeli: aircraft fire attached to the "
-                    + "wreck - four flame beds, crown, column and opening puff.");
+                    + "wreck - five flame beds along the hull, crown, column and "
+                    + "opening puff, all standing upright on the airframe.");
             return true;
         }
 
         /// <summary>One burning bed on the airframe. The vehicle's version is
-        /// 0.94 to 2.06 units of flame at 28 a second; this is up to 7.7 at 84,
+        /// 0.94 to 2.06 units of flame at 28 a second; this is up to 9.4 at 112,
         /// and it does not float upwards - gravityModifier stays slightly
         /// negative so the flame stands on the hull instead of drifting off
         /// it.</summary>
@@ -718,82 +748,86 @@ namespace NextDayRevival
         {
             ParticleSystem ps = Neu(root, "Helikopterflammen", mat, true);
             ps.transform.localPosition = at;
+            Aufrecht(ps);
 
             ParticleSystem.MainModule main = ps.main;
             main.duration = 2f;
             main.loop = true;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(0.75f, 1.70f);
-            main.startSpeed = new ParticleSystem.MinMaxCurve(1.4f, 4.6f);
-            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.85f, r * 2.40f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.85f, 1.95f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(1.6f, 5.2f);
+            main.startSize = new ParticleSystem.MinMaxCurve(r * 1.00f, r * 2.75f);
             main.startColor = new ParticleSystem.MinMaxGradient(
                 new Color(1.00f, 0.90f, 0.42f, 1f),
                 new Color(1.00f, 0.28f, 0.02f, 1f));
-            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.12f);
+            main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.14f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 220;
+            main.maxParticles = 300;
 
             Kegel(ps, r * 0.70f, 26f);
-            Dauer(ps, 84f);
+            Dauer(ps, 112f);
             Farbverlauf(ps, false);
             Groesse(ps, 0.80f, 0.10f);
             ps.Play();
         }
 
         /// <summary>The tall part. A vehicle throws tongues 2.8 to 6.2 units a
-        /// second off a 1.5 radius; this throws them 6 to 14 off a 4.2, which is
-        /// what puts fire above the rotor head instead of level with the
+        /// second off a 1.5 radius; this throws them 6.5 to 15 off a 4.8, which
+        /// is what puts fire above the rotor head instead of level with the
         /// doors.</summary>
         static void HeliFeuerkrone(GameObject root, Material mat)
         {
             ParticleSystem ps = Neu(root, "Helikopterfeuerkrone", mat, true);
-            ps.transform.localPosition = new Vector3(0.5f, 1.4f, 1.5f);
+            ps.transform.localPosition = new Vector3(2.5f, 7.2f, 3.0f);
+            Aufrecht(ps);
 
             ParticleSystem.MainModule main = ps.main;
             main.duration = 3f;
             main.loop = true;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(2.6f, 5.2f);
-            main.startSpeed = new ParticleSystem.MinMaxCurve(6.0f, 14.0f);
-            main.startSize = new ParticleSystem.MinMaxCurve(4.2f, 8.8f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(2.8f, 5.8f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(6.5f, 15.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(4.8f, 9.8f);
             main.startColor = new ParticleSystem.MinMaxGradient(
                 new Color(1.00f, 0.96f, 0.62f, 1f),
                 new Color(1.00f, 0.22f, 0.02f, 1f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.22f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 420;
+            main.maxParticles = 560;
 
-            Kegel(ps, 3.2f, 19f);
-            Dauer(ps, 96f);
+            Kegel(ps, 3.4f, 19f);
+            Dauer(ps, 132f);
             Farbverlauf(ps, false);
             Groesse(ps, 0.85f, 0.07f);
             ps.Play();
         }
 
-        /// <summary>The landmark, a size up from the vehicle's: wider, blacker
-        /// and rising faster, so the column is readable across the map and not
-        /// only across the valley.</summary>
+        /// <summary>The landmark, and deliberately no more than that. It still
+        /// says where the machine went down from across the map, but at seven
+        /// and a half particles a second instead of seventeen it is a column of
+        /// smoke standing over the fire rather than a lid drawn over it.</summary>
         static void HeliRauchsaule(GameObject root, Material mat)
         {
             ParticleSystem ps = Neu(root, "Helikopterrauchsaule", mat, false);
-            ps.transform.localPosition = new Vector3(0.5f, 1.0f, 1.5f);
+            ps.transform.localPosition = new Vector3(2.5f, 8.0f, 3.0f);
+            Aufrecht(ps);
 
             ParticleSystem.MainModule main = ps.main;
             main.duration = 16f;
             main.loop = true;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(22f, 34f);
-            main.startSpeed = new ParticleSystem.MinMaxCurve(9.5f, 14f);
-            main.startSize = new ParticleSystem.MinMaxCurve(7.0f, 14.0f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(14f, 22f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(8.0f, 11.5f);
+            main.startSize = new ParticleSystem.MinMaxCurve(4.8f, 9.0f);
             main.startColor = new ParticleSystem.MinMaxGradient(
-                new Color(0.04f, 0.037f, 0.034f, 1f),
-                new Color(0.14f, 0.13f, 0.12f, 0.96f));
+                new Color(0.05f, 0.046f, 0.042f, 1f),
+                new Color(0.16f, 0.15f, 0.14f, 0.96f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.02f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 520;
+            main.maxParticles = 240;
 
-            Kegel(ps, 3.6f, 8f);
-            Dauer(ps, 17f);
+            Kegel(ps, 2.8f, 9f);
+            Dauer(ps, 7.5f);
             HeliRauchFarbe(ps);
             Groesse(ps, 0.55f, 3.40f);
 
@@ -804,33 +838,34 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// The reason the smoke is there in the first second and not in the
-        /// twentieth. One shot of 90 slow, long-lived particles at the moment of
-        /// the bang: the column above is still only seventeen particles a second
-        /// and needs half a minute to be a column, and the order was that the
-        /// fire arrives WITH the explosion, not after it.
+        /// The reason there is smoke in the first second and not only in the
+        /// twentieth. One shot at the moment of the bang: the column above is
+        /// seven particles a second and would need half a minute to be a
+        /// column. Thirty-four particles and not the ninety it started with -
+        /// enough to mark the crash, not enough to bury the fire it sits over.
         /// </summary>
         static void HeliRauchstoss(GameObject root, Material mat)
         {
             ParticleSystem ps = Neu(root, "Helikopterrauchstoss", mat, false);
-            ps.transform.localPosition = new Vector3(0.5f, 1.0f, 1.5f);
+            ps.transform.localPosition = new Vector3(2.5f, 8.0f, 3.0f);
+            Aufrecht(ps);
 
             ParticleSystem.MainModule main = ps.main;
             main.duration = 1.0f;
             main.loop = false;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(14f, 26f);
-            main.startSpeed = new ParticleSystem.MinMaxCurve(4.0f, 13.0f);
-            main.startSize = new ParticleSystem.MinMaxCurve(8.0f, 16.0f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(8f, 15f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(3.5f, 9.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(5.0f, 9.5f);
             main.startColor = new ParticleSystem.MinMaxGradient(
-                new Color(0.05f, 0.045f, 0.04f, 1f),
-                new Color(0.16f, 0.15f, 0.14f, 0.96f));
+                new Color(0.06f, 0.055f, 0.05f, 1f),
+                new Color(0.18f, 0.17f, 0.16f, 0.96f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.03f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 120;
+            main.maxParticles = 55;
 
-            Kegel(ps, 4.5f, 26f);
-            Ausbruch(ps, 90);
+            Kegel(ps, 3.6f, 26f);
+            Ausbruch(ps, 34);
             HeliRauchFarbe(ps);
             Groesse(ps, 0.70f, 3.00f);
 
@@ -840,9 +875,11 @@ namespace NextDayRevival
             ps.Play();
         }
 
-        /// <summary>Black for longer than the vehicle's, which starts greying at
-        /// 0.18 of a particle's life: kerosene soot stays dark most of the way
-        /// up, and the peak alpha is 0.97 against 0.86.</summary>
+        /// <summary>Kerosene soot is dark, but it is not a painted wall: the
+        /// peak alpha is 0.60 against the 0.97 this started at, and it thins
+        /// from two thirds of the way up instead of holding 0.84 nearly to the
+        /// end. What that buys is the fire underneath being visible THROUGH the
+        /// column rather than only in front of it.</summary>
         static void HeliRauchFarbe(ParticleSystem ps)
         {
             ParticleSystem.ColorOverLifetimeModule col = ps.colorOverLifetime;
@@ -850,14 +887,14 @@ namespace NextDayRevival
             Gradient g = new Gradient();
             g.SetKeys(
                 new GradientColorKey[] {
-                    new GradientColorKey(new Color(0.04f, 0.035f, 0.032f), 0.00f),
-                    new GradientColorKey(new Color(0.07f, 0.062f, 0.056f), 0.34f),
-                    new GradientColorKey(new Color(0.14f, 0.13f, 0.12f), 0.74f),
-                    new GradientColorKey(new Color(0.28f, 0.27f, 0.26f), 1.00f) },
+                    new GradientColorKey(new Color(0.05f, 0.045f, 0.040f), 0.00f),
+                    new GradientColorKey(new Color(0.09f, 0.082f, 0.075f), 0.34f),
+                    new GradientColorKey(new Color(0.18f, 0.17f, 0.16f), 0.74f),
+                    new GradientColorKey(new Color(0.34f, 0.33f, 0.32f), 1.00f) },
                 new GradientAlphaKey[] {
                     new GradientAlphaKey(0.00f, 0.00f),
-                    new GradientAlphaKey(0.97f, 0.03f),
-                    new GradientAlphaKey(0.84f, 0.74f),
+                    new GradientAlphaKey(0.60f, 0.05f),
+                    new GradientAlphaKey(0.44f, 0.62f),
                     new GradientAlphaKey(0.00f, 1.00f) });
             col.color = new ParticleSystem.MinMaxGradient(g);
         }
@@ -869,65 +906,84 @@ namespace NextDayRevival
         {
             GameObject go = new GameObject("Helikopterglut");
             go.transform.parent = root.transform;
-            go.transform.localPosition = new Vector3(0.5f, 1.2f, 1.5f);
+            go.transform.localPosition = new Vector3(2.5f, 6.5f, 3.0f);
 
             Light light = go.AddComponent<Light>();
             light.type = LightType.Point;
             light.color = new Color(1f, 0.44f, 0.12f, 1f);
             light.range = 95f;
-            light.intensity = 6.5f;
+            light.intensity = 7.4f;
             light.shadows = LightShadows.None;
+        }
+
+        /// <summary>Fire goes up. An emitter placed in the machine's frame
+        /// points wherever the machine does, and a wreck lying on its roof would
+        /// fire its flames into the ground; this turns the emitter back to world
+        /// upright after it has been placed, so WHERE it sits stays the hull's
+        /// business and WHICH WAY it throws stays gravity's.</summary>
+        static void Aufrecht(ParticleSystem ps)
+        {
+            if (ps != null) ps.transform.rotation = Quaternion.identity;
         }
 
         // -------------------------------------------------- die fuenf Teile
 
         /// <summary>The bang itself: bright, fast, gone in half a second.</summary>
-        static void Ball(GameObject root, float r, Material mat)
+        static void Ball(GameObject root, float r, Material mat, float flame)
         {
+            float mehr = Mathf.Lerp(1f, flame, 0.35f);
             ParticleSystem ps = Neu(root, "Ball", mat, true);
             ParticleSystem.MainModule main = ps.main;
             main.duration = 0.5f;
             main.loop = false;
             main.startLifetime = new ParticleSystem.MinMaxCurve(0.30f, 0.65f);
             main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.6f, r * 1.4f);
-            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.55f, r * 1.05f);
+            main.startSize = new ParticleSystem.MinMaxCurve(
+                r * 0.55f * mehr, r * 1.05f * mehr);
             main.startColor = new ParticleSystem.MinMaxGradient(
                 new Color(1.00f, 0.92f, 0.62f, 1f), new Color(1.00f, 0.62f, 0.16f, 1f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.12f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 200;
+            main.maxParticles = Anzahl(200, flame);
 
             Kugel(ps, r * 0.22f);
-            Ausbruch(ps, 34);
+            Ausbruch(ps, Anzahl(34, flame));
             Farbverlauf(ps, false);
             Groesse(ps, 0.45f, 1.25f);
         }
 
-        /// <summary>Tongues that stand and climb after the bang.</summary>
-        static void Zungen(GameObject root, float r, Material mat)
+        /// <summary>Tongues that stand and climb after the bang. They are the
+        /// part of the ball that is still there a second later, so a caller that
+        /// asks for more fire gets more of these and it gets them for
+        /// longer.</summary>
+        static void Zungen(GameObject root, float r, Material mat, float flame)
         {
+            float mehr = Mathf.Lerp(1f, flame, 0.35f);
+            float laenger = Mathf.Lerp(1f, flame, 0.30f);
             ParticleSystem ps = Neu(root, "Zungen", mat, true);
             ParticleSystem.MainModule main = ps.main;
             main.duration = 1.2f;
             main.loop = false;
-            main.startLifetime = new ParticleSystem.MinMaxCurve(0.8f, 1.7f);
+            main.startLifetime = new ParticleSystem.MinMaxCurve(
+                0.8f * laenger, 1.7f * laenger);
             main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.15f, r * 0.55f);
-            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.35f, r * 0.80f);
+            main.startSize = new ParticleSystem.MinMaxCurve(
+                r * 0.35f * mehr, r * 0.80f * mehr);
             main.startColor = new ParticleSystem.MinMaxGradient(
                 new Color(1.00f, 0.75f, 0.30f, 1f), new Color(1.00f, 0.40f, 0.08f, 1f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.28f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 120;
+            main.maxParticles = Anzahl(120, flame);
 
             Kegel(ps, r * 0.35f, 22f);
-            Ausbruch(ps, 18);
+            Ausbruch(ps, Anzahl(18, flame));
             Farbverlauf(ps, false);
             Groesse(ps, 0.70f, 0.15f);
         }
 
         /// <summary>Sparks. Small, fast, and the only part that falls.</summary>
-        static void Funken(GameObject root, float r, Material mat)
+        static void Funken(GameObject root, float r, Material mat, float flame)
         {
             ParticleSystem ps = Neu(root, "Funken", mat, true);
             ParticleSystem.MainModule main = ps.main;
@@ -940,33 +996,42 @@ namespace NextDayRevival
                 new Color(1.00f, 0.95f, 0.70f, 1f), new Color(1.00f, 0.55f, 0.15f, 1f));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(1.1f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 160;
+            main.maxParticles = Anzahl(160, flame);
 
             Kugel(ps, r * 0.15f);
-            Ausbruch(ps, 46);
+            Ausbruch(ps, Anzahl(46, flame));
             Farbverlauf(ps, false);
             Groesse(ps, 1.00f, 0.25f);
         }
 
-        /// <summary>What is left over and stands in the air for a while.</summary>
-        static void Rauch(GameObject root, float r, Material mat)
+        /// <summary>What is left over and stands in the air for a while. The
+        /// weight reaches all three of the things that make smoke read as too
+        /// much - how many particles there are, how big they are, and how solid
+        /// they are - because cutting only the count leaves the same wall with
+        /// holes in it. The alpha rides on startColor, which the gradient in
+        /// Farbverlauf is multiplied by.</summary>
+        static void Rauch(GameObject root, float r, Material mat, float smoke)
         {
+            float dichte = Mathf.Clamp01(smoke);
+            float gross = Mathf.Lerp(0.55f, 1f, dichte);
             ParticleSystem ps = Neu(root, "Rauch", mat, false);
             ParticleSystem.MainModule main = ps.main;
             main.duration = 1.5f;
             main.loop = false;
             main.startLifetime = new ParticleSystem.MinMaxCurve(1.8f, 3.6f);
             main.startSpeed = new ParticleSystem.MinMaxCurve(r * 0.15f, r * 0.45f);
-            main.startSize = new ParticleSystem.MinMaxCurve(r * 0.90f, r * 1.80f);
+            main.startSize = new ParticleSystem.MinMaxCurve(
+                r * 0.90f * gross, r * 1.80f * gross);
             main.startColor = new ParticleSystem.MinMaxGradient(
-                new Color(0.18f, 0.16f, 0.15f, 1f), new Color(0.42f, 0.39f, 0.36f, 1f));
+                new Color(0.18f, 0.16f, 0.15f, dichte),
+                new Color(0.42f, 0.39f, 0.36f, dichte));
             main.gravityModifier = new ParticleSystem.MinMaxCurve(-0.06f);
             main.startRotation = new ParticleSystem.MinMaxCurve(0f, 6.28f);
             main.simulationSpace = ParticleSystemSimulationSpace.World;
-            main.maxParticles = 80;
+            main.maxParticles = Anzahl(80, smoke);
 
             Kegel(ps, r * 0.5f, 28f);
-            Ausbruch(ps, 22);
+            Ausbruch(ps, Anzahl(22, smoke));
             Farbverlauf(ps, true);
             Groesse(ps, 0.60f, 1.80f);
 
@@ -1018,6 +1083,13 @@ namespace NextDayRevival
                 r.sortingFudge = vorn ? -2f : 0f;
             }
             return ps;
+        }
+
+        /// <summary>A particle count under a weight, never below four and never
+        /// above what a short burst can afford.</summary>
+        static int Anzahl(int basis, float gewicht)
+        {
+            return Mathf.Clamp(Mathf.RoundToInt(basis * gewicht), 4, 900);
         }
 
         static void Ausbruch(ParticleSystem ps, int anzahl)

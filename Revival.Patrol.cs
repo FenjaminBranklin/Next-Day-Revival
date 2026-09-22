@@ -2780,6 +2780,23 @@ namespace NextDayRevival
             float y;
             Vector3 normal;
             bool found = RoadUnder(line, u.Car.transform, out y, out normal);
+            // THE LOOKUP STARTS AT THE RECORDED LINE, AND THE LINE CAN BE FAR
+            // BELOW THE GROUND. RoadUnder rises at most 48 m over the point it
+            // is given before it casts down, so a route whose y is more than
+            // that under the real surface answers "nothing here" - and the rule
+            // further down then lets the hull KEEP the height it already has.
+            // For a vehicle that is being carried for good, that is a hull
+            // flying along its own route: the run of 2026-09-22 has one on R5 at
+            // hullY 517 over a routeY of 433, found=False, lap after lap, while
+            // the terrain it is drawn over lies 80 m lower. So before the hull
+            // is allowed to keep its height, the same lookup is asked once more
+            // FROM THAT HEIGHT, at the line's own x and z. One extra probe, only
+            // on a step that has already failed, and only when the hull is not
+            // where the line says it should be anyway.
+            if (!found && Mathf.Abs(u.Car.transform.position.y - line.y) > 3f)
+                found = RoadUnder(new Vector3(line.x, u.Car.transform.position.y,
+                                              line.z),
+                                  u.Car.transform, out y, out normal);
             if (!found) { y = line.y; normal = Vector3.up; }
             Vector3 flat = dir - normal * Vector3.Dot(dir, normal);
             if (flat.sqrMagnitude < 0.0001f) { flat = dir; normal = Vector3.up; }
@@ -4580,9 +4597,22 @@ namespace NextDayRevival
         /// obstacle is exactly the shape of mistake that put the driver at
         /// 3 FPS once (E-032). A vehicle, an NPC and a player all carry their
         /// marker component within a few levels of any collider they own.
+        ///
+        /// THE ONE COLLIDER THAT BREAKS THAT RULE IS A RAGDOLL BONE. The game
+        /// hangs a collider on every bone of a character - that is what a bullet
+        /// and an explosion actually hit (Revival.Crew.cs: ExplosionPhysicsEffect
+        /// damages an NPC through a collider tagged `RagdollBone`, the head
+        /// through `BloodHead`) - and a bone sits at the bottom of a skeleton,
+        /// far more than six levels under the NPC_AI2 the walk looks for. So the
+        /// walk answered "not alive" for a man's chest, and the patrol treated
+        /// his limbs as scenery: the run of 2026-09-22 has a technical ghosting
+        /// a rider's chest, shin and upper arm out of its way, fifteen to
+        /// twenty-four of them at every spawn. The tag is asked FIRST, because
+        /// it is one native compare and it is the exact marker.
         /// </summary>
         static bool Lebendig(Transform t)
         {
+            if (Knochen(t)) return true;
             Type[] typen = Marker();
             for (int hoehe = 0; hoehe < 6 && t != null; hoehe++)
             {
@@ -4594,6 +4624,42 @@ namespace NextDayRevival
                 t = t.parent;
             }
             return false;
+        }
+
+        /// <summary>Is this collider a piece of a character's ragdoll?
+        ///
+        /// `CompareTag` is the non-allocating test, and it THROWS when the tag
+        /// it is given is not defined in the build - so each of the two names is
+        /// tried on its own and gives up on its own. A build that knows neither
+        /// falls back to the marker walk, which is exactly what happened before
+        /// this test existed.</summary>
+        static int _tagBone, _tagHead;   // 0 unknown, 1 usable, -1 not defined
+
+        static bool Knochen(Transform t)
+        {
+            if (t == null) return false;
+            if (_tagBone >= 0 && Markiert(t, "RagdollBone", ref _tagBone)) return true;
+            if (_tagHead >= 0 && Markiert(t, "BloodHead", ref _tagHead)) return true;
+            return false;
+        }
+
+        static bool Markiert(Transform t, string tag, ref int state)
+        {
+            try
+            {
+                bool hit = t.CompareTag(tag);
+                state = 1;
+                return hit;
+            }
+            catch
+            {
+                state = -1;
+                RevivalPlugin.L.LogWarning("Patrol: the tag " + tag + " is not "
+                    + "defined in this build - a man's limbs are told from "
+                    + "scenery by the marker walk alone, which cannot reach a "
+                    + "collider deeper than six levels under his NPC_AI2.");
+                return false;
+            }
         }
 
         static Type[] _marker;

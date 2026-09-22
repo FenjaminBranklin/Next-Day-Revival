@@ -1396,29 +1396,28 @@ namespace NextDayRevival
 
         /// <summary>
         /// The visible half of a crash, run on EVERY client: the bang, the
-        /// fire, a silent rotor, the broken airframe, and the hull put down ON
-        /// THE ATTITUDE IT ARRIVED WITH.
+        /// fire, a silent rotor, the broken airframe, and the hull LYING ON THE
+        /// GROUND where it came down.
         ///
-        /// THE ATTITUDE IS THE POINT (order of 2026-09-21). Until now this
-        /// method threw the arrival away: it read the heading, rebuilt the
-        /// rotation from it with a fixed six degrees of nose and eleven of bank,
-        /// and wrote that in one frame. So a machine that came down inverted, on
-        /// its side or nose first stood itself up the instant it touched - which
-        /// is the glitch that was reported, and it was in one line. The
-        /// rotation is now left exactly as the fall or the flight left it, and
-        /// HeliWreckSettle carries it the rest of the way over in the direction
-        /// it was ALREADY leaning. A machine that arrives across the ground ends
-        /// up lying across the ground.
+        /// WHERE IT COMES DOWN IS WHERE IT STAYS (order of 2026-09-21). Until
+        /// then this method threw the arrival away: it read the heading, rebuilt
+        /// the rotation from it with a fixed six degrees of nose and eleven of
+        /// bank, and wrote that in one frame. So a machine that came down
+        /// inverted, on its side or nose first stood itself up the instant it
+        /// touched. The rotation is now left to HeliWreckSettle, which keeps the
+        /// heading, keeps the ground track and keeps the side the machine went
+        /// over on, and lays the fuselage down along the ground it is lying on.
         ///
-        /// Two consequences follow from keeping the attitude. First, the origin
-        /// is no longer the lowest point of the hull: a machine on its flank
-        /// hangs half its width below its own transform, so the height comes
-        /// from the hull box's lowest CORNER (Settle.Rest) instead of from the
-        /// floor alone. Second, the pose must be left alone from here on, so the
-        /// Photon interpolator is switched off on every peer - a wreck is not
-        /// streamed, and without this the host's last piloted pose would pull a
-        /// remote client's wreck upright again a moment after it lands, which
-        /// would look exactly like the bug this change removes.
+        /// Two consequences follow. First, the origin is no longer the lowest
+        /// point of the hull: a machine on its flank hangs half its width below
+        /// its own transform, and a machine on its roof hangs its whole height,
+        /// so the height is read from the hull box's CORNERS against the ground
+        /// under each of them (Settle.Rest) instead of from the floor alone.
+        /// Second, the pose must be left alone from here on, so the Photon
+        /// interpolator is switched off on every peer - a wreck is not streamed,
+        /// and without this the host's last piloted pose would pull a remote
+        /// client's wreck upright again a moment after it lands, which would
+        /// look exactly like the bug this change removes.
         ///
         /// The bang is louder than a vehicle's and the fire is bigger, and both
         /// start in THIS frame - the crash sound moved here from the abandoned
@@ -1436,13 +1435,17 @@ namespace NextDayRevival
                 if (e != null) e.Kill();
                 Interpolator(go, false);
 
+                // The broken airframe FIRST and the settling after it:
+                // the settle measures what is DRAWN before it accepts
+                // that the wreck is on the ground, and what is drawn is
+                // the swapped mesh, not the intact prefab it replaced.
+                HeliWreckModel.Apply(go);
+
                 Transform tr = go.transform;
                 float floor;
                 if (!Floor(tr.position, out floor)) floor = tr.position.y;
                 HeliWreckSettle settle = go.AddComponent<HeliWreckSettle>();
                 settle.Begin(floor);
-
-                HeliWreckModel.Apply(go);
 
                 // The ball is thrown from the middle of the cabin rather than
                 // from the contact point: a 22-unit fireball centred on the
@@ -2642,31 +2645,59 @@ namespace NextDayRevival
     }
 
     /// <summary>
-    /// How a wreck comes to rest, and the answer to the oldest complaint about
-    /// this feature: the fall looked right and the landing did not, because the
-    /// landing threw the fall away and rebuilt a level pose from the heading.
+    /// How a wreck comes to rest, and the answer to two complaints in a row.
     ///
-    /// This component never levels anything. It takes the rotation the machine
-    /// arrived with and moves it FURTHER in the direction it was already
-    /// leaning, by at most thirty-two degrees of bank and fourteen of nose, over
-    /// eight tenths of a second. Eleven tonnes that touch down banked do not
-    /// stand up; they go over onto that side, and then they stop. Three cases
-    /// are left exactly as they arrived: a machine that arrived level (under six
-    /// degrees - there is nothing to slump), one already past a hundred and
-    /// fifty degrees (it came down inverted and it stays inverted), and one
-    /// already lying flatter than the hundred-and-eighteen-degree stop.
+    /// The FIRST one (2026-09-21) was that the landing threw the fall away: it
+    /// rebuilt a level pose out of the heading, so a machine that came down
+    /// inverted stood itself up the instant it touched. That was answered by
+    /// keeping the arrival rotation - and keeping ALL of it is what produced the
+    /// SECOND one (2026-09-22): "das wrack schwebt mehrere meter ueber dem
+    /// boden". The field log says why in a single line. The machine arrived at
+    /// 38 degrees of nose and 163 of bank; the old code drove the nose eleven
+    /// degrees FURTHER down and then put the deepest corner of a thirty-eight
+    /// unit hull box on the floor. A box that long, stood on one corner, holds
+    /// its own origin some sixteen units - six metres - into the air. The wreck
+    /// was exactly where the arithmetic asked for: balanced on the tip of its
+    /// nose.
     ///
-    /// The height cannot come from the floor alone once the attitude is kept. A
-    /// hull on its flank hangs half its width below its own transform origin,
-    /// which sits near the gear plane, so the lift is read from the LOWEST
-    /// CORNER of the same hull box Prepare builds - eight corners through the
-    /// current rotation, and the deepest one is put on the floor. Level, that
-    /// corner is the gear plane and the lift is zero, so an ordinary wreck sits
-    /// exactly where it always did.
+    /// Eleven tonnes do not balance, they LIE. The fuselage goes flat along the
+    /// ground and the machine ends up on its skids, on one of its flanks or on
+    /// its roof - whichever of the four the bank it arrived with is nearest to.
+    /// That is what this component does now, and it is also what keeps the first
+    /// complaint answered: the heading is untouched, the side it went over on is
+    /// the side it arrived on, the place is the place it came down in, and a few
+    /// degrees of the arrival lean are left in so the result is not machine-flat.
+    ///
+    ///   yaw    exactly as it arrived, and so is the ground track
+    ///   nose   the arrival nose relaxed to at most five degrees
+    ///   bank   the nearest of 0, +-90 and 180, plus half the lean it arrived
+    ///          with, up to six degrees
+    ///
+    /// GROUND, NOT SEA LEVEL. The pose is tilted onto the slope the machine is
+    /// lying on, read from four floor samples around it, because a hull lying
+    /// flat on a hillside has one end of itself in the air otherwise - which is
+    /// the same float by another route. The height is not one sample either:
+    /// each of the eight hull-box corners is measured against the floor AT ITS
+    /// OWN PLACE and the HIGHEST of those answers wins, so the machine rests on
+    /// its highest contact the way a rigid body does and never hangs over a
+    /// rise. The last few centimetres are given away on purpose - a hull resting
+    /// exactly tangent to the height data shows daylight under itself on every
+    /// bump, one bedded slightly into the ground does not.
+    ///
+    /// The last word belongs to what is DRAWN, once, when the movement is over:
+    /// see Drop. The hull box is a measurement of the INTACT prefab, and the
+    /// wreck is a different mesh swapped into that prefab's renderers. If the
+    /// swapped mesh sits higher in its own space the box says "down" while the
+    /// player sees a machine hanging in the air, so Drop measures the mesh
+    /// renderers themselves and closes whatever gap is left. It can only ever
+    /// move the wreck DOWN.
     /// </summary>
     public sealed class HeliWreckSettle : MonoBehaviour
     {
-        const float Seconds = 0.8f;
+        const float Seconds = 1.1f;
+
+        // How far the hull is bedded into the ground at rest, in metres.
+        const float Bed = 0.15f;
 
         // The hull box of Prepare, in the machine's own units: centre and half
         // size of the 7 x 11 x 38 cabin whose centre sits 2.5 across, 5.5 up
@@ -2674,9 +2705,12 @@ namespace NextDayRevival
         static readonly Vector3 Centre = new Vector3(2.5f, 5.5f, 3f);
         static readonly Vector3 Half = new Vector3(3.5f, 5.5f, 19f);
 
+        readonly float[] _under = new float[8];
+
         Quaternion _from, _to;
-        float _floor, _t;
-        bool _begun;
+        Vector3 _slope = Vector3.up;
+        float _floor, _t, _arrivedAt, _over;
+        bool _begun, _dropped;
 
         internal void Begin(float floor)
         {
@@ -2684,19 +2718,25 @@ namespace NextDayRevival
             _begun = true;
             _floor = floor;
             _from = transform.rotation;
+            _arrivedAt = transform.position.y;
 
             Quaternion heading;
             float pitch, roll, spin;
             Lean(_from, out heading, out pitch, out roll, out spin);
-            _to = heading * Quaternion.Euler(
-                Slump(pitch, 0.30f, 14f), spin, Slump(roll, 0.55f, 32f));
+
+            float nose = Flat(pitch);
+            float bank = Over(roll);
+            _to = Slope(transform.position)
+                  * heading * Quaternion.Euler(nose, spin, bank);
+            Under();
             Rest();
 
             if (RevivalPlugin.L != null)
-                RevivalPlugin.L.LogInfo("PlayerHeli: wreck came to rest at "
-                    + pitch.ToString("0") + " deg nose, " + roll.ToString("0")
-                    + " deg bank - the attitude it arrived with, settling to "
-                    + Slump(roll, 0.55f, 32f).ToString("0") + " deg.");
+                RevivalPlugin.L.LogInfo("PlayerHeli: wreck arrived at "
+                    + pitch.ToString("0") + " deg nose and " + roll.ToString("0")
+                    + " deg bank, lies down at " + nose.ToString("0") + " / "
+                    + bank.ToString("0") + " deg on ground tilted "
+                    + Vector3.Angle(Vector3.up, _slope).ToString("0") + " deg.");
         }
 
         void Update()
@@ -2704,33 +2744,146 @@ namespace NextDayRevival
             if (!_begun) return;
             _t += Mathf.Min(Time.deltaTime, 0.1f);
             float u = Mathf.Clamp01(_t / Seconds);
-            transform.rotation = Quaternion.Slerp(_from, _to, 1f - (1f - u) * (1f - u));
+            _over = 1f - (1f - u) * (1f - u);
+            transform.rotation = Quaternion.Slerp(_from, _to, _over);
             Rest();
-            if (u >= 1f) UnityEngine.Object.Destroy(this);
+            if (u < 1f) return;
+            Drop();
+            UnityEngine.Object.Destroy(this);
         }
 
-        /// <summary>Put the deepest corner of the hull on the floor, leaving the
-        /// ground track alone: a wreck settles, it does not slide.</summary>
+        /// <summary>The floor under each of the eight hull corners, in the pose
+        /// the wreck is settling INTO. Eight samples once and not eight a frame:
+        /// the machine does not move sideways while it settles, so the answer
+        /// that counts is the one for the attitude it ends in.</summary>
+        void Under()
+        {
+            Vector3 at = transform.position;
+            Vector3 scale = transform.lossyScale;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 off = _to * Vector3.Scale(Corner(i), scale);
+                float floor;
+                _under[i] = PlayerHeli.CrashFloor(
+                    new Vector3(at.x + off.x, at.y, at.z + off.z), out floor)
+                    ? floor : _floor;
+            }
+        }
+
+        /// <summary>
+        /// Put the hull on the ground that is really under it. Each corner says
+        /// how high the machine would have to sit for that corner to stand on
+        /// its own floor, and the highest of the eight answers is the one the
+        /// machine obeys. The ground track is never touched: a wreck settles, it
+        /// does not slide.
+        ///
+        /// The height is on the SAME eased number as the rotation, and it has to
+        /// be. The answer for the pose a machine ARRIVES in is not the answer
+        /// for the pose it ends in - a hull that touches down nose first stands
+        /// six metres tall for as long as it is standing on its nose - so a
+        /// height written straight out would jump in the frame of the bang and
+        /// then sink. Going over is one movement: the machine rolls off the
+        /// attitude it hit the ground with and onto the one it keeps, and its
+        /// origin rises or falls with the roll, which is what toppling is.
+        /// </summary>
         void Rest()
         {
             Vector3 at = transform.position;
-            at.y = _floor + Lift(transform.rotation, transform.lossyScale);
+            Vector3 scale = transform.lossyScale;
+            Quaternion rot = transform.rotation;
+            float best = 0f;
+            for (int i = 0; i < 8; i++)
+            {
+                float y = _under[i] - (rot * Vector3.Scale(Corner(i), scale)).y;
+                if (i == 0 || y > best) best = y;
+            }
+            at.y = Mathf.Lerp(_arrivedAt, best - Bed * PlayerHeli.K, _over);
             transform.position = at;
         }
 
-        internal static float Lift(Quaternion rot, Vector3 scale)
+        /// <summary>
+        /// The one check that cannot be argued with, run once when the machine
+        /// has stopped moving: whatever is DRAWN must touch the ground. The box
+        /// above belongs to the intact prefab; HeliWreckModel has since swapped
+        /// a different mesh into those renderers, and a mesh whose own origin
+        /// sits lower than the one it replaced leaves the whole wreck in the
+        /// air. So the mesh renderers are measured - particle renderers are not
+        /// MeshRenderers and the fire cannot get into this - and anything still
+        /// standing clear of the highest ground under the hull is lowered by
+        /// exactly that gap. Never raised: a wreck bedded into a hillside is
+        /// what a crash looks like, a floating one is not.
+        /// </summary>
+        void Drop()
         {
-            float lowest = 0f;
-            for (int i = 0; i < 8; i++)
+            if (_dropped) return;
+            _dropped = true;
+            try
             {
-                Vector3 corner = new Vector3(
-                    Centre.x + ((i & 1) == 0 ? -Half.x : Half.x),
-                    Centre.y + ((i & 2) == 0 ? -Half.y : Half.y),
-                    Centre.z + ((i & 4) == 0 ? -Half.z : Half.z));
-                float y = (rot * Vector3.Scale(corner, scale)).y;
-                if (y < lowest) lowest = y;
+                MeshRenderer[] drawn = GetComponentsInChildren<MeshRenderer>(false);
+                bool any = false;
+                float bottom = 0f;
+                for (int i = 0; i < drawn.Length; i++)
+                {
+                    if (drawn[i] == null || !drawn[i].enabled) continue;
+                    float b = drawn[i].bounds.min.y;
+                    if (!any || b < bottom) bottom = b;
+                    any = true;
+                }
+                if (!any) return;
+
+                float ground = _under[0];
+                for (int i = 1; i < 8; i++) if (_under[i] > ground) ground = _under[i];
+                float gap = bottom - ground;
+                if (gap <= 0.1f * PlayerHeli.K) return;
+
+                Vector3 at = transform.position;
+                at.y -= gap;
+                transform.position = at;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogInfo("PlayerHeli: the drawn wreck stood "
+                        + (gap / PlayerHeli.K).ToString("0.0") + " m clear of its "
+                        + "ground - the hull box does not fit the swapped mesh, "
+                        + "and the wreck was put down the rest of the way.");
             }
-            return -lowest;
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("PlayerHeli wreck drop: " + ex.Message);
+            }
+        }
+
+        /// <summary>The ground under the wreck as a tilt, from four floor
+        /// samples five metres out. Steep ground is capped at twenty-eight
+        /// degrees, because past that the hull would stand on the slope like a
+        /// signpost instead of lying on it.</summary>
+        Quaternion Slope(Vector3 at)
+        {
+            _slope = Vector3.up;
+            float e = 5f * PlayerHeli.K;
+            float west, east, south, north;
+            if (!PlayerHeli.CrashFloor(at + new Vector3(-e, 0f, 0f), out west)
+                || !PlayerHeli.CrashFloor(at + new Vector3(e, 0f, 0f), out east)
+                || !PlayerHeli.CrashFloor(at + new Vector3(0f, 0f, -e), out south)
+                || !PlayerHeli.CrashFloor(at + new Vector3(0f, 0f, e), out north))
+                return Quaternion.identity;
+
+            Vector3 n = Vector3.Cross(
+                new Vector3(0f, north - south, 2f * e),
+                new Vector3(2f * e, east - west, 0f)).normalized;
+            if (n.y < 0.05f) return Quaternion.identity;
+            float tilt = Vector3.Angle(Vector3.up, n);
+            if (tilt < 0.5f) return Quaternion.identity;
+            if (tilt > 28f) n = Vector3.Slerp(Vector3.up, n, 28f / tilt).normalized;
+            _slope = n;
+            return Quaternion.FromToRotation(Vector3.up, n);
+        }
+
+        static Vector3 Corner(int i)
+        {
+            return new Vector3(
+                Centre.x + ((i & 1) == 0 ? -Half.x : Half.x),
+                Centre.y + ((i & 2) == 0 ? -Half.y : Half.y),
+                Centre.z + ((i & 4) == 0 ? -Half.z : Half.z));
         }
 
         /// <summary>Nose and bank in a frame that has the heading taken out of
@@ -2758,15 +2911,26 @@ namespace NextDayRevival
             spin = Wrap(e.y);
         }
 
-        /// <summary>Further over, never back. Whatever this returns has the sign
-        /// of what went in and is never smaller in size.</summary>
-        static float Slump(float deg, float share, float most)
+        /// <summary>The nose comes down. Whatever angle the machine arrived at,
+        /// what stops it is its own thirteen metres of fuselage lying along the
+        /// ground, so at most five degrees of the arrival nose survive - and
+        /// they keep their sign, so a machine that went in nose first still has
+        /// its nose in the dirt.</summary>
+        static float Flat(float deg)
         {
-            float a = Mathf.Abs(deg);
-            if (a < 6f || a > 150f) return deg;
-            float extra = Mathf.Min(most, a * share);
-            if (a + extra > 118f) extra = Mathf.Max(0f, 118f - a);
-            return deg < 0f ? -(a + extra) : a + extra;
+            float keep = Mathf.Min(5f, Mathf.Abs(deg) * 0.12f);
+            return deg < 0f ? -keep : keep;
+        }
+
+        /// <summary>Which side it stops on. A helicopter comes to rest in one of
+        /// four attitudes - on its skids, on either flank, or on its roof - and
+        /// the machine keeps the one its arrival bank is nearest to. Half of the
+        /// lean it arrived with is left in, up to six degrees, so that no two
+        /// wrecks lie at exactly the same angle.</summary>
+        static float Over(float deg)
+        {
+            float target = Mathf.Round(deg / 90f) * 90f;
+            return target + Mathf.Clamp((deg - target) * 0.5f, -6f, 6f);
         }
 
         static float Wrap(float deg)

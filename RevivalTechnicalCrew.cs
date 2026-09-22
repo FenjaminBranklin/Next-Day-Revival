@@ -177,6 +177,13 @@ namespace NextDayRevival
         /// man who is where he belongs is not written to at all.</summary>
         const float Slack = 0.05f;
 
+        /// <summary>Seconds between two passes of <see cref="Durchlassen"/>.
+        /// Not per frame and not once: an ignored collider pair is forgotten
+        /// when one of the two is switched off and on again, which is what the
+        /// game does to every NPC no player is near, and a patrol crew is far
+        /// from every player for most of its life.</summary>
+        const float PassEvery = 2f;
+
         // --------------------------------------------------------------- data
 
         /// <summary>One manned technical. Everything expensive - the mount, the
@@ -204,6 +211,16 @@ namespace NextDayRevival
             public readonly List<Component> Men = new List<Component>();
             public Component Gunner;
             public readonly List<Component> Cab = new List<Component>();
+
+            // The truck's own colliders and the clock of the pass that makes
+            // its men go through them (Durchlassen). Found once, laid again and
+            // again: Unity forgets an ignored pair when either collider is
+            // switched off and on, and the game does that to every NPC no
+            // player is standing near.
+            public Collider[] Cols;
+            public float NextPass;
+            public int PassMen;                  // men the last pass covered
+            public bool PassLogged;
 
             // the gun
             public float Yaw, Pitch;             // where the barrel is being sent
@@ -289,6 +306,20 @@ namespace NextDayRevival
                 // settlement for and man it a second time, and the editor's
                 // ground groups solved exactly this problem the same way.
                 Zuordnen();
+
+                // EVERY CLIENT, before the master's own work: the men and the
+                // truck that carries them must not collide. The physics step
+                // runs on every machine that has the hull, so the pass does
+                // too - see Durchlassen for why it is repeated rather than done
+                // once.
+                for (int i = 0; i < _trucks.Count; i++)
+                {
+                    Truck t = _trucks[i];
+                    if (t.Vgs == null || t.Root == null || t.Released) continue;
+                    if (Time.time < t.NextPass) continue;
+                    t.NextPass = Time.time + PassEvery;
+                    Durchlassen(t);
+                }
 
                 if (!master) return;
                 for (int i = 0; i < _trucks.Count; i++)
@@ -417,8 +448,15 @@ namespace NextDayRevival
                 }
                 t.Asked = true;
                 // Who they are is known here without waiting for the key pass,
-                // so the very first frame after the spawn already holds them.
+                // so the very first frame after the spawn already holds them -
+                // and the very first PHYSICS step already has them going through
+                // the hull they were just put inside. A pass that waited for the
+                // next scan would be two tenths of a second too late, and two
+                // tenths of a second is a hundred physics steps of a truck
+                // pushing itself out of its own driver.
                 Sammeln(t);
+                t.NextPass = Time.time + PassEvery;
+                Durchlassen(t);
                 RevivalPlugin.L.LogInfo("TechnicalCrew: " + t.Men.Count + " man crew ("
                     + t.Side + ") riding the technical, key " + t.Key
                     + " - gunner " + (t.Gunner != null) + ", cab " + t.Cab.Count + ".");
@@ -539,6 +577,13 @@ namespace NextDayRevival
                     { t.Cab.Add(cab[k]); t.Men.Add(cab[k]); }
                 if (haveGun)
                 { t.Gunner = gun[0]; t.Men.Add(gun[0]); }
+                // A man this machine has just recognized has never been let
+                // through this truck, so the pass is asked for NOW - it runs in
+                // the same scan, a few lines further on, and therefore still
+                // before the next physics step. Only when the crew has actually
+                // changed, though: this pass rebuilds its lists twice a second
+                // and the ordinary refresh is on its own clock.
+                if (t.Men.Count != t.PassMen) t.NextPass = 0f;
             }
         }
 
@@ -587,6 +632,141 @@ namespace NextDayRevival
             return 4.03f * Einheiten(t);
         }
 
+        // ------------------------------------------- through their own truck
+
+        /// <summary>
+        /// THE MEN AND THE TRUCK THAT CARRIES THEM MUST NOT TOUCH.
+        ///
+        /// A rider stands INSIDE the hull he rides: the two in the cab are in
+        /// the cabin, the gunner is on the bed. Neither side knows about the
+        /// arrangement. The truck is a driven rigidbody; a man is a main
+        /// collider plus a full set of ragdoll bones (Revival.Crew.cs, on
+        /// SetPhysActive). So the hull spends every physics step pushing itself
+        /// out of three bodies that the next LateUpdate puts straight back where
+        /// they were, and the field report of 2026-09-22 describes both ends of
+        /// that: a truck shoved off its road and finally off the ground, and men
+        /// who tip over, come off the bed and are run over by their own vehicle.
+        ///
+        /// The answer is the one Revival.Patrol.cs already gives for the world a
+        /// patrol drives through: Physics.IgnoreCollision between THIS truck and
+        /// THESE men. Local, exact, and it costs the riders nothing that matters
+        /// - a raycast is not a collision, so every bullet still hits them and
+        /// every headshot still counts - while they stay solid for the world,
+        /// for other vehicles and for each other.
+        ///
+        /// Both colliders have to be switched on for Unity to accept the pair,
+        /// and the pair is forgotten again when either of them is switched off
+        /// and on, which is exactly what the game's distance optimization does
+        /// to a crew no player is near. That is why this is a pass on a clock
+        /// (<see cref="PassEvery"/>) and not a one-off at the spawn.
+        /// </summary>
+        static void Durchlassen(Truck t)
+        {
+            if (t.Root == null || t.Men.Count == 0) return;
+            try
+            {
+                if (t.Cols == null || t.Cols.Length == 0 || t.Cols[0] == null)
+                    t.Cols = t.Root.GetComponentsInChildren<Collider>(true);
+                if (t.Cols.Length == 0) return;
+
+                int pairs = 0;
+                for (int m = 0; m < t.Men.Count; m++)
+                {
+                    Component ai = t.Men[m];
+                    if (ai == null) continue;
+                    Parken(ai);
+                    Collider[] seine = ai.GetComponentsInChildren<Collider>(true);
+                    for (int i = 0; i < seine.Length; i++)
+                    {
+                        Collider a = seine[i];
+                        // TRIGGERS ARE LEFT ALONE, on both sides. A zone volume
+                        // is not a collision, and an ignored pair costs the game
+                        // the event it fires - the same rule the patrol's own
+                        // hull sweep keeps (QueryTriggerInteraction.Ignore).
+                        if (a == null || a.isTrigger || !a.enabled
+                            || !a.gameObject.activeInHierarchy) continue;
+                        for (int j = 0; j < t.Cols.Length; j++)
+                        {
+                            Collider b = t.Cols[j];
+                            if (b == null || b.isTrigger || !b.enabled
+                                || !b.gameObject.activeInHierarchy) continue;
+                            try { Physics.IgnoreCollision(a, b, true); pairs++; }
+                            catch { /* one bad pair must not stop the rest */ }
+                        }
+                    }
+                }
+                t.PassMen = t.Men.Count;
+                if (pairs > 0 && !t.PassLogged)
+                {
+                    t.PassLogged = true;
+                    RevivalPlugin.L.LogInfo("TechnicalCrew: the " + t.Men.Count
+                        + " men of the technical with key " + t.Key + " go through "
+                        + "its own hull now (" + pairs + " collider pair(s) over "
+                        + t.Cols.Length + " of the truck's). They stay solid for "
+                        + "everything else, and a bullet is a ray and not a "
+                        + "collision, so they can still be shot off it.");
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("TechnicalCrew, letting the crew "
+                    + "through the truck: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Take the man's own navigation off his transform while he rides.
+        ///
+        /// A NavMeshAgent with updatePosition writes the body to ITS position
+        /// every simulation step, and its position is wherever the agent last
+        /// walked to - which for a man on a moving truck is the road behind it.
+        /// Putting him back in LateUpdate does not settle that argument; it only
+        /// decides who wrote last, and the other writer is still moving him
+        /// between the frames the physics step sees. Warping the agent instead
+        /// is what <see cref="Setzen"/> does on a real jump, but a truck is a
+        /// fraction of a metre further on in EVERY frame and an agent warped
+        /// sixty times a second is sixty NavMesh queries for a man who is not
+        /// walking anywhere.
+        ///
+        /// So while he rides, the agent simulates and keeps quiet, and
+        /// <see cref="Absteigen"/> hands the transform back to it - at the place
+        /// the man actually stands - the moment he stops being a rider.
+        /// </summary>
+        static void Parken(Component ai)
+        {
+            NavMeshAgent agent = Agent(ai);
+            if (agent == null) return;
+            try
+            {
+                if (agent.updatePosition) agent.updatePosition = false;
+                if (agent.updateRotation) agent.updateRotation = false;
+            }
+            catch { }
+        }
+
+        /// <summary>The other half of <see cref="Parken"/>: the agent drives the
+        /// body again, starting from where the body actually is. Without the
+        /// warp it would carry him back to wherever it was simulating while he
+        /// rode, which is the far end of the route.</summary>
+        static void Absteigen(Truck t)
+        {
+            for (int i = 0; i < t.Men.Count; i++)
+            {
+                Component ai = t.Men[i];
+                if (ai == null) continue;
+                NavMeshAgent agent = Agent(ai);
+                if (agent == null) continue;
+                try
+                {
+                    agent.updatePosition = true;
+                    agent.updateRotation = true;
+                    if (agent.isActiveAndEnabled)
+                        agent.Warp(ai.transform.position);
+                }
+                catch { }
+            }
+        }
+
         // -------------------------------------------------------- every frame
 
         /// <summary>
@@ -630,15 +810,43 @@ namespace NextDayRevival
         /// frame. He falls off the truck, which is what a shot driver does.</summary>
         static void Halten(Truck t)
         {
+            // THE GUNNER IS PLACED ELSEWHERE, BUT HE IS HELD HERE. Stellung
+            // writes him a position and a heading and knows nothing about
+            // NPC_AI2, so nothing ever held the game's idle logic off the one
+            // man who is standing up in the open. He queued his own walk
+            // intentions all the way down the road and stepped off the bed in
+            // the first frame that did not overwrite him.
+            if (Lebt(t.Gunner)) Ruhig(t.Gunner);
+
             if (!CabCrew) return;
+            Quaternion aufrecht = Aufrecht(t);
             int seat = 0;
             for (int i = 0; i < t.Cab.Count && seat < Technical.SeatTotal - 1; i++)
             {
                 Component ai = t.Cab[i];
                 if (ai == null || !Lebt(ai)) continue;
-                Setzen(t, ai, Platz(t, seat), t.Root.rotation);
+                Setzen(t, ai, Platz(t, seat), aufrecht);
                 seat++;
             }
+        }
+
+        /// <summary>The rotation a rider is given: the truck's HEADING, and
+        /// nothing else of its attitude.
+        ///
+        /// A man is not cargo. Writing the hull's full rotation onto him lays
+        /// him over with every slope, kerb and bump the truck takes, and the
+        /// whole cab lies down at once the moment the truck tips - which is the
+        /// "the NPCs in it fall over while it drives" of the field report of
+        /// 2026-09-22. The gunner has always been treated this way
+        /// (TechnicalGun.Stellung flattens the mount's forward and turns him
+        /// with LookRotation(dir, Vector3.up)); the cab simply never was.</summary>
+        static Quaternion Aufrecht(Truck t)
+        {
+            Vector3 dir = t.Root.forward;
+            dir.y = 0f;
+            if (dir.sqrMagnitude < 0.000001f)
+                return Quaternion.Euler(0f, t.Root.eulerAngles.y, 0f);
+            return Quaternion.LookRotation(dir.normalized, Vector3.up);
         }
 
         /// <summary>Is this man still on his feet? NpcWar owns the answer - it
@@ -700,7 +908,13 @@ namespace NextDayRevival
             if (!ReferenceEquals(t, _fAgentOwner))
             {
                 _fAgentOwner = t;
-                _fAgent = AccessTools.Field(t, "_navMeshAgent");
+                // `_navAgent` is the CONFIRMED name (REVERSE_ENGINEERING: the
+                // NavMeshAgent field of NPC_AI2), and it is what NpcWar and the
+                // artillery battery read. The other spelling stays as a second
+                // try, and the GetComponent below still answers when neither
+                // field exists.
+                _fAgent = AccessTools.Field(t, "_navAgent");
+                if (_fAgent == null) _fAgent = AccessTools.Field(t, "_navMeshAgent");
             }
             try
             {
@@ -1167,6 +1381,9 @@ namespace NextDayRevival
             if (t == null || t.Released || t.Men.Count == 0) return false;
 
             t.Released = true;
+            // They stop being riders here: their own navigation gets the body
+            // back before NpcWar is asked to make them fight on foot.
+            Absteigen(t);
             List<RevivalComposition.CrewMan> loadout = Patrol.CrewedList(t.Vgs);
             int handed = 0;
             if (Abgeben(t, t.CabSquad, "cab", loadout)) handed++;
@@ -1201,6 +1418,10 @@ namespace NextDayRevival
         /// abandoned patrol vehicle becomes.</summary>
         static void Verliere(Truck t, string why)
         {
+            // Whatever the reason, they are not riding anything any more: the
+            // agent that was parked while they rode gets the body back, or they
+            // would stand rooted wherever the truck left them.
+            Absteigen(t);
             if (t.CabSquad != null || t.GunSquad != null)
             {
                 Crew.Forget(t.CabSquad);

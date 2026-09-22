@@ -3131,6 +3131,20 @@ def check_technical_crew():
      10. THE GUN STAYS ANTI-PERSONNEL. No VehicleArmor hit from the NPC's fire
          either, or the crew would quietly give the machine gun the autocannon's
          anti-vehicle rate that check_technical() rule 5 forbids the player.
+     11. THE MEN GO THROUGH THEIR OWN TRUCK. A rider stands inside the hull that
+         carries him, and both sides are solid: the truck's rigidbody pushes
+         itself out of three men that the next LateUpdate puts back, every
+         physics step. That is the 2026-09-22 field report from both ends - a
+         truck shoved off its road and off the ground, men tipped over the side
+         and run over. Physics.IgnoreCollision between this truck and these men
+         answers it, and it has to be laid AGAIN and again: Unity forgets an
+         ignored pair when either collider is switched off and on, which is what
+         the distance optimization does to a crew no player is near.
+     12. NO RIDER IS GIVEN THE HULL'S ATTITUDE. A man takes the truck's HEADING
+         and stays upright. Writing the hull's full rotation onto him lays the
+         whole cab over with every slope and every bump, which is the "the NPCs
+         in it fall over" half of the same report. TechnicalGun.Stellung has
+         always flattened the gunner's; the cab must do the same.
     """
     print("[17b] Technical crew: the men who ride it (statisch)")
     crew_p = os.path.join(ROOT, "RevivalTechnicalCrew.cs")
@@ -3277,6 +3291,33 @@ def check_technical_crew():
             "does not (check_technical rule 5)")
     else:
         ok("the NPC gunner's fire stays anti-personnel, as the player's is")
+
+    # 11 - the riders are not solid to the truck they ride, and stay that way
+    through = _body(crew, "static void Durchlassen(Truck t)")
+    scan_body = _body(crew, "internal static void Scan(Component[] all)")
+    if ("Physics.IgnoreCollision(a, b, true)" in through
+            and "Durchlassen(t)" in scan_body
+            and "t.NextPass = Time.time + PassEvery" in scan_body):
+        ok("the riders go through their own truck, and the pass is refreshed")
+    else:
+        bad("Technical crew: the crew is solid to the truck that carries it - "
+            "the hull pushes itself out of its own driver every physics step "
+            "(or the pass is laid only once and Unity forgets it)")
+    if "Durchlassen(t);" in _body(crew, "static void Bemannen(Truck t)"):
+        ok("a crew is let through the hull in the frame it is spawned in")
+    else:
+        bad("Technical crew: a freshly spawned crew is solid until the next "
+            "scan - a hundred physics steps of the truck fighting its men")
+
+    # 12 - a rider is upright, whatever the truck is doing
+    hold = _body(crew, "static void Halten(Truck t)")
+    upright = _body(crew, "static Quaternion Aufrecht(Truck t)")
+    if ("t.Root.rotation" not in hold and "Aufrecht(t)" in hold
+            and "dir.y = 0f;" in upright):
+        ok("a rider takes the truck's heading and stays on his feet")
+    else:
+        bad("Technical crew: a rider is given the hull's full rotation - the "
+            "cab lies down with every slope the truck takes")
 
     # the file rule the rest of the feature follows
     raw = io.open(crew_p, "rb").read()
@@ -3799,6 +3840,28 @@ def check_player_heli():
          "the fire is laid out along the airframe, not in one spot",
          "the aircraft burns from a single point - a 38-unit hull then shows "
          "one bonfire in the middle of it")
+    # --- where a bed sits is the machine's business, which way it throws is
+    # gravity's. The root used to keep world axes, so the beds ran along world
+    # Z and crossed a hull that was pointing anywhere else.
+    need("root.transform.localRotation = Quaternion.identity;" in heli_fire
+         and "root.transform.localPosition = Vector3.zero;" in heli_fire,
+         "the fire lies along the fuselage whichever way the wreck points",
+         "the fire root keeps world axes - its beds cross the hull instead "
+         "of running along it")
+    need("Aufrecht(ps);" in _body(
+             fire, "static void HeliFlammen(GameObject root, Material mat,"),
+         "a flame bed is placed in the hull and still throws world upwards",
+         "the emitters turn with the wreck - a machine on its roof fires its "
+         "flames into the ground")
+    # --- more fire, less smoke (2026-09-22) is the CRASH's mixture only.
+    # FireHook puts every explosion in the game through Spawn.
+    need("Blast(point, Mathf.Clamp(radius, 1.5f, 20f), 1f, 1f);" in fire,
+         "an ordinary explosion keeps the mixture it has always had",
+         "the game's own explosions were re-weighted along with the "
+         "helicopter - every grenade would change with it")
+    need("Blast(point, Mathf.Clamp(radius, 6f, 60f), 1.55f, 0.40f);" in fire,
+         "the crash ball is weighted towards fire and away from smoke",
+         "the helicopter blast is back on the ordinary mixture")
 
     # --- the attitude. Burn used to rebuild the rotation from the heading with
     # a fixed nose and bank, which stood a machine that came down on its side
@@ -3812,12 +3875,37 @@ def check_player_heli():
          "the wreck settles further over and is taken off the transform sync",
          "the wreck is not settled, or it is left on the interpolator and the "
          "host's last flying pose pulls it upright again")
+    # --- the wreck that hung in the air (2026-09-22: "das wrack schwebt
+    # mehrere meter ueber dem boden"). The old settle drove the nose FURTHER
+    # down and then stood a 38-unit hull box on its single deepest corner,
+    # which holds the machine's own origin some six metres up. Four things
+    # keep that from coming back.
     settle = _body(code, "public sealed class HeliWreckSettle : MonoBehaviour")
-    need(settle != "" and "internal static float Lift(" in settle
-         and "static float Slump(" in settle,
-         "the rest height is the hull's lowest corner and the lean only grows",
-         "the settle has no corner height or no one-way lean - a hull on its "
-         "flank is then buried or stands back up")
+    need(settle != "" and "static float Flat(" in settle
+         and "static float Over(" in settle,
+         "the fuselage lies down, on one of the four attitudes a machine "
+         "comes to rest in",
+         "the settle does not lay the hull down - a machine balanced on its "
+         "nose holds its own origin metres above the ground")
+    need("_under[i]" in settle and "static Vector3 Corner(int i)" in settle
+         and "if (i == 0 || y > best) best = y;" in settle,
+         "the rest height is every hull corner against the ground under THAT "
+         "corner, highest contact winning",
+         "the settle rests on one floor sample or on its lowest corner - the "
+         "wreck then hangs over a rise or is buried in a slope")
+    drop = _body(settle, "void Drop()")
+    need("MeshRenderer" in drop and "at.y -= gap;" in drop
+         and "at.y +=" not in drop,
+         "what is DRAWN has the last word, and it can only be lowered",
+         "nothing measures the swapped wreck mesh, or the check may raise "
+         "the wreck - a mesh sitting higher than the one it replaced then "
+         "leaves the machine in the air")
+    need("HeliWreckModel.Apply(go);" in burn and "settle.Begin(floor);" in burn
+         and burn.index("HeliWreckModel.Apply(go);")
+             < burn.index("settle.Begin(floor);"),
+         "the broken airframe is swapped in before the wreck is put down",
+         "the settle measures the intact prefab instead of the mesh the "
+         "player actually sees")
     need("&& !Burning(go)" in leave and "Interpolator(go, true);" in leave,
          "leaving a WRECK does not switch the interpolator back on",
          "Leave hands the wreck back to the transform sync a moment after "
