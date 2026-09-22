@@ -4292,9 +4292,15 @@ def check_crocodile():
          "the native boss proxy is a resource proven by the asset index",
          "BearBoss_Spawn is absent from resource_paths.tsv or Revival.Crocodile.cs")
     need("NetworkApplyDamage" in code and "DamageTakenMultiplier" in code
-         and "0.20f" in code and "CrocodileSwimmer" in code,
+         and "0.05f" in code and "CrocodileSwimmer" in code,
          "native Animal_AI damage is retained and resistance marks only the crocodile",
-         "the crocodile lost its native damage gate or five-times effective health")
+         "the crocodile lost its native damage gate or twenty-times effective health")
+    # 6.47: bigger. The scale sits on the model transform, so the hit boxes
+    # (its children) grow with it; the bite line and lunge distance must too.
+    need('"BodyScale"' in code and "localScale = Vector3.one * _scale" in code
+         and "4.2f : 4.6f" not in code and "6.5f * Crocodile.BodyScale()" in code,
+         "BodyScale grows the model, its hit boxes, the bite reach and the lunge",
+         "the crocodile's size no longer scales its bite and lunge with the body")
     need("SwimPoint(NetworkClock())" in code and "SwimTangent(NetworkClock())" in code
          and "FindWater(out float y" in code and "DefaultX = 1965f" in code
          and "DefaultZ = 900f" in code,

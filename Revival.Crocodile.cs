@@ -95,6 +95,7 @@ namespace NextDayRevival
         static ConfigEntry<float> _landSpeed;
         static ConfigEntry<float> _sprintEdge;
         static ConfigEntry<float> _baskMinutes;
+        static ConfigEntry<float> _bodyScale;
         static ConfigEntry<bool> _bossBar;
         static ConfigEntry<int> _eventCode;
 
@@ -167,9 +168,9 @@ namespace NextDayRevival
             _fallbackWater = config.Bind("Crocodile", "FallbackWaterY", 430f,
                 Loc.T("Запасная высота воды, если объект воды еще не загружен.",
                       "Fallback water Y if the scene water object is not loaded yet."));
-            _damageTaken = config.Bind("Crocodile", "DamageTakenMultiplier", 0.20f,
-                Loc.T("Доля входящего урона. 0.20 дает боссу пятикратную живучесть.",
-                      "Incoming damage fraction; 0.20 gives five times effective health."));
+            _damageTaken = config.Bind("Crocodile", "DamageTakenMultiplier", 0.05f,
+                Loc.T("Доля входящего урона. 0.05 дает боссу двадцатикратную живучесть.",
+                      "Incoming damage fraction; 0.05 gives twenty times effective health."));
             _respawnMinutes = config.Bind("Crocodile", "RespawnMinutes", 30f,
                 Loc.T("Через сколько минут после смерти босс вернется. 0 = никогда.",
                       "Minutes before the defeated boss returns; 0 means never."));
@@ -179,19 +180,19 @@ namespace NextDayRevival
             _toxicityPerSecond = config.Bind("Crocodile", "ToxicityPerSecond", 4f,
                 Loc.T("Рост отравления в секунду без защиты.",
                       "Toxicity gained per second without protection."));
-            _healthPerSecond = config.Bind("Crocodile", "ToxicDamagePerSecond", 2.5f,
+            _healthPerSecond = config.Bind("Crocodile", "ToxicDamagePerSecond", 4f,
                 Loc.T("Урон здоровью от испарений в секунду без защиты.",
                       "Health damage per second from fumes without protection."));
-            _biteDamage = config.Bind("Crocodile", "BiteDamage", 28f,
+            _biteDamage = config.Bind("Crocodile", "BiteDamage", 50f,
                 Loc.T("Урон от укуса, если игрок не убегает по прямой.",
                       "Bite damage when the player is not fleeing in a straight line."));
             _eatDamage = config.Bind("Crocodile", "EatDamage", 250f,
                 Loc.T("Урон, когда крокодил догоняет игрока, бегущего по прямой. 250 = смерть.",
                       "Damage when it catches a player running straight away; 250 kills."));
-            _shoreReach = config.Bind("Crocodile", "ShoreReach", 30f,
+            _shoreReach = config.Bind("Crocodile", "ShoreReach", 90f,
                 Loc.T("Насколько метров от воды крокодил выходит на берег.",
                       "How many metres from the water the crocodile may crawl ashore."));
-            _huntRadius = config.Bind("Crocodile", "HuntRadius", 55f,
+            _huntRadius = config.Bind("Crocodile", "HuntRadius", 80f,
                 Loc.T("Дистанция, на которой крокодил замечает игрока у озера.",
                       "Distance at which it notices a player in or beside the lake."));
             _landSpeed = config.Bind("Crocodile", "LandChargeSpeed", 8.5f,
@@ -203,6 +204,9 @@ namespace NextDayRevival
             _baskMinutes = config.Bind("Crocodile", "BaskEveryMinutes", 4f,
                 Loc.T("Как часто крокодил выползает греться на берег. 0 = никогда.",
                       "How often it crawls onto the bank to bask; 0 means never."));
+            _bodyScale = config.Bind("Crocodile", "BodyScale", 1.6f,
+                Loc.T("Размер крокодила относительно модели (около 9 м). Пасть и укус растут вместе с ним.",
+                      "Crocodile size relative to the ~9 m model; jaws and bite reach grow with it."));
             _bossBar = config.Bind("Crocodile", "BossBar", true,
                 Loc.T("Показывать полосу здоровья босса, когда крокодил охотится рядом.",
                       "Show the game's boss health bar while the crocodile hunts nearby."));
@@ -1346,17 +1350,18 @@ namespace NextDayRevival
         internal static float RadiusX() { return Mathf.Clamp(_radiusX == null ? 110f : _radiusX.Value, 20f, 350f); }
         internal static float RadiusZ() { return Mathf.Clamp(_radiusZ == null ? 245f : _radiusZ.Value, 20f, 350f); }
         internal static float Speed() { return Mathf.Clamp(_speed == null ? 3.2f : _speed.Value, 0.3f, 12f); }
-        internal static float DamageTaken() { return Mathf.Clamp(_damageTaken == null ? 0.20f : _damageTaken.Value, 0.03f, 1f); }
+        internal static float DamageTaken() { return Mathf.Clamp(_damageTaken == null ? 0.05f : _damageTaken.Value, 0.02f, 1f); }
         internal static float RespawnMinutes() { return Mathf.Max(0f, _respawnMinutes == null ? 30f : _respawnMinutes.Value); }
         internal static float ToxicRadius() { return Mathf.Clamp(_toxicRadius == null ? 14f : _toxicRadius.Value, 0f, 40f); }
         internal static float ToxicityRate() { return Mathf.Max(0f, _toxicityPerSecond == null ? 4f : _toxicityPerSecond.Value); }
-        internal static float ToxicHealthRate() { return Mathf.Max(0f, _healthPerSecond == null ? 2.5f : _healthPerSecond.Value); }
-        internal static float BiteDamage() { return Mathf.Max(0f, _biteDamage == null ? 28f : _biteDamage.Value); }
+        internal static float ToxicHealthRate() { return Mathf.Max(0f, _healthPerSecond == null ? 4f : _healthPerSecond.Value); }
+        internal static float BiteDamage() { return Mathf.Max(0f, _biteDamage == null ? 50f : _biteDamage.Value); }
         internal static float EatDamage() { return Mathf.Max(0f, _eatDamage == null ? 250f : _eatDamage.Value); }
-        internal static float ShoreReach() { return Mathf.Clamp(_shoreReach == null ? 30f : _shoreReach.Value, 0f, 80f); }
-        internal static float HuntRadius() { return Mathf.Clamp(_huntRadius == null ? 55f : _huntRadius.Value, 0f, 200f); }
+        internal static float ShoreReach() { return Mathf.Clamp(_shoreReach == null ? 90f : _shoreReach.Value, 0f, 240f); }
+        internal static float HuntRadius() { return Mathf.Clamp(_huntRadius == null ? 80f : _huntRadius.Value, 0f, 200f); }
         internal static float LandSpeed() { return Mathf.Clamp(_landSpeed == null ? 8.5f : _landSpeed.Value, 2f, 16f); }
         internal static float SprintEdge() { return Mathf.Clamp(_sprintEdge == null ? 1.6f : _sprintEdge.Value, 0.5f, 3f); }
+        internal static float BodyScale() { return Mathf.Clamp(_bodyScale == null ? 1.6f : _bodyScale.Value, 0.5f, 3f); }
         internal static float BaskMinutes() { return Mathf.Max(0f, _baskMinutes == null ? 4f : _baskMinutes.Value); }
         internal static int EventCode() { return _eventCode == null ? DefaultEventCode : _eventCode.Value; }
         internal static string MeshName() { return MeshFile; }
@@ -1378,7 +1383,7 @@ namespace NextDayRevival
         internal const byte Blocked = 0, Water = 1, Shore = 2;
         const float Cell = 2.5f;
         const float SwimDepth = 0.6f;
-        const float ShoreRise = 6f;
+        const float ShoreRise = 6f;        // at the 30 m reach of 6.46; grows with the reach
         const int Budget = 8000;
 
         static float[] _ground;
@@ -1485,6 +1490,7 @@ namespace NextDayRevival
             // Shore: breadth-first outward from every water cell, up to the
             // reach, over ground no higher than ShoreRise above the water.
             int steps = Mathf.Clamp(Mathf.CeilToInt(_reachMetres / Cell), 0, 250);
+            float rise = Mathf.Max(ShoreRise, _reachMetres * 0.2f);
             for (int i = 0; i < total; i++)
                 if (_kind[i] == Water) open.Enqueue(i);
             int shore = 0;
@@ -1502,7 +1508,7 @@ namespace NextDayRevival
                     int next = nz * _nx + nx;
                     if (_reach[next] <= d + 1) continue;
                     float g = _ground[next];
-                    if (float.IsNaN(g) || g > _water + ShoreRise) continue;
+                    if (float.IsNaN(g) || g > _water + rise) continue;
                     if (_kind[next] == Blocked) shore++;
                     if (_kind[next] != Water) _kind[next] = Shore;
                     _reach[next] = (byte)(d + 1);
@@ -1568,7 +1574,7 @@ namespace NextDayRevival
                 at = Crocodile.LoopGoal(from);
                 return true;
             }
-            for (int ring = 0; ring <= 40; ring++)
+            for (int ring = 0; ring <= 100; ring++)
                 for (int dz = -ring; dz <= ring; dz++)
                     for (int dx = -ring; dx <= ring; dx++)
                     {
@@ -1728,6 +1734,7 @@ namespace NextDayRevival
         float _deadAt;
         int _normalFrame;
         int _view;
+        float _scale = 1f;  // BodyScale: the mesh, its hit boxes and waterline
 
         // Shared pose: on the master this IS the simulation, elsewhere it is
         // the smoothed copy of the last broadcast.
@@ -1854,7 +1861,9 @@ namespace NextDayRevival
 
             _model = new GameObject("NDR_ToxicCrocodile_Model");
             _model.transform.SetParent(transform, false);
-            _model.transform.localPosition = new Vector3(0f, SwimModelY, 0f);
+            _scale = Crocodile.BodyScale();
+            _model.transform.localPosition = new Vector3(0f, SwimModelY * _scale, 0f);
+            _model.transform.localScale = Vector3.one * _scale;
             _model.layer = gameObject.layer;
 
             _animatedMesh = UnityEngine.Object.Instantiate(source) as Mesh;
@@ -2277,7 +2286,7 @@ namespace NextDayRevival
             if (_mode == Charge || _mode == Lunge)
             {
                 if (land) _chargeTime += 0.1f;
-                if (_chargeTime > 9f)
+                if (_chargeTime > 18f)
                 {
                     GiveUp(now, 12f, "tired after a long charge on land");
                     return;
@@ -2295,7 +2304,7 @@ namespace NextDayRevival
                         return;
                     }
                 }
-                else if (_mode == Charge && d < 6.5f && Mathf.Abs(error) < 20f
+                else if (_mode == Charge && d < 6.5f * Crocodile.BodyScale() && Mathf.Abs(error) < 20f
                          && now >= _nextLunge)
                 {
                     _nextLunge = now + 2.4f;
@@ -2545,18 +2554,19 @@ namespace NextDayRevival
             if (player == null || !Crocodile.Huntable(player)) return;
             Vector3 p = player.transform.position;
             Vector3 root = transform.position;
+            float s = Crocodile.BodyScale();
             float dy = p.y - root.y;
-            if (dy < -1.6f || dy > 2.4f) return;
+            if (dy < -1.6f || dy > 2.4f * s) return;
             Vector3 forward = Heading(transform.eulerAngles.y);
-            Vector3 a = root + forward * 2.0f;
-            Vector3 b = root + forward * (_mode == Lunge ? 4.6f : 4.2f);
+            Vector3 a = root + forward * (2.0f * s);
+            Vector3 b = root + forward * ((_mode == Lunge ? 4.6f : 4.2f) * s);
             Vector3 ab = b - a;
             ab.y = 0f;
             Vector3 ap = p - a;
             ap.y = 0f;
             float t = Mathf.Clamp01(Vector3.Dot(ap, ab) / Mathf.Max(0.001f, ab.sqrMagnitude));
             Vector3 closest = a + ab * t;
-            float reach = _mode == Lunge ? 1.7f : 1.25f;
+            float reach = (_mode == Lunge ? 1.7f : 1.25f) * s;
             if (Flat(p - closest) > reach) return;
 
             bool eaten = (_mode == Charge || _mode == Lunge) && RunningStraightAway(p);
@@ -2676,7 +2686,7 @@ namespace NextDayRevival
             else _roll = Mathf.MoveTowardsAngle(_roll, rollTarget, dt * 400f);
 
             float swimY = SwimModelY + (_mode == Lunge ? 0.18f : 0f);
-            float modelY = Mathf.Lerp(swimY, StandModelY, _landW);
+            float modelY = Mathf.Lerp(swimY, StandModelY, _landW) * _scale;
             _model.transform.localPosition = new Vector3(0f,
                 modelY + Mathf.Sin(now * 1.65f) * 0.035f * swimW, 0f);
             _model.transform.localRotation = Quaternion.Euler(
@@ -2699,7 +2709,7 @@ namespace NextDayRevival
             _headYaw = Mathf.Lerp(_headYaw, Mathf.Clamp(_yawRate * 0.3f, -28f, 28f) + shake,
                                   Mathf.Clamp01(dt * 6f));
 
-            _gait += dt * _visualSpeed / Stride;
+            _gait += dt * _visualSpeed / (Stride * _scale);
             if (_gait > 1000f) _gait -= 1000f;
 
             if (_renderer != null && !_renderer.isVisible) return;
@@ -2808,7 +2818,7 @@ namespace NextDayRevival
                 _model.transform.localRotation = Quaternion.Euler(0f, 0f, Mathf.Min(70f, age * 60f));
                 return;
             }
-            local.y = SwimModelY - Mathf.Min(0.65f, age * 0.045f);
+            local.y = (SwimModelY - Mathf.Min(0.65f, age * 0.045f)) * _scale;
             _model.transform.localPosition = local;
             _model.transform.localRotation = Quaternion.Euler(
                 Mathf.Min(18f, age * 1.3f), 0f, Mathf.Min(160f, age * 30f));
