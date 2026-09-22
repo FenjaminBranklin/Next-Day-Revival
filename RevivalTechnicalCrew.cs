@@ -230,6 +230,9 @@ namespace NextDayRevival
             public float NextShot;
             public int Burst;
             public float NextLook;
+            public bool Engaged;                 // a contact is running (log only)
+            public float LastContact;            // Time.time a target was last held
+            public int Rounds, Hits;             // of the running contact
         }
 
         static readonly List<Truck> _trucks = new List<Truck>();
@@ -819,6 +822,10 @@ namespace NextDayRevival
             if (Lebt(t.Gunner)) Ruhig(t.Gunner);
 
             if (!CabCrew) return;
+            // Upright on the truck's heading, SEATED as well: verify.py rule 12
+            // holds the field report of 2026-09-22 ("the NPCs in it fall over").
+            // On a slope that leaves a seated man a few degrees off his seat,
+            // which is the smaller fault of the two.
             Quaternion aufrecht = Aufrecht(t);
             int seat = 0;
             for (int i = 0; i < t.Cab.Count && seat < Technical.SeatTotal - 1; i++)
@@ -826,6 +833,7 @@ namespace NextDayRevival
                 Component ai = t.Cab[i];
                 if (ai == null || !Lebt(ai)) continue;
                 Setzen(t, ai, Platz(t, seat), aufrecht);
+                Sitzen(ai, seat);
                 seat++;
             }
         }
@@ -955,6 +963,139 @@ namespace NextDayRevival
             catch { }
         }
 
+        // ------------------------------------------------------ sitting down
+
+        /// <summary>The game's own passenger clips: what a PLAYER in the
+        /// driver's and in any other seat of this very truck is posed with.
+        /// They live in the 495-clip Animation of the player model
+        /// (Male_01_v78/v80, Male_UKB_v70); the NPC model's 96-clip set has
+        /// neither, but it has the bench sit, which is the fallback.</summary>
+        const string ClipDriver = "vehicle_driver_idle";
+        const string ClipPassenger = "vehicle_passenger_idle";
+        const string ClipBench = "npc_seat_bench";
+
+        static UnityEngine.Object _clipDriver, _clipPassenger, _clipBench;
+        static float _nextClipSearch;
+        static int _clipSearches;
+        static bool _clipsLogged;
+        static MethodInfo _sample;
+        static PropertyInfo _clipLength;
+        static FieldInfo _fAnim;
+        static Type _fAnimOwner;
+        static readonly object[] _sampleArgs = new object[2];
+
+        /// <summary>
+        /// Pose one cab man SITTING, this frame, after the game's animation ran.
+        ///
+        /// Up to 6.43.0 he kept the NPC's own pose - standing - on a seat point,
+        /// and a seat point is not a cushion: the game's sit clips bend the legs
+        /// under hips that stay where a standing man's are, so the ROOT sits
+        /// near the floor of the cab (UAZ seat root y -0.17, REVERSE_ENGINEERING
+        /// "How far a seated body reaches above its seat root"). A standing man
+        /// on that root has his legs through the floor and his head in the
+        /// roof.
+        ///
+        /// The clips are sampled onto the NPC's own legacy Animation object
+        /// (NPC_AI2.Anim), the same late-frame trick TechnicalGun.StandingPose
+        /// plays on a gunner. It works across the two models because every one
+        /// of them binds by the same paths - MainChar_Skeleton/MainChar_Based/...
+        /// - and the hips sit at the same place in all five clips measured
+        /// (idle_alert, npc_idle_alert_01, npc_seat_bench, vehicle_driver_idle,
+        /// vehicle_passenger_idle: MainChar_Hips within 0.04 of the origin), so
+        /// no clip needs an offset of its own. Every client runs it, because
+        /// every client draws the man.
+        /// </summary>
+        static void Sitzen(Component ai, int seat)
+        {
+            try
+            {
+                if (!SitClips()) return;
+                UnityEngine.Object clip = seat == 0 ? _clipDriver : _clipPassenger;
+                if (clip == null) clip = _clipBench;
+                if (clip == null) return;
+                GameObject model = Modell(ai);
+                if (model == null) return;
+
+                float laenge = 0f;
+                if (_clipLength != null)
+                {
+                    object v = _clipLength.GetValue(clip, null);
+                    if (v is float) laenge = (float)v;
+                }
+                // Each man on his own phase of the loop: two men breathing in
+                // step read as one animation copied twice.
+                float t = laenge > 0.01f
+                    ? Mathf.Repeat(Time.time + (ai.GetInstanceID() & 255) * 0.13f, laenge)
+                    : 0f;
+                _sampleArgs[0] = model;
+                _sampleArgs[1] = t;
+                _sample.Invoke(clip, _sampleArgs);
+            }
+            catch { }
+        }
+
+        /// <summary>Find the three clips among everything loaded, once. They are
+        /// looked for again every ten seconds while the driver's is missing:
+        /// the player model that carries it is loaded with the local player,
+        /// and a crew can be spawned before he is.</summary>
+        static bool SitClips()
+        {
+            if (_clipDriver != null && _sample != null) return true;
+            // A minute of looking is enough: past that the bench sit is the
+            // answer for this session, and a scene-wide clip walk every ten
+            // seconds would be a cost with no prospect of a result.
+            if (Time.time < _nextClipSearch || (_clipSearches >= 6 && _clipBench != null))
+                return _sample != null && _clipBench != null;
+            _nextClipSearch = Time.time + 10f;
+            _clipSearches++;
+
+            Type clipType = RevivalPlugin.TypeByName("UnityEngine.AnimationClip");
+            if (clipType == null) return false;
+            if (_sample == null)
+            {
+                _sample = clipType.GetMethod("SampleAnimation",
+                    new Type[] { typeof(GameObject), typeof(float) });
+                _clipLength = clipType.GetProperty("length");
+            }
+            if (_sample == null) return false;
+
+            UnityEngine.Object[] all = Resources.FindObjectsOfTypeAll(clipType);
+            for (int i = 0; i < all.Length; i++)
+            {
+                UnityEngine.Object c = all[i];
+                if (c == null) continue;
+                string name = c.name;
+                if (_clipDriver == null && name == ClipDriver) _clipDriver = c;
+                else if (_clipPassenger == null && name == ClipPassenger) _clipPassenger = c;
+                else if (_clipBench == null && name == ClipBench) _clipBench = c;
+            }
+            if (!_clipsLogged && (_clipDriver != null || _clipBench != null))
+            {
+                _clipsLogged = true;
+                RevivalPlugin.L.LogInfo("TechnicalCrew: the cab men sit - driver "
+                    + (_clipDriver != null ? ClipDriver : ClipBench) + ", co-driver "
+                    + (_clipPassenger != null ? ClipPassenger : ClipBench)
+                    + ", sampled after the game's animation every frame.");
+            }
+            return _clipDriver != null || _clipBench != null;
+        }
+
+        /// <summary>The object the man's legacy Animation sits on - the one the
+        /// clip paths start from. NPC_AI2.Anim is the CONFIRMED field
+        /// (REVERSE_ENGINEERING, AutoDisableControl: Anim.Stop()).</summary>
+        static GameObject Modell(Component ai)
+        {
+            Type t = ai.GetType();
+            if (!ReferenceEquals(t, _fAnimOwner))
+            {
+                _fAnimOwner = t;
+                _fAnim = AccessTools.Field(t, "Anim");
+            }
+            if (_fAnim == null) return null;
+            Component anim = _fAnim.GetValue(ai) as Component;
+            return anim == null ? null : anim.gameObject;
+        }
+
         // ---------------------------------------------------------- the gun
 
         /// <summary>The body the station code should treat as this truck's
@@ -1013,7 +1154,18 @@ namespace NextDayRevival
             // A gun whose gunner is dead is a gun that stops. It is left lying
             // wherever he left it: recentring it would be the truck tidying up
             // after the man who was shot off it.
-            if (!Lebt(t.Gunner)) { t.Target = null; t.Held = 0f; return; }
+            if (!Lebt(t.Gunner))
+            {
+                if (t.Engaged) Abbrechen(t);
+                t.Target = null;
+                t.Held = 0f;
+                return;
+            }
+            // A PLAYER in the gunner's place owns this mount (GunnerBody: a
+            // player always wins). Now that the crew lays the gun in quiet
+            // spells too, laying it under a player would be a fight over the
+            // same pivot in every frame.
+            if (!TechnicalGun.NpcManned(t.Vgs)) return;
             if (Time.time >= t.NextLook)
             {
                 t.NextLook = Time.time + 0.5f;
@@ -1021,10 +1173,28 @@ namespace NextDayRevival
             }
             if (t.Target == null || !Feind(t, t.Target, t.TargetNpc))
             {
+                // Three quiet seconds end a contact, not one lost sight ray: a
+                // man ducking behind a fence is the same fight.
+                if (t.Engaged && Time.time - t.LastContact > 3f) Abbrechen(t);
                 t.Target = null;
                 t.TargetNpc = null;
                 t.Held = 0f;
+                Ruhelage(t);
                 return;
+            }
+            t.LastContact = Time.time;
+            if (!t.Engaged)
+            {
+                t.Engaged = true;
+                t.Rounds = 0;
+                t.Hits = 0;
+                RevivalPlugin.L.LogInfo("TechnicalCrew: the gunner of " + t.Key
+                    + " (" + t.Side + ") engages "
+                    + (t.TargetNpc != null
+                        ? "an NPC (" + NpcWar.PatrolFaction(t.TargetNpc) + ")"
+                        : "a player")
+                    + " at " + Vector3.Distance(t.Target.position, t.Root.position)
+                        .ToString("0", CultureInfo.InvariantCulture) + " m.");
             }
 
             Vector3 muzzle = Muendung(t);
@@ -1074,6 +1244,50 @@ namespace NextDayRevival
             Feuern(t, muzzle, bore);
         }
 
+        /// <summary>The line that says how a contact ended. Without it the log
+        /// could not tell a gunner who fired and missed from one who never
+        /// fired, and the 6.43.0 field log is exactly that silence: a technical
+        /// destroyed on R5 with nothing written about its gun at all.</summary>
+        static void Abbrechen(Truck t)
+        {
+            t.Engaged = false;
+            RevivalPlugin.L.LogInfo("TechnicalCrew: the gunner of " + t.Key
+                + " lost his target - " + t.Rounds + " round(s), " + t.Hits
+                + " hit(s).");
+        }
+
+        /// <summary>
+        /// MASTER ONLY. No target: the man stays WITH HIS GUN.
+        ///
+        /// Before, nothing turned him while there was nobody to shoot at, so he
+        /// faced wherever NPC_AI2 last turned him - at the player walking past,
+        /// at the road behind - and TechnicalGun.Stellung, which stands him
+        /// behind the pintle, then solved his hands onto grips beside or behind
+        /// him. That is a man who is at the MG by position only. Here he faces
+        /// the barrel every frame, and after a few quiet seconds the barrel
+        /// comes back to straight ahead at half traverse speed, which is where a
+        /// gunner on a moving truck watches. The mount and the gun are built with
+        /// identity rotation as their rest (TechnicalGun.Aim), so identity is
+        /// "ahead and level".
+        /// </summary>
+        static void Ruhelage(Truck t)
+        {
+            if (Time.time - t.LastContact > 3f)
+            {
+                float step = Mathf.Max(1f, F(CfgTraverse, 150f)) * 0.5f * Time.deltaTime;
+                t.Mount.localRotation = Quaternion.RotateTowards(t.Mount.localRotation,
+                    Quaternion.identity, step);
+                if (t.Gun != null)
+                    t.Gun.localRotation = Quaternion.RotateTowards(t.Gun.localRotation,
+                        Quaternion.identity, step);
+            }
+            Vector3 face = t.Mount.forward;
+            face.y = 0f;
+            if (face.sqrMagnitude > 0.000001f && t.Gunner != null)
+                t.Gunner.transform.rotation =
+                    Quaternion.LookRotation(face.normalized, Vector3.up);
+        }
+
         static Vector3 Muendung(Truck t)
         {
             if (t.Gun != null) return t.Gun.TransformPoint(TechnicalModel.MuzzleLocal);
@@ -1113,12 +1327,14 @@ namespace NextDayRevival
             GameObject struck = Strahl(t, muzzle, dir, range, out impact);
             Vector3 ende = struck == null ? muzzle + dir * range : impact;
             Spur(muzzle, ende);
+            t.Rounds++;
             if (struck == null) return;
 
             float damage = TechnicalGun.CfgDamage == null ? 85f : TechnicalGun.CfgDamage.Value;
-            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return;
-            if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return;
-            Turret.TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage);
+            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) { t.Hits++; return; }
+            if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) { t.Hits++; return; }
+            if (Turret.TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage))
+                t.Hits++;
         }
 
         static Vector3 Streuen(Vector3 dir, float degrees)

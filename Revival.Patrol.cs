@@ -2681,6 +2681,29 @@ namespace NextDayRevival
         static bool RoadUnder(Vector3 point, Transform own, out float y,
                               out Vector3 normal)
         {
+            if (RoadUnderLine(point, own, out y, out normal)) return true;
+            // THE RECORDED HEIGHT CAN BE FAR UNDER THE GROUND. The route editor
+            // reads the terrain heightmap with x and z swapped, so an editor
+            // route carries a y that is right only where the terrain happens to
+            // be symmetric about its diagonal. On R5 it lies 77 m under the road
+            // from waypoint ~150 on (field log 2026-09-22: routeY 441.8,
+            // surfaceY 518.0), the passes above rise at most 48 m, and a ray
+            // that starts inside the terrain never hits it - so F4 answered "the
+            // vehicle could not be put down" with the player standing on that
+            // road. The runtime terrain knows its own height and needs no
+            // collider for it, so the same search is asked once more from THERE.
+            float ground;
+            if (point.y < 10f
+                || !RevivalTroopInsertion.TerrainHeight(point, out ground)
+                || Mathf.Abs(ground - point.y) < 3f)
+                return false;
+            return RoadUnderLine(new Vector3(point.x, ground, point.z), own,
+                                 out y, out normal);
+        }
+
+        static bool RoadUnderLine(Vector3 point, Transform own, out float y,
+                                  out Vector3 normal)
+        {
             y = point.y;
             normal = Vector3.up;
             bool legacy = point.y < 10f;
@@ -4628,18 +4651,20 @@ namespace NextDayRevival
 
         /// <summary>Is this collider a piece of a character's ragdoll?
         ///
-        /// `CompareTag` is the non-allocating test, and it THROWS when the tag
-        /// it is given is not defined in the build - so each of the two names is
-        /// tried on its own and gives up on its own. A build that knows neither
-        /// falls back to the marker walk, which is exactly what happened before
-        /// this test existed.</summary>
-        static int _tagBone, _tagHead;   // 0 unknown, 1 usable, -1 not defined
+        /// `CompareTag` is the non-allocating test. The catch below is for a
+        /// build that THROWS on an unknown tag; this one does not. Given a tag it
+        /// does not define it writes "Tag: X is not defined." to the log as an
+        /// error, EVERY CALL, and answers false. `BloodHead` is such a tag here:
+        /// the 6.43.0 session log is 97,788 lines long and 92,426 of them are
+        /// that one error, one per ray a patrol casts. So only `RagdollBone` is
+        /// asked. It is defined (not one such error in the same log), and it is
+        /// the tag ExplosionPhysicsEffect damages a man through.</summary>
+        static int _tagBone;   // 0 unknown, 1 usable, -1 not defined
 
         static bool Knochen(Transform t)
         {
             if (t == null) return false;
             if (_tagBone >= 0 && Markiert(t, "RagdollBone", ref _tagBone)) return true;
-            if (_tagHead >= 0 && Markiert(t, "BloodHead", ref _tagHead)) return true;
             return false;
         }
 

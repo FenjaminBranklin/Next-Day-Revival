@@ -2280,7 +2280,7 @@ namespace NextDayRevival
         /// by a player. The NPC gunner's own code writes the mount, so the slew
         /// that follows a body's bearing must keep its hands off it: the two
         /// would take turns overwriting each other in the same frame.</summary>
-        static bool NpcManned(Component vgs)
+        internal static bool NpcManned(Component vgs)
         {
             return PassengerAt(vgs, Technical.GunnerSeat) == null
                 && TechnicalCrew.GunnerBody(vgs) != null;
@@ -3287,6 +3287,18 @@ namespace NextDayRevival
                     Component states = statesType == null ? null
                         : body.GetComponentInChildren(statesType, true);
                     Component animation = Field(states, "_anim") as Component;
+                    // A riding crew's gunner (RevivalTechnicalCrew.cs) is an NPC:
+                    // no PlayerStatesController, so up to 6.43.0 this threw and
+                    // he kept whatever NPC_AI2 played - a run cycle on the spot
+                    // in a fight. He has the same skeleton and his own legacy
+                    // Animation in NPC_AI2.Anim, and its 96-clip Male_01_v78 set
+                    // carries idle_alert under the same paths.
+                    if (animation == null)
+                    {
+                        Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
+                        Component npc = npcType == null ? null : body.GetComponent(npcType);
+                        animation = Field(npc, "Anim") as Component;
+                    }
                     if (animation == null) throw new InvalidOperationException("Player animation missing");
                     PropertyInfo item = animation.GetType().GetProperty("Item", new Type[] { typeof(string) });
                     object idle = item == null ? null : item.GetValue(animation, new object[] { "idle_alert" });

@@ -809,6 +809,73 @@ def check_helipads():
              "research/helipad_check.py fehlt - die Landeplaetze sind unbelegt")
 
 
+def check_editor_heights():
+    """[26] Editor terrain heights are read row = z (REVERSE_ENGINEERING.md 42.1).
+
+    Unity serialises TerrainData.m_Heights x-major. Read row = x, every editor
+    height came from the point mirrored across x = z and route R5 lay 77 m
+    under its road. The static half holds the transpose in both readers and
+    the stamp on the served road network; with the game installed, the
+    in-game heights themselves are compared (research/terrain_height_check.py
+    adds all three maps and every network point).
+    """
+    print("[26] Editor terrain heights")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Editor heights: " + why)
+
+    need(".reshape(side, side).T" in read(os.path.join("research", "terrainmap.py")),
+         "terrainmap.py transposes m_Heights to row = z",
+         "research/terrainmap.py reads m_Heights without the transpose - every "
+         "height is the one mirrored across x = z")
+    need(".reshape(1025, 1025).T" in read("routedraft.py"),
+         "routedraft.py transposes m_Heights to row = z",
+         "routedraft.py reads m_Heights without the transpose")
+    need('HEIGHT_ORDER = "zx"' in read("roadnet.py")
+         and '"heightOrder": HEIGHT_ORDER' in read("roadnet.py"),
+         "roadnet.py stamps the networks it writes",
+         "roadnet.py no longer stamps heightOrder - stale networks go unnoticed")
+    sample = read(os.path.join("assets", "editor", "roadnet_sample.json"))
+    need('"heightOrder": "zx"' in sample,
+         "the served road network carries fixed-read heights",
+         "assets/editor/roadnet_sample.json predates the height fix - "
+         "python roadnet.py -reheight")
+    if os.path.isdir(os.path.join(ROOT, "research")):
+        need(os.path.exists(os.path.join(ROOT, "research", "terrain_height_check.py")),
+             "research/terrain_height_check.py liegt vor",
+             "research/terrain_height_check.py fehlt")
+
+    # The heights the game itself reported (6.43.0 log; RE 37 teleport). Only
+    # with the game and UnityPy present; the three on x = z agree either way.
+    known = [(-1245.3, 1916.9, 518.0), (-1268.0, 1932.0, 519.0),
+             (-1371.6, 1814.5, 530.4), (-1530.0, -1515.0, 496.7),
+             (-1575.0, -1515.0, 496.5), (-1620.0, -1515.0, 495.9),
+             (-513.0, -413.0, 497.8)]
+    if not GAME:
+        warn("Editor heights: no game installed - in-game heights not compared")
+        return
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "research"))
+        import terrainmap
+        terrain = terrainmap.terrain("GW_Scene_1")
+    except Exception as ex:
+        warn("Editor heights: GW_Scene_1 terrain unreadable (%s) - in-game "
+             "heights not compared" % type(ex).__name__)
+        return
+    worst = max(abs(terrain.ground(x, z) - y) for x, z, y in known)
+    need(worst <= 1.0,
+         "%d in-game heights match ground(x, z) (largest gap %.2f m)"
+         % (len(known), worst),
+         "ground(x, z) is %.1f m off a height the game reported" % worst)
+
+
 def check_version():
     """VERSION-Datei und die Konstante im Quelltext muessen gleich sein.
 
@@ -4650,6 +4717,7 @@ if __name__ == "__main__":
     check_stinger()
     check_crocodile()
     check_traitor_vendor()
+    check_editor_heights()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

@@ -1015,12 +1015,12 @@ namespace NextDayRevival
                     Assets.Texture(Crocodile.NormalName(), true, true));
                 material.EnableKeyword("_NORMALMAP");
             }
-            if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 0.08f);
-            if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", 0.45f);
+            if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 0f);
+            if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", 0.31f);
             if (material.HasProperty("_EmissionColor"))
             {
-                material.SetColor("_EmissionColor", new Color(0.025f, 0.18f, 0.03f, 1f));
-                material.EnableKeyword("_EMISSION");
+                material.SetColor("_EmissionColor", Color.black);
+                material.DisableKeyword("_EMISSION");
             }
             return material;
         }
