@@ -64,8 +64,8 @@
 // An authored clearing also raises the size limit, and that is deliberate.
 // Without one the rule stays what it was - a tree, a bush, a rock, never a
 // house - because a pad dropped on the map must not punch a hole in a village.
-// Authoring a clearing is the admin saying "this is a building site", so the
-// pad may then take anything narrower than the DECK HE DREW: one structure
+        // Authoring a clearing is the admin saying "this is a building site", so the
+        // pad may then take anything narrower than the SITE HE DREW: one structure
 // goes, the container of half a district does not.
 //
 // The pad is also the LZ: a troop landing whose marked zone falls inside a pad
@@ -152,7 +152,7 @@ namespace NextDayRevival
 
         static ConfigEntry<bool> _cfgEnabled, _cfgMarkers, _cfgClear;
         static ConfigEntry<float> _cfgLift;
-        static ConfigEntry<string> _cfgFile;
+        static ConfigEntry<string> _cfgFile, _cfgClearKey, _cfgClearArea;
         static List<Pad> _pads = new List<Pad>();
         static string[] _source;
         static bool _loaded;
@@ -162,6 +162,9 @@ namespace NextDayRevival
         static Texture _stamp;
         static bool _waitLogged;
         static bool _stampTried;
+        static readonly List<Vector2> _clearArea = new List<Vector2>();
+        static bool _clearAreaArmed;
+        static KeyCode _clearAreaKey = KeyCode.None;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -175,6 +178,11 @@ namespace NextDayRevival
                 "How far the deck stands over the ground, in metres. The ramp around it is graded to match.");
             _cfgClear = cfg.Bind("Helipads", "ClearGround", true,
                 "Remove the trees, bushes, grass and props that stand where a pad is built.");
+            _cfgClearKey = cfg.Bind("Helipads", "ClearAreaKey", "F7",
+                "Press this key, then click four corners on the world map, to clear that building site.");
+            _cfgClearArea = cfg.Bind("Helipads", "ClearArea", "",
+                "Persistent x,z corner pairs written by ClearAreaKey; empty disables the area.");
+            ReadClearArea();
         }
 
         // ================================================================ data
@@ -289,6 +297,7 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
+            ClearAreaInput();
             if (_cfgEnabled == null || !_cfgEnabled.Value) { Clear(); return; }
             if (Time.realtimeSinceStartup < _next) return;
             _next = Time.realtimeSinceStartup + 1f;
@@ -679,7 +688,7 @@ namespace NextDayRevival
 
         /// <summary>The widest thing a pad with no authored clearing may
         /// remove, in metres. A tree, a bush, a rock - yes. A house - never.
-        /// Cap() raises it to the deck's own width for a pad whose site the
+        /// Cap() raises it to the site's width for a pad whose site the
         /// admin authored.</summary>
         const float MaxProp = 14f;
 
@@ -723,11 +732,11 @@ namespace NextDayRevival
 
         /// <summary>The widest thing THIS pad may remove. Without an authored
         /// clearing it is MaxProp and nothing has changed. With one it is the
-        /// deck the admin drew: a structure that would fit on his pad goes, and
-        /// anything wider than the pad itself stays.</summary>
+        /// building site the admin drew. The old deck-radius cap was the reason
+        /// a large house survived inside a deliberately wider clearing.</summary>
         static float Cap(Pad p)
         {
-            return Sited(p) && p.Radius > MaxProp ? p.Radius : MaxProp;
+            return Sited(p) && Footprint(p) > MaxProp ? Footprint(p) : MaxProp;
         }
 
         /// <summary>Is this point inside any pad of the map that is loaded?</summary>
@@ -740,7 +749,7 @@ namespace NextDayRevival
                 float dx = x - p.X, dz = z - p.Z;
                 if (dx * dx + dz * dz <= reach * reach) return true;
             }
-            return false;
+            return InClearArea(x, z);
         }
 
         static void ClearProps(Pad p, float deck)
@@ -1037,6 +1046,42 @@ namespace NextDayRevival
                     data.SetDetailLayer(x0, y0, layer, patch);
                 }
             }
+            TakeAreaGrass(terrain, data, org, size, res, kinds.Length);
+        }
+
+        static void TakeAreaGrass(Terrain terrain, TerrainData data, Vector3 org,
+                                  Vector3 size, int res, int layers)
+        {
+            if (_clearArea.Count != 4) return;
+            float minX = _clearArea[0].x, maxX = minX;
+            float minZ = _clearArea[0].y, maxZ = minZ;
+            for (int i = 1; i < 4; i++)
+            { minX = Mathf.Min(minX, _clearArea[i].x); maxX = Mathf.Max(maxX, _clearArea[i].x);
+              minZ = Mathf.Min(minZ, _clearArea[i].y); maxZ = Mathf.Max(maxZ, _clearArea[i].y); }
+            int x0 = Mathf.Clamp(Mathf.FloorToInt((minX - org.x) / size.x * res), 0, res - 1);
+            int y0 = Mathf.Clamp(Mathf.FloorToInt((minZ - org.z) / size.z * res), 0, res - 1);
+            int x1 = Mathf.Clamp(Mathf.CeilToInt((maxX - org.x) / size.x * res), 0, res - 1);
+            int y1 = Mathf.Clamp(Mathf.CeilToInt((maxZ - org.z) / size.z * res), 0, res - 1);
+            int w = x1 - x0 + 1, h = y1 - y0 + 1;
+            if (w <= 1 || h <= 1) return;
+            for (int layer = 0; layer < layers; layer++)
+            {
+                int[,] patch = data.GetDetailLayer(x0, y0, w, h, layer);
+                int[,] before = (int[,])patch.Clone();
+                bool changed = false;
+                for (int a = 0; a < w; a++) for (int b = 0; b < h; b++)
+                {
+                    if (patch[a, b] == 0) continue;
+                    float wx = org.x + (x0 + a + .5f) / res * size.x;
+                    float wz = org.z + (y0 + b + .5f) / res * size.z;
+                    if (!InClearArea(wx, wz)) continue;
+                    patch[a, b] = 0; changed = true;
+                }
+                if (!changed) continue;
+                Take take = new Take(); take.Terrain = terrain; take.Data = data;
+                take.Layer = layer; take.X = x0; take.Y = y0; take.Detail = before;
+                _taken.Add(take); data.SetDetailLayer(x0, y0, layer, patch);
+            }
         }
 
         /// <summary>Make the change visible and solid. Flush redraws the trees;
@@ -1059,7 +1104,7 @@ namespace NextDayRevival
         /// switched off within a few seconds of the chunk arriving.</summary>
         static void Sweep()
         {
-            if (!ClearOn || _pads.Count == 0) return;
+            if (!ClearOn || (_pads.Count == 0 && _clearArea.Count != 4)) return;
             if (Time.realtimeSinceStartup < _nextSweep) return;
             _nextSweep = Time.realtimeSinceStartup + 3f;
             _hidden.RemoveAll(delegate(GameObject go) { return go == null; });
@@ -1075,6 +1120,7 @@ namespace NextDayRevival
                 }
                 ClearProps(p, p.Deck);
             }
+            ClearAreaProps();
         }
 
         /// <summary>Put the world back. Called before every rebuild and whenever
@@ -1114,6 +1160,111 @@ namespace NextDayRevival
                 }
             }
             _taken.Clear();
+        }
+
+        // =================================================== four-corner site
+
+        static void ReadClearArea()
+        {
+            _clearArea.Clear();
+            if (_cfgClearArea == null || string.IsNullOrEmpty(_cfgClearArea.Value)) return;
+            string[] pairs = _cfgClearArea.Value.Split(';');
+            if (pairs.Length != 4) return;
+            for (int i = 0; i < pairs.Length; i++)
+            {
+                string[] n = pairs[i].Split(',');
+                float x, z;
+                if (n.Length != 2
+                    || !Single.TryParse(n[0], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                    || !Single.TryParse(n[1], NumberStyles.Float, CultureInfo.InvariantCulture, out z))
+                { _clearArea.Clear(); return; }
+                _clearArea.Add(new Vector2(x, z));
+            }
+        }
+
+        static void ClearAreaInput()
+        {
+            if (_cfgClearKey == null) return;
+            if (_clearAreaKey == KeyCode.None)
+            {
+                try { _clearAreaKey = (KeyCode)Enum.Parse(typeof(KeyCode), _cfgClearKey.Value, true); }
+                catch { _clearAreaKey = KeyCode.F7; }
+            }
+            if (!Input.GetKeyDown(_clearAreaKey)) return;
+            _clearArea.Clear();
+            _clearAreaArmed = true;
+            RevivalPlugin.L.LogInfo("Helipads: clear-area marking armed; click four map corners.");
+        }
+
+        internal static bool ClearAreaMapClick()
+        {
+            if (!_clearAreaArmed) return false;
+            Vector3 point;
+            if (!MapTools.MouseWorld(out point)) return true;
+            _clearArea.Add(new Vector2(point.x, point.z));
+            RevivalPlugin.L.LogInfo("Helipads: clear-area corner " + _clearArea.Count + "/4 at "
+                + point.x.ToString("0.00", CultureInfo.InvariantCulture) + ", "
+                + point.z.ToString("0.00", CultureInfo.InvariantCulture) + ".");
+            if (_clearArea.Count < 4) return true;
+            _clearAreaArmed = false;
+            StringBuilder value = new StringBuilder();
+            for (int i = 0; i < 4; i++)
+            {
+                if (i > 0) value.Append(';');
+                value.Append(_clearArea[i].x.ToString("0.00", CultureInfo.InvariantCulture));
+                value.Append(',');
+                value.Append(_clearArea[i].y.ToString("0.00", CultureInfo.InvariantCulture));
+            }
+            _cfgClearArea.Value = value.ToString();
+            Restore();
+            ClearTerrain();
+            ClearAreaProps();
+            _builtKey = "";
+            RevivalPlugin.L.LogInfo("Helipads: four-corner building site saved and cleared.");
+            return true;
+        }
+
+        static bool InClearArea(float x, float z)
+        {
+            if (_clearArea.Count != 4) return false;
+            bool inside = false;
+            for (int i = 0, j = 3; i < 4; j = i++)
+            {
+                Vector2 a = _clearArea[i], b = _clearArea[j];
+                if (((a.y > z) != (b.y > z))
+                    && x < (b.x - a.x) * (z - a.y) / (b.y - a.y) + a.x) inside = !inside;
+            }
+            return inside;
+        }
+
+        static void ClearAreaProps()
+        {
+            if (_clearArea.Count != 4) return;
+            float x0 = _clearArea[0].x, x1 = x0, z0 = _clearArea[0].y, z1 = z0;
+            for (int i = 1; i < 4; i++)
+            { x0 = Mathf.Min(x0, _clearArea[i].x); x1 = Mathf.Max(x1, _clearArea[i].x);
+              z0 = Mathf.Min(z0, _clearArea[i].y); z1 = Mathf.Max(z1, _clearArea[i].y); }
+            Collider[] hits = Physics.OverlapBox(new Vector3((x0 + x1) * .5f, 30f, (z0 + z1) * .5f),
+                new Vector3((x1 - x0) * .5f, 60f, (z1 - z0) * .5f), Quaternion.identity,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            for (int i = 0; i < hits.Length; i++)
+            {
+                Collider hit = hits[i];
+                if (hit == null || hit is TerrainCollider) continue;
+                Transform t = hit.transform;
+                if (t == null || hit.GetComponentInParent<Rigidbody>() != null
+                    || hit.GetComponentInParent<CharacterController>() != null || Networked(t)) continue;
+                Transform group = Group(t);
+                if (group != null) t = group;
+                Bounds box;
+                if (!WorldBounds(t, out box)) continue;
+                if (!InClearArea(box.min.x, box.min.z) || !InClearArea(box.min.x, box.max.z)
+                    || !InClearArea(box.max.x, box.min.z) || !InClearArea(box.max.x, box.max.z)) continue;
+                GameObject go = t.gameObject;
+                if (_hidden.Contains(go)) continue;
+                _hidden.Add(go);
+                go.SetActive(false);
+            }
         }
 
         // ============================================================== the LZ

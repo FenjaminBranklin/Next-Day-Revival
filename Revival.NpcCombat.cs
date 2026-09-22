@@ -470,6 +470,11 @@ namespace NextDayRevival
             public Transform DroneTarget;
             public float LastFullOrder;     // Time.time of the last full (RPC) move order
             public float GroundPause;
+            // His own point of the group's current order: the slot he walks to
+            // beside this patrol waypoint, or the post he guards. Recomputed
+            // once per waypoint, never per frame - it costs a NavMesh sample.
+            public Vector3 GroundDest;
+            public int GroundSlot;
 
             // 6.18: where he stood when he last covered ground, and when. A man
             // told to run who does not move is put back on his feet (Unstick).
@@ -507,10 +512,25 @@ namespace NextDayRevival
             public float MuzzleBlockedSince, MateBlockedSince;
         }
 
+        /// <summary>What an editor ground group does when nobody shoots at it
+        /// (grounddef.BEHAVIORS): stand on the spot it was placed on, wander
+        /// inside its radius, walk the drawn route, or hold a perimeter around
+        /// the point. Every one of them walks; none of them ever runs.</summary>
+        enum GroundMode { Waiting, Wander, Patrol, Guard }
+
         class Squad
         {
             public bool GroundGroup, GroundWalking;
             public float GroundRadius;
+            // The editor ground group's orders. Route is the walked polyline,
+            // GroundLeg the point the group is walking to, GroundForward the
+            // direction it walks it in when it is not a closed loop, and
+            // GroundContact the moment the last shot stops holding it up.
+            public GroundMode GroundDuty;
+            public readonly List<Vector3> GroundRoute = new List<Vector3>();
+            public bool GroundLoop, GroundForward = true;
+            public int GroundLeg;
+            public float GroundHold, GroundHoldUntil, GroundLegUntil, GroundContact;
             public string Tag;
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
@@ -984,14 +1004,48 @@ namespace NextDayRevival
                     Remove(_squads[i], "ground definition changed");
         }
 
+        /// <summary>The men a wrecked vehicle set down. They have no editor
+        /// group behind them and no route: they hold the ground they are on,
+        /// or wander the radius their caller gave them.</summary>
         internal static bool StartGround(string tag, GameObject settlement, Array npcs,
             Vector3 home, bool walking, float radius, List<RevivalComposition.CrewMan> loadout)
+        {
+            return StartGround(tag, settlement, npcs, home, walking ? "walking" : "waiting",
+                radius, loadout, null, false, 0f);
+        }
+
+        internal static bool StartGround(string tag, GameObject settlement, Array npcs,
+            Vector3 home, string behavior, float radius, List<RevivalComposition.CrewMan> loadout,
+            List<Vector3> route, bool loop, float hold)
         {
             if (!LookUp() || settlement == null || npcs == null || IsActive(tag)) return false;
             Squad s = new Squad();
             s.Tag = tag; s.Settlement = settlement; s.Lz = home;
-            s.GroundGroup = true; s.GroundWalking = walking; s.GroundRadius = radius;
+            s.GroundGroup = true; s.GroundRadius = radius;
+            s.GroundDuty = behavior == "walking" ? GroundMode.Wander
+                : behavior == "patrol" ? GroundMode.Patrol
+                : behavior == "guard" ? GroundMode.Guard : GroundMode.Waiting;
+            // The wander flag stays the one thing RunGround asks about: it is
+            // what tells a waiting man from a wandering one.
+            s.GroundWalking = s.GroundDuty == GroundMode.Wander;
+            s.GroundLoop = loop; s.GroundHold = Mathf.Clamp(hold, 0f, 600f);
             s.Centre = home; s.Front = Vector3.forward;
+            // Every drawn waypoint is pulled onto walkable ground once, here.
+            // A point in a rock is dropped rather than walked at forever.
+            if (route != null)
+                for (int i = 0; i < route.Count; i++)
+                {
+                    Vector3 point;
+                    if (RevivalGroundEnemies.TryGround(route[i], 20f, out point))
+                        s.GroundRoute.Add(point);
+                }
+            if (s.GroundDuty == GroundMode.Patrol && s.GroundRoute.Count < 2)
+            {
+                RevivalPlugin.L.LogWarning("Ground enemies: " + tag + " has no walkable "
+                    + "route here - the group holds its position instead.");
+                s.GroundDuty = GroundMode.Guard;
+                s.GroundRoute.Clear();
+            }
             for (int i = 0; i < npcs.Length; i++)
             {
                 Component ai = npcs.GetValue(i) as Component;
@@ -1000,15 +1054,37 @@ namespace NextDayRevival
                 if (sector != null) UnityEngine.Object.Destroy(sector);
                 Fighter f = NewFighter(ai, s);
                 f.GroundPause = Time.time + UnityEngine.Random.Range(1f, 4f);
+                f.GroundSlot = s.Men.Count;
+                f.GroundDest = f.Tr.position;
                 RevivalComposition.CrewMan spec = loadout != null && loadout.Count > 0
                     ? loadout[SpawnIndex(ai, i) % loadout.Count] : null;
                 Equip(f, spec);
                 s.Men.Add(f); _armoured[ai.GetInstanceID()] = f;
             }
             if (s.Men.Count == 0) return false;
+            if (s.GroundDuty == GroundMode.Patrol)
+            {
+                // Start on the waypoint nearest the place they stand, not on
+                // the first one drawn: a group placed at the far end of its
+                // route would otherwise walk the whole line before patrolling.
+                for (int i = 1; i < s.GroundRoute.Count; i++)
+                    if (Flat(s.GroundRoute[i] - home) < Flat(s.GroundRoute[s.GroundLeg] - home))
+                        s.GroundLeg = i;
+                GroundOrders(s, Time.time);
+            }
+            else if (s.GroundDuty == GroundMode.Guard) GuardPosts(s);
             EnsurePointsRoot(); _squads.Add(s);
+            string duty = s.GroundDuty == GroundMode.Wander ? "walking"
+                : s.GroundDuty == GroundMode.Patrol ? "patrol"
+                : s.GroundDuty == GroundMode.Guard ? "guard" : "waiting";
             RevivalPlugin.L.LogInfo("Ground enemies: " + tag + " controls " + s.Men.Count
-                + " men, " + (walking ? "walking" : "waiting") + ", radius " + radius + " m.");
+                + " men, " + duty
+                + (s.GroundDuty == GroundMode.Patrol
+                    ? ", " + s.GroundRoute.Count + " waypoint(s), "
+                        + (loop ? "looping" : "up and down") + ", " + s.GroundHold.ToString("0")
+                        + " s at each"
+                    : s.GroundDuty == GroundMode.Wander ? ", radius " + radius + " m" : "")
+                + ".");
             return true;
         }
 
@@ -1395,6 +1471,7 @@ namespace NextDayRevival
                 s.NextVehicleScan = now + 0.5f;
                 s.Vehicle = HostileVehicle(s, s.Settlement.transform.position);
             }
+            if (s.GroundDuty == GroundMode.Patrol) PatrolCursor(s, now);
             int alive = 0;
             for (int i = 0; i < s.Men.Count; i++)
             {
@@ -1410,8 +1487,15 @@ namespace NextDayRevival
                 {
                     Fire(f, now);
                     f.GroundPause = now + 2f;
+                    // A patrol stops for the fight and picks the route up
+                    // again five seconds after the last shot.
+                    s.GroundContact = now + 5f;
                     continue;
                 }
+                // The two behaviors that were given a place to be: the route
+                // the editor drew, and the perimeter around the point.
+                if (s.GroundDuty == GroundMode.Patrol) { PatrolStep(f, s, now); continue; }
+                if (s.GroundDuty == GroundMode.Guard) { GuardStep(f, s, now); continue; }
                 // Waiting men stand where placed. No target pursuit or running
                 // is allowed for either behavior, including during combat.
                 if (!s.GroundWalking) { Hold(f, null, now); continue; }
@@ -1460,6 +1544,165 @@ namespace NextDayRevival
                 if (inside) return true;
             }
             return false;
+        }
+
+        /// <summary>The group walks its route as one body: everybody is sent to
+        /// the same waypoint and the waypoint only changes when the body has
+        /// arrived, when the leg has taken too long, or after the stand the
+        /// editor asked for. A man who fell behind is not waited for by the
+        /// clock alone - he is simply re-ordered to the new point.</summary>
+        static void PatrolCursor(Squad s, float now)
+        {
+            if (s.GroundRoute.Count < 2) return;
+            Vector3 centre = Vector3.zero;
+            int n = 0;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                centre += f.Tr.position; n++;
+            }
+            if (n == 0) return;
+            centre /= n;
+            // Under fire the patrol stands and shoots; the leg clock is pushed
+            // ahead so the fight is never counted as a stalled walk.
+            if (now < s.GroundContact)
+            { s.GroundLegUntil = Mathf.Max(s.GroundLegUntil, now + 20f); return; }
+            if (now < s.GroundHoldUntil) return;
+            float arrive = 5f + 0.6f * n;
+            bool there = Flat(centre - s.GroundRoute[s.GroundLeg]) <= arrive;
+            if (!there && now < s.GroundLegUntil) return;
+            s.GroundLeg = NextLeg(s);
+            // Standing at the post is what a patrol does when it gets there;
+            // a leg that only ran out of time moves straight on.
+            s.GroundHoldUntil = there ? now + s.GroundHold : now;
+            GroundOrders(s, now);
+        }
+
+        /// <summary>The next point on the route: a loop returns to its first
+        /// point, an open line is walked up and down.</summary>
+        static int NextLeg(Squad s)
+        {
+            int last = s.GroundRoute.Count - 1;
+            if (s.GroundLoop) return s.GroundLeg >= last ? 0 : s.GroundLeg + 1;
+            if (s.GroundForward)
+            {
+                if (s.GroundLeg < last) return s.GroundLeg + 1;
+                s.GroundForward = false;
+                return last - 1;
+            }
+            if (s.GroundLeg > 0) return s.GroundLeg - 1;
+            s.GroundForward = true;
+            return 1;
+        }
+
+        /// <summary>Hand every man his own place beside the new waypoint and
+        /// set the clock for the leg. Both cost a NavMesh sample per man, so
+        /// this runs once per waypoint and never per frame.</summary>
+        static void GroundOrders(Squad s, float now)
+        {
+            if (s.GroundRoute.Count < 2) return;
+            Vector3 target = s.GroundRoute[s.GroundLeg];
+            float far = 0f;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                f.HasOrder = false;
+                f.GroundPause = now + UnityEngine.Random.Range(0f, 1.5f);
+                f.GroundDest = Beside(target, f.GroundSlot);
+                far = Mathf.Max(far, Flat(f.GroundDest - f.Tr.position));
+            }
+            // A walk is 0.8 units a second at worst; half a minute of slack on
+            // top covers the way around whatever stands in the line.
+            s.GroundLegUntil = now + 30f + far / 0.8f;
+        }
+
+        /// <summary>A place beside a waypoint for man number k. A sunflower
+        /// spiral: no two men are given the same point, the group stays a
+        /// compact body, and the offsets never depend on the walked direction,
+        /// so nobody is shuffled around when the route turns.</summary>
+        static Vector3 Beside(Vector3 target, int k)
+        {
+            if (k <= 0) return target;
+            float angle = k * 2.39996f;
+            float radius = 1.9f * Mathf.Sqrt(k + 0.5f);
+            Vector3 spot = target + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius;
+            Vector3 walkable;
+            return RevivalGroundEnemies.TryGround(spot, 4f, out walkable) ? walkable : target;
+        }
+
+        /// <summary>One man on the route. Out of contact he walks to his place
+        /// beside the current waypoint and stands there facing the waypoint
+        /// until the group moves on. He never runs.</summary>
+        static void PatrolStep(Fighter f, Squad s, float now)
+        {
+            if (s.GroundRoute.Count < 2) { Hold(f, null, now); return; }
+            if (now < s.GroundHoldUntil || Flat(f.Tr.position - f.GroundDest) <= 2.5f)
+            {
+                f.HasOrder = false;
+                Hold(f, null, now);
+                FaceDir(f, s.GroundRoute[s.GroundLeg] - f.Tr.position);
+                return;
+            }
+            if (f.HasOrder && now < f.MoveDeadline)
+            {
+                // Keep the native alarm from switching a walk to a run.
+                Drive(f, MainWalk, AddNone, PoseStand, now, false);
+                return;
+            }
+            if (now < f.GroundPause) { Hold(f, null, now); return; }
+            f.GroundPause = now + 3f;
+            Go(f, f.GroundDest, MainWalk, PoseStand, now, Stance.Advance);
+            f.MoveDeadline = now + 15f + Flat(f.GroundDest - f.Tr.position) / 0.8f;
+        }
+
+        /// <summary>The posts of a group that holds its ground: a ring around
+        /// the point, wide enough for the group to cover it and tight enough
+        /// to still be one position. Twelve men on one spot was the complaint
+        /// this answers.</summary>
+        static void GuardPosts(Squad s)
+        {
+            int n = 0;
+            for (int i = 0; i < s.Men.Count; i++)
+                if (s.Men[i].Ai != null && Alive(s.Men[i].Ai)) n++;
+            if (n == 0) return;
+            float radius = Mathf.Clamp(4f + 1.6f * n, 6f, 30f);
+            int taken = 0;
+            for (int i = 0; i < s.Men.Count; i++)
+            {
+                Fighter f = s.Men[i];
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                float angle = taken++ * Mathf.PI * 2f / n;
+                Vector3 post = s.Lz + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius;
+                Vector3 walkable;
+                f.GroundDest = RevivalGroundEnemies.TryGround(post, 8f, out walkable)
+                    ? walkable : f.Tr.position;
+            }
+        }
+
+        /// <summary>One man holding the position: to his post at a walk, and
+        /// then standing on it looking outward.</summary>
+        static void GuardStep(Fighter f, Squad s, float now)
+        {
+            if (Flat(f.Tr.position - f.GroundDest) <= 2f)
+            {
+                f.HasOrder = false;
+                Hold(f, null, now);
+                FaceDir(f, f.GroundDest - s.Lz);
+                return;
+            }
+            if (f.HasOrder && now < f.MoveDeadline)
+            {
+                Drive(f, MainWalk, AddNone, PoseStand, now, false);
+                return;
+            }
+            if (now < f.GroundPause) { Hold(f, null, now); return; }
+            // A post he cannot reach is tried again, but rarely: he holds the
+            // ground he stands on in between, which is the point of the order.
+            f.GroundPause = now + 20f;
+            Go(f, f.GroundDest, MainWalk, PoseStand, now, Stance.Advance);
+            f.MoveDeadline = now + 15f + Flat(f.GroundDest - f.Tr.position) / 0.8f;
         }
 
         /// <summary>The point the whole line runs at. Out of contact, and with

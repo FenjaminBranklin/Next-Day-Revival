@@ -122,6 +122,7 @@ ASSET_FILES = [
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
+    "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
     "t72_track_left.ndmesh", "t72_track_right.ndmesh", "t72_track.png",
     "t72_diffuse.png", "t72_normal.png", "t72_metal.png", "t72_scope.png",
@@ -160,6 +161,7 @@ MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
           "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
+          "crocodile.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
           "shell125.ndmesh", "thermal.ndmesh", "nvmodule.ndmesh",
           "jammod.ndmesh", "antenna_pack.ndmesh", "battery.ndmesh",
@@ -270,6 +272,15 @@ def check_ground_enemies():
     NPCs it was written to avoid, and a missing corner check lets a man walk a
     legal-looking straight line around a lake and out of his area.
 
+    6.42 added the two behaviours that give a group somewhere to be: a patrol
+    that walks the route the editor drew, and a guard that spreads onto a
+    perimeter around its point instead of standing on it. Both are held to the
+    same promise - the checks below insist that every one of their movement
+    orders is a walk, that the patrol actually advances from waypoint to
+    waypoint, and that a fight stops the patrol instead of counting as a stall.
+    The published route is bounded in length and point count, and a patrol
+    without a route is refused rather than left standing around.
+
     The rest guards the shape of the feature. Ground groups travel on their own
     hash-verified /runtime/ground envelope, so an older client keeps its convoy
     data; a bad snapshot is rejected as a whole before any live group is
@@ -336,6 +347,22 @@ def check_ground_enemies():
          "wartende Gruppen bleiben stehen",
          "wartende Bodengruppen bleiben nicht mehr auf ihrem Posten")
 
+    # --- the two behaviours with a place to be: die Route und die Stellung.
+    need("if (s.GroundDuty == GroundMode.Patrol) { PatrolStep(f, s, now); continue; }" in block
+         and "if (s.GroundDuty == GroundMode.Guard) { GuardStep(f, s, now); continue; }" in block,
+         "Laufroute und Stellung haben ihr eigenes Verhalten",
+         "die Bodengruppen kennen wieder nur Warten und Wandern - Laufrouten "
+         "und Stellung halten fehlen")
+    need(block.count("MainWalk") >= 6,
+         "auch Streife und Stellungswechsel gehen im Schritt",
+         "ein Bewegungsbefehl von Streife oder Stellung traegt kein MainWalk")
+    need("s.GroundLeg = NextLeg(s);" in block and "static int NextLeg(Squad s)" in block,
+         "die Streife wandert von Wegpunkt zu Wegpunkt weiter",
+         "die Streife bleibt auf ihrem ersten Wegpunkt stehen")
+    need("if (now < s.GroundContact)" in block,
+         "ein Feuergefecht haelt die Streife an, statt als Stillstand zu zaehlen",
+         "das Gefecht der Streife wird als haengender Marsch gewertet")
+
     # --- and inside the radius around the drop point, path included.
     need("Flat(dest - s.Lz) > s.GroundRadius" in block,
          "das gewaehlte Ziel liegt im Umkreis um den Aussetzpunkt",
@@ -390,9 +417,18 @@ def check_ground_enemies():
     need("if (lines == null || lines.Length > 1025)" in g,
          "die Zeilenzahl des Bodenstands ist begrenzt",
          "ein Bodenstand darf beliebig viele Zeilen haben")
-    need('if (g.Behavior != "waiting" && g.Behavior != "walking")' in g,
-         "genau zwei Verhalten: warten oder gehen",
-         "das Verhalten einer Bodengruppe wird nicht mehr geprueft")
+    need('if (g.Behavior != "waiting" && g.Behavior != "walking"' in g
+         and '&& g.Behavior != "patrol" && g.Behavior != "guard")' in g,
+         "vier gepruefte Verhalten: warten, gehen, streifen, Stellung halten",
+         "das Verhalten einer Bodengruppe wird nicht mehr vollstaendig geprueft")
+    need('throw new IOException("Ground patrol without a route")' in g,
+         "eine Streife ohne Route wird abgelehnt",
+         "eine Streife ohne Route wird angenommen und steht dann herum")
+    need("static void Route(string text, List<Vector3> into)" in g
+         and 'throw new IOException("Too many ground route points")' in g
+         and 'throw new IOException("Ground route too long")' in g,
+         "die veroeffentlichte Route ist in Laenge und Punktzahl begrenzt",
+         "eine veroeffentlichte Route darf beliebig gross werden")
     need("if (total > MaxTotal) throw new IOException" in g,
          "die Gesamtstaerke ist im Plugin begrenzt",
          "das Plugin nimmt beliebig viele Bodengegner an")
@@ -435,9 +471,18 @@ def check_ground_enemies():
          and len(re.findall(r'"[A-Za-z]+"', columns.group(1))) == int(cs_columns.group(1)),
          "Editor und Plugin zaehlen dieselben Spalten",
          "die Spaltenzahl von grounddef.py passt nicht zum Parser des Plugins")
-    need('BEHAVIORS = ["waiting", "walking"]' in gdef,
-         "der Editor bietet genau die beiden Verhalten an",
+    need('BEHAVIORS = ["waiting", "walking", "patrol", "guard"]' in gdef,
+         "der Editor bietet genau die vier Verhalten des Plugins an",
          "der Editor bietet ein Verhalten an, das das Plugin nicht kennt")
+    cs_route = re.search(r"MaxRoutePoints = (\d+)", g)
+    need(cs_route is not None and value("MAX_ROUTE_POINTS") == cs_route.group(1),
+         "Editor und Plugin erlauben gleich viele Wegpunkte",
+         "Editor und Plugin zaehlen verschiedene Wegpunkte - eine gespeicherte "
+         "Route waere dann im Spiel ungueltig")
+    need('ROUTE_MODES = ["pingpong", "loop"]' in gdef
+         and 'if (c[10] != "loop" && c[10] != "pingpong")' in g,
+         "Rundkurs und Hin-und-zurueck heissen auf beiden Seiten gleich",
+         "die Routenrichtung des Editors kennt das Plugin nicht")
 
     comp_p = os.path.join(ROOT, "compdef.py")
     comp = io.open(comp_p, encoding="utf-8").read() if os.path.exists(comp_p) else ""
@@ -466,6 +511,14 @@ def check_ground_enemies():
         need("openPicker('weapon'" in gjs and "SLOTS.forEach" in gjs,
              "Bodengruppen tragen dieselbe Ausruestungsauswahl wie die Besatzungen",
              "die Ausruestungsauswahl der Bodengruppen fehlt")
+        need("function routeEditor(" in gjs and "'+ waypoint'" in gjs
+             and "function drawRoute(" in gjs,
+             "die Laufroute wird im Editor eingetragen und gezeichnet",
+             "im Editor laesst sich keine Laufroute eintragen - genau die "
+             "Luecke, die diese Aufgabe schliessen sollte")
+        need("function seedRoute(" in gjs and "moveGroup(d, x, z)" in gjs,
+             "eine neue Streife bekommt eine Route, und Kopien bekommen ihre eigene",
+             "verteilte Streifen laufen alle auf der Route ihrer Vorlage")
         need('<script src="ground.js"></script>' in html
              and "NDRGround.init();" in app and "NDRGround.draw();" in app
              and "NDRGround.mousedown(ev)" in app,
@@ -515,6 +568,7 @@ def check_helipads():
 
     live = read("Revival.LiveRoutes.cs")
     plug = read("RevivalPlugin.cs")
+    admin = read("Revival.Admin.cs")
     troop = read("RevivalTroopInsertion.cs")
     sync = read("sync_public.py")
 
@@ -620,10 +674,16 @@ def check_helipads():
     # --- 6.40: the clearing is authored, and only an authored one takes a
     # structure. Without one the old limit has to stand unchanged.
     need("static float Cap(Pad p)" in pad
-         and "Sited(p) && p.Radius > MaxProp ? p.Radius : MaxProp" in pad
+         and "Sited(p) && Footprint(p) > MaxProp ? Footprint(p) : MaxProp" in pad
          and "const float MaxProp = 14f;" in pad,
-         "ohne gezeichnete Raeumung bleibt die alte Grenze stehen",
-         "ein Platz ohne Raeumungsradius koennte ein Haus abschalten")
+         "gezeichnete Raeumung nimmt grosse Haeuser, sonst bleibt die alte Grenze",
+         "ein gezeichnetes Baufeld kann ein grosses Haus nicht abschalten")
+    need('"ClearAreaKey", "F7"' in pad
+         and "internal static bool ClearAreaMapClick()" in pad
+         and "if (Helipads.ClearAreaMapClick()) return;" in admin
+         and "static bool InClearArea(float x, float z)" in pad,
+         "vier Kartenpunkte definieren ein dauerhaftes Raeumfeld",
+         "Vierpunkt-Raeumwerkzeug fehlt")
     need("static float Footprint(Pad p)" in pad
          and "return p.Clear > deck ? p.Clear : deck;" in pad,
          "die Raeumung vergroessert die Flaeche nur, sie verkleinert sie nie",
@@ -1392,11 +1452,22 @@ def check_patrol_fall():
         bad("Patrol ground guard: FREE can warp onto a waypoint with no ground")
 
     # 4. Falling is not being stuck, and it is decided before the driver runs.
+    #    The rail is the one vehicle the guard skips, and it may skip it only
+    #    because the rail puts the hull on the surface every step itself - so
+    #    the exemption is accepted in exactly that spelling and no other.
     guard = _body(code, "static bool GroundGuard(")
-    if "if (GroundGuard(u)) continue;" in code and "u.Stuck = 0f;" in guard:
+    guarded = ("if (GroundGuard(u)) continue;" in code
+               or "if (!u.Rail && GroundGuard(u)) continue;" in code)
+    if guarded and "u.Stuck = 0f;" in guard:
         ok("a falling vehicle is taken off the stuck timer before the driver runs")
     else:
         bad("Patrol ground guard: a falling hull can still feed the stuck timer")
+
+    if ("if (!u.Rail && GroundGuard(u)) continue;" not in code
+            or "if (u.Rail) { RailStep(u, Time.fixedDeltaTime); continue; }" in code):
+        ok("a hull the guard skips is one the rail carries, not one nobody moves")
+    else:
+        bad("Patrol ground guard: the rail skips the guard without carrying the hull")
 
     # 5. Repeated failures end the vehicle instead of dropping it in again.
     recover = _body(code, "static void Recover(Unit u)")
@@ -1586,6 +1657,63 @@ def check_patrol_traffic():
          "a refusal says whether the ground or another vehicle was the reason",
          "both refusals read \"no ground\" again - the log then cannot tell an "
          "unloaded area from a deadlocked pair of hulls")
+
+    # 12. The rail. A confirmed stop and the leash both end in a CARRY along the
+    #     recorded line, not in a warp the driver has to take over from. Both
+    #     entries keep the old warp only as the answer for a route the rail has
+    #     no line to work with, which is what RailOn returning false means.
+    esc = _body(code, "static bool Escalate(Unit u, Vector3 pos)")
+    leash = _body(code, "static bool Leashed(Unit u, Vector3 pos)")
+    rail_on = _body(code, "static bool RailOn(Unit u, Vector3 pos, string why)")
+    rail_step = _body(code, "static void RailStep(Unit u, float dt)")
+    need("if (u.ConvoyId == 0" in esc and "RailOn(u, pos" in esc
+         and "Free(u, pos);" in esc
+         and "RailOn(u, pos," in leash and "BackOnRoute(u, pos, off);" in leash,
+         "a stuck patrol and a lost one are carried along their own line",
+         "the stuck escalation or the leash warps the hull again without "
+         "offering the rail first - that is the loop of teleport, wrong way "
+         "round, corner, stuck, teleport")
+
+    # 13. The carry starts where the hull stands, on the carriageway it was
+    #     driving. An out-and-back route carries both directions on one road, so
+    #     the nearest leg in the WORLD is a coin toss between them.
+    #     The order of the walk is half the answer: overlapping legs are all
+    #     zero metres from the hull, so the leg it was driving has to be asked
+    #     first and a later one has to be strictly closer to win.
+    arc_at = _body(code, "static float RailArcAt(Unit u, Vector3 pos)")
+    need("for (int k = 0; k <= 2 * RailLook; k++)" in arc_at
+         and "int step = ((k + 1) / 2) * ((k % 2) == 0 ? 1 : -1);" in arc_at
+         and "int j = u.Next - 1 + step;" in arc_at
+         and "if (have && off >= bestOff) continue;" in arc_at
+         and "u.RailArc = RailArcAt(u, pos);" in rail_on,
+         "the carry starts on the leg the vehicle was actually driving",
+         "the rail picks its arc from the whole route again, or breaks a tie "
+         "between two overlapping legs by luck - on an out-and-back road both "
+         "face the vehicle back the way it came")
+
+    # 14. The same tiebreak for the two warps that remain. Recover and
+    #     BackOnRoute used the global nearest waypoint, which is the "wrong way
+    #     round after a teleport" half of the 2026-09-22 report.
+    recover = _body(code, "static void Recover(Unit u)")
+    back = _body(code, "static bool BackOnRoute(Unit u, Vector3 pos, float off)")
+    need("NearestOn(u, t.position)" in recover and "NearestOn(u, pos)" in back,
+         "every recovery puts the hull back facing the way it was driving",
+         "a recovery is back on the global nearest waypoint - on an "
+         "out-and-back route that is the other carriageway half the time")
+
+    # 15. A carried vehicle is placed by the same measured placement the convoy
+    #     column uses, it keeps the gap to its own mate, and it is handed back
+    #     only once it is a long way further on - or never again, after three
+    #     carries inside two minutes.
+    need("Carry(u, line, RailHeading(r, u.RailArc, u.OneWay), u.RailSpeed," in rail_step
+         and "want = QueueBehind(u, t, want, dt);" in rail_step
+         and "if (went < RailMetres || Time.time - u.RailSince < RailSeconds) return;"
+             in rail_step
+         and "if (u.RailForever) return;" in rail_step
+         and "u.RailRuns >= RailRunsStick" in rail_on,
+         "a carried patrol is placed, spaced and handed back on stated rules",
+         "the rail no longer uses the measured placement, drops the spacing to "
+         "its mate, or hands the wheel back on no rule at all")
 
     # verify.py runs no subprocesses, so the executable proof only has to be
     # in the repository (like research/patrol_fall_check.py for [18]).
@@ -3040,6 +3168,17 @@ def check_technical_crew():
         if "technical" not in editor_kinds:
             bad("Technical crew: the editor no longer offers the technical")
 
+    # The live snapshot is validated before RevivalComposition gets to resolve
+    # registry kinds. Keep the validator in step with the editor, or one
+    # technical row rejects the complete route update as an invalid composition.
+    live_p = os.path.join(ROOT, "Revival.LiveRoutes.cs")
+    live = io.open(live_p, encoding="utf-8").read() if os.path.exists(live_p) else ""
+    validator = _body(live, "static void Validate(Snapshot value)")
+    if 'c[2] != "technical"' in validator:
+        ok("the live composition validator accepts technical rows")
+    else:
+        bad("Technical crew: live routes reject a technical composition row")
+
     # 2 - the seat table and the runtime seats agree
     seats = None
     try:
@@ -3693,6 +3832,13 @@ def check_player_heli():
          "only the two intact hulls are swapped, everything else is hidden",
          "the model swap matches more than the hull - the interior would be "
          "drawn as a second airframe inside the first")
+    need("FindHulls(filters)" in model and "candidates > 0" in model
+         and "if (!hulls[i])" in model,
+         "the wreck swap proves a hull replacement before hiding renderers",
+         "the wreck can hide every renderer when prefab and mesh names differ")
+    need("largest * 0.25f" in model and "Auxiliary(mf, mesh)" in model,
+         "an imported hull with a different mesh name is found by safe bounds",
+         "the broken model only works when Unity preserves the prefab name")
     need("r.material" in model and "r.sharedMaterial =" not in model,
          "the scorch fallback edits a renderer copy, never a shared material",
          "the fallback writes to a shared material - every Mi-8 in the world "
@@ -3893,6 +4039,111 @@ def check_parachute():
          "source and asset generator go into the public repository",
          "Revival.Parachute.cs or parachute_build.py is missing from "
          "sync_public.py - the public repo does not build without them")
+
+
+def check_crocodile():
+    """[25] Blender crocodile art, native boss seam, and swimming contract."""
+    print("[25] Toxic crocodile")
+    paths = {
+        "code": os.path.join(ROOT, "Revival.Crocodile.cs"),
+        "plugin": os.path.join(ROOT, "RevivalPlugin.cs"),
+        "build": os.path.join(ROOT, "build.ps1"),
+        "assets": os.path.join(ROOT, "make_assets.py"),
+        "sync": os.path.join(ROOT, "sync_public.py"),
+        "wrapper": os.path.join(ROOT, "crocodile_build.py"),
+        "blender": os.path.join(ROOT, "assets", "src", "crocodile_blender.py"),
+        "blend": os.path.join(ROOT, "assets", "src", "crocodile.blend"),
+        "preview": os.path.join(ROOT, "assets", "src", "crocodile_preview.png"),
+        "resource_index": os.path.join(ROOT, "research", "resource_paths.tsv"),
+    }
+
+    def text(key):
+        path = paths[key]
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad(why)
+
+    code = text("code")
+    plugin = text("plugin")
+    build = text("build")
+    assets_py = text("assets")
+    sync = text("sync")
+    wrapper = text("wrapper")
+    blender = text("blender")
+    resource_index = text("resource_index")
+
+    need(all(seam in plugin for seam in (
+            "Crocodile.BindConfig(Config)", "Crocodile.Install(_harmony)",
+            "Crocodile.Tick()", "Crocodile.Draw()")),
+         "all four RevivalPlugin lifecycle seams are wired",
+         "RevivalPlugin.cs is missing a Crocodile BindConfig/Install/Tick/Draw seam")
+    need("animalsspawn/bearboss_spawn" in resource_index.lower()
+         and "AnimalsSpawn/BearBoss_Spawn" in code,
+         "the native boss proxy is a resource proven by the asset index",
+         "BearBoss_Spawn is absent from resource_paths.tsv or Revival.Crocodile.cs")
+    need("NetworkApplyDamage" in code and "DamageTakenMultiplier" in code
+         and "0.20f" in code and "CrocodileSwimmer" in code,
+         "native Animal_AI damage is retained and resistance marks only the crocodile",
+         "the crocodile lost its native damage gate or five-times effective health")
+    need("SwimPoint(NetworkClock())" in code and "SwimTangent(NetworkClock())" in code
+         and "FindWater(out float y" in code and "DefaultX = 1965f" in code
+         and "DefaultZ = 900f" in code,
+         "the boss follows the measured lake loop at the detected water surface",
+         "the deterministic swimming loop, lake coordinate, or water lookup is missing")
+    need("GasLauncher.Protection()" in code and "GasLauncher.AddToxicity" in code
+         and "GasLauncher.HurtPlayer" in code,
+         "the toxic aura uses the game's toxicity and protection path",
+         "the crocodile no longer poisons through the shared gas/protection mechanics")
+
+    need('"crocodile.ndmesh"' in build and '"crocodile_diffuse.png"' in build
+         and '"crocodile_normal.png"' in build,
+         "build.ps1 installs all three runtime assets",
+         "build.ps1 does not install the crocodile mesh and texture set")
+    need('(\"crocodile\", [\"crocodile_build.py\"])' in assets_py
+         and '"crocodile_build.py"' in sync
+         and '"assets/src/crocodile_blender.py"' in sync
+         and '"assets/src/crocodile.blend"' in sync,
+         "the Blender generator and editable source travel with the public tree",
+         "make_assets.py or sync_public.py omits the crocodile Blender sources")
+    need("--background" in wrapper and "--factory-startup" in wrapper
+         and "import bpy" in blender and "bpy.ops.wm.save_as_mainfile" in blender,
+         "the reproducible build actually runs Blender and saves a .blend",
+         "crocodile_build.py no longer invokes the Blender modelling source")
+
+    blend_header = b""
+    if os.path.exists(paths["blend"]):
+        with open(paths["blend"], "rb") as handle:
+            blend_header = handle.read(7)
+    need(blend_header == b"BLENDER",
+         "assets/src/crocodile.blend is an editable Blender file",
+         "assets/src/crocodile.blend is missing or not a Blender file")
+    need(os.path.exists(paths["preview"])
+         and os.path.getsize(paths["preview"]) > 10000,
+         "the Blender source includes a rendered visual review image",
+         "the crocodile Blender preview is missing or empty")
+
+    mesh_path = os.path.join(ASSETS, "crocodile.ndmesh")
+    try:
+        n, vertices, _, _, index_count, _ = read_mesh(mesh_path)
+        xs, ys, zs = vertices[0::3], vertices[1::3], vertices[2::3]
+        width = max(xs) - min(xs)
+        height = max(ys) - min(ys)
+        length = max(zs) - min(zs)
+        mesh_ok = (3000 <= index_count // 3 <= 20000 and n > 9000
+                   and 2.5 <= width <= 5.0 and 0.7 <= height <= 2.0
+                   and 7.0 <= length <= 12.0)
+    except Exception:
+        mesh_ok = False
+        n = index_count = 0
+        width = height = length = 0.0
+    need(mesh_ok,
+         "Blender crocodile is %.2f x %.2f x %.2f m, %d triangles"
+         % (width, height, length, index_count // 3),
+         "crocodile.ndmesh is absent or no longer a large animal-shaped mesh")
 
 
 def check_stinger():
@@ -4114,6 +4365,169 @@ def check_stinger():
          "the public repo cannot rebuild the sight")
 
 
+def check_traitor_vendor():
+    """[25] The trader in the blue block at Litvinovka.
+
+    The traitor settlement is the toolkit's own camp, and the request was a
+    vendor in the closed block in the middle of it - an opening in the side
+    facing the street, a man in it, and the same shop the civilian settlement's
+    vendor has. Six rules, each of them one or two lines that a later edit could
+    undo with nothing looking broken until somebody is in the game:
+
+      1. HE IS BUILT BY THE GAME, not by hand. `Crew.DropCustomSquad` is
+         `DropGroundSquad` plus a callback on the spawn point, and the callback
+         has to be CALLED in `Absetzen` - without that line the trader is an
+         ordinary armed crewman with a rifle.
+      2. WHAT MAKES HIM A TRADER lives on that spawn point: BehaviorPattern
+         StoreKeeper and the storekeeper prefab. `InitSpawnNpc` reads them; no
+         other path in the game makes a shop.
+      3. THE SHOP IS COPIED, NOT INVENTED. StorageId, MarketItemRanksSelling
+         and BuyPlayerItemsPercent come off the civilian settlement's own
+         storekeeper. Invented numbers are how a trader ends up with an empty
+         shelf or paying nothing. The search may only latch on a HIT: the first
+         spawn can run before the civilian settlement is in the scene, and a
+         remembered miss would pin the shop to the fall-back for the whole
+         session (the hazard NativeSettlement documents for Crew.Suchen).
+      4. HIS SPAWN KEY CARRIES A SLASH and Revival.GroundEnemies.cs skips keys
+         that have one - the same guard the technical's riders need, for the
+         same reason: that pass DESTROYS every keyed NPC it does not know.
+      5. THE BLOCK IS BORROWED, NOT DAMAGED. A cut always builds a NEW Mesh and
+         the original is put back by `Restore`, so the asset in resources.assets
+         and every other copy of that prop in the world are untouched.
+      6. THE PLACE COMES FROM THE CAMP. Wanted/Centre/Here/Unhate of
+         RevivalNewSettlement.cs: the shop closes with the camp's own switch, a
+         camp moved in the config takes its shop with it, the opening is only
+         built on the map Litvinovka is on, and the traitors do not shoot their
+         own trader.
+    """
+    print("[25] Traitor settlement vendor (statisch)")
+    vendor_p = os.path.join(ROOT, "RevivalTraitorVendor.cs")
+    if not os.path.exists(vendor_p):
+        bad("RevivalTraitorVendor.cs fehlt - die Verraeter haben keinen Haendler")
+        return
+    raw = io.open(vendor_p, "rb").read()
+    vendor = raw.decode("utf-8", "replace")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Traitor vendor: " + why)
+
+    crew = read("Revival.Crew.cs")
+    camp = read("RevivalNewSettlement.cs")
+    plug = read("RevivalPlugin.cs")
+    ground = read("Revival.GroundEnemies.cs")
+    sync = read("sync_public.py")
+
+    # --- file rule: BOM-less UTF-8, and outside ASCII only the Cyrillic of the
+    # player-facing Loc.T lines (the same rule check_helipads keeps).
+    need(not raw.startswith(b"\xef\xbb\xbf"), "keine BOM",
+         "RevivalTraitorVendor.cs beginnt mit einer BOM")
+    strange = sorted(set(c for c in vendor
+                         if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange,
+         "ausserhalb ASCII nur Kyrillisch (Spielertext)",
+         "RevivalTraitorVendor.cs enthaelt Zeichen, die weder ASCII noch "
+         "Kyrillisch sind: " + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # 1 - the game builds him, and the callback is actually reached
+    need("Crew.DropCustomSquad(" in vendor,
+         "der Haendler entsteht ueber die Spawnpunkt-Kette des Spiels",
+         "der Haendler wird nicht mehr ueber Crew.DropCustomSquad gebaut")
+    need("internal static GameObject DropCustomSquad(" in crew,
+         "Crew.DropCustomSquad gibt den Spawnpunkt an den Aufrufer",
+         "Crew.DropCustomSquad fehlt - der Haendler kann kein Haendler werden")
+    need("_pointHook(punkt, i)" in crew,
+         "der Rueckruf wird vor StartMainInit wirklich aufgerufen",
+         "Crew.Absetzen ruft _pointHook nicht mehr auf - der Haendler waere ein "
+         "bewaffneter Crewman")
+
+    # 2 - what makes him a trader
+    need('SetEnum(sp, "BehaviorPattern", "StoreKeeper")' in vendor,
+         "BehaviorPattern StoreKeeper steht auf dem Spawnpunkt",
+         "der Spawnpunkt wird nicht mehr auf StoreKeeper gesetzt")
+    need('"Kladovshik"' in vendor,
+         "er bekommt das Haendler-Prefab des Spiels",
+         "das Kladovshik-Prefab wird nicht mehr genannt - der Haendler saehe "
+         "aus wie ein Marodeur")
+
+    # 3 - the shop is copied
+    for field in ('"StorageId"', '"MarketItemRanksSelling"',
+                  '"BuyPlayerItemsPercent"'):
+        need(field in vendor,
+             "Ladenwert " + field + " wird uebernommen",
+             "der Ladenwert " + field + " wird nicht mehr vom Haendler der "
+             "Zivilsiedlung abgeschrieben")
+    # ... and the search may only remember a hit. The one assignment of the
+    # latch has to stand INSIDE the branch that found a storekeeper; a latch
+    # above it makes the first miss the answer for the whole session.
+    hit = vendor.find("if (best != null)")
+    latch = vendor.find("_tradeLooked = true")
+    need(hit >= 0 and latch > hit
+         and vendor.count("_tradeLooked = true") == 1,
+         "die Ladensuche merkt sich nur den Treffer, nicht den Fehlversuch",
+         "_tradeLooked wird gesetzt, bevor ein Haendler gefunden wurde - eine "
+         "Suche vor dem Laden der Zivilsiedlung wuerde den Verraeter-Haendler "
+         "fuer die ganze Sitzung auf die Notwerte festnageln")
+    need("Regrade()" in vendor,
+         "ein auf Notwerten gebauter Haendler wird spaeter neu gebaut",
+         "Regrade fehlt - ein Haendler, der vor der Zivilsiedlung entstand, "
+         "behielte seine Notwerte, obwohl die echten inzwischen lesbar sind")
+
+    # 4 - the spawn key and the guard that lets it live
+    import re
+    key = re.search(r'const string ShopKey = "([^"]*)"', vendor)
+    need(key is not None and "/" in key.group(1),
+         "der Spawn-Key traegt einen Schraegstrich",
+         "der Spawn-Key des Haendlers hat keinen Schraegstrich - "
+         "Revival.GroundEnemies.cs wuerde ihn als veraltete Bodengruppe loeschen")
+    need("key.IndexOf('/') >= 0" in ground,
+         "Bodengruppen lassen fremde Schluessel in Ruhe",
+         "der Schutz in Revival.GroundEnemies.cs ist weg - der Haendler wird "
+         "beim naechsten Abgleich zerstoert")
+
+    # 5 - the block is borrowed, not damaged
+    need("new Mesh()" in vendor and "_cutFilters[i].sharedMesh = _cutBefore[i]" in vendor,
+         "ein Schnitt erzeugt ein neues Mesh und wird zurueckgenommen",
+         "der Schnitt gibt das Originalmesh nicht mehr zurueck - der Klotz "
+         "bliebe fuer die Sitzung beschaedigt")
+
+    # 6 - the place comes from the camp
+    need("internal static Vector3 Centre()" in camp
+         and "internal static bool Here()" in camp
+         and "internal static void Unhate(" in camp,
+         "Ort, Karte und Fraktion kommen aus der Siedlung selbst",
+         "RevivalNewSettlement.cs gibt Centre/Here/Unhate nicht mehr heraus - "
+         "der Haendler findet sein Dorf nicht")
+    need("NewSettlement.Unhate(_shop)" in vendor,
+         "die Verraeter schiessen nicht auf ihren eigenen Haendler",
+         "der Haendler wird nicht mehr aus der Hassliste des Lagers genommen")
+    # ... and the shop closes with the camp: a Litvinovka with no traitors in
+    # it is no traitor settlement, so a switched-off camp may leave neither an
+    # opened block nor a lone trader behind.
+    need("internal static bool Wanted()" in camp
+         and "NewSettlement.Wanted()" in vendor,
+         "der Laden schliesst mit dem Lager",
+         "TraitorVendor.Tick fragt NewSettlement.Wanted nicht mehr - bei "
+         "abgeschaltetem Verraeterlager bliebe der Klotz offen und ein "
+         "einzelner Haendler stuende in einem unveraenderten Litvinovka")
+
+    # the seams and the public repository
+    for seam in ("TraitorVendor.BindConfig(Config)", "TraitorVendor.Tick()",
+                 "TraitorVendor.LateFrame()"):
+        need(seam in plug, "Seam " + seam + " in RevivalPlugin.cs",
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+    need('"RevivalTraitorVendor.cs"' in sync,
+         "RevivalTraitorVendor.cs geht ins oeffentliche Repository",
+         "RevivalTraitorVendor.cs fehlt in sync_public.py - dort baut das Repo "
+         "nicht")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -4146,6 +4560,8 @@ if __name__ == "__main__":
     check_player_heli()
     check_parachute()
     check_stinger()
+    check_crocodile()
+    check_traitor_vendor()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

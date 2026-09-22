@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.41.0";
+        public const string VERSION = "6.42.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -467,6 +467,7 @@ namespace NextDayRevival
             AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
             Stinger.BindConfig(Config);
             GasLauncher.BindConfig(Config);      // NDR gas launcher
+            Crocodile.BindConfig(Config);        // NDR toxic crocodile boss in the Point 12 lake
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
@@ -476,6 +477,7 @@ namespace NextDayRevival
             Parachute.BindConfig(Config);         // NDR parachute item and the jump out of a helicopter
             WindSound.BindConfig(Config);        // NDR high-altitude wind, kept on in the heli and under canopy
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
+            TraitorVendor.BindConfig(Config);    // NDR trader in the blue block at Litvinovka
             Mortar.BindConfig(Config);           // NDR settlement mortar
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
             ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
@@ -522,6 +524,7 @@ namespace NextDayRevival
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             Stinger.Install(_harmony);
             GasLauncher.Install(_harmony);       // NDR gas launcher
+            Crocodile.Install(_harmony);         // NDR native animal-boss damage gate
             VehicleArmor.Install(_harmony);      // NDR vehicle armour balance
 
             StartCoroutine(Tank.Prewarm());
@@ -2122,6 +2125,8 @@ namespace NextDayRevival
             PlayerHeli.Tick();                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
             WindSound.Tick();                    // NDR high-altitude wind: heli and open-canopy descent
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
+            Crocodile.Tick();                    // NDR toxic crocodile swimming near the neutral base
+            TraitorVendor.Tick();                // NDR trader in the blue block at Litvinovka
             Mortar.Tick();                       // NDR settlement mortar (guns, aim mode, shells)
             ArtyBattery.Tick();                  // NDR settlement artillery (crew, recon drone, fire missions)
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
@@ -2150,6 +2155,10 @@ namespace NextDayRevival
             // NDR player-flown Mi-8: everyone aboard is put in his place after
             // the game's own animator and movement controller have written.
             PlayerHeli.LateFrame();
+            // NDR traitor settlement trader: held behind his counter for the
+            // same reason - a man placed in Update is back where the animation
+            // put him before anything is drawn.
+            TraitorVendor.LateFrame();
         }
 
         void OnGUI()
@@ -2168,6 +2177,7 @@ namespace NextDayRevival
             Helipads.Draw();                     // NDR helicopter landing pads on the world map
             PlayerHeli.Draw();                   // NDR player-flown Mi-8: readout and notices
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
+            Crocodile.Draw();                    // NDR toxic crocodile name and exposure warning
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
             ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)
             Technical.Draw();                    // NDR technical: gunner crosshair and notices

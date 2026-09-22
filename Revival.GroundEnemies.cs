@@ -14,15 +14,24 @@ namespace NextDayRevival
 {
     // Online editor groups. All clients retain the definition; only the Photon
     // master spawns or controls NPCs. No writes to installed, verified assets.
+    // A group holds its post (waiting), wanders inside its radius (walking),
+    // walks the route the editor drew (patrol) or spreads onto a perimeter
+    // around its point and holds that (guard).
     internal static class RevivalGroundEnemies
     {
         internal const int MaxGroups = 64, MaxGroupSize = 12, MaxTotal = 128;
+        // Tail, up to six bends and head - the same walked polyline the troop
+        // arrow uses (troopdef.MAX_ARROW_POINTS).
+        internal const int MaxRoutePoints = 8;
         internal sealed class Group
         {
             internal string Name, Faction, Behavior, Key, Meta;
-            internal bool Enabled, Seen;
-            internal float X, Z, Radius, Respawn, NextSpawn;
+            internal bool Enabled, Seen, Loop;
+            internal float X, Z, Radius, Respawn, NextSpawn, Hold;
             internal int Count;
+            // The patrol route in world coordinates, empty for the behaviors
+            // that never leave their post.
+            internal readonly List<Vector3> Route = new List<Vector3>();
             internal readonly List<RevivalComposition.CrewMan> Loadout = new List<RevivalComposition.CrewMan>();
             internal readonly StringBuilder Rows = new StringBuilder();
             internal string Tag { get { return "ground/" + Name; } }
@@ -48,10 +57,13 @@ namespace NextDayRevival
                 string raw = line.TrimEnd('\r');
                 if (raw.Length == 0 || raw[0] == '#') continue;
                 string[] c = raw.Split('\t');
-                if (c.Length != 17 || !Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
+                // A snapshot from an editor before the routes carries the nine
+                // old metadata columns; it reads as a group without a route.
+                if (c.Length == 17) c = WithoutRoute(c);
+                if (c.Length != 20 || !Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
                     throw new IOException("Invalid ground row");
                 Group g;
-                string meta = String.Join("\t", c, 0, 9);
+                string meta = String.Join("\t", c, 0, 12);
                 if (!names.TryGetValue(c[0], out g))
                 {
                     if (result.Count >= MaxGroups) throw new IOException("Too many ground groups");
@@ -65,10 +77,21 @@ namespace NextDayRevival
                         throw new IOException("Invalid ground faction");
                     g.Count = Integer(c[5], 1, MaxGroupSize);
                     g.Behavior = c[6];
-                    if (g.Behavior != "waiting" && g.Behavior != "walking")
+                    if (g.Behavior != "waiting" && g.Behavior != "walking"
+                        && g.Behavior != "patrol" && g.Behavior != "guard")
                         throw new IOException("Invalid ground behavior");
                     g.Radius = Number(c[7], 25f, 500f);
                     g.Respawn = Number(c[8], 5f, 240f) * 60f;
+                    Route(c[9], g.Route);
+                    if (c[10] != "loop" && c[10] != "pingpong")
+                        throw new IOException("Invalid ground route mode");
+                    g.Loop = c[10] == "loop";
+                    g.Hold = Number(c[11], 0f, 600f);
+                    // A patrol without a walkable line is not a patrol. The
+                    // editor refuses to save one; a hand-made snapshot is
+                    // rejected whole, like every other malformed value here.
+                    if (g.Behavior == "patrol" && g.Route.Count < 2)
+                        throw new IOException("Ground patrol without a route");
                     if (g.Enabled) total += g.Count;
                     if (total > MaxTotal) throw new IOException("Too many ground soldiers");
                     names.Add(g.Name, g); result.Add(g);
@@ -76,17 +99,17 @@ namespace NextDayRevival
                 else if (g.Meta != meta) throw new IOException("Conflicting ground metadata");
                 if (g.Loadout.Count >= MaxGroupSize) throw new IOException("Too many ground loadout rows");
                 RevivalComposition.CrewMan man = new RevivalComposition.CrewMan();
-                man.Role = c[9]; man.Class = "regular"; man.Fpv = false;
+                man.Role = c[12]; man.Class = "regular"; man.Fpv = false;
                 if (man.Role.Length > 0 && !Regex.IsMatch(man.Role, "^[A-Za-z0-9_. -]{1,40}$"))
                     throw new IOException("Invalid ground role");
-                int weapon = Integer(c[10], 0, Int32.MaxValue);
+                int weapon = Integer(c[13], 0, Int32.MaxValue);
                 man.Weapons = weapon == 0 ? new int[0] : new int[] { weapon };
-                man.Headwear = Integer(c[11], 0, Int32.MaxValue);
-                man.Mask = Integer(c[12], 0, Int32.MaxValue);
-                man.Body = Integer(c[13], 0, Int32.MaxValue);
-                man.Legs = Integer(c[14], 0, Int32.MaxValue);
-                man.Hands = Integer(c[15], 0, Int32.MaxValue);
-                man.Backpack = Integer(c[16], 0, Int32.MaxValue);
+                man.Headwear = Integer(c[14], 0, Int32.MaxValue);
+                man.Mask = Integer(c[15], 0, Int32.MaxValue);
+                man.Body = Integer(c[16], 0, Int32.MaxValue);
+                man.Legs = Integer(c[17], 0, Int32.MaxValue);
+                man.Hands = Integer(c[18], 0, Int32.MaxValue);
+                man.Backpack = Integer(c[19], 0, Int32.MaxValue);
                 // The empty editor roster exports one default-kit row.
                 g.Loadout.Add(man);
                 g.Rows.Append(raw).Append('\n');
@@ -96,6 +119,39 @@ namespace NextDayRevival
                     g.Key = g.Name + ":" + BitConverter.ToString(sha.ComputeHash(
                         Encoding.ASCII.GetBytes(g.Rows.ToString()))).Replace("-", "").ToLowerInvariant();
             return result;
+        }
+
+        /// <summary>The three route columns a pre-route snapshot has no idea
+        /// about, inserted behind the respawn delay: no route, and the values
+        /// the editor writes for a group that never walks one.</summary>
+        static string[] WithoutRoute(string[] c)
+        {
+            string[] full = new string[20];
+            Array.Copy(c, 0, full, 0, 9);
+            full[9] = "-"; full[10] = "pingpong"; full[11] = "0";
+            Array.Copy(c, 9, full, 12, 8);
+            return full;
+        }
+
+        /// <summary>"x,z;x,z;..." - the walk route the editor drew, or "-".
+        /// Bounded in length, in point count and in how close two points may
+        /// sit, so a published route can never cost more than it says.</summary>
+        static void Route(string text, List<Vector3> into)
+        {
+            if (text.Length == 0 || text == "-") return;
+            if (text.Length > 256) throw new IOException("Ground route too long");
+            string[] points = text.Split(';');
+            if (points.Length > MaxRoutePoints) throw new IOException("Too many ground route points");
+            foreach (string point in points)
+            {
+                string[] xz = point.Split(',');
+                if (xz.Length != 2) throw new IOException("Invalid ground route point");
+                Vector3 p = new Vector3(Number(xz[0], -2501f, 2501f), 0f,
+                    Number(xz[1], -2501f, 2501f));
+                if (into.Count > 0 && (into[into.Count - 1] - p).magnitude < 5f)
+                    throw new IOException("Ground route leg is too short");
+                into.Add(p);
+            }
         }
 
         static float Number(string text, float min, float max)
@@ -235,7 +291,7 @@ namespace NextDayRevival
                         GameObject root = new GameObject("NDR_GroundControl");
                         root.transform.position = home;
                         if (NpcWar.StartGround(g.Tag, root, men.ToArray(), home,
-                            g.Behavior == "walking", g.Radius, g.Loadout))
+                            g.Behavior, g.Radius, g.Loadout, g.Route, g.Loop, g.Hold))
                         { g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key; }
                         else UnityEngine.Object.Destroy(root);
                         continue;
@@ -271,7 +327,7 @@ namespace NextDayRevival
             GameObject settlement = Crew.DropGroundSquad(home, positions, g.Faction, g.Loadout, g.Key);
             Array npcs = Crew.Men(settlement);
             if (settlement != null && NpcWar.StartGround(g.Tag, settlement, npcs,
-                home, g.Behavior == "walking", g.Radius, g.Loadout)) return true;
+                home, g.Behavior, g.Radius, g.Loadout, g.Route, g.Loop, g.Hold)) return true;
             if (npcs != null)
                 foreach (object npc in npcs) NpcWar.RemoveGroundActor(npc as Component);
             if (settlement != null) { Crew.Forget(settlement); UnityEngine.Object.Destroy(settlement); }

@@ -500,7 +500,8 @@ namespace NextDayRevival
                 // Legacy crewless exports have one extra empty trailing cell.
                 if ((c.Length != 11 && !(c.Length == 12 && c[11] == ""))
                     || !counts.ContainsKey(c[0]) || !int.TryParse(c[1], out index)
-                    || index < 0 || index > 63 || (c[2] != "tank" && c[2] != "btr" && c[2] != "ural" && c[2] != "truck"))
+                    || index < 0 || index > 63 || (c[2] != "tank" && c[2] != "btr" && c[2] != "ural"
+                        && c[2] != "truck" && c[2] != "technical"))
                     throw new IOException("Invalid composition row");
                 for (int i = 4; i <= 10; i++)
                     foreach (string part in c[i].Split('|'))

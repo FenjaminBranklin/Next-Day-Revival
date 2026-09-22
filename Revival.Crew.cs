@@ -714,6 +714,8 @@ namespace NextDayRevival
         static int _spawningCount;
         static string _groundKey;
         static Vector3[] _groundPositions;
+        // Set only for the length of one DropCustomSquad call - see there.
+        static Action<Component, int> _pointHook;
 
         // Append the owner's construction data to the cached Photon spawn.
         // The first five vanilla entries stay byte-for-byte compatible.
@@ -1209,6 +1211,31 @@ namespace NextDayRevival
             finally { _groundKey = null; }
         }
 
+        /// <summary>
+        /// The same squad, with the caller allowed to finish each SPAWN POINT
+        /// before the game reads it.
+        ///
+        /// Everything about an NPC is derived from his spawn point by the game's
+        /// own code (RE 10), so a man who is not a crewman is not a second spawn
+        /// path - he is the same one with different values on that point.
+        /// `Punkt` writes what a crewman needs; this hands the point over
+        /// afterwards, still before `StartMainInit`, with the man's index in the
+        /// squad. The traitor settlement's trader is the first user: it is where
+        /// `NPCType` becomes the storekeeper prefab and `BehaviorPattern`
+        /// StoreKeeper (`RevivalTraitorVendor.cs`).
+        ///
+        /// The callback is cleared again whatever happens, so nothing can leak
+        /// into the next wreck crew.
+        /// </summary>
+        internal static GameObject DropCustomSquad(Vector3 home, Vector3[] positions,
+            string faction, List<RevivalComposition.CrewMan> loadout, string key,
+            Action<Component, int> point)
+        {
+            _pointHook = point;
+            try { return DropGroundSquad(home, positions, faction, loadout, key); }
+            finally { _pointHook = null; }
+        }
+
         /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
         internal static Array Men(GameObject settlement)
         {
@@ -1317,6 +1344,10 @@ namespace NextDayRevival
                         ? spec.MainWeapon : (i < lawCount ? LAW_ID : MG42_ID), MG42_ID);
                     Punkt(punkt, military != null, weapon, spec);
                     RegisterAppearance(punkt, spec);
+                    // The caller's own last word on this point (DropCustomSquad).
+                    // It runs AFTER Punkt, so a man who is not a crewman - the
+                    // traitor settlement's trader - can be one.
+                    if (_pointHook != null) _pointHook(punkt, i);
                 }
 
                 // An unregistered PhotonView - see the class comment.

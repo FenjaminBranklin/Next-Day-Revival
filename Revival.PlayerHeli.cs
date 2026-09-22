@@ -87,7 +87,7 @@ namespace NextDayRevival
         // ============================================================= config
 
         internal static ConfigEntry<bool> CfgEnabled, CfgPassengers, CfgBailOut,
-            CfgCrash, CfgWreckModel;
+            CfgCrash, CfgWreckModel, CfgHold;
         internal static ConfigEntry<string> CfgSpawnKey, CfgBoardKey, CfgViewKey,
             CfgEngineKey, CfgJumpKey;
         internal static ConfigEntry<float> CfgSize, CfgThrust, CfgSideThrust,
@@ -95,8 +95,8 @@ namespace NextDayRevival
             CfgCamHeight, CfgFov, CfgNetHz, CfgBoardRange, CfgSeatSide,
             CfgSeatUp, CfgSeatForward, CfgClimbRate, CfgSinkRate, CfgYawRate,
             CfgSpoolSeconds, CfgCrashSink, CfgCrashSpeed, CfgCrashDamage,
-            CfgWreckSeconds;
-        internal static ConfigEntry<int> CfgEventCode, CfgMaxHelis;
+            CfgWreckSeconds, CfgHoldWeight;
+        internal static ConfigEntry<int> CfgEventCode, CfgMaxHelis, CfgHoldSlots;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -224,6 +224,21 @@ namespace NextDayRevival
                 + "its glass and rotor. Off: the intact model stays and is only "
                 + "scorched. It also stays if that model is not loaded on this "
                 + "map - the log says which of the two happened.");
+            CfgHold = cfg.Bind("PlayerHeli", "Hold", true,
+                "A cargo hold. The machine carries the game's own container on "
+                + "the port side of the cabin, opened with the interact key like "
+                + "any vehicle trunk. Off: the machine carries what its "
+                + "passengers carry and nothing else.");
+            CfgHoldSlots = cfg.Bind("PlayerHeli", "HoldSlots", 200,
+                "Slots in the hold, 12 to 600. For comparison: a car trunk has "
+                + "24 to 32 and the biggest container the game ships has 42 - "
+                + "which is also how many slot forms the container window owns, "
+                + "so everything above 42 is built by cloning them and the "
+                + "window scrolls. If that fails the hold is cut back to what "
+                + "the window can show and the log says so.");
+            CfgHoldWeight = cfg.Bind("PlayerHeli", "HoldWeight", 4000f,
+                "What the hold carries, in kilograms. A car trunk takes 80 to "
+                + "100; an Mi-8 lifts four tonnes.");
         }
 
         internal static bool Enabled
@@ -489,6 +504,15 @@ namespace NextDayRevival
                     Hint(Text.Occupied(), 3f);
                     return;
                 }
+                // A machine taken away takes its hold with it, and a hold is
+                // where a player puts what he does not want to carry. Removing
+                // one full of loot without a word is the bug report this
+                // feature would otherwise generate.
+                if (!HeliHold.Empty(near))
+                {
+                    Hint(Text.HoldFull(), 4f);
+                    return;
+                }
                 Remove(near, true);
                 return;
             }
@@ -575,7 +599,11 @@ namespace NextDayRevival
         }
 
         /// <summary>Remove the oldest EMPTY machine while there are more than
-        /// the configured maximum. An occupied one is never taken away.</summary>
+        /// the configured maximum. An occupied one is never taken away, and
+        /// neither is one with cargo aboard: the cap is there to keep the sky
+        /// tidy, and no tidying is worth a hold full of loot deleted without a
+        /// word. If every machine is loaded the cap simply yields, and the count
+        /// stands one over until one of them is emptied.</summary>
         static void Cap()
         {
             int max = CfgMaxHelis == null ? 4 : Mathf.Clamp(CfgMaxHelis.Value, 1, 16);
@@ -588,10 +616,17 @@ namespace NextDayRevival
                     if (go == null || ReferenceEquals(go, _heli)) continue;
                     if (Burning(go) || Falling(go)) continue;
                     if (Busy(ViewId(go))) continue;
+                    if (!HeliHold.Empty(go)) continue;
                     oldest = go;
                     break;
                 }
-                if (oldest == null) return;
+                if (oldest == null)
+                {
+                    RevivalPlugin.L.LogInfo("PlayerHeli: the maximum of " + max
+                        + " is reached, but every machine standing here is flown "
+                        + "or has cargo aboard - none is taken away.");
+                    return;
+                }
                 RevivalPlugin.L.LogInfo("PlayerHeli: " + Alive() + " machines stand "
                     + "in the world, the maximum is " + max + " - the oldest empty "
                     + "one is removed.");
@@ -1776,6 +1811,11 @@ namespace NextDayRevival
                     if (_pBoxSize != null) _pBoxSize.SetValue(box, new Vector3(7f, 11f, 38f), null);
                 }
 
+                // The cargo hold, after the sweep above and after the hull box:
+                // its plate has to stay switched on, and it has to be the thing
+                // the interact ray meets first.
+                HeliHold.Attach(go);
+
                 // Cold on arrival, on every client. The prefab's own Start plays
                 // the rotor loop and never stops it, so without this a machine
                 // parked for a pilot roars to itself for ever - and so does one
@@ -2135,6 +2175,7 @@ namespace NextDayRevival
                         null, null, null);
                 }
                 HeliInputHook.Install(harmony);
+                HeliHold.Install(harmony);
             }
             catch (Exception ex)
             {
@@ -2439,6 +2480,12 @@ namespace NextDayRevival
             {
                 return Loc.T("Сначала посади машину (Shift - прыжок)",
                              "Land first (shift to jump out)");
+            }
+
+            internal static string HoldFull()
+            {
+                return Loc.T("В грузовом отсеке ещё лежит груз - сначала разгрузи",
+                             "The hold is not empty - unload it first");
             }
 
             internal static string Readout(int kmh, int metres, bool onGround)
@@ -2778,10 +2825,20 @@ namespace NextDayRevival
                 bool want = PlayerHeli.CfgWreckModel == null
                             || PlayerHeli.CfgWreckModel.Value;
                 if (want) Look();
-                bool swap = want && _hull != null;
-
-                int changed = 0, hidden = 0, scorched = 0;
                 MeshFilter[] filters = go.GetComponentsInChildren<MeshFilter>(true);
+                bool[] hulls = FindHulls(filters);
+                int candidates = 0;
+                for (int i = 0; i < hulls.Length; i++)
+                    if (hulls[i]) candidates++;
+
+                // Finding the rusty asset is not enough to make a safe swap.
+                // The shipped prefab's resource name and its embedded mesh name
+                // need not be the same. The old code hid every renderer as soon
+                // as the rusty asset existed, even when it then recognised zero
+                // intact hulls. That turned the whole helicopter invisible.
+                // Only commit the destructive half after a real hull was found.
+                bool swap = want && _hull != null && candidates > 0;
+                int changed = 0, hidden = 0, scorched = 0;
                 for (int i = 0; i < filters.Length; i++)
                 {
                     MeshFilter mf = filters[i];
@@ -2796,13 +2853,10 @@ namespace NextDayRevival
                         continue;
                     }
 
-                    // Only the two INTACT HULLS become the wreck: mi-8_mchs is
-                    // the aid machine this feature flies and mi-8_military the
-                    // green one. Everything else under the object is switched
-                    // off - glass, rotor, and in particular mi-8_interior, which
-                    // matches "mi-8" and would otherwise be given the rusty hull
-                    // as well and draw a second airframe inside the first.
-                    if (name.IndexOf("mchs") < 0 && name.IndexOf("military") < 0)
+                    // Everything except the hull candidates is switched off -
+                    // glass, rotor and interior fittings. FindHulls has already
+                    // proved that at least one visible airframe will replace it.
+                    if (!hulls[i])
                     {
                         if (r != null && r.enabled) { r.enabled = false; hidden++; }
                         continue;
@@ -2825,14 +2879,77 @@ namespace NextDayRevival
                         + hidden + " renderer(s) switched off (glass, rotor).");
                 else
                     RevivalPlugin.L.LogInfo("PlayerHeli: wreck model - the broken "
-                        + "Mi-8 is " + (want ? "not loaded on this map" : "switched "
-                        + "off in the config") + ", " + scorched + " renderer(s) "
+                        + "Mi-8 is " + (!want ? "switched off in the config"
+                        : _hull == null ? "not loaded on this map"
+                        : "loaded but no intact hull renderer was recognised")
+                        + ", " + scorched + " renderer(s) "
                         + "scorched on the intact hull instead.");
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("PlayerHeli wreck model: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Mark every LOD of the intact airframe before changing a renderer. The
+        /// asset index names the prefab mi-8_mchs, but Unity is allowed to give
+        /// an embedded mesh a different name. Prefer the two known names. If
+        /// neither survived import, use the largest non-auxiliary meshes: the
+        /// hull LODs share the airframe's bounds, while glass, rotors and cabin
+        /// fittings either say what they are or are substantially smaller.
+        /// </summary>
+        static bool[] FindHulls(MeshFilter[] filters)
+        {
+            bool[] answer = new bool[filters.Length];
+            bool named = false;
+            for (int i = 0; i < filters.Length; i++)
+            {
+                MeshFilter mf = filters[i];
+                Mesh mesh = mf == null ? null : mf.sharedMesh;
+                string name = mesh == null || string.IsNullOrEmpty(mesh.name)
+                    ? "" : mesh.name.ToLowerInvariant();
+                if (name.IndexOf("mchs") >= 0 || name.IndexOf("military") >= 0)
+                {
+                    answer[i] = true;
+                    named = true;
+                }
+            }
+            if (named) return answer;
+
+            float largest = 0f;
+            for (int i = 0; i < filters.Length; i++)
+            {
+                MeshFilter mf = filters[i];
+                Mesh mesh = mf == null ? null : mf.sharedMesh;
+                if (mesh == null || Auxiliary(mf, mesh)) continue;
+                float size = mesh.bounds.size.sqrMagnitude;
+                if (size > largest) largest = size;
+            }
+            if (largest <= 0f) return answer;
+
+            // Half the linear size is one quarter of squared magnitude. It
+            // catches every hull LOD without promoting small cabin furniture.
+            float threshold = largest * 0.25f;
+            for (int i = 0; i < filters.Length; i++)
+            {
+                MeshFilter mf = filters[i];
+                Mesh mesh = mf == null ? null : mf.sharedMesh;
+                if (mesh != null && !Auxiliary(mf, mesh)
+                    && mesh.bounds.size.sqrMagnitude >= threshold)
+                    answer[i] = true;
+            }
+            return answer;
+        }
+
+        static bool Auxiliary(MeshFilter mf, Mesh mesh)
+        {
+            string name = ((mf == null ? "" : mf.name) + " "
+                + (mesh == null ? "" : mesh.name)).ToLowerInvariant();
+            return name.IndexOf("interior") >= 0 || name.IndexOf("glass") >= 0
+                || name.IndexOf("rotor") >= 0 || name.IndexOf("vint") >= 0
+                || name.IndexOf("propeller") >= 0 || name.IndexOf("lopast") >= 0
+                || name.IndexOf("screw") >= 0 || name.IndexOf("rusty") >= 0;
         }
 
         /// <summary>The rusty mesh at the same level of detail as the one it
@@ -3322,6 +3439,458 @@ namespace NextDayRevival
                 }
             }
             return patched;
+        }
+    }
+
+    /// <summary>
+    /// THE CARGO HOLD. The machine gets the game's own vehicle-trunk component,
+    /// `ItemsContainer`, and a plate to aim at. Nothing about the container is
+    /// rebuilt here: the window, the drag and drop, the weight, the one-player
+    /// lock and the network copy are all the game's, exactly as they are on a
+    /// car. What is ours is where the container hangs, how big it is, and the
+    /// window's room to show it.
+    ///
+    /// WHERE IT HANGS, AND WHY THERE IS NO CHOICE (IL, 2026-09-22).
+    ///   PlayerInteractingManager::SearchGameplayItems finds a container with
+    ///     hit.collider.gameObject.GetComponent&lt;ItemsContainer&gt;()
+    ///   so the collider and the container must be on the SAME GameObject.
+    ///   ItemsContainer::Awake reads photonView.viewID, and PhotonView::Get is a
+    ///   plain GetComponent - it does not climb to a parent. So the container
+    ///   must be on a GameObject that carries a PhotonView.
+    /// On this machine exactly one object satisfies both: the root. It already
+    /// has the scene object's PhotonView, whose viewID is the same number on
+    /// every client, so ContainerID matches everywhere and the container's own
+    /// RPCs land - PUN dispatches an RPC to the components on the view's own
+    /// GameObject, which is where the container now is.
+    ///
+    /// WHY IT IS NOT CONTAINER TYPE "Baggage" (5). That is the vehicle trunk,
+    /// and the interact coroutine reads
+    ///   itemGO.GetComponentInParent&lt;VehicleGameSystem&gt;().DoorsIsLocked
+    /// before opening one. A helicopter is not a vehicle in that sense and has
+    /// no VehicleGameSystem, so type 5 would open nothing at all. The hold is
+    /// the plain type (Universal, 0), which the same coroutine hands straight to
+    /// ShowContainerUI, and its ContainerData.Name is set to the game's own
+    /// "Baggage_Container" so the window is still titled Kofferraum / Trunk.
+    ///
+    /// WHY THE WINDOW HAS TO BE GROWN. PlayerInventoryUISystem
+    /// ::UpdateContainerSlotsUI walks i from 0 to ContainerData.MaxSlots and
+    /// takes ContainerSlotFormsUI.transform.GetChild(i) and ContainerSlotsUI[i]
+    /// for each one. Both hold exactly 42 - the size of the biggest container
+    /// the game ships - so a bigger MaxSlots is an ArgumentOutOfRangeException,
+    /// not a scrollbar. Both parents are NGUI UITables inside a UIScrollView
+    /// that the game repositions itself, so more children is all it takes; the
+    /// prefix below clones them before the walk and rebuilds the array from
+    /// them with the game's own FillArrayItemSlotUI. If that cannot be done the
+    /// prefix cuts MaxSlots back to what the window really has, so the walk can
+    /// never step off the end.
+    ///
+    /// C# 3.0 and the four Unity modules: BoxCollider and every game type go
+    /// through reflection here, the same way the rest of this file works.
+    /// </summary>
+    internal static class HeliHold
+    {
+        /// <summary>Slot forms the container window is built with. Anything
+        /// beyond this is cloned at runtime.</summary>
+        const int Forms = 42;
+
+        /// <summary>
+        /// The plate the interact ray has to meet, in model units on the
+        /// machine's own transform - so it moves and scales with the Size
+        /// setting exactly as the hull box does.
+        ///
+        /// It lies flat against the PORT skin of the cabin, which is the side an
+        /// Mi-8 is loaded from. Two independent measurements of the same prefab
+        /// put it there: the cabin shell mi-8_rusty_int spans x -2.19 to 7.21
+        /// and z -9.6 to 28.8 with the nose at +Z, and the troop insertion - the
+        /// other feature flying this machine - unloads its squad at -X, two
+        /// units forward of the root (HeliFlight.DropNow, "the door is on the
+        /// left, forward of the middle").
+        ///
+        /// The one number that is not about the door is the thickness. The plate
+        /// has to stand proud of NDR_FlyHeliHull, the box that stops a man
+        /// walking through the fuselage, because that box reaches only x -1
+        /// while the skin is at -2.19: a plate inside it would never be the
+        /// first thing the interact ray meets, and the hold would not open.
+        /// </summary>
+        static readonly Vector3 Centre = new Vector3(-1.4f, 5.5f, 6f);
+        static readonly Vector3 Size = new Vector3(1.6f, 5f, 20f);
+
+        static bool On
+        {
+            get { return PlayerHeli.CfgHold == null || PlayerHeli.CfgHold.Value; }
+        }
+
+        /// <summary>How many slots one hold gets. Capped at the window's own 42
+        /// until the prefix that can grow the window is in place - a hold the
+        /// window cannot show is a hold that throws when it is opened.</summary>
+        internal static int Slots()
+        {
+            int want = PlayerHeli.CfgHoldSlots == null ? 200 : PlayerHeli.CfgHoldSlots.Value;
+            return Mathf.Clamp(want, 12, _window ? 600 : Forms);
+        }
+
+        internal static float Weight()
+        {
+            float want = PlayerHeli.CfgHoldWeight == null ? 4000f : PlayerHeli.CfgHoldWeight.Value;
+            return Mathf.Clamp(want, 50f, 100000f);
+        }
+
+        // ======================================================== the container
+
+        static Type _tContainer, _tData, _tBox, _tView;
+        static FieldInfo _fData, _fSpawned, _fMaxSlots, _fMaxWeight, _fName;
+        static MethodInfo _mLength, _mEmpty, _mRefresh;
+        static PropertyInfo _pCentre, _pSize;
+        static bool _looked;
+
+        static bool Look()
+        {
+            if (_looked) return _tContainer != null;
+            _looked = true;
+            _tContainer = RevivalPlugin.TypeByName("ItemsContainer");
+            _tData = RevivalPlugin.TypeByName("ContainerData");
+            if (_tContainer == null || _tData == null)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: ItemsContainer or "
+                    + "ContainerData not found - the machine flies without a hold.");
+                _tContainer = null;
+                return false;
+            }
+            _fData = AccessTools.Field(_tContainer, "_containerData");
+            _fSpawned = AccessTools.Field(_tContainer, "IsSpawnedData");
+            _mLength = AccessTools.Method(_tContainer, "SetContainerDataArraysLenght", null, null);
+            _mEmpty = AccessTools.Method(_tContainer, "IsEmptyContainer", null, null);
+            _fMaxSlots = AccessTools.Field(_tData, "MaxSlots");
+            _fMaxWeight = AccessTools.Field(_tData, "MaxWeight");
+            _fName = AccessTools.Field(_tData, "Name");
+            if (_fData == null || _fMaxSlots == null || _mLength == null)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: the container's own "
+                    + "fields have moved - the machine flies without a hold.");
+                _tContainer = null;
+            }
+            return _tContainer != null;
+        }
+
+        /// <summary>
+        /// Fit the hold. Called from Prepare on EVERY client, because every
+        /// client has to have the component the container's RPCs are delivered
+        /// to, and because the plate is what each of them aims at.
+        /// </summary>
+        internal static void Attach(GameObject go)
+        {
+            if (!On || go == null || !Look()) return;
+            try
+            {
+                if (go.GetComponent(_tContainer) != null) return;   // already fitted
+
+                Plate(go);
+
+                Component hold = go.AddComponent(_tContainer);
+                if (hold == null) return;
+
+                // Before the container's own Start runs. On the master that
+                // method rolls random loot into a fresh container, and this one
+                // has no spawn table to roll from - a hold arrives empty.
+                if (_fSpawned != null) _fSpawned.SetValue(hold, true);
+
+                // Awake has already run SetContainerData, which reads MaxSlots
+                // (zero on a component nobody serialized) and sized the slot
+                // arrays to match. The size is ours, so both are set again here.
+                object data = _fData.GetValue(hold);
+                if (data == null)
+                {
+                    data = Activator.CreateInstance(_tData);
+                    _fData.SetValue(hold, data);
+                }
+
+                int slots = Slots();
+                _fMaxSlots.SetValue(data, slots);
+                if (_fMaxWeight != null) _fMaxWeight.SetValue(data, Weight());
+                if (_fName != null) _fName.SetValue(data, "Baggage_Container");
+                _mLength.Invoke(hold, new object[] { slots });
+
+                Reheard(go);
+
+                RevivalPlugin.L.LogInfo("PlayerHeli: hold fitted - " + slots
+                    + " slots, " + Weight().ToString("0") + " kg.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: " + ex.Message);
+            }
+        }
+
+        /// <summary>True when there is nothing in the hold, and true as well
+        /// when this machine has none - a machine without a hold must not be
+        /// harder to take away than it was before.</summary>
+        internal static bool Empty(GameObject go)
+        {
+            if (!On || go == null || !Look() || _mEmpty == null) return true;
+            try
+            {
+                Component hold = go.GetComponent(_tContainer);
+                if (hold == null) return true;
+                return (bool)_mEmpty.Invoke(hold, null);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: " + ex.Message);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Ask the PhotonView for its RPC targets again.
+        ///
+        /// PUN delivers an RPC to the MonoBehaviours it finds with
+        /// PhotonView.GetComponents on the view's own GameObject, and it is
+        /// allowed to remember that list (NetworkingPeer.UseRpcMonoBehaviourCache).
+        /// The container is added long after the view was built, so a machine
+        /// that had already carried one RPC could hold a list the container is
+        /// not in - and then no client would ever be told what went into the
+        /// hold. One call settles it.
+        /// </summary>
+        static void Reheard(GameObject go)
+        {
+            if (_tView == null) _tView = RevivalPlugin.TypeByName("PhotonView");
+            if (_tView == null) return;
+            if (_mRefresh == null)
+                _mRefresh = AccessTools.Method(_tView, "RefreshRpcMonoBehaviourCache", null, null);
+            Component view = go.GetComponent(_tView);
+            if (view == null || _mRefresh == null) return;
+            try { _mRefresh.Invoke(view, null); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: " + ex.Message);
+            }
+        }
+
+        static void Plate(GameObject go)
+        {
+            if (_tBox == null) _tBox = RevivalPlugin.TypeByName("BoxCollider");
+            if (_tBox == null) return;
+            if (_pCentre == null) _pCentre = AccessTools.Property(_tBox, "center");
+            if (_pSize == null) _pSize = AccessTools.Property(_tBox, "size");
+            Component box = go.AddComponent(_tBox);
+            if (box == null) return;
+            if (_pCentre != null) _pCentre.SetValue(box, Centre, null);
+            if (_pSize != null) _pSize.SetValue(box, Size, null);
+        }
+
+        // =========================================================== the window
+
+        static Type _tUi, _tTable;
+        static FieldInfo _fUiController, _fInteract, _fForms, _fSlotParent, _fSlotArray;
+        static MethodInfo _mFill, _mReposition;
+        static object _measured;      // the window we last counted
+        static int _pool;             // and how many slots it had then
+        static bool _uiLooked, _window, _cutWarned, _windowWarned;
+
+        internal static void Install(Harmony harmony)
+        {
+            if (!On) return;
+            try
+            {
+                _tUi = RevivalPlugin.TypeByName("PlayerInventoryUISystem");
+                MethodInfo walk = _tUi == null ? null
+                    : AccessTools.Method(_tUi, "UpdateContainerSlotsUI", null, null);
+                if (walk == null)
+                {
+                    RevivalPlugin.L.LogWarning("PlayerHeli hold: "
+                        + "PlayerInventoryUISystem.UpdateContainerSlotsUI not found - "
+                        + "the hold stays at the " + Forms + " slots the window owns.");
+                    return;
+                }
+                harmony.Patch(walk,
+                    new HarmonyMethod(typeof(HeliHold).GetMethod("WindowPrefix",
+                        BindingFlags.Public | BindingFlags.Static)),
+                    null, null, null, null);
+                _window = true;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold window: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Before the game walks the open container's slots, make sure there are
+        /// that many to walk. It runs for every container, not only ours: a
+        /// window with room for 42 is the reason the hold has to say how big it
+        /// is here, and the clamp at the end is what keeps the walk in bounds
+        /// whatever happens above it.
+        /// </summary>
+        public static void WindowPrefix(object __instance)
+        {
+            try { Fit(__instance); }
+            catch (Exception ex) { Once(ref _windowWarned, "PlayerHeli hold window: " + ex.Message); }
+        }
+
+        static void Fit(object ui)
+        {
+            if (ui == null || !Look() || !UiLook()) return;
+
+            object controller = _fUiController.GetValue(ui);
+            if (controller == null) return;
+            object container = _fInteract.GetValue(controller);
+            if (container == null) return;
+            object data = _fData.GetValue(container);
+            if (data == null) return;
+
+            int want = (int)_fMaxSlots.GetValue(data);
+            // The cheap answer first: this runs while the window is open, and
+            // every container the game ships is inside the window's own room.
+            if (want <= Forms) return;
+            if (want <= _pool && ReferenceEquals(ui, _measured)) return;
+
+            // Whatever happens from here, `have` is a number the walk can
+            // safely count to. The window's own 42 always are: the two tables
+            // are built with that many children and the array with that many
+            // entries, and growing only ever adds to all three.
+            int have = Forms;
+            try
+            {
+                have = Build(ui, want);
+                _measured = ui;
+                _pool = have;
+            }
+            catch (Exception ex)
+            {
+                Once(ref _windowWarned, "PlayerHeli hold window: " + ex.Message);
+                _measured = null;
+                _pool = 0;
+            }
+
+            if (want <= have) return;
+            _fMaxSlots.SetValue(data, have);
+            Once(ref _cutWarned, "PlayerHeli hold: the container window took "
+                + have + " slots, not " + want + ", so this container is shown with "
+                + have + ". Anything that was put in a higher slot is still in the "
+                + "container and comes back when the window can show it again.");
+        }
+
+        /// <summary>Clone the window up to `want` cells and report how many of
+        /// them the walk may really use - the smallest of the two tables and
+        /// the array, because the walk reads an index out of all three.</summary>
+        static int Build(object ui, int want)
+        {
+            Transform forms = TransformOf(_fForms.GetValue(ui));
+            Transform slots = TransformOf(_fSlotParent.GetValue(ui));
+            if (forms == null || slots == null || _fSlotArray == null || _mFill == null)
+                return Forms;
+
+            Grow(forms, want);
+            Grow(slots, want);
+
+            // The array the walk reads is built from the same children, by the
+            // game's own method, so a cloned slot is wired exactly like a
+            // serialized one.
+            object[] args = new object[] { slots, null, slots.childCount };
+            _mFill.Invoke(ui, args);
+            _fSlotArray.SetValue(ui, args[1]);
+
+            LayOut(forms, _fForms.GetValue(ui));
+            LayOut(slots, _fSlotParent.GetValue(ui));
+
+            Array filled = _fSlotArray.GetValue(ui) as Array;
+            int room = filled == null ? 0 : filled.Length;
+            return Mathf.Min(Mathf.Min(forms.childCount, slots.childCount), room);
+        }
+
+        /// <summary>Say a thing once. A prefix runs while a window is open, and
+        /// a line per frame is a log nobody can read.</summary>
+        static void Once(ref bool said, string text)
+        {
+            if (said) return;
+            said = true;
+            RevivalPlugin.L.LogWarning(text);
+        }
+
+        static bool UiLook()
+        {
+            if (_uiLooked) return _fForms != null;
+            _uiLooked = true;
+            if (_tUi == null) _tUi = RevivalPlugin.TypeByName("PlayerInventoryUISystem");
+            Type controller = RevivalPlugin.TypeByName("UIController");
+            if (_tUi == null || controller == null) return false;
+            _fUiController = AccessTools.Field(_tUi, "_uiController");
+            _fForms = AccessTools.Field(_tUi, "ContainerSlotFormsUI");
+            _fSlotParent = AccessTools.Field(_tUi, "SlotsUIContainer");
+            _fSlotArray = AccessTools.Field(_tUi, "ContainerSlotsUI");
+            _mFill = AccessTools.Method(_tUi, "FillArrayItemSlotUI", null, null);
+            _fInteract = AccessTools.Field(controller, "_interactContainer");
+            _tTable = RevivalPlugin.TypeByName("UITable");
+            _mReposition = _tTable == null ? null
+                : AccessTools.Method(_tTable, "Reposition", null, null);
+            if (_fUiController == null || _fForms == null || _fSlotParent == null
+                || _fInteract == null)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli hold: the container window's "
+                    + "own fields have moved - the hold stays at " + Forms + " slots.");
+                _fForms = null;
+            }
+            return _fForms != null;
+        }
+
+        /// <summary>Clone the last slot until there are `want` of them. The
+        /// clones arrive switched off; the walk switches on the ones it
+        /// fills, exactly as it does with the serialized ones.</summary>
+        static void Grow(Transform parent, int want)
+        {
+            int have = parent.childCount;
+            if (have <= 0 || have >= want) return;
+            GameObject model = parent.GetChild(have - 1).gameObject;
+            Vector3 scale = model.transform.localScale;
+            for (int i = have; i < want; i++)
+            {
+                GameObject clone = UnityEngine.Object.Instantiate(model) as GameObject;
+                if (clone == null) return;
+                clone.name = "NDR_Slot" + i;
+                clone.transform.SetParent(parent, false);
+                clone.transform.localScale = scale;
+                clone.SetActive(false);
+            }
+        }
+
+        /// <summary>
+        /// Give every cell its place, once.
+        ///
+        /// A UITable here is `hideInactive`, so Reposition moves the children
+        /// that are switched ON and leaves the rest where they are. That is why
+        /// the game can switch slots on and off all day without repositioning
+        /// anything: the prefab's own children were all on when the table first
+        /// laid them out, and a cell keeps its place afterwards. A clone has
+        /// never been in such a pass - it sits exactly on top of the slot it was
+        /// copied from - so the pass is run here with everything switched on and
+        /// the state put back straight after.
+        /// </summary>
+        static void LayOut(Transform parent, object table)
+        {
+            int n = parent.childCount;
+            bool[] was = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                GameObject cell = parent.GetChild(i).gameObject;
+                was[i] = cell.activeSelf;
+                if (!was[i]) cell.SetActive(true);
+            }
+            Reposition(table);
+            for (int i = 0; i < n && i < parent.childCount; i++)
+                if (!was[i]) parent.GetChild(i).gameObject.SetActive(false);
+        }
+
+        static Transform TransformOf(object component)
+        {
+            Component c = component as Component;
+            return c == null ? null : c.transform;
+        }
+
+        static void Reposition(object table)
+        {
+            if (table == null || _mReposition == null) return;
+            try { _mReposition.Invoke(table, null); }
+            catch (Exception ex) { Once(ref _windowWarned, "PlayerHeli hold window: " + ex.Message); }
         }
     }
 }

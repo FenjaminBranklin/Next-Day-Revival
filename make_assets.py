@@ -52,6 +52,10 @@ GROUPS = [
     ("parachute", ["parachute_build.py"]),
     # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
+    # Toxic crocodile boss: Blender is the modelling source of truth. The
+    # wrapper finds Blender and produces the editable .blend, runtime ndmesh,
+    # texture set and a source preview in one deterministic background run.
+    ("crocodile", ["crocodile_build.py"]),
     # The technical (gun truck): body, machine gun, pintle and shield from a
     # source model in assets/src. Every part is OPTIONAL - the vehicle runs on
     # generated geometry and the donor UAZ body without it - so this script

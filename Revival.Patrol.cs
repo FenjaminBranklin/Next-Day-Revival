@@ -437,13 +437,32 @@ namespace NextDayRevival
             // origin down to the lowest point of the model, measured once, so
             // the vehicle stands ON the road instead of hovering or sinking.
             // Placed marks that the first exact placement has happened; after
-            // that the heading is eased instead of snapped.
+            // that the heading is eased instead of snapped. The four
+            // measurements and Placed belong to Carry, so the patrol rail below
+            // uses exactly the same ones.
             public bool Column;
             public int ColumnIndex = -1;
             public float ColumnLift;
             public float ColumnHalfLength, ColumnHalfWidth;
             public float ColumnGroundLog;
             public bool Placed;
+
+            // The rail (RailOn, RailStep, RailOff). Rail marks a vehicle that is
+            // no longer driven but carried along its own recorded line, Arc
+            // where it has got to in metres along that line and Speed how fast
+            // it is being carried. From is the arc the carry began at and Since
+            // the Time.time it began, which together decide when the driver is
+            // offered the wheel back. Runs counts the carries close together and
+            // At is when the last one started; Forever marks the vehicle that is
+            // not handed back any more. See the rail block above RailMetres.
+            public bool Rail;
+            public float RailArc;
+            public float RailSpeed;
+            public float RailFrom;
+            public float RailSince;
+            public float RailAt;
+            public int RailRuns;
+            public bool RailForever;
         }
 
         static List<Unit> _units = new List<Unit>();
@@ -658,7 +677,10 @@ namespace NextDayRevival
                     // A hull with nothing under it is falling, not stuck. It is
                     // put back on the road here, before the driver can read the
                     // fall as "not moving" and warp it into the same hole again.
-                    if (GroundGuard(u)) continue;
+                    // A carried hull cannot fall - the rail puts it on the
+                    // surface every step - and two things moving one vehicle is
+                    // the fault this whole file keeps running into.
+                    if (!u.Rail && GroundGuard(u)) continue;
                     if (u.OneWay && !u.Column && u.Next == u.Route.P.Count - 1)
                         Advance(u, u.Car.transform.position);
                     // NDR convoy one-way: a convoy that has driven its whole
@@ -678,6 +700,11 @@ namespace NextDayRevival
                     PatrolSeparate(u);
                     if (u.Deploy) { DeployStep(u); continue; }
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
+                    // The rail: this one proved it cannot drive the road it is
+                    // on, so it is carried along it instead. Not driven, not
+                    // held, and not steered - see the rail block above
+                    // RailMetres.
+                    if (u.Rail) { RailStep(u, Time.fixedDeltaTime); continue; }
                     Drive(u);
                 }
             }
@@ -1513,6 +1540,60 @@ namespace NextDayRevival
         const float LeashMetres = 35f;
         const float LeashSeconds = 8f;
 
+        // ------------------------------------------------------------- the rail
+        //
+        //  WHY THIS EXISTS, in the user's own words (2026-09-22): "wenn am Ende
+        //  die Fahrzeuge wieder TP'd werden, sind sie halt falsch herum, dann
+        //  versuchen sie ne Kurve zu fahren, bleiben immer stuck, werden wieder
+        //  zurueck TP'd, versuchen wieder auf natuerlichem Weg zurueckzufinden
+        //  und es klappt nie."
+        //
+        //  That is one loop with two halves, and BOTH halves are the recovery's
+        //  own doing. A warp puts the hull ON a waypoint and then asks the
+        //  driver to take over from a standstill; the first thing the driver
+        //  wants is the corner the waypoint sits in, it steers into whatever
+        //  stopped the vehicle the first time, and the stuck timer fills again.
+        //  Every lap round that loop the vehicle is somewhere slightly worse.
+        //
+        //  So a confirmed stop no longer ends in a warp and a prayer. The
+        //  vehicle is CARRIED along its own recorded line - the same placement
+        //  the convoy column has used since the column existed: on the surface,
+        //  facing the way the road runs, wheels turning at road speed, physics
+        //  unable to hold it. It cannot end up facing the wrong way because the
+        //  heading is read off the road at the point it stands on, and it cannot
+        //  wedge on anything because nothing it drives through is allowed a vote.
+        //  After RailMetres it is handed back to the driver at speed, pointing
+        //  down the road - which is the hand-over the warp never managed.
+        //
+        //  And if that hand-back fails RailRuns times inside RailForget, the
+        //  pretence stops: the vehicle stays on the rail for the rest of its
+        //  life. A patrol that drives its route through a rock is worth more to
+        //  the game than a patrol that is honest about physics and never moves.
+
+        /// <summary>Metres of recorded line a carried vehicle covers before the
+        /// driver is offered the wheel again. Long enough to be past the thing
+        /// that stopped it and up to road speed when it takes over - fifteen
+        /// metres, the old warp's distance, is neither.</summary>
+        const float RailMetres = 60f;
+
+        /// <summary>Seconds a carry lasts at the very least, so a vehicle
+        /// carried downhill does not cover its sixty metres in one breath and
+        /// get the wheel back before it is going anywhere.</summary>
+        const float RailSeconds = 4f;
+
+        /// <summary>Carries inside <see cref="RailForget"/> after which this
+        /// vehicle is not handed back at all. Three is "the road here is beyond
+        /// it", not "it was unlucky".</summary>
+        const int RailRunsStick = 3;
+        const float RailForget = 120f;
+
+        /// <summary>Legs either side of the one it was driving that the arc
+        /// lookup considers. A lap route can pass within a few metres of itself,
+        /// and the nearest leg IN THE WORLD is then the other carriageway - which
+        /// would face the vehicle back the way it came, the very fault this
+        /// exists to end.</summary>
+        const int RailLook = 4;
+
         /// <summary>Metres inside which something the SHOULDER rays find - and
         /// the centre ray does not - is worth steering away from, and how much
         /// lock that is worth at contact. A forest road grazes those rays with
@@ -1902,7 +1983,10 @@ namespace NextDayRevival
         /// </summary>
         static void PatrolSeparate(Unit u)
         {
-            if (u.ConvoyId != 0 || u.Car == null || u.Column
+            // A carried hull is put on its line every step, so easing it sideways
+            // out of a mate only fights the rail - and the rail is the one that
+            // wins, every step, by a whole placement.
+            if (u.ConvoyId != 0 || u.Car == null || u.Column || u.Rail
                 || u.Died > 0f || u.Arrived || u.PatrolGroupId == 0) return;
             if (u.ColumnLift <= 0f) ColumnFootprint(u);
             Transform t = u.Car.transform;
@@ -2673,7 +2757,24 @@ namespace NextDayRevival
             int seg;
             Vector3 line = PointOnRoute(r, arc, out seg);
             Vector3 dir = HeadingOnRoute(r, arc);
+            Carry(u, line, dir, speed,
+                  "Convoy " + u.ConvoyId + ": ground slot " + u.ColumnIndex);
+            u.Stuck = 0f;
+            u.Next = seg;
+        }
 
+        /// <summary>Put a hull on one point of a recorded line by hand: standing
+        /// on the surface under it, facing the way the road runs there, with its
+        /// wheels turning at carry speed instead of sliding along locked.
+        ///
+        /// This is the ONE placement in this class that moves a vehicle every
+        /// physics step, and both carriers use it: the convoy column for each
+        /// slot of an intact column, and the patrol rail for a vehicle that has
+        /// proved it cannot drive this stretch itself. <paramref name="who"/>
+        /// names the caller in the ground report, which is the only line that
+        /// tells the two apart.</summary>
+        static void Carry(Unit u, Vector3 line, Vector3 dir, float speed, string who)
+        {
             if (u.ColumnLift <= 0f) ColumnFootprint(u);
 
             float y;
@@ -2719,8 +2820,7 @@ namespace NextDayRevival
                     || (u.Placed && Mathf.Abs(t.position.y - targetY) > 2f)))
             {
                 u.ColumnGroundLog = Time.time + 10f;
-                RevivalPlugin.L.LogInfo("Convoy " + u.ConvoyId + ": ground slot "
-                    + u.ColumnIndex + " routeY=" + line.y.ToString("0.0")
+                RevivalPlugin.L.LogInfo(who + " routeY=" + line.y.ToString("0.0")
                     + " surfaceY=" + y.ToString("0.0") + " hullY="
                     + targetY.ToString("0.0") + " found=" + found);
             }
@@ -2740,9 +2840,6 @@ namespace NextDayRevival
                 SetFloat(u.Rcc, "steerInput", 0f);
                 SetFloat(u.Rcc, "handbrakeInput", 0f);
             }
-
-            u.Stuck = 0f;
-            u.Next = seg;
         }
 
         /// <summary>How much the column eases off for the corner it is in.
@@ -3602,6 +3699,32 @@ namespace NextDayRevival
             return false;
         }
 
+        /// <summary>The waypoint this hull is nearest to IN THE DIRECTION IT IS
+        /// DRIVING - which is not the same question as <see cref="Nearest"/>.
+        ///
+        /// WHY THIS EXISTS. An open recording is driven out and back
+        /// (<see cref="OutAndBack"/>), so every metre of that road carries TWO
+        /// waypoints, one per direction, a few metres apart. Which of the two is
+        /// nearest to a stopped hull is a coin toss, and the losing half of the
+        /// time the recovery faces the vehicle back the way it came. It then
+        /// drives the road in reverse until the leash or the next stop puts it
+        /// back - facing forwards again, or not. That is the "wrong way round
+        /// after a teleport, then it tries to turn, then it is stuck again" the
+        /// user reported on 2026-09-22.
+        ///
+        /// The waypoint it was driving to is the tiebreak, exactly as in
+        /// <see cref="RailArcAt"/>, so the answer is always on the carriageway
+        /// the vehicle was actually on.</summary>
+        static int NearestOn(Unit u, Vector3 pos)
+        {
+            Route r = u.Route;
+            if (r == null || r.P.Count < 2) return 0;
+            if (RailSpan(r, u.OneWay) < 1f) return Nearest(r, pos);
+            int seg;
+            RailPoint(r, RailArcAt(u, pos), u.OneWay, out seg);
+            return seg;
+        }
+
         /// <summary>The waypoint of this route nearest to a position, measured
         /// in the ground plane - where a vehicle that has left the road belongs
         /// back on it.</summary>
@@ -3914,7 +4037,7 @@ namespace NextDayRevival
             }
 
             Vector3 target;
-            int at = GroundedWaypoint(r, Nearest(r, t.position), 1.5f,
+            int at = GroundedWaypoint(r, NearestOn(u, t.position), 1.5f,
                                       !u.OneWay, out target);
             if (at < 0)
             {
@@ -4956,10 +5079,26 @@ namespace NextDayRevival
         static bool Escalate(Unit u, Vector3 pos)
         {
             float stuckFor = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolStuck.Value);
+            // A vehicle that has already had to be carried once does not get the
+            // full benefit of the doubt again. Three seconds of standing is a
+            // fair wait for a patrol that might still free itself; for one that
+            // stopped on this same stretch a minute ago it is three seconds of
+            // the thing the user is complaining about.
+            if (u.RailRuns > 0 && Time.time - u.RailAt <= RailForget) stuckFor *= 0.5f;
             bool slow = u.Stuck >= stuckFor;
             // The convoy has its own spacing, braking and separation layer and
             // its own reasons to stand still; this second test is the patrol's.
             if (!slow && (u.ConvoyId != 0 || !NoProgress(u, pos))) return false;
+            // An ordinary patrol is carried out of it along its own line. The
+            // warp below is what produced the loop the rail exists to end, and
+            // it stays only for the convoy - whose column, deploy and lane layer
+            // owns where its vehicles may be put - and for a route with no line.
+            if (u.ConvoyId == 0
+                && RailOn(u, pos, slow
+                    ? "under 3 km/h for " + u.Stuck.ToString("0") + " s"
+                    : "has not covered " + ProgressMetres.ToString("0")
+                      + " m in " + ProgressSeconds.ToString("0") + " s"))
+                return true;
             Free(u, pos);
             return true;
         }
@@ -5025,6 +5164,13 @@ namespace NextDayRevival
             }
             if (Time.time - u.OffRouteSince < LeashSeconds) return false;
             u.OffRouteSince = 0f;
+            // Off the line and finding its own way back is exactly what never
+            // worked: it is put back on the line and CARRIED along it until it
+            // is somewhere it can drive again. BackOnRoute stays for the route
+            // the rail cannot use.
+            if (RailOn(u, pos, off.ToString("0") + " m off its own route for "
+                               + LeashSeconds.ToString("0") + " s"))
+                return true;
             return BackOnRoute(u, pos, off);
         }
 
@@ -5064,7 +5210,7 @@ namespace NextDayRevival
         {
             Route r = u.Route;
             Vector3 target;
-            int at = GroundedWaypoint(r, Nearest(r, pos), 1.5f, !u.OneWay, out target);
+            int at = GroundedWaypoint(r, NearestOn(u, pos), 1.5f, !u.OneWay, out target);
             for (int tries = 0; at >= 0 && tries < GroundTries
                                 && SpotTaken(u, target, FreeRoom); tries++)
                 at = GroundedWaypoint(r, at + 1, 1.5f, !u.OneWay, out target);
@@ -5246,6 +5392,251 @@ namespace NextDayRevival
             RevivalPlugin.L.LogWarning("Patrol: stuck on " + u.Route.Name
                 + " near waypoint " + from + ", but no waypoint from " + to
                 + " on " + why + ".");
+        }
+
+        // =====================================================================
+        //  The rail: a patrol that cannot drive its road is carried along it
+        // =====================================================================
+
+        /// <summary>Arc length of the whole line a vehicle drives: the recorded
+        /// points for a one-way convoy, and the closing leg from the last
+        /// waypoint back to waypoint 0 on top of that for a patrol driving laps.
+        /// <see cref="Metrics"/> measures the recording, which does not include
+        /// that closing leg - and a lap route is nothing BUT a loop, so the rail
+        /// has to know how long the loop really is.</summary>
+        static float RailSpan(Route r, bool oneWay)
+        {
+            Metrics(r);
+            int n = r.P.Count;
+            if (n < 2) return 0f;
+            if (oneWay) return r.Length;
+            return r.Length + FlatDistance(r.P[n - 1].Pos, r.P[0].Pos);
+        }
+
+        /// <summary>The point <paramref name="arc"/> metres along the line, with
+        /// the lap route's closing leg included and the arc wrapped into the
+        /// loop. <see cref="PointOnRoute"/> clamps at both ends, which is right
+        /// for the one-way column it was written for and would park a carried
+        /// patrol on its last waypoint forever.</summary>
+        static Vector3 RailPoint(Route r, float arc, bool oneWay, out int seg)
+        {
+            Metrics(r);
+            int n = r.P.Count;
+            seg = 0;
+            if (n == 0) return Vector3.zero;
+            if (n == 1) return r.P[0].Pos;
+            if (oneWay) return PointOnRoute(r, arc, out seg);
+
+            float span = RailSpan(r, false);
+            if (span < 0.01f) return r.P[0].Pos;
+            arc -= Mathf.Floor(arc / span) * span;
+            if (arc < r.Length) return PointOnRoute(r, arc, out seg);
+
+            // On the closing leg, which Cum does not cover: it runs from the
+            // last waypoint to waypoint 0, so 0 is what it drives towards.
+            float len = span - r.Length;
+            float t = len > 0.001f ? (arc - r.Length) / len : 0f;
+            return Vector3.Lerp(r.P[n - 1].Pos, r.P[0].Pos, Mathf.Clamp01(t));
+        }
+
+        /// <summary>The direction of travel at <paramref name="arc"/>, measured
+        /// over a span of the line for the reason <see cref="HeadingOnRoute"/>
+        /// gives: a dense recording has legs of a few metres, and a heading taken
+        /// from one of those turns the hull with every waypoint.</summary>
+        static Vector3 RailHeading(Route r, float arc, bool oneWay)
+        {
+            int ignore;
+            Vector3 back = RailPoint(r, arc - 7f, oneWay, out ignore);
+            Vector3 fwd = RailPoint(r, arc + 7f, oneWay, out ignore);
+            Vector3 d = fwd - back;
+            d.y = 0f;
+            if (d.sqrMagnitude > 0.0001f) return d.normalized;
+            d = RailPoint(r, arc + 25f, oneWay, out ignore)
+              - RailPoint(r, arc, oneWay, out ignore);
+            d.y = 0f;
+            return d.sqrMagnitude > 0.0001f ? d.normalized : Vector3.forward;
+        }
+
+        /// <summary>Where on the line this hull is standing, in metres along it.
+        /// The waypoint it was driving to is the hint, and only the legs around
+        /// that one are considered: see <see cref="RailLook"/> for why the
+        /// nearest leg in the WORLD is the wrong answer.</summary>
+        static float RailArcAt(Unit u, Vector3 pos)
+        {
+            Route r = u.Route;
+            Metrics(r);
+            int n = r.P.Count;
+            if (n < 2) return 0f;
+            float span = RailSpan(r, u.OneWay);
+            int legs = u.OneWay ? n - 1 : n;      // the lap route closes, the convoy does not
+            if (legs < 1) return 0f;
+
+            float best = 0f;
+            float bestOff = 0f;
+            bool have = false;
+            for (int k = 0; k <= 2 * RailLook; k++)
+            {
+                // The legs in the order 0, -1, +1, -2, +2 ... , counted from the
+                // one the vehicle was driving, and a later leg has to be
+                // STRICTLY closer to the hull to beat an earlier one.
+                //
+                // Both halves matter. On an out-and-back road the outbound leg
+                // and the return leg lie on top of each other, so the hull is
+                // zero metres from BOTH and the answer would otherwise be
+                // whichever index the loop reached first - which is the outbound
+                // one, the wrong carriageway, the reported bug.
+                int step = ((k + 1) / 2) * ((k % 2) == 0 ? 1 : -1);
+                int j = u.Next - 1 + step;        // leg j runs P[j] -> P[j+1]
+                if (u.OneWay) { if (j < 0 || j >= legs) continue; }
+                else j = ((j % legs) + legs) % legs;
+
+                Vector3 from = r.P[j].Pos;
+                Vector3 to = r.P[(j + 1) % n].Pos;
+                float off = LegDistance(from, to, pos);
+                if (have && off >= bestOff) continue;
+
+                Vector3 leg = to - from; leg.y = 0f;
+                Vector3 rel = pos - from; rel.y = 0f;
+                float len = leg.sqrMagnitude;
+                float along = len < 0.01f ? 0f : Mathf.Clamp01(Vector3.Dot(rel, leg) / len);
+                float start = r.Cum[j];
+                best = start + (j < n - 1 ? r.Cum[j + 1] - start : span - start) * along;
+                bestOff = off;
+                have = true;
+            }
+            return best;
+        }
+
+        /// <summary>Take the wheel away from this vehicle and put it on the rail,
+        /// starting where it stands. False when the route has no line to be
+        /// carried along, which is the one case the old warp still has to answer.
+        ///
+        /// The carry starts at the vehicle's OWN arc, not fifteen metres further
+        /// on: it does not blink somewhere else, it simply begins to move, and
+        /// whatever is holding it is gone within a second because the hull is now
+        /// going through it. That is the whole point of the thing.</summary>
+        static bool RailOn(Unit u, Vector3 pos, string why)
+        {
+            Route r = u.Route;
+            if (r == null || r.P.Count < 2) return false;
+            if (RailSpan(r, u.OneWay) < 1f) return false;
+            if (u.Rail) return true;
+
+            // Carries close together are the loop the user reported; carries an
+            // hour apart are two ordinary bad moments on a long shift.
+            if (u.RailRuns > 0 && Time.time - u.RailAt <= RailForget) u.RailRuns++;
+            else u.RailRuns = 1;
+            u.RailAt = Time.time;
+
+            u.Rail = true;
+            u.RailArc = RailArcAt(u, pos);
+            u.RailFrom = u.RailArc;
+            u.RailSince = Time.time;
+            // It keeps the speed it had, which after a confirmed stop is nearly
+            // none - the carry eases up to road speed like a column instead of
+            // snapping there.
+            u.RailSpeed = Velocity(u.Body).magnitude;
+            u.Placed = false;                 // the first placement snaps, then it eases
+            u.Frees++;
+            u.Stuck = 0f;
+            u.Queued = 0f;
+            u.Refusals = 0;
+            u.OffRouteSince = 0f;
+            MadeProgress(u, pos);
+
+            if (!u.RailForever && u.RailRuns >= RailRunsStick)
+            {
+                u.RailForever = true;
+                RevivalPlugin.L.LogWarning("Patrol: the vehicle on " + r.Name
+                    + " has been carried " + u.RailRuns + " times in "
+                    + RailForget.ToString("0") + " s - it stays on its line for "
+                    + "good now. This stretch of the route is beyond it ("
+                    + why + ").");
+            }
+            else
+            {
+                RevivalPlugin.L.LogWarning("Patrol: RAIL on " + r.Name + " at "
+                    + pos + " - " + why + ". Carried along the recorded line from "
+                    + u.RailArc.ToString("0") + " m (carry " + u.RailRuns + ").");
+            }
+            return true;
+        }
+
+        /// <summary>Hand the wheel back: the hull is on the road, pointing down
+        /// it, at road speed. Everything that measures failure starts again from
+        /// here, because none of it happened to the vehicle that is driving
+        /// now.</summary>
+        static void RailOff(Unit u, string why)
+        {
+            if (!u.Rail) return;
+            u.Rail = false;
+            u.Placed = false;
+            u.Stuck = 0f;
+            u.Queued = 0f;
+            u.OffRouteSince = 0f;
+            u.Airborne = false;
+            u.FallSince = 0f;
+            u.NextGround = Time.time + FallSeconds;   // let it settle before the guard judges it
+            if (u.Car != null) MadeProgress(u, u.Car.transform.position);
+            RevivalPlugin.L.LogInfo("Patrol: the vehicle on " + u.Route.Name
+                + " drives itself again - " + why + ".");
+        }
+
+        /// <summary>One step of one carried vehicle: how fast the road says it
+        /// may go here, that much further along the line, and put down on it.
+        /// The driver does not run for this vehicle at all.</summary>
+        static void RailStep(Unit u, float dt)
+        {
+            Route r = u.Route;
+            Transform t = u.Car.transform;
+            float span = RailSpan(r, u.OneWay);
+            if (span < 1f) { RailOff(u, "its route has no line left to carry it along"); return; }
+
+            int seg;
+            RailPoint(r, u.RailArc, u.OneWay, out seg);
+
+            // The recorded speed of the waypoint it is heading for, eased for the
+            // corner exactly as the driver would ease for it - a carried vehicle
+            // that takes a hairpin at fifty looks like a bug even when it is on
+            // the line to the centimetre.
+            float want = r.P[seg].Speed;
+            if (want <= 0f) want = RevivalPlugin.CfgPatrolSpeed.Value;
+            want *= u.OneWay ? ColumnCorner(r, u.RailArc) : CornerFactor(r, seg);
+            want = Mathf.Max(want, 12f);
+            // Behind a group mate, not through it. The rail cannot be blocked by
+            // anything else, but two vehicles of one composition share a road and
+            // the gap between them is the driver's job in both modes.
+            want = QueueBehind(u, t, want, dt);
+
+            u.RailSpeed = Mathf.MoveTowards(u.RailSpeed, want / 3.6f, ColumnAccel * dt);
+            u.RailArc += u.RailSpeed * dt;
+
+            // A one-way convoy arrives at the end of its line and vanishes there,
+            // carried or not. A patrol wraps, and the lap counts.
+            if (u.OneWay && u.RailArc >= span) { u.Arrived = true; return; }
+            if (!u.OneWay && u.RailArc >= span)
+            {
+                u.RailArc -= span;
+                u.RailFrom -= span;
+                u.Lap++;
+            }
+
+            Vector3 line = RailPoint(r, u.RailArc, u.OneWay, out seg);
+            Carry(u, line, RailHeading(r, u.RailArc, u.OneWay), u.RailSpeed,
+                  "Patrol rail on " + r.Name + ":");
+
+            u.Next = seg;
+            u.Stuck = 0f;
+            u.OffRouteSince = 0f;
+            u.Airborne = false;
+            u.FallSince = 0f;
+            MadeProgress(u, t.position);
+
+            float went = u.RailArc - u.RailFrom;
+            if (u.RailForever) return;
+            if (went < RailMetres || Time.time - u.RailSince < RailSeconds) return;
+            RailOff(u, "it is " + went.ToString("0") + " m further down its route "
+                + "and doing " + (u.RailSpeed * 3.6f).ToString("0") + " km/h");
         }
 
         static float FlatDistance(Vector3 a, Vector3 b)

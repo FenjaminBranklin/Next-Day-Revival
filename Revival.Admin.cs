@@ -1056,6 +1056,7 @@ namespace NextDayRevival
 
         public static void MapClickPostfix()
         {
+            if (Helipads.ClearAreaMapClick()) return;
             if (!_teleportArmed || !Zutritt()) return;
             Vector3 point;
             if (!MapTools.MouseWorld(out point))

@@ -402,7 +402,19 @@ namespace NextDayRevival
             RevivalPlugin.L.LogWarning("TraitorSettlement: " + why + ".");
         }
 
-        static Vector3 Centre()
+        /// <summary>Is the camp switched on? A village with no traitors in it is
+        /// no traitor settlement, so the trader in the blue block closes with
+        /// it (`RevivalTraitorVendor.cs`).</summary>
+        internal static bool Wanted()
+        {
+            return _cfgEnabled != null && _cfgEnabled.Value;
+        }
+
+        /// <summary>The middle of the village, y 0. Internal because the camp
+        /// owns the PLACE: the trader in the blue block (`RevivalTraitorVendor.cs`)
+        /// searches around this point and measures the road from it, and a camp
+        /// moved in the config has to take its shop with it.</summary>
+        internal static Vector3 Centre()
         {
             float x = _cfgX == null ? DefaultX : _cfgX.Value;
             float z = _cfgZ == null ? DefaultZ : _cfgZ.Value;
@@ -413,7 +425,7 @@ namespace NextDayRevival
         /// an empty setting means the home map, and an unreadable scene name
         /// answers true so the camp is never withheld by this test alone.
         /// </summary>
-        static bool Here()
+        internal static bool Here()
         {
             return MapScene.Owns(_cfgScene == null ? MapScene.Home : _cfgScene.Value);
         }
@@ -517,7 +529,7 @@ namespace NextDayRevival
         /// object fixes all of them at once however it was passed on. Each NPC's
         /// own MainOptions is walked as well, in case it is a copy.
         /// </summary>
-        static void Unhate(GameObject settlement)
+        internal static void Unhate(GameObject settlement)
         {
             try
             {
