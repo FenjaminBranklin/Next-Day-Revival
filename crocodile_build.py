@@ -51,8 +51,6 @@ def main():
         blender,
         "--background",
         "--factory-startup",
-        "--python-exit-code",
-        "1",
         "--python",
         SCRIPT,
     ], cwd=ROOT)
