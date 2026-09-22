@@ -68,6 +68,18 @@
         // pad may then take anything narrower than the SITE HE DREW: one structure
 // goes, the container of half a district does not.
 //
+// WHY A SITE CAN ALSO BE A DRAWN OUTLINE (6.45).
+// A circle cannot follow a fence. The yard around Pad1 at the safe zone is a
+// rectangle of 77 x 122 m turned by 43 degrees, with the pad 28 m from two of
+// its sides and 93 m from the third; the circle that reaches the far corner
+// takes half the village outside the fence, and the 45 m circle that was
+// authored left the car, the second house and the trees at the far end
+// standing - and House06, a log house wider than the whole 45 m site, standing
+// half on the deck. So a pad may carry an OUTLINE (11th column, 3 to 16
+// corners). Inside it, whatever has its middle inside goes, as long as its
+// footprint is under half the outline; the fence is ONE object as big as the
+// yard it encloses, and that rule is what keeps it standing.
+//
 // The pad is also the LZ: a troop landing whose marked zone falls inside a pad
 // is snapped onto the pad centre and lands with the pad's heading, so an admin
 // places a pad once and every drop authored near it uses it (Snap, called from
@@ -97,6 +109,12 @@ namespace NextDayRevival
         /// order to clear the yard it stands in - and still far short of the
         /// 5000 m map, so a mistyped number cannot strip a region.</summary>
         internal const float MaxClear = 150f;
+
+        /// <summary>The drawn outline of a site (helipaddef.py MAX_AREA_*):
+        /// at most this many corners, none farther than this from the pad
+        /// centre, so a slip of the mouse cannot strip a district.</summary>
+        internal const int MaxAreaPoints = 16;
+        internal const float MaxAreaReach = 300f;
 
         /// <summary>Segments around the deck. A pad is a disc, and a disc with
         /// too few sides is a cog: 32 is smooth at walking distance on a small
@@ -145,6 +163,12 @@ namespace NextDayRevival
             /// <summary>The authored site around the pad in metres, 0 for none.
             /// Never shrinks the clearing: see Footprint.</summary>
             internal float Clear;
+            /// <summary>The drawn outline of the site, x/z corners, or null.
+            /// AreaMin/AreaMax are its bounding box; AreaCap is half the
+            /// ground it encloses, the largest footprint it may take.</summary>
+            internal Vector2[] Area;
+            internal Vector2 AreaMin, AreaMax;
+            internal float AreaCap;
             /// <summary>Deck height once the pad has been built; 0 before.</summary>
             internal float Deck;
             internal GameObject Go;
@@ -188,7 +212,7 @@ namespace NextDayRevival
         // ================================================================ data
 
         /// <summary>One line per pad:
-        /// name enabled x z heading radius surface marker [scene [clear]].
+        /// name enabled x z heading radius surface marker [scene [clear [area]]].
         /// Throws on anything it does not fully understand - a half-read pad
         /// table would put a deck in the wrong place, and the caller keeps the
         /// last table it verified.</summary>
@@ -205,7 +229,7 @@ namespace NextDayRevival
                 string raw = line.TrimEnd('\r');
                 if (raw.Trim().Length == 0 || raw[0] == '#') continue;
                 string[] c = raw.Split('\t');
-                if (c.Length < 8 || c.Length > 10) throw new IOException("Invalid pad row");
+                if (c.Length < 8 || c.Length > 11) throw new IOException("Invalid pad row");
                 if (!Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
                     throw new IOException("Invalid pad name");
                 if (result.Count >= MaxPads) throw new IOException("Too many pads");
@@ -233,13 +257,69 @@ namespace NextDayRevival
                 // there is one, so the eight-column row an older editor wrote
                 // still means exactly what it meant. A value under the deck's
                 // own footprint is not an error - it simply does nothing.
-                p.Clear = c.Length == 10 ? Number(c[9], 0f, MaxClear) : 0f;
+                p.Clear = c.Length >= 10 ? Number(c[9], 0f, MaxClear) : 0f;
+                // The outline comes last of all, written only for a pad that
+                // has one; a ten-column row keeps exactly its old meaning.
+                if (c.Length == 11) ReadArea(p, c[10]);
                 result.Add(p);
                 key.Append(raw).Append('\n');
             }
             string all = key.ToString();
             foreach (Pad p in result) p.Key = all;
             return result;
+        }
+
+        /// <summary>"x,z;x,z;..." - the outline of the site. Every corner
+        /// within MaxAreaReach of the pad, 3 to MaxAreaPoints of them, and some
+        /// ground inside, or the whole table is refused like any other bad
+        /// number.</summary>
+        static void ReadArea(Pad p, string text)
+        {
+            string[] pairs = text.Split(';');
+            if (pairs.Length < 3 || pairs.Length > MaxAreaPoints)
+                throw new IOException("Invalid pad area");
+            Vector2[] area = new Vector2[pairs.Length];
+            for (int i = 0; i < pairs.Length; i++)
+            {
+                string[] n = pairs[i].Split(',');
+                if (n.Length != 2) throw new IOException("Invalid pad area");
+                area[i] = new Vector2(Number(n[0], p.X - MaxAreaReach, p.X + MaxAreaReach),
+                                      Number(n[1], p.Z - MaxAreaReach, p.Z + MaxAreaReach));
+            }
+            float size = AreaSize(area);
+            if (size < 25f) throw new IOException("Invalid pad area");
+            p.Area = area;
+            p.AreaCap = size * 0.5f;
+            p.AreaMin = area[0];
+            p.AreaMax = area[0];
+            for (int i = 1; i < area.Length; i++)
+            {
+                p.AreaMin = Vector2.Min(p.AreaMin, area[i]);
+                p.AreaMax = Vector2.Max(p.AreaMax, area[i]);
+            }
+        }
+
+        /// <summary>Square metres inside an outline, whatever its winding
+        /// (helipaddef.area_size).</summary>
+        static float AreaSize(Vector2[] area)
+        {
+            float total = 0f;
+            for (int i = 0, j = area.Length - 1; i < area.Length; j = i++)
+                total += area[j].x * area[i].y - area[i].x * area[j].y;
+            return Mathf.Abs(total) * 0.5f;
+        }
+
+        /// <summary>Even-odd point in polygon, on the ground plane.</summary>
+        static bool Inside(Vector2[] area, float x, float z)
+        {
+            bool inside = false;
+            for (int i = 0, j = area.Length - 1; i < area.Length; j = i++)
+            {
+                Vector2 a = area[i], b = area[j];
+                if (((a.y > z) != (b.y > z))
+                    && x < (b.x - a.x) * (z - a.y) / (b.y - a.y) + a.x) inside = !inside;
+            }
+            return inside;
         }
 
         static float Number(string text, float min, float max)
@@ -748,6 +828,7 @@ namespace NextDayRevival
                 float reach = Footprint(p);
                 float dx = x - p.X, dz = z - p.Z;
                 if (dx * dx + dz * dz <= reach * reach) return true;
+                if (p.Area != null && Inside(p.Area, x, z)) return true;
             }
             return InClearArea(x, z);
         }
@@ -758,8 +839,14 @@ namespace NextDayRevival
             _looseCache.Clear();
             try
             {
+                // The circle's square, grown to the outline's box when there is
+                // one: the outline may reach far past the circle on one side.
+                Vector2 lo = new Vector2(p.X - reach, p.Z - reach);
+                Vector2 hi = new Vector2(p.X + reach, p.Z + reach);
+                if (p.Area != null) { lo = Vector2.Min(lo, p.AreaMin); hi = Vector2.Max(hi, p.AreaMax); }
                 Collider[] hits = Physics.OverlapBox(
-                    new Vector3(p.X, deck + 14f, p.Z), new Vector3(reach, 28f, reach),
+                    new Vector3((lo.x + hi.x) * 0.5f, deck + 14f, (lo.y + hi.y) * 0.5f),
+                    new Vector3((hi.x - lo.x) * 0.5f, 28f, (hi.y - lo.y) * 0.5f),
                     Quaternion.identity, Physics.DefaultRaycastLayers,
                     QueryTriggerInteraction.Ignore);
                 int gone = 0;
@@ -775,7 +862,8 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("Helipads: " + gone
                         + " prop(s) cleared within "
                         + reach.ToString("0.#", CultureInfo.InvariantCulture)
-                        + " m of pad " + p.Name + ".");
+                        + " m of pad " + p.Name
+                        + (p.Area != null ? " or inside its outline" : "") + ".");
             }
             catch (Exception ex)
             {
@@ -836,11 +924,21 @@ namespace NextDayRevival
             bool answer = false;
             float cap = Cap(p);
             Bounds box;
-            if (WorldBounds(t, out box)
-                && box.size.x <= cap && box.size.z <= cap)
+            if (WorldBounds(t, out box))
             {
-                float dx = box.center.x - p.X, dz = box.center.z - p.Z;
-                answer = dx * dx + dz * dz <= reach * reach;
+                if (box.size.x <= cap && box.size.z <= cap)
+                {
+                    float dx = box.center.x - p.X, dz = box.center.z - p.Z;
+                    answer = dx * dx + dz * dz <= reach * reach;
+                }
+                // Inside a drawn outline the limit is the outline's own: a
+                // house goes, whatever the circle would say - House06 at the
+                // safe zone, some 40 m of log house, stood half on the deck of
+                // a 45 m clearing. What is as big as the yard is the yard's
+                // boundary, not its contents: the fence is one object that
+                // encloses the whole outline and stays.
+                if (!answer && p.Area != null && box.size.x * box.size.z <= p.AreaCap)
+                    answer = Inside(p.Area, box.center.x, box.center.z);
             }
             _looseCache[id] = answer;
             return answer;
@@ -1009,10 +1107,13 @@ namespace NextDayRevival
             {
                 if (!p.Enabled || !MapScene.Owns(p.Scene)) continue;
                 float reach = Footprint(p);
-                int x0 = Mathf.Clamp(Mathf.FloorToInt((p.X - reach - org.x) / size.x * res), 0, res - 1);
-                int y0 = Mathf.Clamp(Mathf.FloorToInt((p.Z - reach - org.z) / size.z * res), 0, res - 1);
-                int x1 = Mathf.Clamp(Mathf.CeilToInt((p.X + reach - org.x) / size.x * res), 0, res - 1);
-                int y1 = Mathf.Clamp(Mathf.CeilToInt((p.Z + reach - org.z) / size.z * res), 0, res - 1);
+                Vector2 lo = new Vector2(p.X - reach, p.Z - reach);
+                Vector2 hi = new Vector2(p.X + reach, p.Z + reach);
+                if (p.Area != null) { lo = Vector2.Min(lo, p.AreaMin); hi = Vector2.Max(hi, p.AreaMax); }
+                int x0 = Mathf.Clamp(Mathf.FloorToInt((lo.x - org.x) / size.x * res), 0, res - 1);
+                int y0 = Mathf.Clamp(Mathf.FloorToInt((lo.y - org.z) / size.z * res), 0, res - 1);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((hi.x - org.x) / size.x * res), 0, res - 1);
+                int y1 = Mathf.Clamp(Mathf.CeilToInt((hi.y - org.z) / size.z * res), 0, res - 1);
                 int w = x1 - x0 + 1, h = y1 - y0 + 1;
                 if (w <= 1 || h <= 1) continue;
 
@@ -1022,16 +1123,18 @@ namespace NextDayRevival
                     if (patch == null) continue;
                     int[,] before = (int[,])patch.Clone();
                     bool changed = false;
-                    // The mask is a circle in the middle of a square, so which
-                    // of the two indices the engine calls x does not matter.
-                    for (int a = 0; a < w; a++)
-                        for (int b = 0; b < h; b++)
+                    // The engine hands the patch back as [row = z, column = x].
+                    // While the window was the square around a circle the
+                    // order did not matter - the mask is symmetric about the
+                    // diagonal - but an outline makes the window a rectangle.
+                    for (int row = 0; row < patch.GetLength(0); row++)
+                        for (int col = 0; col < patch.GetLength(1); col++)
                         {
-                            if (patch[a, b] == 0) continue;
-                            float wx = org.x + (x0 + a + 0.5f) / res * size.x;
-                            float wz = org.z + (y0 + b + 0.5f) / res * size.z;
+                            if (patch[row, col] == 0) continue;
+                            float wx = org.x + (x0 + col + 0.5f) / res * size.x;
+                            float wz = org.z + (y0 + row + 0.5f) / res * size.z;
                             if (!Covered(wx, wz)) continue;
-                            patch[a, b] = 0;
+                            patch[row, col] = 0;
                             changed = true;
                         }
                     if (!changed) continue;
@@ -1069,13 +1172,15 @@ namespace NextDayRevival
                 int[,] patch = data.GetDetailLayer(x0, y0, w, h, layer);
                 int[,] before = (int[,])patch.Clone();
                 bool changed = false;
-                for (int a = 0; a < w; a++) for (int b = 0; b < h; b++)
+                // [row = z, column = x], as in TakeGrass.
+                for (int row = 0; row < patch.GetLength(0); row++)
+                    for (int col = 0; col < patch.GetLength(1); col++)
                 {
-                    if (patch[a, b] == 0) continue;
-                    float wx = org.x + (x0 + a + .5f) / res * size.x;
-                    float wz = org.z + (y0 + b + .5f) / res * size.z;
+                    if (patch[row, col] == 0) continue;
+                    float wx = org.x + (x0 + col + .5f) / res * size.x;
+                    float wz = org.z + (y0 + row + .5f) / res * size.z;
                     if (!InClearArea(wx, wz)) continue;
-                    patch[a, b] = 0; changed = true;
+                    patch[row, col] = 0; changed = true;
                 }
                 if (!changed) continue;
                 Take take = new Take(); take.Terrain = terrain; take.Data = data;

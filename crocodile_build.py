@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(ROOT, "assets", "src", "crocodile_blender.py")
 OUTPUTS = (
     os.path.join(ROOT, "assets", "crocodile.ndmesh"),
+    os.path.join(ROOT, "assets", "crocodile_rig.bin"),
     os.path.join(ROOT, "assets", "crocodile_diffuse.png"),
     os.path.join(ROOT, "assets", "crocodile_normal.png"),
     os.path.join(ROOT, "assets", "src", "crocodile.blend"),
@@ -51,6 +52,8 @@ def main():
         blender,
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         SCRIPT,
     ], cwd=ROOT)

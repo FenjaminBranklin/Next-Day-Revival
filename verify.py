@@ -123,6 +123,7 @@ ASSET_FILES = [
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
+    "crocodile_rig.bin",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
     "t72_track_left.ndmesh", "t72_track_right.ndmesh", "t72_track.png",
     "t72_diffuse.png", "t72_normal.png", "t72_metal.png", "t72_scope.png",
@@ -918,7 +919,8 @@ def check_item_table():
     # Waffenmaterial baut "<stamm>_diffuse.png" zu "<stamm>_metal.png" um.
     # Ohne diese Einschraenkung meldet die Pruefung zwei Dateien als fehlend,
     # die es nie geben soll.
-    named = set(re.findall(r'"([A-Za-z0-9][A-Za-z0-9_]*\.(?:ndmesh|png))"', src))
+    # .bin since 6.45: the crocodile's rig sidecar (crocodile_rig.bin).
+    named = set(re.findall(r'"([A-Za-z0-9][A-Za-z0-9_]*\.(?:ndmesh|png|bin))"', src))
     for f in sorted(named):
         p = os.path.join(ASSETS, f)
         if os.path.exists(p):
@@ -4348,6 +4350,56 @@ def check_crocodile():
          "Blender crocodile is %.2f x %.2f x %.2f m, %d triangles"
          % (width, height, length, index_count // 3),
          "crocodile.ndmesh is absent or no longer a large animal-shaped mesh")
+
+    # 6.45 the hunter. The rig names the jaw and four legs per vertex, in the
+    # ndmesh's own order: a mesh rebuilt without it would animate the wrong
+    # vertices, so both must come from one Blender run.
+    rig_path = os.path.join(ASSETS, "crocodile_rig.bin")
+    rig_ok = False
+    counts = []
+    try:
+        rig = io.open(rig_path, "rb").read()
+        magic, (version, count, parts) = rig[:4], struct.unpack_from("<iii", rig, 4)
+        table = rig[16 + parts * 12:]
+        pivots = [struct.unpack_from("<3f", rig, 16 + 12 * i) for i in range(parts)]
+        counts = [table.count(bytes([p])) for p in range(parts)]
+        rig_ok = (magic == b"NDRG" and count == n and parts == 6
+                  and len(table) == count and min(counts[1:]) >= 50
+                  and counts[0] > count // 2
+                  and all(pivots[k][0] * (1 if k % 2 else -1) > 0.4 for k in range(2, 6))
+                  and pivots[2][2] > 0.5 and pivots[4][2] < -0.5 and pivots[1][2] > 1.5)
+    except Exception:
+        rig_ok = False
+    need(rig_ok,
+         "crocodile_rig.bin maps all %d vertices: body/jaw/legs %s" % (n, counts),
+         "crocodile_rig.bin is missing, stale against the ndmesh, or lacks a jaw/leg part")
+    need('"crocodile_rig.bin"' in build and "RIG_PATH" in blender
+         and "crocodile_rig.bin" in wrapper,
+         "Blender writes the rig and build.ps1 installs it",
+         "the rig is not produced by crocodile_blender.py or not installed by build.ps1")
+    need('"StateAction"' in code and '"NetworkAttackState"' in code
+         and "SetAnimalState" in code and "state != 3 && state != 4" in code,
+         "the native bear brain and its claw attack are silenced for the crocodile only",
+         "the native Animal_AI could still chase and claw from inside the crocodile")
+    need('"PlayerBossController"' in code and '"SetBossData"' in code
+         and '"customName"' in code,
+         "the game's own boss bar is raised with the crocodile's name",
+         "the crocodile no longer raises the native boss health bar")
+    need('_hitRoot.tag = tag' in code and 'string tag = "Animal"' in code,
+         "hit boxes carry the Animal tag the firearm path demands",
+         "crocodile hit boxes lost the Animal tag; shots would not reach Animal_AI")
+    need("CrocodileLake.HuntZone" in code and "ShoreReach" in code
+         and "SwimDepth" in code and "Queue<int>" in code,
+         "the hunting ground is the flooded lake plus its immediate shore",
+         "the crocodile's water/shore map is missing")
+    need("RunningStraightAway" in code and "EatDamage" in code
+         and "_jinks >= 3" in code and "SprintEdge" in code,
+         "straight flight is eaten, a zigzag makes it overshoot and give up",
+         "the zigzag-or-be-eaten rule is missing")
+    need("CrocodileNet.Send" in code and "NetworkEventCode" in code
+         and "DefaultEventCode = 164" in code,
+         "the master broadcasts the hunt on its own Photon event code",
+         "the crocodile hunt is not networked")
 
 
 def check_stinger():

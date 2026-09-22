@@ -152,6 +152,8 @@ $assets = @(
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
     # Blender-built toxic crocodile boss in the Point 12 lake.
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
+    # Its jaw/leg part map from the same Blender run (crocodile_build.py).
+    "crocodile_rig.bin",
     # Deployed head of the mast antenna (item 2055): mesh only.
     "antenna_head.ndmesh",
     # Vehicle modules (2060 thermal, 2061 night vision, 2062 large jammer) and
