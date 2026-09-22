@@ -1874,6 +1874,7 @@ namespace NextDayRevival
             if (!Enabled) { RevivalPlugin.L.LogInfo("Technical: abgeschaltet (Technical/Enabled)."); return; }
             VehicleRegistry.EnsureBuilt();
             TechnicalNetwork.Install(harmony);
+            TechnicalCrew.Install(harmony);      // the gunner's plate against NPC fire
             RevivalPlugin.L.LogInfo("Technical: Gun Truck registriert (Spawntaste "
                 + CfgKey.Value + ", Prefab " + Prefab + ", " + SeatTotal
                 + " Plaetze, " + CfgDurability.Value.ToString("0")

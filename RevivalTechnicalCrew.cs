@@ -63,10 +63,13 @@
 //                              and TechnicalGun.NpcGunner, which is how the
 //                              existing station code finds a gunner who is not
 //                              a passenger.
+//                              Technical.Install installs BoundPrefix.
 //   Revival.Patrol.cs          Patrol.CrewedSide / CrewedList / CrewedCount say
 //                              whose truck this is and how its men are dressed;
 //                              Patrol.UnloadCrew calls ReleaseRiders instead of
 //                              spawning a second crew at the wreck.
+//                              Patrol.Verwaist asks Driverless / Wiped and
+//                              stops a truck whose cab or whole crew is dead.
 //   Revival.GroundEnemies.cs   the guard that leaves our spawn keys alone.
 //   Revival.Crew.cs            Crew.DropGroundSquad / Men / GroundKey / Forget,
 //                              used unchanged.
@@ -97,6 +100,7 @@ namespace NextDayRevival
         public static ConfigEntry<float> CfgBurstPause;
         public static ConfigEntry<float> CfgTraverse;
         public static ConfigEntry<float> CfgCabDrop;
+        public static ConfigEntry<bool> CfgGunnerBound;
 
         public static void BindConfig(ConfigFile cfg)
         {
@@ -157,6 +161,14 @@ namespace NextDayRevival
                 + "is deliberately not a guessed number - it is zero until "
                 + "somebody has looked at a technical from the outside and "
                 + "measured what it wants.");
+            CfgGunnerBound = cfg.Bind("TechnicalCrew", "GunnerDiesWithVehicle", true,
+                "The gunner lives and dies with his truck. While the technical "
+                + "is whole no round hurts him - he is part of the vehicle, "
+                + "behind the plate on the pintle - and when it is destroyed he "
+                + "dies with it instead of climbing down to fight on foot. When "
+                + "the truck is removed he goes with it. Off makes him an "
+                + "ordinary man again: he can be shot off the gun, and he walks "
+                + "away from the wreck.");
         }
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
@@ -233,6 +245,20 @@ namespace NextDayRevival
             public bool Engaged;                 // a contact is running (log only)
             public float LastContact;            // Time.time a target was last held
             public int Rounds, Hits;             // of the running contact
+
+            // Who is still standing, counted on the 5 Hz scan (Zaehlen) and
+            // read by Patrol (Driverless, Wiped). A place only counts as lost
+            // once a living man was seen on it: a truck whose men have not
+            // arrived yet is not a truck whose men are dead.
+            public int CabUp, GunUp;
+            public bool CabSeen, GunSeen;
+
+            // The gunner's own rifle, switched off while he works the MG
+            // (Entwaffnen): the bone it hangs on, found once per man, and the
+            // renderers this client turned off, so they can be turned back on.
+            public Component HandOf;
+            public Transform Hand;
+            public readonly List<Renderer> Hidden = new List<Renderer>();
         }
 
         static readonly List<Truck> _trucks = new List<Truck>();
@@ -258,6 +284,10 @@ namespace NextDayRevival
                 {
                     Truck t = _trucks[i];
                     if (t.Vgs != null && t.Root != null) continue;
+                    // He goes with his truck: a gunner left behind by a truck
+                    // that was removed would stand in the air where the bed was.
+                    if (Bound && Steht(t.Gunner) && NpcWar.GroundOwned(t.Gunner))
+                        NpcWar.RemoveGroundActor(t.Gunner);
                     Verliere(t, "the vehicle is gone");
                     _byVgs.Remove(t.Id);
                     _trucks.RemoveAt(i);
@@ -309,6 +339,12 @@ namespace NextDayRevival
                 // settlement for and man it a second time, and the editor's
                 // ground groups solved exactly this problem the same way.
                 Zuordnen();
+                for (int i = 0; i < _trucks.Count; i++)
+                {
+                    if (_trucks[i].Released) continue;
+                    Zaehlen(_trucks[i]);
+                    Entwaffnen(_trucks[i]);
+                }
 
                 // EVERY CLIENT, before the master's own work: the men and the
                 // truck that carries them must not collide. The physics step
@@ -753,6 +789,7 @@ namespace NextDayRevival
         /// rode, which is the far end of the route.</summary>
         static void Absteigen(Truck t)
         {
+            Bewaffnen(t);
             for (int i = 0; i < t.Men.Count; i++)
             {
                 Component ai = t.Men[i];
@@ -864,6 +901,220 @@ namespace NextDayRevival
         {
             return ai != null && ai.gameObject.activeInHierarchy
                 && NpcWar.GroundAlive(ai);
+        }
+
+        /// <summary>Is this man still alive at all - the question Patrol's
+        /// driver needs, which is not <see cref="Lebt"/>'s. The game switches
+        /// off every NPC no player is near, and a crew switched off far down
+        /// the road is asleep, not dead: a truck that stopped for that would
+        /// stop wherever nobody is watching it. A destroyed body is dead.</summary>
+        static bool Steht(Component ai)
+        {
+            return ai != null && NpcWar.GroundAlive(ai);
+        }
+
+        /// <summary>Count the living men in the cab and at the gun.</summary>
+        static void Zaehlen(Truck t)
+        {
+            int cab = 0;
+            for (int i = 0; i < t.Cab.Count; i++)
+                if (Steht(t.Cab[i])) cab++;
+            int gun = Steht(t.Gunner) ? 1 : 0;
+            t.CabUp = cab;
+            t.GunUp = gun;
+            if (cab > 0) t.CabSeen = true;
+            if (gun > 0) t.GunSeen = true;
+        }
+
+        /// <summary>
+        /// Patrol seam. Nobody alive is left in the cab of this technical -
+        /// the truck must stop where it is. A truck steering itself down the
+        /// road with nobody behind the wheel is the one arrangement the whole
+        /// riding crew exists to avoid (CfgCabCrew), and until 6.44.1 it was
+        /// exactly what a shot-up crew left behind. The gunner, if he still
+        /// lives, keeps working the gun from the standing truck.
+        /// </summary>
+        internal static bool Driverless(Component vgs)
+        {
+            if (!Enabled || vgs == null) return false;
+            Truck t = Find(vgs);
+            return t != null && !t.Released && t.CabSeen && t.CabUp == 0;
+        }
+
+        /// <summary>Patrol seam. Every man of this technical is dead: the
+        /// truck is abandoned, not destroyed. Patrol stops it for good and
+        /// spawns no wreck crew for it - its crew is the dead on the road.
+        /// With GunnerDiesWithVehicle on, a truck that has a gunner never gets
+        /// here while it is whole: he cannot be shot, so a dead cab only
+        /// stops it (Driverless) and he fights on from the standing truck.</summary>
+        internal static bool Wiped(Component vgs)
+        {
+            if (!Enabled || vgs == null) return false;
+            Truck t = Find(vgs);
+            return t != null && !t.Released && t.CabSeen && t.CabUp == 0
+                && t.GunUp == 0;
+        }
+
+        // ------------------------------------------ one with the vehicle
+
+        static bool Bound { get { return CfgGunnerBound == null || CfgGunnerBound.Value; } }
+
+        /// <summary>
+        /// The gunner lives and dies with his truck (field request 2026-09-22,
+        /// after the half-damage plate of c8828a2: "der Schuetze lebt und
+        /// stirbt mit dem Fahrzeug"). A prefix on NPC_AI2.ApplyDamage skips the
+        /// whole call for a RIDING gunner - players' rounds, NPC fire and blasts
+        /// alike, and with it the hit animation and the wounded state, which
+        /// would pull him off the pintle. ReleaseRiders kills him when the truck
+        /// is destroyed; Scan removes him when the truck is removed.
+        /// </summary>
+        internal static void Install(Harmony harmony)
+        {
+            if (!Enabled) return;
+            try
+            {
+                Type npc = RevivalPlugin.TypeByName("NPC_AI2");
+                MethodInfo apply = npc == null ? null
+                    : AccessTools.Method(npc, "ApplyDamage", null, null);
+                if (apply == null)
+                {
+                    RevivalPlugin.L.LogWarning("TechnicalCrew: NPC_AI2.ApplyDamage not "
+                        + "found - the technical's gunner can be shot off his gun.");
+                    return;
+                }
+                harmony.Patch(apply, new HarmonyMethod(typeof(TechnicalCrew).GetMethod(
+                    "BoundPrefix", BindingFlags.Public | BindingFlags.Static)),
+                    null, null, null, null);
+                RevivalPlugin.L.LogInfo("TechnicalCrew: the gunner lives and dies with "
+                    + "his technical (GunnerDiesWithVehicle " + Bound + ").");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("TechnicalCrew: gunner guard not installed - " + ex);
+            }
+        }
+
+        /// <summary>Prefix on NPC_AI2.ApplyDamage: false - the original does not
+        /// run - for the gunner of a technical that is still whole.</summary>
+        public static bool BoundPrefix(object __instance)
+        {
+            if (_trucks.Count == 0 || !Bound) return true;
+            try
+            {
+                for (int i = 0; i < _trucks.Count; i++)
+                {
+                    Truck t = _trucks[i];
+                    if (t.Released || t.Gunner == null) continue;
+                    if (ReferenceEquals(t.Gunner, __instance)) return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        /// <summary>The gunner dies with the truck. Called by ReleaseRiders
+        /// after Released is set, so BoundPrefix lets this one round through.
+        /// ApplyDamage only takes health off on the owner - the machine that
+        /// spawned him, which is the one whose Patrol saw the truck destroyed;
+        /// a crew adopted after a master handover is owned elsewhere and keeps
+        /// its gunner, which the log then says.</summary>
+        static bool Toeten(Component ai)
+        {
+            if (!Steht(ai)) return false;
+            try { Turret.TryDamage(ai.gameObject, "NPC_AI2", "ApplyDamage", 100000f); }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("TechnicalCrew: the gunner could not be "
+                    + "killed with his truck - " + ex.Message);
+            }
+            return !Steht(ai);
+        }
+
+        // ------------------------------------------------ the rifle put away
+
+        static FieldInfo _fWm, _fHelper;
+        static Type _fWmOwner, _fHelperOwner;
+
+        /// <summary>
+        /// The gunner's own rifle is not shown while he works the machine gun:
+        /// his hands are on its grips (TechnicalGun), and the rifle the game
+        /// hung on his right hand stuck out beside them. The model lives under
+        /// NPC_WeaponsManager.Weapons_HelperR (REVERSE_ENGINEERING "The weapon
+        /// draw aborts silently on a missing model":
+        /// NetworkShowWeapon instantiates `*_Weapon` there), so its renderers
+        /// are switched off - on EVERY client, locally, with no RPC and no
+        /// remove clip over the standing pose. Re-applied on the 5 Hz scan,
+        /// because a redraw instantiates a fresh model. Absteigen turns them
+        /// back on.
+        /// </summary>
+        static void Entwaffnen(Truck t)
+        {
+            if (t.Gunner == null || !Steht(t.Gunner)) return;
+            if (!ReferenceEquals(t.HandOf, t.Gunner))
+            {
+                Bewaffnen(t);
+                t.HandOf = t.Gunner;
+                t.Hand = WeaponHand(t.Gunner);
+            }
+            if (t.Hand == null) return;
+            Renderer[] rs = t.Hand.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < rs.Length; i++)
+            {
+                Renderer r = rs[i];
+                if (r == null || !r.enabled) continue;
+                r.enabled = false;
+                if (!t.Hidden.Contains(r)) t.Hidden.Add(r);
+            }
+        }
+
+        static void Bewaffnen(Truck t)
+        {
+            for (int i = 0; i < t.Hidden.Count; i++)
+                if (t.Hidden[i] != null) t.Hidden[i].enabled = true;
+            t.Hidden.Clear();
+            t.HandOf = null;
+            t.Hand = null;
+        }
+
+        static Transform WeaponHand(Component ai)
+        {
+            try
+            {
+                Type at = ai.GetType();
+                if (!ReferenceEquals(at, _fWmOwner))
+                {
+                    _fWmOwner = at;
+                    _fWm = AccessTools.Field(at, "_weaponsManager");
+                }
+                Component wm = _fWm == null ? null : _fWm.GetValue(ai) as Component;
+                if (wm != null)
+                {
+                    Type wt = wm.GetType();
+                    if (!ReferenceEquals(wt, _fHelperOwner))
+                    {
+                        _fHelperOwner = wt;
+                        _fHelper = AccessTools.Field(wt, "Weapons_HelperR");
+                    }
+                    object v = _fHelper == null ? null : _fHelper.GetValue(wm);
+                    Transform h = v as Transform;
+                    if (h == null && v is GameObject) h = ((GameObject)v).transform;
+                    if (h != null) return h;
+                }
+            }
+            catch { }
+            return Suche(ai.transform, "Weapons_HelperR");
+        }
+
+        static Transform Suche(Transform root, string name)
+        {
+            if (root == null) return null;
+            if (root.name == name) return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform hit = Suche(root.GetChild(i), name);
+                if (hit != null) return hit;
+            }
+            return null;
         }
 
         /// <summary>
@@ -1603,10 +1854,16 @@ namespace NextDayRevival
             List<RevivalComposition.CrewMan> loadout = Patrol.CrewedList(t.Vgs);
             int handed = 0;
             if (Abgeben(t, t.CabSquad, "cab", loadout)) handed++;
-            if (Abgeben(t, t.GunSquad, "gun", loadout)) handed++;
+            // The gunner lives and dies with the truck: he goes down with it
+            // at the gun instead of climbing off to fight on foot.
+            string gunner = "no gunner";
+            if (Bound && t.Gunner != null)
+                gunner = Toeten(t.Gunner) ? "the gunner died with it"
+                                          : "the gunner could not be killed here";
+            else if (Abgeben(t, t.GunSquad, "gun", loadout)) handed++;
             RevivalPlugin.L.LogInfo("TechnicalCrew: the technical on " + side
-                + " is destroyed - its " + t.Men.Count + " men are released where "
-                + "they stand, " + handed + " squad(s) fighting on foot.");
+                + " is destroyed - " + gunner + ", " + handed + " squad(s) of its "
+                + t.Men.Count + " men fighting on foot.");
             return true;
         }
 

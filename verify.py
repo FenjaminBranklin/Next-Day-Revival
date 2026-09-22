@@ -3212,6 +3212,18 @@ def check_technical_crew():
          whole cab over with every slope and every bump, which is the "the NPCs
          in it fall over" half of the same report. TechnicalGun.Stellung has
          always flattened the gunner's; the cab must do the same.
+     13. A TRUCK WITH NOBODY ALIVE IN THE CAB STOPS. The men can be shot off a
+         truck that is still whole, and until 6.44.1 nothing told Patrol's
+         driver: the truck drove its route empty (field report 2026-09-22).
+         FixedTick asks Verwaist before it drives, Driverless holds the truck,
+         and a dead crew is counted as dead, not as switched off - Steht must
+         not read activeInHierarchy, or every patrol far from a player stops.
+     14. THE GUNNER LIVES AND DIES WITH THE TRUCK. A prefix on
+         NPC_AI2.ApplyDamage skips every hit on a riding gunner, ReleaseRiders
+         kills him instead of handing him to NpcWar when the truck is destroyed
+         (after Released is set, or the prefix swallows that round too), and
+         his own rifle is switched off while he works the MG - on every
+         client, from the scan, and back on when he dismounts.
     """
     print("[17b] Technical crew: the men who ride it (statisch)")
     crew_p = os.path.join(ROOT, "RevivalTechnicalCrew.cs")
@@ -3385,6 +3397,43 @@ def check_technical_crew():
     else:
         bad("Technical crew: a rider is given the hull's full rotation - the "
             "cab lies down with every slope the truck takes")
+
+    # 13 - nobody alive in the cab, the truck stops
+    fixed = _body(patrol, "public static void FixedTick()")
+    orphan = _body(patrol, "static bool Verwaist(Unit u)")
+    steht = _body(crew, "static bool Steht(Component ai)")
+    if ("if (Verwaist(u))" in fixed
+            and fixed.find("if (Verwaist(u))") < fixed.find("Drive(u);")
+            and "if (u.Driverless) { HoldStill(u); continue; }" in fixed
+            and "TechnicalCrew.Driverless(u.Vgs)" in orphan
+            and "TechnicalCrew.Wiped(u.Vgs)" in orphan
+            and "NpcWar.GroundAlive(ai)" in steht
+            and "activeInHierarchy" not in steht):
+        ok("a technical whose cab is dead stops, one whose crew is dead is abandoned")
+    else:
+        bad("Technical crew: a truck whose men were shot off it drives its "
+            "route empty (or stops wherever its crew is merely switched off)")
+
+    # 14 - the gunner lives and dies with the truck, rifle put away
+    guard = _body(crew, "public static bool BoundPrefix(object __instance)")
+    release = _body(crew, "internal static bool ReleaseRiders(GameObject car, string side)")
+    scan_all = _body(crew, "internal static void Scan(Component[] all)")
+    dismount = _body(crew, "static void Absteigen(Truck t)")
+    if ("TechnicalCrew.Install(harmony);" in tech
+            and '"BoundPrefix"' in crew
+            and "return false;" in guard and "t.Released" in guard
+            and "Toeten(t.Gunner)" in release
+            and release.find("t.Released = true;") < release.find("Toeten(t.Gunner)")
+            and 'GunnerDiesWithVehicle", true' in crew):
+        ok("the riding gunner cannot be shot and dies with his truck")
+    else:
+        bad("Technical crew: the gunner no longer lives and dies with the truck "
+            "(or is killed before Released, which the prefix swallows)")
+    if ("Entwaffnen(_trucks[i]);" in scan_all and "Bewaffnen(t);" in dismount
+            and '"Weapons_HelperR"' in crew):
+        ok("the gunner's own rifle is put away while he works the MG")
+    else:
+        bad("Technical crew: the gunner holds his rifle through the MG's grips")
 
     # the file rule the rest of the feature follows
     raw = io.open(crew_p, "rb").read()

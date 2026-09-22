@@ -336,6 +336,11 @@ namespace NextDayRevival
             public int CrewSize;         // men aboard, one per seat
             public bool CrewOut;         // they have climbed out
             public bool Truck;
+            // NDR technical crew (Verwaist): the men ride visibly and can be
+            // shot off the truck while it is whole. Driverless - nobody alive in
+            // the cab, the truck stands; Abandoned - nobody alive at all.
+            public bool Driverless;
+            public bool Abandoned;
             public bool Deploy;
             public Vector3 DeployTarget;
 
@@ -673,6 +678,9 @@ namespace NextDayRevival
                         continue;
                     }
                     if (!u.Armed) { Arm(u); continue; }
+                    // NDR technical crew: a truck whose men were shot off it
+                    // stops, and an abandoned one a player climbed into is let go.
+                    if (Verwaist(u)) { _units.RemoveAt(i); continue; }
                     if (Gefallen(u)) continue;
                     // A hull with nothing under it is falling, not stuck. It is
                     // put back on the road here, before the driver can read the
@@ -687,6 +695,7 @@ namespace NextDayRevival
                     // recorded route to the last waypoint vanishes there.
                     if (u.Arrived) { ArriveEnd(u, i); continue; }
                     Keep(u);
+                    if (u.Driverless) { HoldStill(u); continue; }
                     // NDR convoy column: Columns() has already put this vehicle
                     // where it belongs. It is not driven and it is not held.
                     if (u.Column) continue;
@@ -2430,6 +2439,95 @@ namespace NextDayRevival
                 >= RevivalConvoy.EngageAdvance - 10f) return;
             u.DeployPosted = false;
             u.DeployRetry = Time.time + EngagePause;
+        }
+
+        /// <summary>
+        /// NDR technical crew. Every other patrol vehicle is a closed hull whose
+        /// crew is a number until it burns; the technical's three men ride in
+        /// the open (RevivalTechnicalCrew.cs) and can be killed while the truck
+        /// is whole. Until 6.44.1 nothing told the driver, and the truck drove
+        /// its route empty.
+        ///
+        /// Nobody alive in the cab: the truck stops where it is (Driverless,
+        /// held in FixedTick) and a living gunner keeps the gun. Nobody alive
+        /// at all: it is abandoned - stopped for good, no wreck crew, the
+        /// replacement clock started, and from then on Gefallen treats it like
+        /// a wreck (removed after WreckSeconds, a convoy's lingers). A player
+        /// may climb into it (Besetzt is false once CrewOut is set), and a
+        /// truck with a player aboard is handed to the game instead of being
+        /// removed under the player. True means: take this unit off the list.
+        /// </summary>
+        static bool Verwaist(Unit u)
+        {
+            if (!u.Abandoned)
+            {
+                if (u.Died > 0f || u.CrewOut) return false;
+                if (!u.Driverless && TechnicalCrew.Driverless(u.Vgs))
+                {
+                    u.Driverless = true;
+                    RevivalPlugin.L.LogInfo("Patrol: the technical on " + u.Route.Name
+                        + " has nobody alive in the cab - it stops where it is.");
+                    Anhalten(u, "technical driver killed");
+                }
+                if (!TechnicalCrew.Wiped(u.Vgs)) return false;
+
+                u.Abandoned = true;
+                u.Driverless = true;
+                u.Died = Time.time;
+                u.CrewOut = true;          // no wreck crew: this crew is dead already
+                u.Target = null;
+                Anhalten(u, "technical crew killed");
+                RevivalPlugin.L.LogInfo("Patrol: every man of the technical on "
+                    + u.Route.Name + " is dead after " + u.Lap + " lap(s) - the "
+                    + "truck is abandoned where it stands.");
+                if (u.ConvoyId == 0) Verloren();
+            }
+
+            // Held every step: nobody else writes this vehicle's pedals now.
+            SetFloat(u.Rcc, "gasInput", 0f);
+            SetFloat(u.Rcc, "brakeInput", 1f);
+            SetFloat(u.Rcc, "steerInput", 0f);
+            SetFloat(u.Rcc, "handbrakeInput", 1f);
+
+            if (!Aboard(u.Vgs)) return false;
+            RevivalPlugin.L.LogInfo("Patrol: a player has taken the abandoned "
+                + "technical on " + u.Route.Name + " - the patrol lets it go.");
+            Forget(u);
+            return true;
+        }
+
+        /// <summary>Stop now, and take the vehicle out of an intact column -
+        /// the column carries its members, and a stopped member is the end of
+        /// the formation the same way a destroyed one is.</summary>
+        static void Anhalten(Unit u, string why)
+        {
+            HoldStill(u);
+            if (u.ConvoyId != 0 && u.Column)
+            {
+                u.Column = false;
+                ColumnBreak(u.ConvoyId, why);
+            }
+        }
+
+        /// <summary>Does anybody sit in this vehicle's seats? Only players are
+        /// ever written into Passengers - the technical's riders are kept out
+        /// of it on purpose (RevivalTechnicalCrew.cs, reason 1).</summary>
+        static bool Aboard(Component vgs)
+        {
+            if (vgs == null) return false;
+            try
+            {
+                FieldInfo f = AccessTools.Field(vgs.GetType(), "Passengers");
+                Array seats = f == null ? null : f.GetValue(vgs) as Array;
+                if (seats == null) return false;
+                for (int i = 0; i < seats.Length; i++)
+                {
+                    UnityEngine.Object o = seats.GetValue(i) as UnityEngine.Object;
+                    if (o != null) return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         static void UnloadCrew(Unit u)
