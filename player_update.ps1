@@ -33,6 +33,13 @@ function Get-NdrRelease([string]$HostName) {
         throw 'The required stable release is not published yet.'
     }
     $assets = @($release.assets | Where-Object { $_.name -ceq "NextDayRevival_Client_$version.zip" })
+    # GitHub's by-tag view can stay stale with an empty asset list long after
+    # the upload (v6.48.0, 2026-09-23); the by-id asset list is current.
+    if ($assets.Count -eq 0 -and $release.id) {
+        # Assigned first: PowerShell 5.1 hands a JSON array on as one object.
+        $byId = Get-NdrJson "https://api.github.com/repos/FenjaminBranklin/Next-Day-Revival/releases/$($release.id)/assets"
+        $assets = @($byId | ForEach-Object { $_ } | Where-Object { $_.name -ceq "NextDayRevival_Client_$version.zip" })
+    }
     if ($assets.Count -ne 1 -or [string]$assets[0].digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
         throw 'GitHub has not provided a verifiable client package. Start is blocked; try again later.'
     }
