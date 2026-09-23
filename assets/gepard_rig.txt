@@ -3,13 +3,13 @@
 part hull - 0.00000 0.00000 0.00000
 part tracks hull 0.00000 0.00000 0.00000
 part turret hull 0.00000 1.60000 0.10000
-part radar_search turret 0.00000 1.29000 -1.27000
-part radar_track turret 0.00000 0.71000 1.36000
-part gun_r turret 1.34000 0.65000 -0.28000
-part gun_l turret -1.34000 0.65000 -0.28000
+part radar_search turret 0.00000 0.87720 -1.09220
+part radar_track turret 0.00000 0.48280 1.16960
+part gun_r turret 1.15240 0.44200 -0.24080
+part gun_l turret -1.15240 0.44200 -0.24080
 # muzzle gun x y z   in the gun's own frame, bore along +Z
-muzzle gun_r 0.06996 0.10500 4.92500
-muzzle gun_l -0.06996 0.10500 4.92500
+muzzle gun_r 0.05595 0.08410 4.69300
+muzzle gun_l -0.05591 0.08398 4.69300
 # measured interior: turret roof above its pivot, hull belly under the ring
-roof 1.51300
+roof 1.18320
 belly 0.38000

@@ -1295,6 +1295,12 @@ namespace NextDayRevival
             GUILayout.Label("Ammunition belts for the Gepard into your inventory");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
+            // Every PMN-2 this client knows, off the map on every client.
+            if (GUILayout.Button("Clear AP mines", GUILayout.Width(190f)))
+                Melde(ApMine.ClearAll());
+            GUILayout.Label("PMN-2 anti-personnel mines laid: " + ApMine.Count);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
             // Same both-ways press as the [PlayerHeli] spawn key: with an empty
             // machine of yours in reach it takes that one away again.
             if (GUILayout.Button("Spawn helicopter", GUILayout.Width(190f)))

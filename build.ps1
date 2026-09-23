@@ -156,6 +156,10 @@ $assets = @(
     # Anti-tank mine (item 1490): mesh + diffuse/normal + inventory icon (the
     # item passes null for metal, so mine_metal/rough are generated but unused).
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
+    # PMN-2 anti-personnel mine (item 1492), Blender-built (apmine_build.py):
+    # the item and the laid mine both read the metal map.
+    "apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png", "apmine_metal.png",
+    "apmine_rough.png", "apmine_icon.png",
     # Blender-built toxic crocodile boss in the Point 12 lake.
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
     # Its jaw/leg part map from the same Blender run (crocodile_build.py).

@@ -126,6 +126,8 @@ ASSET_FILES = [
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
+    "apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png", "apmine_metal.png",
+    "apmine_rough.png", "apmine_icon.png",
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
     "crocodile_rig.bin",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
@@ -165,7 +167,8 @@ OPTIONAL_ASSETS = [
 MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_recoil.ndmesh", "mg42.ndmesh", "sniper50.ndmesh", "m7.ndmesh", "mag68box.ndmesh",
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
-          "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "t72_hull.ndmesh",
+          "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "apmine.ndmesh",
+          "t72_hull.ndmesh",
           "crocodile.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
           "shell125.ndmesh", "thermal.ndmesh", "nvmodule.ndmesh",
@@ -184,7 +187,7 @@ ICON_SIZES = {
     "law_icon.png": (300, 300), "rocket_icon.png": (300, 300),
     "drone_icon.png": (300, 300), "jammer_icon.png": (300, 300),
     "fireext_icon.png": (300, 300), "toolkit_icon.png": (300, 300),
-    "mine_icon.png": (300, 300),
+    "mine_icon.png": (300, 300), "apmine_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
     "thermal_icon.png": (300, 300), "nvmodule_icon.png": (300, 300),
     "jammod_icon.png": (300, 300), "antenna_pack_icon.png": (300, 300),
@@ -1345,6 +1348,115 @@ def check_mine():
         need(seam in plug, "Seam " + seam, "Seam fehlt in RevivalPlugin.cs: " + seam)
 
 
+def check_apmine():
+    """[11b] PMN-2 anti-personnel mine 1492: id band, donor, the no-throw
+    placement, the grenade record, the Photon channel, who tests whom (every
+    client its own player, the master the NPCs and vehicles), the corpse and
+    single-fire guards, targeted damage through the game's gates, the seams
+    and the Blender asset set. Stepping on it stays an in-game item.
+    """
+    print("[11b] Schuetzenmine PMN-2 (statisch)")
+    p = os.path.join(ROOT, "RevivalApMine.cs")
+    if not os.path.exists(p):
+        bad("RevivalApMine.cs fehlt")
+        return
+    s = io.open(p, encoding="utf-8").read()
+    plug = io.open(os.path.join(ROOT, "RevivalPlugin.cs"), encoding="utf-8").read()
+    admin = io.open(os.path.join(ROOT, "Revival.Admin.cs"), encoding="utf-8").read()
+    build = io.open(os.path.join(ROOT, "build.ps1"), encoding="utf-8").read()
+    sync = io.open(os.path.join(ROOT, "sync_public.py"), encoding="utf-8").read()
+    items = io.open(os.path.join(ROOT, "Revival.Items.cs"), encoding="utf-8").read()
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("AP-Mine: " + why)
+
+    import re
+    m = re.search(r"DEF_MINE = (\d+);", s)
+    mid = int(m.group(1)) if m else -1
+    need(mid == 1492, "Id 1492", "Item-Id ist nicht 1492")
+    need(1401 <= mid <= 1500 and mid not in (1490, 1491),
+         "Id im Granatenband 1401..1500 und frei neben 1490/1491",
+         "Id ausserhalb 1401..1500 oder doppelt - dann kein Waffenslot")
+    need("DEF_DONOR = 1403" in s and "DEF_MINE, DEF_DONOR, true," in s,
+         "Spende 1403 mit Handmodell (IsWeapon)",
+         "Spender nicht 1403 oder kein Handmodell")
+    need('"apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png"' in s
+         and '"apmine_icon.png"' in s and '"apmine_metal.png"' in s,
+         "eigene Blender-Assets (Mesh, Albedo, Normal, Metall, Icon)",
+         "die Mine nennt nicht ihre eigenen apmine_*-Dateien")
+    need("ApMineThrowHook" in s and '"CantThrowGrenade"' in s
+         and re.search(r"__result = true;\s+ApMine\.PlaceFromController", s) is not None,
+         "Linksklick setzt statt zu werfen (Sperre vor der Platzierung)",
+         "CantThrowGrenade-Postfix fehlt oder platziert vor der Sperre")
+    need("ApMineDataHook" in s and '"GetGrenadeWeaponData"' in s
+         and "entries.Contains(1403)" in s,
+         "Granatendatensatz aus 1403 geklont",
+         "kein Granatendatensatz fuer 1492 - dann nicht ausruestbar")
+    need("new object[] { 2, DEF_MINE, true, false }" in s
+         and "Send(OpPlace" in s
+         and s.index("consumed = ConsumeEquipped(ctrl)") < s.index("Send(OpPlace"),
+         "genau eine Mine verbraucht, erst dann gemeldet",
+         "Verbrauch fehlt oder die Mine wird vor dem Verbrauch gemeldet")
+    need("const byte EventCode = 196;" in s and '"apmine-v1"' in s
+         and "Delegate.Combine" in s,
+         "Photon-Kanal 196 (apmine-v1)",
+         "kein eigener Ereigniskanal")
+    need("Gepard.CfgEventCode" in s and "Crocodile.EventCode()" in s
+         and "EventCode == 191" in s and "_cfgEventCode" in s,
+         "Kanalpruefung gegen Gepard, Krokodil, Stinger, Moerser und die Plugin-Kanaele",
+         "Ueberschneidungspruefung des Kanals unvollstaendig")
+    need("if (owner != sender" in s,
+         "nur der Leger meldet seine eigene Mine",
+         "PLACE-Ereignisse werden von jedem Absender angenommen")
+    need("Crocodile.Huntable(local)" in s and "if (!master) continue;" in s
+         and "Crocodile.IsMaster()" in s,
+         "jeder Client prueft nur seinen Spieler, der Master NPCs und Fahrzeuge",
+         "Zustaendigkeit der Ausloesung stimmt nicht")
+    need('"IsAlive"' in s and "a corpse is no trigger" in s,
+         "tote NPCs loesen nicht aus",
+         "keine IsAlive-Pruefung - eine Leiche wuerde die Mine zuenden")
+    need("if (!_laid.Remove(m.Key)) return;" in s and "Send(OpGone" in s,
+         "Einmalausloesung je Client plus Entfernen auf allen Clients",
+         "keine Einmalwache oder kein Gone-Ereignis")
+    need("PartBody = 1" in s and "TypeExplosion = 14" in s
+         and '"PlayerApplyDamage"' in s and '"_lastKillerId"' in s,
+         "gezielter Schaden: Koerper, Explosion, Spielertor, Killstreak-Schutz",
+         "Schaden am Opfer falsch adressiert (Kopf x3 oder ohne Streak-Schutz)")
+    need("RocketHook.Detonate" in s, "vernetzte Explosion", "keine vernetzte Explosion")
+    need("ArmSeconds" in s and "Time.time < m.ArmAt" in s,
+         "Scharfschaltverzoegerung", "Mine ist sofort scharf")
+    for seam in ("ApMine.AddItems(Items)", "ApMine.BindConfig(Config)",
+                 "ApMine.Install(_harmony)", "ApMine.Tick()"):
+        need(seam in plug, "Seam " + seam, "Seam fehlt in RevivalPlugin.cs: " + seam)
+    need("ApMine.ClearAll()" in admin, "Adminknopf Clear AP mines",
+         "kein Adminknopf zum Raeumen")
+    need(re.search(r"SellOnlyIds[^;]*1492", items) is not None,
+         "Haendler nimmt die Mine an (Verkaufspreis)", "1492 hat keinen Verkaufspreis")
+    files = ["apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png",
+             "apmine_metal.png", "apmine_rough.png", "apmine_icon.png"]
+    need(all('"%s"' % f in build for f in files),
+         "build.ps1 installiert alle apmine-Dateien",
+         "build.ps1 kopiert nicht alle apmine-Dateien ins Spiel")
+    need('"RevivalApMine.cs"' in sync and '"apmine_build.py"' in sync
+         and '"assets/src/apmine_blender.py"' in sync,
+         "RevivalApMine.cs und die Blender-Quelle gehen ins oeffentliche Repository",
+         "sync_public.py kennt RevivalApMine.cs oder die Blender-Quelle nicht")
+    for f in ("apmine.blend", "apmine_blender.py", "apmine_preview.png"):
+        need(os.path.exists(os.path.join(ASSETS, "src", f)),
+             "Blender-Quelle assets/src/" + f, "Blender-Quelle fehlt: assets/src/" + f)
+    mp = os.path.join(ASSETS, "apmine.ndmesh")
+    if os.path.exists(mp):
+        n, V, N, T, cnt, I = read_mesh(mp)
+        ys = V[1::3]
+        xs = V[0::3]
+        need(abs(min(ys)) < 0.002 and 0.10 < max(ys) < 0.16 and 0.28 < max(xs) - min(xs) < 0.40,
+             "PMN-2 steht auf y 0 und misst %.3f x %.3f Einheiten" % (max(xs) - min(xs), max(ys)),
+             "apmine.ndmesh hat nicht die PMN-2-Masse (Boden y 0, 0.13 hoch, ~0.33 breit)")
+
+
 def check_convoy_ground_and_exit():
     """Regression guards for the convoy road collision and all-vehicle exit.
 
@@ -1986,7 +2098,9 @@ def check_gas_launcher():
          "ItemDef kennt kein HandPoseFrom")
     need("_def.HandPoseFrom != 0 && HandPose(ref pos, ref euler)" in items
          and 'WriteVec3(c, t, "localPosition", pos, names[i]);' in items
-         and 'WriteVec3(c, t, "localEulerAngles", euler, names[i]);' in items
+         and 'WriteVec3(c, t, "localRotation", euler, names[i]);' in items
+         and 'AccessTools.Field(t, "localRotation")' in items
+         and '"localEulerAngles"' not in items
          and "HAND_POSE_EULER" in items,
          "ItemFactory schreibt Lage und Drehung der Referenzwaffe",
          "ItemFactory setzt nur die Skalierung - die Haltung bleibt die der "
@@ -4995,7 +5109,7 @@ def check_gepard():
          "HeliHits 1 - dann ist die Kanone eine Stinger")
     m = re.search(r'"NetworkEventCode",\s*([0-9]+)', g)
     taken = set([160, 161, 162, 164, 170, 171, 172, 173, 174, 175, 176, 177, 178,
-                 179, 180, 181, 182, 183, 184, 185, 190, 191])
+                 179, 180, 181, 182, 183, 184, 185, 190, 191, 196])
     need(m is not None and int(m.group(1)) not in taken and int(m.group(1)) < 200,
          "Ereigniscode %s ist frei" % (m.group(1) if m else "?"),
          "der Ereigniscode des Gepard ueberschneidet einen anderen Kanal")
@@ -5033,6 +5147,7 @@ if __name__ == "__main__":
     check_eac()
     check_winding()
     check_mine()
+    check_apmine()
     check_gas_launcher()
     check_convoy_ground_and_exit()
     check_convoy_column()

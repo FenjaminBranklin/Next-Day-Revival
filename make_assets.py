@@ -52,6 +52,8 @@ GROUPS = [
     ("parachute", ["parachute_build.py"]),
     # Anti-tank mine (1490): own mesh + textures + icon in one pass.
     ("mine", ["antitank_mine_build.py"]),
+    # PMN-2 anti-personnel mine (1492): Blender model, baked maps and icon.
+    ("apmine", ["apmine_build.py"]),
     # Toxic crocodile boss: Blender is the modelling source of truth. The
     # wrapper finds Blender and produces the editable .blend, runtime ndmesh,
     # texture set and a source preview in one deterministic background run.

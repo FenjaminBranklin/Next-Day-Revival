@@ -815,7 +815,12 @@ namespace NextDayRevival
                 WriteVec3(c, t, "localScale", new Vector3(s, s, s), names[i]);
                 if (!pose) continue;
                 WriteVec3(c, t, "localPosition", pos, names[i]);
-                WriteVec3(c, t, "localEulerAngles", euler, names[i]);
+                // The field is called localRotation, but it is a Vector3 that
+                // ApplyLocalTransformData hands to set_localEulerAngles (IL,
+                // 2026-09-23). Asking for a field named localEulerAngles found
+                // nothing, so 1491 kept the frag grenade's rotation and the
+                // tube swung out of view or lay backwards in the hand.
+                WriteVec3(c, t, "localRotation", euler, names[i]);
             }
         }
 
@@ -876,7 +881,7 @@ namespace NextDayRevival
                 Component c = reference.GetComponent(t);
                 if (c == null) continue;
                 FieldInfo fp = AccessTools.Field(t, "localPosition");
-                FieldInfo fe = AccessTools.Field(t, "localEulerAngles");
+                FieldInfo fe = AccessTools.Field(t, "localRotation");
                 if (fp == null || fe == null
                     || fp.FieldType != typeof(Vector3) || fe.FieldType != typeof(Vector3))
                     continue;
@@ -1399,6 +1404,7 @@ namespace NextDayRevival
         // scale: 1164 sits between the MG42 (18000) and the TAC-50 (30000);
         // 1490 under the LAW (25000) because it has to be driven over; 1491
         // likewise, since the cloud denies ground rather than killing armour.
+        // 1492, the PMN-2, is a fraction of either: one man, not one tank.
         // 2052 fits no launcher that exists, so it is worth its scrap. 2058 is
         // twenty rifle rounds against the MG belt's two hundred for 4000, and
         // 2059 is five of those magazines. 2060/2061 rank against the mast
@@ -1407,10 +1413,10 @@ namespace NextDayRevival
         // because it is the same class of shell.
         static readonly int[] SellOnlyIds = new int[] {
             1164, 1490, 1491, 2052, 2058, 2059, 2060, 2061, 2062, 2063, 2064,
-            2066 };
+            2066, 1492 };
         static readonly int[] SellOnlyPrices = new int[] {
             26000, 15000, 20000, 1000, 1500, 6000, 60000, 35000, 130000, 1500,
-            8000, 5000 };
+            8000, 5000, 4000 };
 
         // A custom item whose id is in neither table still has to be sellable -
         // that is the promise of this file, not a property of the list above.

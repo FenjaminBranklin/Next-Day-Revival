@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.48.0";
+        public const string VERSION = "6.49.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -466,6 +466,7 @@ namespace NextDayRevival
             Technical.BindConfig(Config);        // NDR technical (gun truck)
             TechnicalGun.BindConfig(Config);     // NDR technical: the man at the MG
             AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
+            ApMine.BindConfig(Config);           // NDR anti-personnel mine
             Stinger.BindConfig(Config);
             GasLauncher.BindConfig(Config);      // NDR gas launcher
             Crocodile.BindConfig(Config);        // NDR toxic crocodile boss in the Point 12 lake
@@ -525,6 +526,7 @@ namespace NextDayRevival
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             Gepard.Install(_harmony);            // NDR Gepard (spawn marker, event channel, explosion armour)
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
+            ApMine.Install(_harmony);            // NDR anti-personnel mine
             Stinger.Install(_harmony);
             GasLauncher.Install(_harmony);       // NDR gas launcher
             Crocodile.Install(_harmony);         // NDR native animal-boss damage gate
@@ -1624,6 +1626,8 @@ namespace NextDayRevival
             ConvoyRepair.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
+            // PMN-2 anti-personnel mine, Blender model (own file).
+            ApMine.AddItems(Items);              // NDR anti-personnel mine
             // The Stinger shares the LAW's donor but NOT its ammunition setup.
             // The LAW above is a factory-sealed tube: clip 0, and once the
             // rocket is gone the launcher is scrap. The Stinger is a reusable
@@ -2118,6 +2122,7 @@ namespace NextDayRevival
             ArtyVehicle.Tick();                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
             Gepard.Tick();                       // NDR Gepard: spawn key, gunner station, rounds in flight
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
+            ApMine.Tick();                       // NDR anti-personnel mine (event channel, triggers)
             Stinger.Tick();
             GasLauncher.Tick();                  // NDR gas launcher (optional keys, cloud list)
             FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
