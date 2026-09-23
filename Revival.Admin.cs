@@ -1279,6 +1279,22 @@ namespace NextDayRevival
             GUILayout.Label("In front of you (drivable 122 mm howitzer)");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
+            // Same as the howitzer: no free F-key, Gepard/Key is None by default.
+            if (GUILayout.Button("Spawn Gepard", GUILayout.Width(190f)))
+                Melde(Gepard.SpawnInFront());
+            GUILayout.Label("In front of you (35 mm anti-aircraft gun with radar)");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // Four belts of Gepard/AmmoItemId: each one reloads RoundsPerBelt.
+            if (GUILayout.Button("Gepard ammo x4", GUILayout.Width(190f)))
+            {
+                string one;
+                GibItem(Gepard.CfgAmmoId.Value, 4, out one);
+                Melde(one);
+            }
+            GUILayout.Label("Ammunition belts for the Gepard into your inventory");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
             // Same both-ways press as the [PlayerHeli] spawn key: with an empty
             // machine of yours in reach it takes that one away again.
             if (GUILayout.Button("Spawn helicopter", GUILayout.Width(190f)))

@@ -538,6 +538,13 @@ namespace NextDayRevival
             Add(Make("arty", ArtyVehicleText.Label(),
                 ArtyVehicle.Prefab, false, false, ArtyVehicle.Umbauen,
                 ArtyVehicleNetwork.SpawnData));
+            // The Gepard anti-aircraft gun (RevivalGepard.cs): the BTR-80A as a
+            // custom prefab plus rebuild, NOT the BtrDonor path - that one is
+            // CarSpawn.SpawnAt, which carries the T-72 marker or nothing. Not a
+            // composition/convoy type, for the same reason as the two above.
+            Add(Make("gepard", GepardText.Label(),
+                Gepard.Prefab, false, false, Gepard.Umbauen,
+                GepardNet.SpawnData));
         }
 
         static Entry Make(string kind, string label, string prefab, bool isTank,

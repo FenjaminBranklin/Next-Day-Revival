@@ -130,6 +130,12 @@ $assets = @(
     "stinger_missile_icon.png", "stinger_scope.png",
     "arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_recoil.ndmesh",
     "arty_diffuse.png", "arty_metal.png", "arty_normal.png",
+    # The Gepard (RevivalGepard.cs): seven moving parts, atlas, metal map and
+    # the pivot file, all written by gepard_import.py from assets/gepard/.
+    "gepard_hull.ndmesh", "gepard_tracks.ndmesh", "gepard_turret.ndmesh",
+    "gepard_gun_r.ndmesh", "gepard_gun_l.ndmesh", "gepard_radar_search.ndmesh",
+    "gepard_radar_track.ndmesh", "gepard_diffuse.png", "gepard_metal.png",
+    "gepard_rig.txt",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png", "mg42_metal.png",
     "mg42_rough.png", "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",

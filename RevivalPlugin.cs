@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.47.0";
+        public const string VERSION = "6.48.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -457,6 +457,7 @@ namespace NextDayRevival
 
             BindConfig();
             MapUnblock.Install(gameObject, Config);
+            RoadClear.Install(gameObject, Config);   // every road free of objects and trees
             MapScene.BindConfig(Config);         // NDR region gate: one map's data on one map
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
@@ -481,6 +482,7 @@ namespace NextDayRevival
             Mortar.BindConfig(Config);           // NDR settlement mortar
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
             ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
+            Gepard.BindConfig(Config);           // NDR Gepard anti-aircraft gun (radar fire control)
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
@@ -521,6 +523,7 @@ namespace NextDayRevival
             UralTruck.Install(_harmony);         // NDR 15-seat Ural cargo truck
             Technical.Install(_harmony);         // NDR technical (gun truck)
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
+            Gepard.Install(_harmony);            // NDR Gepard (spawn marker, event channel, explosion armour)
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             Stinger.Install(_harmony);
             GasLauncher.Install(_harmony);       // NDR gas launcher
@@ -2113,6 +2116,7 @@ namespace NextDayRevival
             UralTruck.Tick();                    // NDR 15-seat Ural cargo truck (own spawn key)
             Technical.Tick();                    // NDR technical: spawn key, durability cap, the MG
             ArtyVehicle.Tick();                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
+            Gepard.Tick();                       // NDR Gepard: spawn key, gunner station, rounds in flight
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
             Stinger.Tick();
             GasLauncher.Tick();                  // NDR gas launcher (optional keys, cloud list)
@@ -2181,6 +2185,7 @@ namespace NextDayRevival
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
             ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)
             Technical.Draw();                    // NDR technical: gunner crosshair and notices
+            Gepard.Draw();                       // NDR Gepard: sight reticle, radar scope, target boxes
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner

@@ -49,6 +49,7 @@ namespace NextDayRevival
         // it, which is the kind of quiet trap that costs an hour later.
         public const int GunTruck = 4;     // the technical's machine gun
         public const int Heli = 5;         // the helicopter a player flies
+        public const int Gepard = 6;       // the Gepard's sight (RevivalGepard.cs)
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -231,6 +232,7 @@ namespace NextDayRevival
             else if (_owner == Aufklaerer) SurvDrone.LateTick();
             else if (_owner == GunTruck) TechnicalGun.LateTick();
             else if (_owner == Heli) PlayerHeli.LateTick();
+            else if (_owner == Gepard) GepardGun.LateTick();
         }
 
         /// <summary>
