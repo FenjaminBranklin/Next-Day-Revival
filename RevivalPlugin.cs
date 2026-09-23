@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.49.0";
+        public const string VERSION = "6.50.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -459,6 +459,8 @@ namespace NextDayRevival
             MapUnblock.Install(gameObject, Config);
             RoadClear.Install(gameObject, Config);   // every road free of objects and trees
             MapScene.BindConfig(Config);         // NDR region gate: one map's data on one map
+            EastTile.BindConfig(Config);         // research: east extension probe, off by default
+            FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
@@ -2111,6 +2113,8 @@ namespace NextDayRevival
             FrameProf.E(FrameProf.Cursor);
             FrameProf.S(FrameProf.Regions);     Regions.Tick();          FrameProf.E(FrameProf.Regions);
             FrameProf.S(FrameProf.Research);    Research.Tick();         FrameProf.E(FrameProf.Research);
+            EastTile.Tick();                     // research: east extension probe, off by default
+            FrameBench.Tick();                   // research: east extension frame-time baseline, off by default
             FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);
             FrameProf.S(FrameProf.VehModTick);  VehicleModules.Tick();   FrameProf.E(FrameProf.VehModTick);   // NDR vehicle modules
             FrameProf.S(FrameProf.DroneTick);   Drone.Tick();            FrameProf.E(FrameProf.DroneTick);

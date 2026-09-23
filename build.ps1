@@ -204,7 +204,11 @@ $assets = @(
     "ndr_troopdrops.tsv",
     # Helicopter landing pads, the third editor-written runtime view. Header
     # only until pads are authored, so Revival.Helipads.cs builds nothing.
-    "ndr_helipads.tsv"
+    "ndr_helipads.tsv",
+    # East extension probe (Revival.EastTile.cs, [Research] EastTile, off by
+    # default): a Unity 2018.1.0f2 scene bundle with one terrain tile, built by
+    # unity/EastTileProbe. Shipped like a real tile would be.
+    "east_tile_probe.bundle"
 )
 
 # Alte Dateien, die es nicht mehr gibt - sonst liegt die Metallic-Map von 0.2.0
