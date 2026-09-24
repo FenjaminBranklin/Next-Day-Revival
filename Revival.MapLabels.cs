@@ -65,7 +65,8 @@ namespace NextDayRevival
         static int Cell(float value)
         {
             int index = (int)Mathf.Floor(value / CellSize);
-            return index < -1 ? -1 : (index > 16 ? 16 : index);
+            int last = EastWorld.Extends ? 32 : 16;     // the east world's picture is 2048 wide
+            return index < -1 ? -1 : (index > last ? last : index);
         }
 
         static long Key(int cx, int cy) { return ((long)(cx + 1024)) * 4096L + (cy + 1024); }
@@ -182,8 +183,8 @@ namespace NextDayRevival
 
         // A pinned name keeps its full size and stays inside the artwork; the
         // clamp is the only thing that may move it away from the given point.
-        static float Fit(float min, float extent)
-        { return Mathf.Max(3f, Mathf.Min(min, 1021f - extent)); }
+        static float Fit(float min, float extent, float far)
+        { return Mathf.Max(3f, Mathf.Min(min, far - extent)); }
 
         internal bool Place(string key, Vector2 anchor, Vector2 size, out Rect result)
         { return Place(key, null, anchor, size, out result); }
@@ -202,8 +203,8 @@ namespace NextDayRevival
             Vector2 pin;
             if (pins.TryGetValue(key, out pin))
             {
-                result = new Rect(Fit(pin.x - size.x * .5f, size.x),
-                                  Fit(pin.y - size.y * .5f, size.y), size.x, size.y);
+                result = new Rect(Fit(pin.x - size.x * .5f, size.x, EastWorld.Extends ? 2045f : 1021f),
+                                  Fit(pin.y - size.y * .5f, size.y, 1021f), size.x, size.y);
                 Block(result);
                 return true;
             }
@@ -496,8 +497,11 @@ namespace NextDayRevival
             if (reuse) return layer;
             layer.ReadPlaces();
             Texture artwork = Get(texture, "mainTexture") as Texture;
+            // The east artwork's west half is GW_Scene_1's picture, at the same
+            // artwork pixels in the 2048-wide frame: its baked names block too.
             layer.layout.Begin(overworld && artwork != null
-                && artwork.name.StartsWith("GW_Scene_1[", StringComparison.OrdinalIgnoreCase));
+                && (EastWorld.Extends
+                    || artwork.name.StartsWith("GW_Scene_1[", StringComparison.OrdinalIgnoreCase)));
             layer.roads.Clear();
             layer.ReserveWidgets(camera);
             return layer;
@@ -513,8 +517,13 @@ namespace NextDayRevival
             gameObject.layer = source.gameObject.layer;
         }
 
+        /// <summary>Width of the artwork frame: 1024 like its height, or 2048
+        /// for the east world's 2:1 map - one artwork pixel is square either
+        /// way, so names are neither squeezed nor stretched.</summary>
+        static float ArtWidth { get { return EastWorld.Extends ? 2048f : 1024f; } }
+
         internal Vector2 Artwork(Vector2 screen)
-        { return new Vector2((screen.x - full.x) * 1024f / full.width, (screen.y - full.y) * 1024f / full.height); }
+        { return new Vector2((screen.x - full.x) * ArtWidth / full.width, (screen.y - full.y) * 1024f / full.height); }
 
         // How far apart the kept points of a reserved road are, in artwork
         // pixels. The line arrives at rather less than one pixel per point (it
@@ -546,7 +555,7 @@ namespace NextDayRevival
         internal void BlockScreen(Rect screen)
         {
             Vector2 start = Artwork(screen.position);
-            layout.Block(new Rect(start.x, start.y, screen.width * 1024f / full.width,
+            layout.Block(new Rect(start.x, start.y, screen.width * ArtWidth / full.width,
                 screen.height * 1024f / full.height));
         }
 
@@ -647,7 +656,7 @@ namespace NextDayRevival
             { widget.gameObject.SetActive(false); return false; }
             entry.Bounds = bounds;
             entry.Placed = true;
-            float sx = (topRight.x - bottomLeft.x) / 1024f;
+            float sx = (topRight.x - bottomLeft.x) / ArtWidth;
             float sy = (topRight.y - bottomLeft.y) / 1024f;
             widget.transform.localScale = new Vector3(sx, sy, 1f);
             widget.transform.localPosition = new Vector3(bottomLeft.x + bounds.center.x * sx,

@@ -5255,6 +5255,32 @@ def check_east_world():
          and os.path.exists(os.path.join(ROOT, "research", "east_map_check.py")),
          "editor artwork, deterministic generator and acceptance check exist",
          "east editor artwork or its generator/check is missing")
+    # The map window (Revival.EastMapPanel.cs, docs/ai/tasks/east-map-panel.md):
+    # installed only from EastWorld.Install (after its !On return), every hook
+    # gated on EastWorld.Extends, its assets built and installed.
+    panel = _code(read("Revival.EastMapPanel.cs"))
+    install = _body(code, "internal static void Install(")
+    need(bool(panel) and "EastMapPanel.Install(h);" in install
+         and install.index("if (!On) return;") < install.index("EastMapPanel.Install(h);"),
+         "the map window is installed only with [World] EastTile on",
+         "EastMapPanel.Install is missing or not behind EastWorld.Install's !On return")
+    need(all("EastWorld.Extends" in _body(panel, sig) for sig in (
+             "static void AfterInit(", "static void AfterEnable(", "static void AfterUpdate(",
+             "static bool CenterOnPrefix(", "internal static void ApplyPreset(")),
+         "every map window hook returns on !EastWorld.Extends (vanilla window otherwise)",
+         "an EastMapPanel hook can act outside the east world")
+    panel_assets = ("east_map_form.png", "east_map_legend.png", "east_map_grid_en.png", "east_map_grid_ru.png")
+    need(all(os.path.isfile(os.path.join(ROOT, "assets", f)) and '"%s"' % f in read("build.ps1")
+             for f in panel_assets)
+         and os.path.exists(os.path.join(ROOT, "research", "east_map_panel.py"))
+         and os.path.exists(os.path.join(ROOT, "research", "east_map_panel_check.py"))
+         and '"Revival.EastMapPanel.cs"' in read("sync_public.py"),
+         "map window frame/legend/grid assets built, installed and published with their source",
+         "a map window asset, its generator/check, or the public source entry is missing")
+    need(all("if (EastWorld.Extends) return EastMapPanel.GridSquare(pos);" in _body(_code(read(f)), "static string GridCell(")
+             for f in ("RevivalConvoy.cs", "RevivalTroopInsertion.cs")),
+         "banner grid squares name the drawn 20 x 10 grid in the east world",
+         "a GridCell still names a plain 10 x 10 split of the 10 km world")
     crossings = _code(read("Revival.EastCrossings.cs"))
     need("EastCrossings.BeforeLocationMarker(__instance);" in code
          and "Place(trigger.transform, to" in _body(crossings, "internal static void BeforeLocationMarker("),
@@ -5272,6 +5298,10 @@ def check_east_world():
     for cls, meth in targets:
         need(cls + "::" + meth in methods, "%s.%s exists in the game" % (cls, meth),
              "%s.%s is patched but does not exist in Assembly-CSharp" % (cls, meth))
+    for cls, meth in (("MapUIManager", "InitMapData"), ("MapUIManager", "OnEnable"),
+                      ("MapUIManager", "Update"), ("UICenterOnChild", "CenterOn")):
+        need(cls + "::" + meth in methods, "map window target %s.%s exists in the game" % (cls, meth),
+             "map window patches %s.%s, which Assembly-CSharp does not have" % (cls, meth))
 
 
 def check_east_roads():

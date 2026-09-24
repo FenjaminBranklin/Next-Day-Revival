@@ -46,8 +46,8 @@
 // prefixes/postfixes. The alternative, a symmetric padded world (-7500..7500),
 // would need no game patch but spends a third of every map picture on 5 km of
 // nothing west of the map and gives the real world a third fewer pixels.
-// Map ARTWORK is not part of this: until a 2:1 picture exists the vanilla
-// picture is shown stretched over the wider rectangle.
+// The map WINDOW is Revival.EastMapPanel.cs: a 2:1 map as wide as the screen,
+// so the 2:1 artwork (MapInk.ApplyEastArtwork) is shown undistorted.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree lambdas.
 // ASCII only.
@@ -124,6 +124,7 @@ namespace NextDayRevival
             Patch(h, "MapUIManager", "WorldCoordDenormalize", "DenormalizePrefix", null, null);
             Patch(h, "MapUIManager", "FogSizeCheck", null, "FogPostfix", null);
             Patch(h, "LocationChangeTrigger", "Start", "LocationStartPrefix", null, null);
+            EastMapPanel.Install(h);
         }
 
         static void Patch(Harmony h, string type, string method, string prefix, string postfix,
@@ -848,6 +849,7 @@ namespace NextDayRevival
         static void MapPresetPostfix(object __instance, object __0)
         {
             MapInk.ApplyEastArtwork(__instance, __0);
+            EastMapPanel.ApplyPreset(__instance as Component, __0);
         }
 
         static void LocationStartPrefix(object __instance)
@@ -922,6 +924,9 @@ namespace NextDayRevival
                 Vector3 p = fog.transform.position;
                 float fx = (p.x - Extended.xMin) / Extended.width;
                 float fz = (p.z - Extended.yMin) / Extended.height;
+                // The mask is sized in map pixels; the wide window has fewer
+                // of them per metre than the vanilla 803 px per 5 km.
+                mask.localScale *= EastMapPanel.FogScale;
                 _fFogX.SetValue(__instance, fx);
                 _fFogZ.SetValue(__instance, fz);
                 Bounds b = (Bounds)_fFogBounds.GetValue(__instance);

@@ -786,6 +786,9 @@ namespace NextDayRevival
         /// a config/orientation tweak (CfgGrid*).</summary>
         static string GridCell(Vector3 pos)
         {
+            // The east world draws its own 20 x 10 grid (vanilla cells
+            // continued east): name the square that is drawn there.
+            if (EastWorld.Extends) return EastMapPanel.GridSquare(pos);
             Vector2 w = WorldSize();
             int cols = CfgGridCols == null ? 10 : Mathf.Clamp(CfgGridCols.Value, 1, 26);
             int rows = CfgGridRows == null ? 10 : Mathf.Clamp(CfgGridRows.Value, 1, 99);

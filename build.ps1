@@ -215,7 +215,10 @@ $assets = @(
     "east_tile.bundle",
     # Bilingual 2:1 artwork for that world. MapInk installs one only while the
     # east world is active; the vanilla MapLanguagePreset remains untouched off.
-    "east_map_en.png", "east_map_ru.png"
+    "east_map_en.png", "east_map_ru.png",
+    # Its map window (Revival.EastMapPanel.cs): frame, legend icons, the
+    # 20 x 10 grid in RU/EN - research/east_map_panel.py.
+    "east_map_form.png", "east_map_legend.png", "east_map_grid_en.png", "east_map_grid_ru.png"
 )
 
 # Alte Dateien, die es nicht mehr gibt - sonst liegt die Metallic-Map von 0.2.0

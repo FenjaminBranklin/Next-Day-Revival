@@ -66,12 +66,14 @@ namespace NextDayRevival
             if (!EastWorld.Extends)
                 return new Vector2(p.x * (1024f / 5000f) * 1.005f + 514f,
                                   -p.z * (1024f / 5000f) * 1.005f + 508f);
-            // The old 1024 px registration occupies the west half of the new
-            // 2:1 artwork. MapInkLayer's logical canvas stays 1024 square, so
-            // source x is divided by two while source y is unchanged.
-            return new Vector2((p.x * (VanillaArt / 5000f) * 1.005f + 514f)
-                                  * VanillaArt / EastArtWidth,
-                              -p.z * (VanillaArt / 5000f) * 1.005f + 508f);
+            // East world: the 2:1 artwork is registered exactly on the world
+            // rectangle (research/east_map.py resamples the vanilla half onto
+            // it), and this frame is 2048 x 1024 - the same 1024 px per 5 km
+            // on both axes, so dashes are rasterised round. Get() hands its
+            // masks to MapInkLayer in the layer's 1024-wide frame (OutX).
+            Rect w = EastWorld.Extended;
+            return new Vector2((p.x - w.xMin) / w.width * EastArtWidth,
+                               (w.yMax - p.z) / w.height * VanillaArt);
         }
 
         static Vector3 DisplayWorld(Vector2 p, float width)
@@ -79,10 +81,24 @@ namespace NextDayRevival
             if (!EastWorld.Extends)
                 return new Vector3((p.x - 514f) / 1.005f * (5000f / 1024f),
                                    width, -(p.y - 508f) / 1.005f * (5000f / 1024f));
-            float sourceX = p.x * EastArtWidth / VanillaArt;
-            return new Vector3((sourceX - 514f) / 1.005f * (5000f / VanillaArt),
-                               width, -(p.y - 508f) / 1.005f * (5000f / VanillaArt));
+            Rect w = EastWorld.Extended;
+            return new Vector3(w.xMin + p.x / EastArtWidth * w.width, width,
+                               w.yMax - p.y / VanillaArt * w.height);
         }
+
+        /// <summary>A point of MapInkRoads' road artwork (the vanilla picture's
+        /// 1024 px, whatever the switch) in the world. Off, this is exactly
+        /// DisplayWorld.</summary>
+        static Vector3 RoadWorld(Vector2 p, float width)
+        {
+            return new Vector3((p.x - 514f) / 1.005f * (5000f / 1024f),
+                               width, -(p.y - 508f) / 1.005f * (5000f / 1024f));
+        }
+
+        /// <summary>MapInkLayer, Patrol and every other map caller work in
+        /// artwork fractions times 1024 on both axes. The east frame is 2048
+        /// wide: its x is halved on the way out.</summary>
+        static float OutX { get { return EastWorld.Extends ? VanillaArt / EastArtWidth : 1f; } }
 
         /// <summary>Replace only GW_Scene_1's selected RU/EN preset after the
         /// game has applied it. With EastTile off this method returns before a
@@ -172,7 +188,7 @@ namespace NextDayRevival
                                            new Vector2(r[i+7], r[i+8]), t);
                         found = true;
                     }
-                    if (found) return DisplayWorld(art, StrokeWidth);
+                    if (found) return RoadWorld(art, StrokeWidth);
                 }
             }
             // Manual/off-network paths are not attracted to an unrelated road.
@@ -238,6 +254,17 @@ namespace NextDayRevival
                 }
                 cache.Dashes.Add(Raster(samples));
             }
+            float outX = OutX;
+            if (outX != 1f)
+                for (int k = 0; k < cache.Dashes.Count; k++)
+                {
+                    Dash dash = cache.Dashes[k];
+                    dash.Bounds = new Rect(dash.Bounds.x * outX, dash.Bounds.y,
+                                           dash.Bounds.width * outX, dash.Bounds.height);
+                    dash.Mid = new Vector2(dash.Mid.x * outX, dash.Mid.y);
+                    for (int j = 0; j < dash.Points.Count; j++)
+                        dash.Points[j] = new Vector2(dash.Points[j].x * outX, dash.Points[j].y);
+                }
             return cache;
         }
 

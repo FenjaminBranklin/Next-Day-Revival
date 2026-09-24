@@ -68,6 +68,23 @@ namespace NextDayRevival
             "GWTerrain2_more__billboards_2", "GWTerrain2_more__bush_billboards_3",
             "GWTerrain2_two__billboards_0", "GWTerrain2_two__billboards_1" };
 
+        /// <summary>763 draws the ground, 768/769 are the collision: without
+        /// them nothing can be cut. 764..767 only draw trees; one that is not
+        /// in the scene holds no ground anybody stands on, so it must not hold
+        /// up the props, paint, NavMesh and seam (6.51.0: it held up all of them).</summary>
+        static bool Required(int i) { return i == 0 || i >= 5; }
+
+        /// <summary>The names missing from `all`: (all of them, the required ones).</summary>
+        static void Missing(Dictionary<string, Td> all, List<string> any, List<string> required)
+        {
+            for (int i = 0; i < Names.Length; i++)
+                if (!all.ContainsKey(Names[i]))
+                {
+                    any.Add(Names[i]);
+                    if (Required(i)) required.Add(Names[i]);
+                }
+        }
+
         /// <summary>One saddle at runtime: its data and its NavMesh state.</summary>
         sealed class Cut
         {
@@ -94,7 +111,7 @@ namespace NextDayRevival
         // per GW_Scene_1 load
         static int _load;                   // counts sceneLoaded(GW_Scene_1)
         static int _doneLoad = -1;          // the load the heights were handled for
-        static int _waitLogged = -1;
+        static int _waitLogged = -1, _partLogged = -1;
         static bool _refused;
         static float _nextTry, _nextTrees, _groundAt, _errAt = -100f;
         static readonly Dictionary<int, int> _treeCounts = new Dictionary<int, int>();
@@ -189,12 +206,13 @@ namespace NextDayRevival
             {
                 Hook();
                 Dictionary<string, Td> all = Terrains();
-                for (int i = 0; i < Names.Length; i++)
-                    if (!all.ContainsKey(Names[i]))
-                    {
-                        Log("before the spawn: " + Names[i] + " not found yet - the heights follow in Tick.");
-                        return;
-                    }
+                List<string> any = new List<string>(), req = new List<string>();
+                Missing(all, any, req);
+                if (req.Count > 0)
+                {
+                    Log("before the spawn: " + string.Join(", ", req.ToArray()) + " not found yet - the heights follow in Tick.");
+                    return;
+                }
                 bool refused;
                 Log("heights before the spawn: " + CutHeights(all, out refused));
             }
@@ -237,15 +255,31 @@ namespace NextDayRevival
         }
 
         /// <summary>The seven TerrainData, found through the Terrain components
-        /// AND the TerrainColliders (768/769 have no Terrain), by name.</summary>
+        /// AND the TerrainColliders (768/769 have no Terrain), by name - on
+        /// inactive objects too. The game switches the four tree-only
+        /// terrains' objects off after the spawn (6.51.0 log: found by
+        /// BeforeSpawn, then "waiting for the GW_Scene_1 terrains, missing:
+        /// GWTerrain2_more__billboards_0..3" for the whole session), and
+        /// FindObjectsOfType skips inactive objects: Apply waited forever, so
+        /// the trees, props, paint, NavMesh and the seam walls were never
+        /// handled (docs/ai/tasks/east-seam.md).</summary>
         static Dictionary<string, Td> Terrains()
         {
             Dictionary<string, Td> found = new Dictionary<string, Td>();
-            UnityEngine.Object[] ts = UnityEngine.Object.FindObjectsOfType(typeof(Terrain));
-            for (int i = 0; i < ts.Length; i++)
+            Scene home = SceneManager.GetSceneByName(MapScene.Home);
+            if (!home.isLoaded) return found;
+            GameObject[] roots = home.GetRootGameObjects();
+            List<Terrain> ts = new List<Terrain>();
+            List<TerrainCollider> cs = new List<TerrainCollider>();
+            for (int r = 0; r < roots.Length; r++)
             {
-                Terrain t = ts[i] as Terrain;
-                if (t == null || t.terrainData == null || t.gameObject.scene.name != MapScene.Home) continue;
+                ts.AddRange(roots[r].GetComponentsInChildren<Terrain>(true));
+                cs.AddRange(roots[r].GetComponentsInChildren<TerrainCollider>(true));
+            }
+            for (int i = 0; i < ts.Count; i++)
+            {
+                Terrain t = ts[i];
+                if (t == null || t.terrainData == null) continue;
                 Td e;
                 if (!found.TryGetValue(t.terrainData.name, out e))
                 {
@@ -254,11 +288,10 @@ namespace NextDayRevival
                 }
                 e.Terrain = t;
             }
-            UnityEngine.Object[] cs = UnityEngine.Object.FindObjectsOfType(typeof(TerrainCollider));
-            for (int i = 0; i < cs.Length; i++)
+            for (int i = 0; i < cs.Count; i++)
             {
-                TerrainCollider c = cs[i] as TerrainCollider;
-                if (c == null || c.terrainData == null || c.gameObject.scene.name != MapScene.Home) continue;
+                TerrainCollider c = cs[i];
+                if (c == null || c.terrainData == null) continue;
                 Td e;
                 if (!found.TryGetValue(c.terrainData.name, out e))
                 {
@@ -287,6 +320,7 @@ namespace NextDayRevival
                 string foreign = "";
                 for (int i = 0; i < Names.Length; i++)
                 {
+                    if (!all.ContainsKey(Names[i])) { state[k, i] = -1; continue; }
                     int changed, mo, mn;
                     state[k, i] = CrossingCore.ClassifyHeights(all[Names[i]].Data, c.D.Col0, c.D.Row0, c.D.Cols,
                                                                c.D.Rows, c.Old, c.New, out changed, out mo, out mn);
@@ -318,8 +352,8 @@ namespace NextDayRevival
             if (written > 0)
                 for (int i = 0; i < Names.Length; i++)
                 {
-                    Td e = all[Names[i]];
-                    if (e.Terrain != null) e.Terrain.Flush();
+                    Td e;
+                    if (all.TryGetValue(Names[i], out e) && e.Terrain != null) e.Terrain.Flush();
                 }
             return report + "; written " + written + " of " + (_cuts.Length * Names.Length) + " boxes, read back "
                    + (bad == 0 ? "exact" : bad + " sample(s) OFF") + ".";
@@ -329,17 +363,25 @@ namespace NextDayRevival
         {
             _nextTry = Time.realtimeSinceStartup + 3f;
             Dictionary<string, Td> all = Terrains();
-            List<string> missing = new List<string>();
-            for (int i = 0; i < Names.Length; i++) if (!all.ContainsKey(Names[i])) missing.Add(Names[i]);
-            if (missing.Count > 0)
+            List<string> missing = new List<string>(), required = new List<string>();
+            Missing(all, missing, required);
+            // the scene may still be activating: wait for the ground and the
+            // collision terrains; a tree-only terrain gets 20 s, then the rest
+            // goes ahead without it
+            if (required.Count > 0 || (missing.Count > 0 && Time.timeSinceLevelLoad < 20f))
             {
-                // the scene may still be activating; after 60 s say so, once per load
                 if (Time.timeSinceLevelLoad > 60f && _waitLogged != _load)
                 {
                     _waitLogged = _load;
                     Log("waiting for the GW_Scene_1 terrains, missing: " + string.Join(", ", missing.ToArray()));
                 }
                 return;
+            }
+            if (missing.Count > 0 && _partLogged != _load)
+            {
+                _partLogged = _load;
+                Log("tree-only terrain(s) not in the scene: " + string.Join(", ", missing.ToArray())
+                    + " - going ahead without them (they carry no ground and no collision).");
             }
             _doneLoad = _load;
             bool refused;
@@ -566,7 +608,8 @@ namespace NextDayRevival
             int cleared = 0;
             for (int i = 0; i < Names.Length; i++)
             {
-                Td e = all[Names[i]];
+                Td e;
+                if (!all.TryGetValue(Names[i], out e)) continue;
                 for (int k = 0; k < _cuts.Length; k++)
                     cleared += CrossingCore.ClearGrass(e.Data, e.Org, _cuts[k].D.AlphaX0, _cuts[k].D.AlphaZ0,
                                                        _cuts[k].D.AlphaW, _cuts[k].D.AlphaH, _cuts[k].Strength,
