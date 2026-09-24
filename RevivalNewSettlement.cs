@@ -598,10 +598,7 @@ namespace NextDayRevival
         // measured amount so a world-true point lands on the picture's own road.
         // The ring uses the identical correction, so it sits on the picture's
         // Litvinovka rather than a few pixels beside it. DISPLAY ONLY.
-        const float MapArtFit = 1024f;
-        const float MapArtScale = 1.005f;
-        const float MapArtShiftX = 2f;
-        const float MapArtShiftY = -4f;
+        // (MapProject.OnPicture.)
 
         // Reserve before Patrol places names, including the first map frame.
         internal static void ReserveMapLabels(MapLabels labels, Component texture,
@@ -723,12 +720,7 @@ namespace NextDayRevival
 
         static Vector2 MapArt(Vector2 g, Rect full)
         {
-            if (full.width < 1f) return g;
-            float factor = full.width / MapArtFit;
-            float cx = full.x + full.width * 0.5f;
-            float cy = full.y + full.height * 0.5f;
-            return new Vector2((g.x - cx) * MapArtScale + cx + MapArtShiftX * factor,
-                               (g.y - cy) * MapArtScale + cy + MapArtShiftY * factor);
+            return MapProject.OnPicture(g, full);    // the east artwork needs none
         }
 
         static Rect Intersect(Rect a, Rect b)

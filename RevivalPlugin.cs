@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.53.0";
+        public const string VERSION = "6.54.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -2119,6 +2119,7 @@ namespace NextDayRevival
             EastWorld.Tick();                    // east world: tile load/unload, held spawn, WORLD_SIZE; off by default
             EastCrossings.Tick();                // east world: saddle cuts, paint, NavMesh patches, seam links
             EastTile.Tick();                     // research: east extension probe, off by default
+            EastZones.Tick();                    // east world: logs the content marker (airfield greybox id) the player stands in
             FrameBench.Tick();                   // research: east extension frame-time baseline, off by default
             FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);
             FrameProf.S(FrameProf.VehModTick);  VehicleModules.Tick();   FrameProf.E(FrameProf.VehModTick);   // NDR vehicle modules
@@ -2192,6 +2193,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); Stinger.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             RevivalTroopInsertion.Draw();        // NDR heli troop insertion banner
+            EastZones.Draw();                    // east world: the marker id the player stands in
             Helipads.Draw();                     // NDR helicopter landing pads on the world map
             PlayerHeli.Draw();                   // NDR player-flown Mi-8: readout and notices
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)

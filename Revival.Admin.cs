@@ -519,19 +519,10 @@ namespace NextDayRevival
         public static bool WorldToGui(Vector3 point, Component texture, Camera cam,
                                       Vector2 world, Vector2 map, out Vector2 gui)
         {
-            gui = Vector2.zero;
-            if (texture == null || cam == null || world.x <= 0f || world.y <= 0f)
-                return false;
-            // The map is centred on the world origin - except in the east
-            // world, whose rectangle is centred on (2500, 0). Off, the centre
-            // is (0, 0) and subtracting it changes no bit.
-            Vector2 centre = EastWorld.MapCentre;
-            Vector3 local = new Vector3((point.x - centre.x) / world.x * map.x,
-                                        (point.z - centre.y) / world.y * map.y, 0f);
-            Vector3 screen = cam.WorldToScreenPoint(texture.transform.TransformPoint(local));
-            if (screen.z < 0f) return false;
-            gui = new Vector2(screen.x, Screen.height - screen.y);
-            return true;
+            // One projection for every overlay (Revival.MapProject.cs): the
+            // east world's rectangle, and the point in the texture's own
+            // units - its scale is not 1 in the east map window.
+            return MapProject.ToGui(point, texture, cam, world, map, out gui);
         }
 
         /// <summary>

@@ -69,6 +69,18 @@ namespace NextDayRevival
         // The east tile: its bundle and scene (unity/EastTile, BuildTile.cs).
         internal const string SceneName = "EastTile";
         const string BundleFile = "east_tile.bundle";
+        // Placed content, one additive scene bundle per concern
+        // (unity/EastTile BuildContent.cs, docs/ai/tasks/east-pipeline.md):
+        // loaded after the tile, each only if its file is installed, and
+        // unloaded with the tile. File and scene, in load order.
+        static readonly string[][] Content = {
+            new[] { "east_airfield.bundle", "EastAirfield" },
+            new[] { "east_town.bundle", "EastTown" },
+            new[] { "east_bunker.bundle", "EastBunker" },
+            new[] { "east_content_test.bundle", "EastContentTest" },
+        };
+        static readonly Dictionary<string, object> _contentBundles = new Dictionary<string, object>();
+        static bool _contentQueued;
 
         /// <summary>The world with the tile on: vanilla GW_Scene_1 (-2500..2500)
         /// plus one 5 x 5 km tile east of it.</summary>
@@ -208,11 +220,77 @@ namespace NextDayRevival
                 _opLogged = 0f;
                 Log(_op == null ? "FAIL LoadSceneAsync(" + SceneName + ", Additive) returned null."
                                 : "tile load " + why + ".");
+                if (_op != null) QueueContent();
             }
             catch (Exception ex)
             {
                 Log("tile load failed: " + ex.Message);
             }
+        }
+
+        /// <summary>The content scenes, right behind the tile's load (Unity
+        /// runs async loads in order). A missing file is skipped: a checkout
+        /// without that concern built simply has none of it.</summary>
+        static void QueueContent()
+        {
+            if (_contentQueued) return;
+            _contentQueued = true;
+            foreach (string[] c in Content)
+            {
+                try
+                {
+                    if (SceneManager.GetSceneByName(c[1]).isLoaded) continue;
+                    string path = Path.Combine(RevivalPlugin.AssetDir, c[0]);
+                    if (!File.Exists(path)) continue;
+                    if (!_contentBundles.ContainsKey(c[0]))
+                    {
+                        object b = OpenBundle(path);
+                        if (b == null) continue;
+                        _contentBundles[c[0]] = b;
+                    }
+                    AsyncOperation op = SceneManager.LoadSceneAsync(c[1], LoadSceneMode.Additive);
+                    Log(op == null ? "FAIL LoadSceneAsync(" + c[1] + ", Additive) returned null."
+                                   : "content " + c[1] + " queued after the tile (" + c[0] + ").");
+                }
+                catch (Exception ex)
+                {
+                    Log("content " + c[1] + " load failed: " + ex.Message);
+                }
+            }
+        }
+
+        static void UnloadContent()
+        {
+            _contentQueued = false;
+            foreach (string[] c in Content)
+            {
+                if (!SceneManager.GetSceneByName(c[1]).isLoaded) continue;
+                SceneManager.UnloadSceneAsync(c[1]);
+                Log("content " + c[1] + " unloaded with the tile.");
+            }
+        }
+
+        /// <summary>AssetBundle.LoadFromFile by reflection (the module is
+        /// not referenced at compile time); null and a log line on failure.</summary>
+        static object OpenBundle(string path)
+        {
+            Type t = Type.GetType("UnityEngine.AssetBundle, UnityEngine.AssetBundleModule")
+                     ?? RevivalPlugin.TypeByName("UnityEngine.AssetBundle");
+            MethodInfo load = t == null ? null
+                : AccessTools.Method(t, "LoadFromFile", new Type[] { typeof(string) }, null);
+            if (load == null)
+            {
+                Log("FAIL UnityEngine.AssetBundle.LoadFromFile not found.");
+                return null;
+            }
+            object b = load.Invoke(null, new object[] { path });
+            if (b == null || (b as UnityEngine.Object) == null)
+            {
+                Log("FAIL AssetBundle.LoadFromFile(" + path + ") returned null (output_log names Unity's reason).");
+                return null;
+            }
+            Log("bundle " + path + " opened, " + new FileInfo(path).Length + " bytes.");
+            return b;
         }
 
         static bool Bundle()
@@ -272,6 +350,7 @@ namespace NextDayRevival
             {
                 if (s.name != SceneName) return;
                 _placed = false;
+                UnloadContent();
                 Log("tile scene unloaded; GW_Scene_1 loaded " + HomeLoaded() + ".");
             };
         }
@@ -325,6 +404,7 @@ namespace NextDayRevival
                 + mine[0].GetPosition() + " size " + mine[0].terrainData.size : "")
                 + "; activeTerrain " + (Terrain.activeTerrain == null ? "none" : Terrain.activeTerrain.name) + ".");
             SyncSettings(CurrentSettingsTerrain(), "tile placed");
+            EastWater.Attach(SceneManager.GetSceneByName(SceneName));
         }
 
         static Terrain[] TileTerrains()

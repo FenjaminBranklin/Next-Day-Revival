@@ -213,6 +213,10 @@ $assets = @(
     # default): the scene bundle built by unity/EastTile BuildTile.cs, its
     # game content referenced in the game's own files, not copied.
     "east_tile.bundle",
+    # Its placed content, one additive scene bundle per concern, loaded with
+    # the tile (unity/EastTile BuildContent.cs). Build products of
+    # rebuild_east.ps1, committed on main only (docs/ai/tasks/east-pipeline.md).
+    "east_airfield.bundle", "east_town.bundle", "east_bunker.bundle", "east_content_test.bundle",
     # Bilingual 2:1 artwork for that world. MapInk installs one only while the
     # east world is active; the vanilla MapLanguagePreset remains untouched off.
     "east_map_en.png", "east_map_ru.png",

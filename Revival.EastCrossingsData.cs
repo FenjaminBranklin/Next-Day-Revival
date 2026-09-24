@@ -470,7 +470,7 @@ namespace NextDayRevival
             },
             new CrossingSaddle {
                 Key = "S2", Name = "S2 Gorshovo pass",
-                Col0 = 997, Row0 = 560, Cols = 28, Rows = 33, ChangedSamples = 658,
+                Col0 = 997, Row0 = 560, Cols = 28, Rows = 33, ChangedSamples = 660,
                 OldHeights =
                     "rR3AHdgd6x34HQMeEx4sHkceZR6BHpkeqh6zHrIeph6MHmIeLB70HcUdqR2PHXsdax1gHVodUx2uHcwd6x3/HQgeEh4pHkoeax6F" +
                     "Hpserh67Hr4etx6kHoMeVB4cHuQdux2gHYodex1vHWYdXh1bHbod4B0HHiEeJx4uHkYeaR6LHqEesx7CHsoeyR67HqIeex5KHhIe" +
@@ -499,29 +499,29 @@ namespace NextDayRevival
                     "Ex4cHiweUR5/Hpcejx51HloeRx5CHk0eYh51Ho4eqx60Hqwemh6GHmkeRB4WHugd",
                 NewHeights =
                     "rR3AHdgd6x34HQMeEx4sHkceZR6BHpkeqh6zHrIeph6MHmIeLB70HcUdqR2PHXsdax1gHVodUx2uHcwd6x3/HQgeEh4pHkoeax6F" +
-                    "Hpserh67Hr4etx6kHoMeVB4cHuQdux2gHYodex1vHWYdXh1bHbod4B0HHiEeJx4uHkYeaR6LHqEesx7BHscexh66HqIeex5KHhIe" +
-                    "4h2+HaMdjx2BHXUdbB1mHWQdyB30HSMeQB5GHkoeXh6CHpwerR64Hr4evx66Hq8emR52HkYeEx7oHcsdsR2aHYodfh12HXAdbB3X" +
-                    "HQMeMR5RHlseXx5wHoIekh6aHp8enx6eHpsekh6EHmkeRR4dHv0d3x2/HakdmB2KHYAdeR12HeEdCB4zHkseVR5ZHmMeax5vHm8e" +
-                    "bh5sHmoeaB5kHl8eUB47HiYeEh70HdgdvR2oHZgdjB2EHX8d7R0LHi4eRB5QHlceXR5hHmEeXx5eHlweWh5YHlQeUR5HHjkeKh4b" +
-                    "Hgoe8B3XHb4dqh2aHY8diR33HQ8eMB5AHkseTx5UHlQeUx5RHlAeTh5MHkoeRh5DHjweNR4pHh8eEh4BHusd1B29Hakdmx2THfgd" +
-                    "Fh41HjweRB5GHkgeRh5EHkMeQh5AHj4ePB44HjQeLh4pHiEeGx4QHgUe9h3iHcwdtx2lHZod8R0WHjkeOB48HjweOh44HjYeNR40" +
-                    "HjIeMB4uHioeJh4gHhseEx4OHgUe/x31HeYd1h3AHawdnh3iHQoeNR4tHi8eLB4qHiceJh4kHiMeIR4gHh4eGh4WHhAeCx4DHv0d" +
-                    "9R3vHekd3x3UHcQdsx2lHdkdAR4vHiMeIR4eHhweGR4YHhYeFR4THhEeDx4LHggeAR78HfUd7x3mHeEd2x3SHcwdwx29HbQd3B3/" +
-                    "HSkeIx4hHh0eGx4ZHhceFh4VHhMeER4PHgseBx4BHvwd9B3vHeYd4B3bHdIdzB3DHb0dtB3tHQkeLh4jHiEeHR4bHhkeFx4WHhUe" +
-                    "Ex4RHg8eCx4HHgEe/B30He8d5h3gHdsd0h3MHcMdvR20HfodFB4xHiMeIR4dHhseGR4XHhYeFR4THhEeDx4LHgceAR78HfQd7x3m" +
-                    "HeAd2x3SHcwdwx29HbQdBR4cHjUeIx4hHh0eGx4ZHhceFh4VHhMeER4PHgseBx4BHvwd9B3vHeYd4B3bHdIdzB3DHb0dtB0RHiUe" +
-                    "OB4jHiEeHR4bHhkeFx4WHhUeEx4RHg8eCx4HHgEe/B30He8d5h3gHdsd0h3MHcMdvR20HR8eMB49HiMeIR4dHhseGR4XHhYeFR4T" +
-                    "HhEeDx4LHgceAR78HfQd7x3mHeAd2x3SHcwdwx29HbQdLB47HkMeIx4hHh0eGx4ZHhceFh4VHhMeER4PHgseBx4BHvwd9B3vHeYd" +
-                    "4B3bHdIdzB3DHb0dtB01HkMeSR4jHiEeHR4bHhkeFx4WHhUeEx4RHg8eCx4HHgEe/B30He8d5h3gHdsd0h3MHcMdvR20HToeSR5O" +
-                    "HiMeIR4dHhseGR4XHhYeFR4THhEeDx4LHgceAR78HfQd7x3mHeAd2x3SHcwdwx29HbQdOR5KHk8eIx4hHh0eGx4ZHhceFh4VHhMe" +
-                    "ER4PHgseBx4BHvwd9B3vHeYd4B3bHdIdzB3DHb0dtB03HkYeTR4lHiQeIB4eHhweGh4ZHhgeFh4UHhIeDh4KHgQe/x33HfEd6B3j" +
-                    "Hd0d1B3PHcYdvh2yHTUeQx5KHjIeNB4zHjIeLx4uHiweKx4pHiceJR4hHh4eFh4NHgIe/B33HfQd8B3nHeId2B3KHaMdMx5AHkge" +
-                    "OR49Hj4ePx49HjweOh45HjceNh40Hi8eKh4gHhYeDB4IHgUeAx7+HfUd7x3mHdUdsB0yHj4eRx4/HkQeSB5KHkseSh5IHkceRR5E" +
-                    "HkIeOx4xHiYeHh4YHhceFB4RHgseAh79HfMd4h25HTAePR5IHkYeSh5KHlEeVx5YHlYeVR5THlIeTh5EHjgeLR4pHiUeJh4iHh4e" +
-                    "GB4QHgoe/x3sHb0dJx46HkoeTh5SHk8eUx5dHmMeYx5iHmAeXh5XHkkePR41HjIeMR4xHi8eKh4lHh0eFx4JHvMdux0VHi8eSB5W" +
-                    "Hl0eWB5WHmUedB57Hnoedh5vHmUeVx5NHkgeRR5EHkYeRB5CHj4eOB4wHh0e9B20HfodHB46HlAeWR5WHlMeZh6FHpoemh6QHoMe" +
-                    "cx5iHlseWR5VHlceXx5iHmIeYR5bHk0eLh70HbAd1B39HSEeOR5DHkUeRx5gHo8erR6qHpYefx5qHlseWR5ZHlkeXx5wHnoeeB51" +
-                    "HmweWh4uHvEdtR2nHdcdAB4cHikeLR43HlgeiR6pHqIehx5uHlkeTx5PHlgeYh51Howelx6UHocedx5cHjIe/B3IHXYdrh3dHQAe" +
+                    "Hpserh67Hr4etx6kHoMeVB4cHuQdux2gHYodex1vHWYdXh1bHbod4B0HHiEeJx4uHkYeaR6LHqEesx7AHscexh65HqIeex5KHhIe" +
+                    "4h2+HaMdjx2BHXUdbB1mHWQdyB30HSMeQB5GHkoeXh6CHpwerB63Hr0evh65Hq4emR52HkYeEx7oHcsdsR2aHYodfh12HXAdbB3X" +
+                    "HQMeMR5RHloeXx5vHoIekR6ZHp0enR6cHpkekB6CHmgeRB4dHv0d3x2/HakdmB2KHYAdeR12HeEdCB4zHkseVB5ZHmIeaR5tHmwe" +
+                    "ax5pHmgeZh5hHlweTh46HiUeEh70HdgdvR2oHZgdjB2EHX8d7R0LHi4eRB5QHlYeWx5fHl4eXR5bHloeWB5WHlIeTh5FHjgeKR4a" +
+                    "Hgke8B3WHb4dqh2aHY8diR33HQ8eMB4/HkoeTh5SHlIeUB5OHk0eSx5KHkgeRB5AHjoeMx4nHh4eEB4AHuod0x29Hakdmx2THfgd" +
+                    "Fh41HjweRB5FHkYeRB5CHkAePx49HjweOh41HjIeLB4nHh8eGB4OHgMe9R3gHcwdth2lHZkd8R0WHjkeOB48HjoeOR42HjQeMh4x" +
+                    "Hi8eLh4sHiceJB4dHhkeER4LHgMe/B3zHeQd1B2+HasdnR3iHQoeNB4tHi4eKx4oHiUeJB4iHiEeHx4dHhseFx4THg0eCB4AHvsd" +
+                    "8h3sHecd3R3SHcIdsh2jHdkdAR4vHiMeIB4cHhoeFx4VHhQeEh4RHg8eDR4JHgUe/x36HfId7B3kHd4d2B3PHckdwR27HbId3B3/" +
+                    "HSkeIx4gHhweGh4XHhUeEx4SHhAeDx4NHggeBR7/Hfod8h3sHeQd3h3YHc8dyR3AHbsdsh3tHQkeLh4jHiAeHB4aHhceFR4THhIe" +
+                    "EB4PHg0eCB4FHv8d+h3yHewd5B3eHdgdzx3JHcAdux2yHfodFB4xHiMeIB4cHhoeFx4VHhMeEh4QHg8eDR4IHgUe/x36HfId7B3k" +
+                    "Hd4d2B3PHckdwB27HbIdBR4cHjUeIx4gHhweGh4XHhUeEx4SHhAeDx4NHggeBR7/Hfod8h3sHeQd3h3YHc8dyR3AHbsdsh0RHiUe" +
+                    "OB4jHiAeHB4aHhceFR4THhIeEB4PHg0eCB4FHv8d+h3yHewd5B3eHdgdzx3JHcAdux2yHR8eMB49HiMeIB4cHhoeFx4VHhMeEh4Q" +
+                    "Hg8eDR4IHgUe/x36HfId7B3kHd4d2B3PHckdwB27HbIdLB47HkMeIx4gHhweGh4XHhUeEx4SHhAeDx4NHggeBR7/Hfod8h3sHeQd" +
+                    "3h3YHc8dyR3AHbsdsh01HkMeSR4jHiAeHB4aHhceFR4THhIeEB4PHg0eCB4FHv8d+h3yHewd5B3eHdgdzx3JHcAdux2yHToeSR5O" +
+                    "HiMeIB4cHhoeFx4VHhMeEh4QHg8eDR4IHgUe/x36HfId7B3kHd4d2B3PHckdwB27HbIdOR5KHk8eIx4gHhweGh4XHhUeEx4SHhAe" +
+                    "Dx4NHggeBR7/Hfod8h3sHeQd3h3YHc8dyR3AHbsdsh03HkYeTR4lHiMeHx4cHhkeGB4WHhUeEx4SHg8eCx4IHgEe/B30He4d5h3g" +
+                    "Hdsd0h3MHcMdvB2vHTUeQx5KHjIeMx4xHjAeLR4rHioeKB4nHiUeIx4fHhseFB4LHgAe+h31HfId7R3lHd8d1h3IHaIdMx5AHkge" +
+                    "OR48Hj0ePh47HjkeOB43HjUeMx4xHi0eKB4eHhQeCh4GHgMeAB77HfMd7R3kHdMdrx0yHj4eRx4+HkMeRx5JHkkeSB5GHkUeQx5B" +
+                    "Hj8eOR4vHiQeHB4WHhUeEh4PHgkeAB76HfEd4B24HTAePR5IHkYeSR5JHlAeVR5WHlQeUx5RHk8eTB5CHjYeLB4nHiMeJB4gHhwe" +
+                    "Fh4OHgge/R3rHbwdJx46HkoeTR5SHk4eUx5cHmEeYR5gHl4eXB5VHkcePB40HjEeLx4wHi0eKB4jHhseFR4IHvIdux0VHi8eSB5W" +
+                    "Hl0eWB5WHmQecx55HnkedR5uHmQeVh5MHkceRB5DHkUeQx5BHj0eNh4uHhwe8x20HfodHB46HlAeWR5WHlMeZh6FHpkemR6PHoIe" +
+                    "cx5hHlseWB5VHlYeXh5hHmEeYB5ZHkweLR70HbAd1B39HSEeOR5DHkUeRx5gHo8erB6qHpUefx5qHlseWR5ZHlkeXx5wHnkedx51" +
+                    "HmweWR4uHvEdtR2nHdcdAB4cHikeLR43HlgeiR6pHqIehx5uHlkeTx5PHlgeYh51Howelx6UHocedx5cHjIe/B3IHXYdrh3dHQAe" +
                     "Ex4cHiweUR5/Hpcejx51HloeRx5CHk0eYh51Ho4eqx60Hqwemh6GHmkeRB4WHugd",
                 TreeRemove = new string[] {
                     "GWTerrain2\t2486.292 289.004 2460.004 266.267 2431.749 281.834 2408.758 267.936 2382.315 292.867 2433.496 263.507 2397.938 274.471 2380.204 280.396 2421.062 253.711 2404.234 259.285 2461.416 287.641 2429.538 270.191 2441.481 256.211 2431.274 251.051 2421.513 308.921 2483.602 333.039 2443.578 332.719 2392.078 318.127 2431.104 371.448 2418.449 343.091 2469.369 321.544 2454.841 368.707 2448.170 301.202 2412.313 289.339 2407.056 357.209 2477.417 353.376 2455.558 342.591 2409.879 319.961 2479.086 368.537 2421.064 365.467 2465.346 300.953 2408.299 337.344 2446.149 312.642 2447.149 280.260 2402.301 328.405 2458.359 313.891 2400.449 293.644 2416.138 373.805 2434.097 321.838 2474.148 330.585 2477.964 271.355 2389.549 336.408 2456.749 351.228 2435.879 286.177 2398.021 344.476 2438.377 352.315 2379.990 333.176 2473.938 275.405 2426.795 322.248 2435.024 331.739 2494.045 291.691 2496.711 307.166 2468.711 273.054 2391.226 351.945",
@@ -533,45 +533,45 @@ namespace NextDayRevival
                     "GWTerrain2_two__billboards_1\t2461.416 287.641 2429.538 270.191 2441.481 256.211 2431.274 251.051 2456.749 351.228 2435.879 286.177 2398.021 344.476 2438.377 352.315 2379.990 333.176 2473.938 275.405 2426.795 322.248 2435.024 331.739 2494.045 291.691 2496.711 307.166 2468.711 273.054 2391.226 351.945",
                 },
                 TreeReseat = new string[] {
-                    "GWTerrain2\t2434.294 244.507 0.2402069 2453.013 256.480 0.2359892 2375.326 266.776 0.2352830 2379.959 357.924 0.2364870 2375.419 307.097 0.2355949 2373.433 367.275 0.2361297 2463.184 378.077 0.2375962 2374.975 318.482 0.2360729 2403.968 375.535 0.2377995 2396.273 369.786 0.2369924 2490.541 269.766 0.2318114",
-                    "GWTerrain2_more__billboards_0\t2379.959 357.924 0.2364870 2375.419 307.097 0.2355949",
-                    "GWTerrain2_more__billboards_1\t2434.294 244.507 0.2402069 2453.013 256.480 0.2359892 2463.184 378.077 0.2375962 2374.975 318.482 0.2360729 2403.968 375.535 0.2377995",
+                    "GWTerrain2\t2434.294 244.507 0.2401893 2453.013 256.480 0.2359641 2375.326 266.776 0.2352830 2386.782 249.121 0.2365033 2379.959 357.924 0.2364782 2375.419 307.097 0.2355949 2373.433 367.275 0.2361297 2463.184 378.077 0.2375728 2374.975 318.482 0.2360729 2403.968 375.535 0.2377967 2396.273 369.786 0.2369904 2490.541 269.766 0.2318043",
+                    "GWTerrain2_more__billboards_0\t2379.959 357.924 0.2364782 2375.419 307.097 0.2355949",
+                    "GWTerrain2_more__billboards_1\t2434.294 244.507 0.2401893 2453.013 256.480 0.2359641 2463.184 378.077 0.2375728 2374.975 318.482 0.2360729 2403.968 375.535 0.2377967",
                     "GWTerrain2_more__billboards_2\t2373.433 367.275 0.2361297",
-                    "GWTerrain2_more__bush_billboards_3\t2375.326 266.776 0.2352830 2396.273 369.786 0.2369924 2490.541 269.766 0.2318114",
-                    "GWTerrain2_two__billboards_0\t2434.294 244.507 0.2402069 2453.013 256.480 0.2359892 2379.959 357.924 0.2364870 2375.419 307.097 0.2355949 2373.433 367.275 0.2361297 2463.184 378.077 0.2375962 2374.975 318.482 0.2360729 2403.968 375.535 0.2377995",
-                    "GWTerrain2_two__billboards_1\t2375.326 266.776 0.2352830 2396.273 369.786 0.2369924 2490.541 269.766 0.2318114",
+                    "GWTerrain2_more__bush_billboards_3\t2375.326 266.776 0.2352830 2386.782 249.121 0.2365033 2396.273 369.786 0.2369904 2490.541 269.766 0.2318043",
+                    "GWTerrain2_two__billboards_0\t2434.294 244.507 0.2401893 2453.013 256.480 0.2359641 2379.959 357.924 0.2364782 2375.419 307.097 0.2355949 2373.433 367.275 0.2361297 2463.184 378.077 0.2375728 2374.975 318.482 0.2360729 2403.968 375.535 0.2377967",
+                    "GWTerrain2_two__billboards_1\t2375.326 266.776 0.2352830 2386.782 249.121 0.2365033 2396.273 369.786 0.2369904 2490.541 269.766 0.2318043",
                 },
                 Props = new string[] {
                 },
-                AlphaX0 = 1996, AlphaZ0 = 1122, AlphaW = 52, AlphaH = 61, PaintTexels = 205,
+                AlphaX0 = 1996, AlphaZ0 = 1122, AlphaW = 52, AlphaH = 61, PaintTexels = 211,
                 Paint =
-                    "4QAa/wAAAOIAL/8AAADjAGH9AgAA5AB/7RIAAOUAkd4hAADmAJfZJgAA5wCF6BcAAOgAjeIdAADpAHzvEAAA6gCgzTIAAOsASfgH" +
-                    "AADsAEKTbAAA7QAJp1gAABUBEP8AAAAWASr/AAAAFwFc/gEAABgBf+0SAAAZAZHeIQAAGgGV2yQAABsBg+oVAAAcAYfmGQAAHQF2" +
-                    "8wwAAB4Bfe4RAAAfAUH/AAAAIAGsvUIAACEBStwjAAAiAR2BfgAAQwEd/wAAAEQBU/8AAABFAbW/QAAARgHfmWYAAEcB/XiHAABI" +
-                    "Af9YlAsISQH/NX8rIEoB/yRvPi5LAf8eZ0Y0TAH/GmJMN00B/xhfTzlOAf8YX1A4TwH/GmNONFAB/x9qSC5RAf8zfzAdUgH/UZIS" +
-                    "ClMB/HuEAABUAf52iQAAVQHXoF8AAFYBsY5xAABXATC3SAAAeAEw/wAAAHkBltolAAB6AdmeYQAAewH8e4QAAHwB/1qVCQd9Af83" +
-                    "gCoefgH/JG8/LX8B/x5nRzOAAf8aYkw3gQH/GF9QOIIB/xhgUDeDAf8aY040hAH/IW1FLIUB/zeBLBuGAf9clQkFhwH2hHsAAIgB" +
-                    "6pBvAACJAZ/SLQAAigGU3CMAAIsBRP8AAACMARf/AAAAjQEL/wAAAMQBDf8AAAD5ARX/AAAA+gEeu0QAAC4CF/8AAAAvAhj/AAAA" +
-                    "MAIM/AMAAGMCDf8AAABkAjL/AAAAZQIa/QIAAGYCCPEOAACaAg3/AAAAmwII/wAAAM4CC/8AAADPAg//AAAA0AIU/wAAANECC/8A" +
-                    "AAA6Awr/AAAATgYU/wAAAE8GFP8AAACCBjv/AAAAgwY6/wAAALYGcvUKAAC3Bm74BwAA6gaoyjUAAOsGpM4xAAAeB9ahXgAAHwfT" +
-                    "pFsAAFIH8oh3AABTB/GJdgAAhgf+dIsAAIcH/nWKAAC6B/9plAIAuwf/aZQCAO4H/2OWBQHvB/9jlgUBIgj/a5MBACMI/2uTAQBW" +
-                    "CPx7hAAAVwj8e4QAAIoIy6pVAACLCNqdYgAAvgg//wAAAL8IWf8AAADuCJXcIwAA7whl0i0AACIJ+IJ9AAAjCd5/gAAAVgnxiXYA" +
-                    "AFcJ1od4AACKCfWEewAAiwnJiXYAAL4J/nWKAAC/Cbt5hgAA8gn/aJUCAPMJnW2SAAAmCv9HkB8JJwp2TJMZB1oK/yh5SxNbCksq" +
-                    "fEgRjgrkFV9wG48KIhVhcBmgCgz/AAAAoQoM/wAAAKIKCf8AAAC3Cgn/AAAAuAoT/wAAALkKGP8AAAC6Civ/AAAAuwo6/wAAALwK" +
-                    "Nf8AAAC9Cif/AAAAvgpF/wAAAL8KJf8AAADACnL1CgAAwQo3/wAAAMIKjBNVfBvUCgz/AAAA1QoM/wAAANYKCv8AAADsChL/AAAA" +
-                    "7QoX/wAAAO4KJ/8AAADvCjX/AAAA8Ao6/wAAAPEKK/8AAADyCl7+AQAA8wo8/wAAAPQK8Yl2AAD1Co6iXQAA9goYE1R9GwcLWv8A" +
-                    "AAAIC3vwDwAACQuE6RYAAAoLdvMMAAALC0L/AAAADAsi/wAAABsLCf8AAAAcCyb/AAAAHQtO/wAAAB4LbvgHAAAfC4DsEwAAIAuZ" +
-                    "2CcAACELssE+AAAiC8SxTgAAIwvEsU4AACQLubtEAAAlC4fmGQAAJgutxjkAACcLX/0CAAAoC9A+iC0MKQspUJMXBTkLHfwDAAA6" +
-                    "CyH/AAAAOwuQ3SIAADwLe/APAAA9C4TpFgAAPguC6hUAAD8LTf8AAABACyz/AAAAQQsK/wAAAFALEv8AAABRCzf/AAAAUgtd+AcA" +
-                    "AFMLeO0SAABUC5baJQAAVQuxwj0AAFYLxLFOAABXC8SxTgAAWAvIrlEAAFkLmtcoAABaC9CSbQAAWwtawT4AAFwLIhNVdyBvCxz/" +
-                    "AAAAjgspsE8AAA==",
+                    "4QAi/wAAAOIAP/8AAADjAHP1CgAA5ACR3iEAAOUAo88wAADmAKjKNQAA5wCX2SYAAOgAntMsAADpAI3iHQAA6gCuxDsAAOsAWe4R" +
+                    "AADsAEuNcgAA7QALpFsAABUBFf8AAAAWATr/AAAAFwFu+AcAABgBkd4hAAAZAaPPMAAAGgGmzDMAABsBldskAAAcAZnYJwAAHQGH" +
+                    "5hkAAB4Bj+EeAAAfAVj/AAAAIAG5t0gAACEBVN0iAAAiASd/gAAAQwEy/wAAAEQBavkGAABFAcOyTQAARgHsjnEAAEcB/2qTAQFI" +
+                    "Af9EihwVSQH/KnQ4KUoB/x5nRjRLAf8ZYE05TAH/F15QOk0B/xdeUTlOAf8YX1A4TwH/GmNONFAB/x5oSi9RAf8seDkiUgH/RYwd" +
+                    "EVMB/nSLAABUAf50iwAAVQHZnmEAAFYBxI1yAABXATy5RgAAWAELuUYAAHcBDf8AAAB4AUr/AAAAeQGqyDcAAHoB6JJtAAB7Af9t" +
+                    "kgAAfAH/RYsbFH0B/yt1Nyh+Af8eZ0czfwH/GWBOOIAB/xdeUTmBAf8XXlE5ggH/GGBQN4MB/xpjTjSEAf8fakguhQH/L3o2IIYB" +
+                    "/1GSEgqHAft8gwAAiAHujHMAAIkBpc0yAACKAZLdIgAAiwE9/wAAAIwBGP8AAACNAQz/AAAAxAEN/wAAAPkBFP8AAAD6ASHLNAAA" +
+                    "LgIN/wAAAC8CEf8AAAAwAg/6BQAAZAI0/wAAAGUCIP0CAABmAgz1CgAAmgIP/wAAAJsCCv8AAADOAhD/AAAAzwIT/wAAANACCv8A" +
+                    "AABOBhT/AAAATwYU/wAAAIIGO/8AAACDBjr/AAAAtgZy9QoAALcGbvgHAADqBqjKNQAA6wakzjEAAB4H1qFeAAAfB9OkWwAAUgfy" +
+                    "iHcAAFMH8Yl2AACGB/50iwAAhwf+dYoAALoH/2mUAgC7B/9plAIA7gf/Y5YFAe8H/2OWBQEiCP9rkwEAIwj/a5MBAFYI/HuEAABX" +
+                    "CPx7hAAAigjLqlUAAIsI2p1iAAC+CD//AAAAvwhZ/wAAAO4IjeIdAADvCGzfIAAAIgnxiXYAACMJ5Yd4AABWCeiSbQAAVwnbj3AA" +
+                    "AIoJ7oxzAACLCdCRbgAAvgn7fYIAAL8Jy4F+AADyCf9tkgAA8wmyco0AACYK/0iQHgknCopPlBYGWgr/KntIElsKWSx9RRGOCu0W" +
+                    "Ym0ajwooF2RsGKAKDv8AAAChChP/AAAAogoS/wAAAKMKCf8AAAC3ChL/AAAAuAof/wAAALkKJf8AAAC6Cjf/AAAAuwo//wAAALwK" +
+                    "Nf8AAAC9Cif/AAAAvgo8/wAAAL8KHf8AAADACnL1CgAAwQo3/wAAAMIKmhNWexvDCggTV3wZ1AoO/wAAANUKE/8AAADWChP/AAAA" +
+                    "1woK/wAAAOsKEP8AAADsCh3/AAAA7Qok/wAAAO4KNf8AAADvCjz/AAAA8Ao6/wAAAPEKK/8AAADyClP/AAAA8woy/wAAAPQK8Yl2" +
+                    "AAD1CpyiXQAA9goiE1R9GwULCf8AAAAGCwj/AAAABwtl/AMAAAgLiOYZAAAJC4jmGQAACgt28wwAAAsLQv8AAAAMCyL/AAAAGwsJ" +
+                    "/wAAABwLJv8AAAAdC07/AAAAHgtu+AcAAB8LgOwTAAAgC5nYJwAAIQuywT4AACILx69QAAAjC8evUAAAJAu8uEcAACULk90iAAAm" +
+                    "C67EOwAAJwtY/wAAACgL3UCJKwspCzVSkxUFOQsh+QYAADoLJP8AAAA7C5nYJwAAPAuI5hkAAD0LiOYZAAA+C4LqFQAAPwtO/wAA" +
+                    "AEALLv8AAABBCwv/AAAAUAsU/wAAAFELPP8AAABSC2P4BwAAUwt87RIAAFQLl9olAABVC7HCPQAAVgvHr1AAAFcLx69QAABYC8eu" +
+                    "UQAAWQuh0C8AAFoL349wAABbC2fCPQAAXAsuFFd1H28LG/8AAACOCzSyTQAAjwsIwzwAAA==",
                 RebuildBox = new float[] { 2304.00f, 170.67f, 2560.00f, 426.67f },
                 RoadChecks = new float[] {
-                    2395.00f, 314.00f, 475.77f, 470.49f,
-                    2423.33f, 314.00f, 481.26f, 469.90f,
-                    2451.67f, 314.00f, 480.38f, 468.48f,
-                    2480.00f, 314.00f, 476.70f, 466.02f,
-                    2494.00f, 314.00f, 469.17f, 464.77f,
+                    2395.00f, 314.00f, 475.77f, 470.43f,
+                    2423.33f, 314.00f, 481.26f, 469.74f,
+                    2451.67f, 314.00f, 480.38f, 468.36f,
+                    2480.00f, 314.00f, 476.70f, 465.84f,
+                    2494.00f, 314.00f, 469.17f, 464.64f,
                 },
                 SeamZ = 314.00f, SeamWidth = 44.0f,
                 PathWest = new float[] { 2250.00f, 314.00f },

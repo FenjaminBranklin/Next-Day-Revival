@@ -5220,10 +5220,27 @@ def check_east_world():
          "TerrainHeight: the terrain containing the point when on, activeTerrain when off",
          "RevivalTroopInsertion.TerrainHeight is not split on EastWorld.On")
     admin = _code(read("Revival.Admin.cs"))
-    need("(point.x - centre.x) / world.x * map.x" in admin
-         and "(nx - 0.5f) * world.x + centre.x" in admin,
-         "MapTools projects and clicks about EastWorld.MapCentre",
-         "MapTools still assumes the origin-centred map")
+    project = _code(read("Revival.MapProject.cs"))
+    local = _body(project, "internal static Vector3 TextureLocal(")
+    need("return MapProject.ToGui(point, texture, cam, world, map, out gui);" in admin
+         and "(nx - 0.5f) * world.x + centre.x" in admin
+         and "if (!EastWorld.Extends)" in local
+         and "return new Vector3(point.x / world.x * map.x, point.z / world.y * map.y, 0f);" in local
+         and "Rect w = EastWorld.Extended;" in local
+         and "fx * map.x / s.x" in local and "fz * map.y / s.y" in local,
+         "MapTools projects through MapProject (east rectangle, texture's own units) and clicks about EastWorld.MapCentre",
+         "MapTools still assumes the origin-centred map, or projects in MAP_SIZE units onto the scaled texture")
+    # The vanilla picture's 0.5 % fit lives in ONE place and is not applied to
+    # the exactly registered east artwork (docs/ai/tasks/east-map-markers.md).
+    fit = _body(project, "internal static Vector2 OnPicture(")
+    copies = [f for f in ("Revival.Patrol.cs", "RevivalNewSettlement.cs", "Revival.Helipads.cs")
+              if "1.005f" in _code(read(f))]
+    need("if (EastWorld.Extends || full.width < 1f) return g;" in fit and not copies
+         and "MapProject.OnPicture(" in _code(read("Revival.Patrol.cs"))
+         and "MapProject.OnPicture(" in _code(read("RevivalNewSettlement.cs"))
+         and "MapProject.OnPicture(" in _code(read("Revival.Helipads.cs")),
+         "the vanilla picture fit is MapProject.OnPicture only (Patrol, settlement ring, helipads), off in the east world",
+         "a map-picture fit outside MapProject.OnPicture, or applied to the east artwork: " + ", ".join(copies))
     need("(nx - 0.5f) * world.x + centre.x" in _code(read("RevivalMortar.cs")),
          "the mortar's map click uses EastWorld.MapCentre",
          "RevivalMortar.MapPoint still assumes the origin-centred map")
@@ -5255,6 +5272,16 @@ def check_east_world():
          and os.path.exists(os.path.join(ROOT, "research", "east_map_check.py")),
          "editor artwork, deterministic generator and acceptance check exist",
          "east editor artwork or its generator/check is missing")
+    # East map regenerated from the tile data (docs/ai/tasks/east-map-regen.md):
+    # the generator reads the build data, and the projection is proven on the
+    # known places both ways (marker paths and painted pixels).
+    gen = read(os.path.join("research", "east_map.py"))
+    pc = read(os.path.join("research", "east_map_panel_check.py"))
+    need(os.path.exists(os.path.join(ROOT, "research", "east_map_art_check.py"))
+         and all(k in gen for k in ("heights.bin", "trees.bin", "water_polys", "east_airfield.json", '"runway"'))
+         and all(k in pc for k in ("(4632.0, -1602.0)", "(4632.0, 1483.0)", "(2262.0, 1846.0)", "saddle S2")),
+         "east map drawn from heights/trees/water/airfield; runway ends, saddles, Conductor projected",
+         "east map generator not data-driven or the projection points are missing")
     # The map window (Revival.EastMapPanel.cs, docs/ai/tasks/east-map-panel.md):
     # installed only from EastWorld.Install (after its !On return), every hook
     # gated on EastWorld.Extends, its assets built and installed.
@@ -5333,7 +5360,9 @@ def check_east_roads():
     need(os.path.isfile(os.path.join(ROOT, "research", "east_roads.py")),
          "research/east_roads.py designs, routes and carves the roads",
          "research/east_roads.py fehlt")
-    td = read(os.path.join("unity", "EastTile", "Tools", "tile_data.py"))
+    # tile_data.py composes the per-concern files (docs/ai/tasks/east-pipeline.md)
+    td = "".join(read(os.path.join("unity", "EastTile", "Tools", f))
+                 for f in ("tile_data.py", "tile_common.py", "tile_splat.py"))
     need('"east_tile_roads.raw"' in td and "ROAD_LAYER = len(SPLATS) - 1" in td
          and "the road carve touched the seam column" in td,
          "tile_data.py builds the tile from the carved heights (seam column held) and paints the road layer last",
@@ -5392,6 +5421,70 @@ def check_east_roads():
     else:
         warn("East roads: research/out/east-tile/east_roads.json fehlt - Design nicht geprueft "
              "(python research/east_roads.py)")
+
+
+def check_east_pipeline():
+    """[32] The east tile as a recipe (docs/ai/tasks/east-pipeline.md).
+
+    The height passes each in their own file, composed in one fixed order
+    by research/east_tile.py from the shared research/east_layout.json; the
+    tile data per concern, composed by tile_data.py; placed content in its
+    own additive scene bundles, loaded with the tile; rebuild_east.ps1
+    builds every east bundle from a checkout and installs them on main only.
+    """
+    import json
+    print("[32] East pipeline (recipe, passes, content bundles)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("East pipeline: " + why)
+
+    try:
+        lay = json.loads(read(os.path.join("research", "east_layout.json")) or "{}")
+    except ValueError:
+        lay = {}
+    need(all(k in lay for k in ("airfield", "runway", "town", "apron", "river", "roadBed", "saddles", "vegetation")),
+         "research/east_layout.json holds the shared layout, one key per concern",
+         "research/east_layout.json missing or incomplete")
+    et = read(os.path.join("research", "east_tile.py"))
+    passes = ("east_pass_base", "east_pass_relief", "east_pass_river", "east_pass_flatten", "east_pass_seam")
+    need("for p in (%s):" % ", ".join(passes) in et and "LAYOUT_IN" in et,
+         "east_tile.py composes the height passes base -> relief -> river -> flatten -> seam",
+         "east_tile.py does not compose the five height passes in their fixed order")
+    need(all("def apply(ctx):" in read(os.path.join("research", p + ".py")) for p in passes),
+         "each height pass is its own file with apply(ctx)",
+         "a research/east_pass_*.py file is missing or has no apply(ctx)")
+    td = read(os.path.join("unity", "EastTile", "Tools", "tile_data.py"))
+    need("PASSES = (tile_vegetation.density, tile_splat.paint, tile_vegetation.place, tile_grass.grass," in td
+         and "tile_rocks.rocks, tile_seam.seam, tile_water.water)" in td,
+         "tile_data.py composes vegetation, splat, grass, rocks, seam and water in their fixed order",
+         "tile_data.py does not compose the per-concern files")
+    content = ("east_airfield", "east_town", "east_bunker", "east_content_test")
+    ew = read("Revival.EastWorld.cs")
+    bp = read("build.ps1")
+    need(all(os.path.isfile(os.path.join(ROOT, "unity", "EastTile", "Content", c + ".json")) for c in content)
+         and "public static void Build()" in read(os.path.join("unity", "EastTile", "Assets", "Editor", "BuildContent.cs")),
+         "BuildContent.cs builds one additive scene bundle per recipe in unity/EastTile/Content",
+         "BuildContent.cs or a content recipe is missing")
+    need(all('"%s.bundle"' % c in ew and '"%s.bundle"' % c in bp for c in content)
+         and "QueueContent();" in ew and "UnloadContent();" in ew,
+         "EastWorld loads the content bundles with the tile and unloads them with it; build.ps1 installs them",
+         "the content loading hook or its install is missing")
+    rb = read("rebuild_east.ps1")
+    need(all(s in rb for s in ("BuildTile.Build", "BuildContent.Build", "tile_check.py", "east_seam.py",
+                               "game_refs.py", '$branch -ne "main"')),
+         "rebuild_east.ps1 builds, checks and renders every east bundle; installs on main only",
+         "rebuild_east.ps1 is missing a step or the main-only install")
+    need("rebuild_east.ps1" in read("AGENTS.md")
+         and os.path.isfile(os.path.join(ROOT, "docs", "ai", "tasks", "east-pipeline.md")),
+         "AGENTS.md carries the rule; docs/ai/tasks/east-pipeline.md the pass order, ownership and joint checks",
+         "the AGENTS.md rule or docs/ai/tasks/east-pipeline.md is missing")
 
 
 def check_east_crossings():
@@ -5605,6 +5698,7 @@ if __name__ == "__main__":
     check_east_world()
     check_east_crossings()
     check_east_roads()
+    check_east_pipeline()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

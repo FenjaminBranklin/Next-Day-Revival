@@ -1490,24 +1490,13 @@ namespace NextDayRevival
         // and sits about 20 m north-east of the ground it depicts
         // (REVERSE_ENGINEERING.md 33.1). Every marker goes through the same
         // correction Patrol and the settlement ring use, or the pad ring would
-        // sit beside the place the pad actually stands.
-        const float MapArtFit = 1024f;
-        const float MapArtScale = 1.005f;
-        const float MapArtShiftX = 2f;
-        const float MapArtShiftY = -4f;
-
+        // sit beside the place the pad actually stands (MapProject.OnPicture;
+        // the east artwork is registered exactly and needs none).
         static bool Project(Vector3 point, Component texture, Camera camera,
                             Vector2 world, Vector2 map, Rect full, out Vector2 gui)
         {
             if (!MapTools.WorldToGui(point, texture, camera, world, map, out gui)) return false;
-            if (full.width >= 1f)
-            {
-                float factor = full.width / MapArtFit;
-                float cx = full.x + full.width * 0.5f;
-                float cy = full.y + full.height * 0.5f;
-                gui = new Vector2((gui.x - cx) * MapArtScale + cx + MapArtShiftX * factor,
-                                  (gui.y - cy) * MapArtScale + cy + MapArtShiftY * factor);
-            }
+            gui = MapProject.OnPicture(gui, full);
             return true;
         }
     }

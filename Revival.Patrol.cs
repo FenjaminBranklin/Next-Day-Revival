@@ -7893,11 +7893,9 @@ namespace NextDayRevival
         // has to sit in the middle of the road" complaint. The correction below
         // is DISPLAY ONLY; no route waypoint is touched. Set RouteMapRegister to
         // false to draw world-true again.
+        // The numbers (0.5 %, +2 px east, 4 px north at 1024 px) live in
+        // MapProject.OnPicture, shared with the settlement ring and the pads.
         const bool RouteMapRegister = true;
-        const float MapArtFit = 1024f;      // the fit was measured at this size
-        const float MapArtScale = 1.005f;
-        const float MapArtShiftX = 2f;      // picture roads sit +2 px east ...
-        const float MapArtShiftY = -4f;     // ... and 4 px north (GUI y is down)
 
         /// <summary>Moves a world-true projected point onto the map picture's
         /// own road, undoing the picture's registration error (see the MapArt*
@@ -7908,13 +7906,8 @@ namespace NextDayRevival
         /// overlay somewhere arbitrary.</summary>
         static Vector2 MapArt(Vector2 g, Rect full, bool known)
         {
-            if (!known || !RouteMapRegister || full.width < 1f) return g;
-            float factor = full.width / MapArtFit;
-            float cx = full.x + full.width * 0.5f;
-            float cy = full.y + full.height * 0.5f;
-            return new Vector2(
-                (g.x - cx) * MapArtScale + cx + MapArtShiftX * factor,
-                (g.y - cy) * MapArtScale + cy + MapArtShiftY * factor);
+            if (!known || !RouteMapRegister) return g;
+            return MapProject.OnPicture(g, full);    // the east artwork needs none
         }
 
         /// <summary>Is a convoy actually driving this route right now? A convoy
