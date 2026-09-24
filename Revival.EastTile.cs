@@ -165,6 +165,23 @@ namespace NextDayRevival
                 }
                 if (!_placed)
                 {
+                    if (EastWorld.On)
+                    {
+                        // [World] EastTile owns the load and the bundle (a second
+                        // LoadFromFile of the same bundle fails). The probe only
+                        // measures the tile it loaded - no self-test, no load.
+                        if (!_selfTestDone && _cfgSelfTest.Value)
+                            Log("EastTileSelfTest ignored: [World] EastTile loads the tile.");
+                        _selfTestDone = true;
+                        if (SceneManager.GetSceneByName(SceneName).isLoaded && Vanilla() != null)
+                        {
+                            _activeBefore = "(loaded by [World] EastTile)";
+                            _loads++;
+                            _loadStart = Time.realtimeSinceStartup;
+                            Place();
+                        }
+                        return;
+                    }
                     if (_cfgSelfTest.Value && !_selfTestDone && Time.realtimeSinceStartup > 20f
                         && MapScene.Current != MapScene.Home)
                     {

@@ -338,7 +338,10 @@ namespace NextDayRevival
         internal static bool TryGround(Vector3 point, float search, out Vector3 result)
         {
             result = point;
-            if (point.x < -2500f || point.x > 2500f || point.z < -2500f || point.z > 2500f) return false;
+            // The home map is -2500..2500. In the east world the bound is the
+            // terrain itself, so a group can stand on the tile as well.
+            if (EastWorld.On ? !EastWorld.OnTerrain(point)
+                : (point.x < -2500f || point.x > 2500f || point.z < -2500f || point.z > 2500f)) return false;
             float y;
             if (!RevivalTroopInsertion.TerrainHeight(point, out y)) return false;
             point.y = y;
@@ -346,7 +349,8 @@ namespace NextDayRevival
             if (!NavMesh.SamplePosition(point, out hit, search, NavMesh.AllAreas)
                 || Mathf.Abs(hit.position.y - y) > 5f) return false;
             result = hit.position;
-            return result.x >= -2500f && result.x <= 2500f && result.z >= -2500f && result.z <= 2500f;
+            return EastWorld.On ? EastWorld.OnTerrain(result)
+                : result.x >= -2500f && result.x <= 2500f && result.z >= -2500f && result.z <= 2500f;
         }
     }
 }

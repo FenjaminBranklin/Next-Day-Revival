@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.50.0";
+        public const string VERSION = "6.51.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -460,6 +460,8 @@ namespace NextDayRevival
             RoadClear.Install(gameObject, Config);   // every road free of objects and trees
             MapScene.BindConfig(Config);         // NDR region gate: one map's data on one map
             EastTile.BindConfig(Config);         // research: east extension probe, off by default
+            EastWorld.BindConfig(Config);        // GW_Scene_1 + east tile as one world, off by default
+            EastCrossings.BindConfig(Config);    // east world: the three saddle cuts, only with [World] EastTile
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
@@ -520,6 +522,7 @@ namespace NextDayRevival
             PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
+            EastWorld.Install(_harmony);         // east world: nothing is patched while [World] EastTile is off
             TankNetwork.Install(_harmony);
             Patrol.Install(_harmony);
             ConvoyRepair.Install(_harmony);      // NDR convoy vehicle repair
@@ -2113,6 +2116,8 @@ namespace NextDayRevival
             FrameProf.E(FrameProf.Cursor);
             FrameProf.S(FrameProf.Regions);     Regions.Tick();          FrameProf.E(FrameProf.Regions);
             FrameProf.S(FrameProf.Research);    Research.Tick();         FrameProf.E(FrameProf.Research);
+            EastWorld.Tick();                    // east world: tile load/unload, held spawn, WORLD_SIZE; off by default
+            EastCrossings.Tick();                // east world: saddle cuts, paint, NavMesh patches, seam links
             EastTile.Tick();                     // research: east extension probe, off by default
             FrameBench.Tick();                   // research: east extension frame-time baseline, off by default
             FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);

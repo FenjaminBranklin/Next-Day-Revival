@@ -5132,6 +5132,408 @@ def check_gepard():
             warn("noch nicht installiert: gepard_rig.txt (und die Gepard-Teile)")
 
 
+def check_east_world():
+    """[29] The east world ([World] EastTile, Revival.EastWorld.cs).
+
+    GW_Scene_1 plus an additively loaded east tile as one world - and, with
+    the switch off, the vanilla map byte for byte. That second promise rests
+    on structure this check pins: the switch defaults to false and is read
+    once; Install returns before the first Harmony patch when it is off; every
+    call site that knows the east world keeps its old expression on the off
+    branch. The arithmetic itself (off = the old bits, on = one rectangle
+    -2500..7500 x -2500..2500) is executed by research/east_world_check.py;
+    verify.py starts no subprocesses, so that proof only has to be present.
+    Also pinned: the tile is never loaded synchronously (feasibility 4.4: a
+    sync additive load force-activates SceneStreamer's held chunks), and every
+    game method the patches name exists in Assembly-CSharp.
+    """
+    print("[29] East world ([World] EastTile)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("East world: " + why)
+
+    src = read("Revival.EastWorld.cs")
+    if not src:
+        bad("East world: Revival.EastWorld.cs fehlt")
+        return
+    code = _code(src)
+    need('cfg.Bind("World", "EastTile", false,' in code,
+         "[World] EastTile defaults to false",
+         "[World] EastTile is not bound with the default false")
+    need(len(re.findall(r"\bOn = ", code)) == 1
+         and "On = _cfg.Value;" in _body(code, "internal static void BindConfig("),
+         "the switch is read once, in BindConfig",
+         "EastWorld.On is assigned somewhere else than BindConfig")
+    need(re.match(r"\{\s*if \(!On\) return;",
+                  _body(code, "internal static void Install(Harmony h)")) is not None,
+         "Install returns before the first patch when the switch is off",
+         "Install can patch the game with [World] EastTile off")
+    need("SceneManager.LoadScene(" not in code,
+         "the tile is never loaded synchronously (4.4)",
+         "a synchronous SceneManager.LoadScene would flush SceneStreamer's held chunks")
+    tick = _body(code, "internal static void Tick()")
+    guard = _body(code, "static void Guard()")
+    need("Guard();" in tick and "if (!TileLoaded())" in guard and "SeamPoint(p, out seam)" in guard
+         and "surface - 1f" in guard and "MapTools.TeleportLocal(up, out msg)" in guard,
+         "Guard: nobody east of the edge without the tile, nobody left under the tile surface",
+         "Guard() is missing or no longer holds/lifts - the 2026-09-23 relog fell under the tile and died")
+    need("LoadSceneAsync(SceneName, LoadSceneMode.Additive)" in code,
+         "the tile loads async and additive",
+         "the tile load is not LoadSceneAsync(..., Additive)")
+    # The real tile (unity/EastTile BuildTile.cs): its scene and bundle, and
+    # the one terrain lookup every height/surface answer goes through skips
+    # the tile's tree-only terrains (flat stand-in heightmap, no splat).
+    need('internal const string SceneName = "EastTile";' in code
+         and 'const string BundleFile = "east_tile.bundle";' in code
+         and os.path.isfile(os.path.join(ROOT, "assets", "east_tile.bundle"))
+         and '"east_tile.bundle"' in read("build.ps1"),
+         "the east tile: scene EastTile from assets/east_tile.bundle, installed by build.ps1",
+         "SceneName/BundleFile are not the east tile's, or assets/east_tile.bundle is missing or not installed")
+    need("|| !t.drawHeightmap) continue;" in _body(code, "static Terrain OtherTerrainAt("),
+         "terrain lookups take the tile terrain that draws the heightmap",
+         "OtherTerrainAt can answer from a tree-only tile terrain (flat heights, no splat)")
+    frac = _body(code, "internal static Vector2 Fraction(")
+    need("if (!Extends) return new Vector2(pos.x / worldSize.x + 0.5f, pos.z / worldSize.y + 0.5f);" in frac,
+         "Fraction keeps the old grid formula when the east world is not up",
+         "Fraction's off branch is not the old pos / W + 0.5")
+
+    plugin = _code(read("RevivalPlugin.cs"))
+    for seam in ("EastWorld.BindConfig(Config);", "EastWorld.Install(_harmony);", "EastWorld.Tick();"):
+        need(seam in plugin, "Seam " + seam + " in RevivalPlugin.cs", seam + " missing in RevivalPlugin.cs")
+
+    ground = _code(read("Revival.GroundEnemies.cs"))
+    need("EastWorld.On ? !EastWorld.OnTerrain(point)" in ground
+         and "(point.x < -2500f || point.x > 2500f || point.z < -2500f || point.z > 2500f)" in ground
+         and "result.x >= -2500f && result.x <= 2500f && result.z >= -2500f && result.z <= 2500f" in ground,
+         "TryGround: terrain bounds when on, the old +-2500 when off",
+         "TryGround lost either its east-world bound or its old +-2500")
+    troops = _body(_code(read("RevivalTroopInsertion.cs")), "internal static bool TerrainHeight(")
+    need("if (EastWorld.On) return EastWorld.TerrainHeight(xz, out y);" in troops
+         and "_activeTerrain.Invoke(null, null)" in troops,
+         "TerrainHeight: the terrain containing the point when on, activeTerrain when off",
+         "RevivalTroopInsertion.TerrainHeight is not split on EastWorld.On")
+    admin = _code(read("Revival.Admin.cs"))
+    need("(point.x - centre.x) / world.x * map.x" in admin
+         and "(nx - 0.5f) * world.x + centre.x" in admin,
+         "MapTools projects and clicks about EastWorld.MapCentre",
+         "MapTools still assumes the origin-centred map")
+    need("(nx - 0.5f) * world.x + centre.x" in _code(read("RevivalMortar.cs")),
+         "the mortar's map click uses EastWorld.MapCentre",
+         "RevivalMortar.MapPoint still assumes the origin-centred map")
+    for name in ("RevivalConvoy.cs", "RevivalTroopInsertion.cs"):
+        need("EastWorld.Fraction(pos, w)" in _code(read(name)),
+             name + " grid square through EastWorld.Fraction",
+             name + " grid square still assumes the origin-centred map")
+    need('"Revival.EastWorld.cs"' in read("sync_public.py"),
+         "Revival.EastWorld.cs goes into the public repository",
+         "sync_public.py does not carry Revival.EastWorld.cs - the public build breaks")
+    need(os.path.exists(os.path.join(ROOT, "research", "east_world_check.py")),
+         "research/east_world_check.py liegt vor",
+         "research/east_world_check.py fehlt - off/on arithmetic unproven")
+
+    ink = _code(read("Revival.MapInk.cs"))
+    need("if (!EastWorld.Extends)" in _body(ink, "internal static Vector2 Artwork(")
+         and "EastArtWidth" in _body(ink, "internal static Vector2 Artwork(")
+         and "Assets.Texture(file, false, true)" in ink,
+         "MapInk keeps vanilla registration off and installs the wider artwork on",
+         "MapInk has no gated east-art registration")
+    need(all(os.path.isfile(os.path.join(ROOT, "assets", f))
+             for f in ("east_map_en.png", "east_map_ru.png"))
+         and all('"%s"' % f in read("build.ps1")
+                 for f in ("east_map_en.png", "east_map_ru.png")),
+         "the RU/EN east artwork exists and build.ps1 installs it",
+         "east_map_en.png/east_map_ru.png is missing or not installed")
+    need(os.path.exists(os.path.join(ROOT, "assets", "editor", "basemap_east.png"))
+         and os.path.exists(os.path.join(ROOT, "research", "east_map.py"))
+         and os.path.exists(os.path.join(ROOT, "research", "east_map_check.py")),
+         "editor artwork, deterministic generator and acceptance check exist",
+         "east editor artwork or its generator/check is missing")
+    crossings = _code(read("Revival.EastCrossings.cs"))
+    need("EastCrossings.BeforeLocationMarker(__instance);" in code
+         and "Place(trigger.transform, to" in _body(crossings, "internal static void BeforeLocationMarker("),
+         "the Conductor moves before LocationChangeTrigger registers its marker",
+         "the Conductor's map marker can still be registered at the old position")
+
+    targets = re.findall(r'Patch\(h, "(\w+)", "(\w+)"', code)
+    need(len(targets) == 11, "%d game methods patched" % len(targets),
+         "expected 11 patch targets, found %d" % len(targets))
+    game = os.path.join(GAME, "nextday_game_Data", "Managed", "Assembly-CSharp.dll") if GAME else ""
+    if ildasm is None or not game or not os.path.exists(game):
+        warn("East world: Assembly-CSharp.dll or ildasm.py missing - patch targets not checked")
+        return
+    methods = ildasm.Asm(game).methods
+    for cls, meth in targets:
+        need(cls + "::" + meth in methods, "%s.%s exists in the game" % (cls, meth),
+             "%s.%s is patched but does not exist in Assembly-CSharp" % (cls, meth))
+
+
+def check_east_roads():
+    """[31] The east tile's roads (task I, docs/ai/tasks/east-roads.md).
+
+    research/east_roads.py designs and carves them; the tile is built from
+    its carved heights and paints them in a road layer of its own; the bundle
+    meshes them with the game's road materials and carries the game's
+    Bridge_1 and rail40; the pieces on GW_Scene_1's cut floors ship inactive
+    and EastCrossings switches them on with the cuts; the served road network
+    has the tile's sections APPENDED - every GW_Scene_1 id as it was. Pinned
+    too: BuildTile paints the ground after CreateAsset, which resets a
+    TerrainData's alphamaps (until task I the tile bundle shipped with no
+    ground paint at all).
+    """
+    import json
+    print("[31] East roads (task I)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("East roads: " + why)
+
+    need(os.path.isfile(os.path.join(ROOT, "research", "east_roads.py")),
+         "research/east_roads.py designs, routes and carves the roads",
+         "research/east_roads.py fehlt")
+    td = read(os.path.join("unity", "EastTile", "Tools", "tile_data.py"))
+    need('"east_tile_roads.raw"' in td and "ROAD_LAYER = len(SPLATS) - 1" in td
+         and "the road carve touched the seam column" in td,
+         "tile_data.py builds the tile from the carved heights (seam column held) and paints the road layer last",
+         "tile_data.py does not build from east_tile_roads.raw, or has no road layer")
+    bt = _code(read(os.path.join("unity", "EastTile", "Assets", "Editor", "BuildTile.cs")))
+    swap = _body(bt, "static void Swap(")
+    gd = _body(bt, "static TerrainData GroundData(")
+    need("ground.SetAlphamaps(0, 0, before);" in swap and "ground.splatPrototypes = sp;" in swap
+         and swap.find("ground.splatPrototypes = sp;") < swap.find("ground.SetAlphamaps(0, 0, before);")
+         and 0 <= gd.find("AssetDatabase.CreateAsset(td,") < gd.find("td.SetAlphamaps("),
+         "BuildTile paints the ground AFTER CreateAsset (which resets alphamaps) and the GAME swap keeps it",
+         "BuildTile paints before CreateAsset or swaps without restoring the alphamap - the bundle ships unpainted")
+    need("static void Roads(" in bt and "static void MakeBridge(" in bt and "static void Rail(" in bt
+         and "cutRoads.SetActive(false);" in bt and "RoadNav();" in bt and "BridgeNav();" in bt,
+         "BuildTile meshes the roads, builds the bridge, lays the rail, ships the cut pieces inactive, "
+         "checks the NavMesh along the roads and on the deck",
+         "BuildTile lacks the roads, the bridge, the rail, the inactive cut group or the NavMesh checks")
+    cr = _code(read("Revival.EastCrossings.cs"))
+    seam = _body(cr, "static void TickSeam(")
+    need('Find("EastTileCutRoads")' in seam and "SetActive(true)" in seam,
+         "EastCrossings switches the tile's cut-floor roads on together with the cuts",
+         "EastCrossings.TickSeam does not switch EastTileCutRoads on")
+    rn = read("roadnet.py")
+    need("def east_extend(" in rn and "EAST_ROAD_LAYER = 12" in rn and '"-extend" in sys.argv' in rn,
+         "roadnet.py -east -extend skeletonises the tile's road layer",
+         "roadnet.py has no -east -extend")
+    sample = read(os.path.join("assets", "editor", "roadnet_sample.json"))
+    try:
+        net = json.loads(sample)
+    except ValueError:
+        net = {"edges": [], "nodes": []}
+    east = [e for e in net.get("edges", []) if e.get("east")]
+    van = [e for e in net.get("edges", []) if not e.get("east")]
+    vnodes = [n for n in net.get("nodes", []) if not n.get("east")]
+    need(east and [e["id"] for e in van] == list(range(len(van)))
+         and min(e["id"] for e in east) == len(van)
+         and [n["id"] for n in vnodes] == list(range(len(vnodes)))
+         and all(n["id"] >= len(vnodes) for n in net["nodes"] if n.get("east")),
+         "served network: %d east sections appended after GW_Scene_1's %d, every old id in place" % (len(east), len(van)),
+         "assets/editor/roadnet_sample.json has no east sections, or they renumber GW_Scene_1's")
+    by = {e["id"]: e for e in van}
+    joined = True
+    for vid, road in ((21, "s3"), (50, "s2")):
+        v = by.get(vid)
+        ends = [v["pts"][0][:2], v["pts"][-1][:2]] if v else []
+        joined &= any(e.get("eastRoad") == road and e["pts"][0][:2] in ends for e in east)
+    need(joined and all(len(e.get("displayPts") or []) == len(e["pts"]) for e in east),
+         "S3 continues section 21 and S2 section 50 from their end points; every east section has display points",
+         "an east saddle road does not start on its main-map section's end, or lacks displayPts")
+    design = os.path.join(ROOT, "research", "out", "east-tile", "east_roads.json")
+    if os.path.exists(design):
+        checks = json.load(open(design)).get("checks", [])
+        need(checks and not any(c.startswith("FAIL") for c in checks),
+             "east_roads.py design checks: %d, none FAIL (grades < 12 %%, seam column, reserved areas)" % len(checks),
+             "east_roads.py design checks FAIL - python research/east_roads.py")
+    else:
+        warn("East roads: research/out/east-tile/east_roads.json fehlt - Design nicht geprueft "
+             "(python research/east_roads.py)")
+
+
+def check_east_crossings():
+    """[30] The east crossings ([World] EastCrossings, Revival.EastCrossings.cs).
+
+    The three saddle cuts into GW_Scene_1's east berm, in memory, only inside
+    the east world. Pinned here: ONE switch, on by default but acting only with
+    [World] EastTile (off by default), read once; Tick and BeforeSpawn return
+    first when it is off; the heights go in from EastWorld's SpawnPlayer prefix,
+    before anybody is put on the ground. The vanilla NavMesh is never updated
+    in place - UpdateNavMeshData drops every tile outside its bounds
+    (unity/EastCrossingsTest measured it), so only our own NavMeshData is ever
+    built. The tile's temporary seam walls are switched off only by this class.
+    The generated data is self-consistent, carries Kevin's decisions (both
+    tunnels gone, the S1 track and train kept, the Conductor placed beside the
+    road with his spawn points left where they are) and, when the design's
+    cut file is present, equals it sample for sample. The engine behaviour is
+    proved by python research/east_crossings_unity.py (Unity 2018.1.0f2, play
+    mode); verify.py starts no subprocesses, so that proof only has to be present.
+    """
+    print("[30] East crossings ([World] EastCrossings)")
+    import base64
+    import json
+    import struct
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("East crossings: " + why)
+
+    src = read("Revival.EastCrossings.cs")
+    core = read("Revival.EastCrossingsCore.cs")
+    data = read("Revival.EastCrossingsData.cs")
+    if not (src and core and data):
+        bad("East crossings: Revival.EastCrossings.cs / Core.cs / Data.cs fehlt")
+        return
+    code, ccode = _code(src), _code(core)
+    need('cfg.Bind("World", "EastCrossings", true,' in code and "EastCrossingTrial" not in code,
+         "one switch, [World] EastCrossings (default true, acting only inside the east world)",
+         "[World] EastCrossings is not the one switch bound with the default true")
+    need(len(re.findall(r"\bOn = ", code)) == 1
+         and "On = _cfg.Value && EastWorld.On;" in _body(code, "internal static void BindConfig("),
+         "the switch is read once, and only acts together with [World] EastTile",
+         "EastCrossings.On is assigned elsewhere, or not tied to EastWorld.On")
+    need(re.match(r"\{\s*if \(!On\) return;", _body(code, "internal static void Tick()")) is not None
+         and re.match(r"\{\s*if \(!On\) return;", _body(code, "internal static void BeforeSpawn()")) is not None,
+         "Tick and BeforeSpawn return first when the switch is off",
+         "EastCrossings.Tick or BeforeSpawn does work with the switch off")
+    world = _code(read("Revival.EastWorld.cs"))
+    need(re.match(r"\{\s*__state = null;\s*EastCrossings\.BeforeSpawn\(\);",
+                  _body(world, "static void SpawnPrefix(")) is not None,
+         "the cut heights go in from EastWorld.SpawnPrefix, before SpawnPlayer places anybody",
+         "EastWorld.SpawnPrefix does not call EastCrossings.BeforeSpawn() first - a player saved on a cut "
+         "would spawn inside the old berm")
+    plugin = _code(read("RevivalPlugin.cs"))
+    bw, bc = plugin.find("EastWorld.BindConfig(Config);"), plugin.find("EastCrossings.BindConfig(Config);")
+    need(0 <= bw < bc, "EastCrossings.BindConfig runs after EastWorld.BindConfig (it reads EastWorld.On)",
+         "EastCrossings.BindConfig missing or before EastWorld.BindConfig")
+    need("EastCrossings.Tick();" in plugin, "Seam EastCrossings.Tick(); in RevivalPlugin.cs",
+         "EastCrossings.Tick(); missing in RevivalPlugin.cs")
+    # the vanilla NavMesh is never touched in place
+    upd = re.findall(r"UpdateNavMeshData(?:Async)?\((\w+),", code + ccode)
+    need(upd and set(upd) <= {"d"},
+         "UpdateNavMeshData only on our own data (%s)" % ", ".join(sorted(set(upd))),
+         "UpdateNavMeshData on %s - an in-place update drops every vanilla tile outside its bounds"
+         % ", ".join(sorted(set(upd))))
+    need("FindObjectsOfTypeAll(typeof(NavMeshData))" not in code + ccode,
+         "the vanilla NavMeshData is not looked up",
+         "the vanilla NavMeshData is looked up - nothing may rebuild it")
+    need("new NavMeshData(0)" in ccode and "PatchArea = 3" in ccode,
+         "the patch is its own NavMeshData on area 3",
+         "the patch is not its own NavMeshData on area 3")
+    need("DropNav(" in _body(code, "static void Hook()"),
+         "the patches and links are removed with GW_Scene_1 (added NavMesh data outlives scenes)",
+         "nothing removes the patches when GW_Scene_1 goes - they would stay on the next map")
+    need("&& hang.y > pb.y + 0.3f) continue;" in _body(ccode, "internal static List<NavMeshLinkInstance> BandLinks("),
+         "a band link never ends under a hanging remnant of the vanilla surface",
+         "BandLinks can end under a hanging vanilla remnant - agents walk up onto a floating floor")
+    wall = [name for name in os.listdir(ROOT) if name.endswith(".cs") and "EastTileSeamWall" in read(name)]
+    need(wall == ["Revival.EastCrossings.cs"] and 'Find("EastTileSeamWall")' in _body(code, "static void TickSeam()"),
+         "only the crossings take the tile's seam walls down (switch off = walls up)",
+         "EastTileSeamWall is handled in %s, not only in EastCrossings.TickSeam" % wall)
+    # the generated data
+    need("GENERATED by research/east_crossings.py -emit" in data,
+         "Revival.EastCrossingsData.cs is generated", "Revival.EastCrossingsData.cs is not the generator's")
+    blocks = data.split("new CrossingSaddle {")[1:]
+    keys = [re.search(r'Key = "(\w+)"', b).group(1) for b in blocks]
+    need(keys == ["S1", "S2", "S3"], "the data carries S1, S2 and S3", "the data carries %s" % keys)
+
+    def num(b, name):
+        m = re.search(r"\b" + name + r" = (-?[\d.]+)f?[,;]", b)
+        return float(m.group(1)) if m else None
+
+    def blob(b, name):
+        m = re.search(r"\b" + name + r" =\s*((?:\"[^\"]*\"\s*[+,]\s*)+)", b)
+        return base64.b64decode("".join(re.findall(r'"([^"]*)"', m.group(1)))) if m else b""
+
+    cut = os.path.join(ROOT, "research", "out", "east-tile", "main_map_saddle_cuts.json")
+    design = None
+    if os.path.exists(cut):
+        meta = json.load(io.open(cut, encoding="utf-8"))
+        raw = open(cut[:-5] + ".raw", "rb").read()
+        h, w = meta["shape"]
+        design = (meta["origin"]["row"], meta["origin"]["col"], h, w, struct.unpack("<%dh" % (h * w), raw))
+    else:
+        warn("East crossings: research/out/east-tile fehlt - Schnitt nicht gegen das Design verglichen "
+             "(python research/east_tile.py)")
+    layers = re.search(r"PaintLayers = \{ ([\d, ]+) \}", data)
+    need(layers is not None and [int(v) for v in layers.group(1).split(",")] == [6, 7, 14, 13],
+         "paint layers Ter4, Ter6, asphalt_tint, dirt_tint_2 (GWTerrain2 6, 7, 14, 13)",
+         "PaintLayers is not GWTerrain2's Ter4/Ter6/asphalt_tint/dirt_tint_2")
+    for key, b in zip(keys, blocks):
+        col0, row0, cols, rows = (int(num(b, n) or -1) for n in ("Col0", "Row0", "Cols", "Rows"))
+        old = struct.unpack("<%dh" % (cols * rows), blob(b, "OldHeights")) if cols > 0 else ()
+        new = struct.unpack("<%dh" % (cols * rows), blob(b, "NewHeights")) if cols > 0 else ()
+        changed = sum(1 for a, c in zip(old, new) if a != c)
+        need(len(old) == cols * rows == len(new) and changed == int(num(b, "ChangedSamples") or -1)
+             and 0 <= col0 and col0 + cols <= 1025 and 0 <= row0 and row0 + rows <= 1025,
+             "%s: height box %d x %d at col %d row %d, %d changed samples" % (key, cols, rows, col0, row0, changed),
+             "%s: height box inconsistent (%d / %d samples, %d changed)" % (key, len(old), len(new), changed))
+        if design and old:
+            r0, c0, h, w, box = design
+            off = 0
+            for r in range(rows):
+                for c in range(cols):
+                    rr, cc = row0 + r - r0, col0 + c - c0
+                    d = box[rr * w + cc] if 0 <= rr < h and 0 <= cc < w else 0
+                    if new[r * cols + c] - old[r * cols + c] != d:
+                        off += 1
+            need(off == 0, "%s: the shipped cut equals the design's main_map_saddle_cuts.raw sample for sample" % key,
+                 "%s: %d samples differ from main_map_saddle_cuts.raw - re-emit" % (key, off))
+        aw, ah, n = int(num(b, "AlphaW") or 0), int(num(b, "AlphaH") or 0), int(num(b, "PaintTexels") or -1)
+        rec = blob(b, "Paint")
+        good = len(rec) == 7 * n and aw * ah <= 65535
+        for i in range(0, len(rec) if good else 0, 7):
+            idx = rec[i] | (rec[i + 1] << 8)
+            if idx >= aw * ah or rec[i + 2] == 0 or sum(rec[i + 3:i + 7]) != 255:
+                good = False
+                break
+        need(good, "%s: %d paint records inside the %d x %d texel box, each mix sums to 255" % (key, n, aw, ah),
+             "%s: paint records inconsistent" % key)
+    props = "\n".join(re.findall(r'"(GW_Scene_1[^"]*)"', data))
+    hides = set(re.findall(r"/([^/\\]+)\\t[-\d.]+\\t[-\d.]+\\t[-\d.]+\\thide\\t", props))
+    need({"Tonel_GD_LOD_Group", "Zaval_1_LOD_Group", "Tonel_Avto_LOD_Group", "Tonel_Gate_LOD_Group (2)"} <= hides
+         and not {"Railroad_Section12_LOD_Group", "electric_train_LOD_Group"} & hides,
+         "both tunnels go (S1 Tonel_GD + Zaval_1, S3 Tonel_Avto + gate); the S1 track and train stay",
+         "the tunnel hides / track-and-train keeps are not in the data")
+    place = re.search(r"Place = \{(.*?)\};", data, re.S)
+    cond = re.search(r'"GW_Scene_1\\tServerObjects/Triggers/ChangeLocationTriggers/Marauder_Conductor_02\\t'
+                     r'([-\d. ]+)\\t([-\d. ]+)\\t([-\d.]+)\\tSpawnPoints"', place.group(1) if place else "")
+    if cond:
+        fx, fy, fz = (float(v) for v in cond.group(1).split())
+        tx, ty, tz = (float(v) for v in cond.group(2).split())
+        moved = ((tx - fx) ** 2 + (tz - fz) ** 2) ** 0.5
+        need(tx < 2279.0 and 5.0 < moved < 60.0 and abs(tz - 1813.2) > 25.0,
+             "the Conductor goes %.0f m to (%.0f, %.0f), beside the road and off the cut; his SpawnPoints stay"
+             % (moved, tx, tz),
+             "the Conductor's new spot (%.0f, %.0f) is on the cut, on the road or not beside his old one" % (tx, tz))
+    else:
+        bad("East crossings: no Place record moves Marauder_Conductor_02 with his SpawnPoints pinned")
+    for name in ("Revival.EastCrossings.cs", "Revival.EastCrossingsCore.cs", "Revival.EastCrossingsData.cs"):
+        need('"' + name + '"' in read("sync_public.py"), name + " goes into the public repository",
+             "sync_public.py does not carry " + name + " - the public build breaks")
+    for name in ("research/east_crossings.py", "research/east_crossings_emit.py", "research/east_crossings_unity.py",
+                 "unity/EastCrossingsTest/Assets/Scripts/CrossingPlay.cs"):
+        need(os.path.exists(os.path.join(ROOT, name)), name + " liegt vor", name + " fehlt")
+
 if __name__ == "__main__":
     print("=" * 74)
     print("Statische Pruefung des Revival Toolkits")
@@ -5170,6 +5572,9 @@ if __name__ == "__main__":
     check_editor_heights()
     check_road_clear()
     check_gepard()
+    check_east_world()
+    check_east_crossings()
+    check_east_roads()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

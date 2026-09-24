@@ -522,8 +522,12 @@ namespace NextDayRevival
             gui = Vector2.zero;
             if (texture == null || cam == null || world.x <= 0f || world.y <= 0f)
                 return false;
-            Vector3 local = new Vector3(point.x / world.x * map.x,
-                                        point.z / world.y * map.y, 0f);
+            // The map is centred on the world origin - except in the east
+            // world, whose rectangle is centred on (2500, 0). Off, the centre
+            // is (0, 0) and subtracting it changes no bit.
+            Vector2 centre = EastWorld.MapCentre;
+            Vector3 local = new Vector3((point.x - centre.x) / world.x * map.x,
+                                        (point.z - centre.y) / world.y * map.y, 0f);
             Vector3 screen = cam.WorldToScreenPoint(texture.transform.TransformPoint(local));
             if (screen.z < 0f) return false;
             gui = new Vector2(screen.x, Screen.height - screen.y);
@@ -649,8 +653,9 @@ namespace NextDayRevival
                 float ny = (inUi.y - bounds.min.y) / bounds.size.y;
                 if (nx < 0f || nx > 1f || ny < 0f || ny > 1f) return false;
 
-                Vector3 above = new Vector3((nx - 0.5f) * world.x, 1000f,
-                                            (ny - 0.5f) * world.y);
+                Vector2 centre = EastWorld.MapCentre;   // (0, 0) unless the east world is on
+                Vector3 above = new Vector3((nx - 0.5f) * world.x + centre.x, 1000f,
+                                            (ny - 0.5f) * world.y + centre.y);
                 Vector3 hit;
                 if (Turret.RaycastObject(above, Vector3.down, 2500f, out hit) == null)
                     return false;

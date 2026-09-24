@@ -208,7 +208,14 @@ $assets = @(
     # East extension probe (Revival.EastTile.cs, [Research] EastTile, off by
     # default): a Unity 2018.1.0f2 scene bundle with one terrain tile, built by
     # unity/EastTileProbe. Shipped like a real tile would be.
-    "east_tile_probe.bundle"
+    "east_tile_probe.bundle",
+    # The east tile itself ([World] EastTile, Revival.EastWorld.cs, off by
+    # default): the scene bundle built by unity/EastTile BuildTile.cs, its
+    # game content referenced in the game's own files, not copied.
+    "east_tile.bundle",
+    # Bilingual 2:1 artwork for that world. MapInk installs one only while the
+    # east world is active; the vanilla MapLanguagePreset remains untouched off.
+    "east_map_en.png", "east_map_ru.png"
 )
 
 # Alte Dateien, die es nicht mehr gibt - sonst liegt die Metallic-Map von 0.2.0

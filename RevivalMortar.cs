@@ -1733,7 +1733,9 @@ namespace NextDayRevival
                 float ny = (inUi.y - b.min.y) / b.size.y;
                 if (nx < 0f || nx > 1f || ny < 0f || ny > 1f) return false;
 
-                Vector3 flat = new Vector3((nx - 0.5f) * world.x, 0f, (ny - 0.5f) * world.y);
+                Vector2 centre = EastWorld.MapCentre;   // (0, 0) unless the east world is on
+                Vector3 flat = new Vector3((nx - 0.5f) * world.x + centre.x, 0f,
+                                           (ny - 0.5f) * world.y + centre.y);
                 float y;
                 if (!RevivalTroopInsertion.GroundY(flat, out y)) y = 0f;
                 point = new Vector3(flat.x, y, flat.z);

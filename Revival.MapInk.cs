@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 
 namespace NextDayRevival
@@ -32,6 +34,11 @@ namespace NextDayRevival
         static readonly Dictionary<string, Cache> Caches = new Dictionary<string, Cache>();
         static readonly List<string> Retired = new List<string>();
         static int Frame;
+        const float VanillaArt = 1024f;
+        const float EastArtWidth = 2048f;
+        const string EastMapEn = "east_map_en.png";
+        const string EastMapRu = "east_map_ru.png";
+        static bool _artLogged;
 
         internal static void Begin() { Frame++; }
 
@@ -56,14 +63,56 @@ namespace NextDayRevival
 
         internal static Vector2 Artwork(Vector3 p)
         {
-            return new Vector2(p.x * (1024f / 5000f) * 1.005f + 514f,
-                              -p.z * (1024f / 5000f) * 1.005f + 508f);
+            if (!EastWorld.Extends)
+                return new Vector2(p.x * (1024f / 5000f) * 1.005f + 514f,
+                                  -p.z * (1024f / 5000f) * 1.005f + 508f);
+            // The old 1024 px registration occupies the west half of the new
+            // 2:1 artwork. MapInkLayer's logical canvas stays 1024 square, so
+            // source x is divided by two while source y is unchanged.
+            return new Vector2((p.x * (VanillaArt / 5000f) * 1.005f + 514f)
+                                  * VanillaArt / EastArtWidth,
+                              -p.z * (VanillaArt / 5000f) * 1.005f + 508f);
         }
 
         static Vector3 DisplayWorld(Vector2 p, float width)
         {
-            return new Vector3((p.x - 514f) / 1.005f * (5000f / 1024f),
-                               width, -(p.y - 508f) / 1.005f * (5000f / 1024f));
+            if (!EastWorld.Extends)
+                return new Vector3((p.x - 514f) / 1.005f * (5000f / 1024f),
+                                   width, -(p.y - 508f) / 1.005f * (5000f / 1024f));
+            float sourceX = p.x * EastArtWidth / VanillaArt;
+            return new Vector3((sourceX - 514f) / 1.005f * (5000f / VanillaArt),
+                               width, -(p.y - 508f) / 1.005f * (5000f / VanillaArt));
+        }
+
+        /// <summary>Replace only GW_Scene_1's selected RU/EN preset after the
+        /// game has applied it. With EastTile off this method returns before a
+        /// field, property or asset is touched.</summary>
+        internal static void ApplyEastArtwork(object manager, object preset)
+        {
+            if (!EastWorld.Extends || manager == null || preset == null) return;
+            try
+            {
+                FieldInfo mapField = AccessTools.Field(preset.GetType(), "Map");
+                Texture original = mapField == null ? null : mapField.GetValue(preset) as Texture;
+                string name = original == null ? "" : original.name;
+                string file = name.IndexOf("[RU]", StringComparison.OrdinalIgnoreCase) >= 0
+                    ? EastMapRu : EastMapEn;
+                Texture2D replacement = Assets.Texture(file, false, true);
+                FieldInfo widgetField = AccessTools.Field(manager.GetType(), "MapTextureUI");
+                Component widget = widgetField == null ? null : widgetField.GetValue(manager) as Component;
+                PropertyInfo texture = widget == null ? null : AccessTools.Property(widget.GetType(), "mainTexture");
+                if (replacement == null || texture == null) return;
+                texture.SetValue(widget, replacement, null);
+                if (!_artLogged)
+                {
+                    _artLogged = true;
+                    RevivalPlugin.L.LogInfo("MapInk: east artwork " + file + " applied (1848 x 924, RU/EN preset follows the game language).");
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("MapInk: east artwork failed: " + ex.Message);
+            }
         }
 
         sealed class Segment

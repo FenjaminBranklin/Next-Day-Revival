@@ -520,6 +520,11 @@ namespace NextDayRevival
         /// - no collider does not mean no ground.</summary>
         internal static bool TerrainHeight(Vector3 xz, out float y)
         {
+            // East world: the terrain that CONTAINS the point (the vanilla one
+            // first, then the tile), as Crocodile.Ground does over
+            // activeTerrains. activeTerrain alone has no height for any tile
+            // point.
+            if (EastWorld.On) return EastWorld.TerrainHeight(xz, out y);
             y = 0f;
             try
             {
@@ -935,8 +940,9 @@ namespace NextDayRevival
             Vector2 w = WorldSize();
             int cols = CfgGridCols == null ? 10 : Mathf.Clamp(CfgGridCols.Value, 1, 26);
             int rows = CfgGridRows == null ? 10 : Mathf.Clamp(CfgGridRows.Value, 1, 99);
-            float nx = Mathf.Clamp01(pos.x / w.x + 0.5f);
-            float nz = Mathf.Clamp01(pos.z / w.y + 0.5f);
+            Vector2 at = EastWorld.Fraction(pos, w);   // pos / w + 0.5 unless the east world is on
+            float nx = Mathf.Clamp01(at.x);
+            float nz = Mathf.Clamp01(at.y);
             int col = Mathf.Clamp(Mathf.FloorToInt(nx * cols), 0, cols - 1);
             bool topNorth = CfgGridTopIsNorth == null || CfgGridTopIsNorth.Value;
             float rowFrac = topNorth ? (1f - nz) : nz;
