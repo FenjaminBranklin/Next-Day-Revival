@@ -61,6 +61,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
@@ -239,7 +240,40 @@ namespace NextDayRevival
             CfgHoldWeight = cfg.Bind("PlayerHeli", "HoldWeight", 4000f,
                 "What the hold carries, in kilograms. A car trunk takes 80 to "
                 + "100; an Mi-8 lifts four tonnes.");
+            CfgPowerLoss = cfg.Bind("PlayerHeli", "PowerLossThreshold", 0.5f,
+                "Engine output (0..1) under which a machine in the air is lost: "
+                + "it falls, noses down and crashes like a machine nobody flies. "
+                + "A shut-down engine delivers 0 at once, however fast the rotor "
+                + "is still turning. 0 switches the crash off and brings back the "
+                + "old sink under a windmilling rotor.");
+            CfgPowerLossGrace = cfg.Bind("PlayerHeli", "PowerLossGrace", 1f,
+                "Seconds the output may stay under the threshold before the "
+                + "machine is lost. A restart inside this window is a dip, not "
+                + "a crash.");
+            CfgPowerLossHeight = cfg.Bind("PlayerHeli", "PowerLossHeight", 3f,
+                "Under this height in metres an engine stop is a landing, not a "
+                + "crash.");
+            CfgSafetyCanopy = cfg.Bind("PlayerHeli", "SafetyCanopy", true,
+                "Safety net: if the flight ever ends WITHOUT your key and without "
+                + "your death (an error, a machine taken away under you), and you "
+                + "are more than SafetyCanopyHeight over the ground, the canopy "
+                + "opens by itself - no parachute item needed.");
+            CfgSafetyCanopyHeight = cfg.Bind("PlayerHeli", "SafetyCanopyHeight", 10f,
+                "Metres over the ground above which the safety net opens a "
+                + "canopy.");
+            CfgResearchExit = cfg.Bind("PlayerHeli", "ResearchExitTrace", false,
+                "Research: keeps the last two seconds of flight (speed, height, "
+                + "frame time, what else moved the machine, the game's own fall "
+                + "test, collisions of the body) and dumps them into the log at "
+                + "every way out of the machine; logs every damage the player "
+                + "takes aboard with a stack trace; one jitter line per second. "
+                + "The short exit line with its cause is always logged.");
+            FlightView.BindConfig(cfg);
         }
+
+        internal static ConfigEntry<bool> CfgSafetyCanopy, CfgResearchExit;
+        internal static ConfigEntry<float> CfgPowerLoss, CfgPowerLossGrace,
+            CfgPowerLossHeight, CfgSafetyCanopyHeight;
 
         internal static bool Enabled
         {
@@ -330,8 +364,36 @@ namespace NextDayRevival
 
                 if (_heli == null)
                 {
+                    _diedAboard = false;
                     if (Input.GetKeyDown(SpawnKey())) SpawnOrRemove();
                     else if (Input.GetKeyDown(BoardKey())) Board();
+                    return;
+                }
+
+                // The view profile, pilot and passenger alike.
+                float agl;
+                if (Height(_heli, out agl)) FlightView.Report(agl);
+                if (Research) Record();
+
+                // HE DIED IN HIS SEAT. The game's own death (PlayerDeath, hooked
+                // below) ends the flight at once. Before this, a dead man stayed
+                // "aboard" until his body was replaced - and the first key he
+                // pressed on the death screen threw his corpse out of the door,
+                // which is the "jumped at 52 m, canopy False" of 2026-09-25.
+                if (_diedAboard)
+                {
+                    _diedAboard = false;
+                    RevivalPlugin.L.LogInfo("PlayerHeli: the local player died aboard "
+                        + "- the flight ends.");
+                    GameObject left = _heli;
+                    bool wasPilot = _pilot;
+                    bool inAir = _pilot ? !_onGround : Airborne(left);
+                    Vector3 drift = _vel;
+                    Why("death");
+                    Leave(false);
+                    if (wasPilot && inAir && left != null
+                        && (CfgCrash == null || CfgCrash.Value))
+                        Abandon(left, drift, true);
                     return;
                 }
 
@@ -353,6 +415,7 @@ namespace NextDayRevival
                     bool wasPilot = _pilot;
                     bool inAir = _pilot ? !_onGround : Airborne(left);
                     Vector3 drift = _vel;
+                    Why("body gone");
                     Leave(false);
                     // The same rule the jump has, for the same reason: a machine
                     // the PILOT is no longer in, in the air, is a machine nobody
@@ -370,26 +433,46 @@ namespace NextDayRevival
                 // A machine that broke while he was in it does not wait for a
                 // key. Crash() has already thrown him out on this client; this
                 // catches the one somebody else's crash message broke.
-                if (Burning(_heli)) { Leave(false); return; }
+                if (Burning(_heli)) { Involuntary("machine burning"); return; }
+
+                // A machine that has lost its power in the air is falling, and
+                // HeliCrashFall moves it - not the flight. The pilot rides it
+                // down: he can look around, and he can jump.
+                bool falling = Falling(_heli);
 
                 if (Input.GetKeyDown(ViewKey())) _cockpit = !_cockpit;
-                if (Input.GetKeyDown(JumpKey())) { Jump(); return; }
-                if (Input.GetKeyDown(BoardKey())) { Leave(true); return; }
-                if (_pilot && Input.GetKeyDown(EngineKey())) SetEngine(!_engine);
+                if (Input.GetKeyDown(JumpKey())) { Why("key " + JumpKey()); Jump(); return; }
+                if (Input.GetKeyDown(BoardKey())) { Why("key " + BoardKey()); Leave(true); return; }
+                if (_pilot && !falling && Input.GetKeyDown(EngineKey()))
+                {
+                    if (_engine) Why("key " + EngineKey());
+                    SetEngine(!_engine);
+                }
 
                 if (_pilot)
                 {
                     Steer();
-                    Fly();
+                    if (!falling) Fly();
                 }
                 Heartbeat();
+                _errors = 0;
             }
             catch (Exception ex)
             {
+                // One bad frame is not a reason to throw a man out of a machine
+                // at two hundred metres. Several in a row are - and then it is
+                // an involuntary exit, which opens a canopy.
                 RevivalPlugin.L.LogError("PlayerHeli: " + ex);
-                Leave(false);
+                if (++_errors >= 5 || !(_pilot ? !_onGround : Airborne(_heli)))
+                {
+                    _errors = 0;
+                    Involuntary("exception in the flight loop");
+                }
             }
         }
+
+        static int _errors, _camErrors;
+        static bool _diedAboard;
 
         /// <summary>
         /// The body of everyone aboard, put where it belongs. Has to be
@@ -401,7 +484,11 @@ namespace NextDayRevival
         /// </summary>
         internal static void LateFrame()
         {
-            if (!Enabled || _heli == null) return;
+            if (!Enabled) return;
+            // Every frame, aboard or not: out of the machine the profile still
+            // has to blend back to the player's own settings.
+            FlightView.LateTick();
+            if (_heli == null) return;
             try
             {
                 if (_body == null) _body = LocalPlayerRoot();
@@ -478,11 +565,16 @@ namespace NextDayRevival
                 // sprint effects write the field of view back otherwise. Same
                 // reason as the gun camera and the drone.
                 if (CfgFov != null && CfgFov.Value > 1f) cam.fieldOfView = CfgFov.Value;
+                _camErrors = 0;
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("PlayerHeli camera: " + ex);
-                Leave(false);
+                if (++_camErrors >= 5)
+                {
+                    _camErrors = 0;
+                    Involuntary("exception in the camera");
+                }
             }
         }
 
@@ -682,6 +774,10 @@ namespace NextDayRevival
             _heli = go;
             _body = LocalPlayerRoot();
             _hadBody = _body != null;
+            _lowSince = -1f;
+            _hasWritten = false;
+            _foreign = 0f;
+            _ring.Clear();
             _boardedAt = Time.time;
             _cockpit = false;
             _seat = taken ? FreeSeat() : -1;
@@ -749,10 +845,15 @@ namespace NextDayRevival
                 }
                 // Shift and the board key is the old way out, and it is still a
                 // jump - so it gets the same canopy the jump key gets.
+                Why("key " + BoardKey() + " + shift");
                 Jump();
                 return;
             }
 
+            if (!_traced) ExitTrace(byKey ? "leave by key" : "leave");
+            _traced = false;
+            _leaving = true;
+            _leftAt = Time.time;
             int view = ViewId(go);
             try
             {
@@ -779,8 +880,333 @@ namespace NextDayRevival
             {
                 if (_pilot) CameraOwner.Release(CameraOwner.Heli);
                 Reset();
+                _leaving = false;
             }
             RevivalPlugin.L.LogInfo("PlayerHeli: left helicopter " + view + ".");
+        }
+
+        // ======================================================== exit trace
+
+        // Why the next way out is taken. Set by the caller right before it, read
+        // and cleared by ExitTrace; an exit without one says so, and the stack
+        // in the same line names the caller anyway.
+        static string _why;
+        static bool _traced, _leaving;
+        static float _leftAt = -100f;
+
+        static void Why(string cause) { _why = cause; }
+
+        /// <summary>
+        /// One line at EVERY way out of the machine, always on: what happened,
+        /// why (the key, the death, the crash, the error), speed and height,
+        /// which of the exit keys were HELD at that moment - a key nobody
+        /// pressed shows up here - and the call chain. With ResearchExitTrace
+        /// the last two seconds of flight follow.
+        /// </summary>
+        static void ExitTrace(string what)
+        {
+            string cause = string.IsNullOrEmpty(_why) ? "no cause given" : _why;
+            _why = null;
+            _traced = true;
+            try
+            {
+                float k = K;
+                float speed = new Vector3(_vel.x, 0f, _vel.z).magnitude / k * 3.6f;
+                float agl = -1f;
+                bool known = _heli != null && Height(_heli, out agl);
+                if (!known) agl = -1f;
+                StringBuilder sb = new StringBuilder("PlayerHeli exit: ");
+                sb.Append(what).Append(" - cause: ").Append(cause)
+                  .Append("; helicopter ").Append(ViewId(_heli))
+                  .Append(_pilot ? " (pilot)" : " (passenger)")
+                  .Append(", ").Append(Mathf.RoundToInt(speed)).Append(" km/h, ")
+                  .Append(known ? Mathf.RoundToInt(agl) + " m" : "height unknown")
+                  .Append(Falling(_heli) ? ", falling" : "")
+                  .Append("; keys held: ").Append(Held())
+                  .Append("; caller: ").Append(Caller(Research ? 14 : 6));
+                RevivalPlugin.L.LogInfo(sb.ToString());
+                if (Research) Dump();
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli exit trace: " + ex.Message);
+            }
+        }
+
+        /// <summary>The keys that can end a flight, as held right now.</summary>
+        static string Held()
+        {
+            StringBuilder sb = new StringBuilder();
+            KeyCode[] keys = { JumpKey(), BoardKey(), EngineKey(),
+                               KeyCode.LeftShift, KeyCode.RightShift, KeyCode.Escape };
+            for (int i = 0; i < keys.Length; i++)
+                if (Input.GetKey(keys[i]))
+                    sb.Append(sb.Length > 0 ? "+" : "").Append(keys[i]);
+            return sb.Length > 0 ? sb.ToString() : "none";
+        }
+
+        /// <summary>The call chain, compact: "Leave <- Jump <- Tick <- Update".
+        /// Environment.StackTrace, with this method and the tracer cut off.</summary>
+        internal static string Caller(int frames)
+        {
+            string[] lines = Environment.StackTrace.Split('\n');
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            for (int i = 0; i < lines.Length && n < frames; i++)
+            {
+                string l = lines[i].Trim();
+                if (l.StartsWith("at ")) l = l.Substring(3);
+                int paren = l.IndexOf(" (");
+                if (paren < 0) paren = l.IndexOf('(');
+                if (paren > 0) l = l.Substring(0, paren);
+                if (l.Length == 0 || l.StartsWith("System.Environment")
+                    || l.EndsWith(".Caller") || l.EndsWith(".ExitTrace")) continue;
+                l = l.Replace("NextDayRevival.", "");
+                if (sb.Length > 0) sb.Append(" <- ");
+                sb.Append(l);
+                n++;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// The safety net. Every way out that is NOT the player's key and NOT
+        /// his death ends up here - an error in the flight loop, a machine
+        /// taken away under him - and if he is more than SafetyCanopyHeight up
+        /// he gets a canopy, parachute in the pack or not. It should never run;
+        /// if it does, the exit line above names the cause.
+        /// </summary>
+        static void Involuntary(string cause)
+        {
+            GameObject go = _heli;
+            bool wasPilot = _pilot;
+            bool inAir = go != null && (_pilot ? !_onGround : Airborne(go));
+            Vector3 drift = _vel;
+            float height = -1f;
+            Vector3 door = Vector3.zero;
+            float floor;
+            if (go != null)
+            {
+                Transform tr = go.transform;
+                door = tr.position + tr.rotation * (new Vector3(-8f, 0f, 2f) * K);
+                if (Floor(tr.position, out floor)) height = (tr.position.y - floor) / K;
+            }
+            else if (_body != null)
+            {
+                door = _body.position;
+                if (Floor(door, out floor)) height = (door.y - floor) / K;
+            }
+
+            Why("involuntary: " + cause);
+            Leave(false);
+
+            float safe = CfgSafetyCanopyHeight == null ? 10f : CfgSafetyCanopyHeight.Value;
+            if ((CfgSafetyCanopy == null || CfgSafetyCanopy.Value) && height > safe)
+            {
+                bool open = SafetyCanopy(door);
+                RevivalPlugin.L.LogWarning("PlayerHeli: involuntary exit at "
+                    + Mathf.RoundToInt(height) + " m (" + cause + ") - safety canopy "
+                    + (open ? "open." : "FAILED to open."));
+                Hint(open ? Parachute.Text.Open() : Parachute.Text.Failed(), 5f);
+            }
+            if (wasPilot && inAir && go != null && !Burning(go)
+                && (CfgCrash == null || CfgCrash.Value))
+                Abandon(go, drift, true);
+        }
+
+        static MethodInfo _mCanopy;
+
+        /// <summary>The parachute module's own canopy - the game's parachute
+        /// state entered with the canopy open - without its item and height
+        /// checks, which are for a jump the player chose. Through reflection,
+        /// so Revival.Parachute.cs is not touched for a safety net.</summary>
+        static bool SafetyCanopy(Vector3 at)
+        {
+            try
+            {
+                if (_mCanopy == null)
+                    _mCanopy = AccessTools.Method(typeof(Parachute), "Open",
+                        new Type[] { typeof(Vector3) }, null);
+                if (_mCanopy == null) return false;
+                bool open = (bool)_mCanopy.Invoke(null, new object[] { at });
+                if (open) Parachute.Falling = true;
+                return open;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli safety canopy: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>Metres over the floor under the machine.</summary>
+        static bool Height(GameObject go, out float metres)
+        {
+            metres = 0f;
+            if (go == null) return false;
+            float floor;
+            if (!Floor(go.transform.position, out floor)) return false;
+            metres = (go.transform.position.y - floor) / K;
+            return true;
+        }
+
+        /// <summary>The local player's body, for the guard.</summary>
+        internal static Transform Body
+        {
+            get { return _body != null ? _body : LocalPlayerRoot(); }
+        }
+
+        /// <summary>Aboard, or out for less than three seconds - the window in
+        /// which a hit still belongs to the flight.</summary>
+        internal static bool RecentlyAboard
+        {
+            get { return _heli != null || Time.time - _leftAt < 3f; }
+        }
+
+        /// <summary>Speed and height, for a log line.</summary>
+        internal static string Where()
+        {
+            float agl = -1f;
+            bool known = _heli != null && Height(_heli, out agl);
+            if (!known) agl = -1f;
+            return Mathf.RoundToInt(new Vector3(_vel.x, 0f, _vel.z).magnitude / K * 3.6f)
+                + " km/h, " + (known ? Mathf.RoundToInt(agl) + " m" : "height unknown");
+        }
+
+        /// <summary>The game has just killed the local player while he sat in a
+        /// machine. The flight ends on the next Tick, not inside the game's own
+        /// death call.</summary>
+        internal static void DiedAboard(string args)
+        {
+            _diedAboard = true;
+            RevivalPlugin.L.LogInfo("PlayerHeli: local player died aboard (PlayerDeath "
+                + args + "); " + Where() + "; caller: " + Caller(Research ? 14 : 6));
+        }
+
+        // ============================================================ research
+
+        /// <summary>ResearchExitTrace: the flight recorder is on.</summary>
+        internal static bool Research
+        {
+            get { return CfgResearchExit != null && CfgResearchExit.Value; }
+        }
+
+        /// <summary>One frame of the flight recorder.</summary>
+        struct Frame
+        {
+            public float T, Dt, Kmh, Agl, Power, Foreign, Ground;
+            public Vector3 Pos;
+            public bool Grounded, RayHit;
+            public int Guarded;
+        }
+
+        const int RingSize = 120;
+        static readonly List<Frame> _ring = new List<Frame>(RingSize);
+        static int _ringNext;
+        static float _jitterAt, _dtMin = 1f, _dtMax, _foreignMax, _yawStepMax, _lastYawRate;
+        static int _hitches, _guardedFrame;
+        internal static int GuardedCalls;          // counted by HeliBodyGuard
+        internal static string LastBodyHit = "none", LastRayHit = "none";
+
+        /// <summary>
+        /// One frame into the ring: time, frame length, where, how fast, how
+        /// high, the rotor's power, whether the game thinks the seated body is
+        /// on the ground, and the SAME downward line the game's fall check casts
+        /// (200 units, its own mask) - a miss there is what used to kill the
+        /// pilot. Once a second a jitter line: the shortest and longest frame,
+        /// the hitches over 50 ms, the largest foreign jolt and the largest
+        /// frame-to-frame step in the yaw rate.
+        /// </summary>
+        static void Record()
+        {
+            try
+            {
+                Frame f = new Frame();
+                f.T = Time.time;
+                f.Dt = Time.deltaTime;
+                f.Pos = _heli.transform.position;
+                f.Kmh = new Vector3(_vel.x, 0f, _vel.z).magnitude / K * 3.6f;
+                float agl;
+                f.Agl = Height(_heli, out agl) ? agl : -1f;
+                HeliEngine e = _heli.GetComponent<HeliEngine>();
+                f.Power = e == null ? -1f : e.Power;
+                f.Foreign = _foreign;
+                f.Guarded = GuardedCalls - _guardedFrame;
+                _guardedFrame = GuardedCalls;
+                f.Ground = -1f;
+                if (_body != null)
+                {
+                    CharacterController cc = _body.GetComponent<CharacterController>();
+                    if (cc != null)
+                    {
+                        f.Grounded = cc.isGrounded;
+                        if (cc.GetComponent<HeliBodyHits>() == null)
+                            cc.gameObject.AddComponent<HeliBodyHits>();
+                    }
+                    RaycastHit hit;
+                    Vector3 from = _body.position;
+                    f.RayHit = Physics.Linecast(from, from - Vector3.up * 200f,
+                                                out hit, ~67111940);
+                    if (f.RayHit) f.Ground = hit.distance;
+                }
+                if (_ring.Count < RingSize) _ring.Add(f);
+                else _ring[_ringNext] = f;
+                _ringNext = (_ringNext + 1) % RingSize;
+
+                _dtMin = Mathf.Min(_dtMin, f.Dt);
+                _dtMax = Mathf.Max(_dtMax, f.Dt);
+                if (f.Dt > 0.05f) _hitches++;
+                _foreignMax = Mathf.Max(_foreignMax, f.Foreign);
+                _yawStepMax = Mathf.Max(_yawStepMax, Mathf.Abs(_yawRate - _lastYawRate));
+                _lastYawRate = _yawRate;
+                if (Time.time >= _jitterAt)
+                {
+                    _jitterAt = Time.time + 1f;
+                    RevivalPlugin.L.LogInfo("PlayerHeli research: "
+                        + Mathf.RoundToInt(f.Kmh) + " km/h, " + Mathf.RoundToInt(f.Agl)
+                        + " m, pos " + f.Pos.ToString("0")
+                        + "; dt " + (_dtMin * 1000f).ToString("0.0") + "-"
+                        + (_dtMax * 1000f).ToString("0.0") + " ms, hitches>50ms " + _hitches
+                        + ", foreign jolt max " + _foreignMax.ToString("0.00")
+                        + " m, yaw-rate step max " + _yawStepMax.ToString("0.0")
+                        + " deg/s; body grounded " + f.Grounded
+                        + ", fall-check line " + (f.RayHit ? f.Ground.ToString("0") + " u" : "MISS")
+                        + ", fall calls held " + GuardedCalls
+                        + "; last body contact " + LastBodyHit
+                        + "; last hull ray " + LastRayHit + ".");
+                    _dtMin = 1f; _dtMax = 0f; _hitches = 0; _foreignMax = 0f; _yawStepMax = 0f;
+                }
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli research: " + ex.Message);
+            }
+        }
+
+        /// <summary>The ring, oldest first, one compact line per frame - only the
+        /// last 30 frames in detail, the rest summarised, so one exit does not
+        /// bury the log.</summary>
+        static void Dump()
+        {
+            int n = _ring.Count;
+            if (n == 0) return;
+            int start = n < RingSize ? 0 : _ringNext;
+            StringBuilder sb = new StringBuilder("PlayerHeli research: last ");
+            sb.Append(n).Append(" frames before the exit (t dt kmh agl power grounded line foreign held):");
+            for (int i = Mathf.Max(0, n - 30); i < n; i++)
+            {
+                Frame f = _ring[(start + i) % n];
+                sb.Append("\n  ").Append(f.T.ToString("0.000"))
+                  .Append(' ').Append((f.Dt * 1000f).ToString("0.0"))
+                  .Append(' ').Append(Mathf.RoundToInt(f.Kmh))
+                  .Append(' ').Append(f.Agl.ToString("0.0"))
+                  .Append(' ').Append(f.Power.ToString("0.00"))
+                  .Append(' ').Append(f.Grounded ? "G" : "-")
+                  .Append(' ').Append(f.RayHit ? f.Ground.ToString("0") : "MISS")
+                  .Append(' ').Append(f.Foreign.ToString("0.00"))
+                  .Append(' ').Append(f.Guarded);
+            }
+            RevivalPlugin.L.LogInfo(sb.ToString());
         }
 
         static void Reset()
@@ -852,9 +1278,13 @@ namespace NextDayRevival
             float sens = CfgSensitivity == null ? 2.2f : CfgSensitivity.Value;
             float ceiling = CfgYawRate == null ? 55f : Mathf.Max(8f, CfgYawRate.Value);
 
-            // 60 is the frame rate the old per-frame delta was written for, so
-            // the same hand movement still means the same thing.
-            float want = Mathf.Clamp(Input.GetAxis("Mouse X") * sens * 60f,
+            // Mouse X is the movement SINCE THE LAST FRAME, so it has to be
+            // divided by that frame's length to be a rate. It used to be scaled
+            // by a fixed 60: right at 60 fps, half the turn at 120 and double at
+            // 30 - and at speed, where the frame time swings with the streaming,
+            // the heading twitched with it. At 60 fps both are the same number.
+            float want = Mathf.Clamp(Input.GetAxis("Mouse X") * sens
+                                     / Mathf.Max(Time.deltaTime, 0.001f),
                                      -ceiling, ceiling);
             _yawRate = Mathf.Lerp(_yawRate, want, Mathf.Min(1f, 3.5f * dt));
             _yaw += _yawRate * dt;
@@ -897,12 +1327,17 @@ namespace NextDayRevival
             Transform tr = _heli.transform;
             Vector3 pos = tr.position;
             Vector3 was = pos;
+            // Anything that moved the machine since this loop last put it
+            // somewhere - the network interpolator, a collider push - is a
+            // jolt the pilot sees. Research mode records it.
+            _foreign = _hasWritten ? (pos - _lastWritten).magnitude / K : 0f;
 
             Quaternion flat = Quaternion.Euler(0f, _yaw, 0f);
             Vector3 fwd = flat * Vector3.forward;
             Vector3 right = flat * Vector3.right;
 
             float power = Spool(dt);
+            if (PowerLoss(power, dt)) return;
             float thrust = (CfgThrust == null ? 5.5f : CfgThrust.Value) * k * power;
             float side = (CfgSideThrust == null ? 2.6f : CfgSideThrust.Value) * k * power;
             float lift = (CfgLift == null ? 3.2f : CfgLift.Value) * k;
@@ -1014,6 +1449,8 @@ namespace NextDayRevival
 
             tr.position = pos;
             tr.rotation = Quaternion.Euler(_nose, _yaw, -_bank);
+            _lastWritten = pos;
+            _hasWritten = true;
 
             // Two ways to break it, both after the move so the wreck stands
             // where the machine actually got to.
@@ -1021,6 +1458,56 @@ namespace NextDayRevival
             if (wasFlying && _onGround && Touchdown(arrival)) return;
 
             Pose(pos);
+        }
+
+        static float _lowSince = -1f;
+        static Vector3 _lastWritten;
+        static bool _hasWritten;
+        static float _foreign;
+
+        /// <summary>
+        /// ENGINE FAILURE IN FLIGHT IS A CRASH. The machine used to sink under a
+        /// windmilling rotor at most SinkRate / 0.25 - a feather. Now an engine
+        /// whose output stays under PowerLossThreshold for PowerLossGrace
+        /// seconds, with the machine more than PowerLossHeight up, starts the
+        /// same stone-fall a pilotless machine gets (HeliCrashFall: nose down,
+        /// wreck, fire, bang; Net.Crashed with seven floats for everybody
+        /// else). The pilot stays in his seat and rides it: the ground kills
+        /// him (FinishAbandonedCrash) unless he jumps first. A dip shorter than
+        /// the grace - a restart, a spool-up - does nothing, and close to the
+        /// ground an engine stop is simply a landing.
+        ///
+        /// The engine has no fuel and no damage model yet, so its output is its
+        /// spool state while switched on and nothing when off. Anything that
+        /// later takes power away only has to lower that number.
+        /// </summary>
+        static bool PowerLoss(float power, float dt)
+        {
+            float threshold = CfgPowerLoss == null ? 0.5f : CfgPowerLoss.Value;
+            if (threshold <= 0f || (CfgCrash != null && !CfgCrash.Value) || _onGround)
+            {
+                _lowSince = -1f;
+                return false;
+            }
+            float output = _engine ? power : 0f;
+            float agl;
+            float low = CfgPowerLossHeight == null ? 3f : CfgPowerLossHeight.Value;
+            if (output >= threshold || !Height(_heli, out agl) || agl <= low)
+            {
+                _lowSince = -1f;
+                return false;
+            }
+            if (_lowSince < 0f) _lowSince = Time.time;
+            float grace = CfgPowerLossGrace == null ? 1f : Mathf.Max(0f, CfgPowerLossGrace.Value);
+            if (Time.time - _lowSince < grace) return false;
+
+            _lowSince = -1f;
+            float kmh = new Vector3(_vel.x, 0f, _vel.z).magnitude / K * 3.6f;
+            RevivalPlugin.L.LogInfo("PlayerHeli: power lost at " + Mathf.RoundToInt(agl)
+                + " m, " + Mathf.RoundToInt(kmh) + " km/h - crash sequence.");
+            Hint(Loc.T("Отказ двигателя!", "Engine failure!"), 4f);
+            Abandon(_heli, _vel, true);
+            return true;
         }
 
         /// <summary>
@@ -1112,7 +1599,10 @@ namespace NextDayRevival
                 new float[] { view, on ? 1f : 0f }, true);
             Hint(on ? Text.EngineOn() : Text.EngineOff(), 4f);
             RevivalPlugin.L.LogInfo("PlayerHeli: engine " + (on ? "started" : "shut down")
-                + " on helicopter " + view + ".");
+                + " on helicopter " + view + "."
+                + (on || _leaving ? "" : " Cause: " + (_why ?? "none given")
+                   + "; caller: " + Caller(5)));
+            if (!on && !_leaving) _why = null;
         }
 
         /// <summary>The rotor and sound state of one machine, created on demand.
@@ -1169,7 +1659,8 @@ namespace NextDayRevival
                         view, at.x, at.y, at.z, drift.x, drift.y, drift.z }, true);
                 }
                 RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
-                    + " abandoned in flight - visible crash descent started.");
+                    + " abandoned in flight - visible crash descent started. Caller: "
+                    + Caller(4));
             }
             catch (Exception ex)
             {
@@ -1202,6 +1693,9 @@ namespace NextDayRevival
             Burn(go, where);
             RevivalPlugin.L.LogInfo("PlayerHeli: abandoned helicopter "
                 + ViewId(go) + " struck the ground at " + where.ToString("0") + ".");
+            // A power-loss fall carries its crew down with it; so does a fall
+            // the pilot jumped out of while a passenger stayed in the cabin.
+            DestroyedAboard(go, "fall ended in the ground");
         }
 
         /// <summary>
@@ -1267,6 +1761,9 @@ namespace NextDayRevival
                 Vector3 point, normal;
                 GameObject hit = Turret.RaycastObject(origin, dir, rest, out point, out normal);
                 if (hit == null) return false;
+                if (Research)
+                    LastRayHit = hit.name + " (layer " + hit.layer + ", "
+                        + (Vector3.Distance(origin, point) / k).ToString("0.0") + " m)";
                 if (Through(hit))
                 {
                     float used = Mathf.Max(0.3f, Vector3.Distance(origin, point) + 0.3f);
@@ -1329,15 +1826,9 @@ namespace NextDayRevival
         {
             GameObject go = MissileTarget(view);
             if (go == null) return;
-            bool aboard = ReferenceEquals(go, _heli);
             Burn(go, where);
             _busyUntil.Remove(view);
-            if (!aboard) return;
-            _engine = false;
-            Leave(false);
-            float damage = CfgCrashDamage == null ? 1000f : CfgCrashDamage.Value;
-            if (damage > 0f) Hurt(damage);
-            Hint(Text.Wrecked(), 6f);
+            DestroyedAboard(go, "missile");
         }
 
         internal static GameObject MissileTarget(int view)
@@ -1375,23 +1866,33 @@ namespace NextDayRevival
             int view = ViewId(go);
             if (Burning(go)) return;
 
-            bool aboard = ReferenceEquals(go, _heli);
             Burn(go, where);
             if (view != 0) Net.Send(Net.Crashed,
                 new float[] { view, where.x, where.y, where.z }, true);
+            DestroyedAboard(go, "crash");
+        }
 
-            if (aboard)
-            {
-                float damage = CfgCrashDamage == null ? 1000f : CfgCrashDamage.Value;
-                bool wasPilot = _pilot;
-                _engine = false;
-                Leave(false);
-                if (damage > 0f) Hurt(damage);
-                Hint(Text.Wrecked(), 6f);
-                RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
-                    + " destroyed with the local player aboard (pilot: "
-                    + wasPilot + ").");
-            }
+        /// <summary>The machine the local player sits in has just been
+        /// destroyed - flown into something, dropped too hard, brought down by
+        /// a missile, or come down at the end of a power-loss fall, on this
+        /// client or on the one that sent the crash. Everyone aboard pays for
+        /// it through the game's own damage gate, on his own client. This is
+        /// the "death" half of the rule that a man leaves the machine only by
+        /// his own key or by dying.</summary>
+        static void DestroyedAboard(GameObject go, string how)
+        {
+            if (go == null || !ReferenceEquals(go, _heli)) return;
+            float damage = CfgCrashDamage == null ? 1000f : CfgCrashDamage.Value;
+            bool wasPilot = _pilot;
+            int view = ViewId(go);
+            _engine = false;
+            Why(how);
+            Leave(false);
+            if (damage > 0f) Hurt(damage);
+            Hint(Text.Wrecked(), 6f);
+            RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
+                + " destroyed with the local player aboard (" + how + ", pilot: "
+                + wasPilot + ").");
         }
 
         /// <summary>
@@ -1673,6 +2174,7 @@ namespace NextDayRevival
             // the camera and his own legs back; the parachute state then writes
             // his position itself, and nothing of this file's is left to write
             // it again afterwards.
+            ExitTrace("jump at " + Mathf.RoundToInt(height) + " m");
             Leave(false);
 
             string why;
@@ -1854,7 +2356,7 @@ namespace NextDayRevival
         {
             for (int i = _all.Count - 1; i >= 0; i--)
                 if (_all[i] == null) _all.RemoveAt(i);
-            if (_heli == null && (_pilot || _hadBody)) Leave(false);
+            if (_heli == null && (_pilot || _hadBody)) Involuntary("machine gone");
 
             _drop.Clear();
             foreach (KeyValuePair<int, float> e in _busyUntil)
@@ -2179,6 +2681,7 @@ namespace NextDayRevival
                 }
                 HeliInputHook.Install(harmony);
                 HeliHold.Install(harmony);
+                HeliBodyGuard.Install(harmony);
             }
             catch (Exception ex)
             {
@@ -2380,6 +2883,7 @@ namespace NextDayRevival
                             return;
                         }
                         Burn(wreck, new Vector3(f[1], f[2], f[3]));
+                        DestroyedAboard(wreck, "crash on the pilot's client");
                         return;
                     }
 
@@ -4055,6 +4559,201 @@ namespace NextDayRevival
             if (table == null || _mReposition == null) return;
             try { _mReposition.Invoke(table, null); }
             catch (Exception ex) { Once(ref _windowWarned, "PlayerHeli hold window: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// Research: what the local player's CharacterController runs into while
+    /// he sits in the machine. There is no Rigidbody on the player, so there is
+    /// no impulse to report - the controller's velocity and the game's own
+    /// moveDirection are what there is.
+    /// </summary>
+    internal class HeliBodyHits : MonoBehaviour
+    {
+        void OnControllerColliderHit(ControllerColliderHit hit)
+        {
+            if (!PlayerHeli.Research || !PlayerHeli.Aboard || hit == null
+                || hit.collider == null) return;
+            CharacterController cc = hit.controller;
+            PlayerHeli.LastBodyHit = hit.collider.name + " (layer "
+                + hit.collider.gameObject.layer + ", controller velocity "
+                + (cc == null ? "?" : cc.velocity.ToString("0.0"))
+                + ", move " + hit.moveDirection.ToString("0.00")
+                + ", impulse n/a - no rigidbody, t " + Time.time.ToString("0.00") + ")";
+        }
+    }
+
+    /// <summary>
+    /// THE ROOT OF "THROWN OUT OF THE HELICOPTER". The game does not know a man
+    /// can sit in a machine. Every frame the seated body is not grounded,
+    /// PlayerMovementController runs its fall state: moveDirection.y grows by
+    /// 25 per second without end and the controller is moved by it, and a line
+    /// is cast 200 units down - no hit (high over the ground, or over a chunk
+    /// whose colliders have not streamed in yet) is 1000 damage on the spot,
+    /// a hit further than 6 units away is a fall whose landing deals damage
+    /// later. At speed the chunks stream behind the machine, and the pilot
+    /// died in his seat; the first key on the death screen then threw the body
+    /// out. While the local player is aboard both fall methods are held here
+    /// and the fall data cleared.
+    ///
+    /// Two more hooks only watch: PlayerDeath ends the flight the moment the
+    /// local player dies aboard, and PlayerApplyDamage logs every hit the local
+    /// player takes aboard or just after, with its caller.
+    /// </summary>
+    internal static class HeliBodyGuard
+    {
+        static MethodInfo _mClear;
+        static FieldInfo _fMove, _fLifeData, _fHealth;
+        static MethodInfo _mHealth;
+        static bool _warned;
+
+        internal static void Install(Harmony harmony)
+        {
+            Type move = RevivalPlugin.TypeByName("PlayerMovementController");
+            Type life = RevivalPlugin.TypeByName("PlayerLifeDataManager");
+            if (move != null)
+            {
+                _mClear = AccessTools.Method(move, "ClearPlayerFallingData", null, null);
+                _fMove = AccessTools.Field(move, "moveDirection");
+                Patch(harmony, move, "PlayerFallingState", "FallPrefix", null);
+                Patch(harmony, move, "PlayerFallingLanding", "FallPrefix", null);
+            }
+            else RevivalPlugin.L.LogWarning("PlayerHeli: PlayerMovementController not "
+                + "found - the fall guard is off and a seated pilot can die of a fall.");
+            if (life != null)
+            {
+                _fLifeData = AccessTools.Field(life, "_playerLifeData");
+                Patch(harmony, life, "PlayerDeath", null, "DeathPostfix");
+                Patch(harmony, life, "PlayerApplyDamage", "DamagePrefix", null);
+            }
+        }
+
+        static void Patch(Harmony harmony, Type t, string method, string prefix, string postfix)
+        {
+            try
+            {
+                MethodInfo m = AccessTools.Method(t, method, null, null);
+                if (m == null)
+                {
+                    RevivalPlugin.L.LogWarning("PlayerHeli guard: " + t.Name + "."
+                        + method + " not found.");
+                    return;
+                }
+                harmony.Patch(m,
+                    prefix == null ? null : new HarmonyMethod(typeof(HeliBodyGuard).GetMethod(
+                        prefix, BindingFlags.Public | BindingFlags.Static)),
+                    postfix == null ? null : new HarmonyMethod(typeof(HeliBodyGuard).GetMethod(
+                        postfix, BindingFlags.Public | BindingFlags.Static)),
+                    null, null, null);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogError("PlayerHeli guard: " + method + " - " + ex.Message);
+            }
+        }
+
+        /// <summary>Is this component on the local player's own object?</summary>
+        static bool Mine(object instance)
+        {
+            Component c = instance as Component;
+            Transform body = PlayerHeli.Body;
+            if (c == null || body == null) return false;
+            return c.transform.IsChildOf(body);
+        }
+
+        /// <summary>Held while the local player sits in a machine. Everything
+        /// else - every other player, and this one on foot - runs untouched.</summary>
+        public static bool FallPrefix(object __instance)
+        {
+            if (!PlayerHeli.Aboard || !Mine(__instance)) return true;
+            try
+            {
+                if (_mClear != null) _mClear.Invoke(__instance, null);
+                if (_fMove != null) _fMove.SetValue(__instance, Vector3.zero);
+            }
+            catch (Exception ex)
+            {
+                if (!_warned)
+                {
+                    _warned = true;
+                    RevivalPlugin.L.LogWarning("PlayerHeli guard: " + ex.Message);
+                }
+            }
+            PlayerHeli.GuardedCalls++;
+            return false;
+        }
+
+        public static void DeathPostfix(object __instance, object[] __args)
+        {
+            try
+            {
+                if (!PlayerHeli.Aboard || !Mine(__instance) || !Dead(__instance)) return;
+                PlayerHeli.DiedAboard(Args(__args));
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli death hook: " + ex.Message);
+            }
+        }
+
+        public static void DamagePrefix(object __instance, object[] __args)
+        {
+            try
+            {
+                if (!PlayerHeli.RecentlyAboard || !Mine(__instance)) return;
+                RevivalPlugin.L.LogInfo("PlayerHeli: local player takes damage "
+                    + (PlayerHeli.Aboard ? "aboard" : "just after leaving")
+                    + " (" + Args(__args) + "); " + PlayerHeli.Where()
+                    + "; caller: " + PlayerHeli.Caller(PlayerHeli.Research ? 14 : 6));
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerHeli damage hook: " + ex.Message);
+            }
+        }
+
+        static string Args(object[] args)
+        {
+            if (args == null) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(args[i] == null ? "null" : args[i].ToString());
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>PlayerDeath returns at once unless health is at or under
+        /// zero; the postfix runs either way, so it reads the health too. Health
+        /// is an ObscuredFloat, read through its own implicit conversion. If it
+        /// cannot be read, the call is taken at its word.</summary>
+        static bool Dead(object instance)
+        {
+            try
+            {
+                if (_fLifeData == null) return true;
+                object data = _fLifeData.GetValue(instance);
+                if (data == null) return true;
+                if (_fHealth == null) _fHealth = AccessTools.Field(data.GetType(), "Health");
+                if (_fHealth == null) return true;
+                object h = _fHealth.GetValue(data);
+                if (h == null) return true;
+                if (h is float) return (float)h <= 0f;
+                if (_mHealth == null)
+                {
+                    MethodInfo[] ms = h.GetType().GetMethods(BindingFlags.Public | BindingFlags.Static);
+                    for (int i = 0; i < ms.Length; i++)
+                        if (ms[i].Name == "op_Implicit" && ms[i].ReturnType == typeof(float))
+                            _mHealth = ms[i];
+                }
+                if (_mHealth == null) return true;
+                return (float)_mHealth.Invoke(null, new object[] { h }) <= 0f;
+            }
+            catch
+            {
+                return true;
+            }
         }
     }
 }

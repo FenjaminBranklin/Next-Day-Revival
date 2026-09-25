@@ -831,12 +831,22 @@ namespace NextDayRevival
             return Terrain.activeTerrain;
         }
 
+        /// <summary>Beyond every far clip: no terrain in the extended world
+        /// draws its basemap. In 6.54.0 the ground past 500 m came out flat
+        /// white (docs/ai/tasks/east-seam-look.md).</summary>
+        const float NoBasemapM = 20000f;
+
         /// <summary>The five values ApplyGameSettings sets, copied from the
-        /// terrain it set them on onto every tile terrain.</summary>
+        /// terrain it set them on onto every tile terrain; the basemap
+        /// distance of all of them, the vanilla one included, is pushed past
+        /// the far clip.</summary>
         static void SyncSettings(Terrain from, string why)
         {
             if (from == null) return;
             Terrain[] tile = TileTerrains();
+            if (tile.Length == 0) return;
+            float was = from.basemapDistance;
+            from.basemapDistance = NoBasemapM;
             for (int i = 0; i < tile.Length; i++)
             {
                 Terrain t = tile[i];
@@ -846,11 +856,12 @@ namespace NextDayRevival
                 t.treeBillboardDistance = from.treeBillboardDistance;
                 t.treeCrossFadeLength = from.treeCrossFadeLength;
                 t.materialType = from.materialType;
+                t.basemapDistance = NoBasemapM;
             }
-            if (tile.Length > 0)
-                Log("graphics settings of " + from.name + " onto " + tile.Length + " tile terrain(s) (" + why
-                    + "): detail " + from.detailObjectDistance + " m x " + from.detailObjectDensity
-                    + ", billboards " + from.treeBillboardDistance + " m, material " + from.materialType + ".");
+            Log("graphics settings of " + from.name + " onto " + tile.Length + " tile terrain(s) (" + why
+                + "): detail " + from.detailObjectDistance + " m x " + from.detailObjectDensity
+                + ", billboards " + from.treeBillboardDistance + " m, material " + from.materialType
+                + "; basemap " + was + " m -> " + NoBasemapM + " m on all.");
         }
 
         // ------------------------------------------------------ world rectangle
