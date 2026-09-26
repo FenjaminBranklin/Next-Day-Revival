@@ -39,6 +39,9 @@ GROUPS = [
     # Convoy-repair items: own art for the fire extinguisher (2063) and the
     # heavy tool kit (2064), replacing the ammo50/jammer placeholders.
     ("repairitems", ["repair_items_build.py"]),
+    # An-2 repair parts (2069 control cable set, 2070 magneto, 2071 propeller
+    # hub) for Revival.An2Repair.cs.
+    ("an2parts", ["an2_parts_build.py"]),
     # Vehicle modules (2060 thermal, 2061 night vision, 2062 large jammer):
     # own art, replacing the portable jammer all three used to wear.
     ("modules", ["vehicle_modules_build.py"]),

@@ -198,6 +198,15 @@ namespace NextDayRevival
             /// </summary>
             public string Scene = "";
 
+            /// <summary>
+            /// NDR AA site (`hold` in the first waypoint's flags, the editor's
+            /// "Hold position" box): every vehicle of this route stands braked on
+            /// its spawn point for its whole life and never drives. Meant for a
+            /// Gepard guarding the sky over a place (RevivalGepardCrew.cs); its
+            /// gun, like every patrol gun, works while the hull is held.
+            /// </summary>
+            public bool Site;
+
             /// <summary>Is this route on the map that is open right now?</summary>
             public bool Here { get { return MapScene.Owns(Scene); } }
 
@@ -330,6 +339,10 @@ namespace NextDayRevival
             public float NextNet;        // Time.time of the next turret-angle network readout
             public int Burst;            // shots fired in the running burst
             public int Shots, Hits;
+            // GunnerAI: how well the target shows, where and when it was last
+            // seen (suppression), and how fast it moves (spread).
+            public float Vis = 1f, LastSeen, TargetSpeed, SpeedAt;
+            public Vector3 LastKnown, SpeedFrom;
 
             // --------------------------------------------------- the crew
             public string Seite;         // which side climbs out of the wreck
@@ -707,6 +720,9 @@ namespace NextDayRevival
                     // colliders too, and had nothing that did this for them -
                     // which is how a tank came to stand inside its own APC.
                     PatrolSeparate(u);
+                    // NDR AA site: a route marked `hold` never drives - its
+                    // vehicles stand braked where they were put down.
+                    if (u.Route.Site && u.ConvoyId == 0) { HoldStill(u); continue; }
                     if (u.Deploy) { DeployStep(u); continue; }
                     if (u.Hold) { HoldStill(u); continue; }   // NDR convoy: spacing / hold-and-search
                     // The rail: this one proved it cannot drive the road it is
@@ -1054,6 +1070,7 @@ namespace NextDayRevival
             // are no longer anybody's. Crew.StopAll has just taken their
             // settlements; this only drops the book-keeping that pointed at them.
             TechnicalCrew.StopAll();
+            GepardCrew.StopAll();                 // NDR Gepard crew: the men inside go too
         }
 
         // =====================================================================
@@ -2541,6 +2558,12 @@ namespace NextDayRevival
             // vanish to do it. Marking the vehicle empty keeps the rest of the
             // crew logic - Besetzt, CrewedSide - honest about it.
             if (TechnicalCrew.ReleaseRiders(u.Car, u.Seite))
+            {
+                u.CrewOut = true;
+                return;
+            }
+            // NDR Gepard crew: its three men ride inside and climb out here.
+            if (GepardCrew.ReleaseRiders(u.Car, u.Seite))
             {
                 u.CrewOut = true;
                 return;
@@ -5872,40 +5895,17 @@ namespace NextDayRevival
         /// the same tracer - and this class adds only the three things a human
         /// brings: it looks for a target, it turns the barrel, and it misses.
         ///
-        /// HOW IT MISSES, AND WHY EXACTLY LIKE THIS (read out of the game,
-        /// 2026-08-30: NPC_AI2::ShootToTarget, NPC_AI2::CalcChancesToHit,
-        /// NPC_FirearmWeaponController::GetSqrDistanceModifier)
-        ///
-        ///   The game's own NPCs do not spray a cone. They roll ONE chance per
-        ///   shot and then displace the aim point by whole metres:
-        ///
-        ///       chance = base by target stance (0.5 crouched to 1.0 standing)
-        ///                minus the distance loss, clamped to 0..1
-        ///       loss   = 0 inside the weapon's effective range, rising along
-        ///                a cosine to 1 at maximum range, and a loss over 0.95
-        ///                sets the chance to zero outright
-        ///       offset = 0.2 m under 30 m - practically a hit
-        ///                a rolled hit:  up to 2.5 m
-        ///                a rolled miss: 3 m
-        ///
-        ///   That is the "factor common among the NPCs" this gun uses. THREE
-        ///   things are deliberately different. The offset here goes in a
-        ///   random DIRECTION around the aim point instead of into +x and +y
-        ///   together, because the game's version puts every miss of every NPC
-        ///   on the same diagonal. A rolled hit is displaced by 0.25 m, not by
-        ///   2.5: the game gets away with the large number because
-        ///   NPC_FirearmWeaponController::FireTo decides the damage itself,
-        ///   while this gun is a raycast - at 150 m a 2.5 m offset would miss
-        ///   a man every time and the chance above would mean nothing.
-        ///
-        ///   And the third, added on 2026-08-30 after the user reported a
-        ///   patrol as "an 80 percent death sentence": the free ring under
-        ///   30 m is GONE as a constant. It is `GunPointBlank` now, 12 m by
-        ///   default, and the chance is rolled inside it like anywhere else.
-        ///   That one line was the whole difficulty problem - a road vehicle
-        ///   and a man on foot end up inside 30 m of each other in every
-        ///   fight, and inside that ring the gun was perfect no matter what
-        ///   GunAccuracy said.
+        /// HOW IT SEES AND MISSES (vehicle gunner AI v2, 2026-09-26,
+        /// docs/ai/tasks/vehicle-gunner-ai.md). The former model - a hit roll
+        /// times GunAccuracy 0.45 and a 3 m miss beyond GunPointBlank 12 m -
+        /// made a tank miss a man at 30 m more often than not. It is replaced
+        /// by GunnerAI (Revival.GunnerAI.cs): a spread radius from range,
+        /// target speed and visibility, near zero against NPCs and inside
+        /// 50 m against players; a reaction time from range and visibility;
+        /// sight that counts terrain trees and bushes; a seated player seen
+        /// through the hull he sits in; suppression at the last known
+        /// position for a few seconds only. GunNotice, GunAccuracy,
+        /// GunEffectiveRange and GunPointBlank are no longer read.
         ///
         /// COST. Player, vehicle and NPC candidates are shared by all guns.
         /// NPC scene discovery is shared with NpcWar every two seconds; target
@@ -5916,6 +5916,9 @@ namespace NextDayRevival
         {
             public Transform Tr;
             public Component States, Npc, Vehicle;
+            /// <summary>The vehicle a PLAYER sits in (GunnerAI.Carrier), else
+            /// null. His sight ray may end on this hull.</summary>
+            public Component Carrier;
         }
 
         static class Gun
@@ -5952,6 +5955,7 @@ namespace NextDayRevival
                     if (s.Tr == null) continue;
                     CombatTarget c = new CombatTarget();
                     c.Tr = s.Tr; c.States = s.States;
+                    c.Carrier = GunnerAI.Carrier(s.Tr);
                     _targets.Add(c);
                 }
                 List<Component> npcs = NpcWar.PatrolTargets();
@@ -6137,6 +6141,7 @@ namespace NextDayRevival
             {
                 if (!RevivalPlugin.CfgPatrolGun.Value) return;
                 if (units.Count == 0) return;
+                GunnerAI.Sync();
                 Refresh();
                 RefreshTargets();
 
@@ -6156,6 +6161,11 @@ namespace NextDayRevival
             {
                 List<Transform> found = new List<Transform>();
                 Transform[] all = u.Car.GetComponentsInChildren<Transform>(true);
+                // NDR Gepard: its BTR-80A donor still carries the hidden BTR
+                // turret. That gun must not fire invisible 14.5 mm rounds - the
+                // Gepard's own NPC gunner works its 35 mm guns
+                // (RevivalGepardCrew.cs).
+                if (Gepard.IstGepard(u.Car.transform)) all = new Transform[0];
                 for (int i = 0; i < all.Length; i++)
                     if (all[i].name == "turret") found.Add(all[i]);
                 u.Turrets = found.ToArray();
@@ -6197,17 +6207,87 @@ namespace NextDayRevival
 
                 if (u.Lost <= 0f) u.Held += dt;
 
-                Vector3 ziel = Zielpunkt(u.Target);
+                // A target out of sight since the last scan is aimed at where
+                // it was last seen: that is the only place suppression goes.
+                Vector3 echt = Ziel(u.GunTarget);
+                Tempo(u, echt);
+                Vector3 ziel = u.Lost > 0f ? u.LastKnown : echt;
                 if (!Winkel(u, ziel, out u.Yaw, out u.Pitch)) return;
                 Drehen(u, dt);
 
-                if (u.Held < RevivalPlugin.CfgPatrolGunNotice.Value) return;
+                // Reaction from range and visibility (GunnerAI.Reaction), not
+                // the fixed GunNotice of old.
+                float dist = Vector3.Distance(Muendung(u), ziel);
+                if (u.Held < GunnerAI.Reaction(Spielerziel(u.GunTarget), dist, u.Vis)) return;
                 if (Time.time < u.NextShot) return;
                 if (Vector3.Angle(Rohrrichtung(u), ziel - Muendung(u)) > FireWithin) return;
-                if (Vector3.Distance(Muendung(u), ziel) > Suchweite(u)) return;
-                if (!Sicht(u, u.Target)) return;
+                if (dist > Suchweite(u)) return;
 
-                if (Schiessen(u, ziel)) Nachladen(u);
+                // Real sight - raycast AND vegetation - before every round.
+                // Without it only suppression at the last known position, and
+                // only for SuppressSeconds after the target was last seen.
+                float vis = Sichtbar(u, u.GunTarget);
+                bool suppress = vis <= 0f;
+                if (!suppress)
+                {
+                    u.Vis = vis;
+                    u.LastSeen = Time.time;
+                    u.LastKnown = echt;
+                    ziel = echt;
+                }
+                else
+                {
+                    if (Time.time - u.LastSeen > GunnerAI.T.SuppressSeconds) return;
+                    ziel = u.LastKnown;
+                }
+
+                if (Schiessen(u, ziel, suppress)) Nachladen(u);
+            }
+
+            /// <summary>Where a target is shot at: the chest of a man, the
+            /// hull of a vehicle, the torso of a player sitting in one.</summary>
+            static Vector3 Ziel(CombatTarget c)
+            {
+                if (c == null || c.Tr == null) return Vector3.zero;
+                if (c.Carrier != null) return c.Tr.position + Vector3.up * 0.8f;
+                return Zielpunkt(c.Tr);
+            }
+
+            /// <summary>Target speed, smoothed over the frames. Feeds the spread.</summary>
+            static void Tempo(Unit u, Vector3 p)
+            {
+                float dt = Time.time - u.SpeedAt;
+                if (dt < 0.25f) return;
+                float v = dt < 2f ? Vector3.Distance(p, u.SpeedFrom) / dt : 0f;
+                u.TargetSpeed = dt < 2f ? (u.TargetSpeed + v) * 0.5f : 0f;
+                u.SpeedFrom = p;
+                u.SpeedAt = Time.time;
+            }
+
+            /// <summary>A real player (on foot, seated, or the vehicle he
+            /// drives) gets the fair player spread; NPCs and NPC-crewed
+            /// vehicles the tight one.</summary>
+            static bool Spielerziel(CombatTarget c)
+            {
+                if (c == null || c.Npc != null) return false;
+                if (c.Vehicle != null) return CrewedSide(c.Vehicle) == null;
+                return true;
+            }
+
+            /// <summary>0 an exposed person, 1 a player in a vehicle, 2 a
+            /// vehicle (GunnerAI.Weight).</summary>
+            static int Art(CombatTarget c)
+            {
+                if (c.Vehicle != null) return 2;
+                return c.Carrier != null ? 1 : 0;
+            }
+
+            static string Name(CombatTarget c)
+            {
+                if (c == null || c.Tr == null) return "?";
+                string kind = c.Vehicle != null ? "vehicle" : c.Npc != null ? "NPC"
+                    : c.Carrier != null ? "player-in-vehicle" : "player";
+                return kind + " " + c.Tr.name;
             }
 
             /// <summary>
@@ -6259,10 +6339,14 @@ namespace NextDayRevival
                 if (u.Target != null)
                 {
                     bool weg = !Feind(u, u.GunTarget)
-                        || Vector3.Distance(Zielpunkt(u.Target), from) > range;
-                    if (!weg && Sicht(u, u.Target))
+                        || Vector3.Distance(Ziel(u.GunTarget), from) > range;
+                    float seen = weg ? 0f : Sichtbar(u, u.GunTarget);
+                    if (seen > 0f)
                     {
                         u.Lost = 0f;
+                        u.Vis = seen;
+                        u.LastSeen = Time.time;
+                        u.LastKnown = Ziel(u.GunTarget);
                         return;
                     }
                     u.Lost += ScanEvery;
@@ -6277,19 +6361,26 @@ namespace NextDayRevival
                     u.Burst = 0;
                 }
 
+                // Nearest visible hostile, the range weighted by kind: these
+                // are heavy guns (autocannon, tank gun), so a hostile vehicle
+                // counts nearer than a man at the same distance.
                 CombatTarget best = null;
-                float bestDist = 0f;
+                float bestDist = 0f, bestScore = 0f, bestVis = 0f;
                 for (int i = 0; i < _targets.Count; i++)
                 {
                     CombatTarget s = _targets[i];
                     if (s.Tr == null) continue;
-                    float d = Vector3.Distance(Zielpunkt(s.Tr), from);
+                    float d = Vector3.Distance(Ziel(s), from);
                     if (d > range) continue;
-                    if (best != null && d >= bestDist) continue;
+                    float score = d * GunnerAI.Weight(true, Art(s));
+                    if (best != null && score >= bestScore) continue;
                     if (!Feind(u, s)) continue;
-                    if (!Sicht(u, s.Tr)) continue;
+                    float vis = Sichtbar(u, s);
+                    if (vis <= 0f) continue;
                     best = s;
                     bestDist = d;
+                    bestScore = score;
+                    bestVis = vis;
                 }
                 if (best == null) return;
 
@@ -6297,31 +6388,44 @@ namespace NextDayRevival
                 u.Target = best.Tr;
                 u.Held = 0f;
                 u.Lost = 0f;
+                u.Vis = bestVis;
+                u.LastSeen = Time.time;
+                u.LastKnown = Ziel(best);
+                u.SpeedAt = 0f;
+                u.TargetSpeed = 0f;
                 RevivalPlugin.L.LogInfo("Patrol gun: " + (u.Tank ? "tank" : "BTR")
                     + " on " + u.Route.Name + " engages "
-                    + (best.Vehicle != null ? "vehicle" : best.Npc != null ? "NPC" : "player")
+                    + Name(best)
                     + " at "
                     + bestDist.ToString("0") + " m.");
             }
 
-            /// <summary>One ray from the muzzle to the target's chest. Hits on
-            /// our own vehicle are stepped over - the BTR's muzzle sits inside
-            /// its own bow plate (RE 18).</summary>
-            static bool Sicht(Unit u, Transform ziel)
+            /// <summary>
+            /// How well the gun sees this target, 0 (not at all) to 1. One ray
+            /// from the muzzle to the target: hits on our own vehicle are
+            /// stepped over - the BTR's muzzle sits inside its own bow plate
+            /// (RE 18) - and a ray that ends on the hull a player SITS in has
+            /// reached him (GunnerAI.Carrier). Then the vegetation along the
+            /// line (GunnerAI.Transmit): below SightThreshold it is no sight.
+            /// </summary>
+            static float Sichtbar(Unit u, CombatTarget c)
             {
+                if (c == null || c.Tr == null) return 0f;
                 Vector3 from = Muendung(u);
-                Vector3 to = Zielpunkt(ziel);
+                Vector3 to = Ziel(c);
                 Vector3 dir = to - from;
                 float dist = dir.magnitude;
-                if (dist < 0.5f) return true;
+                if (dist < 0.5f) return 1f;
                 dir /= dist;
 
                 Vector3 point;
                 GameObject hit = Strahl(u, from, dir, dist, out point);
-                if (hit == null) return true;           // nothing in between
-                // The target itself is allowed to be in the way of itself.
-                if (hit.transform.IsChildOf(ziel)) return true;
-                return false;
+                // Nothing in between, the target itself, or the hull he sits in.
+                bool frei = hit == null || hit.transform.IsChildOf(c.Tr)
+                    || GunnerAI.OnCarrier(hit, c.Carrier);
+                if (!frei) return 0f;
+                float vis = GunnerAI.Transmit(from, to);
+                return vis >= GunnerAI.T.SightThreshold ? vis : 0f;
             }
 
             /// <summary>Chest height. The transform of a player sits at his
@@ -6418,11 +6522,14 @@ namespace NextDayRevival
 
             // -------------------------------------------------------- firing
 
-            static bool Schiessen(Unit u, Vector3 ziel)
+            static bool Schiessen(Unit u, Vector3 ziel, bool suppress)
             {
                 Vector3 from = Muendung(u);
                 float dist = Vector3.Distance(from, ziel);
-                Vector3 aim = ziel + Streuung(u, dist);
+                float spread = Streuweite(u, dist, suppress);
+                Vector3 aim = ziel + GunnerAI.Offset(ziel - from, spread);
+                string gun = (u.Tank ? "tank " : "BTR ") + u.Route.Name;
+                string wer = Name(u.GunTarget);
 
                 Vector3 dir = aim - from;
                 if (dir.sqrMagnitude < 0.0001f) return false;
@@ -6436,13 +6543,22 @@ namespace NextDayRevival
                 // Check the actual dispersed round, too. A friendly crossing
                 // the muzzle must not be hit by a nominally hostile shot.
                 CombatTarget hit = AmTreffer(struck);
-                if (hit != null && !Feind(u, hit)) return false;
+                if (hit != null && !Feind(u, hit))
+                {
+                    GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
+                        "held: friendly in the line");
+                    return false;
+                }
                 VehicleShotSound.Play(from, u.Tank);
                 Turret.Net.PublishShot(from, u.Tank);
 
                 Spur(u, from + dir * 2f, ende);
                 u.Shots++;
-                if (struck == null) return true;
+                if (struck == null)
+                {
+                    GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress, "miss (sky)");
+                    return true;
+                }
 
                 if (u.Tank && RevivalPlugin.CfgTankExplosion.Value)
                 {
@@ -6463,7 +6579,10 @@ namespace NextDayRevival
                         // networked effect and apply each hostile victim once.
                         Vector3 blast = impact - dir * 0.15f;
                         RocketHook.Detonate(blast, 0f, rad, 3f);
+                        int vorher = u.Hits;
                         Sprengschaden(u, hit, blast, scha, rad, from);
+                        GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
+                            "shell on " + struck.name + ", " + (u.Hits - vorher) + " hostile(s) hurt");
                     }
                     catch (Exception ex)
                     {
@@ -6473,13 +6592,20 @@ namespace NextDayRevival
                     return true;
                 }
 
-                if (Schaden(u, struck, Schadenswert(u), impact, from))
-                {
-                    u.Hits++;
-                    RevivalPlugin.L.LogInfo("Patrol gun: hit at "
-                        + dist.ToString("0") + " m (" + u.Hits + " of " + u.Shots + ").");
-                }
+                bool traf = Schaden(u, struck, Schadenswert(u), impact, from);
+                if (traf) u.Hits++;
+                GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
+                    (traf ? "hit " : "miss on ") + struck.name
+                    + " (" + u.Hits + " of " + u.Shots + ")");
                 return true;
+            }
+
+            /// <summary>Spread radius for this round (GunnerAI.Spread): range,
+            /// target speed, visibility, and whether it is a real player.</summary>
+            static float Streuweite(Unit u, float dist, bool suppress)
+            {
+                return GunnerAI.Spread(Spielerziel(u.GunTarget), dist, u.TargetSpeed,
+                    suppress ? 0f : u.Vis, suppress);
             }
 
             static void Sprengschaden(Unit u, CombatTarget direct, Vector3 point,
@@ -6503,6 +6629,9 @@ namespace NextDayRevival
                     }
                     if (c == direct) dist = 0f;
                     if (dist > radius) continue;
+                    // A man inside armour is hurt through his hull's part 14
+                    // (SetDamageToAllPassengers), not by the blast directly.
+                    if (c.Carrier != null && GunnerAI.Armoured(c.Carrier)) continue;
                     if (c != direct && dist > 0.2f)
                     {
                         Vector3 ignored;
@@ -6523,6 +6652,25 @@ namespace NextDayRevival
                     + (u.Hits - before) + " hostile actor(s) at " + point + ".");
             }
 
+            static readonly List<GameObject> _insassen = new List<GameObject>();
+
+            /// <summary>A round into a soft-skinned hull reaches the hostile
+            /// players sitting in it (GunnerAI.SoftPassThrough). Armour stops it.</summary>
+            static int Durchschlag(Unit u, Component vehicle, float damage, Vector3 point,
+                                   Vector3 from)
+            {
+                if (GunnerAI.Armoured(vehicle) || GunnerAI.T.SoftPassThrough <= 0f) return 0;
+                GunnerAI.Occupants(vehicle, _insassen);
+                int n = 0;
+                for (int i = 0; i < _insassen.Count; i++)
+                {
+                    GameObject man = _insassen[i];
+                    if (!Fraktion.Feind(u.Seite, Fraktion.Spielerseite(man))) continue;
+                    if (SpielerSchaden(man, damage * GunnerAI.T.SoftPassThrough, point, from)) n++;
+                }
+                return n;
+            }
+
             static bool FahrzeugSchaden(Component vehicle, float damage, int part)
             {
                 MethodInfo apply = AccessTools.Method(vehicle.GetType(), "ApplyDamage",
@@ -6530,53 +6678,6 @@ namespace NextDayRevival
                 if (apply == null) return false;
                 apply.Invoke(vehicle, new object[] { damage, part });
                 return true;
-            }
-
-            /// <summary>
-            /// The miss. See the class comment for where the numbers come
-            /// from - this is the game's own model with the direction made
-            /// random, the hit case tightened, and ONE deliberate departure.
-            ///
-            /// THE DEPARTURE (2026-08-30). The game's model gives every shot
-            /// under 30 m a free pass: offset 0.2 m, no roll, accuracy not
-            /// consulted. That single line is why a patrol read as an 80
-            /// percent death sentence - every fight with a road vehicle
-            /// happens inside 30 m sooner or later, and inside it the gun was
-            /// perfect no matter what GunAccuracy said. So the free ring is a
-            /// setting now (`GunPointBlank`, 12 m) and the roll happens at
-            /// EVERY distance. Point blank a rolled miss still lands close,
-            /// because a man standing at arm's length from a BTR should not be
-            /// safe either.
-            /// </summary>
-            static Vector3 Streuung(Unit u, float dist)
-            {
-                float weit = Mathf.Max(1f, Suchweite(u));
-                float nah = Mathf.Clamp(Mathf.Max(RevivalPlugin.CfgPatrolGunEffective.Value,
-                                                  weit * 0.5f), 1f, weit);
-
-                float loss;
-                if (dist <= nah) loss = 0f;
-                else if (dist >= weit) loss = 1f;
-                else loss = 0.5f * (1f - Mathf.Cos(Mathf.PI * (dist - nah) / (weit - nah)));
-
-                float chance = loss > 0.95f
-                    ? 0f
-                    : Mathf.Clamp01((1f - loss) * RevivalPlugin.CfgPatrolGunAccuracy.Value);
-
-                bool nahdran = dist < RevivalPlugin.CfgPatrolGunPointBlank.Value;
-                float betrag;
-                if (UnityEngine.Random.value <= chance) betrag = nahdran ? 0.2f : 0.25f;
-                else betrag = nahdran ? 1.1f : 3f;
-
-                // A direction perpendicular to the shot, so a miss goes past
-                // the man or over him and never falls short and hits anyway.
-                Vector3 achse = Rohrrichtung(u);
-                Vector3 seite = Vector3.Cross(Vector3.up, achse);
-                if (seite.sqrMagnitude < 0.0001f) seite = Vector3.right;
-                seite.Normalize();
-                Vector3 hoch = Vector3.Cross(achse, seite).normalized;
-                float a = UnityEngine.Random.value * Mathf.PI * 2f;
-                return (seite * Mathf.Cos(a) + hoch * Mathf.Sin(a)) * betrag;
             }
 
             /// <summary>Ray that steps over our own vehicle, up to four
@@ -6685,8 +6786,13 @@ namespace NextDayRevival
                 if (c == null || !Feind(shooter, c)) return false;
                 if (PanzerSchaden(shooter, struck)) return true;
                 if (c.Vehicle != null)
-                    return FahrzeugSchaden(c.Vehicle,
+                {
+                    // Part 10 hurts the hull only (VehicleGameSystem.ApplyDamage);
+                    // the men in a soft-skinned car get their share by hand.
+                    bool hull = FahrzeugSchaden(c.Vehicle,
                         RevivalPlugin.CfgPatrolGunTankDamage.Value, 10);
+                    return Durchschlag(shooter, c.Vehicle, damage, point, from) > 0 || hull;
+                }
                 if (SpielerSchaden(struck, damage, point, from)) return true;
                 if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) return true;
                 if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) return true;
@@ -7147,6 +7253,7 @@ namespace NextDayRevival
             if (int.TryParse(FlagValue(p, "count"), out n)) r.Count = Mathf.Clamp(n, 0, 16);
             else r.Count = 1;
             r.Kind = FlagValue(p, "kind").Trim().ToLowerInvariant();   // NDR convoy
+            r.Site = HasFlag(p, "hold");                               // NDR AA site
             // Which map the route lies on. Absent = the home map, which is what
             // every route written before this flag existed means.
             r.Scene = MapScene.Clean(FlagValue(p, "scene"));
@@ -7170,7 +7277,7 @@ namespace NextDayRevival
                 for (int i = 0; i < parts.Length; i++)
                 {
                     string one = parts[i].Trim();
-                    if (one.Length == 0 || one == "spawn" || one == "off") continue;
+                    if (one.Length == 0 || one == "spawn" || one == "off" || one == "hold") continue;
                     if (one.StartsWith("fraction=") || one.StartsWith("vehicle=")
                         || one.StartsWith("count=") || one.StartsWith("kind=")
                         || one.StartsWith("scene=")) continue;
@@ -7183,6 +7290,7 @@ namespace NextDayRevival
             if (v == "btr" || v == "tank" || v == "mixed") keep.Add("vehicle=" + v);
             keep.Add("count=" + r.Count.ToString(CultureInfo.InvariantCulture));
             if (r.IsConvoy) keep.Add("kind=convoy");   // NDR convoy
+            if (r.Site) keep.Add("hold");               // NDR AA site
             // Only a route that is NOT on the home map names its map, so a file
             // of routes from the starting region keeps exactly the shape it has
             // today and no older reader sees a flag it has to skip.

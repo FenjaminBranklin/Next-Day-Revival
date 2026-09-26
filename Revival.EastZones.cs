@@ -79,6 +79,25 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>The marker box of a content id (the smallest when an id
+        /// names more than one): centre, half size and yaw. Airfield.cs anchors
+        /// its loot points on these, so a final model that keeps the id keeps
+        /// the points.</summary>
+        internal static bool Find(string id, out Vector3 centre, out Vector3 half, out Quaternion rot)
+        {
+            centre = half = Vector3.zero;
+            rot = Quaternion.identity;
+            bool found = false;
+            float area = float.MaxValue;
+            foreach (Box b in _boxes)
+            {
+                if (b.id != id || b.area >= area) continue;
+                area = b.area; found = true;
+                centre = b.centre; half = b.half; rot = Quaternion.Inverse(b.inv);
+            }
+            return found;
+        }
+
         static void Set(string where, Vector3 p)
         {
             if (where == _where) return;

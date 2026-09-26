@@ -365,6 +365,8 @@ namespace NextDayRevival
                 if (_heli == null)
                 {
                     _diedAboard = false;
+                    // In the An-2 the same keys belong to it (Revival.PlayerAn2.cs).
+                    if (PlayerAn2.Aboard) return;
                     if (Input.GetKeyDown(SpawnKey())) SpawnOrRemove();
                     else if (Input.GetKeyDown(BoardKey())) Board();
                     return;
@@ -4056,15 +4058,23 @@ namespace NextDayRevival
         public static void Postfix(ref bool __result)
         {
             if (PlayerHeli.Aboard) __result = true;
+            if (PlayerAn2.Aboard) __result = true;
         }
 
         public static void PilotPostfix(ref bool __result)
         {
             if (PlayerHeli.Flying) __result = true;
+            if (PlayerAn2.Flying) __result = true;
         }
 
+        static bool _installed;
+
+        /// <summary>Once, whichever aircraft asks first: the Mi-8 and the An-2
+        /// (Revival.PlayerAn2.cs) share these locks.</summary>
         internal static void Install(Harmony harmony)
         {
+            if (_installed) return;
+            _installed = true;
             System.Text.StringBuilder missing = new System.Text.StringBuilder();
             int patched = Patch(harmony, Locks, "Postfix", missing)
                         + Patch(harmony, PilotLocks, "PilotPostfix", missing);
@@ -4607,8 +4617,14 @@ namespace NextDayRevival
         static MethodInfo _mHealth;
         static bool _warned;
 
+        static bool _installed;
+
+        /// <summary>Once, whichever aircraft asks first: the Mi-8 and the An-2
+        /// (Revival.PlayerAn2.cs) share the fall guard.</summary>
         internal static void Install(Harmony harmony)
         {
+            if (_installed) return;
+            _installed = true;
             Type move = RevivalPlugin.TypeByName("PlayerMovementController");
             Type life = RevivalPlugin.TypeByName("PlayerLifeDataManager");
             if (move != null)
@@ -4656,7 +4672,7 @@ namespace NextDayRevival
         static bool Mine(object instance)
         {
             Component c = instance as Component;
-            Transform body = PlayerHeli.Body;
+            Transform body = PlayerAn2.Aboard ? PlayerAn2.Body : PlayerHeli.Body;
             if (c == null || body == null) return false;
             return c.transform.IsChildOf(body);
         }
@@ -4665,7 +4681,7 @@ namespace NextDayRevival
         /// else - every other player, and this one on foot - runs untouched.</summary>
         public static bool FallPrefix(object __instance)
         {
-            if (!PlayerHeli.Aboard || !Mine(__instance)) return true;
+            if (!(PlayerHeli.Aboard || PlayerAn2.Aboard) || !Mine(__instance)) return true;
             try
             {
                 if (_mClear != null) _mClear.Invoke(__instance, null);
@@ -4687,6 +4703,11 @@ namespace NextDayRevival
         {
             try
             {
+                if (PlayerAn2.Aboard && Mine(__instance) && Dead(__instance))
+                {
+                    PlayerAn2.DiedAboard();
+                    return;
+                }
                 if (!PlayerHeli.Aboard || !Mine(__instance) || !Dead(__instance)) return;
                 PlayerHeli.DiedAboard(Args(__args));
             }

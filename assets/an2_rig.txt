@@ -1,0 +1,34 @@
+# Written by an2_import.py from assets/an2_gameready/an2_flyable.glb. Do not edit.
+# REAL METRES, Unity axes (+x starboard, +y up, +z nose), flight-line frame,
+# origin on the ground under the middle of the main axle.
+scale 2.800 5.000
+# pivot part x y z  ax ay az   (AngleAxis(angle, axis) about the pivot)
+pivot prop -0.00000 1.95000 2.90000 0.00000 -0.00000 -1.00000
+pivot aileron_l -4.85000 3.57312 -0.96200 0.99905 -0.04362 -0.00000
+pivot aileron_r 4.85000 3.57312 -0.96200 0.99905 0.04362 -0.00000
+pivot elevator -0.00000 2.62000 -8.64550 1.00000 -0.00000 -0.00000
+pivot rudder -0.00000 2.40000 -8.76000 0.00000 1.00000 -0.00000
+# contact wheel x y z   bottom of each tyre
+contact l -1.72500 -0.00000 0.00000
+contact r 1.72500 -0.00000 0.00000
+contact tail -0.00000 1.19000 -8.25000
+parked 8.2079
+# seat index x y z   feet of the man; -1 is the pilot (port seat)
+seat -1 -0.4200 1.3800 0.1317
+seat 0 -0.4500 1.4486 -0.6000
+seat 1 0.4500 1.4486 -1.3500
+seat 2 -0.4500 1.4486 -2.1000
+seat 3 0.4500 1.4486 -2.8500
+seat 4 -0.4500 1.4486 -3.6000
+seat 5 0.4500 1.4486 -4.3500
+door -0.8769 1.2821 -2.1000
+# box name cx cy cz sx sy sz   hull colliders
+box fuselage 0.0000 2.1868 -3.6128 1.8319 2.2736 11.1745
+box lowerwing 0.0000 1.5217 -0.6500 14.2400 0.5455 2.0000
+# measured: span length height (m), cockpit and cabin belly/roof (m)
+span 18.1800
+length 12.7400
+height 5.2000
+cockpit 1.0800 3.2200
+cabin 1.1486 3.1450
+wingtip 9.0900 4.8000 -0.9620

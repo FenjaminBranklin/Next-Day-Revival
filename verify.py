@@ -85,6 +85,11 @@ ASSET_FILES = [
     "gepard_hull.ndmesh", "gepard_tracks.ndmesh", "gepard_turret.ndmesh",
     "gepard_gun_r.ndmesh", "gepard_gun_l.ndmesh", "gepard_radar_search.ndmesh",
     "gepard_radar_track.ndmesh", "gepard_diffuse.png", "gepard_metal.png",
+    # The flyable An-2 (an2_import.py). an2_rig.txt is checked in
+    # check_player_an2.
+    "an2_body.ndmesh", "an2_glass.ndmesh", "an2_prop.ndmesh",
+    "an2_aileron_l.ndmesh", "an2_aileron_r.ndmesh", "an2_elevator.ndmesh",
+    "an2_rudder.ndmesh", "an2_diffuse.png", "an2_normal.png",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
     "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -123,6 +128,13 @@ ASSET_FILES = [
     # shows in the backpack. The canopy in the air is the game's own prefab.
     "parachute.ndmesh", "parachute_diffuse.png", "parachute_normal.png",
     "parachute_icon.png",
+    # An-2 repair parts (2069/2070/2071) - own art (an2_parts_build.py).
+    "an2part_cable.ndmesh", "an2part_cable_diffuse.png", "an2part_cable_normal.png",
+    "an2part_cable_icon.png",
+    "an2part_magneto.ndmesh", "an2part_magneto_diffuse.png", "an2part_magneto_normal.png",
+    "an2part_magneto_icon.png",
+    "an2part_prop.ndmesh", "an2part_prop_diffuse.png", "an2part_prop_normal.png",
+    "an2part_prop_icon.png",
     "fireext.ndmesh", "fireext_diffuse.png", "fireext_normal.png", "fireext_icon.png",
     "toolkit.ndmesh", "toolkit_diffuse.png", "toolkit_normal.png", "toolkit_icon.png",
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
@@ -174,9 +186,13 @@ MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_
           "shell125.ndmesh", "thermal.ndmesh", "nvmodule.ndmesh",
           "jammod.ndmesh", "antenna_pack.ndmesh", "battery.ndmesh",
           "survdrone.ndmesh", "parachute.ndmesh",
+          "an2part_cable.ndmesh", "an2part_magneto.ndmesh", "an2part_prop.ndmesh",
           "gepard_hull.ndmesh", "gepard_tracks.ndmesh", "gepard_turret.ndmesh",
           "gepard_gun_r.ndmesh", "gepard_gun_l.ndmesh",
-          "gepard_radar_search.ndmesh", "gepard_radar_track.ndmesh"]
+          "gepard_radar_search.ndmesh", "gepard_radar_track.ndmesh",
+          "an2_body.ndmesh", "an2_glass.ndmesh", "an2_prop.ndmesh",
+          "an2_aileron_l.ndmesh", "an2_aileron_r.ndmesh",
+          "an2_elevator.ndmesh", "an2_rudder.ndmesh"]
 
 # Erwartete Bildgroessen, abgelesen an den Spielvorlagen.
 ICON_SIZES = {
@@ -193,6 +209,8 @@ ICON_SIZES = {
     "jammod_icon.png": (300, 300), "antenna_pack_icon.png": (300, 300),
     "battery_icon.png": (300, 300), "survdrone_icon.png": (300, 300),
     "parachute_icon.png": (300, 300),
+    "an2part_cable_icon.png": (300, 300), "an2part_magneto_icon.png": (300, 300),
+    "an2part_prop_icon.png": (300, 300),
     "mg42_weapon_icon.png": (317, 183), "sniper50_weapon_icon.png": (317, 183),
     "m7_weapon_icon.png": (317, 183),
     "law_weapon_icon.png": (317, 183),
@@ -818,6 +836,84 @@ def check_helipads():
         need(os.path.exists(os.path.join(ROOT, "research", "helipad_check.py")),
              "research/helipad_check.py liegt vor",
              "research/helipad_check.py fehlt - die Landeplaetze sind unbelegt")
+
+
+def check_vehicle_gunner_ai():
+    """[27b] NPC vehicle gunners: sight, spread, reaction (Revival.GunnerAI.cs,
+    docs/ai/tasks/vehicle-gunner-ai.md).
+
+      1. Revival.GunnerAI.cs is ASCII without a BOM and bound in RevivalPlugin.
+      2. Both AI guns (Patrol.Gun, TechnicalCrew) take sight through the
+         vegetation test and through the hull a player sits in, get reaction
+         and spread from GunnerAI, and log every round.
+      3. The patrol gun rechecks sight before every round and fires without it
+         only inside SuppressSeconds.
+      4. research/vehicle_gunner_check.py (the real formulas, headless) passes
+         when the .NET 3.5 compiler is there.
+    """
+    import subprocess
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Vehicle gunner AI: " + why)
+
+    path = os.path.join(ROOT, "Revival.GunnerAI.cs")
+    if not os.path.exists(path):
+        bad("Vehicle gunner AI: Revival.GunnerAI.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 127 for b in raw),
+         "Revival.GunnerAI.cs is ASCII without a BOM", "Revival.GunnerAI.cs is not plain ASCII")
+    ai = raw.decode("ascii", "replace")
+    need("GunnerAI.BindConfig(Config)" in read("RevivalPlugin.cs"),
+         "[GunnerAI] config is bound", "RevivalPlugin does not bind [GunnerAI]")
+    need("TreeInstance" in ai and "SightThreshold" in ai,
+         "gunner sight counts terrain trees and bushes", "the vegetation test is gone")
+
+    patrol = read("Revival.Patrol.cs")
+    einer = _body(patrol, "static void Einer(Unit u)")
+    sicht = _body(patrol, "static float Sichtbar(Unit u, CombatTarget c)")
+    shoot = _body(patrol, "static bool Schiessen(Unit u, Vector3 ziel, bool suppress)")
+    need("GunnerAI.Transmit" in sicht and "GunnerAI.OnCarrier" in sicht,
+         "patrol gun sight: vegetation and the seated player's hull",
+         "Patrol.Gun.Sichtbar lost the vegetation or the carrier test")
+    need("Sichtbar(u, u.GunTarget)" in einer and "SuppressSeconds" in einer
+         and einer.find("Sichtbar(u, u.GunTarget)") < einer.find("Schiessen("),
+         "patrol gun: sight before every round, suppression time-limited",
+         "Patrol.Gun.Einer fires without a sight check or without the suppression limit")
+    need("GunnerAI.Reaction" in einer and "CfgPatrolGunNotice" not in einer,
+         "patrol gun reaction from range and visibility", "Patrol.Gun uses a fixed reaction again")
+    need("GunnerAI.LogShot" in shoot and "Streuweite" in shoot,
+         "patrol gun: GunnerAI spread and one log line per round",
+         "Patrol.Gun.Schiessen lost the GunnerAI spread or the shot log")
+
+    crew = read("RevivalTechnicalCrew.cs")
+    need("GunnerAI.Transmit" in _body(crew, "static float Sicht(Truck t")
+         and "GunnerAI.Spread" in _body(crew, "static void Feuern(Truck t")
+         and "GunnerAI.LogShot" in _body(crew, "static void Feuern(Truck t")
+         and "GunnerAI.Reaction" in _body(crew, "static void Zielen(Truck t)"),
+         "technical gunner: vegetation sight, GunnerAI spread/reaction, shot log",
+         "TechnicalCrew no longer uses GunnerAI for sight, spread, reaction or the log")
+
+    check = os.path.join(ROOT, "research", "vehicle_gunner_check.py")
+    need(os.path.exists(check), "research/vehicle_gunner_check.py present",
+         "research/vehicle_gunner_check.py missing")
+    csc = os.path.join(os.environ.get("WINDIR", "C:\\Windows"),
+                       "Microsoft.NET", "Framework", "v3.5", "csc.exe")
+    if os.path.exists(check) and os.path.exists(csc):
+        r = subprocess.run([sys.executable, check], cwd=os.path.join(ROOT, "research"),
+                           capture_output=True, text=True)
+        need(r.returncode == 0 and "PASS" in r.stdout,
+             "vehicle gunner numbers pass the headless check",
+             "research/vehicle_gunner_check.py fails: " + (r.stdout + r.stderr).strip()[-300:])
+    else:
+        warn("Vehicle gunner AI: .NET 3.5 csc not found - headless check skipped")
 
 
 def check_road_clear():
@@ -4309,6 +4405,418 @@ def check_player_heli():
          "Revival.PlayerHeli.cs is missing from sync_public.py - the public "
          "repo does not build without it")
 
+def check_player_an2():
+    """[22b] The An-2 a player flies (Revival.PlayerAn2.cs, docs/ai/tasks/an2-flight.md).
+
+    The order (task 3d31e25fcb): a fixed-wing flight model - throttle, pitch,
+    roll, rudder; lift from speed and a stall below about 60 km/h; takeoff and
+    landing on the runway or on grass; a fuel gauge; a crash when landing too
+    hard - with the Mi-8's vehicle, seat, camera and crash plumbing reused and
+    its fall guard protecting a seated pilot; one An-2 at the H1 apron behind a
+    config key that is off by default; the scale proven against the player
+    capsule, not the Mi-8. What can be held without the game:
+      - the carrier is the Mi-8 prefab under an OWN marker, drawn as nothing;
+      - the fall guard and the input locks ask PlayerAn2 as well;
+      - the rig is at 2.8 u/m, the meshes measure the published span and
+        length, and the plugin's K is the same 2.8;
+      - the flight equations, run by research/an2_flight_sim.py, stall between
+        45 and 65 km/h and take off on grass inside 300 m;
+      - the seams, the camera owner, the event window and the file lists.
+    """
+    print("[22b] Player-flown An-2")
+    src_p = os.path.join(ROOT, "Revival.PlayerAn2.cs")
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("PlayerAn2: " + why)
+
+    if not os.path.exists(src_p):
+        bad("Revival.PlayerAn2.cs is missing - the An-2 cannot be flown")
+        return
+    raw = io.open(src_p, "rb").read()
+    an2 = raw.decode("utf-8", "replace")
+    code = _code(an2)
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    import re
+    heli = read("Revival.PlayerHeli.cs")
+    plug = read("RevivalPlugin.cs")
+    cam = read("Revival.CameraTurret.cs")
+    sync = read("sync_public.py")
+    build = read("build.ps1")
+
+    def bind(key):
+        m = re.search(r'Bind\(S,\s*"%s"\s*,\s*(-?[0-9.]+|true|false)f?\s*,' % re.escape(key), an2)
+        return None if m is None else m.group(1)
+
+    need(not raw.startswith(b"\xef\xbb\xbf"), "no BOM", "Revival.PlayerAn2.cs starts with a BOM")
+    strange = sorted(set(c for c in an2 if ord(c) > 126 and not 0x400 <= ord(c) <= 0x4FF))
+    need(not strange, "outside ASCII only Cyrillic (player text)",
+         "characters that are neither ASCII nor Cyrillic: "
+         + " ".join("U+%04X" % ord(c) for c in strange))
+
+    # --- the carrier and its marker.
+    need('Marker = "ndr-an2-1"' in code and "ndr-flyheli-1" not in code
+         and "ndr-troopheli-1" not in code,
+         "an own instantiation marker (neither the Mi-8's nor the troop one)",
+         "the An-2 shares a marker - another feature's sweep would take it")
+    need("_fStart.SetValue(mover, Vector3.zero);" in code,
+         "the carrier's own helicopter movement is left idle",
+         "startPosition is not zeroed - the game moves the carrier")
+    need("drawn[i].enabled = false;" in code and "rotor.Kill();" in code,
+         "the carrier Mi-8 is drawn as nothing and its rotor and sound are killed",
+         "the carrier Mi-8 is still drawn or still runs its rotor")
+
+    # --- off by default, the apron stand.
+    need(bind("Enabled") == "false", "[PlayerAn2] Enabled is off by default",
+         "[PlayerAn2] Enabled is not off by default")
+    recipe = read("unity/EastTile/Content/east_airfield.json")
+    m = re.search(r'"id":\s*"AN".*?"x":\s*([0-9.]+),\s*"z":\s*([0-9.]+)', recipe)
+    m2 = re.search(r'Apron = new Vector3\(([0-9.]+)f, 0f, ([0-9.]+)f\)', code)
+    need(m is not None and m2 is not None
+         and abs(float(m.group(1)) - float(m2.group(1))) < 1
+         and abs(float(m.group(2)) - float(m2.group(2))) < 1,
+         "the apron spawn stands on the greybox An-2 stand (east_airfield.json AN)",
+         "the apron spawn is not where the airfield recipe puts the An-2")
+    need('StandInName = "AN An-2 (nose east)"' in code,
+         "the greybox stand-in is hidden while a flyable An-2 exists",
+         "the greybox stand-in is not named - two aeroplanes on one stand")
+
+    # --- scale: the capsule, not the Mi-8.
+    rig_p = os.path.join(ASSETS, "an2_rig.txt")
+    rig = io.open(rig_p, encoding="ascii").read() if os.path.exists(rig_p) else ""
+    kv = {}
+    for line in rig.splitlines():
+        p = line.split()
+        if p and not p[0].startswith("#"):
+            kv.setdefault(p[0], []).append(p[1:])
+    need(os.path.exists(os.path.join(ROOT, "an2_import.py"))
+         and os.path.exists(os.path.join(ASSETS, "an2_gameready", "an2_flyable.glb")),
+         "an2_import.py and the source GLB are in the repository",
+         "an2_import.py or assets/an2_gameready/an2_flyable.glb is missing")
+    scale = kv.get("scale", [[None, None]])[0]
+    need("internal const float K = 2.8f;" in code and scale[0] == "2.800" and scale[1] == "5.000",
+         "2.8 u/m in the plugin and the rig: a 5.0 u capsule is a 1.79 m man",
+         "the plugin and an2_rig.txt disagree on the world scale, or it is not 2.8")
+    try:
+        span = float(kv["span"][0][0])
+        length = float(kv["length"][0][0])
+        need(abs(span - 18.18) / 18.18 < 0.005 and abs(length - 12.74) / 12.74 < 0.005,
+             "the meshes measure the published span %.2f m and length %.2f m" % (span, length),
+             "an2_rig.txt span/length are off the published 18.18/12.74 m")
+        cab = kv["cabin"][0]
+        cabin = float(cab[1]) - float(cab[0])
+        need(cabin * 2.8 > 5.0,
+             "the cabin (%.2f m = %.1f u) takes a standing 5.0 u capsule" % (cabin, cabin * 2.8),
+             "the cabin is lower than the player capsule - the scale is wrong")
+    except (KeyError, IndexError, ValueError):
+        bad("PlayerAn2: an2_rig.txt lacks span/length/cabin - python an2_import.py")
+    pivots = set(p[0] for p in kv.get("pivot", []))
+    need(pivots >= {"prop", "aileron_l", "aileron_r", "elevator", "rudder"}
+         and set(p[0] for p in kv.get("contact", [])) == {"l", "r", "tail"}
+         and "parked" in kv and any(p[0] == "-1" for p in kv.get("seat", [])),
+         "an2_rig.txt: five hinges, three wheels, the parked pitch, the pilot's seat",
+         "an2_rig.txt is incomplete - python an2_import.py")
+    need('"an2_rig.txt"' in build and '"an2_body.ndmesh"' in build,
+         "build.ps1 installs the An-2 assets", "build.ps1 does not install the An-2 assets")
+
+    # --- the flight model: controls, lift, stall, fuel, crash.
+    need("KeyCode.Space" in code and "Axis(KeyCode.S, KeyCode.W)" in code
+         and "Axis(KeyCode.D, KeyCode.A)" in code and "Axis(KeyCode.E, KeyCode.Q)" in code,
+         "throttle, pitch, roll and rudder each have their keys",
+         "one of throttle/pitch/roll/rudder has no input")
+    need("LiftShape(aoa, crit)" in code and "(speed / vs) * (speed / vs)" in code,
+         "lift grows with the square of the airspeed over the stall speed",
+         "the lift does not come from the airspeed")
+    need(bind("StallSpeed") == "60" and "_stalled" in code,
+         "the stall speed is 60 km/h and a stall is detected",
+         "StallSpeed is not 60 km/h or no stall state")
+    need(bind("GrassFriction") is not None and "Paved(" in code,
+         "concrete and grass roll differently, and both carry a takeoff",
+         "the ground roll does not know grass from concrete")
+    need("vis.Fuel - burn * dt" in code and "Gauge(" in code and "SetEngine(false)" in code,
+         "fuel burns with the throttle, the gauge is drawn, an empty tank stops the engine",
+         "no fuel burn, no gauge or no engine stop on an empty tank")
+    need("static bool Touchdown(Vector3 arrival)" in code and '"CrashSinkRate", 4f' in code
+         and "Crash(_plane, _plane.transform.position);" in _body(code, "static bool Touchdown(Vector3 arrival)"),
+         "a touchdown faster than 4 m/s of sink is a crash",
+         "a hard landing does not crash the aeroplane")
+    need("FireEffect.SpawnHeliFire(anchor)" in code and "HeliCrashSound.Play(where);" in code
+         and "Parachute.Jump(" in code,
+         "the crash reuses the aircraft fire, the crash sound and the parachute jump",
+         "the crash does not reuse the Mi-8's fire/sound/parachute path")
+
+    # The equations, flown by the sim. Its arithmetic mirrors the plugin.
+    sim_p = os.path.join(ROOT, "research", "an2_flight_sim.py")
+    if not os.path.exists(sim_p):
+        bad("PlayerAn2: research/an2_flight_sim.py is missing")
+    else:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("an2_flight_sim", sim_p)
+            sim = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sim)
+            need(("Induced = %.1ff;" % sim.INDUCED) in code,
+                 "the sim and the plugin use the same induced drag (%.1f)" % sim.INDUCED,
+                 "research/an2_flight_sim.py and the plugin disagree on the induced drag")
+            sv, lost, _ = sim.stall()
+            need(45.0 <= sv <= 65.0, "the wing stalls at %.0f km/h (order: below ~60)" % sv,
+                 "the model stalls at %.0f km/h, not near 60" % sv)
+            grass = sim.takeoff(False, 1.0)
+            need(grass is not None and grass[0] < 300.0,
+                 "takeoff from grass in %.0f m (short field)" % (grass[0] if grass else -1),
+                 "no short takeoff from grass")
+            need(sim.landing(sim.CFG["CrashSinkRate"] + 0.5) == "crash" and sim.landing(1.5) == "ok",
+                 "hard landing crashes, a normal one does not",
+                 "the touchdown rule does not separate a landing from a crash")
+        except Exception as ex:  # noqa: BLE001
+            bad("PlayerAn2: research/an2_flight_sim.py failed: %s" % ex)
+
+    # --- the Mi-8's plumbing asks for the An-2 too.
+    guard = _body(heli, "public static bool FallPrefix(object __instance)")
+    need("PlayerAn2.Aboard" in guard and "PlayerAn2.Body" in _body(heli, "static bool Mine(object instance)"),
+         "the fall guard holds a seated An-2 pilot out of the game's fall state",
+         "HeliBodyGuard does not protect an An-2 pilot - he can die of a fall in his seat")
+    need("if (PlayerAn2.Aboard) __result = true;" in heli and "if (PlayerAn2.Flying) __result = true;" in heli,
+         "the body and the orbit camera are locked through the game's own predicates",
+         "the input locks do not know the An-2 - the body walks along")
+    need("PlayerAn2.DiedAboard();" in heli, "a death aboard ends the An-2 flight",
+         "a death aboard does not reach the An-2")
+    need("HeliInputHook.Install(harmony);" in code and "HeliBodyGuard.Install(harmony);" in code,
+         "the An-2 installs the shared locks itself (once, with the Mi-8 off too)",
+         "with [PlayerHeli] off the An-2 pilot has no fall guard")
+    need("public const int An2 = 7;" in cam and "else if (_owner == An2) PlayerAn2.LateTick();" in cam,
+         "the pilot's view is an owner of the shared camera",
+         "CameraOwner does not know the An-2")
+    for seam in ("PlayerAn2.BindConfig(Config);", "PlayerAn2.Install(_harmony);",
+                 "PlayerAn2.Tick();", "PlayerAn2.LateFrame();", "PlayerAn2.Draw();"):
+        need(seam in plug, "seam " + seam, "seam missing in RevivalPlugin.cs: " + seam)
+    need('"Revival.PlayerAn2.cs"' in sync and '"an2_import.py"' in sync,
+         "Revival.PlayerAn2.cs and an2_import.py go into the public repository",
+         "sync_public.py lacks Revival.PlayerAn2.cs or an2_import.py")
+
+    # --- the event window: 150..157 against every other band (+6/+7 are the
+    # repair state of Revival.An2Repair.cs).
+    base = bind("NetworkEventCode")
+    if base is None:
+        bad("PlayerAn2: NetworkEventCode is not a plain default")
+    else:
+        base = int(float(base))
+        troop = read("RevivalTroopInsertion.cs")
+        known = [("Troops", _bind_number(troop, "Troops", "NetworkEventCode"), 3),
+                 ("PlayerHeli", _bind_number(heli, "PlayerHeli", "NetworkEventCode"), 6),
+                 ("Drone", _bind_number(plug, "Drone", "EventCode"), 5),
+                 ("Turret", _bind_number(plug, "Turret", "NetworkEventCode"), 1),
+                 ("Admin", _bind_number(plug, "Admin", "NetworkEventCode"), 1),
+                 ("CrewDrone", _bind_number(plug, "Patrol", "CrewDroneEventCode"), 1),
+                 ("SurvDrone", _bind_number(read("RevivalDroneGear.cs"),
+                                            "DroneGear", "SurveillanceEventCode"), 4),
+                 ("Mortar", _bind_number(read("RevivalMortar.cs"), "Mortar", "NetworkEventCode"), 6),
+                 ("Crocodile", 164, 1), ("Stinger", 191, 1), ("Gepard", 193, 1), ("ApMine", 196, 1)]
+        taken = {}
+        for name, start, span in known:
+            if start is None:
+                continue
+            for c in range(int(start), int(start) + span):
+                taken.setdefault(c, name)
+        clash = [(c, taken[c]) for c in range(base, base + 8) if c in taken]
+        need(not clash and base + 7 <= 199, "event codes %d-%d are free" % (base, base + 7),
+             "event codes collide: " + ", ".join("%d is %s" % (c, w) for c, w in clash))
+
+
+def check_an2_repair():
+    """[22c] The An-2 repair loop (Revival.An2Repair.cs, docs/ai/tasks/an2-repair.md).
+
+    The order (task 93c547d5c5): the An-2 at the H1 apron starts broken; four
+    stages (controls/instruments, engine, propeller, fuel) with existing loot
+    items where possible and three new ones; the parts spawn through the
+    airfield's loot tiers; fitting through the existing interaction style with
+    progress per stage; fuel from canisters and the D1 depot; it flies only
+    when every stage is done; the state saved and synced by the master; a
+    config key that is off by default. What can be held without the game:
+      - off by default, and the engine start asks the repair state;
+      - the three new ids are free in the game's table and nowhere else in the
+        plugin, their art exists and is installed;
+      - the airfield's parts/fuel pools roll them;
+      - a part is taken from the pack only after the timer ran out (an
+        interrupted fitting never eats it), and fuel only grows through a
+        canister or the depot;
+      - the depot is where the airfield recipe puts the pump house;
+      - the state travels in the spawn data, the heartbeat and two events, and
+        a wreck resets it;
+      - the seams and the file lists.
+    """
+    print("[22c] An-2 repair loop")
+    src_p = os.path.join(ROOT, "Revival.An2Repair.cs")
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("An2Repair: " + why)
+
+    if not os.path.exists(src_p):
+        bad("Revival.An2Repair.cs is missing - the An-2 cannot be repaired")
+        return
+    raw = io.open(src_p, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf"), "Revival.An2Repair.cs has no BOM",
+         "Revival.An2Repair.cs starts with a BOM")
+    code = _code(raw.decode("utf-8", "replace"))
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    import re
+    import glob
+    an2 = _code(read("Revival.PlayerAn2.cs"))
+    plug = read("RevivalPlugin.cs")
+    airfield = _code(read("Revival.Airfield.cs"))
+    convoy = _code(read("RevivalConvoyRepair.cs"))
+    items = read("Revival.Items.cs")
+
+    need(re.search(r'cfg\.Bind\(S, "Enabled", false,', code) is not None,
+         "[An2Repair] Enabled is off by default",
+         "[An2Repair] Enabled is not off by default")
+
+    # --- the ids: free in the game, one owner in the plugin, own art.
+    ids = []
+    for name in ("CableId", "MagnetoId", "PropId"):
+        m = re.search(r"internal const int %s = ([0-9]+);" % name, code)
+        ids.append(int(m.group(1)) if m else None)
+    need(ids == [2069, 2070, 2071], "the three new parts are 2069, 2070 and 2071",
+         "the part ids are not 2069/2070/2071: %s" % ids)
+    game = set()
+    tsv = os.path.join(ROOT, "research", "items.tsv")
+    if os.path.exists(tsv):
+        for line in io.open(tsv, encoding="utf-8", errors="replace"):
+            p = line.split("\t")
+            if len(p) > 1 and p[1].isdigit():
+                game.add(int(p[1]))
+    need(not ({2069, 2070, 2071} & game), "2069-2071 are not ids of the game",
+         "an An-2 part id is already an item of the game")
+    for want in (10001, 10002, 10004, 10005, 10006):
+        need(want in game or not game, "the reused vehicle item %d exists in the game" % want,
+             "item %d is not in research/items.tsv" % want)
+    claimed = []
+    for p in glob.glob(os.path.join(ROOT, "*.cs")):
+        if os.path.basename(p) == "Revival.An2Repair.cs":
+            continue
+        if re.search(r"\b(2069|2070|2071)\s*,\s*[0-9]{4}\s*,\s*(true|false)",
+                     io.open(p, encoding="utf-8").read()):
+            claimed.append(os.path.basename(p))
+    need(not claimed, "no other ItemDef claims 2069-2071",
+         "another ItemDef uses an An-2 part id: " + ", ".join(claimed))
+    need(re.search(r"SellOnlyIds[^;]*2069, 2070, 2071", items) is not None,
+         "the three parts have a trader's sell price",
+         "2069-2071 are not in Registry.SellOnlyIds - a trader will not take them")
+    for stem in ("an2part_cable", "an2part_magneto", "an2part_prop"):
+        need('"%s.ndmesh"' % stem in code and '"%s_icon.png"' % stem in code,
+             "%s: mesh and icon named by its ItemDef" % stem,
+             "%s is not the art of its item" % stem)
+    need("An2Repair.AddItems(Items);" in plug, "the parts are in the item table",
+         "RevivalPlugin.cs does not call An2Repair.AddItems")
+
+    # --- the loot: the airfield's pools roll the parts and the canisters.
+    pool = _body(code, "internal static string[] Pool(string pool, string[] entries)")
+    need('pool == "parts"' in pool and all('"%d"' % i in pool for i in (2069, 2070, 2071))
+         and 'pool == "fuel"' in pool and '"10001"' in pool,
+         "the parts pool rolls the three parts, the fuel pool the canister",
+         "the airfield pools do not roll the An-2 parts or canisters")
+    need("entries = An2Repair.Pool(pool, entries);" in _body(airfield, "static object Draw(string pool)"),
+         "the airfield loot draw asks the repair for its pools",
+         "Airfield.Draw does not extend its pools - no part ever spawns")
+    need(re.search(r'new Slot\("H1", 3, "parts"', airfield) is not None
+         and re.search(r'new Slot\("D1c", 3, "fuel"', airfield) is not None,
+         "H1 has its parts cage and D1c its fuel point (tier 3)",
+         "the H1 parts cage or the D1c fuel point is gone")
+
+    # --- interruption never eats a part; fuel only through an item or the depot.
+    idle = _body(code, "static void TickIdle()")
+    job = _body(code, "static void TickJob()")
+    need("TakeItem" not in idle and "Turret.TakeItem(PartItem[part]" in job
+         and 0 <= job.find("Time.time - _jobStart < _jobLen") < job.find("TakeItem"),
+         "a part leaves the pack only after the fitting's timer ran out",
+         "a part is taken before the fitting is finished - an interruption eats it")
+    need(code.count("Turret.TakeItem(") == 2, "exactly two places consume: a part and a canister",
+         "an unexpected TakeItem in An2Repair")
+    apply = _body(code, "static void Apply(GameObject go, int what, float litres, int sender)")
+    need("SetFuel(" in apply and "what == FuelCan || what == FuelDepot" in apply
+         and "Mathf.Min(add, Reserve())" in apply
+         and code.count("PlayerAn2.SetFuel(") == 2,
+         "fuel grows only by a canister or the depot's reserve (and the master's state)",
+         "fuel can grow without a canister or past the depot's reserve")
+
+    # --- flies only when repaired.
+    eng = _body(an2, "static void SetEngine(bool on)")
+    need("An2Repair.CanStart(_plane, vis.Fuel, out why)" in eng,
+         "the engine starts only on an airworthy An-2",
+         "SetEngine does not ask An2Repair - a broken An-2 flies")
+    can = _body(code, "internal static bool CanStart(GameObject go, float fuel, out string why)")
+    need("AllParts" in can and "CfgMinFuel" in can, "airworthy = all six parts and the minimum fuel",
+         "CanStart does not check every part and the fuel")
+    newp = _body(code, "internal static void NewPlane(ref float fuel, out int mask)")
+    need("mask = 0;" in newp and "fuel = 0f;" in newp, "a new An-2 starts broken and dry",
+         "a new An-2 does not start broken")
+
+    # --- the depot is the pump house of the recipe.
+    recipe = read("unity/EastTile/Content/east_airfield.json")
+    m = re.search(r'"id":\s*"D1c".*?"x":\s*([0-9.]+),\s*"z":\s*([0-9.]+)', recipe, re.S)
+    m2 = re.search(r"Depot = new Vector3\(([0-9.]+)f, 0f, ([0-9.]+)f\)", code)
+    need(m is not None and m2 is not None
+         and abs(float(m.group(1)) - float(m2.group(1))) < 1
+         and abs(float(m.group(2)) - float(m2.group(2))) < 1,
+         "the fuel depot pump is the recipe's D1c pump house",
+         "the depot is not where east_airfield.json puts D1c")
+
+    # --- authority, sync, persistence.
+    need("An2Repair.NewPlane(ref fuel, out parts);" in an2
+         and "new object[] { Marker, fuel, parts }" in an2
+         and "An2Repair.Prepared(go, data);" in an2,
+         "the mask travels in the spawn data and is read on every client",
+         "the repair mask is not in the spawn data")
+    need("An2Repair.Broadcast(go, view);" in _body(an2, "static void State()")
+         and "An2Repair.OnNet(kind, f, sender);" in an2
+         and "internal const int NetState = 6;" in code and "internal const int NetRequest = 7;" in code,
+         "the master repeats the state in the heartbeat; +6 state, +7 request",
+         "the repair state is not synced")
+    need("RevivalTroopInsertion.MasterClient()" in _body(code, "internal static void OnNet(int kind, float[] f, int sender)")
+         and "if (!RevivalTroopInsertion.MasterClient()) return;" in _body(code, "static void Save(GameObject go)"),
+         "only the master applies requests and writes the save",
+         "a client applies requests or writes the save")
+    need("An2Repair.Wrecked(go);" in _body(an2, "static void Burn(GameObject go, Vector3 where)"),
+         "a wreck resets the repair (the next An-2 is broken)",
+         "a wreck does not reset the repair state")
+    need("An2Repair.SavedPlace(out saved, out savedHeading)" in _body(an2, "static void ApronSpawn()"),
+         "the first An-2 of a session stands where it was parked",
+         "the saved parking place is not used")
+    need("An2Repair.Busy" in _body(convoy, "public static void Postfix(ref bool __result)")
+         and "ConvoyFreezeHook.Install(harmony);" in code,
+         "the body is held while fitting (the convoy repair's freeze)",
+         "the body is not frozen while fitting")
+    need("NativeActionProgress.Begin(ProgressOwner" in code,
+         "fitting uses the native interaction progress",
+         "fitting does not use NativeActionProgress")
+    for seam in ("An2Repair.BindConfig(Config);", "An2Repair.Install(_harmony);",
+                 "An2Repair.Tick();", "An2Repair.Draw();"):
+        need(seam in plug, "seam " + seam, "seam missing in RevivalPlugin.cs: " + seam)
+
+    # --- file lists.
+    build = read("build.ps1")
+    sync = read("sync_public.py")
+    need(all('"an2part_%s_icon.png"' % n in build and '"an2part_%s.ndmesh"' % n in build
+             for n in ("cable", "magneto", "prop")),
+         "build.ps1 installs the part art", "build.ps1 does not install the An-2 part art")
+    need('"Revival.An2Repair.cs"' in sync and '"an2_parts_build.py"' in sync,
+         "Revival.An2Repair.cs and an2_parts_build.py go into the public repository",
+         "sync_public.py lacks Revival.An2Repair.cs or an2_parts_build.py")
+
+
 def check_parachute():
     """[23] The parachute.
 
@@ -5132,6 +5640,293 @@ def check_gepard():
             warn("noch nicht installiert: gepard_rig.txt (und die Gepard-Teile)")
 
 
+def check_gepard_npc():
+    """[28b] The Gepard as an NPC vehicle (docs/ai/tasks/gepard-npc.md).
+
+    The order (2026-09-26): the Gepard selectable in the route editor like
+    the other armed vehicles, an NPC crew that rides via the Photon spawn key,
+    a gunner who engages aircraft first and ground targets second, and a
+    stationary "AA site" that holds its position. What makes that true
+    without the game:
+
+      1. THE EDITOR OFFERS IT: compdef.VEHICLE_TYPES, its three seats, the
+         shipped catalogue sample, and a served catalogue that appends a kind
+         an older extraction lacks.
+      2. THE KEY HAS A SLASH: "gep/" - Revival.GroundEnemies.cs deletes every
+         keyed NPC without one - and the guard there is still generic.
+      3. NO NPC IN Passengers, as for the technical.
+      4. AIR FIRST: the search looks at aircraft and only falls through to the
+         ground when no aircraft was chosen; NPC rounds are judged against the
+         gunner's own contacts.
+      5. THE DONOR'S HIDDEN BTR TURRET never fires on a Gepard patrol.
+      6. THE AA SITE: `hold` read by Patrol and held in FixedTick; compdef
+         writes it and refuses it on a convoy.
+      7. SEAMS: plugin, Gepard.Tick, Patrol.UnloadCrew, public repository.
+    """
+    import re
+    print("[28b] Gepard als NPC-Fahrzeug (Editor, Besatzung, Flugabwehr zuerst, Stellung)")
+
+    def read(name):
+        p = os.path.join(ROOT, name)
+        return io.open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Gepard NPC: " + why)
+
+    crew_raw = read("RevivalGepardCrew.cs")
+    if not crew_raw:
+        bad("RevivalGepardCrew.cs fehlt")
+        return
+    crew = _code(crew_raw)
+    need(all(ord(ch) < 128 for ch in crew_raw) and not crew_raw.startswith("\ufeff"),
+         "RevivalGepardCrew.cs ist ASCII ohne BOM",
+         "RevivalGepardCrew.cs ist nicht ASCII oder hat eine BOM")
+    comp = read("compdef.py")
+    cat = read(os.path.join("assets", "editor", "catalogue_sample.json"))
+    catpy = read(os.path.join("research", "catalogue.py"))
+    editor = read("routeeditor.py")
+    app = read(os.path.join("editor", "app.js"))
+    html = read(os.path.join("editor", "index.html"))
+    patrol = _code(read("Revival.Patrol.cs"))
+    ground = read("Revival.GroundEnemies.cs")
+    gep = _code(read("RevivalGepard.cs"))
+    plug = read("RevivalPlugin.cs")
+    sync = read("sync_public.py")
+
+    # --- 1: the editor
+    types = re.search(r"^VEHICLE_TYPES = \[(.*?)\]", comp, re.M)
+    need(types is not None and '"gepard"' in types.group(1),
+         "compdef.VEHICLE_TYPES enthaelt gepard",
+         "compdef.VEHICLE_TYPES kennt den Gepard nicht - der Editor bietet ihn nicht an")
+    need('"gepard": ["driver", "gunner", "commander"]' in comp,
+         "drei Plaetze: driver, gunner, commander (Sitzreihenfolge RevivalGepard.cs)",
+         "VEHICLE_SEATS fehlt fuer den Gepard")
+    need('"key": "gepard"' in cat and '"key": "gepard"' in catpy,
+         "Katalog (Beispiel und research/catalogue.py) fuehrt den Gepard",
+         "der Katalog kennt den Gepard nicht")
+    need("catalogue_with_vehicles(" in editor and "compdef.VEHICLE_TYPES" in editor,
+         "/api/catalogue ergaenzt fehlende Fahrzeugarten eines aelteren Katalogs",
+         "ein alter Katalog auf dem Server versteckt den Gepard weiter")
+    need("rHold" in app and 'id="rHold"' in html and "gepard:" in app,
+         "Editor: Gepard-Sitze und Kaestchen 'Hold position (AA site)'",
+         "Editor-Oberflaeche ohne Gepard-Sitze oder Stellungs-Kaestchen")
+
+    # --- 2: the key
+    need('KeyPrefix = "gep/"' in crew and 'KeyGunner = "/g"' in crew
+         and 'KeyCrew = "/c"' in crew and "Crew.DropGroundSquad(" in crew,
+         "Besatzung ueber den Photon-Spawnschluessel gep/<view>/g|c",
+         "die Gepard-Besatzung hat keinen Schluessel mit Schraegstrich")
+    need("key.IndexOf('/') >= 0" in ground,
+         "GroundEnemies laesst Schluessel mit Schraegstrich in Ruhe",
+         "Revival.GroundEnemies.cs loescht Schluessel mit Schraegstrich")
+
+    # --- 3: no NPC in Passengers (reading it is allowed)
+    need(not re.search(r"Passengers[^;]*SetValue|SetValue\([^;]*Passengers", crew),
+         "kein NPC im Passengers-Array",
+         "RevivalGepardCrew.cs schreibt in Passengers")
+
+    # --- 4: air first
+    m = re.search(r"static void Suchen\(Hull h\)(.*?)\n        \}", crew, re.S)
+    body = m.group(1) if m else ""
+    ground_at = body.find("NpcWar.PatrolTargets(")
+    need("PlayerHeli.MissileTargets(" in body and "GepardAir.Collect(" in body
+         and 0 <= body.find("GepardAir.Collect(") < ground_at
+         and 0 <= body.find("if (best != null)") < ground_at,
+         "Luftziele (Mi-8, An-2 ueber GepardAir) vor Bodenzielen",
+         "die NPC-Suche nimmt Bodenziele nicht erst nach den Luftzielen")
+    need("GepardShots.Fire(h.Rig, gun, dir, true, h.Air)" in crew
+         and "GepardGun.Proximity(r.Npc," in gep and "GepardGun.Struck(r.Npc," in gep,
+         "NPC-Schuesse werden gegen die eigenen Kontakte des Richtschuetzen gewertet",
+         "NPC-Schuesse laufen ueber die Kontakte des lokalen Spielers")
+    need("GepardNet.SendPose(" in crew,
+         "Turm und Abzug gehen ueber das Gepard-Ereignis an alle Clients",
+         "andere Spieler saehen den NPC-Turm nicht")
+
+    # --- 5: the donor turret stays silent
+    need("if (Gepard.IstGepard(u.Car.transform)) all = new Transform[0];" in patrol,
+         "Patrol.Gun.Collect laesst den versteckten BTR-Turm des Spenders aus",
+         "der unsichtbare BTR-Turm eines Gepard wuerde feuern")
+
+    # --- 6: the AA site
+    need('r.Site = HasFlag(p, "hold");' in patrol
+         and "if (u.Route.Site && u.ConvoyId == 0) { HoldStill(u); continue; }" in patrol
+         and 'if (r.Site) keep.Add("hold");' in patrol,
+         "Stellung: Flag hold, das Fahrzeug steht gebremst am Startpunkt",
+         "Patrol kennt die Stellung (hold) nicht")
+    need('keep.append("hold")' in comp and "hold position (AA site) is a patrol option" in comp,
+         "compdef schreibt hold nur fuer Patrouillen",
+         "compdef schreibt oder prueft hold nicht")
+
+    # --- 7: seams
+    for seam in ("GepardCrew.BindConfig(Config)", "GepardCrew.Install(_harmony)",
+                 "GepardCrew.LateFrame()"):
+        need(seam in plug, "Seam " + seam + " in RevivalPlugin.cs",
+             "Seam fehlt in RevivalPlugin.cs: " + seam)
+    need("GepardCrew.Tick()" in gep, "Gepard.Tick ruft GepardCrew.Tick",
+         "GepardCrew.Tick wird nicht gerufen")
+    need("GepardCrew.ReleaseRiders(u.Car, u.Seite)" in patrol
+         and "GepardCrew.StopAll()" in patrol,
+         "Patrol: Wrack gibt die Besatzung frei, StopAll nimmt sie mit",
+         "Patrol.UnloadCrew/StopAll kennen die Gepard-Besatzung nicht")
+    need('"RevivalGepardCrew.cs"' in sync,
+         "RevivalGepardCrew.cs geht ins oeffentliche Repository",
+         "sync_public.py kennt RevivalGepardCrew.cs nicht - dort baut das Repo nicht")
+
+
+def check_airfield():
+    """[33] East airfield phase 1 (Revival.Airfield.cs).
+
+    Loot points, defender pockets and the event budget of the airfield
+    (docs/ai/tasks/airfield-gameplay-p1.md). Pinned statically: the whole
+    feature acts only in the east world; every loot point names a building id
+    the greybox recipe really has (so a final model that keeps the id keeps
+    its loot) and a pool that exists; the pockets stand inside the fence, off
+    every building footprint, and add up to the concept's 13-18 men; the
+    ground groups, the troop landings and the convoy each carry their seam.
+    Whether the pickups sit on the floors, the men walk their routes and the
+    budget holds in a real round is the in-game checklist.
+    """
+    import json
+    import re
+    print("[33] East airfield phase 1 (loot, defenders, event budget)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Airfield: " + why)
+
+    raw_p = os.path.join(ROOT, "Revival.Airfield.cs")
+    if not os.path.exists(raw_p):
+        bad("Airfield: Revival.Airfield.cs fehlt")
+        return
+    raw = io.open(raw_p, "rb").read()
+    a = raw.decode("utf-8", "replace")
+    need(not raw.startswith(b"\xef\xbb\xbf") and not [c for c in a if ord(c) > 126],
+         "Revival.Airfield.cs: ASCII ohne BOM",
+         "Revival.Airfield.cs enthaelt eine BOM oder Zeichen ausserhalb ASCII")
+    need("get { return EastWorld.On && (CfgEnabled == null || CfgEnabled.Value); }" in a,
+         "wirkt nur in der Ostwelt ([World] EastTile)",
+         "Airfield.On haengt nicht mehr an EastWorld.On - der Flugplatz wirkte "
+         "auch auf der Heimatkarte")
+    for key, default in (("Enabled", "true"), ("Loot", "true"), ("Defenders", "true")):
+        need(re.search(r'cfg\.Bind\("Airfield", "%s", %s,' % (key, default), a) is not None,
+             "[Airfield] %s = %s" % (key, default),
+             "[Airfield] %s ist nicht mehr mit %s gebunden" % (key, default))
+    need('cfg.Bind("Airfield", "EventBudget", 1,' in a,
+         "[Airfield] EventBudget = 1 (Landung oder Konvoi, nie beides)",
+         "das Ereignisbudget steht nicht mehr auf 1")
+
+    # --- loot points against the greybox recipe
+    recipe_p = os.path.join(ROOT, "unity", "EastTile", "Content", "east_airfield.json")
+    try:
+        recipe = json.load(io.open(recipe_p, encoding="utf-8"))
+        gb = recipe["greybox"]
+    except Exception as e:
+        bad("Airfield: east_airfield.json nicht lesbar: %s" % e)
+        return
+    ids = set(b["id"] for b in gb.get("blocks", [])) | set(z["id"] for z in gb.get("zones", []))
+    slots = re.findall(r'new Slot\("([A-Za-z0-9]+)", (\d), "([a-z]+)",\s*(-?[\d.]+)f,\s*(-?[\d.]+)f,\s*([\d.]+)f\)', a)
+    pools = set(re.findall(r'p\["([a-z]+)"\] = new string\[\]', a))
+    need(len(slots) >= 20, "%d Lootpunkte" % len(slots), "weniger als 20 Lootpunkte gefunden")
+    unknown = sorted(set(s[0] for s in slots) - ids)
+    need(not unknown, "jeder Lootpunkt nennt eine Greybox-ID",
+         "Lootpunkte an IDs, die es im Greybox-Rezept nicht gibt: " + ", ".join(unknown))
+    used = set(s[0] for s in slots)
+    for must in ("H1", "C1", "F1", "D1", "D2a", "D3", "S1", "S2", "S4"):
+        need(must in used, "Loot in " + must, "kein Lootpunkt in " + must)
+    need("S3" not in used and "D2b" not in used,
+         "S3 und D2b bleiben verschlossen (spaetere Phase)",
+         "S3 oder D2b hat Loot - beide sind fuer Quest/Schluessel reserviert")
+    bad_pool = sorted(set(s[2] for s in slots) - pools)
+    need(not bad_pool, "jeder Pool ist definiert", "unbekannte Pools: " + ", ".join(bad_pool))
+    need(all(-0.5 <= float(s[3]) <= 0.5 and -0.5 <= float(s[4]) <= 0.5 for s in slots),
+         "alle Punkte liegen im Markerkasten ihres Gebaeudes",
+         "ein Lootpunkt liegt ausserhalb seines Markerkastens (Anteil > 0.5)")
+    need(all(int(s[1]) <= 3 for s in slots) and any(s[1] == "3" for s in slots),
+         "Stufen 0-3, mit Signaturpunkten",
+         "Lootstufe ausserhalb 0-3 oder keine Stufe 3")
+    sure = set(s[0] for s in slots if float(s[5]) >= 1.0)
+    for must in ("H1", "F1", "D1c", "D2a"):
+        need(must in sure, "Reset garantiert eine Kategorie in " + must,
+             must + " hat keinen garantierten Punkt (Konzept: H1, F1, D1, D2)")
+    need("InstantiateSceneObject" in a and "GetRandomItemByCategory" in a
+         and "s.At + new Vector3(0f, 0.8f, 0f)" in a,
+         "das Spiel spawnt seinen eigenen Loot, wie ItemSpawnPoint",
+         "der Loot kommt nicht mehr aus den Kategorien des Spiels")
+    need("if (!master) {" in a and "now + ResetSeconds(s.Tier)" in a,
+         "nur der Master spawnt; ein neuer Master wartet einen Reset",
+         "Loot wird nicht mehr nur vom Master gesetzt oder fuellt bei Masterwechsel auf")
+
+    # --- defender pockets
+    pockets = re.findall(r'new Pocket\("([A-Za-z0-9_.-]+)", "(\w+)", (\d+), ([\d.]+)f,(.*?)\)(?=,\s*new Pocket|\s*\};)',
+                         a, re.S)
+    total = sum(int(p[2]) for p in pockets)
+    need(len(set(p[0].split("-")[1] for p in pockets)) == 4,
+         "vier Nester N1-N4", "nicht genau vier Verteidigernester N1-N4")
+    need(13 <= total <= 18, "%d Verteidiger (Konzept 13-18)" % total,
+         "%d Verteidiger - das Konzept verlangt 13-18" % total)
+    blocks = []
+    for b in gb.get("blocks", []):
+        k = 1.0 if b.get("units", recipe.get("sizeUnits", "m")) == "u" else 2.8
+        if b.get("kind") in ("post", "panel", "mast"):
+            continue
+        blocks.append((b["id"], b["x"], b["z"], b["w"] * k / 2.0, b["d"] * k / 2.0))
+    inside_all = True
+    for p in pockets:
+        pts = [(float(x), float(z)) for x, z in re.findall(r'P\((-?[\d.]+)f, (-?[\d.]+)f\)', p[4])]
+        need(pts and (p[1] != "patrol" or len(pts) >= 2),
+             p[0] + ": " + p[1] + " mit %d Punkt(en)" % len(pts),
+             p[0] + ": Streife ohne Route oder ohne Punkt")
+        for x, z in pts:
+            if not (3990 <= x <= 4820 and -1690 <= z <= 1690):
+                inside_all = False
+                bad("Airfield: %s Punkt (%g, %g) liegt ausserhalb des Zauns" % (p[0], x, z))
+            for bid, bx, bz, hw, hd in blocks:
+                if abs(x - bx) < hw and abs(z - bz) < hd:
+                    inside_all = False
+                    bad("Airfield: %s Punkt (%g, %g) steht in %s" % (p[0], x, z, bid))
+    need(inside_all, "alle Nestpunkte im Zaun und neben den Gebaeuden",
+         "ein Nestpunkt liegt ausserhalb des Zauns oder in einem Gebaeude")
+
+    # --- seams
+    g = read("Revival.GroundEnemies.cs")
+    troop = read("RevivalTroopInsertion.cs")
+    convoy = read("RevivalConvoy.cs")
+    plug = read("RevivalPlugin.cs")
+    zones = read("Revival.EastZones.cs")
+    sync = read("sync_public.py")
+    need("Airfield.AddGroups(fresh);" in g and "Airfield.HoldSpawn(g)" in g,
+         "die Nester laufen als Bodengruppen, Respawn nie vor Spielern",
+         "die Bodengruppen kennen die Flugplatznester nicht mehr")
+    need("Airfield.BlocksTroop(" in troop and "internal static int AirfieldActive()" in troop,
+         "Truppenlandungen fragen das Ereignisbudget",
+         "Truppenlandungen ignorieren das Ereignisbudget des Flugplatzes")
+    need("Airfield.BlocksConvoy(pts)" in convoy and "OffAirfield(routes)" in convoy
+         and "internal static int AirfieldActive()" in convoy,
+         "Konvois fragen das Ereignisbudget",
+         "Konvois ignorieren das Ereignisbudget des Flugplatzes")
+    need("internal static bool Find(string id, out Vector3 centre" in zones,
+         "Lootpunkte haengen an den Markern von EastZones",
+         "EastZones.Find fehlt - die Lootpunkte haben keinen Anker")
+    need("Airfield.BindConfig(Config);" in plug and "Airfield.Tick();" in plug,
+         "Seams Airfield.BindConfig/Tick in RevivalPlugin.cs",
+         "Seam fehlt in RevivalPlugin.cs: Airfield.BindConfig oder Airfield.Tick")
+    need('"Revival.Airfield.cs"' in sync,
+         "Revival.Airfield.cs geht ins oeffentliche Repository",
+         "Revival.Airfield.cs fehlt in sync_public.py")
+    need(os.path.exists(os.path.join(ROOT, "docs", "ai", "tasks", "airfield-gameplay-p1.md")),
+         "Abnahmeliste docs/ai/tasks/airfield-gameplay-p1.md",
+         "docs/ai/tasks/airfield-gameplay-p1.md fehlt")
+
+
 def check_east_world():
     """[29] The east world ([World] EastTile, Revival.EastWorld.cs).
 
@@ -5282,6 +6077,34 @@ def check_east_world():
          and all(k in pc for k in ("(4632.0, -1602.0)", "(4632.0, 1483.0)", "(2262.0, 1846.0)", "saddle S2")),
          "east map drawn from heights/trees/water/airfield; runway ends, saddles, Conductor projected",
          "east map generator not data-driven or the projection points are missing")
+    # Airfield and military town POIs (docs/ai/tasks/airfield-map-pois.md):
+    # one generated list (research/east_pois.py) baked into the artwork with
+    # the fence and the runway, and served read-only to the editor - never
+    # through /api/save, so live authoring data is not touched.
+    import json
+    pois_path = os.path.join(ROOT, "assets", "editor", "pois_east.json")
+    pois_ok = False
+    try:
+        pois = json.load(io.open(pois_path, encoding="utf-8"))
+        kinds = set(p.get("kind") for p in pois.get("pois", []))
+        pois_ok = (pois.get("scene") == "GW_Scene_1" and pois.get("fence") and pois.get("runway")
+                   and {"airfield", "hangar", "tower", "fire", "fuel", "ammo", "town"} <= kinds)
+    except (OSError, ValueError):
+        pass
+    need(pois_ok and os.path.exists(os.path.join(ROOT, "research", "east_pois.py")),
+         "pois_east.json lists the airfield, its buildings and the military town, with fence and runway",
+         "assets/editor/pois_east.json or research/east_pois.py is missing or incomplete")
+    need(all(k in gen for k in ("pois_east.json", "def draw_runway(", "def draw_icons(", "east_pois.fence(")),
+         "the east map bakes the POI icons and labels, the fence line and the runway markings",
+         "research/east_map.py does not draw the POIs, the fence or the runway markings")
+    route_src = read("routeeditor.py")
+    pjs = read(os.path.join("editor", "pois.js")) if os.path.exists(os.path.join(ROOT, "editor", "pois.js")) else ""
+    need('path == "/api/pois"' in route_src and 'path == "/pois.js"' in route_src
+         and '<script src="pois.js"></script>' in read(os.path.join("editor", "index.html"))
+         and "NDRPois.draw();" in read(os.path.join("editor", "app.js"))
+         and bool(pjs) and "S.def" not in pjs.split("*/", 1)[1] and "/api/save" not in pjs.split("*/", 1)[1],
+         "the editor serves and draws the POIs read-only (no S.def, no /api/save)",
+         "the editor POI layer is not wired, or it writes into the saved definition")
     # The map window (Revival.EastMapPanel.cs, docs/ai/tasks/east-map-panel.md):
     # installed only from EastWorld.Install (after its !On return), every hook
     # gated on EastWorld.Extends, its assets built and installed.
@@ -5684,10 +6507,13 @@ if __name__ == "__main__":
     check_native_action_progress()
     check_technical()
     check_technical_crew()
+    check_vehicle_gunner_ai()
     check_arty_vehicle()
     check_ground_enemies()
     check_helipads()
     check_player_heli()
+    check_player_an2()
+    check_an2_repair()
     check_parachute()
     check_stinger()
     check_crocodile()
@@ -5695,10 +6521,12 @@ if __name__ == "__main__":
     check_editor_heights()
     check_road_clear()
     check_gepard()
+    check_gepard_npc()
     check_east_world()
     check_east_crossings()
     check_east_roads()
     check_east_pipeline()
+    check_airfield()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

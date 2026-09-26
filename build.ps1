@@ -136,6 +136,12 @@ $assets = @(
     "gepard_gun_r.ndmesh", "gepard_gun_l.ndmesh", "gepard_radar_search.ndmesh",
     "gepard_radar_track.ndmesh", "gepard_diffuse.png", "gepard_metal.png",
     "gepard_rig.txt",
+    # The flyable An-2 (Revival.PlayerAn2.cs): the body, the glass, five moving
+    # parts, atlas, normal map and the rig, all written by an2_import.py from
+    # assets/an2_gameready/an2_flyable.glb.
+    "an2_body.ndmesh", "an2_glass.ndmesh", "an2_prop.ndmesh",
+    "an2_aileron_l.ndmesh", "an2_aileron_r.ndmesh", "an2_elevator.ndmesh",
+    "an2_rudder.ndmesh", "an2_diffuse.png", "an2_normal.png", "an2_rig.txt",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png", "mg42_metal.png",
     "mg42_rough.png", "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -187,6 +193,14 @@ $assets = @(
     # The canopy that opens in the air is the game's own prefab.
     "parachute.ndmesh", "parachute_diffuse.png", "parachute_normal.png",
     "parachute_icon.png",
+    # An-2 repair parts (2069 cable set, 2070 magneto, 2071 propeller hub),
+    # an2_parts_build.py; Revival.An2Repair.cs.
+    "an2part_cable.ndmesh", "an2part_cable_diffuse.png", "an2part_cable_normal.png",
+    "an2part_cable_icon.png",
+    "an2part_magneto.ndmesh", "an2part_magneto_diffuse.png", "an2part_magneto_normal.png",
+    "an2part_magneto_icon.png",
+    "an2part_prop.ndmesh", "an2part_prop_diffuse.png", "an2part_prop_normal.png",
+    "an2part_prop_icon.png",
     "scope50.png",
     # Helipad decks: one painted texture per built surface, mapped
     # radius-relative over the whole pad (helipad_texture.py). Without them the
@@ -275,6 +289,25 @@ foreach ($f in $assets) {
 if ($missing.Count -gt 0) {
     throw ("Assets fehlen: {0}`nErst die Generatoren laufen lassen: python make_assets.py" -f ($missing -join ", "))
 }
+
+# The airfield's real models, one content bundle per building (east_af_*.bundle,
+# unity/EastTile AirfieldAssembly.cs, docs/ai/tasks/airfield-assembly.md). Build
+# products of rebuild_east.ps1 like the list above, but optional: without them
+# the game shows the greybox fallback in east_airfield.bundle. An installed
+# east_af_* bundle that assets/ no longer has is removed, so a building never
+# stands twice or from an old build.
+$afSrc = @(Get-ChildItem $assetSrc -Filter "east_af_*.bundle" -ErrorAction SilentlyContinue)
+foreach ($b in $afSrc) {
+    Copy-Item $b.FullName (Join-Path $assetDst $b.Name) -Force
+    Write-Host ("  asset copied: {0,-26} {1,8} bytes" -f $b.Name, $b.Length)
+}
+foreach ($old in @(Get-ChildItem $assetDst -Filter "east_af_*.bundle" -ErrorAction SilentlyContinue)) {
+    if (-not (Test-Path (Join-Path $assetSrc $old.Name))) {
+        Remove-Item $old.FullName -Force
+        Write-Host ("  old one removed: {0}" -f $old.Name)
+    }
+}
+if ($afSrc.Count -eq 0) { Write-Host "  east_af_*.bundle: none in assets/ - the airfield stays greybox (fallback)" }
 
 Write-Host ""
 Write-Host ("FERTIG  {0}  {1} bytes" -f (Split-Path -Leaf $out), (Get-Item $out).Length)

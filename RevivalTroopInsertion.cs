@@ -232,6 +232,15 @@ namespace NextDayRevival
                     }
                     if (Time.time >= d.NextSpawn)
                     {
+                        // The airfield's event budget (Airfield.cs): a landing
+                        // there waits while a convoy or another landing is.
+                        if (Airfield.BlocksTroop(new Vector3(d.X, 0f, d.Z), d.Arrow()))
+                        {
+                            d.NextSpawn = Time.time + 600f;
+                            RevivalPlugin.L.LogInfo("Troops: landing " + d.Name
+                                + " waits 10 min - the airfield event budget is full.");
+                            continue;
+                        }
                         d.NextSpawn = -1f;
                         Begin(d);
                     }
@@ -275,13 +284,19 @@ namespace NextDayRevival
                                  "only the master client starts troop landings");
                 Load(false);
                 List<Landing> usable = new List<Landing>();
-                int here = 0;
+                int here = 0, budget = 0;
                 for (int i = 0; i < _landings.Count; i++)
                 {
                     if (!_landings[i].Here) continue;   // another region's landing zone
                     here++;
-                    if (_landings[i].Enabled && !Busy(_landings[i])) usable.Add(_landings[i]);
+                    if (!_landings[i].Enabled || Busy(_landings[i])) continue;
+                    Landing c = _landings[i];
+                    if (Airfield.BlocksTroop(new Vector3(c.X, 0f, c.Z), c.Arrow())) { budget++; continue; }
+                    usable.Add(c);
                 }
+                if (usable.Count == 0 && budget > 0)
+                    return Loc.T("аэродром занят: там уже идёт десант или конвой",
+                                 "the airfield is busy: a landing or convoy is already on it");
                 if (usable.Count == 0)
                     return here == 0
                         ? Loc.T("на этой карте нет десантных точек (редактор -> Troop landings)",
@@ -300,6 +315,19 @@ namespace NextDayRevival
                 return Loc.T("десант не удалось запустить (см. лог)",
                              "troop landing could not start (see log)");
             }
+        }
+
+        /// <summary>How many landings at the airfield are active: the
+        /// helicopter inbound, or the squad still in the field.</summary>
+        internal static int AirfieldActive()
+        {
+            int n = 0;
+            for (int i = 0; i < _landings.Count; i++)
+            {
+                Landing d = _landings[i];
+                if (d.Here && Busy(d) && Airfield.TroopTargets(new Vector3(d.X, 0f, d.Z), d.Arrow())) n++;
+            }
+            return n;
         }
 
         static bool Busy(Landing d)

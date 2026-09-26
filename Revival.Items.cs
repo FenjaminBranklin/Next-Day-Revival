@@ -1410,13 +1410,15 @@ namespace NextDayRevival
         // 2059 is five of those magazines. 2060/2061 rank against the mast
         // antenna (50000), 2062 against the portable jammer (100000) with a
         // vehicle's power behind it. 2066 is the 125 mm round's price (5000),
-        // because it is the same class of shell.
+        // because it is the same class of shell. 2069-2071 are the An-2 repair
+        // parts (Revival.An2Repair.cs): found at the airfield, never sold,
+        // worth about a vehicle part each and the propeller hub the most.
         static readonly int[] SellOnlyIds = new int[] {
             1164, 1490, 1491, 2052, 2058, 2059, 2060, 2061, 2062, 2063, 2064,
-            2066, 1492 };
+            2066, 1492, 2069, 2070, 2071 };
         static readonly int[] SellOnlyPrices = new int[] {
             26000, 15000, 20000, 1000, 1500, 6000, 60000, 35000, 130000, 1500,
-            8000, 5000, 4000 };
+            8000, 5000, 4000, 3000, 6000, 9000 };
 
         // A custom item whose id is in neither table still has to be sellable -
         // that is the promise of this file, not a property of the list above.
@@ -2054,7 +2056,7 @@ namespace NextDayRevival
             }
         }
 
-        static object GetDb()
+        internal static object GetDb()
         {
             Type t = RevivalPlugin.TypeByName("ItemSpawnCategoriesDB");
             if (t == null) { RevivalPlugin.L.LogWarning("ItemSpawnCategoriesDB nicht gefunden."); return null; }

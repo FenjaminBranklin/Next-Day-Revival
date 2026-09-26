@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.55.0";
+        public const string VERSION = "6.56.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -462,6 +462,7 @@ namespace NextDayRevival
             EastTile.BindConfig(Config);         // research: east extension probe, off by default
             EastWorld.BindConfig(Config);        // GW_Scene_1 + east tile as one world, off by default
             EastCrossings.BindConfig(Config);    // east world: the three saddle cuts, only with [World] EastTile
+            Airfield.BindConfig(Config);         // east world: airfield loot, defender pockets, event budget
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
@@ -475,12 +476,16 @@ namespace NextDayRevival
             GasLauncher.BindConfig(Config);      // NDR gas launcher
             Crocodile.BindConfig(Config);        // NDR toxic crocodile boss in the Point 12 lake
             VehicleArmor.BindConfig(Config);     // NDR vehicle armour balance
+            GunnerAI.BindConfig(Config);         // NDR NPC vehicle gunners: sight, spread, reaction
             RevivalConvoy.BindConfig(Config);    // NDR convoy event
             RevivalComposition.BindConfig(Config); // NDR map/road/composition editor data
             RevivalTroopInsertion.BindConfig(Config); // NDR heli troop insertion
             Helipads.BindConfig(Config);         // NDR editor helicopter landing pads
             PlayerHeli.BindConfig(Config);       // NDR the Mi-8 a player flies himself
+            PlayerAn2.BindConfig(Config);        // NDR the An-2 a player flies (off by default)
+            An2Repair.BindConfig(Config);        // NDR An-2 repair loop: four stages, fuel (off by default)
             Parachute.BindConfig(Config);         // NDR parachute item and the jump out of a helicopter
+            AirfieldAmbience.BindConfig(Config);
             WindSound.BindConfig(Config);        // NDR high-altitude wind, kept on in the heli and under canopy
             NewSettlement.BindConfig(Config);    // NDR bottom-left traitor settlement (Phase 1, isolated)
             TraitorVendor.BindConfig(Config);    // NDR trader in the blue block at Litvinovka
@@ -488,6 +493,7 @@ namespace NextDayRevival
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
             ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
             Gepard.BindConfig(Config);           // NDR Gepard anti-aircraft gun (radar fire control)
+            GepardCrew.BindConfig(Config);       // NDR Gepard as an NPC vehicle: riding crew, air-first gunner
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
@@ -520,6 +526,8 @@ namespace NextDayRevival
             Crew.Install(_harmony);
             RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
             PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
+            PlayerAn2.Install(_harmony);         // NDR player-flown An-2: carrier prepare, shared body lock
+            An2Repair.Install(_harmony);         // NDR An-2 repair: the body freeze while fitting
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
             EastWorld.Install(_harmony);         // east world: nothing is patched while [World] EastTile is off
@@ -530,6 +538,7 @@ namespace NextDayRevival
             Technical.Install(_harmony);         // NDR technical (gun truck)
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             Gepard.Install(_harmony);            // NDR Gepard (spawn marker, event channel, explosion armour)
+            GepardCrew.Install(_harmony);        // NDR Gepard crew: the men inside cannot be hurt through the hull
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             ApMine.Install(_harmony);            // NDR anti-personnel mine
             Stinger.Install(_harmony);
@@ -1273,23 +1282,23 @@ namespace NextDayRevival
                 "Tank detection range for hostile players, NPCs and vehicles, "
                 + "in metres. Requires sight and a clear firing line.");
             CfgPatrolGunEffective = Config.Bind("Patrol", "GunEffectiveRange", 30f,
-                "Minimum effective range in metres. At least half the current "
+                "LEGACY, no longer read since the vehicle gunner AI v2: see [GunnerAI]. Minimum effective range in metres. At least half the current "
                 + "combat range stays effective; accuracy then falls along a "
                 + "cosine toward the detection limit.");
             CfgPatrolGunPointBlank = Config.Bind("Patrol", "GunPointBlank", 12f,
-                "Metres under which a shot is displaced by a hand's width "
+                "LEGACY, no longer read since the vehicle gunner AI v2: see [GunnerAI]. Metres under which a shot is displaced by a hand's width "
                 + "whatever the roll says. The game's own NPCs use 30 m for "
                 + "this, and that ring is the single reason a patrol was an "
                 + "80 percent death sentence: inside it accuracy meant "
                 + "nothing. 0 switches the free ring off and rolls every "
                 + "shot.");
             CfgPatrolGunNotice = Config.Bind("Patrol", "GunNotice", 2.5f,
-                "Seconds a target has to be visible before the first shot. "
+                "LEGACY, no longer read since the vehicle gunner AI v2: see [GunnerAI]. Seconds a target has to be visible before the first shot. "
                 + "Without it you are hit in the frame you step out of cover.");
             CfgPatrolGunForget = Config.Bind("Patrol", "GunForget", 8f,
                 "Seconds out of sight before the gun gives the target up.");
             CfgPatrolGunAccuracy = Config.Bind("Patrol", "GunAccuracy", 0.45f,
-                "Multiplier on the hit chance. 1 is the game's own NPC "
+                "LEGACY, no longer read since the vehicle gunner AI v2: see [GunnerAI]. Multiplier on the hit chance. 1 is the game's own NPC "
                 + "behaviour, 0.5 makes every second aimed shot a miss, 0 "
                 + "makes the gun harmless. It applies at every distance now, "
                 + "point blank included - see GunPointBlank.");
@@ -1629,6 +1638,8 @@ namespace NextDayRevival
             DroneGear.AddItems(Items);
             // Fire extinguisher and heavy tool kit for convoy repair (own file).
             ConvoyRepair.AddItems(Items);
+            // An-2 repair parts: control cables, magneto, propeller (own file).
+            An2Repair.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
             // PMN-2 anti-personnel mine, Blender model (own file).
@@ -2119,6 +2130,7 @@ namespace NextDayRevival
             EastWorld.Tick();                    // east world: tile load/unload, held spawn, WORLD_SIZE; off by default
             EastCrossings.Tick();                // east world: saddle cuts, paint, NavMesh patches, seam links
             EastTile.Tick();                     // research: east extension probe, off by default
+            AirfieldAmbience.Tick();
             EastZones.Tick();                    // east world: logs the content marker (airfield greybox id) the player stands in
             FrameBench.Tick();                   // research: east extension frame-time baseline, off by default
             FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);
@@ -2140,8 +2152,11 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
             RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
             RevivalGroundEnemies.Tick();         // editor waiting/walking ground groups
+            Airfield.Tick();                     // east world: airfield loot points (master only)
             Helipads.Tick();                     // editor helicopter landing pads (build on scene/data change)
             PlayerHeli.Tick();                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
+            PlayerAn2.Tick();                    // NDR player-flown An-2 (apron spawn, boarding, flight)
+            An2Repair.Tick();                    // NDR An-2 repair: fit parts, refuel, save the state
             WindSound.Tick();                    // NDR high-altitude wind: heli and open-canopy descent
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Crocodile.Tick();                    // NDR toxic crocodile swimming near the neutral base
@@ -2171,9 +2186,13 @@ namespace NextDayRevival
             // bones between Update and here, so a hand put on a grip earlier is
             // back at the man's side before anything is drawn.
             Technical.LateFrame();
+            // NDR Gepard crew: the men inside a patrol Gepard on their seats,
+            // after the animator, on every client (RevivalGepardCrew.cs).
+            GepardCrew.LateFrame();
             // NDR player-flown Mi-8: everyone aboard is put in his place after
             // the game's own animator and movement controller have written.
             PlayerHeli.LateFrame();
+            PlayerAn2.LateFrame();               // NDR player-flown An-2: the crew in their seats
             // NDR traitor settlement trader: held behind his counter for the
             // same reason - a man placed in Update is back where the animation
             // put him before anything is drawn.
@@ -2196,6 +2215,8 @@ namespace NextDayRevival
             EastZones.Draw();                    // east world: the marker id the player stands in
             Helipads.Draw();                     // NDR helicopter landing pads on the world map
             PlayerHeli.Draw();                   // NDR player-flown Mi-8: readout and notices
+            PlayerAn2.Draw();                    // NDR player-flown An-2: instruments, fuel gauge, stall
+            An2Repair.Draw();                    // NDR An-2 repair: the stage panel and the key prompt
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Crocodile.Draw();                    // NDR toxic crocodile name and exposure warning
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)

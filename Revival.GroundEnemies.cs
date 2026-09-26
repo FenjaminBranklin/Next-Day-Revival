@@ -27,6 +27,8 @@ namespace NextDayRevival
         {
             internal string Name, Faction, Behavior, Key, Meta;
             internal bool Enabled, Seen, Loop;
+            // Airfield.cs's defender pockets: not from the editor channel.
+            internal bool Builtin;
             internal float X, Z, Radius, Respawn, NextSpawn, Hold;
             internal int Count;
             // The patrol route in world coordinates, empty for the behaviors
@@ -40,6 +42,8 @@ namespace NextDayRevival
         static List<Group> _groups = new List<Group>();
         static readonly Dictionary<string, string> _running = new Dictionary<string, string>();
         static string[] _source;
+        static int _builtin;
+        static bool _loaded;
         static float _next, _masterReady;
         static bool _wasMaster;
         static object _room;
@@ -174,12 +178,18 @@ namespace NextDayRevival
         internal static void Load()
         {
             string[] source = LiveRoutes.Ground;
-            if (source == null || source == _source) return;
-            List<Group> fresh = Parse(source);
+            // The airfield's built-in pockets (Airfield.cs) join the editor's
+            // groups; they need no editor data and change with their config.
+            int builtin = Airfield.GroupsVersion();
+            if (source == null) source = _source;
+            if (_loaded && source == _source && builtin == _builtin) return;
+            if (source == null && builtin == 0) return;
+            List<Group> fresh = source == null ? new List<Group>() : Parse(source);
+            Airfield.AddGroups(fresh);
             foreach (Group g in fresh)
                 foreach (Group old in _groups)
                     if (g.Key == old.Key) { g.Seen = old.Seen; g.NextSpawn = old.NextSpawn; break; }
-            _groups = fresh; _source = source;
+            _groups = fresh; _source = source; _builtin = builtin; _loaded = true;
             RevivalPlugin.L.LogInfo("Ground enemies: loaded " + fresh.Count + " editor group(s).");
         }
 
@@ -190,7 +200,7 @@ namespace NextDayRevival
             try
             {
                 Load();
-                if (_source == null) return;
+                if (!_loaded) return;
                 if (_roomGetter == null || _masterGetter == null)
                 {
                     Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
@@ -299,6 +309,8 @@ namespace NextDayRevival
                 }
                 if (g.Seen && g.NextSpawn < 0f) g.NextSpawn = Time.time + g.Respawn;
                 if (spawned || Time.time < g.NextSpawn) continue;
+                // An airfield pocket never appears in front of a player there.
+                if (Airfield.HoldSpawn(g)) { g.NextSpawn = Time.time + 60f; continue; }
                 spawned = true;
                 if (Spawn(g)) { g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key; }
                 else g.NextSpawn = Time.time + 60f;

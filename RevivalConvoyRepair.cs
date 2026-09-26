@@ -610,7 +610,7 @@ namespace NextDayRevival
             return true;
         }
 
-        static bool InVehicle()
+        internal static bool InVehicle()
         {
             if (Time.time < _inVehUntil) return _inVehResult;
             bool inv = false;
@@ -756,10 +756,17 @@ namespace NextDayRevival
         public static void Postfix(ref bool __result)
         {
             if (ConvoyRepair.Busy) __result = true;
+            // The An-2 repair (Revival.An2Repair.cs) holds the body the same way.
+            if (An2Repair.Busy) __result = true;
         }
 
+        static bool _installed;
+
+        /// <summary>Once, whichever repair asks first.</summary>
         public static void Install(Harmony harmony)
         {
+            if (_installed) return;
+            _installed = true;
             HarmonyMethod post = new HarmonyMethod(
                 typeof(ConvoyFreezeHook).GetMethod("Postfix"));
             int patched = 0;

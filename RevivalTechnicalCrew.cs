@@ -133,11 +133,13 @@ namespace NextDayRevival
                 + "at half a kilometre is a technical nobody can drive away "
                 + "from.");
             CfgReaction = cfg.Bind("TechnicalCrew", "ReactionSeconds", 0.8f,
-                "How long the gunner holds a new target in his sight before the "
+                "LEGACY, no longer read: [GunnerAI] Reaction* decide it from range and sight. "
+                + "How long the gunner holds a new target in his sight before the "
                 + "first round. Without it he answers in the frame a man steps "
                 + "out of cover, which reads as a machine and not as a man.");
             CfgSpread = cfg.Bind("TechnicalCrew", "Spread", 1.6f,
-                "Scatter of his fire in degrees. Shooting off a moving bed, so "
+                "LEGACY, no longer read: [GunnerAI] Player*/Npc* spread keys replace it. "
+                + "Scatter of his fire in degrees. Shooting off a moving bed, so "
                 + "wider than the BTR gun's. Zero makes him perfect.");
             CfgBurst = cfg.Bind("TechnicalCrew", "BurstRounds", 8,
                 "Rounds in one burst before he pauses. A belt fed in bursts is "
@@ -238,6 +240,11 @@ namespace NextDayRevival
             public float Yaw, Pitch;             // where the barrel is being sent
             public Transform Target;
             public Component TargetNpc;
+            public Component TargetCarrier;      // the car a player target sits in
+            // GunnerAI: visibility, last sighting (suppression), target speed
+            public float Vis = 1f, LastSeen, TargetSpeed, SpeedAt;
+            public Vector3 LastKnown, SpeedFrom;
+            public bool Suppress;                // out of sight: firing at LastKnown
             public float Held;                   // seconds this target has been held
             public float NextShot;
             public int Burst;
@@ -1420,6 +1427,7 @@ namespace NextDayRevival
             if (Time.time >= t.NextLook)
             {
                 t.NextLook = Time.time + 0.5f;
+                GunnerAI.Sync();
                 Suchen(t);
             }
             if (t.Target == null || !Feind(t, t.Target, t.TargetNpc))
@@ -1429,6 +1437,8 @@ namespace NextDayRevival
                 if (t.Engaged && Time.time - t.LastContact > 3f) Abbrechen(t);
                 t.Target = null;
                 t.TargetNpc = null;
+                t.TargetCarrier = null;
+                t.Suppress = false;
                 t.Held = 0f;
                 Ruhelage(t);
                 return;
@@ -1449,7 +1459,10 @@ namespace NextDayRevival
             }
 
             Vector3 muzzle = Muendung(t);
-            Vector3 to = t.Target.position + Vector3.up * 0.9f - muzzle;
+            Vector3 echt = Punkt(t.Target, t.TargetCarrier);
+            Tempo(t, echt);
+            Vector3 point = t.Suppress ? t.LastKnown : echt;
+            Vector3 to = point - muzzle;
             if (to.sqrMagnitude < 0.0001f) return;
             Vector3 dir = to.normalized;
 
@@ -1485,14 +1498,57 @@ namespace NextDayRevival
                 t.Gunner.transform.rotation =
                     Quaternion.LookRotation(face.normalized, Vector3.up);
 
-            t.Held += Time.deltaTime;
-            if (t.Held < Mathf.Max(0f, F(CfgReaction, 0.8f))) return;
+            // Reaction from range and visibility (GunnerAI.Reaction). The
+            // clock runs only while he actually sees the target.
+            if (!t.Suppress) t.Held += Time.deltaTime;
+            float dist = to.magnitude;
+            if (t.Held < GunnerAI.Reaction(t.TargetNpc == null, dist, t.Vis)) return;
             if (Time.time < t.NextShot) return;
 
             // Laid on? The barrel itself answers, not the wish above it.
             Vector3 bore = t.Gun == null ? t.Mount.forward : t.Gun.forward;
             if (Vector3.Angle(bore, dir) > 3.5f) return;
-            Feuern(t, muzzle, bore);
+
+            // Real sight before every round; without it only suppression at
+            // the last known position for SuppressSeconds.
+            float vis = Sicht(t, muzzle, t.Target, t.TargetCarrier);
+            if (vis > 0f)
+            {
+                t.Suppress = false;
+                t.Vis = vis;
+                t.LastSeen = Time.time;
+                t.LastKnown = echt;
+            }
+            else
+            {
+                if (Time.time - t.LastSeen > GunnerAI.T.SuppressSeconds) return;
+                t.Suppress = true;
+            }
+            Feuern(t, muzzle, bore, dist);
+        }
+
+        /// <summary>Chest of a man; the torso of a player sitting in a car.</summary>
+        static Vector3 Punkt(Transform tr, Component carrier)
+        {
+            return tr.position + Vector3.up * (carrier != null ? 0.8f : 0.9f);
+        }
+
+        /// <summary>Target speed, smoothed. Feeds the spread.</summary>
+        static void Tempo(Truck t, Vector3 p)
+        {
+            float dt = Time.time - t.SpeedAt;
+            if (dt < 0.25f) return;
+            float v = dt < 2f ? Vector3.Distance(p, t.SpeedFrom) / dt : 0f;
+            t.TargetSpeed = dt < 2f ? (t.TargetSpeed + v) * 0.5f : 0f;
+            t.SpeedFrom = p;
+            t.SpeedAt = Time.time;
+        }
+
+        static string Name(Truck t)
+        {
+            if (t.Target == null) return "?";
+            return (t.TargetNpc != null ? "NPC " : t.TargetCarrier != null
+                ? "player-in-vehicle " : "player ") + t.Target.name;
         }
 
         /// <summary>The line that says how a contact ended. Without it the log
@@ -1556,7 +1612,7 @@ namespace NextDayRevival
         /// does not take one: this is an anti-personnel weapon and armour is as
         /// unaffected by it as by rifle fire.
         /// </summary>
-        static void Feuern(Truck t, Vector3 muzzle, Vector3 bore)
+        static void Feuern(Truck t, Vector3 muzzle, Vector3 bore, float dist)
         {
             float pause = TechnicalGun.CfgDelay == null ? 0.11f : TechnicalGun.CfgDelay.Value;
             t.Burst++;
@@ -1568,7 +1624,13 @@ namespace NextDayRevival
             }
             else t.NextShot = Time.time + pause;
 
-            Vector3 dir = Streuen(bore, F(CfgSpread, 1.6f));
+            // GunnerAI spread: a radius at the target's range, from range,
+            // target speed, visibility and whether it is a real player.
+            float spread = GunnerAI.Spread(t.TargetNpc == null, dist, t.TargetSpeed,
+                t.Suppress ? 0f : t.Vis, t.Suppress);
+            Vector3 dir = (bore.normalized * Mathf.Max(1f, dist)
+                + GunnerAI.Offset(bore, spread)).normalized;
+            string gun = "technical " + t.Key;
             float range = TechnicalGun.CfgRange == null ? 600f : TechnicalGun.CfgRange.Value;
 
             VehicleShotSound.PlayTechnical(muzzle);
@@ -1579,25 +1641,33 @@ namespace NextDayRevival
             Vector3 ende = struck == null ? muzzle + dir * range : impact;
             Spur(muzzle, ende);
             t.Rounds++;
-            if (struck == null) return;
+            if (struck == null)
+            {
+                GunnerAI.LogShot(gun, Name(t), dist, !t.Suppress, t.Vis, spread, t.Suppress, "miss (sky)");
+                return;
+            }
 
             float damage = TechnicalGun.CfgDamage == null ? 85f : TechnicalGun.CfgDamage.Value;
-            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)) { t.Hits++; return; }
-            if (Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)) { t.Hits++; return; }
-            if (Turret.TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage))
+            string result = "miss on " + struck.name;
+            if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)
+                || Turret.TryDamage(struck, "Animal_AI", "NetworkApplyDamage", damage)
+                || Turret.TryDamage(struck, "PlayerNetworkController", "PlayerApplyDamage", damage))
+            {
                 t.Hits++;
-        }
-
-        static Vector3 Streuen(Vector3 dir, float degrees)
-        {
-            if (degrees <= 0f) return dir.normalized;
-            Vector3 up = Mathf.Abs(dir.y) > 0.95f ? Vector3.forward : Vector3.up;
-            Vector3 right = Vector3.Cross(up, dir).normalized;
-            Vector3 over = Vector3.Cross(dir, right).normalized;
-            float a = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-            float r = Mathf.Tan(UnityEngine.Random.Range(0f, degrees) * Mathf.Deg2Rad);
-            return (dir.normalized + right * (Mathf.Cos(a) * r)
-                                   + over * (Mathf.Sin(a) * r)).normalized;
+                result = "hit " + struck.name;
+            }
+            else if (t.TargetCarrier != null && t.Target != null
+                     && GunnerAI.OnCarrier(struck, t.TargetCarrier)
+                     && !GunnerAI.Armoured(t.TargetCarrier)
+                     && GunnerAI.PlayerDamage(t.Target.gameObject,
+                            damage * GunnerAI.T.SoftPassThrough, impact, muzzle))
+            {
+                // Through the door of a soft-skinned car into the man in it.
+                t.Hits++;
+                result = "hit through " + struck.name;
+            }
+            GunnerAI.LogShot(gun, Name(t), dist, !t.Suppress, t.Vis, spread, t.Suppress,
+                result + " (" + t.Hits + " of " + t.Rounds + ")");
         }
 
         /// <summary>The ray, stepped past our own truck and past our own men: a
@@ -1693,9 +1763,14 @@ namespace NextDayRevival
                 float d = Vector3.Distance(tr.position, muzzle);
                 if (d > reach) continue;
                 if (!Feind(t, tr, npc)) continue;
-                Merken(tr, npc, d);
+                Merken(tr, npc, null, d);
             }
 
+            // Players, on foot or SITTING IN A CAR. A seated player hangs under
+            // his hull (GunnerAI.Carrier); in a soft-skinned car he is a target
+            // this MG can hurt through the door, so he is one - at a lower
+            // priority than a man in the open (small arms prefer exposed
+            // people). In armour (tank, BTR) he is out of reach and ignored.
             List<GameObject> players = Spieler();
             for (int i = 0; i < players.Count; i++)
             {
@@ -1705,27 +1780,63 @@ namespace NextDayRevival
                 float d = Vector3.Distance(tr.position, muzzle);
                 if (d > reach) continue;
                 if (!Feind(t, tr, null)) continue;
-                Merken(tr, null, d);
+                Component car = GunnerAI.Carrier(tr);
+                if (car != null && (car.transform == t.Root || GunnerAI.Armoured(car))) continue;
+                Merken(tr, null, car, d * GunnerAI.Weight(false, car != null ? 1 : 0));
             }
 
             Transform bestTr = null;
-            Component bestNpc = null;
+            Component bestNpc = null, bestCar = null;
+            float bestVis = 0f;
             for (int i = 0; i < _candTr.Count && i < SightTries; i++)
             {
-                if (!Sicht(t, muzzle, _candTr[i])) continue;
+                float vis = Sicht(t, muzzle, _candTr[i], _candCar[i]);
+                if (vis <= 0f) continue;
                 bestTr = _candTr[i];
                 bestNpc = _candNpc[i];
+                bestCar = _candCar[i];
+                bestVis = vis;
                 break;
             }
 
-            if (bestTr != t.Target) t.Held = 0f;
+            if (bestTr == null)
+            {
+                // Nothing in sight. A target seen a moment ago is kept for
+                // SuppressSeconds and fired at where it was last seen.
+                if (t.Target != null && Time.time - t.LastSeen <= GunnerAI.T.SuppressSeconds
+                    && Feind(t, t.Target, t.TargetNpc))
+                {
+                    t.Suppress = true;
+                    return;
+                }
+                t.Target = null;
+                t.TargetNpc = null;
+                t.TargetCarrier = null;
+                t.Suppress = false;
+                return;
+            }
+
+            if (bestTr != t.Target)
+            {
+                t.Held = 0f;
+                t.SpeedAt = 0f;
+                t.TargetSpeed = 0f;
+            }
             t.Target = bestTr;
             t.TargetNpc = bestNpc;
+            t.TargetCarrier = bestCar;
+            t.Vis = bestVis;
+            t.LastSeen = Time.time;
+            t.LastKnown = Punkt(bestTr, bestCar);
+            t.Suppress = false;
         }
 
-        /// <summary>Keep the nearest few candidates, nearest first. An insertion
-        /// into a list of three beats sorting the whole road.</summary>
-        static void Merken(Transform tr, Component npc, float d)
+        static readonly List<Component> _candCar = new List<Component>();
+
+        /// <summary>Keep the best few candidates, best first, by range times
+        /// the GunnerAI priority weight. An insertion into a list of three
+        /// beats sorting the whole road.</summary>
+        static void Merken(Transform tr, Component npc, Component car, float d)
         {
             int at = _candD.Count;
             for (int i = 0; i < _candD.Count; i++)
@@ -1734,11 +1845,13 @@ namespace NextDayRevival
             _candD.Insert(at, d);
             _candTr.Insert(at, tr);
             _candNpc.Insert(at, npc);
+            _candCar.Insert(at, car);
             while (_candD.Count > SightTries)
             {
                 _candD.RemoveAt(_candD.Count - 1);
                 _candTr.RemoveAt(_candTr.Count - 1);
                 _candNpc.RemoveAt(_candNpc.Count - 1);
+                _candCar.RemoveAt(_candCar.Count - 1);
             }
         }
 
@@ -1760,25 +1873,34 @@ namespace NextDayRevival
 
         /// <summary>Is the target actually reachable from the muzzle? Asked
         /// before a target is taken, not only before a round, so the gunner does
-        /// not swing onto a man behind a wall and sit there aiming at masonry.</summary>
-        static bool Sicht(Truck t, Vector3 muzzle, Transform target)
+        /// not swing onto a man behind a wall and sit there aiming at masonry.
+        /// The answer is a visibility, 0 (no sight) to 1: after the ray, the
+        /// terrain trees and bushes along the line (GunnerAI.Transmit) - the
+        /// game's own sight ray passes through foliage, which is how a gun
+        /// "sniped" through a treeline. A ray that ends on the car a player
+        /// sits in has reached him.</summary>
+        static float Sicht(Truck t, Vector3 muzzle, Transform target, Component carrier)
         {
-            Vector3 aim = target.position + Vector3.up * 0.9f;
+            if (target == null) return 0f;
+            Vector3 aim = Punkt(target, carrier);
             Vector3 dir = aim - muzzle;
             float range = dir.magnitude;
-            if (range < 0.5f) return true;
+            if (range < 0.5f) return 1f;
             Vector3 hit;
             GameObject struck = Strahl(t, muzzle, dir / range, range + 1f, out hit);
-            if (struck == null) return false;
+            if (struck == null) return 0f;
+            bool frei = GunnerAI.OnCarrier(struck, carrier);
             Transform tr = struck.transform;
-            while (tr != null)
+            while (tr != null && !frei)
             {
-                if (tr == target) return true;
+                if (tr == target) frei = true;
                 tr = tr.parent;
             }
             // Close enough to the man counts: a rifle in his hands or the bag on
             // his back is a separate object and the ray stops on it.
-            return Vector3.Distance(hit, aim) < 1.2f;
+            if (!frei && Vector3.Distance(hit, aim) >= 1.2f) return 0f;
+            float vis = GunnerAI.Transmit(muzzle, aim);
+            return vis >= GunnerAI.T.SightThreshold ? vis : 0f;
         }
 
         static readonly List<GameObject> _players = new List<GameObject>();

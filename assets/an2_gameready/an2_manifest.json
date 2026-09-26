@@ -1,0 +1,1199 @@
+{
+ "generator": "an2_gameready_build.py",
+ "units": "game units = real metres x 2.8",
+ "frame": "glTF +Y up, +Z nose, +X port (Unity: nose +Z, +X starboard)",
+ "published": {
+  "span_upper_m": 18.18,
+  "span_lower_m": 14.24,
+  "length_m": 12.74,
+  "height_flight_line_m": 5.35,
+  "height_parked_m": 4.01,
+  "prop_diameter_m": 3.6,
+  "main_track_m": 3.45,
+  "main_tyre_m": [
+   0.8,
+   0.26
+  ],
+  "tail_tyre_m": [
+   0.47,
+   0.21
+  ],
+  "chord_upper_m": 2.45,
+  "chord_lower_m": 2.0,
+  "tailplane_span_m": 7.2,
+  "cargo_door_m": [
+   1.53,
+   1.46
+  ]
+ },
+ "dimensions": [
+  {
+   "what": "span_upper_m",
+   "model_m": 18.18,
+   "published_m": 18.18,
+   "off_pct": 0.0,
+   "model_u": 50.9
+  },
+  {
+   "what": "span_lower_m",
+   "model_m": 14.24,
+   "published_m": 14.24,
+   "off_pct": 0.0,
+   "model_u": 39.87
+  },
+  {
+   "what": "length_m",
+   "model_m": 12.74,
+   "published_m": 12.74,
+   "off_pct": 0.0,
+   "model_u": 35.67
+  },
+  {
+   "what": "height_flight_line_m",
+   "model_m": 5.35,
+   "published_m": 5.35,
+   "off_pct": 0.0,
+   "model_u": 14.98
+  },
+  {
+   "what": "height_parked_m",
+   "model_m": 4.05,
+   "published_m": 4.01,
+   "off_pct": 1.0,
+   "model_u": 11.34
+  }
+ ],
+ "atlas": {
+  "size": 2048,
+  "px_per_m_real": 108.3,
+  "px_per_u": 38.68,
+  "charts": {
+   "TIP": {
+    "x": 0,
+    "y": 0,
+    "w": 45,
+    "h": 551,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "UPPER_WING": {
+    "x": 45,
+    "y": 0,
+    "w": 956,
+    "h": 437,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "METAL_DARK": {
+    "x": 1001,
+    "y": 0,
+    "w": 164,
+    "h": 430,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "ENGINE": {
+    "x": 1165,
+    "y": 0,
+    "w": 143,
+    "h": 430,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "FUSE_PORT": {
+    "x": 0,
+    "y": 551,
+    "w": 1211,
+    "h": 390,
+    "amin": 1.2,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "FUSE_STBD": {
+    "x": 0,
+    "y": 941,
+    "w": 1211,
+    "h": 390,
+    "amin": 1.2,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "FIN": {
+    "x": 1211,
+    "y": 941,
+    "w": 295,
+    "h": 386,
+    "amin": 2.55,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "LOWER_WING": {
+    "x": 0,
+    "y": 1331,
+    "w": 664,
+    "h": 358,
+    "amin": 0.75,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "STAB": {
+    "x": 664,
+    "y": 1331,
+    "w": 382,
+    "h": 229,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "RUDDER": {
+    "x": 1046,
+    "y": 1331,
+    "w": 312,
+    "h": 216,
+    "amin": 2.4,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "INTERIOR": {
+    "x": 1358,
+    "y": 1331,
+    "w": 195,
+    "h": 199,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "METAL_PAINT": {
+    "x": 1553,
+    "y": 1331,
+    "w": 205,
+    "h": 169,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "COWL_PANEL": {
+    "x": 0,
+    "y": 1689,
+    "w": 522,
+    "h": 165,
+    "amin": -0.593,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "CTRL_UPPER": {
+    "x": 522,
+    "y": 1689,
+    "w": 956,
+    "h": 157,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "ELEV": {
+    "x": 1478,
+    "y": 1689,
+    "w": 350,
+    "h": 146,
+    "amin": 0.3,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "COWL_DISC": {
+    "x": 1828,
+    "y": 1689,
+    "w": 143,
+    "h": 143,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "CTRL_LOWER": {
+    "x": 0,
+    "y": 1854,
+    "w": 664,
+    "h": 130,
+    "amin": 0.75,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "SLAT": {
+    "x": 664,
+    "y": 1854,
+    "w": 496,
+    "h": 128,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "TYRE": {
+    "x": 1160,
+    "y": 1854,
+    "w": 281,
+    "h": 90,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "PROP": {
+    "x": 1441,
+    "y": 1854,
+    "w": 203,
+    "h": 73,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "COWL_RING": {
+    "x": 0,
+    "y": 1984,
+    "w": 544,
+    "h": 63,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "HUB": {
+    "x": 544,
+    "y": 1984,
+    "w": 60,
+    "h": 60,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "CAPS": {
+    "x": 604,
+    "y": 1984,
+    "w": 274,
+    "h": 52,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   },
+   "FABRIC_IN": {
+    "x": 878,
+    "y": 1984,
+    "w": 48,
+    "h": 42,
+    "amin": 0.0,
+    "bmin": 0.0,
+    "pad": 4
+   }
+  }
+ },
+ "normal_map": 1024,
+ "variants": {
+  "an2_flyable.glb": {
+   "bytes": 1944012,
+   "triangles_per_lod": [
+    13474,
+    4548,
+    1604
+   ],
+   "lod_ratio": [
+    1.0,
+    0.338,
+    0.119
+   ],
+   "lod_group_size_u": 50.9,
+   "lod_switch_u": [
+    195.9,
+    440.8
+   ],
+   "cull_u": 2204.2,
+   "bounds_u": {
+    "min": [
+     -25.45,
+     -0.0,
+     -28.79
+    ],
+    "max": [
+     25.45,
+     11.34,
+     7.88
+    ]
+   },
+   "min_y_u": -0.0,
+   "attitude": {
+    "rotation_quat": [
+     -0.071566,
+     0.0,
+     0.0,
+     0.997436
+    ],
+    "lift_u": -0.0,
+    "pitch_nose_up_deg": 8.21
+   },
+   "broken_panel_droop_deg": null,
+   "parts": {
+    "Part_Fuselage": [
+     1944,
+     940,
+     232
+    ],
+    "Door_Cargo": [
+     32,
+     32,
+     0
+    ],
+    "BayDoor_FL": [
+     20,
+     20,
+     0
+    ],
+    "BayDoor_FR": [
+     20,
+     20,
+     0
+    ],
+    "BayDoor_AL": [
+     28,
+     28,
+     0
+    ],
+    "BayDoor_AR": [
+     28,
+     28,
+     0
+    ],
+    "Part_Wing_Upper_L": [
+     2030,
+     374,
+     82
+    ],
+    "Aileron_L": [
+     144,
+     56,
+     12
+    ],
+    "Part_Wing_Lower_L_Inner": [
+     1098,
+     216,
+     66
+    ],
+    "Part_Wing_Lower_L_Outer": [
+     438,
+     114,
+     70
+    ],
+    "Part_Wing_Upper_R": [
+     2054,
+     374,
+     82
+    ],
+    "Aileron_R": [
+     144,
+     56,
+     12
+    ],
+    "Part_Wing_Lower_R_Inner": [
+     1098,
+     216,
+     66
+    ],
+    "Part_Wing_Lower_R_Outer": [
+     438,
+     114,
+     70
+    ],
+    "Part_Struts_L": [
+     104,
+     40,
+     16
+    ],
+    "Part_Struts_R": [
+     104,
+     40,
+     16
+    ],
+    "Part_Stabiliser": [
+     572,
+     192,
+     88
+    ],
+    "Elevator": [
+     288,
+     112,
+     24
+    ],
+    "Part_Fin": [
+     306,
+     72,
+     28
+    ],
+    "Rudder": [
+     192,
+     84,
+     28
+    ],
+    "Part_Cowling_Ring": [
+     256,
+     192,
+     128
+    ],
+    "Part_Cowl_Panel_1": [
+     58,
+     46,
+     24
+    ],
+    "Part_Cowl_Panel_2": [
+     58,
+     46,
+     24
+    ],
+    "Part_Cowl_Panel_3": [
+     58,
+     46,
+     24
+    ],
+    "Part_Cowl_Panel_4": [
+     58,
+     46,
+     24
+    ],
+    "Part_Engine": [
+     336,
+     212,
+     32
+    ],
+    "Propeller": [
+     464,
+     192,
+     112
+    ],
+    "Part_Gear_Main_L": [
+     112,
+     80,
+     32
+    ],
+    "Wheel_L": [
+     288,
+     144,
+     88
+    ],
+    "Part_Gear_Main_R": [
+     112,
+     80,
+     32
+    ],
+    "Wheel_R": [
+     288,
+     144,
+     88
+    ],
+    "Part_Gear_Tail": [
+     88,
+     72,
+     32
+    ],
+    "Wheel_Tail": [
+     216,
+     120,
+     72
+    ]
+   },
+   "missing_parts": [],
+   "pivots": {
+    "Pivot_Propeller": {
+     "origin_u": [
+      0.0,
+      5.46,
+      8.12
+     ],
+     "axis_local_x": [
+      0.0,
+      0.0,
+      1.0
+     ],
+     "sense": "spin; +: clockwise seen from the cockpit (direction not verified)",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    },
+    "Pivot_Aileron_L": {
+     "origin_u": [
+      13.58,
+      10.005,
+      -2.694
+     ],
+     "axis_local_x": [
+      0.999,
+      0.0436,
+      0.0
+     ],
+     "sense": "+: trailing edge up",
+     "range_deg": [
+      -20,
+      20
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_Aileron_R": {
+     "origin_u": [
+      -13.58,
+      10.005,
+      -2.694
+     ],
+     "axis_local_x": [
+      0.999,
+      -0.0436,
+      -0.0
+     ],
+     "sense": "+: trailing edge up",
+     "range_deg": [
+      -20,
+      20
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_Elevator": {
+     "origin_u": [
+      0.0,
+      7.336,
+      -24.207
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: trailing edge up (nose up)",
+     "range_deg": [
+      -25,
+      15
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_Rudder": {
+     "origin_u": [
+      0.0,
+      6.72,
+      -24.528
+     ],
+     "axis_local_x": [
+      -0.0,
+      -1.0,
+      -0.0
+     ],
+     "sense": "+: trailing edge to port",
+     "range_deg": [
+      -25,
+      25
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_Door_Cargo": {
+     "origin_u": [
+      2.455,
+      3.59,
+      -5.88
+     ],
+     "axis_local_x": [
+      0.001,
+      -1.0,
+      -0.0
+     ],
+     "sense": "+: opens outward (hinge at the forward edge)",
+     "range_deg": [
+      0,
+      100
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_FL": {
+     "origin_u": [
+      1.391,
+      3.062,
+      -0.84
+     ],
+     "axis_local_x": [
+      -0.0,
+      -0.0098,
+      1.0
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_FR": {
+     "origin_u": [
+      -1.391,
+      3.062,
+      -0.84
+     ],
+     "axis_local_x": [
+      0.0,
+      0.0098,
+      -1.0
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_AL": {
+     "origin_u": [
+      1.391,
+      3.106,
+      -5.32
+     ],
+     "axis_local_x": [
+      0.005,
+      -0.0517,
+      0.9986
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_AR": {
+     "origin_u": [
+      -1.391,
+      3.106,
+      -5.32
+     ],
+     "axis_local_x": [
+      0.005,
+      0.0517,
+      -0.9986
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_Wheel_L": {
+     "origin_u": [
+      4.83,
+      1.12,
+      0.0
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    },
+    "Pivot_Wheel_R": {
+     "origin_u": [
+      -4.83,
+      1.12,
+      0.0
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    },
+    "Pivot_Wheel_Tail": {
+     "origin_u": [
+      0.0,
+      3.99,
+      -23.1
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    }
+   },
+   "sockets_u": {
+    "Socket_Drop_1": [
+     0.7,
+     3.892,
+     -2.52
+    ],
+    "Socket_Drop_2": [
+     -0.7,
+     3.892,
+     -2.52
+    ],
+    "Socket_Drop_3": [
+     0.7,
+     4.004,
+     -7.0
+    ],
+    "Socket_Drop_4": [
+     -0.7,
+     4.004,
+     -7.0
+    ]
+   }
+  },
+  "an2_wreck.glb": {
+   "bytes": 2337212,
+   "triangles_per_lod": [
+    13574,
+    4482,
+    1556
+   ],
+   "lod_ratio": [
+    1.0,
+    0.33,
+    0.115
+   ],
+   "lod_group_size_u": 50.87,
+   "lod_switch_u": [
+    195.8,
+    440.6
+   ],
+   "cull_u": 2202.9,
+   "bounds_u": {
+    "min": [
+     -24.96,
+     -0.12,
+     -28.57
+    ],
+    "max": [
+     25.92,
+     11.96,
+     7.95
+    ]
+   },
+   "min_y_u": -0.117,
+   "attitude": {
+    "rotation_quat": [
+     -0.066768,
+     0.0,
+     -0.023015,
+     0.997503
+    ],
+    "lift_u": -0.222,
+    "pitch_nose_up_deg": 7.65
+   },
+   "broken_panel_droop_deg": -34.51,
+   "parts": {
+    "Part_Fuselage": [
+     1940,
+     938,
+     232
+    ],
+    "Door_Cargo": [
+     32,
+     32,
+     0
+    ],
+    "BayDoor_FL": [
+     20,
+     20,
+     0
+    ],
+    "BayDoor_FR": [
+     20,
+     20,
+     0
+    ],
+    "BayDoor_AL": [
+     28,
+     28,
+     0
+    ],
+    "BayDoor_AR": [
+     28,
+     28,
+     0
+    ],
+    "Part_Wing_Upper_L": [
+     2030,
+     374,
+     82
+    ],
+    "Aileron_L": [
+     144,
+     56,
+     12
+    ],
+    "Part_Wing_Lower_L_Inner": [
+     1118,
+     236,
+     66
+    ],
+    "Part_Wing_Lower_L_Outer": [
+     494,
+     122,
+     70
+    ],
+    "Part_Wing_Upper_R": [
+     2150,
+     374,
+     82
+    ],
+    "Aileron_R": [
+     144,
+     56,
+     12
+    ],
+    "Part_Wing_Lower_R_Inner": [
+     1146,
+     216,
+     66
+    ],
+    "Part_Wing_Lower_R_Outer": [
+     438,
+     114,
+     70
+    ],
+    "Part_Struts_L": [
+     104,
+     40,
+     16
+    ],
+    "Part_Struts_R": [
+     104,
+     40,
+     16
+    ],
+    "Part_Stabiliser": [
+     572,
+     192,
+     88
+    ],
+    "Elevator": [
+     288,
+     112,
+     24
+    ],
+    "Part_Fin": [
+     306,
+     72,
+     28
+    ],
+    "Rudder": [
+     192,
+     84,
+     28
+    ],
+    "Part_Cowling_Ring": [
+     256,
+     192,
+     128
+    ],
+    "Part_Cowl_Panel_3": [
+     58,
+     46,
+     24
+    ],
+    "Part_Cowl_Panel_4": [
+     58,
+     46,
+     24
+    ],
+    "Part_Engine": [
+     336,
+     212,
+     32
+    ],
+    "Propeller": [
+     464,
+     192,
+     112
+    ],
+    "Part_Gear_Main_L": [
+     112,
+     80,
+     32
+    ],
+    "Wheel_L": [
+     288,
+     144,
+     88
+    ],
+    "Part_Gear_Main_R": [
+     112,
+     80,
+     32
+    ],
+    "Wheel_R": [
+     288,
+     144,
+     88
+    ],
+    "Part_Gear_Tail": [
+     88,
+     72,
+     32
+    ],
+    "Wheel_Tail": [
+     216,
+     120,
+     72
+    ]
+   },
+   "missing_parts": [
+    "Part_Cowl_Panel_1",
+    "Part_Cowl_Panel_2"
+   ],
+   "pivots": {
+    "Pivot_Propeller": {
+     "origin_u": [
+      0.0,
+      5.46,
+      8.12
+     ],
+     "axis_local_x": [
+      0.0,
+      0.0,
+      1.0
+     ],
+     "sense": "spin; +: clockwise seen from the cockpit (direction not verified)",
+     "range_deg": null,
+     "wreck_pose_deg": 17.0
+    },
+    "Pivot_Aileron_L": {
+     "origin_u": [
+      13.58,
+      10.005,
+      -2.694
+     ],
+     "axis_local_x": [
+      0.999,
+      0.0436,
+      0.0
+     ],
+     "sense": "+: trailing edge up",
+     "range_deg": [
+      -20,
+      20
+     ],
+     "wreck_pose_deg": 8.0
+    },
+    "Pivot_Aileron_R": {
+     "origin_u": [
+      -13.58,
+      10.005,
+      -2.694
+     ],
+     "axis_local_x": [
+      0.999,
+      -0.0436,
+      -0.0
+     ],
+     "sense": "+: trailing edge up",
+     "range_deg": [
+      -20,
+      20
+     ],
+     "wreck_pose_deg": -8.0
+    },
+    "Pivot_Elevator": {
+     "origin_u": [
+      0.0,
+      7.336,
+      -24.207
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: trailing edge up (nose up)",
+     "range_deg": [
+      -25,
+      15
+     ],
+     "wreck_pose_deg": -12.0
+    },
+    "Pivot_Rudder": {
+     "origin_u": [
+      0.0,
+      6.72,
+      -24.528
+     ],
+     "axis_local_x": [
+      -0.0,
+      -1.0,
+      -0.0
+     ],
+     "sense": "+: trailing edge to port",
+     "range_deg": [
+      -25,
+      25
+     ],
+     "wreck_pose_deg": 18.0
+    },
+    "Pivot_Door_Cargo": {
+     "origin_u": [
+      2.455,
+      3.59,
+      -5.88
+     ],
+     "axis_local_x": [
+      0.001,
+      -1.0,
+      -0.0
+     ],
+     "sense": "+: opens outward (hinge at the forward edge)",
+     "range_deg": [
+      0,
+      100
+     ],
+     "wreck_pose_deg": 25.0
+    },
+    "Pivot_BayDoor_FL": {
+     "origin_u": [
+      1.391,
+      3.062,
+      -0.84
+     ],
+     "axis_local_x": [
+      -0.0,
+      -0.0098,
+      1.0
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_FR": {
+     "origin_u": [
+      -1.391,
+      3.062,
+      -0.84
+     ],
+     "axis_local_x": [
+      0.0,
+      0.0098,
+      -1.0
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_AL": {
+     "origin_u": [
+      1.391,
+      3.106,
+      -5.32
+     ],
+     "axis_local_x": [
+      0.005,
+      -0.0517,
+      0.9986
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": null
+    },
+    "Pivot_BayDoor_AR": {
+     "origin_u": [
+      -1.391,
+      3.106,
+      -5.32
+     ],
+     "axis_local_x": [
+      0.005,
+      0.0517,
+      -0.9986
+     ],
+     "sense": "+: opens down",
+     "range_deg": [
+      0,
+      90
+     ],
+     "wreck_pose_deg": 70.0
+    },
+    "Pivot_Wheel_L": {
+     "origin_u": [
+      4.83,
+      1.12,
+      0.0
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    },
+    "Pivot_Wheel_R": {
+     "origin_u": [
+      -4.83,
+      1.12,
+      0.0
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    },
+    "Pivot_Wheel_Tail": {
+     "origin_u": [
+      0.0,
+      3.99,
+      -23.1
+     ],
+     "axis_local_x": [
+      1.0,
+      0.0,
+      0.0
+     ],
+     "sense": "+: rolls forward",
+     "range_deg": null,
+     "wreck_pose_deg": null
+    }
+   },
+   "sockets_u": {
+    "Socket_Drop_1": [
+     0.7,
+     3.892,
+     -2.52
+    ],
+    "Socket_Drop_2": [
+     -0.7,
+     3.892,
+     -2.52
+    ],
+    "Socket_Drop_3": [
+     0.7,
+     4.004,
+     -7.0
+    ],
+    "Socket_Drop_4": [
+     -0.7,
+     4.004,
+     -7.0
+    ]
+   }
+  }
+ }
+}

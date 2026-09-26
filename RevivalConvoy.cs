@@ -348,6 +348,10 @@ namespace NextDayRevival
                 if (routes == null || routes.Count == 0)
                     return Loc.T("нет маршрута конвоя (F4 -> маршрут -> \"конвой\")",
                                  "no convoy route marked (F4 -> a route -> \"convoy\")");
+                routes = OffAirfield(routes);
+                if (routes.Count == 0)
+                    return Loc.T("аэродром занят: там уже идёт десант или конвой",
+                                 "the airfield is busy: a landing or convoy is already on it");
                 string pick = routes[UnityEngine.Random.Range(0, routes.Count)];
                 return DoSpawn(pick)
                     ? Loc.T("конвой выехал на ", "convoy sent out on ") + pick
@@ -371,6 +375,13 @@ namespace NextDayRevival
                     + "(F4 -> a route -> \"convoy\").");
                 return;
             }
+            routes = OffAirfield(routes);
+            if (routes.Count == 0)
+            {
+                RevivalPlugin.L.LogInfo("Convoy: due, but every route runs to the airfield "
+                    + "and its event budget is full - skipped.");
+                return;
+            }
             string pick = routes[UnityEngine.Random.Range(0, routes.Count)];
             DoSpawn(pick);
         }
@@ -387,6 +398,12 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogWarning("Convoy: route \"" + routeName
                     + "\" is unusable (needs at least 3 waypoints).");
+                return false;
+            }
+            if (Airfield.BlocksConvoy(pts))
+            {
+                RevivalPlugin.L.LogInfo("Convoy: route \"" + routeName + "\" runs to the "
+                    + "airfield and its event budget is full - not sent.");
                 return false;
             }
 
@@ -760,6 +777,31 @@ namespace NextDayRevival
                             c.LostOne = true;
                 if (!any) _convoys.RemoveAt(i);
             }
+        }
+
+        /// <summary>The routes a convoy may take now: all of them, less the
+        /// ones to the airfield while its event budget is full (Airfield.cs).</summary>
+        static List<string> OffAirfield(List<string> routes)
+        {
+            List<string> ok = new List<string>();
+            for (int i = 0; i < routes.Count; i++)
+                if (!Airfield.BlocksConvoy(Patrol.ConvoyRoutePoints(routes[i]))) ok.Add(routes[i]);
+            return ok;
+        }
+
+        /// <summary>How many convoys on an airfield route still drive.</summary>
+        internal static int AirfieldActive()
+        {
+            int n = 0;
+            for (int i = 0; i < _convoys.Count; i++)
+            {
+                Convoy c = _convoys[i];
+                bool alive = false;
+                for (int k = 0; k < c.Members.Count; k++)
+                    if (c.Members[k].IsAlive) { alive = true; break; }
+                if (alive && Airfield.ConvoyTargets(Patrol.ConvoyRoutePoints(c.Route))) n++;
+            }
+            return n;
         }
 
         static bool HasWreck(Convoy c)

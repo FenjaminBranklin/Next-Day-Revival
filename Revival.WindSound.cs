@@ -66,7 +66,7 @@ namespace NextDayRevival
             try
             {
                 if (Parachute.Falling) CheckLanded();
-                bool want = PlayerHeli.Aboard || Parachute.Falling;
+                bool want = PlayerHeli.Aboard || PlayerAn2.Aboard || Parachute.Falling;
 
                 if (want && _source == null) Start();
                 if (_source == null) return;

@@ -50,6 +50,7 @@ namespace NextDayRevival
         public const int GunTruck = 4;     // the technical's machine gun
         public const int Heli = 5;         // the helicopter a player flies
         public const int Gepard = 6;       // the Gepard's sight (RevivalGepard.cs)
+        public const int An2 = 7;          // the An-2 a player flies (Revival.PlayerAn2.cs)
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -233,6 +234,7 @@ namespace NextDayRevival
             else if (_owner == GunTruck) TechnicalGun.LateTick();
             else if (_owner == Heli) PlayerHeli.LateTick();
             else if (_owner == Gepard) GepardGun.LateTick();
+            else if (_owner == An2) PlayerAn2.LateTick();
         }
 
         /// <summary>

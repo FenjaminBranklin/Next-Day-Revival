@@ -72,7 +72,11 @@ namespace NextDayRevival
         // Placed content, one additive scene bundle per concern
         // (unity/EastTile BuildContent.cs, docs/ai/tasks/east-pipeline.md):
         // loaded after the tile, each only if its file is installed, and
-        // unloaded with the tile. File and scene, in load order.
+        // unloaded with the tile. Every east_*.bundle next to the tile bundle
+        // is content (the airfield is one bundle per building, east_af_*,
+        // docs/ai/tasks/airfield-assembly.md); its scene name comes from the
+        // bundle. These known ones load first, in this order, and are the
+        // whole list when the folder cannot be listed (the old fixed path).
         static readonly string[][] Content = {
             new[] { "east_airfield.bundle", "EastAirfield" },
             new[] { "east_town.bundle", "EastTown" },
@@ -80,7 +84,12 @@ namespace NextDayRevival
             new[] { "east_content_test.bundle", "EastContentTest" },
         };
         static readonly Dictionary<string, object> _contentBundles = new Dictionary<string, object>();
+        static readonly Dictionary<string, string> _contentScenes = new Dictionary<string, string>();   // bundle file -> scene
+        static readonly List<string> _contentLoaded = new List<string>();                             // files queued this time
         static bool _contentQueued;
+        // The combined greybox in east_airfield.bundle keeps, switched off, the
+        // pieces each east_af_* bundle replaces (root/Fallback/<bundle name>).
+        const string AirfieldScene = "EastAirfield", AirfieldRoot = "EastAirfieldRoot", FallbackGroup = "Fallback";
 
         /// <summary>The world with the tile on: vanilla GW_Scene_1 (-2500..2500)
         /// plus one 5 x 5 km tile east of it.</summary>
@@ -235,38 +244,117 @@ namespace NextDayRevival
         {
             if (_contentQueued) return;
             _contentQueued = true;
-            foreach (string[] c in Content)
+            _contentLoaded.Clear();
+            foreach (string file in ContentFiles())
             {
                 try
                 {
-                    if (SceneManager.GetSceneByName(c[1]).isLoaded) continue;
-                    string path = Path.Combine(RevivalPlugin.AssetDir, c[0]);
+                    string path = Path.Combine(RevivalPlugin.AssetDir, file);
                     if (!File.Exists(path)) continue;
-                    if (!_contentBundles.ContainsKey(c[0]))
+                    string scene;
+                    if (_contentScenes.TryGetValue(file, out scene) && SceneManager.GetSceneByName(scene).isLoaded)
                     {
-                        object b = OpenBundle(path);
-                        if (b == null) continue;
-                        _contentBundles[c[0]] = b;
+                        _contentLoaded.Add(file);
+                        continue;
                     }
-                    AsyncOperation op = SceneManager.LoadSceneAsync(c[1], LoadSceneMode.Additive);
-                    Log(op == null ? "FAIL LoadSceneAsync(" + c[1] + ", Additive) returned null."
-                                   : "content " + c[1] + " queued after the tile (" + c[0] + ").");
+                    object b;
+                    if (!_contentBundles.TryGetValue(file, out b))
+                    {
+                        b = OpenBundle(path);
+                        if (b == null) continue;
+                        _contentBundles[file] = b;
+                    }
+                    scene = SceneOf(file, b);
+                    if (scene == null) continue;
+                    _contentScenes[file] = scene;
+                    if (SceneManager.GetSceneByName(scene).isLoaded) { _contentLoaded.Add(file); continue; }
+                    AsyncOperation op = SceneManager.LoadSceneAsync(scene, LoadSceneMode.Additive);
+                    if (op != null) _contentLoaded.Add(file);
+                    Log(op == null ? "FAIL LoadSceneAsync(" + scene + ", Additive) returned null."
+                                   : "content " + scene + " queued after the tile (" + file + ").");
                 }
                 catch (Exception ex)
                 {
-                    Log("content " + c[1] + " load failed: " + ex.Message);
+                    Log("content " + file + " load failed: " + ex.Message);
                 }
             }
+        }
+
+        /// <summary>The content bundle files: the known ones first, then every
+        /// other east_*.bundle beside the tile bundle (not the tile's own),
+        /// sorted. The known list alone when the folder cannot be read.</summary>
+        static List<string> ContentFiles()
+        {
+            List<string> r = new List<string>();
+            foreach (string[] c in Content) r.Add(c[0]);
+            try
+            {
+                string[] found = Directory.GetFiles(RevivalPlugin.AssetDir, "east_*.bundle");
+                Array.Sort(found, StringComparer.Ordinal);
+                foreach (string f in found)
+                {
+                    string n = Path.GetFileName(f);
+                    if (n.StartsWith("east_tile", StringComparison.Ordinal) || r.Contains(n)) continue;
+                    r.Add(n);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("content folder not listed (" + ex.Message + "): the known bundles only.");
+            }
+            return r;
+        }
+
+        /// <summary>A content bundle's scene: the known name, else the first
+        /// scene the bundle holds (AssetBundle.GetAllScenePaths by reflection).</summary>
+        static string SceneOf(string file, object bundle)
+        {
+            foreach (string[] c in Content)
+                if (c[0] == file) return c[1];
+            try
+            {
+                MethodInfo m = bundle.GetType().GetMethod("GetAllScenePaths", Type.EmptyTypes);
+                string[] p = m == null ? null : m.Invoke(bundle, null) as string[];
+                if (p != null && p.Length > 0) return Path.GetFileNameWithoutExtension(p[0]);
+                Log("content " + file + ": the bundle holds no scene - skipped.");
+            }
+            catch (Exception ex)
+            {
+                Log("content " + file + ": no scene path (" + ex.Message + ") - skipped.");
+            }
+            return null;
+        }
+
+        /// <summary>East_airfield.bundle holds, switched off, the greybox of
+        /// every building that has its own bundle (root/Fallback/east_af_*):
+        /// a group comes on when its bundle was not queued, so a missing or
+        /// broken building bundle leaves its greybox standing.</summary>
+        static void ApplyFallback(Scene s)
+        {
+            Transform fb = null;
+            GameObject[] roots = s.GetRootGameObjects();
+            for (int i = 0; i < roots.Length && fb == null; i++)
+                if (roots[i].name == AirfieldRoot) fb = roots[i].transform.Find(FallbackGroup);
+            if (fb == null) return;
+            List<string> grey = new List<string>();
+            foreach (Transform t in fb)
+            {
+                bool own = _contentLoaded.Contains(t.name + ".bundle");
+                t.gameObject.SetActive(!own);
+                if (!own) grey.Add(t.name);
+            }
+            Log("airfield: " + (fb.childCount - grey.Count) + " of " + fb.childCount + " parts from their own bundles"
+                + (grey.Count > 0 ? "; greybox fallback for " + string.Join(", ", grey.ToArray()) : "") + ".");
         }
 
         static void UnloadContent()
         {
             _contentQueued = false;
-            foreach (string[] c in Content)
+            foreach (string scene in new List<string>(_contentScenes.Values))
             {
-                if (!SceneManager.GetSceneByName(c[1]).isLoaded) continue;
-                SceneManager.UnloadSceneAsync(c[1]);
-                Log("content " + c[1] + " unloaded with the tile.");
+                if (!SceneManager.GetSceneByName(scene).isLoaded) continue;
+                SceneManager.UnloadSceneAsync(scene);
+                Log("content " + scene + " unloaded with the tile.");
             }
         }
 
@@ -345,6 +433,8 @@ namespace NextDayRevival
                     QueueTile("queued after sceneLoaded(GW_Scene_1) - the load did not go through LoadSceneNow's async branch");
                 else if (s.name == SceneName)
                     Log("tile scene loaded (" + mode + "); active scene " + SceneManager.GetActiveScene().name + ".");
+                else if (s.name == AirfieldScene)
+                    ApplyFallback(s);
             };
             SceneManager.sceneUnloaded += delegate(Scene s)
             {

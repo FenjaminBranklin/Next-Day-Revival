@@ -561,6 +561,9 @@ namespace NextDayRevival
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Gepard spawn key: " + ex); }
             GepardGun.Tick();
+            // NDR Gepard crew: the men inside, found on the vehicle scan, and on
+            // the master the NPC gunner's fire control (RevivalGepardCrew.cs).
+            GepardCrew.Tick();
             GepardShots.Tick();
         }
 
@@ -973,9 +976,10 @@ namespace NextDayRevival
         internal sealed class Contact
         {
             public GameObject Go;
-            public int Kind;             // 0 heli, 1 vehicle, 2 FPV, 3 recon (player), 4 crew drone, 5 battery drone
+            public int Kind;             // 0 heli, 1 vehicle, 2 FPV, 3 recon (player), 4 crew drone, 5 battery drone, 6 registered aircraft (GepardAir)
             public int Actor;            // drone owner for 2/3
             public int HeliView;
+            public GepardAir.Source Src; // kind 6: the registry entry that owns it
             public Component Vehicle;
             public Vector3 LocalCentre;
             public float Radius;
@@ -1003,6 +1007,7 @@ namespace NextDayRevival
         static Contact _lock;
         static readonly List<Contact> _contacts = new List<Contact>();
         static readonly List<GameObject> _tmp = new List<GameObject>();
+        static readonly List<GepardAir.Found> _air = new List<GepardAir.Found>();
         static readonly Dictionary<int, int> _rounds = new Dictionary<int, int>();
         static readonly Dictionary<int, int> _heliHits = new Dictionary<int, int>();
         static readonly Dictionary<int, float> _vehicleNext = new Dictionary<int, float>();
@@ -1212,6 +1217,10 @@ namespace NextDayRevival
             _tmp.Clear();
             PlayerHeli.MissileTargets(_tmp);
             for (int i = 0; i < _tmp.Count; i++) Offer(_tmp[i], 0, 0, radar, reach);
+            // Every other aircraft somebody registered (GepardAir: the An-2).
+            _air.Clear();
+            GepardAir.Collect(_air);
+            for (int i = 0; i < _air.Count; i++) Offer(_air[i].Go, 6, 0, radar, reach, _air[i].Src);
             if (Gepard.CfgGroundTargets.Value)
             {
                 Component[] all = VehicleScan.All();
@@ -1280,6 +1289,7 @@ namespace NextDayRevival
         {
             if (c.Go == null || !c.Go.activeInHierarchy) return false;
             if (c.Kind == 0) return PlayerHeli.MissileTarget(c.HeliView) != null;
+            if (c.Kind == 6) return GepardAir.Alive(c);
             if (c.Kind == 1 && c.Vehicle != null)
             {
                 object d = Field(c.Vehicle, "Durability");
@@ -1289,6 +1299,11 @@ namespace NextDayRevival
         }
 
         static void Offer(GameObject go, int kind, int actor, Vector3 radar, float reach)
+        {
+            Offer(go, kind, actor, radar, reach, null);
+        }
+
+        static void Offer(GameObject go, int kind, int actor, Vector3 radar, float reach, GepardAir.Source src)
         {
             if (go == null || !go.activeInHierarchy) return;
             Contact c = null;
@@ -1301,6 +1316,7 @@ namespace NextDayRevival
                 c.Go = go;
                 c.Kind = kind;
                 c.Actor = actor;
+                c.Src = src;
                 if (kind == 0) c.HeliView = PlayerHeli.MissileView(go);
                 if (kind == 1) c.Vehicle = go.GetComponent(RevivalPlugin.TypeByName("VehicleGameSystem"));
                 Measure(c);
@@ -1312,7 +1328,7 @@ namespace NextDayRevival
             c.SeenAt = Time.time;
         }
 
-        static void Measure(Contact c)
+        internal static void Measure(Contact c)
         {
             Renderer[] rs = c.Go.GetComponentsInChildren<Renderer>();
             bool found = false;
@@ -1665,6 +1681,13 @@ namespace NextDayRevival
         /// its proximity burst: the nearest along the segment wins.</summary>
         internal static bool Proximity(Vector3 a, Vector3 b, out Contact hit, out Vector3 at)
         {
+            return Proximity(_contacts, a, b, out hit, out at);
+        }
+
+        /// <summary>The same test against any contact list - the NPC gunner
+        /// (RevivalGepardCrew.cs) keeps its own.</summary>
+        internal static bool Proximity(List<Contact> contacts, Vector3 a, Vector3 b, out Contact hit, out Vector3 at)
+        {
             hit = null;
             at = b;
             Vector3 seg = b - a;
@@ -1672,9 +1695,9 @@ namespace NextDayRevival
             if (len2 < 1e-8f) return false;
             float fuze = Mathf.Max(0f, Gepard.CfgFuze.Value);
             float best = 2f;
-            for (int i = 0; i < _contacts.Count; i++)
+            for (int i = 0; i < contacts.Count; i++)
             {
-                Contact c = _contacts[i];
+                Contact c = contacts[i];
                 if (!c.Air || c.Go == null) continue;
                 float t = Mathf.Clamp01(Vector3.Dot(c.Pos - a, seg) / len2);
                 Vector3 p = a + seg * t;
@@ -1690,14 +1713,23 @@ namespace NextDayRevival
         /// <summary>A live round struck a collider.</summary>
         internal static void Struck(GameObject go, Vector3 point, Vector3 dir)
         {
+            Struck(_contacts, _root, false, go, point, dir);
+        }
+
+        /// <summary>A live round of the gun on the vehicle <paramref name="own"/>
+        /// struck a collider; <paramref name="npc"/> marks an NPC gunner's
+        /// rounds.</summary>
+        internal static void Struck(List<Contact> contacts, Transform own, bool npc,
+                                    GameObject go, Vector3 point, Vector3 dir)
+        {
             if (go == null) return;
-            for (int i = 0; i < _contacts.Count; i++)
+            for (int i = 0; i < contacts.Count; i++)
             {
-                Contact c = _contacts[i];
+                Contact c = contacts[i];
                 if (c.Go == null || c.Kind == 1) continue;
                 if (go.transform == c.Go.transform || go.transform.IsChildOf(c.Go.transform))
                 {
-                    Hit(c, point, dir);
+                    Hit(c, point, dir, npc);
                     return;
                 }
             }
@@ -1705,7 +1737,7 @@ namespace NextDayRevival
             Component vehicle = vgsType == null ? null : go.GetComponentInParent(vgsType);
             if (vehicle != null)
             {
-                if (vehicle.transform != _root) VehicleHit(vehicle);
+                if (vehicle.transform != own) VehicleHit(vehicle);
                 return;
             }
             float dmg = Gepard.CfgInfantryDamage.Value;
@@ -1718,11 +1750,17 @@ namespace NextDayRevival
         /// point - the ones the Stinger uses, with a 35 mm-sized number.</summary>
         internal static void Hit(Contact c, Vector3 point, Vector3 dir)
         {
+            Hit(c, point, dir, false);
+        }
+
+        internal static void Hit(Contact c, Vector3 point, Vector3 dir, bool npc)
+        {
             if (c == null || c.Go == null) return;
             float dmg = Mathf.Max(1f, Gepard.CfgDroneDamage.Value);
             switch (c.Kind)
             {
-                case 0: HeliHit(c, point); break;
+                case 0: HeliHit(c, point, npc); break;
+                case 6: GepardAir.Hit(c, point); break;
                 case 1: if (c.Vehicle != null) VehicleHit(c.Vehicle); break;
                 case 2:
                     if (Time.time < c.NextHit) return;
@@ -1747,7 +1785,7 @@ namespace NextDayRevival
             }
         }
 
-        static void HeliHit(Contact c, Vector3 point)
+        static void HeliHit(Contact c, Vector3 point, bool npc)
         {
             int view = c.HeliView;
             if (view <= 0 || PlayerHeli.MissileTarget(view) == null) return;
@@ -1757,10 +1795,11 @@ namespace NextDayRevival
             int need = Mathf.Max(1, Gepard.CfgHeliHits.Value);
             if (n < need) { _heliHits[view] = n; return; }
             _heliHits.Remove(view);
-            RevivalPlugin.L.LogInfo("Gepard: helicopter " + view + " shot down after " + n + " hits.");
+            RevivalPlugin.L.LogInfo("Gepard: helicopter " + view + " shot down after " + n
+                + " hits" + (npc ? " by an NPC gunner." : "."));
             GepardNet.SendHeliKill(view, point);
             PlayerHeli.MissileImpact(view, point);
-            Hint(GepardText.HeliDown(), 3f);
+            if (!npc) Hint(GepardText.HeliDown(), 3f);
         }
 
         /// <summary>
@@ -2058,6 +2097,7 @@ namespace NextDayRevival
             switch (c.Kind)
             {
                 case 0: return GepardText.KindHeli();
+                case 6: return GepardText.KindPlane();
                 case 1:
                     if (c.Vehicle != null && Tank.IstPanzer(c.Vehicle.transform)) return GepardText.KindTank();
                     return GepardText.KindVehicle();
@@ -2099,6 +2139,7 @@ namespace NextDayRevival
             public bool Live;
             public Transform Owner;
             public LineRenderer Line;
+            public List<GepardGun.Contact> Npc;   // an NPC gunner's contacts; null = the local gunner's
         }
 
         static readonly List<Round> _rounds = new List<Round>();
@@ -2108,6 +2149,14 @@ namespace NextDayRevival
         static readonly Color TracerTail = new Color(1f, 0.25f, 0.08f, 0f);
 
         internal static void Fire(GepardRig rig, int gun, Vector3 dir, bool live)
+        {
+            Fire(rig, gun, dir, live, null);
+        }
+
+        /// <summary>A round whose damage is judged against <paramref name="npc"/>
+        /// - the contacts of an NPC gunner on this machine
+        /// (RevivalGepardCrew.cs) - instead of the local gunner's.</summary>
+        internal static void Fire(GepardRig rig, int gun, Vector3 dir, bool live, List<GepardGun.Contact> npc)
         {
             if (rig == null) return;
             Vector3 muzzle = rig.Muzzle(gun);
@@ -2126,6 +2175,7 @@ namespace NextDayRevival
             r.Life = Mathf.Max(200f, Gepard.CfgMaxRange == null ? 2600f : Gepard.CfgMaxRange.Value) / speed;
             r.Live = live;
             r.Owner = rig.Vehicle;
+            r.Npc = npc;
             r.Line = Take();
             if (r.Line != null)
             {
@@ -2178,17 +2228,22 @@ namespace NextDayRevival
                 {
                     GepardGun.Contact c;
                     Vector3 at;
-                    if (GepardGun.Proximity(r.Pos, end, out c, out at))
+                    bool near = r.Npc != null
+                        ? GepardGun.Proximity(r.Npc, r.Pos, end, out c, out at)
+                        : GepardGun.Proximity(r.Pos, end, out c, out at);
+                    if (near)
                     {
                         GepardFx.Burst(at, 1f);
-                        GepardGun.Hit(c, at, dir);
+                        GepardGun.Hit(c, at, dir, r.Npc != null);
                         return true;
                     }
                 }
                 if (struck)
                 {
                     GepardFx.Impact(hit.point, hit.normal);
-                    if (r.Live) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
+                    if (r.Live && r.Npc != null)
+                        GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir);
+                    else if (r.Live) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
                     return true;
                 }
                 r.Flown += len;
@@ -2735,6 +2790,7 @@ namespace NextDayRevival
         internal static string OutOfReach() { return Loc.T("ВНЕ СЕКТОРА", "OUT OF REACH"); }
         internal static string Rounds() { return Loc.T("Снаряды", "Rounds"); }
         internal static string KindHeli() { return Loc.T("ВЕРТОЛЁТ", "HELICOPTER"); }
+        internal static string KindPlane() { return Loc.T("САМОЛЁТ", "AIRCRAFT"); }
         internal static string KindTank() { return Loc.T("ТАНК", "TANK"); }
         internal static string KindVehicle() { return Loc.T("ТЕХНИКА", "VEHICLE"); }
         internal static string KindDrone() { return Loc.T("ДРОН", "DRONE"); }
