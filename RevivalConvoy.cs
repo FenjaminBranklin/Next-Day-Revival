@@ -425,6 +425,10 @@ namespace NextDayRevival
             // line-up, spacing and loss reaction are unchanged either way - only
             // WHICH kinds spawn.
             string[] kinds = RevivalComposition.VehicleKindStrings(routeName);
+            // NDR military town: the reinforcement column grows with the
+            // number of players at the town (Revival.MilitaryTown.cs).
+            string[] town = MilitaryTown.ConvoyKinds(routeName);
+            if (town != null && town.Length > 0) kinds = town;
             if (kinds == null || kinds.Length == 0)
             {
                 bool[] cfg = Composition();        // front -> tail, true = tank

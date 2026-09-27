@@ -134,9 +134,13 @@ namespace NextDayRevival
         }
 
         /// <summary>Does a troop landing (zone or any arrow point) reach the
-        /// airfield?</summary>
+        /// airfield - or the military town, which SHARES this budget
+        /// (Revival.MilitaryTown.cs), so an event at one never stacks on an
+        /// event at the other?</summary>
         internal static bool TroopTargets(Vector3 zone, List<Vector3> arrow)
         {
+            if (MilitaryTown.TroopTargets(zone, arrow)) return true;
+            if (!On) return false;
             if (Inside(zone, 150f)) return true;
             if (arrow != null)
                 for (int i = 0; i < arrow.Count; i++)
@@ -144,10 +148,13 @@ namespace NextDayRevival
             return false;
         }
 
-        /// <summary>Does a convoy route reach the airfield?</summary>
+        /// <summary>Does a convoy route reach the airfield or the military
+        /// town (shared budget)?</summary>
         internal static bool ConvoyTargets(List<Vector3> route)
         {
             if (route == null) return false;
+            if (MilitaryTown.ConvoyTargets(route)) return true;
+            if (!On) return false;
             for (int i = 0; i < route.Count; i++)
                 if (Inside(route[i], 100f)) return true;
             return false;
@@ -162,19 +169,19 @@ namespace NextDayRevival
         /// caller has already found that its event targets the airfield.</summary>
         internal static bool Full()
         {
-            if (!On) return false;
+            if (!On && !MilitaryTown.On) return false;
             int active = Active();
             return active >= Budget();
         }
 
         internal static bool BlocksTroop(Vector3 zone, List<Vector3> arrow)
         {
-            return On && TroopTargets(zone, arrow) && Full();
+            return TroopTargets(zone, arrow) && Full();
         }
 
         internal static bool BlocksConvoy(List<Vector3> route)
         {
-            return On && ConvoyTargets(route) && Full();
+            return ConvoyTargets(route) && Full();
         }
 
         // ========================================================== defenders
@@ -208,7 +215,7 @@ namespace NextDayRevival
             new Pocket("airfield-N4-ammo", "guard", 4, 60f, P(4130f, -1110f))
         };
 
-        static string Faction()
+        internal static string Faction()
         {
             string f = CfgFaction == null ? "looter" : CfgFaction.Value.Trim().ToLowerInvariant();
             return f == "civilian" || f == "traitor" || f == "neutral" ? f : "looter";
@@ -275,7 +282,7 @@ namespace NextDayRevival
         /// its post, so nobody watches men appear.</summary>
         internal static bool HoldSpawn(RevivalGroundEnemies.Group g)
         {
-            if (g == null || !g.Builtin) return false;
+            if (g == null || !g.Builtin || !g.Name.StartsWith("airfield-", StringComparison.Ordinal)) return false;
             if (g.Seen) return PlayerInside(60f);
             if (PlayerNear(new Vector3(g.X, 0f, g.Z), 150f)) return true;
             for (int i = 0; i < g.Route.Count; i++)
@@ -285,11 +292,18 @@ namespace NextDayRevival
 
         // =============================================================== loot
 
-        sealed class Slot
+        internal sealed class Slot
         {
             internal string Building, Pool;
             internal int Tier;
             internal float Fx, Fz, Chance;
+            // NDR military town (Revival.MilitaryTown.cs): World = the
+            // fractions are along the WORLD axes of the marker box's extent,
+            // not its own; Keep = a point that has to move beside a solid
+            // shell must stay inside this rectangle (the HQ compound for the
+            // armoury), else it goes to the nearest walkable spot to Anchor.
+            internal bool World, Keep;
+            internal float KeepMinX, KeepMaxX, KeepMinZ, KeepMaxZ, AnchorX, AnchorZ;
             // Runtime, master only.
             internal GameObject Item;
             internal float NextAt;
@@ -302,7 +316,28 @@ namespace NextDayRevival
         // Tier 0 dressing, 1 field, 2 specialist, 3 signature (concept 2).
         // Chance 0 = the tier's default; 1 = the reset always brings it back
         // (the guaranteed category at H1, F1, D1 and D2).
-        static readonly Slot[] Slots = new Slot[] {
+        static Slot[] _slots;
+
+        /// <summary>The airfield's points, then the military town's
+        /// (Revival.MilitaryTown.cs), each only while its part is on. Built at
+        /// first use: the config is bound by then and does not change.</summary>
+        static Slot[] Slots
+        {
+            get
+            {
+                if (_slots != null) return _slots;
+                List<Slot> all = new List<Slot>();
+                if (On && CfgLoot != null && CfgLoot.Value) all.AddRange(AirfieldSlots);
+                _airfieldCount = all.Count;
+                if (MilitaryTown.LootOn) all.AddRange(MilitaryTown.LootSlots());
+                _slots = all.ToArray();
+                return _slots;
+            }
+        }
+
+        static int _airfieldCount;
+
+        static readonly Slot[] AirfieldSlots = new Slot[] {
             // H1 repair hangar: the parts cage and the lockers along the west
             // wall; the floor stays empty. No fuel here - that is D1.
             new Slot("H1", 3, "parts",   -0.38f,  0.36f, 1f),
@@ -386,6 +421,23 @@ namespace NextDayRevival
                 "MilitaryWeaponFirearm", "SpecialWeaponFirearm", "MilitaryWeaponUsableItem",
                 "SpecialClotheJackets" };
             p["parts"] = new string[] { "VehicleItems", "CraftComponents", "RareItem" };
+            // NDR military town (military-town-gameplay.md). The armoury is
+            // the best tier of the east: special weapons and ammunition
+            // twice over, so they are drawn twice as often.
+            p["armoury"] = new string[] { "SpecialWeaponFirearm", "SpecialWeaponFirearm",
+                "SpecialAmmunation", "SpecialAmmunation", "MilitaryWeaponFirearm",
+                "SpecialClotheJackets", "RareItem" };
+            // The 122 mm shell (Mortar.DEF_SHELL) and the gun crews' ammunition.
+            p["shells"] = new string[] { "2066" };
+            p["gunners"] = new string[] { "2066", "MilitaryAmmunation", "MilitaryMeds" };
+            // The officers' flats: the special household of the town.
+            p["officer"] = new string[] { "SpecialMeds", "MilitaryBackpacks", "SpecialClotheJackets",
+                "MilitaryWeaponUsableItem", "RareItem", "MilitaryClotheHats", "SpecialAmmunation" };
+            // The staff building: maps, radio, the duty officers' kit.
+            p["hq"] = new string[] { "MilitaryWeaponUsableItem", "MilitaryAmmunation",
+                "MilitaryBackpacks", "SpecialMeds", "MilitaryWeaponFirearm" };
+            p["flat"] = new string[] { "HomeItems", "EatFoodCans", "EatWater", "CivilianMeds",
+                "CivilianClotheJackets", "CivilianAmmunation" };
             return p;
         }
 
@@ -396,12 +448,14 @@ namespace NextDayRevival
                 case 0: return 0.3f;
                 case 1: return 0.7f;
                 case 2: return 0.55f;
-                default: return 0.35f;
+                case 3: return 0.35f;
+                default: return 0.6f;       // tier 4: the town's armoury
             }
         }
 
         static float ResetSeconds(int tier)
         {
+            if (tier >= 4) return MilitaryTown.ArmourySeconds();   // NDR military town
             if (tier >= 3)
                 return Mathf.Clamp(CfgSignatureReset == null ? 180f : CfgSignatureReset.Value, 5f, 1440f) * 60f;
             return Mathf.Clamp(CfgLootReset == null ? 45f : CfgLootReset.Value, 5f, 600f) * 60f;
@@ -414,7 +468,8 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
-            if (!On || CfgLoot == null || !CfgLoot.Value) return;
+            if (!(On && CfgLoot != null && CfgLoot.Value) && !MilitaryTown.LootOn) return;
+            if (Slots.Length == 0) return;
             float now = Time.time;
             if (now < _next) return;
             _next = now + 2f;
@@ -461,7 +516,9 @@ namespace NextDayRevival
         {
             Vector3 c0, h0;
             Quaternion r0;
-            if (!EastZones.Find("H1", out c0, out h0, out r0)) { _markersAt = -1f; return false; }
+            // The first point's building stands for its scene: H1 for the
+            // airfield, the town's first id when the airfield's loot is off.
+            if (!EastZones.Find(Slots[0].Building, out c0, out h0, out r0)) { _markersAt = -1f; return false; }
             if (_markersAt < 0f) _markersAt = Time.time;
             if (Time.time - _markersAt < 15f) return false;
             int placed = 0, missing = 0, beside = 0;
@@ -472,11 +529,22 @@ namespace NextDayRevival
                 Vector3 centre, half;
                 Quaternion rot;
                 if (!EastZones.Find(s.Building, out centre, out half, out rot)) { missing++; continue; }
-                Vector3 local = new Vector3(s.Fx * half.x * 2f, 0f, s.Fz * half.z * 2f);
-                Vector3 top = centre + rot * local + Vector3.up * (half.y + 2f);
+                Vector3 top;
+                if (s.World)
+                {
+                    Vector3 ext = Extent(half, rot);
+                    top = centre + new Vector3(s.Fx * ext.x * 2f, ext.y + 2f, s.Fz * ext.z * 2f);
+                }
+                else
+                {
+                    Vector3 local = new Vector3(s.Fx * half.x * 2f, 0f, s.Fz * half.z * 2f);
+                    top = centre + rot * local + Vector3.up * (half.y + 2f);
+                }
                 Vector3 floor;
                 bool moved;
                 if (!Floor(top, half.y * 2f + 12f, out floor) || !Walkable(ref floor, out moved))
+                { missing++; continue; }
+                if (moved && s.Keep && !Kept(s, floor) && !Anchor(s, out floor))
                 { missing++; continue; }
                 if (moved) beside++;
                 s.At = floor;
@@ -487,8 +555,9 @@ namespace NextDayRevival
             if (!_placedSaid && missing == 0)
             {
                 _placedSaid = true;
-                RevivalPlugin.L.LogInfo("Airfield loot: " + placed + " points placed, " + beside
-                    + " of them beside a solid (greybox) shell.");
+                RevivalPlugin.L.LogInfo("Airfield loot: " + placed + " points placed ("
+                    + _airfieldCount + " airfield, " + (Slots.Length - _airfieldCount)
+                    + " military town), " + beside + " of them beside a solid (greybox) shell.");
             }
             if (missing > 0 && !_missingSaid)
             {
@@ -520,6 +589,37 @@ namespace NextDayRevival
             floor = Floor(hit.position + Vector3.up * 3f, 8f, out ground) ? ground : hit.position;
             moved = true;
             return true;
+        }
+
+        /// <summary>The world-axis half extent of a rotated marker box.</summary>
+        internal static Vector3 Extent(Vector3 half, Quaternion rot)
+        {
+            Vector3 ax = rot * new Vector3(half.x, 0f, 0f);
+            Vector3 ay = rot * new Vector3(0f, half.y, 0f);
+            Vector3 az = rot * new Vector3(0f, 0f, half.z);
+            return new Vector3(Mathf.Abs(ax.x) + Mathf.Abs(ay.x) + Mathf.Abs(az.x),
+                               Mathf.Abs(ax.y) + Mathf.Abs(ay.y) + Mathf.Abs(az.y),
+                               Mathf.Abs(ax.z) + Mathf.Abs(ay.z) + Mathf.Abs(az.z));
+        }
+
+        static bool Kept(Slot s, Vector3 p)
+        {
+            return p.x >= s.KeepMinX && p.x <= s.KeepMaxX && p.z >= s.KeepMinZ && p.z <= s.KeepMaxZ;
+        }
+
+        /// <summary>A kept point whose nearest walkable spot fell outside its
+        /// rectangle: the nearest walkable spot to the anchor instead, if that
+        /// one is inside.</summary>
+        static bool Anchor(Slot s, out Vector3 floor)
+        {
+            floor = Vector3.zero;
+            Vector3 ground;
+            if (!Floor(new Vector3(s.AnchorX, 2000f, s.AnchorZ), 4000f, out ground)) return false;
+            UnityEngine.AI.NavMeshHit hit;
+            if (!UnityEngine.AI.NavMesh.SamplePosition(ground, out hit, 12f, UnityEngine.AI.NavMesh.AllAreas))
+                return false;
+            floor = hit.position;
+            return Kept(s, floor);
         }
 
         static float _markersAt = -1f;
@@ -649,6 +749,7 @@ namespace NextDayRevival
             string[] entries;
             if (!Pools.TryGetValue(pool, out entries) || entries.Length == 0) return null;
             entries = An2Repair.Pool(pool, entries);   // the An-2 repair parts, when on
+            entries = An2Bombs.Pool(pool, entries);    // FAB-50 bombs in the bunkers, when on
             for (int attempt = 0; attempt < 4; attempt++)
             {
                 string e = entries[UnityEngine.Random.Range(0, entries.Length)];

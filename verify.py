@@ -14,6 +14,7 @@ auffallen und dort nur als stilles Nichtstun erscheinen:
 """
 
 import io
+import json
 import os
 import re
 import struct
@@ -838,6 +839,79 @@ def check_helipads():
              "research/helipad_check.py fehlt - die Landeplaetze sind unbelegt")
 
 
+def check_settings():
+    """[27c] Unified player settings (task P9, Revival.Settings.cs,
+    docs/ai/tasks/settings-cleanup.md).
+
+      1. Revival.Settings.cs is bound, ticked and drawn in RevivalPlugin, the
+         settings window releases the cursor, and sync_public ships the file.
+      2. [Effects] ParticleDensity reaches every particle system: each source
+         that adds a ParticleSystem uses Fx, and every `ps.Play();` in them is
+         followed by Fx.Apply / Fx.ApplyVital (or, for a hand-emitted pool,
+         names the Fx.Keep gate on the same line).
+      3. Tracers, recoil, radar rotation and muzzle flashes ask Anim.
+      4. The permanent help texts (drone guide, east zone label) go through Hints.
+    """
+    import re
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Settings: " + why)
+
+    src = read("Revival.Settings.cs")
+    if not src:
+        bad("Settings: Revival.Settings.cs missing")
+        return
+    plugin = read("RevivalPlugin.cs")
+    need("Settings.BindConfig(Config)" in plugin and "Settings.Tick()" in plugin
+         and "Settings.Draw()" in plugin and "Settings.IsOpen" in plugin,
+         "settings bound, ticked, drawn; window frees the cursor",
+         "RevivalPlugin lost Settings.BindConfig/Tick/Draw or the cursor release")
+    need('"Revival.Settings.cs"' in read("sync_public.py"),
+         "sync_public ships Revival.Settings.cs", "sync_public.py does not ship Revival.Settings.cs")
+    for key in ('"ParticleDensity"', '"Animations"', '"Recoil"', '"RadarRotation"', '"Tracers"',
+                '"MuzzleFlashes"', '"Mode"', '"Seconds"', '"Key"', '"MenuKey"', '"Version"'):
+        need(key in src, "settings key " + key + " bound", "key " + key + " is gone")
+
+    missing = []
+    for name in sorted(os.listdir(ROOT)):
+        if not name.endswith(".cs") or name == "Revival.Settings.cs":
+            continue
+        text = read(name)
+        if "AddComponent<ParticleSystem>" not in text:
+            continue
+        if "Fx." not in text:
+            missing.append(name + " (no Fx call)")
+            continue
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r"\s*ps\.Play\(\);", line):
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                if "Fx." not in line and "Fx.Apply" not in nxt and "Fx.Apply" not in lines[i - 1]:
+                    missing.append(name + ":" + str(i + 1))
+    need(not missing, "every particle source follows [Effects] ParticleDensity",
+         "particles outside the density level: " + ", ".join(missing[:6])
+         + " - call Fx.Apply(ps) after Play()")
+
+    need("Anim.Tracers" in _body(read("Revival.CombatHooks.cs"), "internal static void SpawnTracer(List<Vector3> points)")
+         and "Anim.Tracers" in read("RevivalTechnical.cs") and "Anim.Tracers" in read("RevivalGepard.cs")
+         and "Anim.Tracers" in read("Revival.CameraTurret.cs"),
+         "tracers follow [Effects] Tracers", "a tracer ignores [Effects] Tracers")
+    gep = read("RevivalGepard.cs")
+    need("Anim.Radar" in gep and "Anim.Recoil" in gep and "Anim.MuzzleFlash" in gep
+         and "Anim.Recoil" in read("RevivalArtyBattery.cs"),
+         "radar rotation, recoil and muzzle flashes can be switched off",
+         "Gepard/artillery lost an Anim switch")
+    need("Hints.Alpha" in read("RevivalDroneGear.cs") and "Hints.Alpha" in read("Revival.EastZones.cs"),
+         "drone guide and zone label follow [Hints]", "a permanent help box ignores [Hints]")
+
+
 def check_vehicle_gunner_ai():
     """[27b] NPC vehicle gunners: sight, spread, reaction (Revival.GunnerAI.cs,
     docs/ai/tasks/vehicle-gunner-ai.md).
@@ -1025,6 +1099,585 @@ def check_editor_heights():
          "%d in-game heights match ground(x, z) (largest gap %.2f m)"
          % (len(known), worst),
          "ground(x, z) is %.1f m off a height the game reported" % worst)
+
+
+def check_flak():
+    """[34] East airfield flak: ZU-23-2 guns on the AA positions (Revival.Flak.cs).
+
+    Pinned statically (docs/ai/tasks/airfield-flak-p4.md): the file is plain
+    ASCII and wired into the plugin, the camera and the public package; the
+    rounds, damage and puffs go through the Gepard's code paths; the crew keys
+    carry the slash GroundEnemies needs; every effect and animation has its
+    switch; the numbers are real ones in world units (1 m = 2.8 u) and the
+    gun is less accurate than the Gepard; the event code is free; the P5/P6a
+    API is there. How it looks and feels is the in-game checklist.
+    """
+    import re
+    print("[34] East airfield flak (ZU-23-2)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Flak: " + why)
+
+    path = os.path.join(ROOT, "Revival.Flak.cs")
+    if not os.path.exists(path):
+        bad("Flak: Revival.Flak.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 128 for b in raw),
+         "Revival.Flak.cs is ASCII without a BOM", "Revival.Flak.cs is not plain ASCII")
+    s = raw.decode("ascii", "replace")
+    plug, cam, gep = read("RevivalPlugin.cs"), read("Revival.CameraTurret.cs"), read("RevivalGepard.cs")
+    sync = read("sync_public.py")
+
+    for seam in ("Flak.BindConfig(Config);", "Flak.Install(_harmony);", "Flak.Tick();",
+                 "Flak.LateFrame();", "Flak.Draw();"):
+        need(seam in plug, "seam " + seam + " in RevivalPlugin.cs", "seam missing in RevivalPlugin.cs: " + seam)
+    need("public const int Flak = 8;" in cam and "NextDayRevival.Flak.LateTick();" in cam,
+         "the sight camera is an owner of CameraOwner (8)",
+         "the ZU-23 sight is not dispatched by CameraOwner")
+    need('"Revival.Flak.cs"' in sync, "Revival.Flak.cs goes to the public repository",
+         "sync_public.py does not ship Revival.Flak.cs - the public repo would not build")
+
+    # the Gepard's code paths
+    need("GepardShots.Fire(Spec()" in s and "internal sealed class Spec" in gep
+         and "spec.Gravity" in gep,
+         "rounds fly in the Gepard's round loop with the ZU-23's ballistics",
+         "the flak does not fire through GepardShots with its own Spec")
+    need("GepardGun.Hit(c, at, dir, true, spec.HeliHits)" in gep and "GepardGun.Nearest(" in gep
+         and "GepardFx.Flak(at)" in gep,
+         "direct hits and timed bursts damage through GepardGun.Hit, the puff is GepardFx.Flak",
+         "the burst does not reach the Gepard's damage path or the puff effect")
+    need("GepardNet.EnsureHooked();" in s,
+         "a helicopter kill travels on the Gepard's event even with the Gepard off",
+         "GepardNet is not hooked by the flak - kills stay local")
+
+    # crew
+    need('KeyPrefix = "flak/"' in s and 'KeyGunner = "/g"' in s and 'KeyLoader = "/c"' in s
+         and "Crew.DropGroundSquad(" in s,
+         "crew keys flak/<id>/g and /c (the slash keeps GroundEnemies off them)",
+         "crew keys missing or without the slash")
+    need("Airfield.Faction()" in s and "TechnicalCrew.Sitzen(ai, clip)" in s,
+         "the crew is of the airfield's faction and sits with the game's clip",
+         "crew faction or seated clip missing")
+    need("friendly = true" in s and "if (friendly) continue;" in s and "Airborne(c)" in s,
+         "never an aircraft with the crew's own faction aboard, air targets only",
+         "the own-faction or airborne filter is missing")
+    need("_manned" in s and "CameraOwner.Request(CameraOwner.Flak" in s
+         and "Flak.Up(g.Gunner) || Flak.Up(g.Loader)" in s,
+         "a player takes a gun over only when its crew is dead",
+         "player takeover or its dead-crew condition is missing")
+
+    # switches
+    for key in ("Tracers", "MuzzleFlash", "BarrelRecoil", "Casings", "FlakPuffs", "GunSound",
+                "BurstSound", "SeatedCrew", "HandwheelAnimation"):
+        need('cfg.Bind(S, "%s", true' % key in s, "switch [Flak] %s" % key,
+             "effect/animation switch [Flak] %s missing" % key)
+
+    # numbers
+    def num(key):
+        m = re.search(r'cfg\.Bind\(S, "%s", (-?[0-9.]+)f?' % key, s)
+        return float(m.group(1)) if m else None
+
+    def gnum(key):
+        m = re.search(r'"%s",\s*([0-9.]+)f?' % key, gep)
+        return float(m.group(1)) if m else None
+
+    need("internal const float K = 2.8f;" in s and "* K" in s,
+         "metres go to world units at 2.8", "the 2.8 u/m conversion is missing")
+    v, r, d = num("MuzzleVelocity"), num("EngageRange"), num("Dispersion")
+    need(v is not None and 900 <= v <= 1000, "muzzle velocity %s m/s" % v, "MuzzleVelocity is not the real ~970 m/s")
+    need(r is not None and 1500 <= r <= 2500, "engage range %s m (x 2.8 in the world)" % r,
+         "EngageRange is not a real 23 mm range")
+    need(d is not None and gnum("Dispersion") is not None and d > gnum("Dispersion"),
+         "dispersion %s mil, above the Gepard's %s" % (d, gnum("Dispersion")),
+         "the ZU-23 is not less accurate than the Gepard")
+    need((num("InitialError") or 0) > (num("ErrorFloor") or 0) > 0 and 0 < (num("WalkFactor") or 0) < 1
+         and (num("EvadeFactor") or 0) > 0,
+         "bursts walk in (initial error > floor, walk factor < 1) and evading throws them off",
+         "the walking-in error model is missing or inert")
+    tr, el = num("TraverseSpeed"), num("ElevationSpeed")
+    need(tr is not None and el is not None and 0 < tr <= 100 and 0 < el <= 80
+         and num("PitchMin") == -10 and num("PitchMax") == 90,
+         "slew limits %s / %s deg/s, elevation -10..+90" % (tr, el),
+         "slew limits or the elevation range are not the ZU-23-2's")
+    need("i == 0 ? -0.2f : 0.2f" in s or "b == 0 ? -0.2f : 0.2f" in s,
+         "two barrels", "the model has not two barrels")
+    need("g.GunIdx = 1 - b;" in s and "g.Recoil[barrel] = 1f;" in s,
+         "the barrels fire and recoil alternately", "the barrels do not alternate")
+
+    # the wire
+    m = re.search(r'"NetworkEventCode", ([0-9]+)', s)
+    taken = set([150, 151, 152, 153, 154, 155, 160, 161, 162, 164, 170, 171, 172, 173, 174, 175,
+                 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 190, 191, 192, 193, 194, 195, 196])
+    need(m is not None and int(m.group(1)) not in taken and int(m.group(1)) < 200,
+         "event code %s is free" % (m.group(1) if m else "?"),
+         "the flak's event code overlaps another channel")
+
+    # the API
+    for api in ("public static List<FlakGunInfo> Guns()", "public static bool AssignTarget(",
+                "public static bool WeaponsFree(", "public static bool HoldFire(",
+                "public static bool ZoneDefence(", "public enum FlakState", "public static bool Authority"):
+        need(api in s, "API: " + api.split("(")[0].replace("public static ", ""),
+             "API member missing: " + api)
+
+
+def check_tower_radar():
+    """[35] East airfield P5: the tower C1 as air defence HQ (Revival.TowerRadar.cs).
+
+    Pinned statically (docs/ai/tasks/airfield-radar-p5.md): the file is plain
+    ASCII and wired into the plugin and the public package; the radar is a
+    building-kit model (unity/EastTile/Tools/c1_radar.py, built here into a
+    temporary folder: its turning parts lie under "Head/") placed in the c1
+    bundle's recipe; its measures are a P-18's in metres x 2.8; every effect
+    and animation has its switch; fire control goes through the P4 flak API
+    (AssignTarget / WeaponsFree / HoldFire / AssignedOnly, SetFireDirection)
+    with an operator better and a destroyed HQ worse than the crews by eye;
+    the operator key carries GroundEnemies' slash; the event code is free.
+    How it looks and feels is the in-game checklist.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+    print("[35] East airfield tower radar HQ (P5)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("TowerRadar: " + why)
+
+    path = os.path.join(ROOT, "Revival.TowerRadar.cs")
+    if not os.path.exists(path):
+        bad("TowerRadar: Revival.TowerRadar.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 128 for b in raw),
+         "Revival.TowerRadar.cs is ASCII without a BOM", "Revival.TowerRadar.cs is not plain ASCII")
+    s = raw.decode("ascii", "replace")
+    plug, flak, sync = read("RevivalPlugin.cs"), read("Revival.Flak.cs"), read("sync_public.py")
+    for seam in ("TowerRadar.BindConfig(Config);", "TowerRadar.Install(_harmony);", "TowerRadar.Tick();",
+                 "TowerRadar.LateFrame();", "TowerRadar.Draw();"):
+        need(seam in plug, "seam " + seam + " in RevivalPlugin.cs", "seam missing in RevivalPlugin.cs: " + seam)
+    need('"Revival.TowerRadar.cs"' in sync, "Revival.TowerRadar.cs goes to the public repository",
+         "sync_public.py does not ship Revival.TowerRadar.cs - the public repo would not build")
+
+    # the kit radar
+    tool = os.path.join(ROOT, "unity", "EastTile", "Tools", "c1_radar.py")
+    recipe = read(os.path.join("unity", "EastTile", "Content", "east_af_c1.json"))
+    rebuild = read("rebuild_east.ps1")
+    need(os.path.exists(tool), "kit radar source Tools/c1_radar.py", "unity/EastTile/Tools/c1_radar.py missing")
+    need('"C1 radar"' in recipe and "Build/c1r/c1r_scene.json" in recipe,
+         "the c1 bundle's recipe places the kit radar \"C1 radar\"",
+         "east_af_c1.json does not place \"C1 radar\" (rerun airfield_assembly.py)")
+    need('"c1_radar.py"' in rebuild, "rebuild_east.ps1 builds the kit radar before the bundles",
+         "rebuild_east.ps1 does not run c1_radar.py - the bundle build would miss its scene file")
+    t = read(os.path.join("unity", "EastTile", "Tools", "c1_radar.py"))
+
+    def tnum(key):
+        m = re.search(r"^%s = ([0-9.]+)" % key, t, re.M)
+        return float(m.group(1)) if m else None
+    ay, aw, boom, rpm = tnum("ARRAY_Y"), tnum("ARRAY_W"), tnum("YAGI_BOOM"), tnum("RPM")
+    need(ay is not None and 6.0 <= ay <= 12.0 and aw is not None and 7.0 <= aw <= 11.0
+         and boom is not None and 2.5 <= boom <= 4.5,
+         "P-18 measures: array centre %s m, %s m wide, Yagi booms %s m" % (ay, aw, boom),
+         "the radar's measures are not a P-18's (array 6-12 m up, 7-11 m wide, booms 2.5-4.5 m)")
+    need(rpm is not None and 2 <= rpm <= 6 and "M = bk.M" in t, "turns at %s rpm, metres x 2.8 through bldg_kit" % rpm,
+         "the radar's rpm or the kit's metre scale is off")
+    if os.path.exists(tool):
+        out = tempfile.mkdtemp(prefix="c1r_")
+        try:
+            r = subprocess.run([sys.executable, tool, "--out", out], capture_output=True, text=True, timeout=300)
+            scene = os.path.join(out, "c1r_scene.json")
+            if r.returncode != 0 or not os.path.exists(scene):
+                tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no output"]
+                if "No module named" in " ".join(tail):
+                    warn("TowerRadar: kit build skipped here: " + tail[0])
+                else:
+                    bad("TowerRadar: the kit build c1_radar.py failed: " + tail[0])
+            else:
+                sc = _json.load(open(scene))
+                head = [x for x in sc["renderers"] if x["path"] == "Head"]
+                names = set(x["name"] for x in head)
+                need({"Frame", "Booms", "Elements"} <= names
+                     and all(x["path"] in ("Head", "Static") for x in sc["renderers"]),
+                     "kit build: %d renderers, the turning ones under Head (%s)"
+                     % (len(sc["renderers"]), ", ".join(sorted(names))),
+                     "the kit radar's turning parts are not under Head/ (TowerRadar turns \"C1 radar/Head\")")
+                need(len(sc["boxes"]) >= 4, "kit build: %d box colliders" % len(sc["boxes"]),
+                     "the kit radar has no colliders on trailer and shelter")
+        except Exception as ex:
+            warn("TowerRadar: kit build not run: %s" % ex)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    # the runtime
+    need('RadarName = "C1 radar"' in s and 'Find("Head")' in s and "RadarModel.Build(" in s,
+         "the game turns the kit radar's Head, a primitive twin without the rebuilt bundle",
+         "the kit radar is not found by name or has no fallback")
+    need("internal const float K = 2.8f;" in s and "* K" in s, "metres go to world units at 2.8",
+         "the 2.8 u/m conversion is missing")
+    for key in ("AntennaRotation", "SweepLine", "BlipFade", "ScreenGlow", "Siren", "SirenNpcAlarm", "ContactLog",
+                "RunwayLights", "SeatedOperator", "DamageVisuals", "NpcOperator"):
+        need('cfg.Bind(S, "%s", true' % key in s, "switch [TowerRadar] %s" % key,
+             "effect/animation switch [TowerRadar] %s missing" % key)
+    for api in ("public static bool AssignedOnly(", "public static void SetFireDirection(", "AssignedOnly = 3,"):
+        need(api in flak, "flak API: " + api.split("(")[0].replace("public static ", ""),
+             "the P4 flak lacks " + api)
+    need("g.Mode == FlakMode.AssignedOnly && c.Go != g.Assigned" in flak and "* Flak.DirReaction" in flak
+         and "* Flak.DirError" in flak and "* Flak.DirTracking" in flak,
+         "the crews hold all but the assigned target and take the direction scales",
+         "AssignedOnly or the direction scales do not reach the flak's fire control")
+    for call in ("Flak.AssignTarget(null, c.Go)", "Flak.WeaponsFree(null)", "Flak.HoldFire(null)", "Flak.AssignedOnly(null)"):
+        need(call in s, "console command " + call, "the console does not command the guns: " + call + " missing")
+
+    def num(key):
+        m = re.search(r'cfg\.Bind\(S, "%s", (-?[0-9.]+)f?' % key, s)
+        return float(m.group(1)) if m else None
+    dr, de, dt = num("DirectedReaction"), num("DirectedError"), num("DirectedTracking")
+    xr, xe, xt = num("DestroyedReaction"), num("DestroyedError"), num("DestroyedTracking")
+    need(None not in (dr, de, dt, xr, xe, xt) and dr < 1 < xr and de < 1 < xe and dt > 1 > xt,
+         "with an operator faster and closer (%s/%s/%s), destroyed slower and wider (%s/%s/%s)" % (dr, de, dt, xr, xe, xt),
+         "the operator must make the guns better and a destroyed HQ worse than by eye")
+    need("Obeyed(" in s and "Fraktion.Eigene(Airfield.Faction())" in s,
+         "the crews take orders only from the airfield's own faction", "command authority is missing")
+    need('Key = "radar/c1/op"' in s and "Crew.DropGroundSquad(" in s,
+         "NPC operator key radar/c1/op (the slash keeps GroundEnemies off him)",
+         "operator key missing or without the slash")
+    need("RadarHits" in s and "ConsoleHits" in s and "FireOneShot" in s and "NetworkVisualizeExplode" in s
+         and "!TowerRadar.Working" in s,
+         "the radar and the console take rounds and explosions; destroyed = scope dark",
+         "the HQ cannot be destroyed or the scope does not go dark")
+    m = re.search(r'"NetworkEventCode", ([0-9]+)', s)
+    fm = re.search(r'"NetworkEventCode", ([0-9]+)', flak)
+    taken = set([150, 151, 152, 153, 154, 155, 156, 157, 160, 161, 162, 164, 170, 171, 172, 173, 174, 175,
+                 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 190, 191, 192, 193, 194, 195, 196])
+    if fm:
+        taken.add(int(fm.group(1)))
+    need(m is not None and int(m.group(1)) not in taken and int(m.group(1)) < 200,
+         "event code %s is free" % (m.group(1) if m else "?"),
+         "the tower radar's event code overlaps another channel")
+
+
+def check_nofly():
+    """[35] No-fly zones (Revival.NoFly.cs, P6a).
+
+    Pinned statically (docs/ai/tasks/nofly-zones-p6a.md): the file is plain
+    ASCII and wired into the plugin and the public package; the zones and the
+    map style in the plugin are the ones in assets/editor/nofly.json that the
+    web editor draws (editor/nofly.js); the marker is finer than a patrol
+    route; a violator is warned before it is engaged, by the zone's ZU-23s
+    (the P4 API), a Gepard of the zone's faction, or scripted flak through the
+    Gepard's damage path; the event code is free. How it looks and feels is
+    the in-game checklist.
+    """
+    import json
+    import re
+    print("[35] No-fly zones (P6a)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("NoFly: " + why)
+
+    path = os.path.join(ROOT, "Revival.NoFly.cs")
+    if not os.path.exists(path):
+        bad("NoFly: Revival.NoFly.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 128 for b in raw),
+         "Revival.NoFly.cs is ASCII without a BOM", "Revival.NoFly.cs is not plain ASCII")
+    s = raw.decode("ascii", "replace")
+    plug, gep, ink = read("RevivalPlugin.cs"), read("RevivalGepardCrew.cs"), read("Revival.MapInk.cs")
+    sync = read("sync_public.py")
+    js, html, app, srv = read("editor/nofly.js"), read("editor/index.html"), read("editor/app.js"), read("routeeditor.py")
+
+    for seam in ("NoFly.BindConfig(Config);", "NoFly.Tick();", "NoFly.Draw();"):
+        need(seam in plug, "seam " + seam + " in RevivalPlugin.cs", "seam missing in RevivalPlugin.cs: " + seam)
+    need('"Revival.NoFly.cs"' in sync, "Revival.NoFly.cs goes to the public repository",
+         "sync_public.py does not ship Revival.NoFly.cs - the public repo would not build")
+
+    # the one zone list, in both places
+    try:
+        data = json.load(io.open(os.path.join(ROOT, "assets", "editor", "nofly.json"), encoding="utf-8"))
+    except (OSError, ValueError) as ex:
+        bad("NoFly: assets/editor/nofly.json unreadable: %s" % ex)
+        return
+    zones = data.get("zones") or []
+    need(len(zones) > 0, "%d zone(s) in assets/editor/nofly.json" % len(zones), "no zone in nofly.json")
+    code = {}
+    for m in re.finditer(r'Zones\.Add\(Circle\("([^"]+)", "([^"]+)", "([^"]+)", "([^"]+)", '
+                         r'(-?[0-9.]+)f, (-?[0-9.]+)f, ([0-9.]+)f, ([0-9.]+)f', s):
+        code[m.group(1)] = m.groups()
+    # polygon zones (P6b): Polygon("id", "name", "scene", "faction", new Vector2[] {...}, ceiling f
+    poly = {}
+    for m in re.finditer(r'Polygon\("([^"]+)", "([^"]+)", "([^"]+)", "([^"]+)", new Vector2\[\] \{(.*?)\}, '
+                         r'([0-9.]+)f', s, re.S):
+        pts = [(float(x), float(y)) for x, y in
+               re.findall(r'new Vector2\((-?[0-9.]+)f, (-?[0-9.]+)f\)', m.group(5))]
+        poly[m.group(1)] = (m.group(1), m.group(2), m.group(3), m.group(4), pts, m.group(6))
+    for z in zones:
+        c = code.get(z.get("id"))
+        same = (c is not None and z.get("shape") == "circle" and c[1] == z.get("name")
+                and c[2] == z.get("scene") and c[3] == z.get("faction")
+                and abs(float(c[4]) - z["x"]) < 0.01 and abs(float(c[5]) - z["z"]) < 0.01
+                and abs(float(c[6]) - z["radius"]) < 0.01 and abs(float(c[7]) - z["ceiling"]) < 0.01)
+        q = poly.get(z.get("id"))
+        if c is None and q is not None:
+            zp = z.get("points") or []
+            same = (z.get("shape") == "polygon" and q[1] == z.get("name") and q[2] == z.get("scene")
+                    and q[3] == z.get("faction") and len(zp) == len(q[4]) >= 3
+                    and all(abs(a[0] - b[0]) < 0.01 and abs(a[1] - b[1]) < 0.01 for a, b in zip(q[4], zp))
+                    and abs(float(q[5]) - z["ceiling"]) < 0.01)
+        need(same, "zone %s is the same in the plugin and the editor" % z.get("id"),
+             "zone %s differs between Revival.NoFly.cs and assets/editor/nofly.json" % z.get("id"))
+    need(len(code) + len(poly) == len(zones), "the plugin has no zone the editor lacks",
+         "Revival.NoFly.cs and nofly.json list different zones")
+    n12 = [z for z in zones if z.get("id") == "N12"]
+    need(n12 and n12[0]["scene"] == "GW_Scene_1" and abs(n12[0]["x"] - 1446.6) < 60
+         and abs(n12[0]["z"] - 1703.2) < 60 and 250 <= n12[0]["radius"] <= 600,
+         "zone N12 over the neutral settlement NPC_Settlement[Neutrals] (1446.6, 1703.2)",
+         "the neutral settlement's zone is missing or not over Point N12")
+
+    # the style: the same numbers, finer than a patrol route
+    st = data.get("style") or {}
+
+    def const(src, name):
+        m = re.search(r'internal const float %s = ([0-9.]+)f;' % name, src)
+        return float(m.group(1)) if m else None
+
+    dash, gap, width = const(s, "DashLength"), const(s, "GapLength"), const(s, "StrokeWidth")
+    need(dash == st.get("dash") and gap == st.get("gap") and width == st.get("width")
+         and ('internal const string Label = "%s";' % st.get("label")) in s
+         and ("internal const int LabelSize = %s;" % st.get("labelSize")) in s,
+         "map style %s / %s / %s px, label %r - the same in game and editor" % (dash, gap, width, st.get("label")),
+         "the map style differs between Revival.NoFly.cs and nofly.json")
+    need(st.get("label") == "NO FLY ZONE", "the label reads NO FLY ZONE", "the label is not NO FLY ZONE")
+    pw, pd = const(ink, "StrokeWidth"), const(ink, "DashLength")
+    need(None not in (width, pw, dash, pd) and width <= pw * 0.4 and dash < pd,
+         "finer than a patrol route (stroke %s vs %s, dash %s vs %s)" % (width, pw, dash, pd),
+         "the no-fly line is not finer than the patrol route")
+    need("internal static Dash Raster(List<Vector2> points, float strokeWidth)" in ink
+         and "MapInk.Raster(samples, StrokeWidth)" in s and 'MapInkLayer.Begin("nofly"' in s,
+         "drawn in the native map ink with its own stroke width", "the map ink path is missing")
+    need("setLineDash" in js and "/api/nofly" in js and '<script src="nofly.js"></script>' in html
+         and "NDRNoFly.draw()" in app and '"/api/nofly"' in srv and '"/nofly.js"' in srv
+         and "5000 / 1024" in js,
+         "the web editor draws the zones from nofly.json, scaled like the in-game ink",
+         "the editor's no-fly layer is not wired (nofly.js, index.html, app.js, routeeditor.py)")
+
+    # warning, then the defenders
+    need("now - v.Since >= Seconds()" in s and "NO FLY ZONE: " in s
+         and "defensive fire in " in s and "under defensive fire" in s and "NoFlyBeep.Play(" in s,
+         "a violator is warned (banner, beep) before it is engaged",
+         "the warning phase or the banner is missing")
+    need("anyone && !owner" in s and "FlakFire.Airborne(c)" in s,
+         "only airborne aircraft with a player aboard and nobody of the zone's faction",
+         "the violator filter is missing")
+    need("Flak.ZoneDefence(" in s and "Flak.AssignTarget(" in s and "Flak.ClearTarget(" in s,
+         "the zone's ZU-23s go to zone defence and are assigned the violator (P4 API)",
+         "the flak API is not used")
+    need("GepardCrew.Defends(" in s and "NoFly.Engaged(c.Go, h.Side, h.Root.position)" in gep
+         and "internal static bool Defends(" in gep,
+         "a Gepard of the zone's faction takes the violator", "the Gepard hook is missing")
+    need("GepardGun.Hit(c, there" in s and "GepardFx.Flak(" in s and "FlakSound.Burst(" in s
+         and "GepardNet.EnsureHooked();" in s,
+         "scripted flak: puffs, bangs and fragment hits through the Gepard's damage path",
+         "the scripted defensive fire is missing")
+    m = re.search(r'"NetworkEventCode", ([0-9]+)', s)
+    taken = set([150, 151, 152, 153, 154, 155, 160, 161, 162, 164, 170, 171, 172, 173, 174, 175,
+                 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 190, 191, 192, 193, 194, 195, 196, 198])
+    need(m is not None and int(m.group(1)) not in taken and int(m.group(1)) < 200,
+         "event code %s is free" % (m.group(1) if m else "?"),
+         "the no-fly event code overlaps another channel")
+
+
+def check_military_town_ring():
+    """[36] Military town outer ring and no-fly zone (P6b).
+
+    Pinned statically (docs/ai/tasks/military-town-ring-nofly.md): the ring
+    groups stand OUTSIDE the fence and close to it, beside the S3 road at its
+    two checkpoints, before both breaches, and one patrol walks the whole fence
+    and closes on itself; the watchtowers carry posted guards; the no-fly zone
+    MT holds the whole town and the AA site, keeps a clear margin to the
+    airfield, is shown only with the town and defended only by the town's
+    Gepard. How it plays is the in-game checklist.
+    """
+    import json
+    import math
+    import re
+    print("[36] Military town ring and no-fly zone (P6b)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("MT ring: " + why)
+
+    path = os.path.join(ROOT, "Revival.MilitaryTownRing.cs")
+    if not os.path.exists(path):
+        bad("MT ring: Revival.MilitaryTownRing.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 128 for b in raw),
+         "Revival.MilitaryTownRing.cs is ASCII without a BOM", "Revival.MilitaryTownRing.cs is not plain ASCII")
+    ring = raw.decode("ascii", "replace")
+    town, nofly, gep = read("Revival.MilitaryTown.cs"), read("Revival.NoFly.cs"), read("RevivalGepardCrew.cs")
+    need('"Revival.MilitaryTownRing.cs"' in read("sync_public.py"), "Revival.MilitaryTownRing.cs goes to the public repository",
+         "sync_public.py does not ship Revival.MilitaryTownRing.cs - the public repo would not build")
+    need("internal static partial class MilitaryTown" in town and "internal static partial class MilitaryTown" in ring
+         and "BindRingConfig(cfg);" in town and '"DefenceRing"' in ring and '"NoFlyZone"' in ring,
+         "one MilitaryTown class over two files, [MilitaryTown] DefenceRing / NoFlyZone",
+         "the ring is not part of MilitaryTown or its config keys are missing")
+    need("Specs.Length + RingSpecs.Length" in town and "IsRing(p.Name) && !RingOn" in town
+         and "IsRing(g.Name) ? RingHold" in town,
+         "ring groups are town groups (AddGroups), switched by DefenceRing, respawn held near the fence",
+         "AddGroups / HoldSpawn do not carry the ring groups")
+
+    # --- the ring groups
+    FX0, FX1, FZ0, FZ1 = 5452.0, 5848.0, 602.0, 1198.0
+    AF_MAX_X = 4820.0
+
+    def out_of_fence(x, z):
+        dx = max(FX0 - x, 0.0, x - FX1)
+        dz = max(FZ0 - z, 0.0, z - FZ1)
+        return math.hypot(dx, dz)
+
+    specs = re.findall(r'new Spec\("(mt-ring-[A-Za-z0-9]+)", "(\w+)", (\d+), ([\d.]+)f, "(\w+)", (\d),(.*?)\)(?=,\s*(?://[^\n]*\n\s*)*new Spec|\s*\};)',
+                       ring, re.S)
+    need(len(specs) >= 5, "%d ring groups" % len(specs), "fewer than 5 ring groups parsed")
+    pts_of = {}
+    good = True
+    for s in specs:
+        pts = [(float(x), float(z)) for x, z in re.findall(r'P\((-?[\d.]+)f, (-?[\d.]+)f\)', s[6])]
+        pts_of[s[0]] = pts
+        if not pts or (s[1] == "patrol" and len(pts) < 4):
+            good = False
+            bad("MT ring: %s has no point or a patrol without a route" % s[0])
+        for x, z in pts:
+            d = out_of_fence(x, z)
+            if not (5.0 <= d <= 140.0):
+                good = False
+                bad("MT ring: %s point (%g, %g) is %.0f u outside the fence (want 5..140)" % (s[0], x, z, d))
+            if x < AF_MAX_X + 400.0:
+                good = False
+                bad("MT ring: %s point (%g, %g) is near the airfield" % (s[0], x, z))
+    need(good, "every ring point 5..140 u outside the fence, far from the airfield",
+         "a ring point is inside the fence, too far out or near the airfield")
+
+    s3 = []
+    try:
+        net = json.load(io.open(os.path.join(ROOT, "assets", "editor", "roadnet_sample.json"), encoding="utf-8"))
+        for e in net.get("edges", []):
+            if e.get("east") and e.get("eastRoad") == "s3":
+                s3 += [(p[0], p[1]) for p in e["pts"]]
+    except (OSError, ValueError):
+        pass
+
+    def road(x, z):
+        return min(math.hypot(x - a, z - b) for a, b in s3) if s3 else 1e9
+
+    names = dict((s[0], s) for s in specs)
+    for cp in ("mt-ring-CPN", "mt-ring-CPS"):
+        p = pts_of.get(cp, [None])[0]
+        need(p is not None and names[cp][1] == "guard" and 4.0 <= road(p[0], p[1]) <= 25.0,
+             "%s: a checkpoint beside the S3 road (%.0f u from its centre line)" % (cp, road(p[0], p[1]) if p else -1),
+             "%s is missing or not beside the S3 road" % cp)
+    cpn, cps = pts_of.get("mt-ring-CPN", [(0, 0)])[0], pts_of.get("mt-ring-CPS", [(0, 0)])[0]
+    need(cpn[1] > FZ1 and cps[1] < FZ0, "the road checkpoints sit north (airfield side) and south of the town",
+         "the S3 checkpoints are not on the north and south approaches")
+    cpe, cpb = pts_of.get("mt-ring-CPE", [(0, 0)])[0], pts_of.get("mt-ring-CPB", [(0, 0)])[0]
+    need(cpe[0] > FX1 and 700 <= cpe[1] <= 810 and cpb[1] > FZ1 and 5660 <= cpb[0] <= 5710,
+         "posts before the east breach (z 745..765) and the north breach (x 5676..5690)",
+         "the breach posts are missing or misplaced")
+    loop = pts_of.get("mt-ring-loop", [])
+    sides = set()
+    for x, z in loop:
+        if x < FX0:
+            sides.add("W")
+        if x > FX1:
+            sides.add("E")
+        if z < FZ0:
+            sides.add("S")
+        if z > FZ1:
+            sides.add("N")
+    closes = len(loop) > 3 and math.hypot(loop[0][0] - loop[-1][0], loop[0][1] - loop[-1][1]) < 100.0
+    need(sides == set("NESW") and closes and names.get("mt-ring-loop", ("", ""))[1] == "patrol",
+         "the ring patrol walks all four sides of the fence and closes on itself",
+         "the ring patrol does not go round the whole fence or does not close (< 100 u)")
+    crossing = False
+    for (ax, az), (bx, bz) in zip(loop, loop[1:] + loop[:1]):
+        for k in range(1, 20):
+            t = k / 20.0
+            if out_of_fence(ax + (bx - ax) * t, az + (bz - az) * t) <= 0.0:
+                crossing = True
+    need(not crossing, "no leg of the ring patrol cuts through the fenced town",
+         "a leg of the ring patrol cuts through the town")
+    tw = re.findall(r'new Post\("(mt-TW\d)", "(MT-T\d)"', town)
+    need(sorted(tw) == [("mt-TW1", "MT-T1"), ("mt-TW2", "MT-T2")]
+         and 'new Spec("mt-TW1", "waiting"' in town and 'new Spec("mt-TW2", "waiting"' in town,
+         "a posted guard on each watchtower T1 / T2", "the watchtower guards are missing")
+
+    # --- the no-fly zone
+    zones = []
+    try:
+        zones = json.load(io.open(os.path.join(ROOT, "assets", "editor", "nofly.json"), encoding="utf-8")).get("zones") or []
+    except (OSError, ValueError):
+        pass
+    mt = [z for z in zones if z.get("id") == "MT"]
+    if not mt or mt[0].get("shape") != "polygon":
+        bad("MT ring: no polygon zone MT in assets/editor/nofly.json")
+        return
+    poly = [(float(p[0]), float(p[1])) for p in mt[0]["points"]]
+
+    def inside(x, z):
+        c = False
+        for i in range(len(poly)):
+            (ax, az), (bx, bz) = poly[i], poly[i - 1]
+            if (az > z) != (bz > z) and x < (bx - ax) * (z - az) / (bz - az) + ax:
+                c = not c
+        return c
+    corners = [(FX0, FZ0), (FX1, FZ0), (FX1, FZ1), (FX0, FZ1), (5482.0, 892.0)]
+    need(all(inside(x, z) for x, z in corners) and mt[0].get("scene") == "GW_Scene_1",
+         "zone MT holds the whole fenced town and the AA1 Gepard", "zone MT does not cover the town or AA1")
+    gap = 1e9
+    for i in range(len(poly)):
+        (ax, az), (bx, bz) = poly[i - 1], poly[i]
+        for k in range(21):
+            t = k / 20.0
+            x, z = ax + (bx - ax) * t, az + (bz - az) * t
+            dx = max(3990.0 - x, 0.0, x - AF_MAX_X)
+            dz = max(-1690.0 - z, 0.0, z - 1690.0)
+            gap = min(gap, math.hypot(dx, dz))
+    need(gap >= 300.0, "zone MT stays %.0f u (%.0f m) clear of the airfield fence" % (gap, gap / 2.8),
+         "zone MT comes within %.0f u of the airfield (want >= 300)" % gap)
+    need('mt.Reach = 0f;' in nofly and 'mt.Scripted = false;' in nofly
+         and 'mt.Exists = MilitaryTown.NoFlyShown;' in nofly and 'mt.Armed = MilitaryTown.NoFlyArmed;' in nofly
+         and 'mt.Side = MilitaryTown.Faction;' in nofly and "zn.Radius + zn.Reach" in nofly
+         and "zn.Scripted && B(CfgScripted)" in nofly and "internal static bool Standing(" in gep
+         and "GepardCrew.Standing(" in ring,
+         "zone MT: only with the town, the garrison's faction, defended by the town's Gepard alone",
+         "zone MT is not gated by the town or not tied to the AA1 Gepard")
 
 
 def check_version():
@@ -4629,6 +5282,74 @@ def check_player_an2():
              "event codes collide: " + ", ".join("%d is %s" % (c, w) for c, w in clash))
 
 
+def check_fuel_economy():
+    """[22d] Fuel economy and the airfield POL depot (Revival.Fuel.cs,
+    docs/ai/tasks/fuel-economy.md, task 75462e6f82).
+
+    What can be held without the game: the three parts are wired into the
+    plugin, the depot decides on the master only, the tanks are the ones of the
+    airfield recipe, the fire respects [Effects] Fire, the event code is its
+    own, and the An-2 pump draws from the same pool.
+    """
+    print("[22d] Fuel economy and POL depot")
+    src_p = os.path.join(ROOT, "Revival.Fuel.cs")
+    if not os.path.exists(src_p):
+        bad("Revival.Fuel.cs is missing - no fuel balance, stations or depot")
+        return
+    raw = io.open(src_p, "rb").read()
+    code = raw.decode("utf-8", "replace")
+    plug = io.open(os.path.join(ROOT, "RevivalPlugin.cs"), encoding="utf-8").read()
+    an2r = io.open(os.path.join(ROOT, "Revival.An2Repair.cs"), encoding="utf-8").read()
+    sync = io.open(os.path.join(ROOT, "sync_public.py"), encoding="utf-8").read()
+    fuelwater = io.open(os.path.join(ROOT, "unity/EastTile/Content/east_af_fuel_water.json"),
+                        encoding="utf-8").read()
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad(why)
+
+    BOM = bytes([0xEF, 0xBB, 0xBF])
+    need(not raw.startswith(BOM), "Revival.Fuel.cs has no BOM",
+         "Revival.Fuel.cs starts with a BOM")
+    need(all(("%s.%s" % (c, m)) in plug for c in ("FuelBalance", "FuelStations", "FuelDepot")
+             for m in ("BindConfig(Config);", "Tick();"))
+         and "FuelDepot.Install(_harmony);" in plug and "FuelDepot.Draw();" in plug,
+         "fuel balance, stations and depot are bound, installed and ticked",
+         "RevivalPlugin.cs does not wire all of Revival.Fuel.cs")
+    need('"Revival.Fuel.cs"' in sync, "sync_public.py ships Revival.Fuel.cs",
+         "Revival.Fuel.cs is missing in sync_public.py - the public repo does not build")
+    dmg = _body(code, "static void Damage(int i, float dmg)")
+    ev = _body(code, "public static void OnEvent(byte code, object content, int sender)")
+    need("if (master && Active && f.Length >= 2) Damage(" in ev
+         and "if (RevivalTroopInsertion.MasterClient()) Damage(tank, dmg);" in code
+         and "RespawnAt" in dmg and "Send(OpExplode" in dmg,
+         "only the master applies damage; a dead tank waits for its respawn",
+         "tank damage is not master-owned")
+    models = [(m["x"], m["z"]) for m in json.loads(fuelwater)["models"]
+              if m["name"].startswith("pol_tank_") and "torn" not in m["name"]]
+    tanks = [("%gf, %gf" % xz, xz) for xz in models]
+    need(len(tanks) == 5 and all(a in code for a, _ in tanks),
+         "the five pool tanks stand where east_af_fuel_water.json puts them",
+         "the depot tanks do not match east_af_fuel_water.json")
+    need("RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value" in _body(code, "static void Explode(int i, bool fresh)"),
+         "the depot fire obeys [Effects] Fire", "the depot fire ignores [Effects] Fire")
+    m = re.search(r'"NetworkEventCode", (\d+), "Photon event code \(0\.\.199\) of fuel', code)
+    used = set()
+    for f in os.listdir(ROOT):
+        if f.endswith(".cs") and f != "Revival.Fuel.cs":
+            t = io.open(os.path.join(ROOT, f), encoding="utf-8", errors="replace").read()
+            used.update(int(x) for x in re.findall(r'(?:EventCode|NetworkEventCode)"?,\s*(\d+)', t))
+            used.update(int(x) for x in re.findall(r'const (?:byte|int) (?:Default)?EventCode = (\d+);', t))
+    need(m is not None and int(m.group(1)) not in used,
+         "the fuel event code %s is its own" % (m.group(1) if m else "?"),
+         "the fuel event code collides with another channel")
+    need("if (global::NextDayRevival.FuelDepot.Active) return global::NextDayRevival.FuelDepot.Pool;" in an2r
+         and "global::NextDayRevival.FuelDepot.Draw(add)" in an2r,
+         "the An-2 pump draws from the depot pool", "the An-2 pump has its own fuel again")
+
+
 def check_an2_repair():
     """[22c] The An-2 repair loop (Revival.An2Repair.cs, docs/ai/tasks/an2-repair.md).
 
@@ -5452,6 +6173,43 @@ def check_traitor_vendor():
          "abgeschaltetem Verraeterlager bliebe der Klotz offen und ein "
          "einzelner Haendler stuende in einem unveraenderten Litvinovka")
 
+    # 7 - why the first version never stood in the kiosk (6.56.0 log, task
+    # 423561235e). He was a crewman in a trader's body: Absichern forced his
+    # god mode off and armed the settlement alarm and drone; he had no post
+    # (task Empty) and was "held" through a NavMeshAgent field and a pause
+    # method that do not exist; and he was built in the middle of the camp
+    # because the host was far away, then never carried into the shop.
+    need(re.search(r"DropCustomSquad\([^;]*Konfigurieren\),\s*true\)", vendor)
+         and "if (_quietSquad) Beruhigen(sied);" in crew
+         and "else Absichern(sied);" in crew,
+         "der Haendler ist ein ruhiger Trupp: kein Alarm, keine Drohne, kein "
+         "erzwungenes GodMode-aus",
+         "der Haendler wird wieder als kaempfende Crew gebaut (Absichern: "
+         "Alarm, Drohne, SetGodMode(false))")
+    code = re.sub(r"//.*", "", vendor)    # the comments name the old bug
+    need('"_navAgent"' in code and "_navMeshAgent" not in code
+         and "SetCalculatedPauseTime" not in code,
+         "der NavMeshAgent wird ueber das echte Feld _navAgent gefunden",
+         "TraitorVendor liest wieder ein NPC_AI2-Feld/eine Methode, die es "
+         "nicht gibt (_navMeshAgent / SetCalculatedPauseTime)")
+    need('Write(sp, "GuardPoint", _post == null ? null : _post.transform)' in vendor
+         and "TaskGuard" in vendor,
+         "er steht auf Guard an seinem eigenen Posten",
+         "der Haendler hat keinen GuardPoint mehr - ohne Posten laeuft er aus "
+         "dem Kiosk")
+    need(re.search(r"const float KioskX = -?\d", vendor) is not None
+         and "TerrainHeight(kiosk" in vendor,
+         "er wird sofort am vermessenen Kiosk gebaut, nicht in der Lagermitte",
+         "die vermessene Kioskstelle fehlt - ein weit entfernter Host stellt "
+         "den Haendler wieder mitten ins Lager")
+    need("Snapshot(best)" in vendor and "Konfigurieren" in vendor,
+         "der ganze Spawnpunkt des Vorlage-Haendlers wird uebernommen",
+         "nur noch einzelne Ladenwerte werden kopiert - Verhalten und Aussehen "
+         "weichen vom Haendler der Locator/Zivilsiedlung ab")
+    need("Kunden()" in vendor and "SetBehaviorPattern" in vendor,
+         "auch die Kopie auf einem Client wird zum Haendler",
+         "auf Clients bleibt der Haendler eine Crew-Puppe ohne Laden")
+
     # the seams and the public repository
     for seam in ("TraitorVendor.BindConfig(Config)", "TraitorVendor.Tick()",
                  "TraitorVendor.LateFrame()"):
@@ -5927,6 +6685,349 @@ def check_airfield():
          "docs/ai/tasks/airfield-gameplay-p1.md fehlt")
 
 
+def check_military_town():
+    """[34] Military town gameplay (Revival.MilitaryTown.cs).
+
+    The town as a hard, rewarding destination
+    (docs/ai/tasks/military-town-gameplay.md). Pinned statically, against the
+    town recipe (unity/EastTile/Content/east_town.json) so everything keys on
+    MT building ids that really exist:
+
+      1. EAST WORLD ONLY: MilitaryTown.On hangs on EastWorld.On; the config
+         keys are default on.
+      2. LOOT: every point names a recipe id and a defined pool; tier 4 only
+         in the armoury H2 (the best tier of the east - the airfield stops at
+         3), at least three guaranteed there, all of them kept inside the HQ
+         compound; 122 mm shells at both ammunition niches; the officers'
+         flats in A3.
+      3. DEFENDERS: every point inside the fence and off every footprint; the
+         HQ core inside the compound; street patrols on the streets; spotter
+         and sniper posts on real buildings, one post per posted man.
+      4. BATTERIES: four recipe pits, a town post never drones, spots only
+         through a living spotter and never into the town.
+      5. ROUTES: the generated data is what research/mt_gameplay.py writes;
+         the AA site holds a Gepard on AA1; the reinforcement runs from
+         outside the airfield's budget margin into the fence; built-in routes
+         are never saved, drawn by the random convoy or driven early.
+      6. BUDGET, seams, public repository, the acceptance doc.
+    """
+    import json
+    import math
+    import re
+    print("[34] Military town gameplay (batteries, spotters, AA site, defenders, loot)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Military town: " + why)
+
+    raw_p = os.path.join(ROOT, "Revival.MilitaryTown.cs")
+    if not os.path.exists(raw_p):
+        bad("Military town: Revival.MilitaryTown.cs is missing")
+        return
+    for name in ("Revival.MilitaryTown.cs", "Revival.MilitaryTownData.cs"):
+        raw = io.open(os.path.join(ROOT, name), "rb").read() if os.path.exists(os.path.join(ROOT, name)) else b""
+        need(raw and not raw.startswith(b"\xef\xbb\xbf") and all(b < 127 for b in raw),
+             name + ": ASCII without BOM", name + " is missing, has a BOM or non-ASCII bytes")
+    m = io.open(raw_p, encoding="utf-8").read()
+    code = _code(m)
+    need("get { return EastWorld.On && (CfgEnabled == null || CfgEnabled.Value); }" in m,
+         "acts only in the east world ([World] EastTile)",
+         "MilitaryTown.On no longer hangs on EastWorld.On")
+    for key in ("Enabled", "Loot", "Defenders", "Batteries", "AaSite", "VehiclePatrol", "Reinforcements"):
+        need(re.search(r'cfg\.Bind\("MilitaryTown", "%s", true,' % key, m) is not None,
+             "[MilitaryTown] %s = true" % key, "[MilitaryTown] %s is not bound default true" % key)
+
+    try:
+        recipe = json.load(io.open(os.path.join(ROOT, "unity", "EastTile", "Content", "east_town.json"),
+                                   encoding="utf-8"))
+        gb = recipe["greybox"]
+    except Exception as e:
+        bad("Military town: east_town.json unreadable: %s" % e)
+        return
+    ids = set(b["id"] for b in gb.get("blocks", [])) | set(z["id"] for z in gb.get("zones", []))
+    air = read("Revival.Airfield.cs")
+    pools = set(re.findall(r'p\["([a-z]+)"\] = new string\[\]', air))
+
+    # --- 2: loot
+    slots = re.findall(r'S\("(MT-[A-Za-z0-9]+)", (\d), "([a-z]+)",\s*(-?[\d.]+)f,\s*(-?[\d.]+)f,\s*([\d.]+)f\)', code)
+    need(len(slots) >= 40, "%d town loot points" % len(slots), "fewer than 40 town loot points")
+    unknown = sorted(set(s[0] for s in slots) - ids)
+    need(not unknown, "every loot point names an MT id of the recipe",
+         "loot at ids the town recipe does not have: " + ", ".join(unknown))
+    bad_pool = sorted(set(s[2] for s in slots) - pools)
+    need(not bad_pool, "every pool is defined in Airfield.MakePools", "undefined pools: " + ", ".join(bad_pool))
+    need(all(-0.5 <= float(s[3]) <= 0.5 and -0.5 <= float(s[4]) <= 0.5 for s in slots),
+         "every point lies in its building's marker box", "a loot fraction is beyond 0.5")
+    tier4 = [s for s in slots if s[1] == "4"]
+    need(tier4 and all(s[0] == "MT-H2" and s[2] == "armoury" for s in tier4)
+         and sum(1 for s in tier4 if float(s[5]) >= 1.0) >= 3,
+         "tier 4 only in the H2 armoury, %d points, 3+ guaranteed" % len(tier4),
+         "tier 4 is not the armoury's alone or has fewer than 3 guaranteed points")
+    air_tiers = re.findall(r'new Slot\("[A-Za-z0-9]+", (\d),', air)
+    need(air_tiers and max(int(t) for t in air_tiers) < 4,
+         "the armoury is the best tier of the east (airfield tops out at %s)" % max(air_tiers or ["?"]),
+         "an airfield point reaches tier 4 - the armoury would not be the best tier")
+    hq_lines = [ln for ln in code.split("\n") if 'S("MT-H2"' in ln or 'S("MT-H1"' in ln]
+    need(hq_lines and all("Hq(S(" in ln for ln in hq_lines)
+         and "s.KeepMinX = 5759f; s.KeepMaxX = 5844f; s.KeepMinZ = 872f; s.KeepMaxZ = 1063f;" in m
+         and "if (moved && s.Keep && !Kept(s, floor) && !Anchor(s, out floor))" in air,
+         "armoury and HQ loot kept inside the HQ compound (only through the HQ fight)",
+         "an H1/H2 point is not kept inside the HQ compound")
+    need(any(s[0] == "MT-AB1m" and s[2] == "shells" and float(s[5]) >= 1 for s in slots)
+         and any(s[0] == "MT-AB2m" and s[2] == "shells" and float(s[5]) >= 1 for s in slots)
+         and 'p["shells"] = new string[] { "2066" };' in air
+         and "public const int DEF_SHELL = 2066;" in read("RevivalMortar.cs"),
+         "122 mm shells (item 2066) at both batteries' ammunition niches",
+         "no guaranteed shells at AB1m and AB2m, or the shell id changed")
+    need(any(s[0] == "MT-A3" and s[2] == "officer" for s in slots),
+         "officers' flats (A3) have their own pool", "no officer loot in A3")
+    need("if (tier >= 4) return MilitaryTown.ArmourySeconds();" in air
+         and "if (MilitaryTown.LootOn) all.AddRange(MilitaryTown.LootSlots());" in air,
+         "the airfield's loot engine runs the town's points", "Airfield does not load the town's points")
+
+    # --- 3: defenders
+    k = 2.8
+    blocks = []
+    for b in gb.get("blocks", []):
+        if b.get("kind") in ("post", "panel"):
+            continue
+        w, d = b["w"] * k / 2.0, b["d"] * k / 2.0
+        if abs(float(b.get("yaw", 0.0))) % 180 == 90:
+            w, d = d, w
+        blocks.append((b["id"], b["x"], b["z"], w, d))
+    specs = re.findall(r'new Spec\("([A-Za-z0-9_.-]+)", "(\w+)", (\d+), ([\d.]+)f, "(\w+)", (\d),(.*?)\)(?=,\s*(?://[^\n]*\n\s*)?new Spec|\s*\};)',
+                       code, re.S)
+    need(len(specs) >= 15, "%d town groups" % len(specs), "fewer than 15 town groups parsed")
+    good = True
+    for s in specs:
+        pts = [(float(x), float(z)) for x, z in re.findall(r'P\((-?[\d.]+)f, (-?[\d.]+)f\)', s[6])]
+        if not pts or (s[1] == "patrol" and len(pts) < 2):
+            good = False
+            bad("Military town: %s has no point or a patrol without a route" % s[0])
+        for x, z in pts:
+            if not (5452 < x < 5848 and 602 < z < 1198):
+                good = False
+                bad("Military town: %s point (%g, %g) is outside the fence" % (s[0], x, z))
+            for bid, bx, bz, hw, hd in blocks:
+                if abs(x - bx) < hw and abs(z - bz) < hd:
+                    good = False
+                    bad("Military town: %s point (%g, %g) stands in %s" % (s[0], x, z, bid))
+            if s[0] in ("mt-HQ-core", "mt-HQ-armoury", "mt-HQ-reserve") and not (5757 < x < 5846 and 870 < z < 1065):
+                good = False
+                bad("Military town: %s point (%g, %g) is outside the HQ compound" % (s[0], x, z))
+    need(good, "every group point inside the fence and off the footprints",
+         "a group point is outside the fence, in a building or (HQ core) outside the compound")
+    names = dict((s[0], s) for s in specs)
+    for must in ("mt-R2-street", "mt-R4-street"):
+        need(must in names and names[must][1] == "patrol", "street patrol on foot: " + must,
+             must + " is not a foot patrol")
+    need(all(n in names and names[n][4] == "defender" for n in ("mt-HQ-gate", "mt-HQ-core", "mt-HQ-armoury")),
+         "the HQ core is defenders (armour, MG)", "the HQ core groups are not class defender")
+    need(any(int(s[5]) > 1 for s in specs) and "Level() < spec.MinPlayers" in code,
+         "extra groups with more players near the town", "no group scales with the player count")
+    posts = re.findall(r'(?:Spot|new Post)\("(mt-[A-Za-z0-9]+)", "(MT-[A-Za-z0-9]+)"', code)
+    need(posts and all(b in ids for g, b in posts), "%d posts on recipe buildings" % len(posts),
+         "a post names a building the recipe does not have")
+    spot_groups = set(g for g, b in re.findall(r'Spot\("(mt-SP\d)", "(MT-[A-Za-z0-9]+)"', code))
+    need(spot_groups == set(["mt-SP1", "mt-SP2", "mt-SP3"]),
+         "spotters SP1 chimney, SP2 A1 roof, SP3 HQ roof", "not exactly the three spotter posts SP1-SP3")
+    need(set(g for g, b in posts if g.startswith("mt-SN")) >= set(["mt-SN1", "mt-SN2", "mt-SN3", "mt-SN4"]),
+         "sniper floors SN1-SN4", "a sniper floor SN1-SN4 has no post")
+    counts = {}
+    for g, b in posts:
+        counts[g] = counts.get(g, 0) + 1
+    need(all(g in names and counts[g] >= int(names[g][2]) for g in counts),
+         "one post per posted man", "a posted group has more men than posts")
+    need("Park(p.Man);" in code and "tr.position = p.At;" in code and "Crew.GroundKey(ai)" in code
+         and "ViewId(a).CompareTo(ViewId(b))" in code,
+         "posted men held on every client by spawn key, Photon view order",
+         "the posted men are not held on their posts by key")
+
+    # --- 4: batteries
+    pits = re.findall(r'"(MT-AB\d[ab])"', code)
+    need(sorted(set(pits)) == ["MT-AB1a", "MT-AB1b", "MT-AB2a", "MT-AB2b"] and all(p in ids for p in pits),
+         "four guns in the recipe pits AB1a/b, AB2a/b", "the gun pits do not match the recipe")
+    arty = read("RevivalArtyBattery.cs")
+    need("if (p.Town ? p.Wrecked || !MilitaryTown.SpotterAlive() : !p.DroneUp) return;" in arty
+         and arty.count("if (p.Town ? !MilitaryTown.Sees(") == 2
+         and "if (p.Town) { p.DroneUp = false; return; }" in arty
+         and "if (p.Wrecked) { p.Sighting = false; return; }" in arty,
+         "a town gun fires only on what a living spotter sees; no drone; a wreck never fires",
+         "ArtyBattery's town post spots without the spotter rule or still flies a drone")
+    need("if (Inside(at, 10f)) return false;" in code and "Physics.Raycast(eye + dir * 1.2f, dir, out hit" in code
+         and "InSector(p, bearing)" in code,
+         "spotter rule: range, sector, clear ray, never into the town",
+         "MilitaryTown.Sees lost its range/sector/ray test or fires into the town")
+    need("internal static bool RaiseFixed(" in read("RevivalMortar.cs")
+         and "ArtyBattery.TownGunRaised(id, go, spot, name, side);" in read("RevivalMortar.cs"),
+         "guns through the existing stationary artillery (Mortar.RaiseFixed)",
+         "Mortar.RaiseFixed is missing or does not hand the gun to ArtyBattery")
+    need("NetworkVisualizeExplode" in code and "if (g.Hits >= need) Wreck(g);" in code,
+         "explosions wreck a gun (GunHits)", "no way to destroy a town gun")
+
+    # --- 5: routes
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "research"))
+        import mt_gameplay
+        want = mt_gameplay.emit()
+        have = read("Revival.MilitaryTownData.cs").replace("\r\n", "\n")
+        need(want == have, "Revival.MilitaryTownData.cs is what research/mt_gameplay.py writes",
+             "Revival.MilitaryTownData.cs differs from research/mt_gameplay.py - regenerate it")
+        conv, pat, aa = mt_gameplay.routes()
+        need(abs(aa[0][0] - 5482) < 1 and abs(aa[0][2] - 892) < 1,
+             "AA site waypoint 0 on the AA1 platform", "the AA site does not start on AA1")
+        need(conv[0][0] > 4820 + 100 and 5452 < conv[-1][0] < 5848 and 602 < conv[-1][2] < 1198,
+             "reinforcement: from outside the airfield's margin into the town (%d points)" % len(conv),
+             "the reinforcement route starts inside the airfield margin or ends outside the town")
+        inside = sum(1 for p in pat if 5452 < p[0] < 5848 and 602 < p[2] < 1198)
+        need(inside >= 20 and math.hypot(pat[0][0] - pat[-1][0], pat[0][2] - pat[-1][2]) < 1.0,
+             "vehicle patrol: S3 and %d town street points, closed loop" % inside,
+             "the vehicle patrol does not run through the town or does not close")
+    except Exception as e:
+        bad("Military town: research/mt_gameplay.py failed: %s" % e)
+    need('vehicle=gepard,count=1,hold' in code and ',kind=convoy' in code,
+         "AA site = held Gepard route; reinforcement = convoy route",
+         "the AA site is not a held Gepard or the reinforcement is not a convoy route")
+    patrol = read("Revival.Patrol.cs")
+    need("if (r.Builtin) continue;" in patrol and "&& !r.Builtin)" in patrol
+         and "if (r.Builtin && !MilitaryTown.RouteReady(r.Name)) continue;" in patrol
+         and "string[] builtin = MilitaryTown.RouteLines();" in patrol,
+         "built-in routes: loaded, never saved, not in the random convoy draw, driven once the town is up",
+         "Patrol's built-in route handling is incomplete")
+    gep = read("RevivalGepardCrew.cs")
+    need("GepardAir.Collect(" in gep and "PlayerHeli.MissileTargets(" in gep,
+         "the AA site's gunner engages the Mi-8 and registered aircraft (An-2) first",
+         "RevivalGepardCrew lost its air-first search")
+
+    # --- 6: budget and seams
+    need("if (MilitaryTown.TroopTargets(zone, arrow)) return true;" in air
+         and "if (MilitaryTown.ConvoyTargets(route)) return true;" in air
+         and "if (Airfield.Full())" in code,
+         "one event budget for the airfield and the town", "the town does not share the airfield's event budget")
+    need("MilitaryTown.ConvoyKinds(routeName)" in read("RevivalConvoy.cs")
+         and "RevivalConvoy.SpawnOn(ReinforceRoute)" in code,
+         "reinforcement convoy sent by the town, column by player count",
+         "the reinforcement convoy seam is missing")
+    g = read("Revival.GroundEnemies.cs")
+    need("MilitaryTown.AddGroups(fresh);" in g and "MilitaryTown.HoldSpawn(g)" in g
+         and "MilitaryTown.GroupsVersion()" in g,
+         "defenders run as ground groups", "the ground groups do not know the town")
+    plug = read("RevivalPlugin.cs")
+    need(all(("MilitaryTown.%s" % s) in plug for s in ("BindConfig(Config);", "Install(_harmony);", "Tick();", "LateFrame();")),
+         "seams BindConfig/Install/Tick/LateFrame in RevivalPlugin.cs", "a MilitaryTown seam is missing in RevivalPlugin.cs")
+    sync = read("sync_public.py")
+    need('"Revival.MilitaryTown.cs"' in sync and '"Revival.MilitaryTownData.cs"' in sync,
+         "both files go to the public repository", "sync_public.py lacks a military town file")
+    doc = read(os.path.join("docs", "ai", "tasks", "military-town-gameplay.md"))
+    need(doc and "arty stops after the spotters die" in doc.lower() and "gepard shoots a heli" in doc.lower()
+         and "armoury is reachable only through the hq fight" in doc.lower(),
+         "docs/ai/tasks/military-town-gameplay.md with the in-game checklist",
+         "docs/ai/tasks/military-town-gameplay.md or its three checklist items are missing")
+
+
+def check_military_town_assembly():
+    """[35] Military town assembly (Tools/town_assembly.py, east_mt_* bundles).
+
+    The MT models in place of the town greybox, one content bundle per
+    building (docs/ai/tasks/military-town-assembly.md). Pinned statically:
+      1. RECIPES: every Content/east_mt_<id>.json is written by
+         town_assembly.py (it names the id), built by AirfieldAssembly.Populate
+         into its own scene, its kit scenes come from the MT generators, and
+         what it replaces exists in east_town.json - each id once.
+      2. FALLBACK: AirfieldGreybox takes the town's prefix for east_town.json;
+         Revival.EastWorld.cs switches the town's Fallback groups like the
+         airfield's; build.ps1 installs and prunes east_mt_*.bundle.
+      3. PIPELINE: rebuild_east.ps1 checks the recipes, runs the generators,
+         TownAssembly.Check and the headless load check --town.
+      4. The acceptance doc with its checklist.
+    """
+    import json
+    import re
+    print("[35] Military town assembly (east_mt_* bundles, greybox fallback)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Town assembly: " + why)
+
+    content = os.path.join(ROOT, "unity", "EastTile", "Content")
+    tool = read(os.path.join("unity", "EastTile", "Tools", "town_assembly.py"))
+    if not tool:
+        bad("Town assembly: unity/EastTile/Tools/town_assembly.py is missing")
+        return
+    try:
+        gb = json.load(io.open(os.path.join(content, "east_town.json"), encoding="utf-8"))["greybox"]
+    except Exception as e:
+        bad("Town assembly: east_town.json unreadable: %s" % e)
+        return
+    blocks = set(b["id"] for b in gb.get("blocks", []))
+    fences = set(f["id"] for f in gb.get("fences", []))
+    files = sorted(f for f in os.listdir(content) if f.startswith("east_mt_") and f.endswith(".json"))
+    need(len(files) >= 20, "%d east_mt_ recipes" % len(files), "fewer than 20 east_mt_ recipes in Content/")
+    seen, problems = {}, []
+    for f in files:
+        bid = f[len("east_mt_"):-5]
+        try:
+            r = json.load(io.open(os.path.join(content, f), encoding="utf-8"))
+        except Exception as e:
+            problems.append("%s unreadable (%s)" % (f, e))
+            continue
+        if '("%s", ' % bid not in tool:
+            problems.append("%s: town_assembly.py has no builder %s" % (f, bid))
+        if r.get("builder") != "AirfieldAssembly.Populate" or not str(r.get("scene", "")).startswith("EastMt"):
+            problems.append("%s: builder or scene" % f)
+        if "town_assembly.py" not in r.get("about", ""):
+            problems.append("%s: not written by town_assembly.py" % f)
+        for b in r.get("buildings", []):
+            if not re.match(r"Build/mt(_civic|_service|_core)?/mt_\w+_scene\.json$", b.get("scene", "")):
+                problems.append("%s: scene %s from no MT generator" % (f, b.get("scene")))
+        rep = r.get("replaces", {})
+        for i in rep.get("blocks", []) + rep.get("fences", []):
+            if i not in blocks and i not in fences:
+                problems.append("%s replaces unknown %s" % (f, i))
+            if i in seen:
+                problems.append("%s replaced by %s and %s" % (i, seen[i], f))
+            seen[i] = f
+    need(not problems, "every recipe written by town_assembly.py, one scene each, MT kit scenes, replaced ids "
+         "in east_town.json once (%d)" % len(seen), "; ".join(problems[:4]))
+
+    gbx = read(os.path.join("unity", "EastTile", "Assets", "Editor", "AirfieldGreybox.cs"))
+    asm = read(os.path.join("unity", "EastTile", "Assets", "Editor", "AirfieldAssembly.cs"))
+    need("AirfieldAssembly.ReplacedIds(prefix, rb, rs, rf);" in gbx and 'public const string TownPrefix = "east_mt_";' in asm
+         and '== "east_town" ? TownPrefix : Prefix;' in asm,
+         "east_town.json keeps the east_mt_ pieces as its switched-off fallback",
+         "AirfieldGreybox/AirfieldAssembly do not give east_town.json the east_mt_ prefix")
+    ew = read("Revival.EastWorld.cs")
+    need('TownScene = "EastTown", TownRoot = "EastTownRoot"' in ew and 'ApplyFallback(s, TownRoot, "town");' in ew
+         and 'ApplyFallback(s, AirfieldRoot, "airfield");' in ew,
+         "Revival.EastWorld.cs switches the town's fallback groups like the airfield's",
+         "Revival.EastWorld.cs does not apply the town's fallback")
+    bp = read("build.ps1")
+    need('@("east_mt_*.bundle", "the military town")' in bp, "build.ps1 installs and prunes east_mt_*.bundle",
+         "build.ps1 does not install east_mt_*.bundle")
+    rb = read("rebuild_east.ps1")
+    need('town_assembly.py", "--check"' in rb and '"TownAssembly.Check"' in rb and 'airfield_load_check.py", "--town"' in rb
+         and '"mt_blocks.py"' in rb and '"mt_core.py"' in rb,
+         "rebuild_east.ps1 checks the recipes, builds the MT pieces, runs TownAssembly.Check and the load check",
+         "rebuild_east.ps1 lacks a town assembly step")
+    doc = read(os.path.join("docs", "ai", "tasks", "military-town-assembly.md")).lower()
+    need(doc and "in-game checklist (yes / no)" in doc and "parts from their own bundles" in doc
+         and "merged into this branch" in doc,
+         "docs/ai/tasks/military-town-assembly.md with the in-game checklist",
+         "docs/ai/tasks/military-town-assembly.md or its checklist is missing")
+
+
 def check_east_world():
     """[29] The east world ([World] EastTile, Revival.EastWorld.cs).
 
@@ -5959,9 +7060,19 @@ def check_east_world():
         bad("East world: Revival.EastWorld.cs fehlt")
         return
     code = _code(src)
-    need('cfg.Bind("World", "EastTile", false,' in code,
-         "[World] EastTile defaults to false",
-         "[World] EastTile is not bound with the default false")
+    # 6.57.0: on by default; a config from before (settings layout < 2) is
+    # switched on once, a later "false" is the player's and stays.
+    need('cfg.Bind("World", "EastTile", true,' in code,
+         "[World] EastTile defaults to true (6.57.0)",
+         "[World] EastTile is not bound with the default true")
+    bc = _body(code, "internal static void BindConfig(")
+    sset = _code(read("Revival.Settings.cs"))
+    need("Settings.FileLayout(cfg) < Settings.EastTileOnLayout" in bc and "_cfg.Value = true;" in bc
+         and bc.index("_cfg.Value = true;") < bc.index("On = _cfg.Value;")
+         and "internal const int EastTileOnLayout = 2;" in sset and "const int Layout = 2;" in sset
+         and "if (_fileLayout < 0) _fileLayout = _version.Value;" in sset,
+         "an older config's EastTile = false is switched on once, by the settings layout stamp",
+         "the one-time EastTile migration (Settings.FileLayout < EastTileOnLayout) is missing")
     need(len(re.findall(r"\bOn = ", code)) == 1
          and "On = _cfg.Value;" in _body(code, "internal static void BindConfig("),
          "the switch is read once, in BindConfig",
@@ -6508,12 +7619,14 @@ if __name__ == "__main__":
     check_technical()
     check_technical_crew()
     check_vehicle_gunner_ai()
+    check_settings()
     check_arty_vehicle()
     check_ground_enemies()
     check_helipads()
     check_player_heli()
     check_player_an2()
     check_an2_repair()
+    check_fuel_economy()
     check_parachute()
     check_stinger()
     check_crocodile()
@@ -6527,6 +7640,12 @@ if __name__ == "__main__":
     check_east_roads()
     check_east_pipeline()
     check_airfield()
+    check_military_town()
+    check_military_town_assembly()
+    check_military_town_ring()
+    check_flak()
+    check_tower_radar()
+    check_nofly()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

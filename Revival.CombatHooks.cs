@@ -192,6 +192,7 @@ namespace NextDayRevival
 
         internal static void SpawnTracer(List<Vector3> points)
         {
+            if (!Anim.Tracers) return;   // NDR P9: [Effects] Tracers
             SpawnTracer(points, 0.035f, 0.012f, Color.white, TracerFarbe, 0.22f);
         }
 
@@ -359,6 +360,108 @@ namespace NextDayRevival
             if (chosen == null)
                 throw new MissingMethodException("PhotonNetwork.Instantiate(string,Vector3,Quaternion,byte)");
             return chosen.Invoke(null, new object[] { path, position, rotation, group }) as GameObject;
+        }
+    }
+
+    /// <summary>
+    /// P11 combat balance: the part of a player tank shell the game's own
+    /// explosion cannot deliver. ExplosionObject damages an NPC only through a
+    /// RagdollBone collider (REVERSE_ENGINEERING.md, "SetPlayVisualizationValue"),
+    /// and an NPC with IsPlayVisualizationEnabled false - every settlement
+    /// NPC far from the local player's body, which is exactly where a tank
+    /// gun at 400 m lands - has those colliders switched off. The shell then
+    /// went off in the middle of a group and nobody fell.
+    ///
+    /// This sweep hurts ONLY those frozen NPCs, with the game's own profile
+    /// (full damage to radius, cosine to zero at twice it) and the same
+    /// cover rule (a ray from the crater to the body that ends on something
+    /// else blocks it, under 3 units nothing does). An NPC the native blast
+    /// can reach is left to it, so no one is hit twice. The damage owner is
+    /// 0, as with the mortar: anonymous, credited to nobody.
+    /// </summary>
+    internal static class ShellSplash
+    {
+        static FieldInfo _visual;
+        static bool _visualLooked;
+        static bool _warned;
+
+        internal static int SweepFrozen(Vector3 point, float damage, float radius)
+        {
+            if (damage <= 0f || radius <= 0f) return 0;
+            FieldInfo vis = Visual();
+            if (vis == null) return 0;
+            List<Component> npcs = NpcWar.PatrolTargets();
+            float reach = radius * 2f;
+            int hurt = 0;
+            for (int i = 0; i < npcs.Count; i++)
+            {
+                Component ai = npcs[i];
+                if (ai == null) continue;
+                Vector3 body = ai.transform.position;
+                float d = Vector3.Distance(point, body + Vector3.up * 1.6f);
+                if (d > reach) continue;
+                try
+                {
+                    // Reachable by the native blast: its business, not ours.
+                    if ((bool)vis.GetValue(ai)) continue;
+                    if (!NpcWar.PatrolTarget(ai)) continue;
+                    if (d > 3f && Covered(point, ai.transform, body)) continue;
+                    float amount = damage * Modifier(d, radius);
+                    if (amount < 1f) continue;
+                    if (Turret.TryDamage(ai.gameObject, "NPC_AI2", "ApplyDamage", amount)) hurt++;
+                }
+                catch (Exception ex)
+                {
+                    if (!_warned)
+                    {
+                        _warned = true;
+                        RevivalPlugin.L.LogWarning("Tank shell splash: " + ex.Message);
+                    }
+                }
+            }
+            if (hurt > 0)
+                RevivalPlugin.L.LogInfo("Tank shell splash: " + hurt
+                    + " NPC(s) out of the game's blast reach hurt at " + point + ".");
+            return hurt;
+        }
+
+        /// <summary>ExplosionObject.DistanceDamageModifier, IL-exact: 1 up to
+        /// the radius, 0.5 + 0.5 cos(pi (d - r) / r) up to twice it.</summary>
+        internal static float Modifier(float d, float radius)
+        {
+            if (d > radius * 2f) return 0f;
+            if (d < radius) return 1f;
+            return Mathf.Cos((d - radius) * Mathf.PI / radius) * 0.5f + 0.5f;
+        }
+
+        /// <summary>Cover: rays to the hips and to the chest both end on
+        /// something that is not this NPC.</summary>
+        static bool Covered(Vector3 point, Transform npc, Vector3 feet)
+        {
+            Vector3 from = point + Vector3.up * 0.6f;
+            for (int k = 0; k < 2; k++)
+            {
+                Vector3 aim = feet + Vector3.up * (k == 0 ? 1.8f : 3.3f);
+                Vector3 to = aim - from;
+                float len = to.magnitude;
+                if (len < 0.2f) return false;
+                Vector3 hit;
+                GameObject struck = Turret.RaycastObject(from, to / len, len, out hit);
+                if (struck == null || struck.transform.IsChildOf(npc)) return false;
+            }
+            return true;
+        }
+
+        static FieldInfo Visual()
+        {
+            if (_visualLooked) return _visual;
+            _visualLooked = true;
+            Type t = RevivalPlugin.TypeByName("NPC_AI2");
+            FieldInfo f = t == null ? null : AccessTools.Field(t, "IsPlayVisualizationEnabled");
+            if (f != null && f.FieldType == typeof(bool)) _visual = f;
+            else RevivalPlugin.L.LogWarning("Tank shell splash: NPC_AI2.IsPlayVisualizationEnabled "
+                + "missing - frozen NPCs are left to the game's blast.");
+            return _visual;
         }
     }
 

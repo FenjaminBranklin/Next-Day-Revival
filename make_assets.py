@@ -42,6 +42,8 @@ GROUPS = [
     # An-2 repair parts (2069 control cable set, 2070 magneto, 2071 propeller
     # hub) for Revival.An2Repair.cs.
     ("an2parts", ["an2_parts_build.py"]),
+    # The An-2's FAB-50 bomb (2072) for Revival.An2Bombs.cs.
+    ("fab50", ["fab50_build.py"]),
     # Vehicle modules (2060 thermal, 2061 night vision, 2062 large jammer):
     # own art, replacing the portable jammer all three used to wear.
     ("modules", ["vehicle_modules_build.py"]),

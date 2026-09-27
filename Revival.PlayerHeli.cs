@@ -2285,6 +2285,7 @@ namespace NextDayRevival
         {
             if (go == null || _all.Contains(go)) return;
             _all.Add(go);
+            ViewDistance.KeepVisible(go);        // drawn to the far clip, never prop-culled
             try
             {
                 float s = Scale();

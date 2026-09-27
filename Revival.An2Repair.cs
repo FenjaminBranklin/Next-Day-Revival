@@ -365,7 +365,10 @@ namespace NextDayRevival
                 float add = Mathf.Clamp(litres, 0f, Capacity - fuel);
                 if (what == FuelDepot) add = Mathf.Min(add, Reserve());
                 if (add <= 0f) return;
-                if (what == FuelDepot) _depot = Reserve() - add;
+                // With the POL depot of Revival.Fuel.cs the pump draws from its pool.
+                if (what == FuelDepot && global::NextDayRevival.FuelDepot.Active) add = global::NextDayRevival.FuelDepot.Draw(add);
+                else if (what == FuelDepot) _depot = Reserve() - add;
+                if (add <= 0f) return;
                 PlayerAn2.SetFuel(go, fuel + add);
                 did = Mathf.RoundToInt(add) + " l from " + (what == FuelDepot ? "the D1 depot" : "a canister");
             }
@@ -390,6 +393,7 @@ namespace NextDayRevival
         /// DepotRefillMinutes (master-side, lazily).</summary>
         static float Reserve()
         {
+            if (global::NextDayRevival.FuelDepot.Active) return global::NextDayRevival.FuelDepot.Pool;   // the airfield POL depot (Revival.Fuel.cs)
             float full = Mathf.Max(0f, F(CfgDepotLitres, 1200f));
             if (_depot < 0f) { _depot = full; _depotAt = Time.time; }
             if (RevivalTroopInsertion.MasterClient())
@@ -399,6 +403,25 @@ namespace NextDayRevival
                 _depotAt = Time.time;
             }
             return _depot;
+        }
+
+        /// <summary>Master only, from Revival.An2Bombs.cs: a bomb that bursts
+        /// within <paramref name="reach"/> world units of the D1 pump house
+        /// sets the depot's fuel off. The reserve goes to zero (it refills
+        /// over DepotRefillMinutes as ever) and the caller shows a second
+        /// blast. False when the repair loop is off or the depot is dry.</summary>
+        internal static bool DepotHit(Vector3 point, float reach)
+        {
+            if (!Enabled || !RevivalTroopInsertion.MasterClient()) return false;
+            Vector3 d = point - Depot;
+            d.y = 0f;
+            if (d.magnitude > reach) return false;
+            if (Reserve() < 1f) return false;
+            RevivalPlugin.L.LogInfo("An2Repair: a bomb set the D1 depot off - "
+                + Mathf.RoundToInt(_depot) + " l burnt.");
+            _depot = 0f;
+            _depotAt = Time.time;
+            return true;
         }
 
         // ------------------------------------------------------------ frame
@@ -647,7 +670,7 @@ namespace NextDayRevival
                 GameObject go = _job != Job.None ? _jobPlane : _near;
                 if (go == null) return;
                 Panel(go);
-                if (_job == Job.None && !string.IsNullOrEmpty(_prompt)) Prompt(_prompt);
+                if (_job == Job.None && !string.IsNullOrEmpty(_prompt) && Hints.Prompts) Prompt(_prompt);   // NDR P9
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("An2Repair.Draw: " + ex); }
         }
@@ -696,7 +719,7 @@ namespace NextDayRevival
                     have = fuel >= min ? 1 : 0;
                     parts = Mathf.RoundToInt(fuel) + " / " + Mathf.RoundToInt(Capacity) + " l"
                         + (AtDepot(go) ? Loc.T("  - склад ГСМ рядом (", "  - depot in reach (")
-                                         + Mathf.RoundToInt(Mathf.Max(0f, _depot < 0f ? F(CfgDepotLitres, 1200f) : _depot)) + " l)" : "");
+                                         + Mathf.RoundToInt(global::NextDayRevival.FuelDepot.Active ? global::NextDayRevival.FuelDepot.Pool : Mathf.Max(0f, _depot < 0f ? F(CfgDepotLitres, 1200f) : _depot)) + " l)" : "");
                 }
                 bool done = have >= need;
                 Label(x, y, StageName(stage) + "   " + have + "/" + need,

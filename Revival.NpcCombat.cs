@@ -231,6 +231,7 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgAntiTankSelfDefense;
         internal static ConfigEntry<int>   CfgAntiTankDrones;
         internal static ConfigEntry<float> CfgAntiTankDroneSeconds;
+        internal static ConfigEntry<int>   CfgAntiTankSquadDrones;
         // New in 6.18: the arrow may bend, it is a corridor and not a
         // suggestion, and a squad that stops walking is put back on its feet.
         internal static ConfigEntry<float> CfgArrowCorridor;
@@ -340,17 +341,28 @@ namespace NextDayRevival
                 "Defender: Schadensfaktor, solange er kniet (das Fenster fuer die Spieler).");
             CfgAntiTankBack = cfg.Bind("NpcWarClasses", "AntiTankBack", 25f,
                 "Panzerabwehrschuetze: so viele Meter bleibt er hinter der Linie.");
-            CfgAntiTankRockets = cfg.Bind("NpcWarClasses", "AntiTankRockets", 4,
-                "Panzerabwehrschuetze: LAW-Raketen je Einsatz, nur gegen Fahrzeuge.");
+            CfgAntiTankRockets = cfg.Bind("NpcWarClasses", "AntiTankRockets", 2,
+                "Panzerabwehrschuetze: LAW-Raketen je Einsatz, nur gegen Fahrzeuge. "
+                + "Patrol/CrewLawRounds and CrewLawReload cap every NPC LAW on top.");
+            // P11 combat balance: migrate the released defaults, or the limits
+            // reach nobody who already has a config file.
+            if (CfgAntiTankRockets.Value == 4) CfgAntiTankRockets.Value = 2;
             CfgAntiTankLawRange = cfg.Bind("NpcWarClasses", "AntiTankLawRange", 90f,
                 "Panzerabwehrschuetze: aus dieser Entfernung (Meter) feuert er die LAW.");
             CfgAntiTankSelfDefense = cfg.Bind("NpcWarClasses", "AntiTankSelfDefense", 35f,
                 "Panzerabwehrschuetze: sein Gewehr benutzt er nur gegen Gegner, die "
                 + "naeher sind (Meter).");
-            CfgAntiTankDrones = cfg.Bind("NpcWarClasses", "AntiTankDrones", 3,
+            CfgAntiTankDrones = cfg.Bind("NpcWarClasses", "AntiTankDrones", 1,
                 "Panzerabwehrschuetze: FPV-Drohnen je Einsatz.");
-            CfgAntiTankDroneSeconds = cfg.Bind("NpcWarClasses", "AntiTankDroneSeconds", 45f,
-                "Panzerabwehrschuetze: Sekunden zwischen zwei Drohnen.");
+            if (CfgAntiTankDrones.Value == 3) CfgAntiTankDrones.Value = 1;
+            CfgAntiTankDroneSeconds = cfg.Bind("NpcWarClasses", "AntiTankDroneSeconds", 150f,
+                "Panzerabwehrschuetze: Sekunden zwischen zwei Drohnen (auch fuer "
+                + "einen abgelehnten Start). Patrol/CrewDrone* begrenzt zusaetzlich "
+                + "je Gebiet und auf der ganzen Karte.");
+            if (CfgAntiTankDroneSeconds.Value == 45f) CfgAntiTankDroneSeconds.Value = 150f;
+            CfgAntiTankSquadDrones = cfg.Bind("NpcWarClasses", "AntiTankSquadDrones", 2,
+                "FPV drones one squad may launch in one operation, all its "
+                + "anti-tank gunners together.");
         }
 
         internal static bool DronesEnabled
@@ -475,6 +487,8 @@ namespace NextDayRevival
             // once per waypoint, never per frame - it costs a NavMesh sample.
             public Vector3 GroundDest;
             public int GroundSlot;
+            // A building post (BuildingNav) looks out this way; zero = away from the group's point.
+            public Vector3 GuardLook;
 
             // 6.18: where he stood when he last covered ground, and when. A man
             // told to run who does not move is put back on his feet (Unstick).
@@ -979,6 +993,13 @@ namespace NextDayRevival
         {
             return LookUp() && ai != null && ai.gameObject.activeInHierarchy
                 && Alive(ai) && Targetable(ai);
+        }
+
+        /// <summary>Is this NPC_AI2 alive? (CrewDrone: an FPV operator who
+        /// dies while preparing his drone cancels the launch.)</summary>
+        internal static bool NpcAlive(Component ai)
+        {
+            return LookUp() && ai != null && ai.gameObject.activeInHierarchy && Alive(ai);
         }
 
         internal static string PatrolFaction(Component ai)
@@ -1667,13 +1688,25 @@ namespace NextDayRevival
             for (int i = 0; i < s.Men.Count; i++)
                 if (s.Men[i].Ai != null && Alive(s.Men[i].Ai)) n++;
             if (n == 0) return;
-            float radius = Mathf.Clamp(4f + 1.6f * n, 6f, 30f);
-            int taken = 0;
+            // A home in or beside a walkable east building: its posts first
+            // (inside, at the outer walls, every floor), the rest ring outside.
+            List<Vector3> posts = new List<Vector3>(), looks = new List<Vector3>();
+            BuildingNav.Posts(s.Lz, n, posts, looks);
+            int ringN = Mathf.Max(1, n - posts.Count);
+            float radius = Mathf.Clamp(4f + 1.6f * ringN, 6f, 30f);
+            int taken = 0, posted = 0;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
-                float angle = taken++ * Mathf.PI * 2f / n;
+                if (posted < posts.Count)
+                {
+                    f.GroundDest = posts[posted];
+                    f.GuardLook = looks[posted++];
+                    continue;
+                }
+                f.GuardLook = Vector3.zero;
+                float angle = taken++ * Mathf.PI * 2f / ringN;
                 Vector3 post = s.Lz + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius;
                 Vector3 walkable;
                 f.GroundDest = RevivalGroundEnemies.TryGround(post, 8f, out walkable)
@@ -1689,7 +1722,7 @@ namespace NextDayRevival
             {
                 f.HasOrder = false;
                 Hold(f, null, now);
-                FaceDir(f, f.GroundDest - s.Lz);
+                FaceDir(f, f.GuardLook != Vector3.zero ? f.GuardLook : f.GroundDest - s.Lz);
                 return;
             }
             if (f.HasOrder && now < f.MoveDeadline)
@@ -3032,6 +3065,7 @@ namespace NextDayRevival
             try
             {
                 if (sound) VehicleShotSound.Play(from, false);
+                if (!Anim.Tracers) return;   // NDR P9: [Effects] Tracers
                 List<Vector3> path = new List<Vector3>();
                 path.Add(from + (end - from).normalized * 1.2f);
                 path.Add(end);
@@ -4064,14 +4098,16 @@ namespace NextDayRevival
 
         static bool CanLaunch(Fighter f, float now)
         {
-            int allowed = Mathf.Clamp(CfgAntiTankDrones == null ? 3 : CfgAntiTankDrones.Value, 0, 20);
+            int allowed = Mathf.Clamp(CfgAntiTankDrones == null ? 1 : CfgAntiTankDrones.Value, 0, 20);
+            int squad = Mathf.Clamp(CfgAntiTankSquadDrones == null ? 2 : CfgAntiTankSquadDrones.Value, 0, 20);
+            if (f.Squad != null && f.Squad.Drones >= squad) return false;
             return DronesEnabled && f.DronesUsed < allowed && now >= f.NextDrone && f.DroneId == 0;
         }
 
         static void LaunchDrone(Fighter f, Squad s, GameObject target, float aimUp, float miss,
                                 string what, float now)
         {
-            float seconds = Mathf.Clamp(CfgAntiTankDroneSeconds == null ? 45f : CfgAntiTankDroneSeconds.Value, 5f, 600f);
+            float seconds = Mathf.Clamp(CfgAntiTankDroneSeconds == null ? 150f : CfgAntiTankDroneSeconds.Value, 5f, 900f);
             f.NextDrone = now + seconds;
             if (target == null) return;
             // The player FPV drone's blast: VehicleArmor knows it (a tank takes
@@ -4080,7 +4116,7 @@ namespace NextDayRevival
             float radius = RevivalPlugin.CfgDroneRadius == null ? 7f : RevivalPlugin.CfgDroneRadius.Value;
             Vector3 from = f.Tr.position + Vector3.up * 3.2f + f.Tr.forward * 1.5f;
             int id = 0;
-            try { id = CrewDrone.LaunchAt(from, target, aimUp, miss, damage, radius, what); }
+            try { id = CrewDrone.LaunchAt(from, target, aimUp, miss, damage, radius, what, f.Ai); }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("NpcWar: FPV launch failed - " + ex.Message);
@@ -4090,7 +4126,10 @@ namespace NextDayRevival
             f.DronesUsed++;
             s.Drones++;
             f.DroneTarget = target.transform;
-            f.DroneHoldUntil = now + 40f;
+            // Kneeling through the preparation as well as the flight.
+            float prep = RevivalPlugin.CfgPatrolCrewDroneLaunchSeconds == null ? 9f
+                : Mathf.Clamp(RevivalPlugin.CfgPatrolCrewDroneLaunchSeconds.Value, 0f, 60f);
+            f.DroneHoldUntil = now + 40f + prep;
             f.HasOrder = false;
             if (f.IkDriven) ReleaseAim(f);
         }

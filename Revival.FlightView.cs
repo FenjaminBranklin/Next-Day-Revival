@@ -127,6 +127,10 @@ namespace NextDayRevival
 
         static bool Enabled { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
 
+        /// <summary>The profile holds values right now; ViewDistance does not
+        /// write while it does, so the profile's baseline is the level's.</summary>
+        internal static bool Active { get { return _active; } }
+
         static float V(ConfigEntry<float> e, float fallback)
         {
             return e == null ? fallback : e.Value;

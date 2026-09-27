@@ -169,9 +169,9 @@ namespace NextDayRevival
             CfgStartFuel = cfg.Bind(S, "StartFuel", 0.6f,
                 "Fraction of the tanks filled when an An-2 is parked (0..1). Fuel "
                 + "never comes back by itself; refuelling is phase 2.");
-            CfgFuelBurn = cfg.Bind(S, "FuelBurn", 30f,
+            CfgFuelBurn = cfg.Bind(S, "FuelBurn", 40f,
                 "Litres per minute at full throttle (game time). Idle burns 15 % "
-                + "of that. 1200 l last 40 minutes at full power.");
+                + "of that. 1200 l last 30 minutes at full power (fuel economy, P3).");
             CfgCrash = cfg.Bind(S, "Crash", true,
                 "Hard landings, obstacles and wingtips on the ground destroy the "
                 + "aeroplane. Off: nothing breaks (testing).");
@@ -251,6 +251,12 @@ namespace NextDayRevival
         internal static bool Aboard { get { return _plane != null; } }
         internal static bool Flying { get { return _plane != null && _pilot; } }
         internal static Transform Body { get { return _plane != null ? _body : null; } }
+
+        // ---- for the bombs (Revival.An2Bombs.cs)
+        internal static GameObject Plane { get { return _plane; } }
+        /// <summary>The local pilot's velocity, m/s in world axes.</summary>
+        internal static Vector3 Velocity { get { return _pilot ? _vel : Vector3.zero; } }
+        internal static bool OnGround { get { return _onGround; } }
 
         internal static bool Flown(GameObject go)
         {
@@ -403,6 +409,11 @@ namespace NextDayRevival
                 Camera cam = CameraOwner.ViewCamera();
                 if (cam == null) return;
                 Transform tr = _plane.transform;
+                if (An2Bombs.SightOn)
+                {
+                    An2Bombs.SightCamera(cam, tr);   // the bombsight looks down
+                    return;
+                }
                 if (_cockpit)
                 {
                     Vector3 seat = An2Model.Seat(-1);
@@ -505,7 +516,7 @@ namespace NextDayRevival
             _throttle = Mathf.Clamp01(_throttle + thrIn * 0.5f * dt);
             if (vis.Running && vis.Power > 0.01f)
             {
-                float burn = F(CfgFuelBurn, 30f) / 60f * (0.15f + 0.85f * _throttle) * power;
+                float burn = F(CfgFuelBurn, 40f) / 60f * (0.15f + 0.85f * _throttle) * power;
                 vis.Fuel = Mathf.Max(0f, vis.Fuel - burn * dt);
                 if (vis.Fuel <= 0f)
                 {
@@ -1057,7 +1068,41 @@ namespace NextDayRevival
             else Hint(Text.Spawned(Key(CfgBoardKey, KeyCode.F).ToString()), 5f);
         }
 
+        /// <summary>The admin panel's button: a ready An-2 (full tanks, all
+        /// parts, full racks) 14 m in front of the player. The host builds
+        /// it; anyone else asks the host with the ready flag on the spawn
+        /// request (fifth float).</summary>
+        internal static string SpawnReadyInFront()
+        {
+            if (!Enabled)
+                return "PlayerAn2 is switched off ([PlayerAn2] Enabled = false).";
+            Net.EnsureHooked();
+            GameObject me = MapTools.LocalPlayer();
+            if (me == null) return "No local player.";
+            Transform t = me.transform;
+            float heading = t.eulerAngles.y;
+            Vector3 at = t.position + Quaternion.Euler(0f, heading, 0f) * new Vector3(0f, 0f, 14f * K);
+            float y;
+            if (RevivalTroopInsertion.GroundY(at, out y) || RevivalTroopInsertion.TerrainHeight(at, out y))
+                at.y = y;
+            if (!RevivalTroopInsertion.MasterClient())
+            {
+                Net.Send(Net.SpawnRequest, new float[] { at.x, at.y, at.z, heading, 1f }, true);
+                return Text.Asked();
+            }
+            return Build(at, heading, true) == null ? Text.SpawnFailed()
+                : Text.Spawned(Key(CfgBoardKey, KeyCode.F).ToString());
+        }
+
         internal static GameObject Build(Vector3 at, float heading)
+        {
+            return Build(at, heading, false);
+        }
+
+        /// <summary><paramref name="ready"/>: the admin panel's An-2 - full
+        /// tanks, every repair part fitted, the bomb racks full; it does not
+        /// take the saved repair state, which stays for the apron one.</summary>
+        internal static GameObject Build(Vector3 at, float heading, bool ready)
         {
             if (!An2Model.Load()) return null;
             if (!LookUp()) return null;
@@ -1065,7 +1110,12 @@ namespace NextDayRevival
             {
                 float fuel = Mathf.Clamp01(F(CfgStartFuel, 0.6f)) * F(CfgFuelCapacity, 1200f);
                 int parts;
-                An2Repair.NewPlane(ref fuel, out parts);
+                if (ready)
+                {
+                    fuel = F(CfgFuelCapacity, 1200f);
+                    parts = An2Repair.Enabled ? An2Repair.AllParts : -1;
+                }
+                else An2Repair.NewPlane(ref fuel, out parts);
                 object[] data = parts < 0 ? new object[] { Marker, fuel } : new object[] { Marker, fuel, parts };
                 ParameterInfo[] ps = _instantiate.GetParameters();
                 object group = Convert.ChangeType(0, ps[3].ParameterType);
@@ -1081,8 +1131,9 @@ namespace NextDayRevival
                 Idle(go);
                 go.transform.position = at;
                 go.transform.rotation = rot;
+                if (ready) An2Bombs.FullLoad(go);
                 RevivalPlugin.L.LogInfo("PlayerAn2: An-2 " + ViewId(go) + " at " + at.ToString("0")
-                    + ", heading " + heading.ToString("0") + ".");
+                    + ", heading " + heading.ToString("0") + (ready ? ", ready (admin)." : "."));
                 return go;
             }
             catch (Exception ex)
@@ -1596,6 +1647,7 @@ namespace NextDayRevival
         {
             if (go == null || _all.Contains(go)) return;
             _all.Add(go);
+            ViewDistance.KeepVisible(go);        // drawn to the far clip, never prop-culled
             try
             {
                 go.transform.localScale = Vector3.one;
@@ -2055,7 +2107,7 @@ namespace NextDayRevival
                     if (kind == SpawnRequest)
                     {
                         if (f.Length < 4 || !RevivalTroopInsertion.MasterClient()) return;
-                        Build(new Vector3(f[0], f[1], f[2]), f[3]);
+                        Build(new Vector3(f[0], f[1], f[2]), f[3], f.Length >= 5 && f[4] > 0.5f);
                         return;
                     }
                     if (kind == PoseUpdate)
@@ -2498,7 +2550,7 @@ namespace NextDayRevival
                 float rpm = _power * (0.25f + 0.75f * Throttle);
                 _spin += rpm * 1650f * dt;                         // deg/s at full rpm (visible blur)
                 if (_spin > 360f) _spin -= 360f * Mathf.Floor(_spin / 360f);
-                _prop.localRotation = Quaternion.AngleAxis(_spin, _axProp);
+                if (Anim.Propeller) _prop.localRotation = Quaternion.AngleAxis(_spin, _axProp);   // NDR P9: [Effects] Propeller
                 float k = Mathf.Min(1f, 8f * dt);
                 _e = Mathf.Lerp(_e, Elevator, k);
                 _a = Mathf.Lerp(_a, Aileron, k);

@@ -28,6 +28,15 @@
 // open ground, facing into the most geometry. Measurement and numbers in
 // docs/ai/tasks/east-extension-session.md.
 //
+// Spot sets ([Research] FrameBenchSpots): "vanilla" the eight above,
+// "airfield" the east airfield against two vanilla towns (needs [World]
+// EastTile; docs/ai/tasks/airfield-perf.md): the apron looking at H1, the
+// runway looking at the building line, inside H1, the gate; "all" both.
+// Tile spots stand on the tile terrain (EastWorld.TerrainHeight). After each
+// spot's window the renderers are counted once (outside the window): visible
+// ones, of them shadow casters, of them in east content scenes, and the
+// ContentPerf state, so a before/after run shows where the frame time went.
+//
 // The header line logs what the numbers depend on: quality level, resolution,
 // vSync, target frame rate, lodBias, shadow distance, the terrain's tree and
 // detail distances and the camera far plane, so a LOWEST run and a normal run
@@ -57,6 +66,7 @@ namespace NextDayRevival
         const float SettleSeconds = 5f;
         const float MeasureSeconds = 10f;
         const float HitchSeconds = 0.05f;
+        const float VanillaEast = 2500f;       // GW_Scene_1's east edge; beyond it a spot is on the east tile
 
         struct Spot
         {
@@ -67,7 +77,7 @@ namespace NextDayRevival
         }
 
         // Keep in step with docs/ai/tasks/east-extension-session.md.
-        static readonly Spot[] Spots = new Spot[] {
+        static readonly Spot[] VanillaSpots = new Spot[] {
             new Spot("berezki",        1312f, -2008f, 105f),  // biggest settlement
             new Spot("gorshovo",       1231f,   525f, 135f),  // second
             new Spot("kochkino",       -803f,   430f,  45f),  // third
@@ -78,6 +88,18 @@ namespace NextDayRevival
             new Spot("ne_corner",      2450f,  2450f,  45f),  // north-east corner
         };
 
+        // Keep in step with docs/ai/tasks/airfield-perf.md (views: unity/EastTile AirfieldViews.cs).
+        static readonly Spot[] AirfieldSpots = new Spot[] {
+            new Spot("berezki",        1312f, -2008f, 105f),  // vanilla town reference, biggest settlement
+            new Spot("gorshovo",       1231f,   525f, 135f),  // vanilla town reference, second
+            new Spot("af_apron_h1",    4455f,  1255f, 225f),  // apron north end, H1 gates and F1 in view
+            new Spot("af_runway",      4632f,   900f, 290f),  // runway centreline, the building line H2..B1
+            new Spot("af_h1_inside",   4318f,  1080f, 270f),  // inside H1 behind the gates, looking west
+            new Spot("af_gate",        4100f,  1745f, 180f),  // outside G1, down the gate spur
+        };
+
+        static Spot[] Spots = VanillaSpots;
+
         struct Result
         {
             public bool Done;
@@ -85,10 +107,12 @@ namespace NextDayRevival
             public int Frames, Hitches, ScenesStart, ScenesEnd;
             public float Seconds, AvgFps, Low1Fps, MaxMs;
             public string Ground;
+            public int Visible, VisibleShadow, VisibleEast;
         }
 
         static ConfigEntry<bool> _cfgEnabled;
         static ConfigEntry<string> _cfgKey;
+        static ConfigEntry<string> _cfgSpots;
         static KeyCode _key = KeyCode.Home;
         static bool _keyParsed;
 
@@ -119,6 +143,10 @@ namespace NextDayRevival
             _cfgKey = cfg.Bind("Research", "FrameBenchKey", "Home",
                 "With FrameBench on: start the run; pressed again, abort it. A "
                 + "name from UnityEngine.KeyCode.");
+            _cfgSpots = cfg.Bind("Research", "FrameBenchSpots", "vanilla",
+                "With FrameBench on: which spots. vanilla = the eight GW_Scene_1 spots; "
+                + "airfield = two vanilla towns and four airfield spots (needs [World] "
+                + "EastTile); all = both.");
         }
 
         static bool On { get { return _cfgEnabled != null && _cfgEnabled.Value; } }
@@ -153,6 +181,16 @@ namespace NextDayRevival
                     + SceneManager.GetActiveScene().name + "); the spots are GW_Scene_1 spots.");
                 return;
             }
+            string set = _cfgSpots == null ? "vanilla" : _cfgSpots.Value.Trim().ToLowerInvariant();
+            if (set == "airfield") Spots = AirfieldSpots;
+            else if (set == "all")
+            {
+                List<Spot> both = new List<Spot>(VanillaSpots);
+                foreach (Spot a in AirfieldSpots)
+                    if (a.X > VanillaEast) both.Add(a);
+                Spots = both.ToArray();
+            }
+            else Spots = VanillaSpots;
             _home = me.transform.position;
             _homeRot = me.transform.rotation;
             _results = new Result[Spots.Length];
@@ -162,7 +200,7 @@ namespace NextDayRevival
                 + F0(MeasureSeconds) + " s each, about "
                 + F0(Spots.Length * (SettleSeconds + MeasureSeconds)) + " s. Hands off mouse and keys; "
                 + Key() + " aborts.");
-            Log("SETTINGS " + Settings());
+            Log("SETTINGS " + Settings() + "; spots " + set);
             Go(0);
         }
 
@@ -209,6 +247,7 @@ namespace NextDayRevival
             Score(ref r);
             r.ScenesEnd = SceneManager.sceneCount;
             r.Ground = Ground(me.transform.position);
+            Count(ref r);
             r.Done = true;
             _results[_spot] = r;
             Log(Row(s, r));
@@ -238,6 +277,21 @@ namespace NextDayRevival
             r.Hitches = hitches;
         }
 
+        /// <summary>Renderers seen by any camera in the last frame (shadow
+        /// passes included), of them shadow casters and east content.</summary>
+        static void Count(ref Result r)
+        {
+            Renderer[] all = UnityEngine.Object.FindObjectsOfType<Renderer>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                Renderer x = all[i];
+                if (x == null || !x.enabled || !x.isVisible) continue;
+                r.Visible++;
+                if (x.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off) r.VisibleShadow++;
+                if (x.gameObject.scene.name.StartsWith("East", StringComparison.Ordinal)) r.VisibleEast++;
+            }
+        }
+
         static void Finish(string why)
         {
             _running = false;
@@ -264,7 +318,7 @@ namespace NextDayRevival
             {
                 StringBuilder sb = new StringBuilder();
                 sb.Append("spot,x,z,yaw,placed_y,start_y,frames,seconds,avg_fps,low1_fps,max_ms,")
-                  .Append("over50ms,scenes_start,scenes_end,ground,settings\n");
+                  .Append("over50ms,scenes_start,scenes_end,visible,visible_shadow,visible_east,ground,settings\n");
                 string settings = Settings().Replace("\"", "'");
                 for (int i = 0; i < Spots.Length; i++)
                 {
@@ -276,7 +330,8 @@ namespace NextDayRevival
                       .Append(',').Append(r.Frames).Append(',').Append(F2(r.Seconds)).Append(',')
                       .Append(F1(r.AvgFps)).Append(',').Append(F1(r.Low1Fps)).Append(',').Append(F1(r.MaxMs))
                       .Append(',').Append(r.Hitches).Append(',').Append(r.ScenesStart).Append(',')
-                      .Append(r.ScenesEnd).Append(",\"").Append((r.Ground ?? "").Replace("\"", "'"))
+                      .Append(r.ScenesEnd).Append(',').Append(r.Visible).Append(',').Append(r.VisibleShadow)
+                      .Append(',').Append(r.VisibleEast).Append(",\"").Append((r.Ground ?? "").Replace("\"", "'"))
                       .Append("\",\"").Append(settings).Append("\"\n");
                 }
                 File.WriteAllText(path, sb.ToString());
@@ -293,7 +348,7 @@ namespace NextDayRevival
             return Pad("spot", 14) + " " + LPad("x", 5) + " " + LPad("z", 6) + " " + LPad("yaw", 5)
                 + " " + LPad("frames", 7) + " " + LPad("avg fps", 8) + " " + LPad("1% low", 7) + " "
                 + LPad("max ms", 7) + " " + LPad(">50ms", 6) + " " + LPad("scenes", 7) + " "
-                + LPad("drop m", 7) + "  ground";
+                + LPad("drop m", 7) + " " + LPad("vis", 5) + " " + LPad("shad", 5) + " " + LPad("east", 5) + "  ground";
         }
 
         static string Row(Spot s, Result r)
@@ -302,7 +357,8 @@ namespace NextDayRevival
                 + " " + LPad(r.Frames.ToString(Inv), 7) + " " + LPad(F1(r.AvgFps), 8) + " "
                 + LPad(F1(r.Low1Fps), 7) + " " + LPad(F1(r.MaxMs), 7) + " " + LPad(r.Hitches.ToString(Inv), 6)
                 + " " + LPad(r.ScenesStart + "->" + r.ScenesEnd, 7) + " " + LPad(F1(r.Placed.y - r.Start.y), 7)
-                + "  " + r.Ground;
+                + " " + LPad(r.Visible.ToString(Inv), 5) + " " + LPad(r.VisibleShadow.ToString(Inv), 5) + " "
+                + LPad(r.VisibleEast.ToString(Inv), 5) + "  " + r.Ground;
         }
 
         // Ground at the spot: the vanilla terrain height, then the first
@@ -312,6 +368,8 @@ namespace NextDayRevival
             Terrain t = Vanilla();
             Vector3 p = new Vector3(s.X, 0f, s.Z);
             float h = t == null ? 500f : t.SampleHeight(p) + t.GetPosition().y;
+            float th;
+            if (s.X > VanillaEast && EastWorld.TerrainHeight(p, out th)) h = th;   // a tile spot
             RaycastHit hit;
             if (Physics.Raycast(new Vector3(s.X, h + 3f, s.Z), Vector3.down, out hit, 10f,
                                 Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
@@ -369,6 +427,7 @@ namespace NextDayRevival
                   .Append(" basemap ").Append(F0(t.basemapDistance));
             Camera c = Camera.main;
             if (c != null) sb.Append(", camera far ").Append(F0(c.farClipPlane)).Append(" fov ").Append(F0(c.fieldOfView));
+            sb.Append(", ").Append(ContentPerf.Summary());
             sb.Append(", GPU ").Append(SystemInfo.graphicsDeviceName)
               .Append(", CPU ").Append(SystemInfo.processorType);
             return sb.ToString();

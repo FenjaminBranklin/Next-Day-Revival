@@ -258,6 +258,15 @@ namespace NextDayRevival
                     ? "G" : RevivalPlugin.CfgDroneKey.Value;
                 string survKey = CfgSurvKey == null ? "B" : CfgSurvKey.Value;
 
+                // NDR P9: [Hints] - shown when the state changes (gear picked up,
+                // antenna raised ...), then faded; the hint key brings it back.
+                // The state is the flags, not the text: the grounded drone's
+                // running distance must not keep the box up.
+                float fade = Hints.Alpha("drone.guide", (haveAnt ? "a" : "-") + (haveFpv ? "f" : "-")
+                    + (haveSurv ? "s" : "-") + (grounded >= 0 ? "g" : "-") + (inVeh ? "v" : "-")
+                    + (up ? "u" : "-") + (deploying ? "d" : "-") + fpvKey + survKey + antKey);
+                if (fade <= 0f) return;
+
                 // Build the lines. Each is {text, tint}.
                 List<string> lines = new List<string>();
                 List<Color> tints = new List<Color>();
@@ -347,16 +356,16 @@ namespace NextDayRevival
                 float y = Screen.height * 0.32f;
 
                 Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
+                GUI.color = new Color(0f, 0f, 0f, 0.55f * fade);
                 GUI.DrawTexture(new Rect(x - 4f, y - 4f, w + 8f, h + 8f), GuidePx());
 
-                GUI.color = new Color(0.75f, 0.85f, 1f, 0.97f);
+                GUI.color = new Color(0.75f, 0.85f, 1f, 0.97f * fade);
                 GUI.Label(new Rect(x + pad, y + pad, w - pad * 2f, lh),
                           Loc.T("ДРОН - как запустить", "DRONE - how to launch"));
 
                 for (int i = 0; i < lines.Count; i++)
                 {
-                    GUI.color = tints[i];
+                    GUI.color = Hints.Tint(tints[i], fade);
                     GUI.Label(new Rect(x + pad, y + pad + lh * (i + 1), w - pad * 2f, lh),
                               lines[i]);
                 }

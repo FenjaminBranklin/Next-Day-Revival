@@ -87,9 +87,12 @@ namespace NextDayRevival
         static readonly Dictionary<string, string> _contentScenes = new Dictionary<string, string>();   // bundle file -> scene
         static readonly List<string> _contentLoaded = new List<string>();                             // files queued this time
         static bool _contentQueued;
-        // The combined greybox in east_airfield.bundle keeps, switched off, the
-        // pieces each east_af_* bundle replaces (root/Fallback/<bundle name>).
+        // The combined greyboxes keep, switched off, the pieces each building
+        // bundle replaces (root/Fallback/<bundle name>): east_airfield.bundle
+        // for the east_af_* bundles, east_town.bundle for the military town's
+        // east_mt_* (docs/ai/tasks/military-town-assembly.md).
         const string AirfieldScene = "EastAirfield", AirfieldRoot = "EastAirfieldRoot", FallbackGroup = "Fallback";
+        const string TownScene = "EastTown", TownRoot = "EastTownRoot";
 
         /// <summary>The world with the tile on: vanilla GW_Scene_1 (-2500..2500)
         /// plus one 5 x 5 km tile east of it.</summary>
@@ -117,13 +120,25 @@ namespace NextDayRevival
 
         internal static void BindConfig(ConfigFile cfg)
         {
-            _cfg = cfg.Bind("World", "EastTile", false,
+            _cfg = cfg.Bind("World", "EastTile", true,
                 "East extension: load the east terrain tile "
-                + "(assets/east_tile.bundle) together with GW_Scene_1 and treat "
+                + "(assets/east_tile.bundle) with its airfield and military town "
+                + "together with GW_Scene_1 and treat "
                 + "both as one world - map rectangle -2500..7500 x -2500..2500, "
                 + "footstep and impact surface, graphics settings, troop and ground "
                 + "group heights, a player saved on the tile. Read at start: a "
-                + "change needs a restart. Off = the vanilla map, unchanged.");
+                + "change needs a restart. Off = the vanilla map, unchanged. "
+                + "On by default since 6.57.0; an older file is switched on once, "
+                + "setting it false afterwards keeps it off.");
+            // 6.57.0 turned the tile on by default. A file written before that
+            // ([Settings] Version < 2) holds the old default false, not a
+            // choice: switch it on once. Settings.Migrate then stamps the file,
+            // so a player who turns it off afterwards stays off.
+            if (!_cfg.Value && Settings.FileLayout(cfg) < Settings.EastTileOnLayout)
+            {
+                _cfg.Value = true;
+                Log("[World] EastTile false in a config from before 6.57.0 - switched on once (east tile on by default).");
+            }
             On = _cfg.Value;
         }
 
@@ -325,16 +340,17 @@ namespace NextDayRevival
             return null;
         }
 
-        /// <summary>East_airfield.bundle holds, switched off, the greybox of
-        /// every building that has its own bundle (root/Fallback/east_af_*):
-        /// a group comes on when its bundle was not queued, so a missing or
-        /// broken building bundle leaves its greybox standing.</summary>
-        static void ApplyFallback(Scene s)
+        /// <summary>East_airfield.bundle (east_town.bundle) holds, switched
+        /// off, the greybox of every building that has its own bundle
+        /// (root/Fallback/east_af_*, east_mt_*): a group comes on when its
+        /// bundle was not queued, so a missing or broken building bundle
+        /// leaves its greybox standing.</summary>
+        static void ApplyFallback(Scene s, string rootName, string what)
         {
             Transform fb = null;
             GameObject[] roots = s.GetRootGameObjects();
             for (int i = 0; i < roots.Length && fb == null; i++)
-                if (roots[i].name == AirfieldRoot) fb = roots[i].transform.Find(FallbackGroup);
+                if (roots[i].name == rootName) fb = roots[i].transform.Find(FallbackGroup);
             if (fb == null) return;
             List<string> grey = new List<string>();
             foreach (Transform t in fb)
@@ -343,7 +359,7 @@ namespace NextDayRevival
                 t.gameObject.SetActive(!own);
                 if (!own) grey.Add(t.name);
             }
-            Log("airfield: " + (fb.childCount - grey.Count) + " of " + fb.childCount + " parts from their own bundles"
+            Log(what + ": " + (fb.childCount - grey.Count) + " of " + fb.childCount + " parts from their own bundles"
                 + (grey.Count > 0 ? "; greybox fallback for " + string.Join(", ", grey.ToArray()) : "") + ".");
         }
 
@@ -434,7 +450,9 @@ namespace NextDayRevival
                 else if (s.name == SceneName)
                     Log("tile scene loaded (" + mode + "); active scene " + SceneManager.GetActiveScene().name + ".");
                 else if (s.name == AirfieldScene)
-                    ApplyFallback(s);
+                    ApplyFallback(s, AirfieldRoot, "airfield");
+                else if (s.name == TownScene)
+                    ApplyFallback(s, TownRoot, "town");
             };
             SceneManager.sceneUnloaded += delegate(Scene s)
             {

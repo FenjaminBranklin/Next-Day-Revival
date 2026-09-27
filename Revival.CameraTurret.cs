@@ -51,6 +51,7 @@ namespace NextDayRevival
         public const int Heli = 5;         // the helicopter a player flies
         public const int Gepard = 6;       // the Gepard's sight (RevivalGepard.cs)
         public const int An2 = 7;          // the An-2 a player flies (Revival.PlayerAn2.cs)
+        public const int Flak = 8;         // the airfield's ZU-23-2 sight (Revival.Flak.cs)
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -235,6 +236,7 @@ namespace NextDayRevival
             else if (_owner == Heli) PlayerHeli.LateTick();
             else if (_owner == Gepard) GepardGun.LateTick();
             else if (_owner == An2) PlayerAn2.LateTick();
+            else if (_owner == Flak) NextDayRevival.Flak.LateTick();
         }
 
         /// <summary>
@@ -360,7 +362,7 @@ namespace NextDayRevival
         { return _tank ? RevivalPlugin.CfgTankRange.Value : RevivalPlugin.CfgTurretRange.Value; }
 
         static float Ladezeit()
-        { return _tank ? RevivalPlugin.CfgTankDelay.Value : RevivalPlugin.CfgTurretDelay.Value; }
+        { return _tank ? RevivalPlugin.CfgTankDelay.Value : BtrGun.ShotInterval(RevivalPlugin.CfgTurretDelay.Value); }
 
         static float Drehgeschwindigkeit()
         { return _tank ? RevivalPlugin.CfgTankTurnSpeed.Value : RevivalPlugin.CfgTurretTurnSpeed.Value; }
@@ -1169,8 +1171,15 @@ namespace NextDayRevival
 
             Vector3 origin, dir;
             AimRay(out origin, out dir);
-            VehicleShotSound.Play(origin, _tank);
-            Net.PublishShot(origin, _tank);
+            // The BTR's round is drawn by Revival.BtrGun.cs once its end is
+            // known: game flash, smoke, cases, report and tracer at the real
+            // muzzle, the game's impact, and the round sent to the others.
+            bool btrFx = !_tank && BtrGun.Active;
+            if (!btrFx)
+            {
+                VehicleShotSound.Play(origin, _tank);
+                Net.PublishShot(origin, _tank);
+            }
             Vector3 impact;
             GameObject struck = RaycastPastVehicle(origin, dir,
                                                    Reichweite(), out impact);
@@ -1180,7 +1189,8 @@ namespace NextDayRevival
             // als ginge das Geschuetz gar nicht los.
             Vector3 ende = struck == null
                 ? origin + dir * Reichweite() : impact;
-            Tracer(origin + dir * 3f, ende);
+            if (btrFx) BtrGun.Fire(_vehicleRoot, _turrets, ende, struck != null);
+            else Tracer(origin + dir * 3f, ende);
             if (struck == null) return true;
 
             // Sprenggranate am Einschlag - beim Panzer. Das BTR schiesst seit
@@ -1193,6 +1203,10 @@ namespace NextDayRevival
                 {
                     RocketHook.Detonate(impact - dir * 0.15f,
                         Sprengschaden(), Sprengradius(), 3f);
+                    // P11: the NPCs the game's blast cannot reach (frozen,
+                    // ragdoll collision off) get the same profile here.
+                    ShellSplash.SweepFrozen(impact - dir * 0.15f,
+                        Sprengschaden(), Sprengradius());
                 }
                 catch (Exception ex)
                 {
@@ -1259,12 +1273,13 @@ namespace NextDayRevival
                 bahn.Add(von);
                 bahn.Add(bis);
 
-                if (_tank)
+                bool spur = Anim.Tracers;   // NDR P9: [Effects] Tracers
+                if (spur && _tank)
                 {
                     RocketHook.SpawnTracer(bahn, 1.20f, 0.50f, SpurHof, SpurHof, 0.30f);
                     RocketHook.SpawnTracer(bahn, 0.44f, 0.17f, SpurKern, SpurEnde, 0.55f);
                 }
-                else
+                else if (spur)
                 {
                     RocketHook.SpawnTracer(bahn, 0.34f, 0.14f, SpurHof, SpurHof, 0.10f);
                     RocketHook.SpawnTracer(bahn, 0.13f, 0.05f, SpurKern, SpurEnde, 0.18f);
@@ -1275,7 +1290,7 @@ namespace NextDayRevival
                 // die Muendungsposition noch die Rohrrichtung.
                 Vector3 achse = bis - von;
                 float laenge = achse.magnitude;
-                if (laenge > 0.01f)
+                if (laenge > 0.01f && Anim.MuzzleFlash)   // NDR P9: [Effects] MuzzleFlashes
                 {
                     float feuer = _tank ? 7.0f : 3.0f;
                     if (feuer > laenge) feuer = laenge;
@@ -2136,6 +2151,28 @@ namespace NextDayRevival
                 }
             }
 
+            /// <summary>A BTR round with everything a peer needs to rebuild
+            /// it on its own copy of the turret (Revival.BtrGun.cs): action
+            /// -3, view id, end point, hit, tracer. False when there is no
+            /// channel or view - the caller then sends the plain shot sound.</summary>
+            internal static bool PublishBtrShot(Transform root, Vector3 end, bool hit, bool tracer)
+            {
+                if (!_hooked || root == null) return false;
+                try
+                {
+                    int viewId = ViewId(root);
+                    if (viewId <= 0) return false;
+                    Send(new float[] { -3f, viewId, end.x, end.y, end.z,
+                                       hit ? 1f : 0f, tracer ? 1f : 0f }, false);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("BTR shot network send: " + ex.Message);
+                    return false;
+                }
+            }
+
             internal static void PublishTechnicalShot(Vector3 point)
             {
                 if (!_hooked) return;
@@ -2172,6 +2209,24 @@ namespace NextDayRevival
                 return id;
             }
 
+            /// <summary>The vehicle (its VehicleGameSystem) a view id belongs to.</summary>
+            static Transform VehicleRoot(int viewId)
+            {
+                object view = _findView.Invoke(null, new object[] { viewId });
+                Component component = view as Component;
+                if (component == null) return null;
+
+                Transform root = component.transform;
+                Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
+                if (vgsType != null)
+                {
+                    Component vgs = component.gameObject.GetComponentInParent(vgsType);
+                    if (vgs == null) vgs = component.gameObject.GetComponentInChildren(vgsType, true);
+                    if (vgs != null) root = vgs.transform;
+                }
+                return root;
+            }
+
             public static void OnPhotonEvent(byte code, object content, int sender)
             {
                 if (code != (byte)RevivalPlugin.CfgTurretEventCode.Value) return;
@@ -2189,19 +2244,18 @@ namespace NextDayRevival
                             VehicleShotSound.Play(point, data[1] > 0.5f);
                         return;
                     }
-                    int viewId = Mathf.RoundToInt(data[0]);
-                    object view = _findView.Invoke(null, new object[] { viewId });
-                    Component component = view as Component;
-                    if (component == null) return;
-
-                    Transform root = component.transform;
-                    Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
-                    if (vgsType != null)
+                    if (action == -3 && data.Length >= 7)
                     {
-                        Component vgs = component.gameObject.GetComponentInParent(vgsType);
-                        if (vgs == null) vgs = component.gameObject.GetComponentInChildren(vgsType, true);
-                        if (vgs != null) root = vgs.transform;
+                        // A BTR round (Revival.BtrGun.cs): rebuilt on this copy.
+                        Transform shooter = VehicleRoot(Mathf.RoundToInt(data[1]));
+                        if (shooter != null)
+                            BtrGun.Remote(shooter, new Vector3(data[2], data[3], data[4]),
+                                          data[5] > 0.5f, data[6] > 0.5f);
+                        return;
                     }
+                    int viewId = Mathf.RoundToInt(data[0]);
+                    Transform root = VehicleRoot(viewId);
+                    if (root == null) return;
 
                     if (action == -1)
                     {

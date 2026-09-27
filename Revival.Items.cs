@@ -1413,12 +1413,14 @@ namespace NextDayRevival
         // because it is the same class of shell. 2069-2071 are the An-2 repair
         // parts (Revival.An2Repair.cs): found at the airfield, never sold,
         // worth about a vehicle part each and the propeller hub the most.
+        // 2072, the An-2's FAB-50 bomb (Revival.An2Bombs.cs), is priced a
+        // little under the 122 mm shell: found in the bunkers, never sold.
         static readonly int[] SellOnlyIds = new int[] {
             1164, 1490, 1491, 2052, 2058, 2059, 2060, 2061, 2062, 2063, 2064,
-            2066, 1492, 2069, 2070, 2071 };
+            2066, 1492, 2069, 2070, 2071, 2072 };
         static readonly int[] SellOnlyPrices = new int[] {
             26000, 15000, 20000, 1000, 1500, 6000, 60000, 35000, 130000, 1500,
-            8000, 5000, 4000, 3000, 6000, 9000 };
+            8000, 5000, 4000, 3000, 6000, 9000, 4000 };
 
         // A custom item whose id is in neither table still has to be sellable -
         // that is the promise of this file, not a property of the list above.

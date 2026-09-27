@@ -1114,6 +1114,81 @@ namespace NextDayRevival
             return true;
         }
 
+        // ------------------------------------------ fixed guns (military town)
+
+        /// <summary>
+        /// NDR military town. A gun at a FIXED spot, belonging to no
+        /// settlement: the four pits of the town's two batteries
+        /// (Revival.MilitaryTown.cs). Every client raises it itself at the same
+        /// spot - the spot is the pit's own terrain height, not a search - so
+        /// nothing crosses the wire and the centre key is the same everywhere.
+        /// The id is the caller's (outside any instance id range the settlement
+        /// scan can produce); the battery takes the gun over as a town post.
+        /// Everything else about it - laying, the NPC fire mission, the shot
+        /// picture, the player's sight once the crew is dead - is this file's.
+        /// </summary>
+        internal static bool RaiseFixed(int id, Vector3 spot, Vector3 normal, Vector3 facing,
+                                        string name, string side)
+        {
+            if (!Enabled) return false;
+            if (HasTube(id)) return true;
+            Vector3 out3 = facing;
+            out3.y = 0f;
+            if (out3.sqrMagnitude < 0.01f) out3 = Vector3.forward;
+            Transform turret, barrel;
+            GameObject go = ArtyModel.Build(out turret, out barrel);
+            if (go == null) return false;
+            go.transform.position = spot + normal * 0.02f;
+            go.transform.rotation = Quaternion.LookRotation(out3.normalized, Vector3.up);
+            go.transform.up = normal;
+            float sc = Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f);
+            go.transform.localScale = new Vector3(sc, sc, sc);
+
+            Tube t = new Tube();
+            t.Go = go;
+            t.Turret = turret;
+            t.Barrel = barrel;
+            t.Name = name;
+            t.SettlementId = id;
+            t.Centre = spot;
+            t.Yaw = go.transform.eulerAngles.y;
+            t.WantYaw = t.Yaw;
+            t.Pitch = PitchFor((MinRange + MaxRange) * 0.5f);
+            t.WantPitch = t.Pitch;
+            Point(t);
+            _tubes.Add(t);
+            _placed[id] = true;
+            ArtyBattery.TownGunRaised(id, go, spot, name, side);   // NDR military town
+            RevivalPlugin.L.LogInfo("Mortar: fixed gun \"" + name + "\" raised at "
+                + spot.ToString("0") + ".");
+            return true;
+        }
+
+        /// <summary>NDR military town: is this fixed gun still in the fire
+        /// control? A scene change takes it with the level.</summary>
+        internal static bool HasFixed(int id) { return HasTube(id); }
+
+        /// <summary>NDR military town: the fixed gun is taken out of the fire
+        /// control (a wreck is not a gun any more) and, with destroy, out of
+        /// the world too.</summary>
+        internal static void RemoveFixed(int id, bool destroy)
+        {
+            for (int i = _tubes.Count - 1; i >= 0; i--)
+            {
+                Tube t = _tubes[i];
+                if (t.SettlementId != id || t.Mobile) continue;
+                DropShells(t);
+                if (_aiming == t) LeaveAim("the gun is gone");
+                if (destroy)
+                {
+                    ArtyBattery.GunLost(id);
+                    if (t.Go != null) UnityEngine.Object.Destroy(t.Go);
+                }
+                _tubes.RemoveAt(i);
+            }
+            _placed.Remove(id);
+        }
+
         // The fail-open emplacement search. Fixed offsets are walked in a fixed
         // order, but streamed colliders and local config may still differ. The
         // master's result therefore travels as kind 3; a client uses this search
@@ -2462,17 +2537,30 @@ namespace NextDayRevival
         internal static void Sweep(Vector3 point, bool shooter,
                                    out int npcHits, out int vehicleHits, out int playerHits)
         {
+            Sweep(point, shooter, Radius, Mathf.Max(0f, F(_cfgDamage, 450f)),
+                  Mathf.Max(0f, F(_cfgVehicleDamage, 700f)), Mathf.Max(0f, F(_cfgPlayerDamage, 260f)),
+                  out npcHits, out vehicleHits, out playerHits);
+        }
+
+        /// <summary>The same sweep with its own radius and peaks: the An-2's
+        /// bombs (Revival.An2Bombs.cs) go off through exactly these rules -
+        /// owner 0 on NPCs, vehicles on the master, players from the shooter
+        /// and never one of his own faction.</summary>
+        internal static void Sweep(Vector3 point, bool shooter, float radius,
+                                   float npcPeak, float vehiclePeak, float playerPeak,
+                                   out int npcHits, out int vehicleHits, out int playerHits)
+        {
             npcHits = 0;
             vehicleHits = 0;
             playerHits = 0;
-            float radius = Radius;
+            radius = Mathf.Max(0.5f, radius);
 
             // ---- NPCs. Turret.TryDamage fills every argument but the damage
             //      with its type default, so damageOwnerId goes in as 0 - the
             //      anonymous owner that is credited to nobody.
             if (LookUp() && _npcType != null)
             {
-                float peak = Mathf.Max(0f, F(_cfgDamage, 450f));
+                float peak = npcPeak;
                 UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_npcType);
                 for (int i = 0; i < all.Length; i++)
                 {
@@ -2509,7 +2597,7 @@ namespace NextDayRevival
             //      a tank hit exactly as it does for every other blast.
             if (Master())
             {
-                float peak = Mathf.Max(0f, F(_cfgVehicleDamage, 700f));
+                float peak = vehiclePeak;
                 Type vgs = RevivalPlugin.TypeByName("VehicleGameSystem");
                 MethodInfo apply = vgs == null ? null : AccessTools.Method(vgs, "ApplyDamage",
                     new Type[] { typeof(float), typeof(int) }, null);
@@ -2536,7 +2624,7 @@ namespace NextDayRevival
             // ---- Players, shooter only, and never one of our own faction.
             if (shooter)
             {
-                float peak = Mathf.Max(0f, F(_cfgPlayerDamage, 260f));
+                float peak = playerPeak;
                 List<GameObject> players = Players();
                 for (int i = 0; i < players.Count; i++)
                 {
@@ -2843,7 +2931,7 @@ namespace NextDayRevival
                 // will not move, and the reason for that is not on the gun he
                 // may or may not be standing next to.
                 if (!string.IsNullOrEmpty(_travel)) { DrawPlate(_travel, 0.62f); return; }
-                if (!string.IsNullOrEmpty(_prompt)) DrawPlate(_prompt, 0.62f);
+                if (!string.IsNullOrEmpty(_prompt) && Hints.Prompts) DrawPlate(_prompt, 0.62f);   // NDR P9
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Mortar.Draw: " + ex); }
         }
@@ -3166,7 +3254,7 @@ namespace NextDayRevival
         /// <summary>Two procedural spatial clips, built once and generated the
         /// same way on every client - the pattern VehicleShotSound established,
         /// for the same reason: there is no donor AudioClip to borrow.</summary>
-        static class Sound
+        internal static class Sound
         {
             static AudioClip _thump;
             static AudioClip _whistle;

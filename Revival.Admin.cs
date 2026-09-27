@@ -1304,6 +1304,26 @@ namespace NextDayRevival
             GUILayout.Label("In front of you (Mi-8 you can fly - "
                             + PlayerHeli.CfgBoardKey.Value + " to get in)");
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // The flyable An-2 ready to go: full tanks, every repair part,
+            // full bomb racks. The host builds it, anyone else asks the host
+            // over the An-2's own spawn request - the helicopter's pattern.
+            if (GUILayout.Button("Spawn An-2 (ready)", GUILayout.Width(190f)))
+                Melde(PlayerAn2.SpawnReadyInFront());
+            GUILayout.Label("In front of you (repaired, fuelled, bombs aboard - "
+                            + PlayerAn2.CfgBoardKey.Value + " to get in)");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // FAB-50s for the An-2's racks, as the Gepard's belts above.
+            if (GUILayout.Button("An-2 bombs x" + An2Bombs.Capacity, GUILayout.Width(190f)))
+            {
+                string one;
+                GibItem(An2Bombs.ItemId, An2Bombs.Capacity, out one);
+                Melde(one);
+            }
+            GUILayout.Label("FAB-50 bombs into your inventory ("
+                            + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)");
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));

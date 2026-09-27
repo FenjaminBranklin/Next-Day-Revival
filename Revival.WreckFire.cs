@@ -274,6 +274,7 @@ namespace NextDayRevival
         {
             if (RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value) return;
             if (_noShader) return;
+            if (!Fx.On && !Anim.Lights) return;   // NDR P9: nothing of it would be drawn
 
             float scale = RevivalPlugin.CfgFireScale == null
                 ? 1f : Mathf.Max(0.1f, RevivalPlugin.CfgFireScale.Value);
@@ -297,7 +298,8 @@ namespace NextDayRevival
             Zungen(root, r, add, flame);
             Funken(root, r, add, flame);
             Rauch(root, r, blend, smoke);
-            Blitz(root, r);
+            if (Anim.Lights) Blitz(root, r);   // NDR P9: [Effects] ExplosionLights
+            Fx.ApplyAll(root);                 // NDR P9: [Effects] ParticleDensity
 
             UnityEngine.Object.Destroy(root, 8f);
         }
@@ -335,7 +337,7 @@ namespace NextDayRevival
             WrackFlammen(root, add,  0.75f, tank ? 1.15f : 1.25f);
             WrackFeuerkrone(root, add, tank ? 1.35f : 1.50f);
             WrackRauch(root, blend, tank ? 1.15f : 1.30f);
-            WrackLicht(root, tank ? 34f : 38f);
+            if (Anim.Lights) WrackLicht(root, tank ? 34f : 38f);   // NDR P9: [Effects] ExplosionLights
 
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("Vehicle: tall smoke and fire attached to "
@@ -367,6 +369,7 @@ namespace NextDayRevival
             Farbverlauf(ps, false);
             Groesse(ps, 0.80f, 0.08f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>
@@ -398,6 +401,7 @@ namespace NextDayRevival
             Farbverlauf(ps, false);
             Groesse(ps, 0.85f, 0.06f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>
@@ -432,6 +436,7 @@ namespace NextDayRevival
             rot.enabled = true;
             rot.z = new ParticleSystem.MinMaxCurve(-0.18f, 0.18f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>Opaque low down, slowly greyer, transparent only at the top.</summary>
@@ -564,6 +569,7 @@ namespace NextDayRevival
             Farbverlauf(ps, false);
             Groesse(ps, 0.80f, 0.06f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>
@@ -607,6 +613,7 @@ namespace NextDayRevival
             rot.enabled = true;
             rot.z = new ParticleSystem.MinMaxCurve(-0.30f, 0.30f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>Grey, and never opaque. WrackRauchFarbe holds 0.86 for two
@@ -730,7 +737,7 @@ namespace NextDayRevival
             HeliFeuerkrone(root, add);
             HeliRauchsaule(root, blend);
             HeliRauchstoss(root, blend);
-            HeliGlut(root);
+            if (Anim.Lights) HeliGlut(root);   // NDR P9: [Effects] ExplosionLights
 
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("PlayerHeli: aircraft fire attached to the "
@@ -769,6 +776,7 @@ namespace NextDayRevival
             Farbverlauf(ps, false);
             Groesse(ps, 0.80f, 0.10f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>The tall part. A vehicle throws tongues 2.8 to 6.2 units a
@@ -800,6 +808,7 @@ namespace NextDayRevival
             Farbverlauf(ps, false);
             Groesse(ps, 0.85f, 0.07f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>The landmark, and deliberately no more than that. It still
@@ -835,6 +844,7 @@ namespace NextDayRevival
             rot.enabled = true;
             rot.z = new ParticleSystem.MinMaxCurve(-0.16f, 0.16f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>
@@ -873,6 +883,7 @@ namespace NextDayRevival
             rot.enabled = true;
             rot.z = new ParticleSystem.MinMaxCurve(-0.22f, 0.22f);
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         /// <summary>Kerosene soot is dark, but it is not a painted wall: the

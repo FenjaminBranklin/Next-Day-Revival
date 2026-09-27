@@ -178,11 +178,14 @@ namespace NextDayRevival
         internal static void Draw()
         {
             if (!EastWorld.On || _label.Length == 0) return;
+            // NDR P9: [Hints] - the zone name shows on entering, then fades.
+            float fade = Hints.Alpha("east.zone", _label);
+            if (fade <= 0f) return;
             if (_st == null) { _st = new GUIStyle(GUI.skin.label); _st.fontSize = 14; }
             GUIStyle st = _st;
-            st.normal.textColor = Color.black;
+            st.normal.textColor = new Color(0f, 0f, 0f, fade);
             GUI.Label(new Rect(11f, 61f, 900f, 24f), _label, st);
-            st.normal.textColor = new Color(1f, 0.92f, 0.55f);
+            st.normal.textColor = new Color(1f, 0.92f, 0.55f, fade);
             GUI.Label(new Rect(10f, 60f, 900f, 24f), _label, st);
         }
 

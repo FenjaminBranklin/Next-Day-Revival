@@ -27,7 +27,8 @@ namespace NextDayRevival
         {
             internal string Name, Faction, Behavior, Key, Meta;
             internal bool Enabled, Seen, Loop;
-            // Airfield.cs's defender pockets: not from the editor channel.
+            // Airfield.cs's defender pockets and the military town's groups
+            // (Revival.MilitaryTown.cs): not from the editor channel.
             internal bool Builtin;
             internal float X, Z, Radius, Respawn, NextSpawn, Hold;
             internal int Count;
@@ -180,12 +181,13 @@ namespace NextDayRevival
             string[] source = LiveRoutes.Ground;
             // The airfield's built-in pockets (Airfield.cs) join the editor's
             // groups; they need no editor data and change with their config.
-            int builtin = Airfield.GroupsVersion();
+            int builtin = Airfield.GroupsVersion() ^ (MilitaryTown.GroupsVersion() * 31);
             if (source == null) source = _source;
             if (_loaded && source == _source && builtin == _builtin) return;
             if (source == null && builtin == 0) return;
             List<Group> fresh = source == null ? new List<Group>() : Parse(source);
             Airfield.AddGroups(fresh);
+            MilitaryTown.AddGroups(fresh);       // NDR military town: defenders, spotters, snipers
             foreach (Group g in fresh)
                 foreach (Group old in _groups)
                     if (g.Key == old.Key) { g.Seen = old.Seen; g.NextSpawn = old.NextSpawn; break; }
@@ -310,7 +312,7 @@ namespace NextDayRevival
                 if (g.Seen && g.NextSpawn < 0f) g.NextSpawn = Time.time + g.Respawn;
                 if (spawned || Time.time < g.NextSpawn) continue;
                 // An airfield pocket never appears in front of a player there.
-                if (Airfield.HoldSpawn(g)) { g.NextSpawn = Time.time + 60f; continue; }
+                if (Airfield.HoldSpawn(g) || MilitaryTown.HoldSpawn(g)) { g.NextSpawn = Time.time + 60f; continue; }
                 spawned = true;
                 if (Spawn(g)) { g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key; }
                 else g.NextSpawn = Time.time + 60f;

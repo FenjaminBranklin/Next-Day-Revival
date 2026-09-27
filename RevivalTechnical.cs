@@ -3680,14 +3680,17 @@ namespace NextDayRevival
             {
                 float tempo = CfgTracerSpeed == null ? 700f : CfgTracerSpeed.Value;
                 float laenge = CfgTracerLength == null ? 6f : CfgTracerLength.Value;
-                TechnicalTracerStreak.Spawn(von, bis, tempo, laenge * 1.6f,
-                                            0.24f, 0.10f, SpurHof, SpurHof);
-                TechnicalTracerStreak.Spawn(von, bis, tempo, laenge,
-                                            0.11f, 0.04f, SpurKern, SpurEnde);
+                if (Anim.Tracers)   // NDR P9: [Effects] Tracers
+                {
+                    TechnicalTracerStreak.Spawn(von, bis, tempo, laenge * 1.6f,
+                                                0.24f, 0.10f, SpurHof, SpurHof);
+                    TechnicalTracerStreak.Spawn(von, bis, tempo, laenge,
+                                                0.11f, 0.04f, SpurKern, SpurEnde);
+                }
 
                 Vector3 achse = bis - von;
                 float distanz = achse.magnitude;
-                if (distanz > 0.01f)
+                if (distanz > 0.01f && Anim.MuzzleFlash)   // NDR P9: [Effects] MuzzleFlashes
                 {
                     float feuer = Mathf.Min(2.5f, distanz);
                     List<Vector3> muendung = new List<Vector3>();

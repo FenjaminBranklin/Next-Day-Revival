@@ -24,20 +24,21 @@
 //     `BuyPlayerItemsPercent` (`docs/ai/tasks/testregion-arena.md`, the field
 //     list of `NPC_SpawnPoint`; RE 10 for the init chain that reads them).
 //
-//   2 WHAT HE SELLS IS COPIED, NEVER INVENTED. The three trade values above are
-//     read off the CIVILIAN settlement's own storekeeper spawn point at runtime
-//     and written onto ours. That is what "the same as the vendor in the civ
-//     settlement" means, and it is the same trick the artillery crew uses to
-//     take a settlement's real faction off a living man (RE 39). The rank list
-//     is CLONED, not shared: `RecalculateMarketItemsCategory` walks the list
-//     the storekeeper was given, and two traders holding the same List object
-//     is a bug waiting for the first time the game sorts it in place. Without a
-//     trader on the map the fall-back is ranks A-D and 50 percent, which is a
-//     working trader, and the log says it was a fall-back.
+//   2 HE IS COPIED WHOLE, NEVER INVENTED. The storekeeper spawn point of
+//     the Locator (the map's other armed-faction base) - or, without one, of
+//     the civilian settlement - is read at runtime and EVERY value that
+//     describes the man is written onto ours: behaviour, shop (`StorageId`,
+//     `MarketItemRanksSelling`, `BuyPlayerItemsPercent`), body, weapon, god
+//     mode, task. Not copied: his place (walk points, guard post), his side
+//     (the shop settlement is Traitor) and quest data. That is "the exact
+//     traitor equivalent of the vendors in the Locator and the civilian
+//     settlement". Lists are CLONED, never shared: `RecalculateMarketItems-
+//     Category` walks the list a storekeeper was given, and two traders
+//     holding one List object is a bug waiting for the first in-place sort.
+//     Without a trader on the map the fall-back is ranks A-D and 50 percent.
 //     The toolkit's own items ride along by themselves: `Registry`
 //     (`Revival.Items.cs`) writes them into every A-D list and into
-//     `MarketItemsPriceDictionary`, so anything the civilian trader offers this
-//     one offers too (RE 30, RE 30.1).
+//     `MarketItemsPriceDictionary` (RE 30, RE 30.1).
 //
 //   3 THE OPENING. The block is a piece of the map, and a piece of the map is
 //     not ours to damage: everything here is reversible, and the mesh asset in
@@ -69,28 +70,36 @@
 // - hide the block and draw it again as a box with a window - and it is only
 // ever used when the config says so.
 //
-// WHICH SIDE FACES THE STREET. Not guessed at a runtime raycast: the dirt road
-// through Litvinovka is a straight run of about 110 m and its bearing is known
-// from committed data (`assets/editor/roadnet_sample.json` edge 41, nodes 23
-// (-1434.33, -1458.74) and 18 (-1614.99, -1636.96) -> 225.4 degrees, and the
-// camp centre itself sits ON that road). The window looks at the closest point
-// of that line, which is the one direction a village kiosk can face. `Facing`
-// overrides it with a single number when the block turns out to stand the other
-// way round.
+// WHICH BLOCK, AND WHICH SIDE. Measured, not guessed (task 423561235e): the
+// level files (level7 = GW_Scene_1, level8 = its Chunk0) hold exactly one
+// box-shaped prop within 80 m of the camp centre, the covered well house
+// `GameWorldData/Kirill_Remade/Wells/Colodec2_LOD_Group`, 6.44 x 4.15 x
+// 3.63 m - the same object the 6.56.0 runtime search picked. The road through
+// the village (`assets/editor/roadnet_sample.json` edge 41, its CURVED
+// polyline) passes 31 m north of it, so the opening goes into its north side.
+// `KioskX/KioskZ/KioskYaw` are that counter, and the man is built there from
+// the first spawn, wherever the host stands. The runtime search stays - it
+// builds the opening from the block's own transform and still serves a camp
+// moved in the config - and `Block`, `Facing` and `StandX/Z/Yaw` override it.
 //
-// WHERE THE BLOCK IS is a question no file in this repository can answer: the
-// level data lives in the game folder, not here. So it is SEARCHED for, once a
-// player is near enough for the village to be loaded, and every candidate is
-// written to the log with its path, its size and its distance - so a wrong pick
-// is fixed by putting one name into `Block` rather than by another release.
+// WHY THE FIRST VERSION NEVER STOOD IN THE KIOSK (6.56.0 log). The spawn key
+// was fine - it always had the slash `Revival.GroundEnemies.cs` needs. But:
+// (a) the host was 6.7 km away, so he was built in the middle of the camp and
+// was to be "carried" into the shop later; (b) the carrying went through a
+// `_navMeshAgent` field and a `SetCalculatedPauseTime(float)` that NPC_AI2 does
+// not have (its agent is `_navAgent`), so the agent kept pulling him back; (c)
+// he had no post (task Empty, no GuardPoint) and was held by force every frame;
+// (d) Crew's `Absichern` treated him as a fighting crew - god mode forced off,
+// settlement alarm, recon drone. Now he is built at the counter, stands on
+// Guard at his own GuardPoint like the game's storekeepers, and
+// `Crew.DropCustomSquad(quiet)` skips the crew's combat set-up.
 //
 // MASTER AND CLIENT. The opening is local geometry and is built on EVERY
 // machine from the block's own transform, so everyone sees the same hole. The
-// man is a networked scene object and therefore master-only, exactly like the
-// camp around him. A master who has never been to Litvinovka cannot find the
-// block and therefore has no place to put the trader; `StandX`/`StandZ`/
-// `StandYaw` pin the spot once it is known, and the log prints the three
-// numbers ready to be copied.
+// man is a networked scene object built by the master. A client's copy is
+// rebuilt by `Crew.InitializeRemote` as a crew puppet, so every machine finds
+// him by his spawn key (`Kunden`) and applies the same shop through the game's
+// own `NPC_AI2.SetBehaviorPattern`.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree
 // lambdas, no LINQ. ASCII outside the Cyrillic of player-facing `Loc.T` text.
@@ -98,7 +107,8 @@
 // SEAMS OUTSIDE THIS FILE (all marked there):
 //   RevivalPlugin.cs           BindConfig / Tick / LateFrame.
 //   Revival.Crew.cs            DropCustomSquad - DropGroundSquad plus the
-//                              per-spawn-point callback this file needs.
+//                              per-spawn-point callback this file needs, and
+//                              `quiet`: no crew alarm, drone or god-mode-off.
 //   RevivalNewSettlement.cs    Wanted / Centre / Here / Unhate, now internal:
 //                              the camp owns the switch, the place, the faction
 //                              and the map gate. The shop opens and closes with
@@ -190,6 +200,31 @@ namespace NextDayRevival
         /// readback check only; the field itself is written by NAME.</summary>
         const int BehaviorStoreKeeper = 1;
 
+        /// <summary>NPCTask.Guard (Patrol 0, Guard 1, KillTarget 2,
+        /// WalkPointsTasks 3, Escape 4, Empty 5, Sleep 6 - `ilq.py fields
+        /// NPCTask`). A man on Guard walks to his `GuardPoint` and stays there,
+        /// facing its rotation (`NPC_AI2.InitSpawnPoint`).</summary>
+        const int TaskGuard = 1;
+
+        // THE KIOSK, MEASURED. The level files were read with UnityPy
+        // (level7 = GW_Scene_1, level8 = its Chunk0): the only box-shaped prop
+        // within 80 m of the camp centre is this covered well house, 6.44 x
+        // 4.15 x 3.63 m, and the 6.56.0 runtime log found the same object and
+        // put the serving hatch on its north side. The dirt road through the
+        // village (roadnet_sample.json edge 41, its CURVED polyline, not the
+        // straight node-to-node line) passes 31 m north of it at KioskStreet.
+        // With these the trader is built at his counter from the first
+        // spawn, wherever the host is - the first version put him in the middle
+        // of the camp until a host walked there and then failed to move him.
+        const string KioskName = "Colodec2_LOD_Group";
+        const float KioskX = -1545.09f, KioskZ = -1527.97f, KioskYaw = 2.55f;
+        static readonly Vector3 KioskStreet = new Vector3(-1551.7f, 0f, -1501.7f);
+
+        /// <summary>The name plate. `PlayerInteractingManager` localizes the key
+        /// first and returns a key longer than five characters verbatim when it
+        /// is not in the table (Crew.Punkt, same reason).</summary>
+        static string ShopName() { return Loc.T("Торговец предателей", "Traitor Trader"); }
+
         // ================================================================ state
 
         sealed class Block
@@ -268,6 +303,12 @@ namespace NextDayRevival
         static int _tradeGrantWeapon = -1;
         static int _tradeWeaponId = -1;
         static string _tradeFrom = "";
+        // Every value of the template storekeeper's spawn point, by field name,
+        // taken when the lookup hits (see Snapshot / Konfigurieren).
+        static readonly Dictionary<string, object> _template = new Dictionary<string, object>();
+        // His guard post: the Transform his spawn point's GuardPoint names.
+        static GameObject _post;
+        static float _nextClient;
 
         // ============================================================== binding
 
@@ -335,10 +376,12 @@ namespace NextDayRevival
                 + "(0.1..1.5). In hatch mode he stands that far IN FRONT of it "
                 + "instead, inside the hatch.");
             _cfgTraderFrom = cfg.Bind("TraitorVendor", "CopyShopFrom", "",
-                "Which trader on the map his shop is copied from. Empty = the "
-                + "one in the civilian settlement (a StoreKeeper spawn point "
-                + "under a settlement whose name mentions StoreKeeper or Peace). "
-                + "Any part of a settlement's name pins another one.");
+                "Which trader on the map he is copied from - his whole spawn "
+                + "point: shop, stash, body, behaviour. Empty = the trader of the "
+                + "Locator (the map's other armed-faction base, whose trader is "
+                + "the one a hostile camp has), then the civilian settlement "
+                + "(Peaces), then any other storekeeper. Any part of a "
+                + "settlement's name pins one, e.g. Peaces.");
             _cfgOutside = cfg.Bind("TraitorVendor", "VendorWithoutBlock", true,
                 "Put the trader in the village even when the block could not be "
                 + "found - in the open, at the centre of the camp. The "
@@ -347,9 +390,9 @@ namespace NextDayRevival
                 + "the candidates so the block can be pinned afterwards.");
             _cfgStandX = cfg.Bind("TraitorVendor", "StandX", 0f,
                 "Pin the exact spot the trader stands on, world X. 0 = work it "
-                + "out from the block. The log prints the three numbers of the "
-                + "spot it found, ready to be copied in here - which is also how "
-                + "a host who never walks to Litvinovka gets a trader there.");
+                + "out from the block, and before the block is seen use the "
+                + "measured spot at the kiosk's counter. The log prints the three "
+                + "numbers of the spot it found, ready to be copied in here.");
             _cfgStandZ = cfg.Bind("TraitorVendor", "StandZ", 0f,
                 "Pin the exact spot, world Z. 0 = work it out from the block.");
             _cfgStandYaw = cfg.Bind("TraitorVendor", "StandYaw", -1f,
@@ -450,11 +493,22 @@ namespace NextDayRevival
                 if (_block == null && near && Time.time >= _nextScan) Scan(centre);
                 if (_block != null && _window == null) Open();
 
+                // EVERY machine that sees him: a client's copy is rebuilt by
+                // Crew as a crew puppet and must be made a storekeeper there too.
+                if (near && Time.time >= _nextClient) Kunden();
+
                 if (!RevivalTroopInsertion.MasterClient()) return;
                 if (Time.time < _worldSince + SettleSeconds) return;
 
                 Stand();
                 if (!_standKnown) return;
+                if (_post != null)
+                {
+                    // The block, found later, may have moved his spot: the post
+                    // moves with it and LateFrame carries him there once.
+                    _post.transform.position = _stand;
+                    _post.transform.rotation = _look;
+                }
 
                 if (_shop == null || _vendor == null)
                 {
@@ -475,13 +529,19 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// Hold the man on his spot, AFTER the animator has written his root.
-        /// The same pass `TechnicalCrew.Setzen` makes for a man riding a truck,
-        /// for the same measured reason: a character placed in Update is back
-        /// where the animation put him before anything is drawn, and a
-        /// NavMeshAgent with a path of its own walks him out of the shop.
-        /// Master only - his position is replicated from there, and a client
-        /// that writes a remote puppet's transform only fights the sync.
+        /// Put him back at his post when something has carried him off it.
+        ///
+        /// NOT A PER-FRAME HOLD any more. He stands on Guard at his own
+        /// `GuardPoint`, which is how the game keeps every one of its
+        /// storekeepers at the counter; the first version had no post (task
+        /// Empty) and pinned him here every frame instead - through a
+        /// `_navMeshAgent` field that does not exist (the game's is `_navAgent`,
+        /// RE) and a `SetCalculatedPauseTime(float)` that does not exist either,
+        /// so the agent kept pulling him back and the pin only ever fought it.
+        /// What is left is the one job the post cannot do: a man whose spot has
+        /// MOVED (the block was found after he was built) or who was shoved far
+        /// off it is warped there once, agent included, AFTER the animator has
+        /// written his root. Master only - a client's copy follows the sync.
         /// </summary>
         internal static void LateFrame()
         {
@@ -489,40 +549,27 @@ namespace NextDayRevival
             try
             {
                 if (!RevivalTroopInsertion.MasterClient()) return;
-
-                // HANDS OFF WHILE SOMEBODY IS TALKING TO HIM. The trade runs
-                // through the game's own talk state, and a man whose intentions
-                // are cleared and whose body is turned sixty times a second
-                // while that state is up is a shop that closes in the customer's
-                // face. He cannot walk away during a conversation either, so
-                // there is nothing to hold.
+                // Hands off while somebody is trading with him: moving the man
+                // closes the window in the customer's face.
                 if (Flag(_vendor, "IsTalkActive")) return;
 
                 Transform tr = _vendor.transform;
                 if (tr == null) return;
-                float away = (tr.position - _stand).sqrMagnitude;
-                if (away > 0.0004f)
+                Vector3 off = tr.position - _stand;
+                off.y = 0f;
+                if (off.sqrMagnitude < 1.44f) return;       // 1.2 m: he is there
+
+                NavMeshAgent agent = Agent(_vendor);
+                try
                 {
-                    // Only a REAL jump takes the agent with it - it is a NavMesh
-                    // query, and a man who has drifted a centimetre is not
-                    // walking anywhere (TechnicalCrew.Setzen, same reason).
-                    if (away > 4f)
+                    if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
                     {
-                        NavMeshAgent agent = Agent(_vendor);
-                        try
-                        {
-                            if (agent != null && agent.isActiveAndEnabled
-                                && agent.isOnNavMesh)
-                            {
-                                agent.ResetPath();
-                                agent.Warp(_stand);
-                            }
-                        }
-                        catch { }
+                        agent.ResetPath();
+                        agent.Warp(_stand);
                     }
-                    tr.position = _stand;
-                    Quiet(_vendor);
                 }
+                catch { }
+                tr.position = _stand;
                 tr.rotation = _look;
             }
             catch (Exception ex)
@@ -625,7 +672,15 @@ namespace NextDayRevival
                     return;
                 }
             }
-            else best = found[0];
+            else
+            {
+                // The measured kiosk wins over any score when it is among the
+                // candidates (see KioskName); the search stays for a moved camp.
+                for (int i = 0; i < found.Count && best == null; i++)
+                    if (found[i].Path.IndexOf(KioskName, StringComparison.Ordinal) >= 0)
+                        best = found[i];
+                if (best == null) best = found[0];
+            }
 
             _block = Frame(best);
             if (_block == null)
@@ -957,14 +1012,22 @@ namespace NextDayRevival
         }
 
         /// <summary>Which way the street is from here. `Facing` answers it with
-        /// one number; otherwise the road through the village is a straight line
-        /// of known bearing through the camp centre, and the window looks at the
-        /// closest point of it.</summary>
+        /// one number; near the kiosk the measured point of the real road
+        /// (`KioskStreet`); elsewhere a straight line of known bearing through
+        /// the camp centre, and the window looks at the closest point of it.
+        /// </summary>
         static Vector3 ToRoad(Vector3 from)
         {
             float facing = _cfgFacing == null ? -1f : _cfgFacing.Value;
             if (facing >= 0f)
                 return Quaternion.Euler(0f, facing, 0f) * Vector3.forward;
+
+            // Near the kiosk the road's real, curved line is known: it passes
+            // KioskStreet. The straight line below is 60 m off the camp centre
+            // there and all but ties two sides of the block.
+            Vector3 street = new Vector3(KioskStreet.x - from.x, 0f, KioskStreet.z - from.z);
+            if (street.sqrMagnitude > 1f && street.sqrMagnitude < 80f * 80f)
+                return street.normalized;
 
             float bearing = _cfgRoadBearing == null ? DefaultRoadBearing
                                                     : _cfgRoadBearing.Value;
@@ -1940,6 +2003,25 @@ namespace NextDayRevival
                 return;
             }
 
+            // No block seen yet: the measured counter of the kiosk (KioskX/Z).
+            // Only while the camp still stands where the kiosk is - a camp moved
+            // in the config is searched for instead. The ground comes from the
+            // height data, never a raycast: a ray from above would land on the
+            // hatch roof or on the well house itself.
+            Vector3 kiosk = new Vector3(KioskX, 0f, KioskZ);
+            Vector3 camp = NewSettlement.Centre();
+            float kx = camp.x - KioskX, kz = camp.z - KioskZ;
+            if (kx * kx + kz * kz < 80f * 80f)
+            {
+                float ky;
+                if (!RevivalTroopInsertion.TerrainHeight(kiosk, out ky)
+                    && !RevivalTroopInsertion.GroundY(kiosk, out ky)) return;
+                _stand = new Vector3(KioskX, ky, KioskZ);
+                _look = Quaternion.Euler(0f, KioskYaw, 0f);
+                _standKnown = true;
+                return;
+            }
+
             if (_cfgOutside == null || !_cfgOutside.Value) return;
             // No block: at least the settlement gets its trader, the way every
             // other settlement has one. Not before the search has actually run
@@ -1975,22 +2057,37 @@ namespace NextDayRevival
             }
             LookUpTrade();
             _tradeStale = false;       // he is built from what is known NOW
+
+            // HIS POST. The spawn point's GuardPoint must name a live Transform
+            // BEFORE StartMainInit reads it; it hangs under the shop settlement
+            // afterwards, so it goes when he goes.
+            if (_post != null) UnityEngine.Object.Destroy(_post);
+            _post = new GameObject("TraitorVendor_Post");
+            _post.transform.position = _stand;
+            _post.transform.rotation = _look;
             try
             {
                 Vector3[] where = new Vector3[] { _stand };
+                // quiet: no crew alarm, no drone, no god mode forced off - he is
+                // a storekeeper, not a gunman (Crew.DropCustomSquad).
                 _shop = Crew.DropCustomSquad(_stand, where, "traitor", null, ShopKey,
-                    new Action<Component, int>(Konfigurieren));
+                    new Action<Component, int>(Konfigurieren), true);
             }
             catch (Exception ex)
             {
+                UnityEngine.Object.Destroy(_post);
+                _post = null;
                 Fail("the trader could not be built - " + ex.Message);
                 return;
             }
             if (_shop == null)
             {
+                UnityEngine.Object.Destroy(_post);
+                _post = null;
                 Fail("Crew built nobody for the shop - the Crew lines above say why");
                 return;
             }
+            _post.transform.SetParent(_shop.transform, true);
 
             // The camp does not shoot its own trader, and its own trader raises
             // no alarm about the camp: the same in-place fix the camp uses.
@@ -2006,6 +2103,7 @@ namespace NextDayRevival
             }
 
             int pattern = (int)Number(_vendor, "BehaviorPattern");
+            object godMode = Field(_vendor, "GodModeEnabled");
             _goneSince = 0f;
             _nextWatch = Time.time + WatchSeconds;
             RevivalPlugin.L.LogInfo("TraitorVendor: the trader stands at "
@@ -2015,9 +2113,12 @@ namespace NextDayRevival
                 + (pattern == BehaviorStoreKeeper ? " = StoreKeeper"
                    : " - NOT a StoreKeeper, so he will not trade; the spawn point "
                      + "did not take the value")
-                + ", shop " + (_tradeCopied ? "copied from " + _tradeFrom
-                               : "on the fall-back ranks A-D at "
-                                 + Num(_tradePercent * 100f) + " percent") + ".");
+                + ", guarding his post"
+                + (godMode is bool ? ", god mode " + godMode : "")
+                + ", " + (_tradeCopied ? "copied whole from the trader of "
+                          + _tradeFrom + " (" + _template.Count + " values)"
+                          : "on the fall-back ranks A-D at "
+                            + Num(_tradePercent * 100f) + " percent") + ".");
             if (!_announced)
             {
                 _announced = true;
@@ -2028,70 +2129,146 @@ namespace NextDayRevival
         }
 
         /// <summary>
-        /// The one difference between this man and a crewman, written on his
-        /// spawn point before the game builds him. Everything the trade needs is
-        /// here: `InitSpawnNpc` hands `BehaviorPattern`, `StorageId`,
-        /// `MarketItemRanksSelling` and `BuyPlayerItemsPercent` straight to
-        /// `NPC_AI2.SetBehaviorPattern`, which is how every shipped storekeeper
-        /// on the map is made.
+        /// Write the trader onto his spawn point before the game builds him.
+        ///
+        /// THE WHOLE TEMPLATE, NOT FOUR VALUES. `InitSpawnNpc` derives every
+        /// part of an NPC from his spawn point (RE 10), so the storekeeper of
+        /// the Locator / the civilian settlement is reproduced by copying his
+        /// spawn point: behaviour, shop (`StorageId`, `MarketItemRanksSelling`,
+        /// `BuyPlayerItemsPercent`), body (`NPCType` and the appearance ids),
+        /// weapon, god mode, task. What is NOT copied is what belongs to his
+        /// place and his side: walk points, guard post, quest data, the
+        /// individual faction (the shop settlement's Traitor options decide),
+        /// and the init bookkeeping (`IsInitialized`, `MyNPC`).
+        ///
+        /// His post is `_post` and his task Guard unless the template's own task
+        /// needs no walk points (Guard, Empty, Sleep): the game then holds him
+        /// at the counter the way it holds its own traders.
         /// </summary>
         static void Konfigurieren(Component sp, int index)
         {
             try
             {
+                int copied = 0;
+                foreach (KeyValuePair<string, object> kv in _template)
+                {
+                    if (kv.Key == "MarketItemRanksSelling") continue;   // cloned below
+                    Write(sp, kv.Key, Duplicate(kv.Value));
+                    copied++;
+                }
+
                 SetEnum(sp, "BehaviorPattern", "StoreKeeper");
                 // NPCType 0 is "Customizable" and would build a random body out
-                // of this point's own appearance fields - a crewman's, which is
-                // a soldier. A trader is a PREFAB: Kladovshik_NPC, the one the
-                // runtime log names in the civilian settlement.
-                if (_tradeNpcType > 0) SetNumber(sp, "NPCType", _tradeNpcType);
-                else SetEnum(sp, "NPCType", "Kladovshik");
-
+                // of a crewman's appearance fields - a soldier behind the counter.
+                if ((int)Number(sp, "NPCType") <= 0)
+                {
+                    if (_tradeNpcType > 0) SetNumber(sp, "NPCType", _tradeNpcType);
+                    else SetEnum(sp, "NPCType", "Kladovshik");
+                }
                 if (_tradeStorage != null) Write(sp, "StorageId", _tradeStorage);
                 object ranks = Ranks(sp);
                 if (ranks != null) Write(sp, "MarketItemRanksSelling", ranks);
                 SetNumber(sp, "BuyPlayerItemsPercent", _tradePercent);
 
-                // A trader stands behind his counter. No walking, no guard post
-                // of a template's, no loot to roll on a man who cannot be killed.
+                // His place, not the template's.
+                Write(sp, "UseIndividualWalkPoints", false);
+                Write(sp, "WalkPointsRootTr", null);
                 Write(sp, "RandomWalkPoint", false);
                 Write(sp, "CircleWalkPoint", false);
-                Write(sp, "UseIndividualWalkPoints", false);
-                // MainTask stays the 0 Crew.Punkt writes, and is deliberately
-                // NOT copied off the civilian trader: a task that means "stand
-                // at your GuardPoint" with no GuardPoint is a null reference
-                // inside the game's own AI. He is held on his spot by the frame
-                // pass instead, which needs no task at all.
-                Write(sp, "GuardPoint", null);
-                SetNumber(sp, "MainTask", 0f);
-                SetNumber(sp, "RandomItemsCount", 0);
-                Write(sp, "UseIndividualGodMode", true);
-                Write(sp, "GodModeEnabled", true);
-                // What he carries, but only when the man he is copied from
-                // carries something a fixed id can name. A WeaponId of 0 would
-                // send NetworkShowWeapon at a prefab that does not exist, and
-                // the crew weapon Crew.UsableWeapon has already checked is a
-                // better answer than that.
-                if (_tradeWeaponId > 0)
+                Write(sp, "GuardPoint", _post == null ? null : _post.transform);
+                int task = (int)Number(sp, "MainTask");
+                if (_post != null && task != 1 && task != 5 && task != 6)
+                    SetNumber(sp, "MainTask", TaskGuard);
+                // His side: the settlement's Traitor options, never a Peace or
+                // Marauder faction carried over from the template.
+                Write(sp, "UseIndividualFraction", false);
+                if (copied == 0)
                 {
-                    SetNumber(sp, "GrantWeaponType", _tradeGrantWeapon >= 0
-                                                     ? _tradeGrantWeapon : 1f);
-                    SetNumber(sp, "WeaponId", _tradeWeaponId);
+                    // No template: what every shipped storekeeper has.
+                    SetNumber(sp, "RandomItemsCount", 0);
+                    Write(sp, "UseIndividualGodMode", true);
+                    Write(sp, "GodModeEnabled", true);
+                    if (_tradeWeaponId > 0)
+                    {
+                        SetNumber(sp, "GrantWeaponType", _tradeGrantWeapon >= 0
+                                                         ? _tradeGrantWeapon : 1f);
+                        SetNumber(sp, "WeaponId", _tradeWeaponId);
+                    }
                 }
 
-                // PlayerInteractingManager localizes this key before it draws the
-                // name plate, and a key longer than five characters that is not
-                // in the table is returned verbatim (Crew.Punkt, same reason).
+                // The name plate needs a non-null key (Crew.Punkt, same reason).
                 FieldInfo qf = AccessTools.Field(sp.GetType(), "Quests");
                 object quests = qf == null ? null : qf.GetValue(sp);
-                if (quests != null) Write(quests, "NameKey",
-                    Loc.T("Торговец", "Trader"));
+                if (quests != null) Write(quests, "NameKey", ShopName());
             }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("TraitorVendor: the spawn point could "
                     + "not be made a trader's - " + ex.Message);
             }
+        }
+
+        /// <summary>Spawn-point fields that are NOT taken off the template:
+        /// place, side, quest data and init bookkeeping. See Konfigurieren.
+        /// </summary>
+        static readonly string[] NotCopied = new string[] {
+            "Quests", "IsInitialized", "MyNPC", "UseIndividualWalkPoints",
+            "WalkPointsRootTr", "RandomWalkPoint", "CircleWalkPoint", "GuardPoint",
+            "UseIndividualFraction", "IndividualFraction", "Active" };
+
+        /// <summary>Every value of the template's spawn point that describes the
+        /// MAN (see NotCopied), by name. Scene objects are skipped - a reference
+        /// into the civilian settlement is never carried into ours.</summary>
+        static void Snapshot(Component sp)
+        {
+            _template.Clear();
+            FieldInfo[] fields = sp.GetType().GetFields(BindingFlags.Instance
+                | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+            for (int i = 0; i < fields.Length; i++)
+            {
+                FieldInfo f = fields[i];
+                if (f.IsInitOnly || f.IsLiteral) continue;
+                if (Array.IndexOf(NotCopied, f.Name) >= 0) continue;
+                if (typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType)) continue;
+                try { _template[f.Name] = Duplicate(f.GetValue(sp)); }
+                catch { }
+            }
+        }
+
+        /// <summary>A copy of a list or array, so no two traders share one
+        /// collection (the game sorts rank lists in place); values as they are.
+        /// </summary>
+        static object Duplicate(object v)
+        {
+            if (v == null) return null;
+            Array arr = v as Array;
+            if (arr != null) return arr.Clone();
+            Type t = v.GetType();
+            System.Collections.IList list = v as System.Collections.IList;
+            if (list != null && t.IsGenericType)
+            {
+                try
+                {
+                    System.Collections.IList made =
+                        (System.Collections.IList)Activator.CreateInstance(t);
+                    for (int i = 0; i < list.Count; i++) made.Add(list[i]);
+                    return made;
+                }
+                catch { return v; }
+            }
+            return v;
+        }
+
+        /// <summary>God mode as the template storekeeper has it; on for the
+        /// fall-back, which is what every shipped storekeeper has.</summary>
+        static bool TemplateGod()
+        {
+            object use, on;
+            if (_template.TryGetValue("UseIndividualGodMode", out use)
+                && _template.TryGetValue("GodModeEnabled", out on)
+                && use is bool && on is bool && (bool)use)
+                return (bool)on;
+            return true;
         }
 
         /// <summary>
@@ -2147,9 +2324,14 @@ namespace NextDayRevival
                     string lower = owner.ToLowerInvariant();
                     if (pin.Length > 0 && !Has(lower, pin)) continue;
 
+                    // The Locator's trader first: the map's other armed-faction
+                    // base, so his is the shop a hostile camp's trader mirrors
+                    // (RE 39: Locator and Peaces are the two IsMain settlements,
+                    // Locator Marauder, Peaces Peace). Then the civilian one.
                     int score = 0;
-                    if (Has(lower, "storekeeper")) score += 3;
+                    if (Has(lower, "locator")) score += 3;
                     if (Has(lower, "peace")) score += 2;
+                    if (Has(lower, "storekeeper")) score += 1;
                     if (pin.Length > 0) score += 4;
                     if (score <= bestScore) continue;
                     bestScore = score;
@@ -2169,6 +2351,7 @@ namespace NextDayRevival
                     _tradeWeaponId = (int)Number(best, "WeaponId");
                     _tradeFrom = bestName;
                     _tradeCopied = true;
+                    Snapshot(best);
                     RevivalPlugin.L.LogInfo("TraitorVendor: the shop is copied from "
                         + "the trader of \"" + bestName + "\" - storage "
                         + (_tradeStorage == null ? "?" : _tradeStorage.ToString())
@@ -2206,12 +2389,17 @@ namespace NextDayRevival
         /// with the same contents is what the game gives each of them.</summary>
         static object Ranks(Component sp)
         {
+            FieldInfo fi = AccessTools.Field(sp.GetType(), "MarketItemRanksSelling");
+            return fi == null ? null : CloneRanks(fi.FieldType);
+        }
+
+        /// <summary>The template's rank list as a new List of the given type;
+        /// every rank (A-D) without a template.</summary>
+        static object CloneRanks(Type listType)
+        {
             try
             {
-                FieldInfo fi = AccessTools.Field(sp.GetType(), "MarketItemRanksSelling");
-                if (fi == null) return null;
-                Type listType = fi.FieldType;
-                if (!listType.IsGenericType) return null;
+                if (listType == null || !listType.IsGenericType) return null;
                 object made = Activator.CreateInstance(listType);
                 System.Collections.IList target = made as System.Collections.IList;
                 if (target == null) return null;
@@ -2329,40 +2517,93 @@ namespace NextDayRevival
             if (ai == null) return null;
             try
             {
-                FieldInfo fi = AccessTools.Field(ai.GetType(), "_navMeshAgent");
+                FieldInfo fi = AccessTools.Field(ai.GetType(), "_navAgent");
                 NavMeshAgent a = fi == null ? null : fi.GetValue(ai) as NavMeshAgent;
                 return a != null ? a : ai.GetComponent<NavMeshAgent>();
             }
             catch { return ai.GetComponent<NavMeshAgent>(); }
         }
 
-        static MethodInfo _mClearIntentions, _mPauseTime;
-        static Type _mQuietOwner;
+        static MethodInfo _mBehavior, _mGod;
+        static Type _mBehaviorOwner;
 
-        /// <summary>Keep the vanilla idle logic off him: `IdleStateAction` queues
-        /// its own intentions on every pass and returns early while the
-        /// calculated pause is still running, so a short pause refreshed every
-        /// frame is the whole hold - the same one the technical's crew and a
-        /// posted artillery man use.</summary>
-        static void Quiet(Component ai)
+        /// <summary>
+        /// EVERY MACHINE. Make every copy of him a storekeeper.
+        ///
+        /// Only the master builds him through his spawn point. A client gets
+        /// the Photon object and `Crew.InitializeRemote` rebuilds its context as
+        /// a CREW PUPPET: a fresh spawn point, Aggressive, "Patrol Crew" on the
+        /// name plate. The prefab is right (Kladovshik travels in the Photon
+        /// path), the shop is not - a joined player would find a man in the
+        /// kiosk who does not trade. So each machine finds him by his spawn key
+        /// and hands the game's own `NPC_AI2.SetBehaviorPattern` the same four
+        /// values the master's spawn point carries - read off the same template
+        /// storekeeper, which is a scene object on every machine. On the master
+        /// the check finds a StoreKeeper already and does nothing.
+        /// </summary>
+        static void Kunden()
         {
-            Type t = ai.GetType();
-            if (!ReferenceEquals(t, _mQuietOwner))
+            _nextClient = Time.time + 5f;
+            Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
+            if (npcType == null) return;
+            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(npcType);
+            for (int i = 0; i < all.Length; i++)
             {
-                _mQuietOwner = t;
-                _mClearIntentions = AccessTools.Method(t, "ClearIntentions", null, null);
-                _mPauseTime = AccessTools.Method(t, "SetCalculatedPauseTime",
-                                                 new Type[] { typeof(float) }, null);
-                if (_mPauseTime == null)
-                    _mPauseTime = AccessTools.Method(t, "SetPauseTime",
-                                                     new Type[] { typeof(float) }, null);
+                Component ai = all[i] as Component;
+                if (ai == null || Crew.GroundKey(ai) != ShopKey) continue;
+                if (!Flag(ai, "IsInitialized")) continue;      // Crew is not done yet
+                if ((int)Number(ai, "BehaviorPattern") == BehaviorStoreKeeper) continue;
+                Bekehren(ai);
             }
+        }
+
+        static void Bekehren(Component ai)
+        {
             try
             {
-                if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
-                if (_mPauseTime != null) _mPauseTime.Invoke(ai, new object[] { 1.4f });
+                LookUpTrade();
+                Type t = ai.GetType();
+                if (!ReferenceEquals(t, _mBehaviorOwner))
+                {
+                    _mBehaviorOwner = t;
+                    _mBehavior = null;
+                    foreach (MethodInfo m in t.GetMethods(BindingFlags.Instance
+                        | BindingFlags.Public | BindingFlags.NonPublic))
+                        if (m.Name == "SetBehaviorPattern" && m.GetParameters().Length == 4)
+                        { _mBehavior = m; break; }
+                    _mGod = AccessTools.Method(t, "SetGodMode", new Type[] { typeof(bool) }, null);
+                }
+                if (_mBehavior == null)
+                {
+                    Fail("NPC_AI2.SetBehaviorPattern(4) is missing - a client's copy "
+                        + "of the trader cannot be made one");
+                    return;
+                }
+                ParameterInfo[] ps = _mBehavior.GetParameters();
+                object pattern = Enum.ToObject(ps[0].ParameterType, BehaviorStoreKeeper);
+                object storage = _tradeStorage != null
+                    && ps[1].ParameterType.IsInstanceOfType(_tradeStorage)
+                    ? _tradeStorage : Enum.ToObject(ps[1].ParameterType, 0);
+                object ranks = CloneRanks(ps[2].ParameterType);
+                _mBehavior.Invoke(ai, new object[] { pattern, storage, ranks, _tradePercent });
+                // SetBehaviorPattern stores the four values; the field that
+                // ApplyDamage and the interaction read is the same one the spawn
+                // point would have set.
+                Write(ai, "BehaviorPattern", pattern);
+                if (_mGod != null) _mGod.Invoke(ai, new object[] { TemplateGod() });
+
+                object sp = Field(ai, "MySpawnPoint");
+                object quests = Field(sp, "Quests");
+                if (quests != null) Write(quests, "NameKey", ShopName());
+
+                RevivalPlugin.L.LogInfo("TraitorVendor: this machine's copy of the "
+                    + "trader is a storekeeper now (" + (_tradeCopied ? "shop of "
+                    + _tradeFrom : "fall-back shop") + ").");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Fail("a client's copy of the trader - " + ex.Message);
+            }
         }
 
         static object Field(object owner, string name)

@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.56.0";
+        public const string VERSION = "6.57.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -343,6 +343,9 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgPatrolGunPointBlank;
         internal static ConfigEntry<float> CfgPatrolShellDamage;
         internal static ConfigEntry<float> CfgPatrolShellRadius;
+        internal static ConfigEntry<float> CfgPatrolShellInfantryDamage;
+        internal static ConfigEntry<float> CfgPatrolShellInfantryRadius;
+        internal static ConfigEntry<float> CfgPatrolShellLethalRadius;
         internal static ConfigEntry<bool> CfgPatrolCrush;
         internal static ConfigEntry<float> CfgPatrolCrushHeight;
         internal static ConfigEntry<float> CfgPatrolCrushWidth;
@@ -357,6 +360,14 @@ namespace NextDayRevival
         internal static ConfigEntry<int> CfgPatrolCrewDroneHitpoints;
         internal static ConfigEntry<float> CfgPatrolCrewDroneHitRadius;
         internal static ConfigEntry<int> CfgPatrolCrewDroneEventCode;
+        internal static ConfigEntry<float> CfgPatrolCrewDroneLaunchSeconds;
+        internal static ConfigEntry<int> CfgPatrolCrewDroneMaxAir;
+        internal static ConfigEntry<int> CfgPatrolCrewDroneAreaMax;
+        internal static ConfigEntry<float> CfgPatrolCrewDroneAreaRadius;
+        internal static ConfigEntry<float> CfgPatrolCrewDroneAreaCooldown;
+        internal static ConfigEntry<int> CfgPatrolCrewLawRounds;
+        internal static ConfigEntry<float> CfgPatrolCrewLawReload;
+        internal static ConfigEntry<float> CfgPatrolCrewLawMinRange;
         internal static ConfigEntry<bool> CfgAdmin;
         internal static ConfigEntry<string> CfgAdminKey;
         internal static ConfigEntry<string> CfgAdminIds;
@@ -460,10 +471,13 @@ namespace NextDayRevival
             RoadClear.Install(gameObject, Config);   // every road free of objects and trees
             MapScene.BindConfig(Config);         // NDR region gate: one map's data on one map
             EastTile.BindConfig(Config);         // research: east extension probe, off by default
-            EastWorld.BindConfig(Config);        // GW_Scene_1 + east tile as one world, off by default
+            EastWorld.BindConfig(Config);        // GW_Scene_1 + east tile as one world, on by default since 6.57.0
             EastCrossings.BindConfig(Config);    // east world: the three saddle cuts, only with [World] EastTile
             Airfield.BindConfig(Config);         // east world: airfield loot, defender pockets, event budget
+            MilitaryTown.BindConfig(Config);     // east world: military town batteries, AA site, defenders, loot, reinforcements
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
+            ContentPerf.BindConfig(Config);      // east world: LOD/cull, shadows, colliders, interiors, batching of content scenes
+            ViewDistance.BindConfig(Config);     // view distance Low/Medium/High/Ultra (far clip, prop culling, fog)
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
@@ -484,6 +498,10 @@ namespace NextDayRevival
             PlayerHeli.BindConfig(Config);       // NDR the Mi-8 a player flies himself
             PlayerAn2.BindConfig(Config);        // NDR the An-2 a player flies (off by default)
             An2Repair.BindConfig(Config);        // NDR An-2 repair loop: four stages, fuel (off by default)
+            An2Bombs.BindConfig(Config);         // NDR An-2 bombs: racks, bombsight, release ([Gameplay] An2Bombs)
+            FuelBalance.BindConfig(Config);      // NDR fuel use and tank size per vehicle class
+            FuelStations.BindConfig(Config);     // NDR fuel columns: a few canisters, slow refill
+            FuelDepot.BindConfig(Config);        // NDR airfield POL depot: damageable tanks, finite pool
             Parachute.BindConfig(Config);         // NDR parachute item and the jump out of a helicopter
             AirfieldAmbience.BindConfig(Config);
             WindSound.BindConfig(Config);        // NDR high-altitude wind, kept on in the heli and under canopy
@@ -494,11 +512,16 @@ namespace NextDayRevival
             ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
             Gepard.BindConfig(Config);           // NDR Gepard anti-aircraft gun (radar fire control)
             GepardCrew.BindConfig(Config);       // NDR Gepard as an NPC vehicle: riding crew, air-first gunner
+            Flak.BindConfig(Config);             // east airfield: ZU-23-2 flak guns on the AA positions (P4)
+            TowerRadar.BindConfig(Config);       // east airfield: the tower C1 as air defence HQ, radar + console (P5)
+            NoFly.BindConfig(Config);            // no-fly zones: warning, zone defence, scripted flak (P6a)
+            BtrGun.BindConfig(Config);           // NDR MTW (BTR-80A) gun: game flash, cases, tracer, impacts, recoil
             LiveRoutes.BindConfig(Config);
             FrameProf.BindConfig(Config);        // NDR frame-time overlay (F6)
             PeerCheck.BindConfig(Config);        // NDR version badge + peer mismatch warning
             NpcWar.BindConfig(Config);           // NDR NPC-vs-NPC combat for troop squads
             MapLabels.BindConfig(Config);        // NDR map names: fixed places for individual labels
+            Settings.BindConfig(Config);         // NDR P9: particle density, animation switches, hints, settings window
             BuildItemTable();
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
@@ -528,6 +551,7 @@ namespace NextDayRevival
             PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
             PlayerAn2.Install(_harmony);         // NDR player-flown An-2: carrier prepare, shared body lock
             An2Repair.Install(_harmony);         // NDR An-2 repair: the body freeze while fitting
+            FuelDepot.Install(_harmony);         // NDR POL depot: explosion and firearm hits on the tanks
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
             EastWorld.Install(_harmony);         // east world: nothing is patched while [World] EastTile is off
@@ -539,6 +563,9 @@ namespace NextDayRevival
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             Gepard.Install(_harmony);            // NDR Gepard (spawn marker, event channel, explosion armour)
             GepardCrew.Install(_harmony);        // NDR Gepard crew: the men inside cannot be hurt through the hull
+            MilitaryTown.Install(_harmony);      // east world: explosions on the town guns (only with the town on)
+            Flak.Install(_harmony);              // east airfield flak: event channel, the manning player's input lock
+            TowerRadar.Install(_harmony);        // tower radar HQ: the console's input lock, hits on the radar and console
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             ApMine.Install(_harmony);            // NDR anti-personnel mine
             Stinger.Install(_harmony);
@@ -1140,8 +1167,16 @@ namespace NextDayRevival
             CfgTankExplosionDamage = Config.Bind("Tank", "ExplosionDamage", 1600f,
                 "Sprengschaden am Einschlag. Knapp doppelt so viel wie die LAW - "
                 + "die ist eine Handwaffe, das hier ist Artillerie.");
-            CfgTankExplosionRadius = Config.Bind("Tank", "ExplosionRadius", 16f,
-                "Wirkungsradius der Sprengwirkung in Metern.");
+            CfgTankExplosionRadius = Config.Bind("Tank", "ExplosionRadius", 28f,
+                "Radius of full blast damage in world units (about 2.8 units to "
+                + "the metre). The game's explosion keeps full damage out to this "
+                + "radius and falls off to zero at twice it; cover blocks it. 28 "
+                + "(10 m full, 20 m rim) kills a group of NPCs out to about 17 m "
+                + "with the 1600 damage above. 16 was about 5.7 m and left most "
+                + "of a group standing beside the impact.");
+            // P11 combat balance: migrate the released default, or the bigger
+            // splash reaches nobody who already has a config file.
+            if (CfgTankExplosionRadius.Value == 16f) CfgTankExplosionRadius.Value = 28f;
             CfgTankDelay = Config.Bind("Tank", "FireDelay", 12f,
                 "Ladezeit in Sekunden. Ein echter T-72 laedt mit Lademaschine in "
                 + "sieben bis acht Sekunden, von Hand in ueber zwanzig. Waehrend "
@@ -1337,8 +1372,8 @@ namespace NextDayRevival
             CfgPatrolCrewLawCount = Config.Bind("Patrol", "CrewLawCount", 1,
                 "How many of a crew carry an M72 LAW instead of the MG42. A LAW "
                 + "man fires a real rocket - a networked explosion on impact - "
-                + "and re-arms in about three seconds, so one rocketeer keeps the "
-                + "pressure on a vehicle or on a man behind thin cover. The rest "
+                + "but only CrewLawRounds of them, CrewLawReload apart, and only "
+                + "at a vehicle or a target behind hard cover. The rest "
                 + "carry the MG42. 0 gives the whole crew the machine gun; a "
                 + "number at or above the crew size gives them all the LAW.");
             CfgPatrolCrewMgShotDelay = Config.Bind("Patrol", "CrewMgShotDelay", 0.06f,
@@ -1397,9 +1432,28 @@ namespace NextDayRevival
                 + "own tank keeps [Tank] ExplosionDamage (1600). 0 takes the "
                 + "player value, which is very nearly a guaranteed kill.");
             CfgPatrolShellRadius = Config.Bind("Patrol", "ShellRadius", 6f,
-                "Blast radius of a shell fired by an AI tank, in metres. A "
-                + "player keeps [Tank] ExplosionRadius (16). 0 takes the "
+                "Blast radius of a shell fired by an AI tank against players and "
+                + "vehicles, in world units. NPCs use ShellInfantryRadius. A "
+                + "player keeps [Tank] ExplosionRadius (28). 0 takes the "
                 + "player value.");
+            // P11 combat balance: a shell into a group of NPCs used to wound
+            // nobody - 260 in 6 units (about 2 m) and a third of that for an NPC,
+            // 87 at the very centre against 150 health. Infantry gets its own
+            // profile: full damage in a lethal core, linear falloff to the rim,
+            // hard cover between blast and man blocks it. Units, not metres
+            // (about 2.8 units to the metre).
+            CfgPatrolShellInfantryDamage = Config.Bind("Patrol", "ShellInfantryDamage", 450f,
+                "Damage an AI tank shell does to an NPC inside the lethal core "
+                + "(an NPC has 150 health, a defender about 225). Falls off "
+                + "linearly from ShellLethalRadius to zero at ShellInfantryRadius. "
+                + "Cover between the impact and the NPC blocks it.");
+            CfgPatrolShellInfantryRadius = Config.Bind("Patrol", "ShellInfantryRadius", 42f,
+                "Outer blast radius of an AI tank shell against NPCs, in world "
+                + "units (42 is about 15 m). With the defaults an NPC dies out to "
+                + "about 31 units (11 m) and is badly wounded out to about 37.");
+            CfgPatrolShellLethalRadius = Config.Bind("Patrol", "ShellLethalRadius", 12f,
+                "Inner radius in world units (12 is about 4 m) inside which an "
+                + "AI tank shell does its full ShellInfantryDamage to an NPC.");
 
             // ------------------------------------------ routes and factions
             CfgPatrolFraction = Config.Bind("Patrol", "Fraction", "looter",
@@ -1465,6 +1519,37 @@ namespace NextDayRevival
             CfgPatrolCrewDroneEventCode = Config.Bind("Patrol", "CrewDroneEventCode", 183,
                 "Photon event code for crew FPV drones. It must not overlap the "
                 + "player drone, turret or admin channels.");
+            // P11 combat balance: NPC FPV drones were spammed. These limits
+            // hold for every NPC drone, patrol crew and heli squad alike.
+            CfgPatrolCrewDroneLaunchSeconds = Config.Bind("Patrol", "CrewDroneLaunchSeconds", 9f,
+                "Seconds an NPC needs to unpack, arm and spin up an FPV drone "
+                + "before it takes off. He kneels meanwhile; killing him or "
+                + "losing the target cancels the launch. 0 launches at once.");
+            CfgPatrolCrewDroneMaxAir = Config.Bind("Patrol", "CrewDroneMaxAir", 2,
+                "Most NPC FPV drones in the air or being prepared at the same "
+                + "time, on the whole map.");
+            CfgPatrolCrewDroneAreaMax = Config.Bind("Patrol", "CrewDroneAreaMax", 1,
+                "Most NPC FPV drones in the air or being prepared inside "
+                + "CrewDroneAreaRadius of each other.");
+            CfgPatrolCrewDroneAreaRadius = Config.Bind("Patrol", "CrewDroneAreaRadius", 450f,
+                "Radius of one drone area in world units (450 is about 160 m).");
+            CfgPatrolCrewDroneAreaCooldown = Config.Bind("Patrol", "CrewDroneAreaCooldown", 120f,
+                "Seconds after an NPC drone launch before another NPC may "
+                + "launch one inside CrewDroneAreaRadius of it.");
+            // P11 combat balance: NPC anti-tank rockets were spammed at
+            // infantry - a LAW man re-armed every three seconds and every round
+            // was a 600 blast. CrewLaw now gates every NPC LAW shot.
+            CfgPatrolCrewLawRounds = Config.Bind("Patrol", "CrewLawRounds", 2,
+                "LAW rockets one NPC may fire in his life (every NPC with a LAW: "
+                + "patrol crew and heli squad anti-tank gunner). After that he "
+                + "switches to the MG42 if he is a patrol crewman.");
+            CfgPatrolCrewLawReload = Config.Bind("Patrol", "CrewLawReload", 30f,
+                "Seconds between two LAW rockets of one NPC: the spent tube goes, "
+                + "the next is unslung, extended and aimed.");
+            CfgPatrolCrewLawMinRange = Config.Bind("Patrol", "CrewLawMinRange", 40f,
+                "An NPC never fires a LAW at a target closer than this, in world "
+                + "units (40 is about 14 m). Rockets go only at vehicles or at a "
+                + "target behind hard cover - never at a man in the open.");
 
             // ------------------------------------------------- Diagnostics
             CfgPhotonTimeout = Config.Bind("Diagnostics", "PhotonTimeoutMs", 60000,
@@ -1640,6 +1725,8 @@ namespace NextDayRevival
             ConvoyRepair.AddItems(Items);
             // An-2 repair parts: control cables, magneto, propeller (own file).
             An2Repair.AddItems(Items);
+            // FAB-50 bomb for the An-2's racks (own file).
+            An2Bombs.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
             // PMN-2 anti-personnel mine, Blender model (own file).
@@ -2122,17 +2209,22 @@ namespace NextDayRevival
             // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
             // man kann keinen Knopf treffen.
             FrameProf.S(FrameProf.Cursor);
-            if (Admin.IsOpen || Patrol.EditorOpen) CursorGuard.Release();
+            Settings.Tick();                     // NDR P9: settings window key and the hint key
+            if (Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen) CursorGuard.Release();
             else CursorGuard.Tick();
             FrameProf.E(FrameProf.Cursor);
             FrameProf.S(FrameProf.Regions);     Regions.Tick();          FrameProf.E(FrameProf.Regions);
             FrameProf.S(FrameProf.Research);    Research.Tick();         FrameProf.E(FrameProf.Research);
-            EastWorld.Tick();                    // east world: tile load/unload, held spawn, WORLD_SIZE; off by default
+            EastWorld.Tick();                    // east world: tile load/unload, held spawn, WORLD_SIZE; on by default
             EastCrossings.Tick();                // east world: saddle cuts, paint, NavMesh patches, seam links
             EastTile.Tick();                     // research: east extension probe, off by default
             AirfieldAmbience.Tick();
             EastZones.Tick();                    // east world: logs the content marker (airfield greybox id) the player stands in
+            BuildingNav.Tick();                  // east world: walkable content buildings - links re-joined, self-check log
+            ContentPerf.Tick();                  // east world: perf settings per content scene, interior occlusion
+            EastLadders.Tick();                  // east world: wires the content ladders (chimney B1c) to the game's LadderObject
             FrameBench.Tick();                   // research: east extension frame-time baseline, off by default
+            BtrGun.Tick();                       // NDR BTR gun: mount back at rest before the turret is read
             FrameProf.S(FrameProf.TurretTick);  Turret.Tick();           FrameProf.E(FrameProf.TurretTick);
             FrameProf.S(FrameProf.VehModTick);  VehicleModules.Tick();   FrameProf.E(FrameProf.VehModTick);   // NDR vehicle modules
             FrameProf.S(FrameProf.DroneTick);   Drone.Tick();            FrameProf.E(FrameProf.DroneTick);
@@ -2143,6 +2235,9 @@ namespace NextDayRevival
             Technical.Tick();                    // NDR technical: spawn key, durability cap, the MG
             ArtyVehicle.Tick();                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
             Gepard.Tick();                       // NDR Gepard: spawn key, gunner station, rounds in flight
+            Flak.Tick();                         // east airfield flak: guns, crews, fire control, a manning player
+            TowerRadar.Tick();                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
+            NoFly.Tick();                        // no-fly zones: violators, warning, defenders, scripted flak
             AntiTankMine.Tick();                 // NDR anti-tank mine (placement)
             ApMine.Tick();                       // NDR anti-personnel mine (event channel, triggers)
             Stinger.Tick();
@@ -2153,10 +2248,15 @@ namespace NextDayRevival
             RevivalTroopInsertion.Tick();        // NDR heli troop insertion (own light schedule)
             RevivalGroundEnemies.Tick();         // editor waiting/walking ground groups
             Airfield.Tick();                     // east world: airfield loot points (master only)
+            MilitaryTown.Tick();                 // east world: town guns, posted men, fight clock, spotter warning
             Helipads.Tick();                     // editor helicopter landing pads (build on scene/data change)
             PlayerHeli.Tick();                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
             PlayerAn2.Tick();                    // NDR player-flown An-2 (apron spawn, boarding, flight)
             An2Repair.Tick();                    // NDR An-2 repair: fit parts, refuel, save the state
+            An2Bombs.Tick();                     // NDR An-2 bombs: load, sight, release, falling bombs
+            FuelBalance.Tick();                  // NDR fuel balance per vehicle class
+            FuelStations.Tick();                 // NDR fuel columns: stock, refill, sync
+            FuelDepot.Tick();                    // NDR POL depot: pool, tanks, refuelling
             WindSound.Tick();                    // NDR high-altitude wind: heli and open-canopy descent
             NewSettlement.Tick();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Crocodile.Tick();                    // NDR toxic crocodile swimming near the neutral base
@@ -2189,6 +2289,17 @@ namespace NextDayRevival
             // NDR Gepard crew: the men inside a patrol Gepard on their seats,
             // after the animator, on every client (RevivalGepardCrew.cs).
             GepardCrew.LateFrame();
+            // NDR military town: the posted spotters and snipers on their
+            // posts, after the animator, on every client (Revival.MilitaryTown.cs).
+            MilitaryTown.LateFrame();
+            // East airfield flak: mount and barrels, the crew on their seats
+            // (after the animator, every client; Revival.Flak.cs).
+            Flak.LateFrame();
+            // Tower radar HQ: the NPC operator on his chair (Revival.TowerRadar.cs).
+            TowerRadar.LateFrame();
+            // View distance level: far clip, fog, terrain, prop culling. Before
+            // PlayerHeli.LateFrame, whose FlightView blends on top of it.
+            ViewDistance.LateTick();
             // NDR player-flown Mi-8: everyone aboard is put in his place after
             // the game's own animator and movement controller have written.
             PlayerHeli.LateFrame();
@@ -2197,6 +2308,9 @@ namespace NextDayRevival
             // same reason - a man placed in Update is back where the animation
             // put him before anything is drawn.
             TraitorVendor.LateFrame();
+            // NDR BTR gun: the recoil kick drawn on the turret mount, after
+            // the camera has been placed from the mount at rest.
+            BtrGun.LateFrame();
         }
 
         void OnGUI()
@@ -2217,17 +2331,23 @@ namespace NextDayRevival
             PlayerHeli.Draw();                   // NDR player-flown Mi-8: readout and notices
             PlayerAn2.Draw();                    // NDR player-flown An-2: instruments, fuel gauge, stall
             An2Repair.Draw();                    // NDR An-2 repair: the stage panel and the key prompt
+            An2Bombs.Draw();                     // NDR An-2 bombs: the bombsight and the load prompt
+            FuelDepot.Draw();                    // NDR POL depot: remaining fuel and the key prompt
             NewSettlement.Draw();                // NDR bottom-left traitor settlement (Phase 1, isolated)
             Crocodile.Draw();                    // NDR toxic crocodile name and exposure warning
             Mortar.Draw();                       // NDR settlement mortar (prompt and map fire control)
             ArtyBattery.Draw();                  // NDR settlement artillery (recon drone on the map)
             Technical.Draw();                    // NDR technical: gunner crosshair and notices
             Gepard.Draw();                       // NDR Gepard: sight reticle, radar scope, target boxes
+            Flak.Draw();                         // east airfield flak: the man-the-gun prompt and the ZU-23 sight
+            TowerRadar.Draw();                   // tower radar HQ: the console prompt and the PPI radar view
+            NoFly.Draw();                        // no-fly zones: the dashed outline on the map, the HUD banner
             FrameProf.S(FrameProf.DroneAlrtD);  DroneAlert.Draw();       FrameProf.E(FrameProf.DroneAlrtD);
             FrameProf.S(FrameProf.OtherDraw);
             PeerCheck.Draw();                    // NDR version badge + mismatch banner
             ClientIntegrity.Draw();              // Required verified-launch recovery message
             NpcWar.Draw();                       // NDR NPC-vs-NPC combat debug status
+            Settings.Draw();                     // NDR P9: the in-game settings window
             FrameProf.E(FrameProf.OtherDraw);
             FrameProf.DrawOverlay();
         }

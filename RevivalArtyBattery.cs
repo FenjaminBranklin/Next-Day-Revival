@@ -363,6 +363,13 @@ namespace NextDayRevival
             public Vector3 Centre;          // the settlement centre, the orbit's middle
             public string Name;
             public bool Safe;               // a trader camp: scenery, nothing more
+            // NDR military town (Revival.MilitaryTown.cs): a gun in one of
+            // the town's four pits. No drone - the town's posted spotters are
+            // its eyes (MilitaryTown.Sees) - its crew wears TownSide, and a
+            // wrecked gun (MilitaryTown's explosion count) never fires again.
+            public bool Town;
+            public string TownSide;
+            public bool Wrecked;
             public float Phase;             // where on the circle this drone starts
 
             // A KNOWN SETTLEMENT WITHOUT A GUN YET (see GunExpected). Gun, crew
@@ -537,6 +544,61 @@ namespace NextDayRevival
             _byId[settlementId] = p;
             RevivalPlugin.L.LogInfo("ArtyBattery: gun for \"" + p.Name + "\" taken over, "
                 + "orbit " + Orbit().ToString("0") + " m around " + centre.ToString("0") + ".");
+        }
+
+        /// <summary>NDR military town: a fixed gun of the town's batteries
+        /// (Mortar.RaiseFixed). The same post as a settlement's, marked as the
+        /// town's: its crew is spawned on the town's side straight away (there
+        /// is no village to copy a side from) and it spots through the town's
+        /// posted spotters instead of a drone.</summary>
+        internal static void TownGunRaised(int id, GameObject gun, Vector3 centre,
+                                           string name, string side)
+        {
+            GunRaised(id, gun, centre, name, false);
+            Post p;
+            if (!_byId.TryGetValue(id, out p)) return;
+            p.Town = true;
+            p.TownSide = side == null || side.Length == 0 ? "looter" : side;
+            p.FactionSet = true;
+        }
+
+        /// <summary>NDR military town: how many of this gun's crew still
+        /// stand, and whether the gun still serves (its gunner alive). -1 when
+        /// the gun is not a post (yet).</summary>
+        internal static int TownCrew(int id, out bool serves)
+        {
+            serves = false;
+            Post p;
+            if (!_byId.TryGetValue(id, out p)) return -1;
+            serves = !p.Wrecked && GunnerServes(p);
+            if (p.CrewSettlement != null)
+                return (Alive(p.Gunner) ? 1 : 0) + (Alive(p.Operator) ? 1 : 0);
+            return p.MenNear;
+        }
+
+        /// <summary>NDR military town: has the crew been raised at all? A
+        /// crew that was never spawned is not a dead crew.</summary>
+        internal static bool TownCrewAsked(int id)
+        {
+            Post p;
+            return _byId.TryGetValue(id, out p) && (p.CrewSettlement != null || p.MenNear > 0);
+        }
+
+        /// <summary>NDR military town: the vehicle of a town gun, or null.</summary>
+        internal static GameObject TownGun(int id)
+        {
+            Post p;
+            return _byId.TryGetValue(id, out p) ? p.Gun : null;
+        }
+
+        /// <summary>NDR military town: the gun is destroyed. It never fires
+        /// again; the crew that is left fights on the ground.</summary>
+        internal static void TownWreck(int id)
+        {
+            Post p;
+            if (!_byId.TryGetValue(id, out p)) return;
+            p.Wrecked = true;
+            p.Sighting = false;
         }
 
         /// <summary>The scene changed under us - the gun is gone and so is
@@ -846,8 +908,8 @@ namespace NextDayRevival
                 // (20 s) to have somebody on his feet to read; after that the
                 // crew is raised anyway, because a battery is worth more than a
                 // perfect uniform and MatchFaction keeps trying.
-                Component template = SettlementMan(p);
-                if (template == null && p.CrewTries < 4) return;
+                Component template = p.Town ? null : SettlementMan(p);
+                if (template == null && p.CrewTries < 4 && !p.Town) return;
 
                 Transform gun = p.Gun.transform;
                 // AT THE VEHICLE, not behind it. They used to be set down 19.5
@@ -885,12 +947,12 @@ namespace NextDayRevival
                 gunner.Role = "gunner";
                 gunner.Weapons = new int[] { CrewWeapon };
                 RevivalComposition.CrewMan spotter = new RevivalComposition.CrewMan();
-                spotter.Role = "drone_operator";
+                spotter.Role = p.Town ? "loader" : "drone_operator";
                 spotter.Weapons = new int[] { CrewWeapon };
                 loadout.Add(gunner);
                 loadout.Add(spotter);
 
-                string side = SideFor(template);
+                string side = p.Town ? p.TownSide : SideFor(template);
                 // Facing the hull from the off, and from the LEVEL frame the
                 // stations are built in: a gun stood on a ground normal has a
                 // Y euler that is not its heading at all. Both men work the
@@ -2017,6 +2079,8 @@ namespace NextDayRevival
 
         static void Fly(Post p, float now, bool havePlayer, Vector3 mine)
         {
+            // NDR military town: no drone. The town's spotters are its eyes.
+            if (p.Town) { p.DroneUp = false; return; }
             DroneState(p, now);
             bool want = B(_cfgDrone, true) && p.DroneHits > 0 && OperatorFlies(p);
             p.DroneUp = want;
@@ -2390,7 +2454,10 @@ namespace NextDayRevival
         static void Spot(Post p, float now)
         {
             if (p.Safe || !B(_cfgAutoFire, true)) return;
-            if (p.Sighting || !p.DroneUp) return;
+            if (p.Sighting) return;
+            // NDR military town: a town gun fires only on what a LIVING
+            // spotter sees; with every spotter dead it stays silent.
+            if (p.Town ? p.Wrecked || !MilitaryTown.SpotterAlive() : !p.DroneUp) return;
             if (now < p.NextScan) return;
             p.NextScan = now + 0.5f;
             if (now < p.NextMissionAt) return;
@@ -2409,7 +2476,7 @@ namespace NextDayRevival
                 GameObject go = players[i];
                 if (go == null) continue;
                 Vector3 at = go.transform.position;
-                if (Flat(p.DroneAt - at) > radius) continue;
+                if (p.Town ? !MilitaryTown.Sees(at, go) : Flat(p.DroneAt - at) > radius) continue;
                 if (!InReach(p, at)) continue;
                 if (!HostileToBattery(p, PlayerFaction(go), true)) continue;
                 found = at;
@@ -2424,7 +2491,7 @@ namespace NextDayRevival
                 if (ai == null) continue;
                 if (ReferenceEquals(ai, p.Gunner) || ReferenceEquals(ai, p.Operator)) continue;
                 Vector3 at = ai.transform.position;
-                if (Flat(p.DroneAt - at) > radius) continue;
+                if (p.Town ? !MilitaryTown.Sees(at, ai.gameObject) : Flat(p.DroneAt - at) > radius) continue;
                 if (!InReach(p, at)) continue;
                 if (!HostileToBattery(p, FactionOf(ai), false)) continue;
                 found = at;
@@ -2480,7 +2547,7 @@ namespace NextDayRevival
             p.Error = e;
             p.ReportAt = now + Mathf.Max(0f, F(_cfgReportDelay, 9f))
                 + UnityEngine.Random.value * Mathf.Max(0f, F(_cfgReportJitter, 5f));
-            RevivalPlugin.L.LogInfo("ArtyBattery: \"" + p.Name + "\" drone reports "
+            RevivalPlugin.L.LogInfo("ArtyBattery: \"" + p.Name + (p.Town ? "\" spotter reports " : "\" drone reports ")
                 + found.ToString("0") + ", gun laid in "
                 + (p.ReportAt - now).ToString("0.0") + " s, aim error "
                 + e.magnitude.ToString("0") + " m.");
@@ -2493,6 +2560,7 @@ namespace NextDayRevival
         static void Mission(Post p, float now)
         {
             if (!p.Sighting) return;
+            if (p.Wrecked) { p.Sighting = false; return; }
             // Recheck allegiance after the report delay, before laying/firing.
             if (p.Target == null || !HostileToBattery(p, p.TargetNpc == null
                 ? PlayerFaction(p.Target) : FactionOf(p.TargetNpc), p.TargetNpc == null))
@@ -2575,7 +2643,7 @@ namespace NextDayRevival
         static bool HostileToBattery(Post p, object faction, bool isPlayer)
         {
             Component owner = p.Gunner != null ? p.Gunner : p.Operator;
-            if (owner == null) owner = SettlementMan(p);
+            if (owner == null && !p.Town) owner = SettlementMan(p);
             if (owner != null)
             {
                 object own = FactionOf(owner);
@@ -3556,10 +3624,12 @@ namespace NextDayRevival
         void LateUpdate()
         {
             // Local +Z is the bore; elevation may change while it returns.
-            if (Slide != null) Slide.localPosition = -Vector3.forward * Stroke(Time.time - _shot);
+            if (Slide != null) Slide.localPosition = Anim.Recoil   // NDR P9: [Effects] Recoil
+                ? -Vector3.forward * Stroke(Time.time - _shot) : Vector3.zero;
         }
         internal static void Smoke(Vector3 muzzle, Vector3 forward)
         {
+            if (!Fx.On) return;   // NDR P9: [Effects] ParticleDensity
             if (_smoke == null)
             {
                 Shader shader = Shader.Find("Particles/Alpha Blended");
@@ -3622,6 +3692,7 @@ namespace NextDayRevival
             renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             renderer.receiveShadows = false;
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
             UnityEngine.Object.Destroy(cloud, 3.5f);
         }
     }

@@ -866,13 +866,14 @@ namespace NextDayRevival
             {
                 float rpm = Gepard.CfgRadarRpm == null ? 60f : Gepard.CfgRadarRpm.Value;
                 _search = Mathf.Repeat(_search + dt * rpm * 6f, 360f);
-                RadarSearch.localRotation = Quaternion.Euler(0f, _search, 0f);
+                if (Anim.Radar) RadarSearch.localRotation = Quaternion.Euler(0f, _search, 0f);   // NDR P9: [Effects] RadarRotation
             }
             if (!LocalControl) Remote(dt);
-            if (SlideR != null) SlideR.localPosition = new Vector3(0f, 0f, -Recoil(Time.time - _shotR));
-            if (SlideL != null) SlideL.localPosition = new Vector3(0f, 0f, -Recoil(Time.time - _shotL));
-            Glow(FlashR, Time.time - _shotR);
-            Glow(FlashL, Time.time - _shotL);
+            bool recoil = Anim.Recoil, flash = Anim.MuzzleFlash;   // NDR P9: [Effects] Recoil / MuzzleFlashes
+            if (SlideR != null) SlideR.localPosition = new Vector3(0f, 0f, recoil ? -Recoil(Time.time - _shotR) : 0f);
+            if (SlideL != null) SlideL.localPosition = new Vector3(0f, 0f, recoil ? -Recoil(Time.time - _shotL) : 0f);
+            Glow(FlashR, flash ? Time.time - _shotR : -1f);
+            Glow(FlashL, flash ? Time.time - _shotL : -1f);
         }
 
         static float Recoil(float age)
@@ -1688,12 +1689,21 @@ namespace NextDayRevival
         /// (RevivalGepardCrew.cs) keeps its own.</summary>
         internal static bool Proximity(List<Contact> contacts, Vector3 a, Vector3 b, out Contact hit, out Vector3 at)
         {
+            return Proximity(contacts, a, b, Gepard.CfgFuze.Value, out hit, out at);
+        }
+
+        /// <summary>The same test with another gun's fuze distance
+        /// (GepardShots.Spec, Revival.Flak.cs).</summary>
+        internal static bool Proximity(List<Contact> contacts, Vector3 a, Vector3 b, float fuzeDistance,
+                                       out Contact hit, out Vector3 at)
+        {
             hit = null;
             at = b;
+            if (contacts == null) return false;
             Vector3 seg = b - a;
             float len2 = seg.sqrMagnitude;
             if (len2 < 1e-8f) return false;
-            float fuze = Mathf.Max(0f, Gepard.CfgFuze.Value);
+            float fuze = Mathf.Max(0f, fuzeDistance);
             float best = 2f;
             for (int i = 0; i < contacts.Count; i++)
             {
@@ -1755,12 +1765,40 @@ namespace NextDayRevival
 
         internal static void Hit(Contact c, Vector3 point, Vector3 dir, bool npc)
         {
+            Hit(c, point, dir, npc, 0);
+        }
+
+        /// <summary>The nearest air contact whose body is within
+        /// <paramref name="reach"/> of <paramref name="at"/> - what a timed
+        /// flak burst there reaches with its fragments; null if none.</summary>
+        internal static Contact Nearest(List<Contact> contacts, Vector3 at, float reach)
+        {
+            if (contacts == null) return null;
+            Contact best = null;
+            float bestD = float.MaxValue;
+            for (int i = 0; i < contacts.Count; i++)
+            {
+                Contact c = contacts[i];
+                if (c == null || !c.Air || c.Go == null) continue;
+                float d = Vector3.Distance(c.Pos, at) - c.Radius;
+                if (d > reach || d >= bestD) continue;
+                best = c;
+                bestD = d;
+            }
+            return best;
+        }
+
+        /// <summary><paramref name="heliHits"/> &gt; 0: the hits a helicopter
+        /// or registered aircraft takes from THIS gun (a lighter calibre than
+        /// the Gepard's); 0 = [Gepard] HeliHits.</summary>
+        internal static void Hit(Contact c, Vector3 point, Vector3 dir, bool npc, int heliHits)
+        {
             if (c == null || c.Go == null) return;
             float dmg = Mathf.Max(1f, Gepard.CfgDroneDamage.Value);
             switch (c.Kind)
             {
-                case 0: HeliHit(c, point, npc); break;
-                case 6: GepardAir.Hit(c, point); break;
+                case 0: HeliHit(c, point, npc, heliHits); break;
+                case 6: GepardAir.Hit(c, point, heliHits); break;
                 case 1: if (c.Vehicle != null) VehicleHit(c.Vehicle); break;
                 case 2:
                     if (Time.time < c.NextHit) return;
@@ -1785,14 +1823,14 @@ namespace NextDayRevival
             }
         }
 
-        static void HeliHit(Contact c, Vector3 point, bool npc)
+        static void HeliHit(Contact c, Vector3 point, bool npc, int heliHits)
         {
             int view = c.HeliView;
             if (view <= 0 || PlayerHeli.MissileTarget(view) == null) return;
             int n;
             _heliHits.TryGetValue(view, out n);
             n++;
-            int need = Mathf.Max(1, Gepard.CfgHeliHits.Value);
+            int need = Mathf.Max(1, heliHits > 0 ? heliHits : Gepard.CfgHeliHits.Value);
             if (n < need) { _heliHits[view] = n; return; }
             _heliHits.Remove(view);
             RevivalPlugin.L.LogInfo("Gepard: helicopter " + view + " shot down after " + n
@@ -1967,14 +2005,20 @@ namespace NextDayRevival
         /// reference (the heli and the technical measure theirs too).</summary>
         static void Shadowed(Rect r, string s, GUIStyle st, Color c, int align)
         {
+            Shadowed(r, s, st, c, align, 1f);
+        }
+
+        static void Shadowed(Rect r, string s, GUIStyle st, Color c, int align, float alpha)
+        {
             GUIContent content = new GUIContent(s);
             Vector2 size = st.CalcSize(content);
             float x = align == Centre ? r.x + (r.width - size.x) * 0.5f
                 : align == Right ? r.x + r.width - size.x : r.x;
             float y = align == Right ? r.y + r.height - size.y : r.y;
             Rect at = new Rect(x, y, size.x + 2f, size.y);
-            GUI.color = new Color(0f, 0f, 0f, 0.8f);
+            GUI.color = new Color(0f, 0f, 0f, 0.8f * alpha);
             GUI.Label(new Rect(at.x + 1, at.y + 1, at.width, at.height), content, st);
+            c.a *= alpha;
             GUI.color = c;
             GUI.Label(at, content, st);
             GUI.color = Color.white;
@@ -2087,9 +2131,11 @@ namespace NextDayRevival
             y += h;
             Shadowed(new Rect(x, y, w, h), GepardText.Angles(Mathf.RoundToInt(Mathf.Repeat(_rig.Yaw, 360f)),
                 Mathf.RoundToInt(_rig.Pitch), Mathf.RoundToInt(Fovs[_fov])), _small, Dim, Left);
-            Shadowed(new Rect(0, Screen.height - 34f, Screen.width - 24f, 30f),
-                GepardText.Keys(_radarKey.ToString(), _nextKey == KeyCode.Mouse1 ? GepardText.RightMouse() : _nextKey.ToString(),
-                _manKey.ToString()), _small, Dim, Right);
+            float keys = Hints.Alpha("gepard.keys", "sight");   // NDR P9: [Hints]
+            if (keys > 0f)
+                Shadowed(new Rect(0, Screen.height - 34f, Screen.width - 24f, 30f),
+                    GepardText.Keys(_radarKey.ToString(), _nextKey == KeyCode.Mouse1 ? GepardText.RightMouse() : _nextKey.ToString(),
+                    _manKey.ToString()), _small, Dim, Right, keys);
         }
 
         static string Describe(Contact c)
@@ -2140,6 +2186,66 @@ namespace NextDayRevival
             public Transform Owner;
             public LineRenderer Line;
             public List<GepardGun.Contact> Npc;   // an NPC gunner's contacts; null = the local gunner's
+            // Another gun's ballistics (Revival.Flak.cs); the Gepard's own
+            // rounds keep Spec null and read the [Gepard] config as before.
+            public Spec Spec;
+        }
+
+        /// <summary>
+        /// The ballistics of a gun that is not the Gepard but fires through
+        /// the same round loop, proximity test, damage path and effects - the
+        /// ZU-23-2 of the airfield (Revival.Flak.cs). Every field is in world
+        /// units and seconds.
+        /// </summary>
+        internal sealed class Spec
+        {
+            public float Speed = 1175f;          // muzzle velocity, u/s
+            public float Gravity = -9.81f;       // u/s^2, negative is down
+            public float Dispersion = 1.5f;      // one round, milliradians
+            public float Fuze = 1.5f;            // passing distance that counts as a hit, u
+            public float Splash;                 // a timed burst this close to an aircraft hits it, u (0 = none)
+            public int HeliHits;                 // 0 = [Gepard] HeliHits
+            public bool Tracer = true;
+            public bool Flak;                    // self-destruct as a black flak puff with its own sound
+            public bool PuffFx = true;           // Flak: draw the puff (the burst still happens)
+            public Action<Vector3> BurstSound;   // the far bang of a puff; null = silent
+        }
+
+        static int _tickFrame = -1;
+
+        /// <summary>A round of another gun (<paramref name="spec"/>): from
+        /// <paramref name="muzzle"/> along <paramref name="dir"/>, bursting
+        /// after <paramref name="life"/> seconds if it meets nothing - the
+        /// flak gunner's fuze setting. Damage is judged against
+        /// <paramref name="contacts"/> when live; an unlive round is the
+        /// picture a remote client draws of somebody else's burst.</summary>
+        internal static void Fire(Spec spec, Transform owner, Vector3 muzzle, Vector3 dir, float life,
+                                  bool live, List<GepardGun.Contact> contacts)
+        {
+            if (spec == null) return;
+            float mil = Mathf.Max(0f, spec.Dispersion) * 0.001f;
+            Vector2 spread = UnityEngine.Random.insideUnitCircle * mil;
+            Vector3 right = Vector3.Cross(Vector3.up, dir);
+            if (right.sqrMagnitude < 1e-6f) right = Vector3.right;
+            right.Normalize();
+            Vector3 up = Vector3.Cross(dir, right);
+            dir = (dir + right * spread.x + up * spread.y).normalized;
+
+            Round r = new Round();
+            r.Pos = muzzle;
+            r.Vel = dir * Mathf.Max(100f, spec.Speed);
+            r.Life = Mathf.Max(0.05f, life);
+            r.Live = live;
+            r.Owner = owner;
+            r.Npc = contacts;
+            r.Spec = spec;
+            r.Line = spec.Tracer ? Take() : null;
+            if (r.Line != null)
+            {
+                r.Line.SetPosition(0, muzzle);
+                r.Line.SetPosition(1, muzzle);
+            }
+            _rounds.Add(r);
         }
 
         static readonly List<Round> _rounds = new List<Round>();
@@ -2176,7 +2282,7 @@ namespace NextDayRevival
             r.Live = live;
             r.Owner = rig.Vehicle;
             r.Npc = npc;
-            r.Line = Take();
+            r.Line = Anim.Tracers ? Take() : null;   // NDR P9: [Effects] Tracers
             if (r.Line != null)
             {
                 r.Line.SetPosition(0, muzzle);
@@ -2192,6 +2298,10 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
+            // Called by Gepard.Tick and by Flak.Tick (either may be switched
+            // off): once a frame whoever comes first.
+            if (_tickFrame == Time.frameCount) return;
+            _tickFrame = Time.frameCount;
             if (_rounds.Count == 0) return;
             float dt = Mathf.Min(Time.deltaTime, 0.05f);
             float g = Physics.gravity.y;
@@ -2213,6 +2323,8 @@ namespace NextDayRevival
 
         static bool Step(Round r, float dt, float g)
         {
+            Spec spec = r.Spec;
+            if (spec != null) g = spec.Gravity;
             r.Age += dt;
             Vector3 next = r.Pos + r.Vel * dt + Vector3.up * (0.5f * g * dt * dt);
             r.Vel += Vector3.up * (g * dt);
@@ -2228,13 +2340,17 @@ namespace NextDayRevival
                 {
                     GepardGun.Contact c;
                     Vector3 at;
-                    bool near = r.Npc != null
+                    bool near = spec != null
+                        ? GepardGun.Proximity(r.Npc, r.Pos, end, spec.Fuze, out c, out at)
+                        : r.Npc != null
                         ? GepardGun.Proximity(r.Npc, r.Pos, end, out c, out at)
                         : GepardGun.Proximity(r.Pos, end, out c, out at);
                     if (near)
                     {
-                        GepardFx.Burst(at, 1f);
-                        GepardGun.Hit(c, at, dir, r.Npc != null);
+                        if (spec != null && spec.Flak) Puff(spec, at);
+                        else GepardFx.Burst(at, 1f);
+                        if (spec != null) GepardGun.Hit(c, at, dir, true, spec.HeliHits);
+                        else GepardGun.Hit(c, at, dir, r.Npc != null);
                         return true;
                     }
                 }
@@ -2243,7 +2359,7 @@ namespace NextDayRevival
                     GepardFx.Impact(hit.point, hit.normal);
                     if (r.Live && r.Npc != null)
                         GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir);
-                    else if (r.Live) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
+                    else if (r.Live && spec == null) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
                     return true;
                 }
                 r.Flown += len;
@@ -2251,17 +2367,38 @@ namespace NextDayRevival
             r.Pos = next;
             if (r.Age >= r.Life)
             {
+                if (spec != null && spec.Flak)
+                {
+                    // The flak gunner's fuze: a black puff where he set it, and
+                    // the fragments reach an aircraft within Splash of it.
+                    Puff(spec, r.Pos);
+                    if (r.Live && spec.Splash > 0f && r.Npc != null)
+                    {
+                        GepardGun.Contact c = GepardGun.Nearest(r.Npc, r.Pos, spec.Splash);
+                        if (c != null) GepardGun.Hit(c, r.Pos, r.Vel.normalized, true, spec.HeliHits);
+                    }
+                    return true;
+                }
                 // The HEI round's self-destruct: a small black puff in the sky.
                 GepardFx.Burst(r.Pos, 0.7f);
                 return true;
             }
             if (r.Line != null)
             {
-                Vector3 back = r.Vel.normalized * Mathf.Min(TracerLength, r.Flown);
+                float length = spec != null ? spec.Speed * 0.012f : TracerLength;
+                Vector3 back = r.Vel.normalized * Mathf.Min(length, r.Flown);
                 r.Line.SetPosition(0, r.Pos - back);
                 r.Line.SetPosition(1, r.Pos);
             }
             return false;
+        }
+
+        static void Puff(Spec spec, Vector3 at)
+        {
+            if (spec.PuffFx) GepardFx.Flak(at);
+            if (spec.BurstSound == null) return;
+            try { spec.BurstSound(at); }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak burst sound: " + ex.Message); }
         }
 
         /// <summary>A ray that steps past the firing vehicle (its own hull and
@@ -2335,7 +2472,7 @@ namespace NextDayRevival
                 if (_soft == null) _soft = Soft();
                 if (_flash == null) _flash = Make("NDR Gepard flash", true, 0f, false, 300);
                 if (_sparks == null) _sparks = Make("NDR Gepard sparks", true, 0.9f, true, 800);
-                if (_smoke == null) _smoke = Make("NDR Gepard smoke", false, -0.03f, false, 600);
+                if (_smoke == null) _smoke = Make("NDR Gepard smoke", false, -0.03f, false, 1200);
                 if (_cases == null) _cases = Make("NDR Gepard cases", false, 1.3f, false, 300);
             }
             catch (Exception ex)
@@ -2410,12 +2547,13 @@ namespace NextDayRevival
             if (stretch) { r.velocityScale = 0.035f; r.lengthScale = 1f; }
             r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             r.receiveShadows = false;
-            ps.Play();
+            ps.Play();   // hand-emitted: Fx.Keep() gates every Emit (NDR P9)
             return ps;
         }
 
         static void Emit(ParticleSystem ps, Vector3 p, Vector3 v, float size, float life, Color c)
         {
+            if (!Fx.Keep()) return;   // NDR P9: [Effects] ParticleDensity
             ParticleSystem.EmitParams e = new ParticleSystem.EmitParams();
             e.position = p;
             e.velocity = v;
@@ -2433,9 +2571,12 @@ namespace NextDayRevival
         {
             if (!Ready()) return;
             Color hot = new Color(1f, 0.82f, 0.5f, 1f);
-            Emit(_flash, at + dir * 0.2f, dir * 2f, 1.5f, 0.05f, hot);
-            Emit(_flash, at + dir * 0.9f, dir * 4f, 1.0f, 0.04f, hot);
-            Emit(_flash, at + dir * 1.6f, dir * 6f, 0.6f, 0.035f, new Color(1f, 0.6f, 0.3f, 1f));
+            if (Anim.MuzzleFlash)   // NDR P9: [Effects] MuzzleFlashes
+            {
+                Emit(_flash, at + dir * 0.2f, dir * 2f, 1.5f, 0.05f, hot);
+                Emit(_flash, at + dir * 0.9f, dir * 4f, 1.0f, 0.04f, hot);
+                Emit(_flash, at + dir * 1.6f, dir * 6f, 0.6f, 0.035f, new Color(1f, 0.6f, 0.3f, 1f));
+            }
             Emit(_smoke, at + dir * 0.8f, dir * 4f + Rnd() * 0.6f, 0.9f, 0.9f, new Color(0.6f, 0.58f, 0.55f, 0.35f));
         }
 
@@ -2447,6 +2588,33 @@ namespace NextDayRevival
             Vector3 at = gun.position - gun.forward * 0.3f * gun.lossyScale.x;
             Vector3 v = gun.right * side * UnityEngine.Random.Range(3f, 5f) + Vector3.up * UnityEngine.Random.Range(1.5f, 3f);
             Emit(_cases, at, v, 0.1f, 1.4f, new Color(0.85f, 0.65f, 0.25f, 1f));
+        }
+
+        /// <summary>Gun smoke only, blown forward off the muzzle and drifting
+        /// (the BTR gun, Revival.BtrGun.cs, has the game's flash).</summary>
+        internal static void Smoke(Vector3 at, Vector3 dir, float scale)
+        {
+            if (!Ready()) return;
+            Emit(_smoke, at + dir * 0.5f * scale, dir * 3f + Rnd() * 0.5f, 0.8f * scale,
+                 UnityEngine.Random.Range(0.8f, 1.3f), new Color(0.62f, 0.6f, 0.57f, 0.3f));
+            Emit(_smoke, at + dir * 1.2f * scale, dir * 1.5f + Rnd() * 0.4f, 1.1f * scale,
+                 UnityEngine.Random.Range(1.0f, 1.6f), new Color(0.6f, 0.58f, 0.55f, 0.22f));
+        }
+
+        /// <summary>An empty case from a given point and velocity.</summary>
+        internal static void Casing(Vector3 at, Vector3 v, float size)
+        {
+            if (!Ready()) return;
+            Emit(_cases, at, v, size, 1.4f, new Color(0.85f, 0.65f, 0.25f, 1f));
+        }
+
+        /// <summary>Earth and grit a heavy bullet throws off a surface.</summary>
+        internal static void Dust(Vector3 at, Vector3 normal, float scale)
+        {
+            if (!Ready()) return;
+            Emit(_smoke, at + normal * 0.3f, normal * 1.2f + Rnd() * 0.4f,
+                 UnityEngine.Random.Range(0.9f, 1.4f) * scale,
+                 UnityEngine.Random.Range(0.9f, 1.4f), new Color(0.42f, 0.38f, 0.32f, 0.5f));
         }
 
         /// <summary>A 35 mm HE-I round on a surface: flash, sparks thrown off
@@ -2475,6 +2643,22 @@ namespace NextDayRevival
             for (int i = 0; i < 8; i++)
                 Emit(_sparks, at, Rnd() * UnityEngine.Random.Range(10f, 22f), 0.06f,
                      UnityEngine.Random.Range(0.15f, 0.35f), new Color(1f, 0.65f, 0.3f, 1f));
+        }
+
+        /// <summary>A timed 23 mm flak burst (Revival.Flak.cs): a short
+        /// flash and a ball of black smoke that hangs in the sky for seconds
+        /// and drifts - the puff a pilot sees walking toward him.</summary>
+        internal static void Flak(Vector3 at)
+        {
+            if (!Ready()) return;
+            Emit(_flash, at, Vector3.zero, 6f, 0.06f, new Color(1f, 0.72f, 0.38f, 1f));
+            for (int i = 0; i < 4; i++)
+                Emit(_smoke, at + Rnd() * 1.4f, Rnd() * 0.8f + Vector3.up * 0.3f,
+                     UnityEngine.Random.Range(4.5f, 7f), UnityEngine.Random.Range(4f, 5.5f),
+                     new Color(0.05f, 0.05f, 0.05f, 0.85f));
+            for (int i = 0; i < 5; i++)
+                Emit(_sparks, at, Rnd() * UnityEngine.Random.Range(12f, 26f), 0.07f,
+                     UnityEngine.Random.Range(0.12f, 0.3f), new Color(1f, 0.65f, 0.3f, 1f));
         }
     }
 

@@ -2073,6 +2073,7 @@ namespace NextDayRevival
                     UnityEngine.Rendering.ShadowCastingMode.Off;
                 particleRenderer.receiveShadows = false;
             }
+            Fx.ApplyVital(_fumes);   // NDR P9: density, but a toxic zone stays visible
 
             _glow = fumes.AddComponent<Light>();
             _glow.type = LightType.Point;

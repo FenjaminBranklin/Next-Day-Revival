@@ -870,10 +870,12 @@ namespace NextDayRevival
                       Loc.T("ОПТИКА: ", "OPTICS: ") + modeTxt
                       + Loc.T("   МОДУЛИ:", "   MODULES:") + mods);
 
-            GUI.contentColor = new Color(0.82f, 0.86f, 0.82f, 0.72f);
-            GUI.Label(new Rect(mx + 8f, h - my + 3f, w - 2f * mx - 16f, 20f),
-                      Loc.T("N: режим   I: установить модуль   Shift+I: снять модуль",
-                            "N: mode   I: install module   Shift+I: remove module"));
+            float keys = Hints.Alpha("optics.keys", "sight");   // NDR P9: [Hints]
+            GUI.contentColor = new Color(0.82f, 0.86f, 0.82f, 0.72f * keys);
+            if (keys > 0f)
+                GUI.Label(new Rect(mx + 8f, h - my + 3f, w - 2f * mx - 16f, 20f),
+                          Loc.T("N: режим   I: установить модуль   Shift+I: снять модуль",
+                                "N: mode   I: install module   Shift+I: remove module"));
             GUI.contentColor = oldc;
         }
     }

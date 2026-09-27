@@ -207,6 +207,15 @@ namespace NextDayRevival
             /// </summary>
             public bool Site;
 
+            /// <summary>
+            /// NDR military town (Revival.MilitaryTown.cs): a route the plugin
+            /// brings itself - the town's AA site, its vehicle patrol and the
+            /// reinforcement convoy's road. Appended at every load, never
+            /// written back to the route file, never drawn by the random convoy
+            /// schedule, and only driven once the town is loaded.
+            /// </summary>
+            public bool Builtin;
+
             /// <summary>Is this route on the map that is open right now?</summary>
             public bool Here { get { return MapScene.Owns(Scene); } }
 
@@ -338,6 +347,7 @@ namespace NextDayRevival
             public float NextLook;       // Time.time of the next target scan
             public float NextNet;        // Time.time of the next turret-angle network readout
             public int Burst;            // shots fired in the running burst
+            public int BurstLen;         // rounds in the running burst, drawn at its first
             public int Shots, Hits;
             // GunnerAI: how well the target shows, where and when it was last
             // seen (suppression), and how fast it moves (spread).
@@ -972,6 +982,7 @@ namespace NextDayRevival
                 if (r.IsConvoy) continue;   // NDR convoy: driven by the convoy event, not the auto-patrol
                 if (!r.Here) continue;      // a route of another region is not driven here
                 if (!r.Enabled || r.Count <= 0 || r.P.Count < 3) continue;
+                if (r.Builtin && !MilitaryTown.RouteReady(r.Name)) continue;   // NDR military town: once the town is loaded
                 int fehlt = r.Count - Fahren(r.Name);
                 if (fehlt <= 0) continue;
                 if (best == null || fehlt > bestFehlt) { best = r; bestFehlt = fehlt; }
@@ -2607,7 +2618,8 @@ namespace NextDayRevival
             {
                 Route r;
                 if (_routes.TryGetValue(_order[i], out r) && r != null
-                    && r.Here && r.IsConvoy && r.Enabled && r.P.Count >= 3)
+                    && r.Here && r.IsConvoy && r.Enabled && r.P.Count >= 3
+                    && !r.Builtin)   // NDR military town: its convoy is sent by the town, not drawn
                     names.Add(r.Name);
             }
             return names;
@@ -6300,7 +6312,12 @@ namespace NextDayRevival
             static void Nachladen(Unit u)
             {
                 float delay = Ladezeit(u);
-                int burst = delay >= 1f ? 1 : Mathf.Max(1, RevivalPlugin.CfgPatrolGunBurst.Value);
+                // The burst's length is drawn at its first round: the KPVT
+                // gunner's short bursts (BtrGun.NpcBurst) or [Patrol] GunBurst.
+                if (u.Burst == 0 || u.BurstLen <= 0)
+                    u.BurstLen = u.Tank ? RevivalPlugin.CfgPatrolGunBurst.Value
+                        : BtrGun.NpcBurst(RevivalPlugin.CfgPatrolGunBurst.Value);
+                int burst = delay >= 1f ? 1 : Mathf.Max(1, u.BurstLen);
 
                 u.Burst++;
                 if (u.Burst < burst)
@@ -6549,10 +6566,16 @@ namespace NextDayRevival
                         "held: friendly in the line");
                     return false;
                 }
-                VehicleShotSound.Play(from, u.Tank);
-                Turret.Net.PublishShot(from, u.Tank);
-
-                Spur(u, from + dir * 2f, ende);
+                // The BTR's round: game effects at the measured muzzle and
+                // sent to the other players (Revival.BtrGun.cs).
+                if (!u.Tank && BtrGun.Active)
+                    BtrGun.Fire(u.Car.transform, u.Turrets, ende, struck != null);
+                else
+                {
+                    VehicleShotSound.Play(from, u.Tank);
+                    Turret.Net.PublishShot(from, u.Tank);
+                    Spur(u, from + dir * 2f, ende);
+                }
                 u.Shots++;
                 if (struck == null)
                 {
@@ -6612,12 +6635,19 @@ namespace NextDayRevival
                                        float damage, float radius, Vector3 from)
             {
                 int before = u.Hits;
+                // NPCs take the infantry profile (P11): full damage inside the
+                // lethal core, linear to zero at the outer rim. Players and
+                // vehicles keep ShellDamage / ShellRadius.
+                float infDamage = Mathf.Max(0f, RevivalPlugin.CfgPatrolShellInfantryDamage.Value);
+                float infRadius = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolShellInfantryRadius.Value);
+                float core = Mathf.Clamp(RevivalPlugin.CfgPatrolShellLethalRadius.Value, 0f, infRadius);
+                float reach = Mathf.Max(radius, infRadius);
                 for (int i = 0; i < _targets.Count; i++)
                 {
                     CombatTarget c = _targets[i];
                     if (!Feind(u, c)) continue;
                     Vector3 to = Zielpunkt(c.Tr);
-                    if (c != direct && Vector3.Distance(point, to) > radius + 20f) continue;
+                    if (c != direct && Vector3.Distance(point, to) > reach + 20f) continue;
                     Collider[] hull = c.Tr.GetComponentsInChildren<Collider>();
                     float dist = Vector3.Distance(point, to);
                     for (int k = 0; k < hull.Length; k++)
@@ -6628,28 +6658,50 @@ namespace NextDayRevival
                         if (d < dist) { dist = d; to = near; }
                     }
                     if (c == direct) dist = 0f;
-                    if (dist > radius) continue;
+                    if (dist > (c.Npc != null ? infRadius : radius)) continue;
                     // A man inside armour is hurt through his hull's part 14
                     // (SetDamageToAllPassengers), not by the blast directly.
                     if (c.Carrier != null && GunnerAI.Armoured(c.Carrier)) continue;
-                    if (c != direct && dist > 0.2f)
-                    {
-                        Vector3 ignored;
-                        GameObject cover = Strahl(u, point, (to - point).normalized,
-                                                   dist, out ignored);
-                        if (cover != null && !cover.transform.IsChildOf(c.Tr)) continue;
-                    }
-                    float amount = damage * (1f - Mathf.Clamp01(dist / Mathf.Max(0.1f, radius)));
-                    if (amount <= 0f) continue;
+                    if (c != direct && dist > 0.2f && Gedeckt(u, c, point, to)) continue;
+                    float amount;
+                    if (c.Npc != null)
+                        amount = dist <= core ? infDamage
+                            : infDamage * (1f - Mathf.Clamp01((dist - core) / Mathf.Max(0.1f, infRadius - core)));
+                    else
+                        amount = damage * (1f - Mathf.Clamp01(dist / Mathf.Max(0.1f, radius)));
+                    if (amount < 1f) continue;
                     bool hurt;
                     if (c.Vehicle != null) hurt = FahrzeugSchaden(c.Vehicle, amount, 14);
                     else if (c.Npc != null)
-                        hurt = Turret.TryDamage(c.Tr.gameObject, "NPC_AI2", "ApplyDamage", amount / 3f);
+                        hurt = Turret.TryDamage(c.Tr.gameObject, "NPC_AI2", "ApplyDamage", amount);
                     else hurt = SpielerSchaden(c.Tr.gameObject, amount, point, from);
                     if (hurt) u.Hits++;
                 }
                 RevivalPlugin.L.LogInfo("Patrol gun: " + u.Seite + " shell hit "
                     + (u.Hits - before) + " hostile actor(s) at " + point + ".");
+            }
+
+            /// <summary>Is there hard cover between the impact and this target?
+            /// Two rays from just above the crater - to the nearest point of
+            /// the body and to the chest - and only when BOTH end on something
+            /// that is not the target does the cover count. One ray alone
+            /// grazed the ground the shell had just hit and saved men standing
+            /// in the open.</summary>
+            static bool Gedeckt(Unit u, CombatTarget c, Vector3 point, Vector3 near)
+            {
+                Vector3 from = point + Vector3.up * 0.6f;
+                Vector3 chest = c.Tr.position + Vector3.up * 3.3f;
+                Vector3[] aims = new Vector3[] { near + Vector3.up * 0.3f, chest };
+                for (int k = 0; k < aims.Length; k++)
+                {
+                    Vector3 to = aims[k] - from;
+                    float len = to.magnitude;
+                    if (len < 0.2f) return false;
+                    Vector3 ignored;
+                    GameObject cover = Strahl(u, from, to / len, len, out ignored);
+                    if (cover == null || cover.transform.IsChildOf(c.Tr)) return false;
+                }
+                return true;
             }
 
             static readonly List<GameObject> _insassen = new List<GameObject>();
@@ -6741,6 +6793,7 @@ namespace NextDayRevival
                     List<Vector3> bahn = new List<Vector3>();
                     bahn.Add(von);
                     bahn.Add(bis);
+                    if (!Anim.Tracers) return;   // NDR P9: [Effects] Tracers
                     if (u.Tank)
                     {
                         RocketHook.SpawnTracer(bahn, 1.20f, 0.50f, SpurHof, SpurHof, 0.30f);
@@ -6909,7 +6962,7 @@ namespace NextDayRevival
             static float Ladezeit(Unit u)
             {
                 return u.Tank ? RevivalPlugin.CfgTankDelay.Value
-                              : RevivalPlugin.CfgTurretDelay.Value;
+                              : BtrGun.ShotInterval(RevivalPlugin.CfgTurretDelay.Value);
             }
 
             static float Drehgeschwindigkeit(Unit u)
@@ -7042,7 +7095,9 @@ namespace NextDayRevival
 
             string path = Path.Combine(RevivalPlugin.AssetDir,
                                        RevivalPlugin.CfgPatrolFile.Value);
-            if (LiveRoutes.Current == null && !File.Exists(path))
+            bool haveFile = LiveRoutes.Current != null || File.Exists(path);
+            string[] builtin = MilitaryTown.RouteLines();   // NDR military town
+            if (!haveFile && builtin.Length == 0)
             {
                 RevivalPlugin.L.LogWarning("Patrol: " + path + " does not exist. "
                     + "No route until one is recorded.");
@@ -7051,7 +7106,15 @@ namespace NextDayRevival
 
             try
             {
-                string[] lines = LiveRoutes.Current == null ? File.ReadAllLines(path) : LiveRoutes.Current.Routes;
+                string[] own = !haveFile ? new string[0]
+                    : LiveRoutes.Current == null ? File.ReadAllLines(path) : LiveRoutes.Current.Routes;
+                string[] lines = own;
+                if (builtin.Length > 0)
+                {
+                    lines = new string[own.Length + builtin.Length];
+                    own.CopyTo(lines, 0);
+                    builtin.CopyTo(lines, own.Length);
+                }
                 int bad = 0;
                 for (int i = 0; i < lines.Length; i++)
                 {
@@ -7087,6 +7150,7 @@ namespace NextDayRevival
                     {
                         r = new Route();
                         r.Name = name;
+                        r.Builtin = i >= own.Length;   // NDR military town
                         _routes[name] = r;
                         _order.Add(name);
                     }
@@ -7189,6 +7253,7 @@ namespace NextDayRevival
                 for (int i = 0; i < _order.Count; i++)
                 {
                     Route r = _routes[_order[i]];
+                    if (r.Builtin) continue;   // NDR military town: the plugin's own, never saved
                     MetaSchreiben(r);
                     for (int k = 0; k < r.P.Count; k++)
                     {
@@ -7484,10 +7549,14 @@ namespace NextDayRevival
                     KeepRouteNames(labels, full, clip, mouseAbs,
                                    ref hoverText, ref hoverAt, ref hoverColor);
 
-                GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f);
-                GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
-                          Loc.T("F4: изменить или удалить маршруты патрулей",
-                                "F4: edit or delete patrol routes"));
+                float f4 = Hints.Alpha("patrol.f4", "map");   // NDR P9: [Hints]
+                if (f4 > 0f)
+                {
+                    GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f * f4);
+                    GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
+                              Loc.T("F4: изменить или удалить маршруты патрулей",
+                                    "F4: edit or delete patrol routes"));
+                }
 
                 // The hover note, on top of everything, beside the cursor and
                 // clamped onto the screen.
@@ -8055,8 +8124,10 @@ namespace NextDayRevival
         }
 
         // Each curved dash is one cached coverage mask, with map-relative
-        // dimensions. Zoom scales the road and its ink together; pan only moves
-        // it. The clearance points are therefore measured in the SCALED
+        // dimensions, built for the zoom it is shown at (MapInk.Get), so the
+        // dashes keep their screen size while the road scales; pan only moves
+        // them. The chevrons that mark the driving direction are masks of the
+        // same kind and go through the same clearance. The clearance points are therefore measured in the SCALED
         // PICTURE's own frame, with the map's screen origin left out: the
         // distances - and so every decision here - are the same screen
         // distances as before, but they no longer change when the map is
@@ -8065,7 +8136,7 @@ namespace NextDayRevival
                                 Vector2 scale, ClearGrid grid, List<Vector2> ink,
                                 MapInkLayer inkLayer)
         {
-            MapInk.Cache cache = MapInk.Get(name, world, loop);
+            MapInk.Cache cache = MapInk.Get(name, world, loop, scale, true);
             for (int i = 0; i < cache.Dashes.Count; i++)
             {
                 MapInk.Dash dash = cache.Dashes[i];
@@ -8073,14 +8144,14 @@ namespace NextDayRevival
                 // NGUI clips per pixel and follows scroll transforms immediately;
                 // screen culling here would leave missing dashes after fast pans.
                 bool blocked = false;
-                for (int j = 0; j < dash.Points.Count; j += 8)
+                for (int j = 0; j < dash.Points.Count; j += 4)
                 {
                     Vector2 p = Vector2.Scale(dash.Points[j], scale);
                     if (grid != null && grid.Blocked(p)) { blocked = true; break; }
                 }
                 if (blocked) continue;
                 inkLayer.Draw(dash.Bounds, dash.Texture, GUI.color);
-                for (int j = 0; j < dash.Points.Count; j += 4)
+                for (int j = 0; j < dash.Points.Count; j += 2)
                     ink.Add(Vector2.Scale(dash.Points[j], scale));
             }
         }

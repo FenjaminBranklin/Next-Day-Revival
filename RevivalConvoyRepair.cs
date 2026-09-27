@@ -503,7 +503,7 @@ namespace NextDayRevival
             try
             {
                 if (_phase != Phase.Idle) return;
-                if (!string.IsNullOrEmpty(_prompt)) DrawPrompt(_prompt);
+                if (!string.IsNullOrEmpty(_prompt) && Hints.Prompts) DrawPrompt(_prompt);   // NDR P9
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("ConvoyRepair.Draw: " + ex); }
         }
@@ -758,6 +758,8 @@ namespace NextDayRevival
             if (ConvoyRepair.Busy) __result = true;
             // The An-2 repair (Revival.An2Repair.cs) holds the body the same way.
             if (An2Repair.Busy) __result = true;
+            // So does refuelling at the airfield depot (Revival.Fuel.cs).
+            if (FuelDepot.Busy) __result = true;
         }
 
         static bool _installed;

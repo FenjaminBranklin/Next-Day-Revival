@@ -156,12 +156,20 @@ namespace NextDayRevival
         /// is responsible for showing it on every client.</summary>
         internal static void Hit(GepardGun.Contact c, Vector3 point)
         {
+            Hit(c, point, 0);
+        }
+
+        /// <summary><paramref name="gunHits"/> &gt; 0: the hits this aircraft
+        /// takes from the firing gun when its source names none (the ZU-23,
+        /// Revival.Flak.cs); 0 = [Gepard] HeliHits.</summary>
+        internal static void Hit(GepardGun.Contact c, Vector3 point, int gunHits)
+        {
             if (!Alive(c)) return;
             int id = c.Go.GetInstanceID();
             int n;
             _hits.TryGetValue(id, out n);
             n++;
-            int need = c.Src.Hits > 0 ? c.Src.Hits
+            int need = c.Src.Hits > 0 ? c.Src.Hits : gunHits > 0 ? gunHits
                 : Mathf.Max(1, Gepard.CfgHeliHits == null ? 10 : Gepard.CfgHeliHits.Value);
             if (n < need) { _hits[id] = n; return; }
             _hits.Remove(id);
@@ -1296,6 +1304,9 @@ namespace NextDayRevival
         /// worth a round.</summary>
         static bool Feindlich(Hull h, GepardGun.Contact c)
         {
+            // P6a: an engaged violator of a no-fly zone of this Gepard's
+            // faction, whoever is aboard (Revival.NoFly.cs).
+            if (h.Root != null && NoFly.Engaged(c.Go, h.Side, h.Root.position)) return true;
             float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
             List<GameObject> players = Spieler();
             for (int i = 0; i < players.Count; i++)
@@ -1369,7 +1380,44 @@ namespace NextDayRevival
         static FieldInfo _ngsPlayers;
         static bool _ngsLooked;
 
-        static List<GameObject> Spieler()
+        /// <summary>P6b: a Gepard hull within <paramref name="reach"/> of the
+        /// point, not burnt out, its gun alive and its gunner in his seat.
+        /// Every client can answer it (no side, no laying state - those are
+        /// the master's), so a zone that depends on its Gepard warns only
+        /// while one stands (Revival.NoFly.cs, MilitaryTown.NoFlyArmed).</summary>
+        internal static bool Standing(Vector3 at, float reach)
+        {
+            for (int i = 0; i < _hulls.Count; i++)
+            {
+                Hull h = _hulls[i];
+                if (h == null || h.Vgs == null || h.Root == null || Out(h)) continue;
+                if (h.Rig != null && !h.Rig.Alive) continue;
+                Vector3 d = h.Root.position - at;
+                d.y = 0f;
+                if (d.sqrMagnitude <= reach * reach && Manned(h)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>P6a no-fly zones: a Gepard of <paramref name="side"/>
+        /// laying its guns (manned, alive, master) within
+        /// <paramref name="reach"/> of the point - it takes over the zone's
+        /// defence (Revival.NoFly.cs).</summary>
+        internal static bool Defends(string side, Vector3 at, float reach)
+        {
+            string own = Fraktion.Eigene(side);
+            for (int i = 0; i < _hulls.Count; i++)
+            {
+                Hull h = _hulls[i];
+                if (h == null || !h.Laying || h.Root == null || Fraktion.Eigene(h.Side) != own) continue;
+                Vector3 d = h.Root.position - at;
+                d.y = 0f;
+                if (d.sqrMagnitude <= reach * reach) return true;
+            }
+            return false;
+        }
+
+        internal static List<GameObject> Spieler()
         {
             if (Time.time < _nextPlayers) return _players;
             _nextPlayers = Time.time + 0.5f;
@@ -1406,12 +1454,12 @@ namespace NextDayRevival
 
         // --------------------------------------------------------------- misc
 
-        static bool Steht(Component ai)
+        internal static bool Steht(Component ai)
         {
             return ai != null && NpcWar.GroundAlive(ai);
         }
 
-        static void Parken(Component ai)
+        internal static void Parken(Component ai)
         {
             NavMeshAgent agent = Agent(ai);
             if (agent == null) return;
@@ -1426,7 +1474,7 @@ namespace NextDayRevival
         static FieldInfo _fAgent;
         static Type _fAgentOwner;
 
-        static NavMeshAgent Agent(Component ai)
+        internal static NavMeshAgent Agent(Component ai)
         {
             if (ai == null) return null;
             Type t = ai.GetType();
@@ -1450,7 +1498,7 @@ namespace NextDayRevival
         /// <summary>The vanilla idle logic held off a riding man: the same
         /// short pause refreshed every frame that the technical's crew and the
         /// artillery battery use.</summary>
-        static void Ruhig(Component ai)
+        internal static void Ruhig(Component ai)
         {
             Type t = ai.GetType();
             if (!ReferenceEquals(t, _mQuietOwner))

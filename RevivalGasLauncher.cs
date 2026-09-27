@@ -2070,6 +2070,7 @@ namespace NextDayRevival
             sh.shapeType = ParticleSystemShapeType.Sphere;
             sh.radius = 0.15f;
             ps.Play();
+            Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
         }
 
         void Update()
@@ -2223,6 +2224,7 @@ namespace NextDayRevival
             rot.enabled = true;
             rot.z = new ParticleSystem.MinMaxCurve(-0.12f, 0.12f);
             ps.Play();
+            Fx.ApplyVital(ps);                    // NDR P9: density, never invisible
 
             systems.Add(ps);
             rates.Add(rate);
@@ -2261,6 +2263,7 @@ namespace NextDayRevival
             Fade(ps);
             Grow(ps, 0.6f, 1.8f);
             ps.Play();
+            Fx.ApplyVital(ps);                    // NDR P9: density, never invisible
 
             systems.Add(ps);
             rates.Add(rate);
@@ -2351,7 +2354,7 @@ namespace NextDayRevival
                 {
                     if (_systems[i] == null) continue;
                     ParticleSystem.EmissionModule em = _systems[i].emission;
-                    em.rateOverTime = new ParticleSystem.MinMaxCurve(_rates[i] * strength);
+                    em.rateOverTime = new ParticleSystem.MinMaxCurve(_rates[i] * strength * Fx.VitalFactor);   // NDR P9
                 }
             }
 

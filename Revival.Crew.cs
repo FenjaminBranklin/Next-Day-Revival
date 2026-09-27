@@ -716,6 +716,9 @@ namespace NextDayRevival
         static Vector3[] _groundPositions;
         // Set only for the length of one DropCustomSquad call - see there.
         static Action<Component, int> _pointHook;
+        // Set only for the length of one DropCustomSquad call with quiet=true:
+        // the squad is no fighting crew (see Absichern).
+        static bool _quietSquad;
 
         // Append the owner's construction data to the cached Photon spawn.
         // The first five vanilla entries stay byte-for-byte compatible.
@@ -1224,16 +1227,24 @@ namespace NextDayRevival
         /// `NPCType` becomes the storekeeper prefab and `BehaviorPattern`
         /// StoreKeeper (`RevivalTraitorVendor.cs`).
         ///
-        /// The callback is cleared again whatever happens, so nothing can leak
-        /// into the next wreck crew.
+        /// QUIET is for men who are not a fighting crew. A crew is made
+        /// killable, armed and put into the settlement's alarm with a drone
+        /// over it (`Absichern`); a trader who gets that is a shopkeeper who
+        /// opens fire, can be shot dead and hunts the player through the
+        /// village. Quiet leaves god mode, weapon and alarm to what the spawn
+        /// point says - exactly what the game does for its own storekeepers.
+        ///
+        /// The callback and the flag are cleared again whatever happens, so
+        /// nothing can leak into the next wreck crew.
         /// </summary>
         internal static GameObject DropCustomSquad(Vector3 home, Vector3[] positions,
             string faction, List<RevivalComposition.CrewMan> loadout, string key,
-            Action<Component, int> point)
+            Action<Component, int> point, bool quiet)
         {
             _pointHook = point;
+            _quietSquad = quiet;
             try { return DropGroundSquad(home, positions, faction, loadout, key); }
-            finally { _pointHook = null; }
+            finally { _pointHook = null; _quietSquad = false; }
         }
 
         /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
@@ -1368,10 +1379,11 @@ namespace NextDayRevival
                 try { Invoke(sied, "StartMainInit"); }
                 finally { _spawningSettlement = null; _spawningCar = null; }
                 _appearance.Clear();
-                ArmNativeWeapons(sied);
+                if (!_quietSquad) ArmNativeWeapons(sied);
                 Set(sied, "AllInitializationDone", true);
                 if (count > 8) AssignSectors(sied, wege.transform, car.transform, count, wType);
-                Absichern(sied);
+                if (_quietSquad) Beruhigen(sied);
+                else Absichern(sied);
 
                 string wer = Fraktion.Sauber(fraktion);
                 if (wer.Length == 0) wer = "neutral";
@@ -1631,6 +1643,21 @@ namespace NextDayRevival
             CrewAlarm delayed = settlement.gameObject.AddComponent<CrewAlarm>();
             delayed.Begin(settlement, npcs);
             CrewDrone.Begin(settlement.transform, npcs);
+        }
+
+        /// <summary>The quiet counterpart of <see cref="Absichern"/> for a
+        /// DropCustomSquad(quiet): only the initialization flag. No SetGodMode
+        /// (the spawn point's UseIndividualGodMode/GodModeEnabled stand, as they
+        /// do for every storekeeper of the map), no alarm, no drone.</summary>
+        static void Beruhigen(Component settlement)
+        {
+            Array npcs = GetNpcArray(settlement);
+            if (npcs == null) return;
+            for (int i = 0; i < npcs.Length; i++)
+            {
+                Component ai = npcs.GetValue(i) as Component;
+                if (ai != null && !Bool(ai, "IsInitialized")) Set(ai, "IsInitialized", true);
+            }
         }
 
         /// <summary>Enter the game's own settlement alarm once Unity Start has
@@ -2415,6 +2442,19 @@ namespace NextDayRevival
                 harmony.Patch(fire, null,
                     new HarmonyMethod(typeof(CrewLaw).GetMethod("FirePostfix")),
                     null, null, null);
+                // P11: the two entry points of an NPC shot on the master. A
+                // refused LAW shot never starts - no sound, no round spent.
+                MethodInfo fireTo = AccessTools.Method(t, "FireTo", null, null);
+                if (fireTo != null)
+                    harmony.Patch(fireTo, new HarmonyMethod(typeof(CrewLaw).GetMethod("FireToPrefix")),
+                        null, null, null, null);
+                MethodInfo fireAi = AccessTools.Method(t, "Fire", null, null);
+                if (fireAi != null)
+                    harmony.Patch(fireAi, new HarmonyMethod(typeof(CrewLaw).GetMethod("FireAiPrefix")),
+                        null, null, null, null);
+                if (fireTo == null || fireAi == null)
+                    RevivalPlugin.L.LogWarning("Crew LAW: FireTo/Fire not found - the rocket "
+                        + "limit only holds back the blast, not the shot.");
                 RevivalPlugin.L.LogInfo("Crew LAW: rocket impact explosion active.");
             }
             catch (Exception ex)
@@ -2440,6 +2480,9 @@ namespace NextDayRevival
                     if (_itemId == null) return;
                 }
                 if (ItemId(_itemId.GetValue(data)) != Crew.LAW_ID) return;
+                // P11: a rocket is counted here, once, and the blast only
+                // comes while this NPC still has one and has re-armed.
+                if (!Consume(__instance)) return;
 
                 Vector3 muzzle = _muzzlePos == null ? Vector3.zero
                     : (Vector3)_muzzlePos.Invoke(__instance, null);
@@ -2490,6 +2533,255 @@ namespace NextDayRevival
                 if (RevivalPlugin.L != null)
                     RevivalPlugin.L.LogWarning("Crew LAW fire: " + ex.Message);
             }
+        }
+
+        // ------------------------------------------------ P11 rocket limits
+        //
+        // Every NPC LAW shot - vanilla patrol crew AI (Fire) and NpcWar squads
+        // (FireTo) - passes Allow first. A rocket is fired only when the NPC
+        // has one left (CrewLawRounds), has re-armed (CrewLawReload), the
+        // target is at least CrewLawMinRange away, and the target is a vehicle
+        // or sits behind hard cover. A man in the open never gets one.
+
+        sealed class LawState
+        {
+            public int Used;
+            public float NextRocket;
+            public float NextCheck;
+            public float InfantrySince = -1f;
+            public bool Swapped;
+        }
+
+        static readonly Dictionary<int, LawState> _law = new Dictionary<int, LawState>();
+        static Type _npcType;
+        static FieldInfo _killTarget;
+        static bool _npcLooked;
+        static float _nextLawLog;
+
+        public static bool FireToPrefix(object __instance, Vector3 __0)
+        {
+            return Allow(__instance, __0, true);
+        }
+
+        public static bool FireAiPrefix(object __instance)
+        {
+            return Allow(__instance, Vector3.zero, false);
+        }
+
+        static int Rounds()
+        {
+            return RevivalPlugin.CfgPatrolCrewLawRounds == null ? 2
+                : Mathf.Clamp(RevivalPlugin.CfgPatrolCrewLawRounds.Value, 0, 20);
+        }
+
+        static LawState State(object weapon)
+        {
+            UnityEngine.Object o = weapon as UnityEngine.Object;
+            if (o == null) return null;
+            int key = o.GetInstanceID();
+            LawState st;
+            if (!_law.TryGetValue(key, out st))
+            {
+                if (_law.Count > 256)
+                {
+                    // Dead NPCs' controllers are gone; start the table over
+                    // rather than grow it for a whole session.
+                    _law.Clear();
+                }
+                st = new LawState();
+                _law[key] = st;
+            }
+            return st;
+        }
+
+        static bool IsLaw(object weapon)
+        {
+            if (weapon == null || _weaponData == null) return false;
+            object data = _weaponData.GetValue(weapon);
+            if (data == null) return false;
+            if (_itemId == null)
+            {
+                _itemId = AccessTools.Field(data.GetType(), "ItemID");
+                if (_itemId == null) return false;
+            }
+            return ItemId(_itemId.GetValue(data)) == Crew.LAW_ID;
+        }
+
+        /// <summary>The FireOneShot side: count the rocket. False when the
+        /// NPC is out of rockets or still re-arming (a shot that slipped past
+        /// Allow keeps its puny bullet, but gets no blast).</summary>
+        static bool Consume(object weapon)
+        {
+            LawState st = State(weapon);
+            if (st == null) return true;
+            float now = Time.time;
+            if (st.Used >= Rounds() || now < st.NextRocket - 0.05f) return false;
+            st.Used++;
+            float reload = RevivalPlugin.CfgPatrolCrewLawReload == null ? 30f
+                : Mathf.Clamp(RevivalPlugin.CfgPatrolCrewLawReload.Value, 0f, 600f);
+            st.NextRocket = now + reload;
+            RevivalPlugin.L.LogInfo("Crew LAW: rocket " + st.Used + " of " + Rounds()
+                + " fired, next in " + reload.ToString("0") + " s.");
+            return true;
+        }
+
+        static bool Allow(object weapon, Vector3 aim, bool haveAim)
+        {
+            try
+            {
+                if (!IsLaw(weapon)) return true;
+                if (!IsMaster()) return true;   // Fire checks isMine itself; no blast off the master
+                LawState st = State(weapon);
+                if (st == null) return true;
+                float now = Time.time;
+                if (now < st.NextCheck) return false;
+                st.NextCheck = now + 0.5f;
+
+                Component ai = Owner(weapon);
+                if (st.Used >= Rounds())
+                {
+                    SwapToMg(weapon, ai, st, "out of rockets");
+                    return false;
+                }
+                if (now < st.NextRocket) return false;
+
+                GameObject target = TargetOf(ai);
+                if (!haveAim)
+                {
+                    if (target == null) return false;
+                    aim = target.transform.position + Vector3.up * 3.3f;
+                }
+                Vector3 muzzle = Vector3.zero;
+                if (_muzzlePos != null)
+                {
+                    try { muzzle = (Vector3)_muzzlePos.Invoke(weapon, null); }
+                    catch { muzzle = Vector3.zero; }
+                }
+                if (muzzle == Vector3.zero)
+                {
+                    Component w = weapon as Component;
+                    muzzle = (ai != null ? ai.transform.position
+                        : (w != null ? w.transform.position : aim)) + Vector3.up * 4f;
+                }
+                float minRange = RevivalPlugin.CfgPatrolCrewLawMinRange == null ? 40f
+                    : Mathf.Max(0f, RevivalPlugin.CfgPatrolCrewLawMinRange.Value);
+                float dist = Vector3.Distance(muzzle, aim);
+                if (dist < minRange) return false;
+
+                string why;
+                if (VehicleTarget(target, aim)) why = "vehicle";
+                else if (Fortified(muzzle, aim, target)) why = "target behind cover";
+                else why = null;
+                if (why == null)
+                {
+                    if (st.InfantrySince < 0f) st.InfantrySince = now;
+                    else if (now - st.InfantrySince > 8f)
+                        SwapToMg(weapon, ai, st, "infantry in the open");
+                    return false;
+                }
+                st.InfantrySince = -1f;
+                st.NextCheck = 0f;
+                if (now >= _nextLawLog)
+                {
+                    _nextLawLog = now + 5f;
+                    RevivalPlugin.L.LogInfo("Crew LAW: rocket cleared at " + why + " ("
+                        + dist.ToString("0") + " units).");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Crew LAW gate: " + ex.Message);
+                return false;
+            }
+        }
+
+        static Component Owner(object weapon)
+        {
+            Component w = weapon as Component;
+            if (w == null) return null;
+            if (!_npcLooked)
+            {
+                _npcLooked = true;
+                _npcType = RevivalPlugin.TypeByName("NPC_AI2");
+                if (_npcType != null) _killTarget = AccessTools.Field(_npcType, "_killTarget");
+            }
+            if (_npcType == null) return null;
+            Component ai = w.GetComponentInParent(_npcType);
+            return ai == null ? null : ai;
+        }
+
+        static GameObject TargetOf(Component ai)
+        {
+            if (ai == null || _killTarget == null) return null;
+            object raw = _killTarget.GetValue(ai);
+            GameObject go = raw as GameObject;
+            Component c = raw as Component;
+            if (go == null && c != null) go = c.gameObject;
+            return go != null && go.activeInHierarchy ? go : null;
+        }
+
+        /// <summary>The target is a vehicle, sits in one, or the aim point is
+        /// within 3 units of a vehicle's hull.</summary>
+        static bool VehicleTarget(GameObject target, Vector3 aim)
+        {
+            if (target != null && GunnerAI.Carrier(target.transform) != null) return true;
+            Component[] all = VehicleScan.All();
+            for (int i = 0; i < all.Length; i++)
+            {
+                Component v = all[i];
+                if (v == null) continue;
+                if (target != null && target.transform.IsChildOf(v.transform)) return true;
+                if (Vector3.Distance(v.transform.position, aim) > 40f) continue;
+                Collider[] hull = v.GetComponentsInChildren<Collider>();
+                for (int k = 0; k < hull.Length; k++)
+                {
+                    if (!hull[k].enabled || hull[k].isTrigger) continue;
+                    if (Vector3.Distance(hull[k].ClosestPointOnBounds(aim), aim) <= 3f) return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>The line of fire ends on hard cover right in front of the
+        /// target: a wall, a sandbag, a building - not the ground, not a
+        /// person, not something next to the shooter.</summary>
+        static bool Fortified(Vector3 muzzle, Vector3 aim, GameObject target)
+        {
+            Vector3 to = aim - muzzle;
+            float len = to.magnitude;
+            if (len < 1f) return false;
+            Vector3 hit;
+            GameObject struck = Turret.RaycastObject(muzzle, to / len, len + 1f, out hit);
+            if (struck == null) return false;
+            if (target != null && struck.transform.IsChildOf(target.transform)) return false;
+            if (Vector3.Distance(hit, aim) > 8f) return false;
+            if (struck.GetComponent<TerrainCollider>() != null) return false;
+            if (struck.CompareTag("RagdollBone")) return false;
+            if (_npcType != null && struck.GetComponentInParent(_npcType) != null) return false;
+            Type pnc = RevivalPlugin.TypeByName("PlayerNetworkController");
+            if (pnc != null && struck.GetComponentInParent(pnc) != null) return false;
+            Rigidbody body = struck.GetComponentInParent<Rigidbody>();
+            if (body != null && !body.isKinematic) return false;   // loose props are not a bunker
+            return true;
+        }
+
+        /// <summary>A patrol crewman with no rocket left, or with nothing but
+        /// infantry in front of him, puts the LAW away and draws the MG42.
+        /// A heli squad's anti-tank gunner is left alone: NpcWar switches him
+        /// to his rifle itself (AntiTankStep).</summary>
+        static void SwapToMg(object weapon, Component ai, LawState st, string why)
+        {
+            if (st.Swapped || ai == null) return;
+            st.Swapped = true;
+            float d1, d2;
+            if (NpcWar.SquadLaw(weapon, out d1, out d2)) return;
+            CrewLawSwap swap = ai.gameObject.GetComponent<CrewLawSwap>();
+            if (swap == null) swap = ai.gameObject.AddComponent<CrewLawSwap>();
+            swap.Begin(ai);
+            RevivalPlugin.L.LogInfo("Crew LAW: " + ai.name + " puts the LAW away (" + why
+                + ") and draws the MG42.");
         }
 
         /// <summary>Master-client check by reflection - PhotonNetwork is a game
@@ -2662,6 +2954,53 @@ namespace NextDayRevival
     }
 
     /// <summary>
+    /// P11: a patrol crewman's LAW goes away and the MG42 comes out - the
+    /// same two RPCs NpcWar.BeginSwitch uses: EquipWeapon(false, true) hides
+    /// the weapon in hand, SetMainWeaponId(id, true) draws the other a moment
+    /// later, once the slot is free.
+    /// </summary>
+    public sealed class CrewLawSwap : MonoBehaviour
+    {
+        Component _ai;
+        float _drawAt;
+
+        public void Begin(Component ai)
+        {
+            _ai = ai;
+            _drawAt = Time.time + 1.5f;
+            try
+            {
+                MethodInfo equip = AccessTools.Method(ai.GetType(), "EquipWeapon",
+                    new Type[] { typeof(bool), typeof(bool) }, null);
+                if (equip != null) equip.Invoke(ai, new object[] { false, true });
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew LAW swap: hide failed - "
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+            }
+        }
+
+        void Update()
+        {
+            if (_ai == null) { UnityEngine.Object.Destroy(this); return; }
+            if (Time.time < _drawAt) return;
+            try
+            {
+                MethodInfo draw = AccessTools.Method(_ai.GetType(), "SetMainWeaponId",
+                    new Type[] { typeof(int), typeof(bool) }, null);
+                if (draw != null) draw.Invoke(_ai, new object[] { Crew.MG42_ID, true });
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Crew LAW swap: draw failed - "
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+            }
+            UnityEngine.Object.Destroy(this);
+        }
+    }
+
+    /// <summary>
     /// One disposable FPV drone per dismounted crew. The master client uses
     /// the crew's real kill target, which preserves the game's faction rules.
     /// A fixed lateral error keeps it dangerous without making it a perfect
@@ -2695,6 +3034,13 @@ namespace NextDayRevival
             public float AimUp = 1.1f;
             public float Damage = -1f, Radius = -1f;
             public string What = "player";
+            // P11: a drone is not in the air the moment it is wanted. The
+            // operator unpacks, arms and spins it up first (LaunchAt); until
+            // then Go is null and a dead operator or a lost target cancels it.
+            public float LaunchAt;
+            public bool Launched;
+            public Component Operator;   // NPC_AI2 of the heli squad operator
+            public bool HasOperator;
         }
 
         class Remote
@@ -2716,6 +3062,106 @@ namespace NextDayRevival
             new Dictionary<string, Remote>();
         static readonly List<string> _remove = new List<string>();
         static int _nextId = 1;
+
+        // P11 spam limits, shared by patrol crews and heli squads: where and
+        // when the recent launches were, for the per-area cooldown.
+        static readonly List<Vector3> _launchPos = new List<Vector3>();
+        static readonly List<float> _launchTime = new List<float>();
+        static float _nextRefusalLog;
+
+        static float LaunchSeconds()
+        {
+            return RevivalPlugin.CfgPatrolCrewDroneLaunchSeconds == null ? 9f
+                : Mathf.Clamp(RevivalPlugin.CfgPatrolCrewDroneLaunchSeconds.Value, 0f, 60f);
+        }
+
+        /// <summary>May a new drone be launched from here? No while
+        /// CrewDroneMaxAir are already up or being prepared anywhere, while
+        /// CrewDroneAreaMax are up or being prepared inside CrewDroneAreaRadius,
+        /// or while a launch inside that radius is younger than
+        /// CrewDroneAreaCooldown.</summary>
+        internal static bool AreaFree(Vector3 at, out string why)
+        {
+            why = "";
+            int maxAir = RevivalPlugin.CfgPatrolCrewDroneMaxAir == null ? 2
+                : Mathf.Max(0, RevivalPlugin.CfgPatrolCrewDroneMaxAir.Value);
+            int areaMax = RevivalPlugin.CfgPatrolCrewDroneAreaMax == null ? 1
+                : Mathf.Max(0, RevivalPlugin.CfgPatrolCrewDroneAreaMax.Value);
+            float radius = RevivalPlugin.CfgPatrolCrewDroneAreaRadius == null ? 450f
+                : Mathf.Max(0f, RevivalPlugin.CfgPatrolCrewDroneAreaRadius.Value);
+            float cooldown = RevivalPlugin.CfgPatrolCrewDroneAreaCooldown == null ? 120f
+                : Mathf.Max(0f, RevivalPlugin.CfgPatrolCrewDroneAreaCooldown.Value);
+            if (_local.Count >= maxAir)
+            {
+                why = _local.Count + " drone(s) already up (max " + maxAir + ")";
+                return false;
+            }
+            int near = 0;
+            for (int i = 0; i < _local.Count; i++)
+            {
+                Local d = _local[i];
+                Vector3 p = d.Go == null && d.Operator != null ? d.Operator.transform.position : d.Pos;
+                if (Vector3.Distance(p, at) <= radius) near++;
+            }
+            if (near >= areaMax)
+            {
+                why = near + " drone(s) up in this area (max " + areaMax + ")";
+                return false;
+            }
+            for (int i = _launchTime.Count - 1; i >= 0; i--)
+            {
+                if (Time.time - _launchTime[i] > cooldown)
+                {
+                    _launchTime.RemoveAt(i);
+                    _launchPos.RemoveAt(i);
+                    continue;
+                }
+                if (Vector3.Distance(_launchPos[i], at) <= radius)
+                {
+                    why = "area cooldown, " + (cooldown - (Time.time - _launchTime[i])).ToString("0")
+                        + " s left";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static void Refused(string who, string why)
+        {
+            if (Time.time < _nextRefusalLog) return;
+            _nextRefusalLog = Time.time + 20f;
+            RevivalPlugin.L.LogInfo("Crew FPV: " + who + " launch refused - " + why + ".");
+        }
+
+        /// <summary>Book the drone against the area now; it flies after
+        /// LaunchSeconds of preparation (Spawn).</summary>
+        static void Queue(Local d)
+        {
+            d.LaunchAt = Time.time + LaunchSeconds();
+            d.Launched = false;
+            _local.Add(d);
+            _launchPos.Add(d.Pos);
+            _launchTime.Add(Time.time);
+        }
+
+        /// <summary>Preparation over: the airframe appears and flies.</summary>
+        static void Spawn(Local d)
+        {
+            d.Launched = true;
+            Vector3 to = AimPoint(d) - d.Pos;
+            if (d.Target != null && to.sqrMagnitude > 0.01f) d.Dir = to.normalized;
+            d.Armed = Time.time + 1.2f;
+            d.Deadline = Time.time + 55f;
+            d.Go = Drone.Modell.Bauen();
+            d.Go.name = "NDR Crew FPV " + d.Id;
+            d.Go.transform.localScale *= 1.15f;
+            d.Go.transform.position = d.Pos;
+            d.Go.transform.rotation = Quaternion.LookRotation(d.Dir, Vector3.up);
+            Drone.Sound.Anhaengen(d.Go);
+            Net.Send(Net.Start, d.Id, d.Pos, d.Dir, 0f, true);
+            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " airborne after "
+                + LaunchSeconds().ToString("0") + " s of preparation.");
+        }
 
         public static void Begin(Transform root, Array npcs)
         {
@@ -2747,6 +3193,13 @@ namespace NextDayRevival
                 if (Time.time < p.At) continue;
                 GameObject target = FindTarget(p.Npcs);
                 if (target == null) continue;
+                string why;
+                if (!AreaFree(p.Root.position, out why))
+                {
+                    Refused("patrol crew", why);
+                    p.At = Time.time + 5f;
+                    continue;
+                }
                 Launch(p.Root, target);
                 _pending.RemoveAt(i);
             }
@@ -2788,17 +3241,8 @@ namespace NextDayRevival
                                   radius * 0.12f,
                                   Mathf.Sin(angle) * radius);
             d.Hp = Mathf.Max(1, RevivalPlugin.CfgPatrolCrewDroneHitpoints.Value);
-            d.Armed = Time.time + 1.2f;
-            d.Deadline = Time.time + 55f;
-            d.Go = Drone.Modell.Bauen();
-            d.Go.name = "NDR Crew FPV " + d.Id;
-            d.Go.transform.localScale *= 1.15f;
-            d.Go.transform.position = d.Pos;
-            d.Go.transform.rotation = Quaternion.LookRotation(d.Dir, Vector3.up);
-            Drone.Sound.Anhaengen(d.Go);
-            _local.Add(d);
-            Net.Send(Net.Start, d.Id, d.Pos, d.Dir, 0f, true);
-            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " launched at player "
+            Queue(d);
+            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " being prepared against "
                 + target.name + " with " + radius.ToString("0.0")
                 + " m deliberate miss.");
         }
@@ -2811,8 +3255,26 @@ namespace NextDayRevival
         internal static int LaunchAt(Vector3 from, GameObject target, float aimUp,
                                      float miss, float damage, float radius, string what)
         {
+            return LaunchAt(from, target, aimUp, miss, damage, radius, what, null);
+        }
+
+        /// <summary>As above, with the operator who prepares it: while he
+        /// unpacks and arms it, his death cancels the launch. 0 also when the
+        /// area limits (AreaFree) refuse it.</summary>
+        internal static int LaunchAt(Vector3 from, GameObject target, float aimUp,
+                                     float miss, float damage, float radius, string what,
+                                     Component op)
+        {
             if (target == null) return 0;
+            string why;
+            if (!AreaFree(from, out why))
+            {
+                Refused("squad", why);
+                return 0;
+            }
             Local d = new Local();
+            d.Operator = op;
+            d.HasOperator = op != null;
             d.Id = _nextId++;
             d.Target = target;
             d.AimUp = aimUp;
@@ -2826,17 +3288,8 @@ namespace NextDayRevival
             float r = Mathf.Max(0f, miss) * (0.45f + 0.55f * Mathf.Abs(Mathf.Sin(d.Id * 78.233f)));
             d.Error = new Vector3(Mathf.Cos(angle) * r, 0f, Mathf.Sin(angle) * r);
             d.Hp = Mathf.Max(1, RevivalPlugin.CfgPatrolCrewDroneHitpoints.Value);
-            d.Armed = Time.time + 1.2f;
-            d.Deadline = Time.time + 55f;
-            d.Go = Drone.Modell.Bauen();
-            d.Go.name = "NDR Crew FPV " + d.Id;
-            d.Go.transform.localScale *= 1.15f;
-            d.Go.transform.position = d.Pos;
-            d.Go.transform.rotation = Quaternion.LookRotation(d.Dir, Vector3.up);
-            Drone.Sound.Anhaengen(d.Go);
-            _local.Add(d);
-            Net.Send(Net.Start, d.Id, d.Pos, d.Dir, 0f, true);
-            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " launched at " + d.What + " "
+            Queue(d);
+            RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " being prepared against " + d.What + " "
                 + target.name + " (" + Vector3.Distance(from, target.transform.position).ToString("0")
                 + " units, blast " + damage.ToString("0") + " in " + radius.ToString("0.#") + ").");
             return d.Id;
@@ -2847,7 +3300,7 @@ namespace NextDayRevival
         {
             if (id <= 0) return false;
             for (int i = 0; i < _local.Count; i++)
-                if (_local[i].Id == id && _local[i].Go != null) return true;
+                if (_local[i].Id == id && (_local[i].Go != null || !_local[i].Launched)) return true;
             return false;
         }
 
@@ -2865,6 +3318,20 @@ namespace NextDayRevival
 
         static void Move(Local d)
         {
+            if (d != null && !d.Launched)
+            {
+                bool lost = d.Target == null || !d.Target.activeInHierarchy;
+                bool opDown = d.HasOperator && !NpcWar.NpcAlive(d.Operator);
+                if (lost || opDown)
+                {
+                    _local.Remove(d);
+                    RevivalPlugin.L.LogInfo("Crew FPV " + d.Id + " launch cancelled: "
+                        + (opDown ? "operator down" : "target gone") + ".");
+                    return;
+                }
+                if (Time.time < d.LaunchAt) return;
+                Spawn(d);
+            }
             if (d == null || d.Go == null)
             {
                 if (d != null) _local.Remove(d);
@@ -2923,6 +3390,7 @@ namespace NextDayRevival
         static void Finish(Local d, Vector3 point, bool explode, string why)
         {
             if (!_local.Remove(d)) return;
+            if (!d.Launched) return;
             Net.Send(Net.End, d.Id, point, d.Dir, explode ? 1f : 0f, true);
             if (d.Go != null) UnityEngine.Object.Destroy(d.Go);
             if (explode)

@@ -201,6 +201,9 @@ $assets = @(
     "an2part_magneto_icon.png",
     "an2part_prop.ndmesh", "an2part_prop_diffuse.png", "an2part_prop_normal.png",
     "an2part_prop_icon.png",
+    # The An-2's FAB-50 bomb (2072), fab50_build.py; Revival.An2Bombs.cs
+    # (the item and the falling bomb in the world).
+    "fab50.ndmesh", "fab50_diffuse.png", "fab50_normal.png", "fab50_icon.png",
     "scope50.png",
     # Helipad decks: one painted texture per built surface, mapped
     # radius-relative over the whole pad (helipad_texture.py). Without them the
@@ -290,24 +293,27 @@ if ($missing.Count -gt 0) {
     throw ("Assets fehlen: {0}`nErst die Generatoren laufen lassen: python make_assets.py" -f ($missing -join ", "))
 }
 
-# The airfield's real models, one content bundle per building (east_af_*.bundle,
-# unity/EastTile AirfieldAssembly.cs, docs/ai/tasks/airfield-assembly.md). Build
+# The airfield's and the military town's real models, one content bundle per
+# building (east_af_*.bundle, east_mt_*.bundle; unity/EastTile AirfieldAssembly.cs,
+# docs/ai/tasks/airfield-assembly.md, military-town-assembly.md). Build
 # products of rebuild_east.ps1 like the list above, but optional: without them
-# the game shows the greybox fallback in east_airfield.bundle. An installed
-# east_af_* bundle that assets/ no longer has is removed, so a building never
+# the game shows the greybox fallback in east_airfield.bundle / east_town.bundle.
+# An installed one that assets/ no longer has is removed, so a building never
 # stands twice or from an old build.
-$afSrc = @(Get-ChildItem $assetSrc -Filter "east_af_*.bundle" -ErrorAction SilentlyContinue)
-foreach ($b in $afSrc) {
-    Copy-Item $b.FullName (Join-Path $assetDst $b.Name) -Force
-    Write-Host ("  asset copied: {0,-26} {1,8} bytes" -f $b.Name, $b.Length)
-}
-foreach ($old in @(Get-ChildItem $assetDst -Filter "east_af_*.bundle" -ErrorAction SilentlyContinue)) {
-    if (-not (Test-Path (Join-Path $assetSrc $old.Name))) {
-        Remove-Item $old.FullName -Force
-        Write-Host ("  old one removed: {0}" -f $old.Name)
+foreach ($pat in @(@("east_af_*.bundle", "the airfield"), @("east_mt_*.bundle", "the military town"))) {
+    $afSrc = @(Get-ChildItem $assetSrc -Filter $pat[0] -ErrorAction SilentlyContinue)
+    foreach ($b in $afSrc) {
+        Copy-Item $b.FullName (Join-Path $assetDst $b.Name) -Force
+        Write-Host ("  asset copied: {0,-26} {1,8} bytes" -f $b.Name, $b.Length)
     }
+    foreach ($old in @(Get-ChildItem $assetDst -Filter $pat[0] -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path (Join-Path $assetSrc $old.Name))) {
+            Remove-Item $old.FullName -Force
+            Write-Host ("  old one removed: {0}" -f $old.Name)
+        }
+    }
+    if ($afSrc.Count -eq 0) { Write-Host ("  {0}: none in assets/ - {1} stays greybox (fallback)" -f $pat[0], $pat[1]) }
 }
-if ($afSrc.Count -eq 0) { Write-Host "  east_af_*.bundle: none in assets/ - the airfield stays greybox (fallback)" }
 
 Write-Host ""
 Write-Host ("FERTIG  {0}  {1} bytes" -f (Split-Path -Leaf $out), (Get-Item $out).Length)

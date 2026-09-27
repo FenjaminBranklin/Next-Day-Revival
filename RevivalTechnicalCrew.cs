@@ -1263,7 +1263,7 @@ namespace NextDayRevival
         /// no clip needs an offset of its own. Every client runs it, because
         /// every client draws the man.
         /// </summary>
-        static void Sitzen(Component ai, int seat)
+        internal static void Sitzen(Component ai, int seat)
         {
             try
             {
