@@ -517,6 +517,13 @@ namespace NextDayRevival
                 dir.y = 0f;
                 if (dir.sqrMagnitude > 0.000001f)
                     _body.rotation = Quaternion.LookRotation(dir.normalized, Vector3.up);
+                // THE CAMERA RIG HANGS UNDER THE BODY (CameraTPSController
+                // finds PlayerStates with GetComponentInParent, IL 2026-09-28).
+                // CameraOwner.LateTick placed the camera before this, so moving
+                // the body just now dragged the camera by one frame of flight -
+                // a distance that swings with the frame time: the "two steps
+                // forward, one back" of every flight. Place it again, last.
+                if (CameraOwner.Has(CameraOwner.Heli)) LateTick();
             }
             catch (Exception ex)
             {

@@ -49,7 +49,10 @@
 //           aeroplane drops its nose, gathers speed and flies again
 // Controls are rates (W/S pitch, A/D roll, Q/E rudder, space/ctrl throttle),
 // scaled by airspeed and propeller wash. On the ground the tail wheel steers
-// and the tail stays down until speed and forward stick lift it.
+// and the tail stays down until speed and forward stick lift it. With
+// [PlayerAn2] FlightAssist (default) the keys fly WASD-style instead: A/D a
+// banked turn that flies itself, W/S a dive or climb angle, released it holds
+// level flight (Assist; research/an2_assist_sim.py), and A/D steer on the ground.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree
 // lambdas. Physics and Collider go through reflection (build.ps1 references
@@ -103,7 +106,7 @@ namespace NextDayRevival
         // ============================================================= config
 
         internal static ConfigEntry<bool> CfgEnabled, CfgApronSpawn, CfgPassengers,
-            CfgBailOut, CfgCrash;
+            CfgBailOut, CfgCrash, CfgAssist, CfgInvertPitch;
         internal static ConfigEntry<string> CfgSpawnKey, CfgBoardKey, CfgViewKey,
             CfgEngineKey, CfgJumpKey, CfgBrakeKey;
         internal static ConfigEntry<float> CfgStallSpeed, CfgCritAoa, CfgThrust,
@@ -112,7 +115,7 @@ namespace NextDayRevival
             CfgFuelBurn, CfgCrashSink, CfgCrashSpeed, CfgCrashBank, CfgCrashSlope,
             CfgImpactSpeed, CfgRollFriction, CfgGrassFriction, CfgBrake,
             CfgCrashDamage, CfgWreckSeconds, CfgRespawnMinutes, CfgBoardRange,
-            CfgCamDistance, CfgCamHeight, CfgSensitivity, CfgNetHz;
+            CfgCamDistance, CfgCamHeight, CfgSensitivity, CfgNetHz, CfgMaxBank;
         internal static ConfigEntry<int> CfgEventCode;
 
         internal static void BindConfig(ConfigFile cfg)
@@ -163,6 +166,15 @@ namespace NextDayRevival
             CfgPitchRate = cfg.Bind(S, "PitchRate", 40f, "Deg/s at full elevator and full authority.");
             CfgRollRate = cfg.Bind(S, "RollRate", 75f, "Deg/s at full aileron.");
             CfgYawRate = cfg.Bind(S, "YawRate", 20f, "Deg/s at full rudder in the air.");
+            CfgAssist = cfg.Bind(S, "FlightAssist", true,
+                "WASD flying: A/D bank the aeroplane into a turn and the turn "
+                + "flies itself (rudder and back pressure are added), let go and "
+                + "the wings come level; with W/S released it holds its height. "
+                + "Off: A/D are bare ailerons and W/S bare elevator.");
+            CfgMaxBank = cfg.Bind(S, "MaxBank", 40f,
+                "Degrees of bank that A/D ask for with FlightAssist on.");
+            CfgInvertPitch = cfg.Bind(S, "InvertPitch", false,
+                "Off: W pushes the nose down, S pulls it up (the stick). On: W nose up.");
             CfgGroundSteer = cfg.Bind(S, "GroundSteer", 35f,
                 "Deg/s the tail wheel turns the aeroplane at walking speed; "
                 + "fades out towards 100 km/h, where the rudder takes over.");
@@ -357,7 +369,12 @@ namespace NextDayRevival
                 if (Input.GetKeyDown(Key(CfgViewKey, KeyCode.V))) _cockpit = !_cockpit;
                 if (Input.GetKeyDown(Key(CfgJumpKey, KeyCode.X))) { Jump(); return; }
                 if (Input.GetKeyDown(Key(CfgBoardKey, KeyCode.F))) { Leave(true); return; }
-                if (_pilot && !gliding && Input.GetKeyDown(Key(CfgEngineKey, KeyCode.G)))
+                // G is the engine on the ground and the bombsight in the air
+                // (An2Bombs SightKey): the engine is not switched off in flight
+                // by the key that opens the sight.
+                KeyCode engineKey = Key(CfgEngineKey, KeyCode.G);
+                bool sightKey = !_onGround && An2Bombs.Enabled && An2Bombs.SightKey == engineKey;
+                if (_pilot && !gliding && !sightKey && Input.GetKeyDown(engineKey))
                     SetEngine(!VisualOf(_plane).Running);
 
                 if (_pilot)
@@ -424,6 +441,10 @@ namespace NextDayRevival
                 dir.y = 0f;
                 if (dir.sqrMagnitude > 0.000001f)
                     _body.rotation = Quaternion.LookRotation(dir.normalized, Vector3.up);
+                // The camera rig is a child of the body (PlayerHeli.LateFrame
+                // has the IL): seating the body dragged the camera that
+                // CameraOwner.LateTick had already placed. Place it again, last.
+                if (CameraOwner.Has(CameraOwner.An2)) LateTick();
             }
             catch (Exception ex)
             {
@@ -479,6 +500,8 @@ namespace NextDayRevival
         /// view comes back behind the tail by itself once the hand rests.</summary>
         static void Look()
         {
+            // In the bombsight the mouse lays the crosshair (An2Bombs.Aim).
+            if (_pilot && An2Bombs.SightOn) return;
             float sens = F(CfgSensitivity, 2.2f);
             float mx = Input.GetAxis("Mouse X"), my = Input.GetAxis("Mouse Y");
             if (Mathf.Abs(mx) > 0.001f || Mathf.Abs(my) > 0.001f) _lastMouse = Time.time;
@@ -557,7 +580,9 @@ namespace NextDayRevival
             }
 
             // ---- controls, smoothed so a key is a deflection, not a switch
-            _pIn = Mathf.MoveTowards(_pIn, Axis(KeyCode.S, KeyCode.W), 4f * dt);
+            float pitchKeys = Axis(KeyCode.S, KeyCode.W);
+            if (CfgInvertPitch != null && CfgInvertPitch.Value) pitchKeys = -pitchKeys;
+            _pIn = Mathf.MoveTowards(_pIn, pitchKeys, 4f * dt);
             _rIn = Mathf.MoveTowards(_rIn, Axis(KeyCode.D, KeyCode.A), 4f * dt);
             _yIn = Mathf.MoveTowards(_yIn, Axis(KeyCode.E, KeyCode.Q), 3f * dt);
             _brake = Input.GetKey(Key(CfgBrakeKey, KeyCode.B));
@@ -597,18 +622,27 @@ namespace NextDayRevival
                 GroundAttitude(dt, speed, auth);
             else
             {
-                float pRate = _pIn * F(CfgPitchRate, 40f) * auth;
-                float rRate = _rIn * F(CfgRollRate, 75f) * ailAuth;
-                float yRate = _yIn * F(CfgYawRate, 20f) * auth;
+                float pRate, rRate, yRate;
                 float aero = Mathf.Clamp01(speed / 20f);
+                float steer = 0f;
+                bool autopilot = Mathf.Abs(_rIn) < 0.05f && An2Bombs.Steer(out steer);
+                if (Assisted() || autopilot)
+                    Assist(speed, aoa, crit, auth, ailAuth, aero, autopilot, steer,
+                           out pRate, out rRate, out yRate);
+                else
+                {
+                    pRate = _pIn * F(CfgPitchRate, 40f) * auth;
+                    rRate = _rIn * F(CfgRollRate, 75f) * ailAuth;
+                    yRate = _yIn * F(CfgYawRate, 20f) * auth;
+                    float bank = Bank(right);
+                    if (Mathf.Abs(_rIn) < 0.05f && Mathf.Abs(bank) < 60f) rRate -= bank * 0.3f;
+                }
                 // The nose weathervanes into the airflow: that is what makes a
                 // stalled aeroplane drop its nose and fly again, and what makes
                 // full back stick hold the wing near - not past - its critical
                 // angle at speed (40 deg/s against 3 per degree: 13 degrees).
                 pRate -= 3f * (aoa - 2f) * aero;
                 yRate += 2.5f * beta * aero;
-                float bank = Bank(right);
-                if (Mathf.Abs(_rIn) < 0.05f && Mathf.Abs(bank) < 60f) rRate -= bank * 0.3f;
                 if (_stalled)
                 {
                     pRate -= 12f;
@@ -691,6 +725,64 @@ namespace NextDayRevival
             Pose(pos);
         }
 
+        static bool Assisted() { return CfgAssist == null || CfgAssist.Value; }
+
+        /// <summary>
+        /// WASD FLYING (FlightAssist). The bare controls were a stick: A/D
+        /// rolled and kept rolling, a turn needed back pressure and rudder on
+        /// top, and every release left the aeroplane in whatever attitude it
+        /// had - "mega weird" in the field (2026-09-28). With the assist:
+        ///   A/D  ask for a bank (MaxBank at full key) and the turn flies
+        ///        itself - the coordinated pitch and yaw rates of a level turn
+        ///        at that bank, omega = g tan(bank) / v, are added; let go and
+        ///        the wings come level without swinging through;
+        ///   W/S  ask for a dive or climb angle, released it is level flight:
+        ///        the angle of attack that carries 1/cos(bank) g at this speed
+        ///        as a feed-forward against the weathervane term, plus a
+        ///        vertical-speed trim; never past the critical angle minus 3
+        ///        degrees, so the wing does not stall under the assist - with
+        ///        too little power the aeroplane sinks instead;
+        ///   Q/E  stay the rudder.
+        /// The bombsight's steering (An2Bombs.Steer) asks for the bank instead
+        /// of A/D while the pilot keeps his hands off them.
+        /// research/an2_assist_sim.py flies these equations; change it with them.
+        /// </summary>
+        static void Assist(float speed, float aoa, float crit, float auth, float ailAuth,
+                           float aero, bool autopilot, float steer,
+                           out float pRate, out float rRate, out float yRate)
+        {
+            Vector3 right = _rot * Vector3.right, up = _rot * Vector3.up;
+            // Full circle, unlike Bank(): upside down must read as upside down.
+            float bank = Mathf.Atan2(-right.y, up.y) * Mathf.Rad2Deg;
+            float maxBank = Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+            float want = autopilot ? Mathf.Clamp(steer, -maxBank, maxBank) : _rIn * maxBank;
+            float rollMax = F(CfgRollRate, 75f);
+            rRate = Mathf.Clamp((want - bank) * 2.5f, -rollMax, rollMax) * ailAuth;
+
+            float phi = Mathf.Clamp(bank, -70f, 70f) * Mathf.Deg2Rad;
+            float omega = speed > 8f ? G * Mathf.Tan(phi) / speed * Mathf.Rad2Deg : 0f;
+            pRate = omega * Mathf.Sin(phi) * aero;
+            yRate = omega * Mathf.Cos(phi) * aero + _yIn * F(CfgYawRate, 20f) * auth;
+
+            float gamma = _pIn * (_pIn > 0f ? 15f : 25f);
+            float vyWant = speed * Mathf.Sin(gamma * Mathf.Deg2Rad);
+            float vs = Vs();
+            if (vyWant > 0f) vyWant *= Mathf.Clamp01((speed - 1.2f * vs) / (0.5f * vs));
+            // Close to the ground a held W is an approach, not a dive into it:
+            // the gear takes CrashSinkRate, the assist asks for half of it.
+            float agl;
+            if (vyWant < 0f && Height(_plane, out agl) && agl < 25f)
+                vyWant = Mathf.Max(vyWant, -0.5f * F(CfgCrashSink, 4f));
+            if (!_stalled && speed > vs * 0.9f)
+            {
+                float need = (vs / speed) * (vs / speed) / Mathf.Max(0.3f, Mathf.Cos(phi));
+                float hold = Mathf.Min(-2f + need * (crit + 2f), crit - 3f);
+                pRate += 3f * (hold - 2f) * aero
+                    + Mathf.Clamp((vyWant - _vel.y) * 3f, -15f, 15f) * auth;
+            }
+            if (aoa > crit - 3f) pRate -= 6f * (aoa - (crit - 3f));
+        }
+
         // Ground attitude: heading and the nose-up angle of the three-point
         // stance. The tail rises with speed and forward stick; the tail wheel
         // steers at taxi speed and the rudder takes over as the air gets hold.
@@ -699,7 +791,9 @@ namespace NextDayRevival
         static void GroundAttitude(float dt, float speed, float auth)
         {
             float steerFade = Mathf.Clamp01(1f - speed / 28f);
-            float yRate = _yIn * (F(CfgGroundSteer, 35f) * steerFade + F(CfgYawRate, 20f) * auth);
+            // WASD: with the assist A/D steer the tail wheel too.
+            float steer = Assisted() ? Mathf.Clamp(_yIn + _rIn, -1f, 1f) : _yIn;
+            float yRate = steer * (F(CfgGroundSteer, 35f) * steerFade + F(CfgYawRate, 20f) * auth);
             _gHeading += yRate * dt;
             float parked = An2Model.Parked;
             float able = Mathf.Clamp01((speed - 8f) / 14f);
@@ -2324,6 +2418,12 @@ namespace NextDayRevival
 
             internal static string Controls(string engine, string view, string jump, string board, string brake)
             {
+                if (Assisted())
+                    return Loc.T(
+                        "Пробел/Ctrl - газ, W/S - вниз/вверх, A/D - поворот, Q/E - руль, " + brake + " - тормоз, "
+                        + engine + " - двигатель (на земле), " + view + " - вид, " + jump + " - прыжок, " + board + " - выйти",
+                        "space/ctrl throttle, W/S down/up, A/D turn, Q/E rudder, " + brake + " brake, "
+                        + engine + " engine (on the ground), " + view + " view, " + jump + " jump, " + board + " out");
                 return Loc.T(
                     "Пробел/Ctrl - газ, W/S - тангаж, A/D - крен, Q/E - руль, " + brake + " - тормоз, "
                     + engine + " - двигатель, " + view + " - вид, " + jump + " - прыжок, " + board + " - выйти",

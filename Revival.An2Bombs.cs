@@ -10,16 +10,17 @@
 //      bombs come from the airfield loot (the "military" pool, D2a and the
 //      other bunkers) or from the admin panel. An An-2 the admin spawns
 //      "ready" comes with a full load.
-//   2. The sight. The pilot presses the sight key (Z): the view drops
-//      through the floor, WW2 style - a downward camera that follows the
-//      point where a bomb released NOW would burst. The fixed reticle in the
-//      middle is that point; a pipper marks it exactly (the camera trails it
-//      a little), the track line shows where the aeroplane is going over the
-//      ground, the heading tick where its nose points (the difference is the
-//      drift), and the nadir mark the point straight below - the gap between
-//      nadir and reticle is the lead. Readouts: height over the ground,
-//      ground speed, fall time, lead and drift.
-//   3. The release key (R) drops one bomb. It is a REAL falling projectile:
+//   2. The sight. The pilot presses the sight key (G, in the air - on the
+//      ground G is the engine): the view drops under the belly, WW2 style -
+//      a downward camera laid on a crosshair on the ground. The mouse moves
+//      the crosshair; with the pilot's hands off A/D the aeroplane banks
+//      itself until its track runs through it (Steer, PlayerAn2.Assist) and
+//      flies the run-in wings level. The amber pipper is the point where a
+//      bomb released NOW bursts; it slides up the track line onto the
+//      crosshair, and "DROP!" flashes when they meet. The nadir mark is the
+//      point straight below - the gap to the pipper is the lead. Readouts:
+//      height over the ground, ground speed, fall time, lead and drift.
+//   3. The release key (left mouse button) drops one bomb. It is a REAL falling projectile:
 //      it leaves with the aeroplane's velocity, falls under gravity with a
 //      little drag, and the sight's prediction runs the same equations, so
 //      a steady, level, low run puts it on a vehicle-sized target. The
@@ -100,10 +101,10 @@ namespace NextDayRevival
 
         internal static ConfigEntry<bool> CfgGameplay, CfgDepotHit, CfgSightView, CfgModel;
         internal static ConfigEntry<string> CfgSightKey, CfgReleaseKey, CfgLoadKey;
-        internal static ConfigEntry<int> CfgCapacity, CfgEventCode;
+        internal static ConfigEntry<int> CfgCapacity, CfgEventCode, CfgControls;
         internal static ConfigEntry<float> CfgRadius, CfgNpcDamage, CfgVehicleDamage,
             CfgPlayerDamage, CfgDrag, CfgScatter, CfgScatterPerHeight, CfgScatterPerBank,
-            CfgArmSeconds, CfgInterval, CfgSightFov, CfgDepotReach;
+            CfgArmSeconds, CfgInterval, CfgSightFov, CfgDepotReach, CfgAimSensitivity;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -126,11 +127,14 @@ namespace NextDayRevival
             CfgCapacity = cfg.Bind(S, "BombCapacity", 6,
                 "FAB-50s on the racks of one An-2 (the real one carried 4-6 small "
                 + "bombs under the lower wing).");
-            CfgSightKey = cfg.Bind(S, "SightKey", "Z", "Pilot: open or close the bombsight.");
-            CfgReleaseKey = cfg.Bind(S, "ReleaseKey", "R", "Pilot: drop one bomb.");
+            CfgSightKey = cfg.Bind(S, "SightKey", "G",
+                "Pilot, in the air: open or close the bombsight. The same key as "
+                + "[PlayerAn2] EngineKey is fine: on the ground it is the engine.");
+            CfgReleaseKey = cfg.Bind(S, "ReleaseKey", "Mouse0",
+                "Pilot: drop one bomb (Mouse0 = left mouse button).");
             CfgLoadKey = cfg.Bind(S, "LoadKey", "R",
                 "On foot beside a parked An-2: move FAB-50s from the backpack onto its racks.");
-            CfgRadius = cfg.Bind(S, "BlastRadius", 12f,
+            CfgRadius = cfg.Bind(S, "BlastRadius", 25f,
                 "Metres. Damage falls off linearly to zero here. A vehicle needs "
                 + "a burst within a few metres to be hurt badly.");
             CfgNpcDamage = cfg.Bind(S, "NpcDamage", 500f, "Damage to an NPC at the burst point.");
@@ -152,10 +156,44 @@ namespace NextDayRevival
                 "Seconds of fall before the fuze is armed. Earlier impact: a dud.");
             CfgInterval = cfg.Bind(S, "ReleaseInterval", 0.4f, "Seconds between two releases.");
             CfgSightFov = cfg.Bind(S, "SightFov", 40f, "Field of view of the bombsight camera, degrees.");
+            CfgAimSensitivity = cfg.Bind(S, "AimSensitivity", 0.5f,
+                "Degrees the bombsight crosshair moves per unit of mouse travel. "
+                + "The aeroplane steers itself onto the crosshair.");
             CfgDepotReach = cfg.Bind(S, "DepotReach", 25f,
                 "Metres from the D1 pump house within which a burst sets the depot off.");
             CfgEventCode = cfg.Bind(S, "NetworkEventCode", 158,
                 "Photon event code (0..199). Must be the same on every client.");
+            CfgControls = cfg.Bind(S, "ControlsLayout", 0,
+                "Internal: which key/radius defaults this file has been moved to. Do not edit.");
+            Migrate();
+        }
+
+        /// <summary>
+        /// 2026-09-28: sight Z -> G, release R -> left mouse button, blast
+        /// radius 12 -> 25 m. BepInEx keeps what a file already holds, so an
+        /// old file that still carries the OLD DEFAULT is moved once; a value
+        /// somebody chose stays. The stamp makes it once.
+        /// </summary>
+        static void Migrate()
+        {
+            if (CfgControls == null || CfgControls.Value >= 1) return;
+            CfgControls.Value = 1;
+            if (CfgSightKey.Value.Trim().Equals("Z", StringComparison.OrdinalIgnoreCase)) CfgSightKey.Value = "G";
+            if (CfgReleaseKey.Value.Trim().Equals("R", StringComparison.OrdinalIgnoreCase)) CfgReleaseKey.Value = "Mouse0";
+            if (Mathf.Abs(CfgRadius.Value - 12f) < 0.01f) CfgRadius.Value = 25f;
+            if (RevivalPlugin.L != null) RevivalPlugin.L.LogInfo("An2Bombs: config moved to layout 1 - sight " + CfgSightKey.Value
+                + ", release " + CfgReleaseKey.Value + ", blast radius " + CfgRadius.Value + " m.");
+        }
+
+        /// <summary>The bombsight key; PlayerAn2 keeps the engine off it in the air.</summary>
+        internal static KeyCode SightKey { get { return PlayerAn2.KeyOf(CfgSightKey, KeyCode.G); } }
+
+        /// <summary>A key as the HUD names it: the mouse buttons in words.</summary>
+        static string KeyName(KeyCode k)
+        {
+            if (k == KeyCode.Mouse0) return Loc.T("ЛКМ", "LMB");
+            if (k == KeyCode.Mouse1) return Loc.T("ПКМ", "RMB");
+            return k.ToString();
         }
 
         internal static bool Enabled
@@ -241,6 +279,11 @@ namespace NextDayRevival
         static string _hint = "";
         static float _hintUntil;
 
+        // The crosshair: a point on the ground the pilot lays with the mouse.
+        // The camera looks at it, the aeroplane steers onto it (Steer).
+        static bool _aimSet;
+        static Vector3 _aim;
+
         // Sight solution, refreshed every frame while the pilot flies.
         static bool _solved;
         static Vector3 _impact, _nadir;
@@ -300,20 +343,25 @@ namespace NextDayRevival
                 // The prediction runs ahead up to 60 s of fall on the terrain
                 // height data: only while the sight is open (Release solves
                 // for itself).
-                if (_sight) Solve(plane);
+                if (_sight) { Solve(plane); Aim(plane.transform); }
                 else _solved = false;
-                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgSightKey, KeyCode.Z)))
+                // Down on the wheels the sight has nothing to do, and the
+                // same key starts the engine there (PlayerAn2.Tick).
+                if (_sight && PlayerAn2.OnGround) CloseSight();
+                if (!PlayerAn2.OnGround && GameUi.KeyDown(SightKey))
                 {
                     if (_sight) CloseSight();
                     else
                     {
                         _sight = true;
-                        Hint(Loc.T("Бомбовый прицел", "Bombsight") + " - "
-                            + PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R) + " "
-                            + Loc.T("сброс", "release"), 3f);
+                        _aimSet = false;
+                        Hint(Loc.T("Бомбовый прицел - мышь наводит, самолёт доворачивает сам",
+                                   "Bombsight - the mouse lays the crosshair, the aeroplane steers onto it")
+                            + ". " + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " "
+                            + Loc.T("сброс", "release"), 4f);
                     }
                 }
-                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R))) Release(plane);
+                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0))) Release(plane);
                 _errors = 0f;
             }
             catch (Exception ex)
@@ -326,6 +374,7 @@ namespace NextDayRevival
         static void CloseSight()
         {
             _sight = false;
+            _aimSet = false;
             if (_savedFov > 0f)
             {
                 try
@@ -437,29 +486,130 @@ namespace NextDayRevival
                 ? Vector3.Angle(nose, flat) * Mathf.Sign(Vector3.Cross(nose, flat).y) : 0f;
         }
 
+        /// <summary>Where the sight looks from: UNDER the belly, ahead of the
+        /// main gear. It used to be half a metre above the wheels' reference
+        /// point, which is inside the fuselage - the cabin floor and the
+        /// pilot's own body filled the picture (field report 2026-09-28).
+        /// Never under the ground on a low pass.</summary>
+        static Vector3 SightEye(Transform tr)
+        {
+            Vector3 eye = tr.position + tr.rotation * (new Vector3(0f, -1.2f, 2.5f) * K);
+            float ground;
+            if (RevivalTroopInsertion.TerrainHeight(eye, out ground) && eye.y < ground + 0.8f * K)
+                eye.y = ground + 0.8f * K;
+            return eye;
+        }
+
+        static Vector3 Track(Transform tr)
+        {
+            Vector3 track = PlayerAn2.Velocity;
+            track.y = 0f;
+            if (track.sqrMagnitude < 1f) { track = tr.forward; track.y = 0f; }
+            if (track.sqrMagnitude < 0.0001f) track = Vector3.forward;
+            return track.normalized;
+        }
+
+        /// <summary>
+        /// The crosshair on the ground. Laid on the predicted burst when the
+        /// sight opens (a little ahead of it, so there is time to correct);
+        /// the mouse turns the line of sight from the eye and the crosshair is
+        /// where that line meets the ground again. It stays on the ground
+        /// while the aeroplane flies - a target under it stays under it. Once
+        /// it has fallen behind the aeroplane it is laid ahead again.
+        /// </summary>
+        static void Aim(Transform tr)
+        {
+            if (!SightOn) { _aimSet = false; return; }
+            Vector3 eye = SightEye(tr);
+            Vector3 track = Track(tr);
+            Vector3 nadir = new Vector3(tr.position.x, _nadir.y, tr.position.z);
+            if (_aimSet && Vector3.Dot(_aim - nadir, track) < 0f) _aimSet = false;
+            if (!_aimSet)
+            {
+                if (!_solved) return;
+                _aim = _impact + track * (Mathf.Max(40f, _lead * 0.5f) * K);
+                float gy;
+                if (RevivalTroopInsertion.TerrainHeight(_aim, out gy)) _aim.y = gy;
+                _aimSet = true;
+            }
+            float mx = GameUi.Axis("Mouse X"), my = GameUi.Axis("Mouse Y");
+            if (Mathf.Abs(mx) < 0.0001f && Mathf.Abs(my) < 0.0001f) return;
+            float sens = Mathf.Clamp(F(CfgAimSensitivity, 0.5f), 0.02f, 5f);
+            Vector3 dir = _aim - eye;
+            if (dir.sqrMagnitude < 0.01f) return;
+            dir = Quaternion.AngleAxis(mx * sens, Vector3.up) * dir;
+            Vector3 side = Vector3.Cross(Vector3.up, dir);
+            if (side.sqrMagnitude > 0.0001f)
+                dir = Quaternion.AngleAxis(-my * sens, side.normalized) * dir;
+            dir.Normalize();
+            // Between 8 degrees under the horizon and straight down.
+            float below = -Mathf.Asin(Mathf.Clamp(dir.y, -1f, 1f)) * Mathf.Rad2Deg;
+            if (below < 8f)
+            {
+                Vector3 flat = new Vector3(dir.x, 0f, dir.z).normalized;
+                dir = flat * Mathf.Cos(8f * Mathf.Deg2Rad) + Vector3.down * Mathf.Sin(8f * Mathf.Deg2Rad);
+            }
+            // Meet the ground: the plane at the crosshair's height, then the
+            // terrain there.
+            float drop = eye.y - _aim.y;
+            if (drop < 1f) drop = 1f;
+            Vector3 at = eye + dir * (drop / Mathf.Max(0.05f, -dir.y));
+            Vector3 off = at - nadir;
+            off.y = 0f;
+            float reach = 1500f * K;
+            if (off.magnitude > reach) at = nadir + off.normalized * reach;
+            if (Vector3.Dot(at - nadir, track) < 5f * K) return;   // not behind the aeroplane
+            float y;
+            if (RevivalTroopInsertion.TerrainHeight(at, out y)) at.y = y;
+            _aim = at;
+        }
+
+        /// <summary>
+        /// PlayerAn2.Fly asks here while the pilot's hands are off A/D: the
+        /// bank that turns the ground track onto the crosshair. The burst
+        /// point lies on the track ahead of the nadir, so a track through the
+        /// crosshair puts the bombs on it. For the run-in - the crosshair
+        /// within the lead plus a margin - the wings are held level: bank at
+        /// release widens the scatter (ScatterPerBank). The same law is flown
+        /// in research/an2_assist_sim.py (steer_for).
+        /// </summary>
+        internal static bool Steer(out float bank)
+        {
+            bank = 0f;
+            if (!_sight || !_aimSet || !SightOn) return false;
+            GameObject plane = PlayerAn2.Plane;
+            if (plane == null || PlayerAn2.OnGround) return false;
+            Transform tr = plane.transform;
+            Vector3 track = Track(tr);
+            Vector3 to = _aim - tr.position;
+            to.y = 0f;
+            float dist = to.magnitude / K;
+            if (dist < _lead * 1.1f + 30f) return true;         // run-in: level
+            float err = Vector3.Angle(track, to) * Mathf.Sign(Vector3.Cross(track, to).y);
+            bank = Mathf.Clamp(err * 1.5f, -25f, 25f);
+            return true;
+        }
+
         /// <summary>PlayerAn2.LateTick while the sight is open: the camera
-        /// under the floor, looking at the burst point, the ground track up
-        /// the screen so a target slides straight down the track line.</summary>
+        /// under the belly, laid on the crosshair (on the predicted burst
+        /// until there is one), the ground track up the screen so a target
+        /// slides straight down the track line. No smoothing: the crosshair is
+        /// on the ground and the eye follows the aeroplane exactly, so the
+        /// picture is as steady as the flight.</summary>
         internal static void SightCamera(Camera cam, Transform tr)
         {
             if (cam == null || tr == null) return;
             if (_savedFov < 0f) _savedFov = cam.fieldOfView;
             cam.fieldOfView = Mathf.Clamp(F(CfgSightFov, 40f), 10f, 90f);
-            Vector3 eye = tr.position + tr.rotation * (new Vector3(0f, 0.5f, 1.2f) * K);
-            Vector3 track = PlayerAn2.Velocity;
-            track.y = 0f;
-            if (track.sqrMagnitude < 1f) { track = tr.forward; track.y = 0f; }
-            if (track.sqrMagnitude < 0.0001f) track = Vector3.forward;
-            track.Normalize();
-            Vector3 look = _solved ? (_impact - eye) : (track * 2f + Vector3.down);
+            Vector3 eye = SightEye(tr);
+            Vector3 track = Track(tr);
+            Vector3 look = _aimSet ? (_aim - eye) : _solved ? (_impact - eye) : (track * 2f + Vector3.down);
             if (look.sqrMagnitude < 0.0001f) look = Vector3.down;
             look.Normalize();
             // Keep 'up' off the look direction: at a vertical look the track
             // is perpendicular anyway; ahead it is bent up by LookRotation.
-            Quaternion want = Quaternion.LookRotation(look, track);
             cam.transform.position = eye;
-            cam.transform.rotation = Quaternion.Slerp(cam.transform.rotation, want,
-                Mathf.Clamp01(Time.deltaTime * 12f));
+            cam.transform.rotation = Quaternion.LookRotation(look, track);
         }
 
         // -------------------------------------------------------------- release
@@ -874,8 +1024,8 @@ namespace NextDayRevival
                 if (_sight) Sight(cx, cy);
                 else
                     Label(Loc.T("Бомбы", "Bombs") + " " + CountOf(plane) + "/" + Capacity + "   "
-                          + PlayerAn2.KeyOf(CfgSightKey, KeyCode.Z) + " " + Loc.T("прицел", "sight") + ", "
-                          + PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R) + " " + Loc.T("сброс", "release"),
+                          + KeyName(SightKey) + " " + Loc.T("прицел", "sight") + ", "
+                          + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " " + Loc.T("сброс", "release"),
                           cx, cy + 246f, new Color(0.85f, 0.82f, 0.62f, 1f), 13);
             }
             else if (plane == null && _near != null && !PlayerAn2.Aboard)
@@ -898,7 +1048,8 @@ namespace NextDayRevival
             Color amber = new Color(1f, 0.75f, 0.25f, 0.95f);
             Transform tr = PlayerAn2.Plane.transform;
 
-            // The fixed reticle (the camera is laid on the burst point).
+            // The fixed reticle: the crosshair the pilot lays with the mouse
+            // (the camera looks at it). The amber pipper below is the burst.
             if (SightOn)
             {
                 Ring(cx, cy, 34f, green);
@@ -934,6 +1085,24 @@ namespace NextDayRevival
                     Bar(s.x - 1f, s.y - 7f, 2f, 14f, amber);
                     Ring(s.x, s.y, 12f, amber);
                 }
+                // The pipper reaching the crosshair: the moment to release.
+                if (SightOn && _solved && _aimSet)
+                {
+                    Vector3 along = PlayerAn2.Velocity;
+                    along.y = 0f;
+                    Vector3 miss = _aim - _impact;
+                    miss.y = 0f;
+                    float ahead = along.sqrMagnitude > 1f ? Vector3.Dot(miss, along.normalized) / K : 0f;
+                    float wide = along.sqrMagnitude > 1f
+                        ? Mathf.Abs(Vector3.Cross(along.normalized, miss).y) / K : miss.magnitude / K;
+                    float r = Mathf.Max(4f, F(CfgRadius, 25f) * 0.35f);
+                    bool now = ahead < r && ahead > -r && wide < r;
+                    string cue = now ? Loc.T("СБРОС!", "DROP!")
+                        : ahead > 0f && _gs > 1f ? Loc.T("до сброса", "to release") + " "
+                          + (ahead / _gs).ToString("0.0") + " s" : "";
+                    if (cue.Length > 0 && (!now || Mathf.Repeat(Time.time, 0.4f) < 0.28f))
+                        Label(cue, cx, cy + 44f, now ? new Color(1f, 0.3f, 0.25f, 1f) : green, now ? 22 : 13);
+                }
             }
 
             // Readouts.
@@ -948,8 +1117,9 @@ namespace NextDayRevival
             Text(Loc.T("СНОС", "DRIFT") + " " + _drift.ToString("0") + " deg", left, top + 72f, green);
             Text(Loc.T("БОМБ", "BOMBS") + " " + CountOf(plane) + "/" + Capacity, left, top + 90f,
                  CountOf(plane) > 0 ? amber : new Color(1f, 0.35f, 0.3f, 0.95f));
-            Label(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R) + " " + Loc.T("сброс", "release") + "   "
-                  + PlayerAn2.KeyOf(CfgSightKey, KeyCode.Z) + " " + Loc.T("закрыть прицел", "close sight"),
+            Label(Loc.T("мышь - прицел", "mouse aims") + "   "
+                  + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " " + Loc.T("сброс", "release") + "   "
+                  + KeyName(SightKey) + " " + Loc.T("закрыть прицел", "close sight"),
                   cx, cy + 246f, new Color(0.80f, 0.85f, 0.90f, 1f), 13);
         }
 
