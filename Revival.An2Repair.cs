@@ -1,7 +1,7 @@
 // Next Day: Survival - Revival Toolkit
 //
 // THE AN-2 REPAIR LOOP (phase 2 of the flyable An-2, Revival.PlayerAn2.cs).
-// With [An2Repair] Enabled (off by default) the An-2 on the H1 apron starts
+// With [An2Repair] Enabled (on by default since Q4) the An-2 on the H1 apron starts
 // BROKEN and only flies once four stages are done - the four stages of
 // docs/ai/tasks/airfield-gameplay.md section 4:
 //
@@ -98,10 +98,12 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             const string S = "An2Repair";
-            CfgEnabled = cfg.Bind(S, "Enabled", false,
+            CfgEnabled = cfg.Bind(S, "Enabled", true,
                 "Die An-2 auf dem H1-Vorfeld steht kaputt da und muss in vier Stufen "
                 + "repariert werden (Steuerung/Instrumente, Motor, Propeller, Treibstoff). "
-                + "Braucht [PlayerAn2] Enabled. Aus: die An-2 fliegt sofort wie bisher.");
+                + "Braucht [PlayerAn2] Enabled. Standardmaessig an (eine aeltere Datei "
+                + "wird einmal eingeschaltet). Aus: die An-2 fliegt sofort wie bisher.");
+            Settings.GameplayOn(cfg, CfgEnabled);
             CfgKey = cfg.Bind(S, "Key", "G",
                 "Taste zu Fuss neben der An-2: das naechste getragene Teil einbauen bzw. tanken.");
             CfgFitSeconds = cfg.Bind(S, "FitSeconds", 8f, "Dauer des Einbaus eines Teils in Sekunden.");

@@ -599,8 +599,14 @@ namespace NextDayRevival
 
         static Component GrenadeController()
         {
+            // Q1 perf: the local controller lives as long as the player body, so
+            // a live cached one is kept (re-checked for ownership) and the
+            // whole-scene scan below runs only while there is none - it used to
+            // run every 0.4 s regardless, in two modules, as unmeasured spikes.
             if (_gren != null && Time.time < _grenUntil) return _gren;
-            _grenUntil = Time.time + 0.4f;
+            if (_gren != null && IsMine(_gren)) { _grenUntil = Time.time + 0.4f; return _gren; }
+            if (_gren == null && Time.time < _grenUntil) return null;
+            _grenUntil = Time.time + 2f;
             _gren = null;
             try
             {
@@ -854,7 +860,7 @@ namespace NextDayRevival
             {
                 Type t = RevivalPlugin.TypeByName("NPC_AI2");
                 if (t == null) { _npcs = new Component[0]; return _npcs; }
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                UnityEngine.Object[] all = NpcScan.All();
                 List<Component> list = new List<Component>(all.Length);
                 for (int i = 0; i < all.Length; i++)
                 {

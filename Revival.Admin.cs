@@ -1278,7 +1278,7 @@ namespace NextDayRevival
             // Same as the howitzer: no free F-key, Gepard/Key is None by default.
             if (GUILayout.Button("Spawn Gepard", GUILayout.Width(190f)))
                 Melde(Gepard.SpawnInFront());
-            GUILayout.Label("In front of you (35 mm anti-aircraft gun with radar)");
+            GUILayout.Label(Gepard.OffNote() ?? "In front of you (35 mm anti-aircraft gun with radar)");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             // Four belts of Gepard/AmmoItemId: each one reloads RoundsPerBelt.
@@ -1310,8 +1310,9 @@ namespace NextDayRevival
             // over the An-2's own spawn request - the helicopter's pattern.
             if (GUILayout.Button("Spawn An-2 (ready)", GUILayout.Width(190f)))
                 Melde(PlayerAn2.SpawnReadyInFront());
-            GUILayout.Label("In front of you (repaired, fuelled, bombs aboard - "
-                            + PlayerAn2.CfgBoardKey.Value + " to get in)");
+            GUILayout.Label(PlayerAn2.OffNote() ?? An2Bombs.OffNote()
+                            ?? ("In front of you (repaired, fuelled, bombs aboard - "
+                                + PlayerAn2.CfgBoardKey.Value + " to get in)"));
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             // FAB-50s for the An-2's racks, as the Gepard's belts above.
@@ -1322,7 +1323,9 @@ namespace NextDayRevival
                 Melde(one);
             }
             GUILayout.Label("FAB-50 bombs into your inventory ("
-                            + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)");
+                            + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)"
+                            + (An2Bombs.Enabled ? "" : " - loading needs [PlayerAn2] Enabled and "
+                               + "[Gameplay] An2Bombs; the ready An-2 switches both on"));
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6f);

@@ -1212,6 +1212,35 @@ def check_flak():
     need("g.GunIdx = 1 - b;" in s and "g.Recoil[barrel] = 1f;" in s,
          "the barrels fire and recoil alternately", "the barrels do not alternate")
 
+    # Q2 (after the 6.57.0 test): tracking, fair engagements, the crash, the crew
+    heli, an2, crew, tech, radar, gepard = (read("Revival.PlayerHeli.cs"), read("Revival.PlayerAn2.cs"),
+        read("RevivalGepardCrew.cs"), read("RevivalTechnicalCrew.cs"), read("Revival.TowerRadar.cs"),
+        read("RevivalGepard.cs"))
+    need("g.WantYawRate + Mathf.Clamp(dy * 4f, -stop, stop)" in s and "Interval() * 1.6f" in s,
+         "the mount tracks with feed-forward inside the slew limits; each barrel runs out before its next round",
+         "the slew feed-forward or the alternating recoil run-out is missing")
+    need("internal static Vector3 Offset(" in s and "g.Err = Offset(" in s,
+         "the first burst of an engagement is always visibly off the target",
+         "the first burst can land on the target by chance")
+    need("FlakFire.Offset(h.AirTarget" in crew and "GepardShots.FireTimed(h.Rig" in crew
+         and "internal static void FireTimed(" in gepard and "CfgAirWalk" in crew,
+         "the NPC Gepard's air bursts walk in as timed puffs too",
+         "the NPC Gepard still fires at aircraft with a perfect radar solution")
+    mi = heli[heli.find("internal static void MissileImpact("):]
+    mi = mi[:mi.find(chr(10) + "        }" + chr(10))]
+    need("Abandon(go, _vel, true);" in mi and "Airborne(go)" in mi and "static void ShotDownFallback()" in heli
+         and "if (go == null || Falling(go) || Burning(go)) return;" in heli,
+         "a helicopter shot down in the air falls with its crew aboard (no ejection, no teleport)",
+         "a helicopter shot down in the air is still burnt in place and its crew thrown out")
+    need("internal static void ShotDown(GameObject go, Vector3 where)" in an2 and '"ShotDown"' in crew
+         and "if (f.Length == 5)" in an2,
+         "an An-2 shot down in the air falls with its crew aboard",
+         "the An-2 kill still burns the aeroplane in place")
+    need("internal static void Unbewaffnet(Component ai)" in tech and "TechnicalCrew.Unbewaffnet(ai);" in s
+         and "TechnicalCrew.Unbewaffnet(ai);" in radar,
+         "the flak crews and the radar operator sit without a weapon in their hands",
+         "a seated AA crewman or the radar operator still holds a weapon")
+
     # the wire
     m = re.search(r'"NetworkEventCode", ([0-9]+)', s)
     taken = set([150, 151, 152, 153, 154, 155, 160, 161, 162, 164, 170, 171, 172, 173, 174, 175,
@@ -1339,8 +1368,14 @@ def check_tower_radar():
          and "* Flak.DirError" in flak and "* Flak.DirTracking" in flak,
          "the crews hold all but the assigned target and take the direction scales",
          "AssignedOnly or the direction scales do not reach the flak's fire control")
-    for call in ("Flak.AssignTarget(null, c.Go)", "Flak.WeaponsFree(null)", "Flak.HoldFire(null)", "Flak.AssignedOnly(null)"):
+    # Q3: orders go gun by gun to those that follow the commanding side
+    for call in ("Flak.AssignTarget(ids[i], c.Go)", "Flak.WeaponsFree(ids[i])", "Flak.HoldFire(ids[i])",
+                 "Flak.AssignedOnly(ids[i])"):
         need(call in s, "console command " + call, "the console does not command the guns: " + call + " missing")
+    need("return side == HomeSide() || !NpcOperatorUp;" in s and "if (g.CrewAlive > 0) return side == HomeSide();" in s
+         and "TowerRadar.ControlSide });" in s and "Flak.SightOrder = SightLine;" in s,
+         "radar takeover: faction lock only while the HQ operator lives, guns with a hostile crew ignore, synced",
+         "the radar takeover (Q3) is incomplete: lock, per-gun follow, ControlSide sync or sight line missing")
 
     def num(key):
         m = re.search(r'cfg\.Bind\(S, "%s", (-?[0-9.]+)f?' % key, s)
@@ -1496,16 +1531,13 @@ def check_nofly():
     need("GepardCrew.Defends(" in s and "NoFly.Engaged(c.Go, h.Side, h.Root.position)" in gep
          and "internal static bool Defends(" in gep,
          "a Gepard of the zone's faction takes the violator", "the Gepard hook is missing")
-    need("GepardGun.Hit(c, there" in s and "GepardFx.Flak(" in s and "FlakSound.Burst(" in s
-         and "GepardNet.EnsureHooked();" in s,
-         "scripted flak: puffs, bangs and fragment hits through the Gepard's damage path",
-         "the scripted defensive fire is missing")
-    m = re.search(r'"NetworkEventCode", ([0-9]+)', s)
-    taken = set([150, 151, 152, 153, 154, 155, 160, 161, 162, 164, 170, 171, 172, 173, 174, 175,
-                 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 190, 191, 192, 193, 194, 195, 196, 198])
-    need(m is not None and int(m.group(1)) not in taken and int(m.group(1)) < 200,
-         "event code %s is free" % (m.group(1) if m else "?"),
-         "the no-fly event code overlaps another channel")
+    # Q2 (after 6.57.0): no scripted defensive fire - zones are defended by
+    # real guns only (ZU-23, Gepard), and the banner says so when none is up.
+    need("NoFlyFire" not in s and "ScriptedFire" not in s and "GepardFx.Flak(" not in s
+         and "GepardGun.Hit(" not in s and "static bool Defended(Zone zn)" in s
+         and "no air defence answers" in s,
+         "no scripted fire: a zone is defended only by its guns or a Gepard",
+         "scripted defensive fire is back in Revival.NoFly.cs")
 
 
 def check_military_town_ring():
@@ -1671,10 +1703,10 @@ def check_military_town_ring():
             gap = min(gap, math.hypot(dx, dz))
     need(gap >= 300.0, "zone MT stays %.0f u (%.0f m) clear of the airfield fence" % (gap, gap / 2.8),
          "zone MT comes within %.0f u of the airfield (want >= 300)" % gap)
-    need('mt.Reach = 0f;' in nofly and 'mt.Scripted = false;' in nofly
+    need('mt.Reach = 0f;' in nofly
          and 'mt.Exists = MilitaryTown.NoFlyShown;' in nofly and 'mt.Armed = MilitaryTown.NoFlyArmed;' in nofly
          and 'mt.Side = MilitaryTown.Faction;' in nofly and "zn.Radius + zn.Reach" in nofly
-         and "zn.Scripted && B(CfgScripted)" in nofly and "internal static bool Standing(" in gep
+         and "internal static bool Standing(" in gep
          and "GepardCrew.Standing(" in ring,
          "zone MT: only with the town, the garrison's faction, defended by the town's Gepard alone",
          "zone MT is not gated by the town or not tied to the AA1 Gepard")
@@ -5125,9 +5157,19 @@ def check_player_an2():
          "the carrier Mi-8 is drawn as nothing and its rotor and sound are killed",
          "the carrier Mi-8 is still drawn or still runs its rotor")
 
-    # --- off by default, the apron stand.
-    need(bind("Enabled") == "false", "[PlayerAn2] Enabled is off by default",
-         "[PlayerAn2] Enabled is not off by default")
+    # --- on by default (Q4: every gameplay feature on), an older file
+    # switched on once through the settings layout stamp; the apron stand.
+    need(bind("Enabled") == "true"
+         and "Settings.GameplayOn(cfg, CfgEnabled);" in _body(code, "internal static void BindConfig("),
+         "[PlayerAn2] Enabled is on by default and an older file is switched on once",
+         "[PlayerAn2] Enabled is not on by default or lacks the Settings.GameplayOn migration")
+    # --- the admin spawn never refuses silently: a key that is off is named
+    # and switched on for the session (Q4).
+    ready = _body(code, "internal static string SpawnReadyInFront(")
+    need("ForceOn()" in ready and "An2Bombs.ForceOn()" in ready
+         and "switched off" not in ready,
+         "the admin's ready An-2 names an off key and spawns anyway, with bombs",
+         "the admin's ready An-2 still refuses when [PlayerAn2] Enabled or [Gameplay] An2Bombs is off")
     recipe = read("unity/EastTile/Content/east_airfield.json")
     m = re.search(r'"id":\s*"AN".*?"x":\s*([0-9.]+),\s*"z":\s*([0-9.]+)', recipe)
     m2 = re.search(r'Apron = new Vector3\(([0-9.]+)f, 0f, ([0-9.]+)f\)', code)
@@ -5401,9 +5443,10 @@ def check_an2_repair():
     convoy = _code(read("RevivalConvoyRepair.cs"))
     items = read("Revival.Items.cs")
 
-    need(re.search(r'cfg\.Bind\(S, "Enabled", false,', code) is not None,
-         "[An2Repair] Enabled is off by default",
-         "[An2Repair] Enabled is not off by default")
+    need(re.search(r'cfg\.Bind\(S, "Enabled", true,', code) is not None
+         and "Settings.GameplayOn(cfg, CfgEnabled);" in code,
+         "[An2Repair] Enabled is on by default and an older file is switched on once",
+         "[An2Repair] Enabled is not on by default or lacks the Settings.GameplayOn migration")
 
     # --- the ids: free in the game, one owner in the plugin, own art.
     ids = []
@@ -7069,7 +7112,9 @@ def check_east_world():
     sset = _code(read("Revival.Settings.cs"))
     need("Settings.FileLayout(cfg) < Settings.EastTileOnLayout" in bc and "_cfg.Value = true;" in bc
          and bc.index("_cfg.Value = true;") < bc.index("On = _cfg.Value;")
-         and "internal const int EastTileOnLayout = 2;" in sset and "const int Layout = 2;" in sset
+         and "internal const int EastTileOnLayout = 2;" in sset
+         and re.search(r"const int Layout = ([0-9]+);", sset) is not None
+         and int(re.search(r"const int Layout = ([0-9]+);", sset).group(1)) >= 2
          and "if (_fileLayout < 0) _fileLayout = _version.Value;" in sset,
          "an older config's EastTile = false is switched on once, by the settings layout stamp",
          "the one-time EastTile migration (Settings.FileLayout < EastTileOnLayout) is missing")

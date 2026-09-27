@@ -2581,7 +2581,9 @@ namespace NextDayRevival
             }
             u.CrewOut = true;
             List<RevivalComposition.CrewMan> crew = u.CrewSnapshot;
-            Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew);
+            Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew,
+                u.Route != null && (u.Route.Name == MilitaryTown.AaRoute
+                    || u.Route.Name == MilitaryTown.PatrolRoute || u.Route.Name == MilitaryTown.ReinforceRoute));
         }
 
         /// <summary>Remove every vehicle of one convoy - living stragglers and
@@ -3103,7 +3105,9 @@ namespace NextDayRevival
             if (_columns.Count == 0) return;
             float dt = Time.fixedDeltaTime;
 
-            _columnGroups.Clear();
+            // Q1 perf: the member lists are reused step to step (emptied, not
+            // replaced) - a fresh List per convoy per physics step was garbage.
+            foreach (KeyValuePair<int, List<Unit>> kv in _columnGroups) kv.Value.Clear();
             for (int i = 0; i < _units.Count; i++)
             {
                 Unit u = _units[i];
@@ -3131,7 +3135,10 @@ namespace NextDayRevival
                 ColumnStep(kv.Value, mem, dt);
             }
             for (int i = 0; i < _columnDrop.Count; i++)
+            {
                 _columns.Remove(_columnDrop[i]);
+                _columnGroups.Remove(_columnDrop[i]);
+            }
         }
 
         /// <summary>One step of one column: wait until everybody is armed, then
@@ -6010,7 +6017,7 @@ namespace NextDayRevival
                 if (side != null) return Fraktion.Feind(u.Seite, Fraktion.Eigene(side));
                 // A parked empty hull is not a combatant. A friendly occupant
                 // vetoes a shot even when an enemy shares that vehicle.
-                FieldInfo f = AccessTools.Field(c.Vehicle.GetType(), "Passengers");
+                FieldInfo f = FastField.Find(c.Vehicle.GetType(), "Passengers");
                 Array seats = f == null ? null : f.GetValue(c.Vehicle) as Array;
                 bool enemy = false;
                 if (seats == null) return false;
@@ -8882,8 +8889,14 @@ namespace NextDayRevival
         //  fresh lookup per physics step for six vehicles is not free.
         // =====================================================================
 
-        static Dictionary<string, FieldInfo> _fieldCache = new Dictionary<string, FieldInfo>();
-        static Dictionary<string, MethodInfo> _methodCache = new Dictionary<string, MethodInfo>();
+        // Keyed by Type, then by name: the old "FullName|name" string key built
+        // two fresh strings per lookup (Type.FullName allocates on Mono), and
+        // the driver does a dozen lookups per vehicle per physics step - the
+        // bulk of Patrol.FixedTick's garbage (Q1 perf).
+        static Dictionary<Type, Dictionary<string, FieldInfo>> _fieldCache =
+            new Dictionary<Type, Dictionary<string, FieldInfo>>();
+        static Dictionary<Type, Dictionary<string, MethodInfo>> _methodCache =
+            new Dictionary<Type, Dictionary<string, MethodInfo>>();
         static PropertyInfo _velocity, _angular;
         static bool _bodyLookedUp;
 
@@ -8891,11 +8904,16 @@ namespace NextDayRevival
         {
             if (o == null) return null;
             Type t = o.GetType();
-            string key = t.FullName + "|" + name;
+            Dictionary<string, FieldInfo> byName;
+            if (!_fieldCache.TryGetValue(t, out byName))
+            {
+                byName = new Dictionary<string, FieldInfo>();
+                _fieldCache[t] = byName;
+            }
             FieldInfo fi;
-            if (_fieldCache.TryGetValue(key, out fi)) return fi;
+            if (byName.TryGetValue(name, out fi)) return fi;
             fi = AccessTools.Field(t, name);
-            _fieldCache[key] = fi;
+            byName[name] = fi;
             if (fi == null)
                 RevivalPlugin.L.LogWarning("Patrol: field " + name + " not on " + t.Name + ".");
             return fi;
@@ -8911,38 +8929,43 @@ namespace NextDayRevival
         {
             FieldInfo fi = Field(o, name);
             if (fi == null || fi.FieldType != typeof(float)) return fallback;
-            return (float)fi.GetValue(o);
+            return FastField.GetFloat(fi, o);
         }
 
         static void SetFloat(object o, string name, float value)
         {
             FieldInfo fi = Field(o, name);
-            if (fi != null && fi.FieldType == typeof(float)) fi.SetValue(o, value);
+            if (fi != null && fi.FieldType == typeof(float)) FastField.SetFloat(fi, o, value);
         }
 
         static bool GetBool(object o, string name, bool fallback)
         {
             FieldInfo fi = Field(o, name);
             if (fi == null || fi.FieldType != typeof(bool)) return fallback;
-            return (bool)fi.GetValue(o);
+            return FastField.GetBool(fi, o);
         }
 
         static void SetBool(object o, string name, bool value)
         {
             FieldInfo fi = Field(o, name);
-            if (fi != null && fi.FieldType == typeof(bool)) fi.SetValue(o, value);
+            if (fi != null && fi.FieldType == typeof(bool)) FastField.SetBool(fi, o, value);
         }
 
         static void Invoke(object o, string name)
         {
             if (o == null) return;
             Type t = o.GetType();
-            string key = t.FullName + "|()" + name;
+            Dictionary<string, MethodInfo> byName;
+            if (!_methodCache.TryGetValue(t, out byName))
+            {
+                byName = new Dictionary<string, MethodInfo>();
+                _methodCache[t] = byName;
+            }
             MethodInfo mi;
-            if (!_methodCache.TryGetValue(key, out mi))
+            if (!byName.TryGetValue(name, out mi))
             {
                 mi = AccessTools.Method(t, name, null, null);
-                _methodCache[key] = mi;
+                byName[name] = mi;
                 if (mi == null)
                     RevivalPlugin.L.LogWarning("Patrol: method " + name + " not on " + t.Name + ".");
             }
@@ -8966,6 +8989,11 @@ namespace NextDayRevival
 
         static Vector3 Velocity(object body)
         {
+            // Q1 perf: a Rigidbody is read directly (PhysicsModule is
+            // referenced now); the reflected getter boxed a Vector3 per call,
+            // several calls per vehicle per physics step.
+            Rigidbody rb = body as Rigidbody;
+            if (rb != null) return rb.velocity;
             LookUpBody();
             if (body == null || _velocity == null) return Vector3.zero;
             return (Vector3)_velocity.GetValue(body, null);
@@ -8973,6 +9001,8 @@ namespace NextDayRevival
 
         static void Stop(object body)
         {
+            Rigidbody rb = body as Rigidbody;
+            if (rb != null) { rb.velocity = Vector3.zero; rb.angularVelocity = Vector3.zero; return; }
             LookUpBody();
             if (body == null) return;
             if (_velocity != null) _velocity.SetValue(body, Vector3.zero, null);
@@ -8985,6 +9015,8 @@ namespace NextDayRevival
         /// zeroed velocity would slide down the road on locked wheels.</summary>
         static void Roll(object body, Vector3 velocity)
         {
+            Rigidbody rb = body as Rigidbody;
+            if (rb != null) { rb.velocity = velocity; rb.angularVelocity = Vector3.zero; return; }
             LookUpBody();
             if (body == null) return;
             if (_velocity != null) _velocity.SetValue(body, velocity, null);

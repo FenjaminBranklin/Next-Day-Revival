@@ -4,28 +4,43 @@
 // per-frame work. It exists to ANSWER a reported FPS drop with a measurement
 // instead of a guess: it shows the overall frame rate (with a 1% low, so a
 // steady drop is told apart from occasional hitches) and, broken out, how many
-// milliseconds each of our Update ticks and OnGUI draws costs THIS build. If our
-// systems barely register, the cost is elsewhere (rendering the added vehicle
-// geometry, the base game, drivers) and we look there; if one of ours stands
-// out, it names itself.
+// milliseconds each of our Update/FixedUpdate/LateUpdate ticks and OnGUI draws
+// costs THIS build. If our systems barely register, the cost is elsewhere
+// (rendering, physics, the base game, drivers) and we look there; if one of
+// ours stands out, it names itself.
+//
+// Q1 perf (6.57.0 stutter report) extended it to cover EVERY Revival call in
+// RevivalPlugin's Update, FixedUpdate, LateUpdate and OnGUI (the east world,
+// flak, radar, fuel depot, BuildingNav, ContentPerf, EastLadders ... were not
+// bracketed before, which is why "measured calls" read 14% of the frame), and
+// added what the frame time alone cannot tell:
+//   - managed allocations per frame and per slot (GC.GetTotalMemory deltas -
+//     block granular on Unity's Boehm GC, so read the smoothed figures), GC
+//     collections, the managed heap size. Garbage is paid for in one
+//     stop-the-world pause, so a steady KB/frame is a future long frame;
+//   - peaks over the last ~4 s, not only since F6 was pressed;
+//   - physics steps per frame (a slow frame runs several FixedUpdates, which
+//     multiplies every FixedTick);
+//   - the render settings that drive GPU cost (far clip, shadow distance, LOD
+//     bias, terrain tree/billboard/grass distances), so a screenshot of the
+//     overlay says which view settings were active;
+//   - every frame over 50 ms is attributed in the log: how much of it was ours,
+//     which slot, whether a GC ran, how many physics steps - "FrameSpike:" lines.
 //
 // Cost when OFF is a single bool test per bracket (S/E return immediately) plus
 // one subtraction per frame for the FPS ring - deliberately negligible, so the
-// overlay never distorts the number it is trying to measure. It ships OFF and is
-// toggled with a key at runtime (default F6). All player-visible strings go
-// through Loc.T (bilingual); comments and logs stay ASCII.
-//
-// Isolation: this whole file is self-contained. The only edits in
-// RevivalPlugin.cs are FrameProf.BindConfig in Awake, FrameProf.NewFrame plus an
-// S/E pair around each module call in Update, an S/E pair around each draw in
-// OnGUI, and FrameProf.DrawOverlay at the end of OnGUI. No shared state, so a
-// merge agent folds it in beside the other branches.
+// overlay never distorts the number it is trying to measure. The overlay's text
+// is rebuilt four times a second, not per OnGUI pass, so its own strings do not
+// show up as allocation. It ships OFF and is toggled with a key at runtime
+// (default F6). All player-visible strings go through Loc.T (bilingual) or are
+// plain ASCII numbers; comments and logs stay ASCII.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree lambdas.
 // UTF-8 (no BOM), compiled with /codepage:65001 like the rest.
 
 using System;
 using System.Diagnostics;
+using System.Text;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -33,16 +48,15 @@ namespace NextDayRevival
 {
     /// <summary>
     /// Per-slot frame-time accumulator and overlay. A "slot" is one bracketed
-    /// call site (a module's Tick or Draw). <see cref="S"/> stamps the start,
-    /// <see cref="E"/> adds the elapsed span to that slot's accumulator; both are
-    /// no-ops while the overlay is off. <see cref="NewFrame"/>, called once at the
-    /// top of Update, folds the finished frame's accumulators into a smoothed
-    /// per-slot average and clears them for the next frame.
+    /// call site (a module's Tick, LateFrame or Draw). <see cref="S"/> stamps the
+    /// start, <see cref="E"/> adds the elapsed span (and the managed memory
+    /// growth) to that slot's accumulator; both are no-ops while the overlay is
+    /// off. <see cref="NewFrame"/>, called first in Update, folds the finished
+    /// frame's accumulators into smoothed per-slot figures and clears them.
     /// </summary>
     public static class FrameProf
     {
-        // ---- slot ids. Keep in sync with Names below. Update side 0..16, OnGUI
-        //      side 17..26. Two ids per module where it both ticks and draws.
+        // ---- slot ids. Keep in sync with Names below.
         public const int NetWatch     = 0;
         public const int AdminTick    = 1;
         public const int MapTeleTick  = 2;
@@ -76,10 +90,83 @@ namespace NextDayRevival
         public const int CameraLate = 28;
         public const int PeerTick = 29;
         public const int OtherDraw = 30;
-        public const int Count = 31;
-        // The first OnGUI slot; slots below it are Update-side, at and above are
-        // OnGUI-side. Used only to sum the two groups for the overlay.
-        const int FirstDrawSlot = 17;
+        // Q1 perf: every other call in RevivalPlugin's frame loop. T = Update,
+        // L = LateUpdate, D = OnGUI.
+        public const int S_LiveRoutesT = 31;
+        public const int S_ClientIntegrityT = 32;
+        public const int S_NativeActionProgressT = 33;
+        public const int S_EastWorldT = 34;
+        public const int S_EastCrossingsT = 35;
+        public const int S_EastTileT = 36;
+        public const int S_AirfieldAmbienceT = 37;
+        public const int S_EastZonesT = 38;
+        public const int S_BuildingNavT = 39;
+        public const int S_ContentPerfT = 40;
+        public const int S_EastLaddersT = 41;
+        public const int S_FrameBenchT = 42;
+        public const int S_BtrGunT = 43;
+        public const int S_UralTruckT = 44;
+        public const int S_TechnicalT = 45;
+        public const int S_ArtyVehicleT = 46;
+        public const int S_GepardT = 47;
+        public const int S_FlakT = 48;
+        public const int S_TowerRadarT = 49;
+        public const int S_NoFlyT = 50;
+        public const int S_AntiTankMineT = 51;
+        public const int S_ApMineT = 52;
+        public const int S_StingerT = 53;
+        public const int S_GasLauncherT = 54;
+        public const int S_TroopInsertionT = 55;
+        public const int S_GroundEnemiesT = 56;
+        public const int S_AirfieldT = 57;
+        public const int S_MilitaryTownT = 58;
+        public const int S_HelipadsT = 59;
+        public const int S_PlayerHeliT = 60;
+        public const int S_PlayerAn2T = 61;
+        public const int S_An2RepairT = 62;
+        public const int S_An2BombsT = 63;
+        public const int S_FuelBalanceT = 64;
+        public const int S_FuelStationsT = 65;
+        public const int S_FuelDepotT = 66;
+        public const int S_WindSoundT = 67;
+        public const int S_NewSettlementT = 68;
+        public const int S_CrocodileT = 69;
+        public const int S_TraitorVendorT = 70;
+        public const int S_MortarT = 71;
+        public const int S_ArtyBatteryT = 72;
+        public const int S_NpcWarT = 73;
+        public const int S_TechnicalL = 74;
+        public const int S_GepardCrewL = 75;
+        public const int S_MilitaryTownL = 76;
+        public const int S_FlakL = 77;
+        public const int S_TowerRadarL = 78;
+        public const int S_ViewDistanceL = 79;
+        public const int S_PlayerHeliL = 80;
+        public const int S_PlayerAn2L = 81;
+        public const int S_TraitorVendorL = 82;
+        public const int S_BtrGunL = 83;
+        public const int S_TroopInsertionD = 84;
+        public const int S_EastZonesD = 85;
+        public const int S_HelipadsD = 86;
+        public const int S_PlayerHeliD = 87;
+        public const int S_PlayerAn2D = 88;
+        public const int S_An2RepairD = 89;
+        public const int S_An2BombsD = 90;
+        public const int S_FuelDepotD = 91;
+        public const int S_NewSettlementD = 92;
+        public const int S_CrocodileD = 93;
+        public const int S_MortarD = 94;
+        public const int S_ArtyBatteryD = 95;
+        public const int S_TechnicalD = 96;
+        public const int S_GepardD = 97;
+        public const int S_FlakD = 98;
+        public const int S_TowerRadarD = 99;
+        public const int S_NoFlyD = 100;
+        public const int S_PeerCheckD = 101;
+        public const int S_ClientIntegrityD = 102;
+        public const int S_NpcWarD = 103;
+        public const int S_SettingsD = 104;
+        public const int Count = 105;
 
         static readonly string[] Names = new string[]
         {
@@ -91,16 +178,114 @@ namespace NextDayRevival
             "Turret.DrawScope", "Drone.Draw", "DroneGear.Draw", "Patrol.DrawMap",
             "MapTeleport.Draw", "Admin.Draw", "Patrol.Draw", "ConvoyRepair.Draw",
             "Convoy.Draw", "DroneAlert.Draw",
-            "Patrol.FixedTick", "Camera.LateTick", "PeerCheck.Tick", "Other.Draw",
+            "Patrol.FixedTick", "Camera.LateTick", "PeerCheck.Tick", "Mines+Gas+Stinger.Draw",
+            "LiveRoutes.Tick",
+            "ClientIntegrity.Tick",
+            "NativeActionProgress.Tick",
+            "EastWorld.Tick",
+            "EastCrossings.Tick",
+            "EastTile.Tick",
+            "AirfieldAmbience.Tick",
+            "EastZones.Tick",
+            "BuildingNav.Tick",
+            "ContentPerf.Tick",
+            "EastLadders.Tick",
+            "FrameBench.Tick",
+            "BtrGun.Tick",
+            "UralTruck.Tick",
+            "Technical.Tick",
+            "ArtyVehicle.Tick",
+            "Gepard.Tick",
+            "Flak.Tick",
+            "TowerRadar.Tick",
+            "NoFly.Tick",
+            "AntiTankMine.Tick",
+            "ApMine.Tick",
+            "Stinger.Tick",
+            "GasLauncher.Tick",
+            "TroopInsertion.Tick",
+            "GroundEnemies.Tick",
+            "Airfield.Tick",
+            "MilitaryTown.Tick",
+            "Helipads.Tick",
+            "PlayerHeli.Tick",
+            "PlayerAn2.Tick",
+            "An2Repair.Tick",
+            "An2Bombs.Tick",
+            "FuelBalance.Tick",
+            "FuelStations.Tick",
+            "FuelDepot.Tick",
+            "WindSound.Tick",
+            "NewSettlement.Tick",
+            "Crocodile.Tick",
+            "TraitorVendor.Tick",
+            "Mortar.Tick",
+            "ArtyBattery.Tick",
+            "NpcWar.Tick",
+            "Technical.LateFrame",
+            "GepardCrew.LateFrame",
+            "MilitaryTown.LateFrame",
+            "Flak.LateFrame",
+            "TowerRadar.LateFrame",
+            "ViewDistance.LateTick",
+            "PlayerHeli.LateFrame",
+            "PlayerAn2.LateFrame",
+            "TraitorVendor.LateFrame",
+            "BtrGun.LateFrame",
+            "TroopInsertion.Draw",
+            "EastZones.Draw",
+            "Helipads.Draw",
+            "PlayerHeli.Draw",
+            "PlayerAn2.Draw",
+            "An2Repair.Draw",
+            "An2Bombs.Draw",
+            "FuelDepot.Draw",
+            "NewSettlement.Draw",
+            "Crocodile.Draw",
+            "Mortar.Draw",
+            "ArtyBattery.Draw",
+            "Technical.Draw",
+            "Gepard.Draw",
+            "Flak.Draw",
+            "TowerRadar.Draw",
+            "NoFly.Draw",
+            "PeerCheck.Draw",
+            "ClientIntegrity.Draw",
+            "NpcWar.Draw",
+            "Settings.Draw",
         };
 
-        // Per-slot: start stamp (this frame) and accumulated ticks (this frame).
+        // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI.
+        static readonly byte[] Kind = new byte[Count];
+
+        static FrameProf()
+        {
+            for (int i = 0; i < Count; i++)
+            {
+                string n = Names[i];
+                if ((i >= TurretScope && i <= DroneAlrtD) || i == OtherDraw
+                    || n.EndsWith(".Draw") || n.EndsWith(".DrawScope") || n.EndsWith(".DrawMap"))
+                    Kind[i] = 3;
+                else if (i == PatrolFixed) Kind[i] = 1;
+                else if (i == CameraLate || n.EndsWith(".LateFrame") || n.EndsWith(".LateTick"))
+                    Kind[i] = 2;
+            }
+        }
+
+        // Per-slot: start stamp and memory (this frame), accumulated ticks and
+        // bytes (this frame).
         static readonly long[] _mark = new long[Count];
         static readonly long[] _acc  = new long[Count];
-        // Smoothed per-slot milliseconds, shown in the overlay.
+        static readonly long[] _memMark = new long[Count];
+        static readonly long[] _memAcc = new long[Count];
+        // Smoothed per-slot milliseconds and KB, shown in the overlay.
         static readonly double[] _ms = new double[Count];
-        static readonly double[] _peak = new double[Count];
+        static readonly double[] _kb = new double[Count];
+        static readonly double[] _peak = new double[Count];     // since F6
+        static readonly double[] _winCur = new double[Count];   // this 2 s window
+        static readonly double[] _winPrev = new double[Count];  // the one before
         static readonly int[] _order = new int[Count];
+        static float _winEnd;
 
         // Stopwatch ticks -> milliseconds. Stopwatch, not DateTime: it is the
         // high-resolution timer and cheap to sample.
@@ -121,6 +306,18 @@ namespace NextDayRevival
         static double _fpsAvg;
         static float _low1;                         // 1% low fps
         static float _lowThrottle;
+
+        // ---- memory, physics steps, spikes (only while On).
+        static long _lastMem;
+        static int _lastGc = -1;
+        static double _allocKb;                     // smoothed KB per frame
+        static double _heapMb;
+        static int _fixedThis;
+        static double _fixedAvg;
+        static int _fixedLast;
+        static string _lastSpike = "";
+        static float _nextSpikeLog;
+        static int _spikes;
 
         public static bool On;
         static ConfigEntry<string> _key;
@@ -154,6 +351,7 @@ namespace NextDayRevival
         {
             if (!On) return;
             if (slot < 0 || slot >= Count) return;
+            _memMark[slot] = GC.GetTotalMemory(false);
             _mark[slot] = Stopwatch.GetTimestamp();
         }
 
@@ -163,7 +361,12 @@ namespace NextDayRevival
             if (!On) return;
             if (slot < 0 || slot >= Count) return;
             _acc[slot] += Stopwatch.GetTimestamp() - _mark[slot];
+            long grew = GC.GetTotalMemory(false) - _memMark[slot];
+            if (grew > 0) _memAcc[slot] += grew;    // a GC inside reads negative: ignored
         }
+
+        /// <summary>Called at the top of FixedUpdate: physics steps per frame.</summary>
+        public static void FixedStep() { _fixedThis++; }
 
         /// <summary>
         /// Called once at the very top of Update. Handles the toggle key, folds
@@ -174,6 +377,9 @@ namespace NextDayRevival
         {
             try
             {
+                int fixedSteps = _fixedThis;
+                _fixedThis = 0;
+
                 if (Input.GetKeyDown(ToggleKey()))
                 {
                     On = !On;
@@ -182,9 +388,17 @@ namespace NextDayRevival
                         // Entering: clear stale spans so the first shown frame is
                         // real, not a span measured across the paused interval.
                         for (int i = 0; i < Count; i++)
-                        { _acc[i] = 0; _ms[i] = 0; _peak[i] = 0; }
+                        {
+                            _acc[i] = 0; _ms[i] = 0; _peak[i] = 0; _memAcc[i] = 0; _kb[i] = 0;
+                            _winCur[i] = 0; _winPrev[i] = 0;
+                        }
                         _gcStart = GC.CollectionCount(0);
+                        _lastGc = -1;
+                        _allocKb = 0;
+                        _spikes = 0;
+                        _lastSpike = "";
                         _nextLog = Time.unscaledTime + 5f;
+                        _textAt = 0f;
                     }
                 }
 
@@ -202,13 +416,59 @@ namespace NextDayRevival
 
                 if (!On) return;
 
+                // Managed memory: growth since the last frame is what the frame
+                // allocated (block granular); a collection resets the heap, so
+                // that frame's figure is unknown and skipped.
+                long mem = GC.GetTotalMemory(false);
+                int gc = GC.CollectionCount(0);
+                bool gcRan = _lastGc >= 0 && gc != _lastGc;
+                if (_lastGc >= 0 && !gcRan && mem >= _lastMem)
+                    _allocKb += ((mem - _lastMem) / 1024.0 - _allocKb) * Smooth;
+                _lastMem = mem;
+                _lastGc = gc;
+                _heapMb = mem / (1024.0 * 1024.0);
+                _fixedAvg += (fixedSteps - _fixedAvg) * Smooth;
+                _fixedLast = fixedSteps;
+
+                // A long frame: say in the log how much of it was ours.
+                float frameMs = dt * 1000f;
+                if (frameMs > 50f && _dtCount > 5)
+                {
+                    _spikes++;
+                    double ours = 0; int top = 0;
+                    for (int i = 0; i < Count; i++)
+                    {
+                        ours += _acc[i] * TickMs;
+                        if (_acc[i] > _acc[top]) top = i;
+                    }
+                    _lastSpike = string.Format(
+                        "{0:0} ms: ours {1:0.0} ms (top {2} {3:0.0}), GC {4}, physics steps {5}",
+                        frameMs, ours, Names[top], _acc[top] * TickMs, gcRan ? "YES" : "no", fixedSteps);
+                    if (Time.unscaledTime >= _nextSpikeLog)
+                    {
+                        _nextSpikeLog = Time.unscaledTime + 1f;
+                        RevivalPlugin.L.LogInfo("FrameSpike: " + _lastSpike + ", heap "
+                            + _heapMb.ToString("0") + " MB, spikes since F6 " + _spikes + ".");
+                    }
+                }
+
+                // Rolling 2 + 2 s window for "peak lately".
+                if (Time.unscaledTime >= _winEnd)
+                {
+                    _winEnd = Time.unscaledTime + 2f;
+                    for (int i = 0; i < Count; i++) { _winPrev[i] = _winCur[i]; _winCur[i] = 0; }
+                }
+
                 // Fold the finished frame's per-slot spans into the averages.
                 for (int i = 0; i < Count; i++)
                 {
                     double ms = _acc[i] * TickMs;
                     if (ms > _peak[i]) _peak[i] = ms;
+                    if (ms > _winCur[i]) _winCur[i] = ms;
                     _ms[i] = _ms[i] + (ms - _ms[i]) * Smooth;
+                    _kb[i] = _kb[i] + (_memAcc[i] / 1024.0 - _kb[i]) * Smooth;
                     _acc[i] = 0;
+                    _memAcc[i] = 0;
                 }
 
                 // 1% low, recomputed a few times a second (a small sort).
@@ -221,23 +481,30 @@ namespace NextDayRevival
                 {
                     _nextLog = Time.unscaledTime + 5f;
                     double measured = 0;
-                    int top = 0;
+                    int top = 0, topPeak = 0, topKb = 0;
                     for (int i = 0; i < Count; i++)
                     {
                         measured += _ms[i];
                         if (_ms[i] > _ms[top]) top = i;
+                        if (WinPeak(i) > WinPeak(topPeak)) topPeak = i;
+                        if (_kb[i] > _kb[topKb]) topKb = i;
                     }
                     RevivalPlugin.L.LogInfo(string.Format(
                         "FramePerf: fps={0:0.0} p99fps={1:0.0} worstMs={2:0.0} "
                         + "over50ms={3}/{4} measuredMs={5:0.000} "
-                        + "top={6}:{7:0.000} peakSinceEnableMs={8:0.000} gc0={9}",
+                        + "top={6}:{7:0.000} peak4s={8}:{9:0.0} "
+                        + "allocKB/frame={10:0.0} topAlloc={11}:{12:0.0} heapMB={13:0} "
+                        + "gc0={14} fixed/frame={15:0.0} | {16}",
                         _fpsAvg, _low1, _worstMs, _slowFrames, _dtCount,
-                        measured, Names[top], _ms[top], _peak[top],
-                        GC.CollectionCount(0) - _gcStart));
+                        measured, Names[top], _ms[top], Names[topPeak], WinPeak(topPeak),
+                        _allocKb, Names[topKb], _kb[topKb], _heapMb,
+                        GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine()));
                 }
             }
             catch { /* diagnostics must never throw into the frame loop */ }
         }
+
+        static double WinPeak(int i) { return _winCur[i] > _winPrev[i] ? _winCur[i] : _winPrev[i]; }
 
         /// <summary>Worst frame time in the ring as an fps figure (the 1% low).</summary>
         static float OnePercentLow()
@@ -255,9 +522,36 @@ namespace NextDayRevival
             return worst > 0f ? 1f / worst : 0f;
         }
 
+        /// <summary>The GPU-relevant view settings as one line: far clip, shadow
+        /// distance, LOD bias, terrain tree/billboard/grass distances.</summary>
+        static string RenderLine()
+        {
+            try
+            {
+                Camera cam = Camera.main;
+                Terrain t = Terrain.activeTerrain;
+                Terrain[] all = Terrain.activeTerrains;
+                return string.Format(
+                    "far {0:0} m, shadows {1:0} m x{2}, LOD bias {3:0.00}, q{4}, "
+                    + "terrains {5}: trees {6:0}/{7:0} m, grass {8:0} m x{9:0.00}, pixErr {10:0}",
+                    cam != null ? cam.farClipPlane : 0f, QualitySettings.shadowDistance,
+                    QualitySettings.shadowCascades, QualitySettings.lodBias,
+                    QualitySettings.GetQualityLevel(), all != null ? all.Length : 0,
+                    t != null ? t.treeDistance : 0f, t != null ? t.treeBillboardDistance : 0f,
+                    t != null ? t.detailObjectDistance : 0f, t != null ? t.detailObjectDensity : 0f,
+                    t != null ? t.heightmapPixelError : 0f);
+            }
+            catch { return "render settings unavailable"; }
+        }
+
         // -------------------------------------------------------------- overlay
 
         static Texture2D _bg;
+        const int Shown = 12;
+        static readonly string[] _text = new string[Shown + 12];
+        static readonly Color[] _tint = new Color[Shown + 12];
+        static int _lines;
+        static float _textAt;
 
         static Texture2D Bg()
         {
@@ -270,37 +564,105 @@ namespace NextDayRevival
             return _bg;
         }
 
+        static void Add(string s, Color c)
+        {
+            if (_lines >= _text.Length) return;
+            _text[_lines] = s; _tint[_lines] = c; _lines++;
+        }
+
+        /// <summary>Rebuilds the overlay text. Four times a second, so the
+        /// overlay's own strings are not what it reports as allocation.</summary>
+        static void BuildText()
+        {
+            _lines = 0;
+            double upd = 0, fix = 0, late = 0, gui = 0;
+            for (int i = 0; i < Count; i++)
+            {
+                switch (Kind[i])
+                {
+                    case 1: fix += _ms[i]; break;
+                    case 2: late += _ms[i]; break;
+                    case 3: gui += _ms[i]; break;
+                    default: upd += _ms[i]; break;
+                }
+            }
+            double ours = upd + fix + late + gui;
+            float frameMs = _fpsAvg > 0.01 ? (float)(1000.0 / _fpsAvg) : 0f;
+            float pct = frameMs > 0.01f ? (float)(ours / frameMs * 100.0) : 0f;
+
+            // Rank the slots by average.
+            int[] order = _order;
+            for (int i = 0; i < Count; i++) order[i] = i;
+            Array.Sort(order, CompareAvg);
+
+            Color head = new Color(0.7f, 0.9f, 1f, 1f);
+            Color plain = Color.white;
+            Color soft = new Color(0.8f, 0.85f, 0.9f, 1f);
+            Add(Loc.T("NDR-Messfenster (" + ToggleKey() + " = aus)",
+                      "NDR frame overlay (" + ToggleKey() + " = off)"), head);
+            Add(string.Format(Loc.T("FPS {0:0}   Bild {1:0.0} ms   1%-Low {2:0}",
+                                    "FPS {0:0}   frame {1:0.0} ms   1% low {2:0}"),
+                _fpsAvg, frameMs, _low1), plain);
+            Add(string.Format(Loc.T("Gemessene Aufrufe {0:0.00} ms ({1:0}% vom Bild)",
+                                    "Measured calls {0:0.00} ms ({1:0}% of frame)"), ours, pct),
+                pct > 25f ? new Color(1f, 0.55f, 0.4f, 1f) : new Color(0.6f, 0.95f, 0.6f, 1f));
+            Add(string.Format("  Update {0:0.00}  Fixed {1:0.00} ({2:0.0} steps)  Late {3:0.00}  GUI {4:0.00} ms",
+                upd, fix, _fixedAvg, late, gui), soft);
+            Add(string.Format("Last {0} frames: max {1:0.0} ms, >50 ms: {2}, GC0 since F6: {3}",
+                _dtCount, _worstMs, _slowFrames, GC.CollectionCount(0) - _gcStart), plain);
+            Add(string.Format("Managed alloc {0:0.0} KB/frame ({1:0} KB/s), heap {2:0} MB",
+                _allocKb, _allocKb * _fpsAvg, _heapMb),
+                _allocKb > 8.0 ? new Color(1f, 0.6f, 0.45f, 1f) : plain);
+            Add(RenderLine(), soft);
+            Add("Spike: " + (_lastSpike.Length > 0 ? _lastSpike : "none since F6"),
+                _lastSpike.Length > 0 ? new Color(1f, 0.8f, 0.5f, 1f) : soft);
+            Add("Engine/GPU are the rest of the frame. Peak = last 4 s.", soft);
+            Add(Loc.T("Groesste Posten: Mittel / Spitze ms, KB/Bild",
+                      "Top consumers: avg / peak ms, KB/frame"), head);
+            for (int i = 0; i < Shown && i < Count; i++)
+            {
+                int s = order[i];
+                double v = _ms[s];
+                Color c = v > 1.0 ? new Color(1f, 0.6f, 0.45f, 1f)
+                        : v > 0.3 ? new Color(1f, 0.9f, 0.55f, 1f)
+                                  : new Color(0.72f, 0.75f, 0.8f, 1f);
+                Add(string.Format("  {0,-24} {1,6:0.000} / {2,6:0.0}  {3,5:0.0}",
+                    Names[s], v, WinPeak(s), _kb[s]), c);
+            }
+
+            // The spikiest slots, whatever their average.
+            int a = -1, b = -1, d = -1;
+            for (int i = 0; i < Count; i++)
+            {
+                double p = WinPeak(i);
+                if (a < 0 || p > WinPeak(a)) { d = b; b = a; a = i; }
+                else if (b < 0 || p > WinPeak(b)) { d = b; b = i; }
+                else if (d < 0 || p > WinPeak(d)) d = i;
+            }
+            StringBuilder sb = new StringBuilder("Peaks: ");
+            int[] top3 = new int[] { a, b, d };
+            for (int k = 0; k < 3; k++)
+                if (top3[k] >= 0 && WinPeak(top3[k]) > 0.05)
+                    sb.Append(Names[top3[k]]).Append(' ').Append(WinPeak(top3[k]).ToString("0.0")).Append("  ");
+            Add(sb.ToString(), new Color(1f, 0.9f, 0.55f, 1f));
+        }
+
+        static int CompareAvg(int x, int y) { return _ms[y].CompareTo(_ms[x]); }
+
         /// <summary>Called last in OnGUI. Draws nothing while off.</summary>
         public static void DrawOverlay()
         {
             if (!On) return;
             try
             {
-                // Group sums.
-                double updMs = 0, drawMs = 0;
-                for (int i = 0; i < Count; i++)
+                if (Time.unscaledTime >= _textAt)
                 {
-                    if ((i >= FirstDrawSlot && i <= DroneAlrtD) || i == OtherDraw)
-                        drawMs += _ms[i];
-                    else updMs += _ms[i];
+                    _textAt = Time.unscaledTime + 0.25f;
+                    BuildText();
                 }
-                double ourMs = updMs + drawMs;
-                float frameMs = Time.unscaledDeltaTime > 0f
-                    ? Time.unscaledDeltaTime * 1000f : 0f;
-                float pct = frameMs > 0.01f ? (float)(ourMs / frameMs * 100.0) : 0f;
-
-                // Rank the slots for a "top consumers" list.
-                int[] order = _order;
-                for (int i = 0; i < Count; i++) order[i] = i;
-                for (int a = 0; a < Count - 1; a++)
-                    for (int b = a + 1; b < Count; b++)
-                        if (_ms[order[b]] > _ms[order[a]])
-                        { int t = order[a]; order[a] = order[b]; order[b] = t; }
-
-                float x = 12f, y = 12f, w = 440f;
-                int shown = 10;
+                float x = 12f, y = 12f, w = 620f;
                 float lh = 16f;
-                float h = lh * (shown + 8) + 16f;
+                float h = lh * _lines + 16f;
 
                 Color old = GUI.color;
                 GUI.color = new Color(0f, 0f, 0f, 0.72f);
@@ -308,44 +670,8 @@ namespace NextDayRevival
                 GUI.color = old;
 
                 float tx = x + 10f, ty = y + 8f;
-                Line(tx, ref ty, w, lh, new Color(0.7f, 0.9f, 1f, 1f),
-                    Loc.T("NDR-Messfenster (" + ToggleKey() + " = aus)",
-                          "NDR frame overlay (" + ToggleKey() + " = off)"));
-                Line(tx, ref ty, w, lh, Color.white, string.Format(
-                    Loc.T("FPS {0:0}   Bild {1:0.0} ms   1%-Low {2:0}",
-                          "FPS {0:0}   frame {1:0.0} ms   1% low {2:0}"),
-                    _fpsAvg, frameMs, _low1));
-
-                Color acc = pct > 25f ? new Color(1f, 0.55f, 0.4f, 1f)
-                                      : new Color(0.6f, 0.95f, 0.6f, 1f);
-                Line(tx, ref ty, w, lh, acc, string.Format(
-                    Loc.T("Gemessene Aufrufe {0:0.00} ms ({1:0}% vom Bild)",
-                          "Measured calls {0:0.00} ms ({1:0}% of frame)"),
-                    ourMs, pct));
-                Line(tx, ref ty, w, lh, new Color(0.8f, 0.85f, 0.9f, 1f), string.Format(
-                    Loc.T("  Update/Fixed/Late {0:0.00} ms    GUI {1:0.00} ms",
-                          "  Update/Fixed/Late {0:0.00} ms    GUI {1:0.00} ms"),
-                    updMs, drawMs));
-                Line(tx, ref ty, w, lh, Color.white, string.Format(
-                    "Last {0} frames: max {1:0.0} ms, >50 ms: {2}, GC0: {3}",
-                    _dtCount, _worstMs, _slowFrames, GC.CollectionCount(0) - _gcStart));
-                Line(tx, ref ty, w, lh, Color.white,
-                    "Engine/GPU excluded. Peak = since F6 enabled.");
-
-                ty += 4f;
-                Line(tx, ref ty, w, lh, new Color(0.7f, 0.9f, 1f, 1f),
-                    Loc.T("Groesste Posten (ms/Bild): Mittel / Spitze",
-                          "Top consumers (ms/frame): Average / Peak"));
-                for (int i = 0; i < shown && i < Count; i++)
-                {
-                    int s = order[i];
-                    double v = _ms[s];
-                    Color c = v > 1.0 ? new Color(1f, 0.6f, 0.45f, 1f)
-                            : v > 0.3 ? new Color(1f, 0.9f, 0.55f, 1f)
-                                      : new Color(0.72f, 0.75f, 0.8f, 1f);
-                    Line(tx, ref ty, w, lh, c, string.Format(
-                        "  {0,-20} {1,6:0.000} / {2,6:0.000}", Names[s], v, _peak[s]));
-                }
+                for (int i = 0; i < _lines; i++)
+                    Line(tx, ref ty, w, lh, _tint[i], _text[i]);
             }
             catch { /* never throw into OnGUI */ }
         }

@@ -214,7 +214,19 @@ namespace NextDayRevival
                 + "Must not overlap any other channel (0..199).");
         }
 
-        public static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
+        public static bool Enabled { get { return _forced || CfgEnabled == null || CfgEnabled.Value; } }
+
+        /// <summary>Set by the admin panel's spawn with the key off: the
+        /// Gepard runs for this session, the config file keeps its value.</summary>
+        static bool _forced;
+        static Harmony _harmony;
+
+        /// <summary>The admin panel's note on a switched-off Gepard, or null.</summary>
+        internal static string OffNote()
+        {
+            if (Enabled) return null;
+            return "[Gepard] Enabled = false in the config - the spawn switches it on for this session";
+        }
 
         public static bool IstGepard(Transform root)
         {
@@ -538,6 +550,7 @@ namespace NextDayRevival
 
         public static void Install(Harmony harmony)
         {
+            if (harmony != null) _harmony = harmony;
             if (!Enabled)
             {
                 RevivalPlugin.L.LogInfo("Gepard: off (Gepard/Enabled).");
@@ -575,7 +588,16 @@ namespace NextDayRevival
 
         internal static string SpawnInFront()
         {
-            if (!Enabled) return "The Gepard is disabled in the configuration.";
+            // The admin button always spawns: a key that is off is named and
+            // switched on for the session, never a silent no.
+            string off = "";
+            if (!Enabled)
+            {
+                _forced = true;
+                Install(_harmony);
+                RevivalPlugin.L.LogWarning("Gepard: [Gepard] Enabled = false - switched on for this session by the spawn.");
+                off = "[Gepard] Enabled = false in the config - switched on for this session. ";
+            }
             Camera cam = Camera.main;
             if (cam == null) return "No player camera available.";
             Vector3 ahead = cam.transform.forward;
@@ -586,15 +608,15 @@ namespace NextDayRevival
             Vector3 above = cam.transform.position + ahead * dist + Vector3.up * 30f;
             Vector3 ground;
             GameObject under = Turret.RaycastObject(above, Vector3.down, 200f, out ground);
-            if (under == null) return "No ground found ahead of the player.";
+            if (under == null) return off + "No ground found ahead of the player.";
             Vector3 pos = ground + Vector3.up * 1.6f;
             Quaternion rot = Quaternion.LookRotation(ahead, Vector3.up);
             bool isTank;
             GameObject car = VehicleRegistry.Spawn("gepard", pos, rot, out isTank);
-            if (car == null) return "Gepard spawn failed; see the game log.";
+            if (car == null) return off + "Gepard spawn failed; see the game log.";
             RevivalPlugin.L.LogInfo("Gepard: created at " + pos + ", ground \"" + under.name + "\".");
             GepardGun.Hint(GepardText.Spawned(), 4f);
-            return GepardText.Spawned();
+            return off + GepardText.Spawned();
         }
 
         static KeyCode Key()
@@ -839,7 +861,7 @@ namespace NextDayRevival
 
         float _search;
         float _shotR = -10f, _shotL = -10f;
-        float _rYaw, _rPitch, _rTrack, _rLast = -100f, _rNext;
+        float _rYaw, _rPitch, _rTrack, _rLast = -100f, _rNext, _rFuze;
         bool _rFiring;
         int _rGun;
         float _nextAlive;
@@ -936,6 +958,15 @@ namespace NextDayRevival
 
         internal void RemoteState(float yaw, float pitch, float track, bool firing)
         {
+            RemoteState(yaw, pitch, track, firing, 0f);
+        }
+
+        /// <summary><paramref name="fuze"/> &gt; 0: the NPC gunner's air rounds
+        /// are set to burst at this range (world units) - drawn as the same
+        /// timed puffs here (GepardShots.FireTimed).</summary>
+        internal void RemoteState(float yaw, float pitch, float track, bool firing, float fuze)
+        {
+            _rFuze = fuze;
             _rYaw = yaw;
             _rPitch = pitch;
             _rTrack = track;
@@ -956,7 +987,8 @@ namespace NextDayRevival
             int n = 0;
             while (Time.time >= _rNext && n < 4)
             {
-                GepardShots.Fire(this, _rGun, Bore(_rGun), false);
+                if (_rFuze > 0f) GepardShots.FireTimed(this, _rGun, Bore(_rGun), _rFuze, false, null);
+                else GepardShots.Fire(this, _rGun, Bore(_rGun), false);
                 _rGun = 1 - _rGun;
                 _rNext += interval;
                 n++;
@@ -1058,7 +1090,7 @@ namespace NextDayRevival
                     Rescan();
                 }
                 if (_vgs == null || _rig == null) { SetManning(false); return; }
-                if (Input.GetKeyDown(_manKey)) Toggle();
+                if (GameUi.KeyDown(_manKey)) Toggle();
                 if (!_manning) return;
 
                 if (Time.time > _seatWait && IntField(_vgs, "_localPlayerPassengerId") != Gepard.GunnerSeat)
@@ -1073,9 +1105,9 @@ namespace NextDayRevival
                     return;
                 }
 
-                if (Input.GetKeyDown(_radarKey)) ToggleRadar();
-                if (_radar && Input.GetKeyDown(_nextKey)) NextTarget();
-                float wheel = Input.GetAxis("Mouse ScrollWheel");
+                if (GameUi.KeyDown(_radarKey)) ToggleRadar();
+                if (_radar && GameUi.KeyDown(_nextKey)) NextTarget();
+                float wheel = GameUi.Axis("Mouse ScrollWheel");
                 if (wheel > 0.01f && _fov < Fovs.Length - 1) _fov++;
                 else if (wheel < -0.01f && _fov > 0) _fov--;
 
@@ -1535,8 +1567,8 @@ namespace NextDayRevival
                 // AimLead degrees ahead of the guns, so the picture turns at
                 // the turret's speed and the traverse rate still counts.
                 float sens = Gepard.CfgSensitivity.Value;
-                _cmdYaw += Input.GetAxis("Mouse X") * sens;
-                _cmdPitch += Input.GetAxis("Mouse Y") * sens;
+                _cmdYaw += GameUi.Axis("Mouse X") * sens;
+                _cmdPitch += GameUi.Axis("Mouse Y") * sens;
                 float lead = Mathf.Max(0.5f, Gepard.CfgAimLead.Value);
                 float losPitch = _rig.Pitch - _superElev;
                 _cmdYaw = _rig.Yaw + Mathf.Clamp(Mathf.DeltaAngle(_rig.Yaw, _cmdYaw), -lead, lead);
@@ -1593,7 +1625,7 @@ namespace NextDayRevival
 
         static void Trigger()
         {
-            bool held = Input.GetMouseButton(0);
+            bool held = GameUi.Button(0);
             int rounds = Rounds();
             _firing = false;
             if (!held || _reloading) return;
@@ -2259,6 +2291,44 @@ namespace NextDayRevival
             Fire(rig, gun, dir, live, null);
         }
 
+        static Spec _timed;
+
+        /// <summary>
+        /// A 35 mm round of the NPC gunner at an AIR target (Q2, after the
+        /// 6.57.0 test): the same gun, flash, kick and case as Fire, but the
+        /// round is set to burst at <paramref name="fuze"/> world units - the
+        /// range the gunner lays at - as a black puff whose fragments reach an
+        /// aircraft within 3 m (the Spec path the ZU-23 uses). The radar gun
+        /// used to fire rounds that flew on to 2.6 km: the pilot saw tracers
+        /// and nothing else until the tenth hit. Now every burst is a row of
+        /// puffs he can see walking in.
+        /// </summary>
+        internal static void FireTimed(GepardRig rig, int gun, Vector3 dir, float fuze, bool live,
+                                       List<GepardGun.Contact> npc)
+        {
+            if (rig == null) return;
+            if (_timed == null) _timed = new Spec();
+            float speed = Mathf.Max(100f, Gepard.CfgVelocity == null ? 1175f : Gepard.CfgVelocity.Value);
+            _timed.Speed = speed;
+            _timed.Gravity = Physics.gravity.y;
+            _timed.Dispersion = Mathf.Max(0f, Gepard.CfgDispersion == null ? 1.5f : Gepard.CfgDispersion.Value);
+            _timed.Fuze = Gepard.CfgFuze == null ? 1.5f : Gepard.CfgFuze.Value;
+            _timed.Splash = 3f * 2.8f;
+            _timed.HeliHits = 0;
+            _timed.Tracer = Anim.Tracers;
+            _timed.Flak = true;
+            _timed.PuffFx = true;
+            _timed.BurstSound = FlakSound.Burst;
+            Vector3 muzzle = rig.Muzzle(gun);
+            float range = Mathf.Clamp(fuze, 30f, Mathf.Max(200f, Gepard.CfgMaxRange == null ? 2600f : Gepard.CfgMaxRange.Value));
+            float life = range / speed * UnityEngine.Random.Range(0.97f, 1.03f);
+            Fire(_timed, rig.Vehicle, muzzle, dir, life, live, npc);
+            rig.Kick(gun);
+            GepardFx.Muzzle(muzzle, dir);
+            GepardFx.Casing(gun == 0 ? rig.GunR : rig.GunL, gun == 0 ? 1f : -1f);
+            VehicleShotSound.Play(muzzle, false);
+        }
+
         /// <summary>A round whose damage is judged against <paramref name="npc"/>
         /// - the contacts of an NPC gunner on this machine
         /// (RevivalGepardCrew.cs) - instead of the local gunner's.</summary>
@@ -2820,12 +2890,20 @@ namespace NextDayRevival
 
         internal static void SendPose(Transform root, float yaw, float pitch, float track, bool firing, bool radar)
         {
+            SendPose(root, yaw, pitch, track, firing, radar, 0f);
+        }
+
+        /// <summary>... plus the NPC gunner's air fuze range (world units,
+        /// 0 = none) as an eighth float; a client without it ignores it.</summary>
+        internal static void SendPose(Transform root, float yaw, float pitch, float track, bool firing, bool radar,
+                                      float fuze)
+        {
             if (!_hooked || root == null) return;
             try
             {
                 int view = ViewId(root);
                 if (view <= 0) return;
-                Send(new float[] { Pose, view, yaw, pitch, track, firing ? 1f : 0f, radar ? 1f : 0f }, false);
+                Send(new float[] { Pose, view, yaw, pitch, track, firing ? 1f : 0f, radar ? 1f : 0f, fuze }, false);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Gepard network send: " + ex.Message); }
         }
@@ -2864,7 +2942,8 @@ namespace NextDayRevival
                 }
                 GepardRig rig = Gepard.Rig(root);
                 if (rig == null || rig.LocalControl) return;
-                rig.RemoteState(f[2], Mathf.Clamp(f[3], -10f, 90f), f[4], f[5] > 0.5f);
+                rig.RemoteState(f[2], Mathf.Clamp(f[3], -10f, 90f), f[4], f[5] > 0.5f,
+                                f.Length >= 8 ? Mathf.Max(0f, f[7]) : 0f);
             }
             catch (Exception ex)
             {

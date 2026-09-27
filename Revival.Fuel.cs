@@ -120,7 +120,7 @@ namespace NextDayRevival
             if (Time.time < _next) return;
             _next = Time.time + 4f;
             if (!LookUp()) return;
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_vgs);
+            UnityEngine.Object[] all = VehicleScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 Component v = all[i] as Component;
@@ -392,6 +392,10 @@ namespace NextDayRevival
             internal GameObject Fire;
             internal bool HaveY;
             internal float Y;
+            internal GameObject Model;
+            internal Collider[] Shell;
+            internal Bounds Bounds;
+            internal float NextBind;
         }
 
         // unity/EastTile/Content/east_af_fuel_water.json; the torn horizontal
@@ -464,8 +468,41 @@ namespace NextDayRevival
             return take;
         }
 
+        static readonly string[] ModelNames = {
+            "pol_tank_vertical 1", "pol_tank_vertical_split_roof 1",
+            "pol_tank_horizontal 1", "pol_tank_horizontal 2", "pol_tank_horizontal 3"
+        };
+
         static bool TankY(TankDef t)
         {
+            // Use the assembled tank's real collision geometry: its seating
+            // height includes the bund and model pivot, not just the terrain.
+            if (t.Model != null && t.Model.activeInHierarchy) return true;
+            t.Shell = null;
+            if (Time.time >= t.NextBind)
+            {
+                t.NextBind = Time.time + 5f;
+                int index = Array.IndexOf(_tanks, t);
+                GameObject model = GameObject.Find(ModelNames[index]);
+                if (model != null)
+                {
+                    Collider[] all = model.GetComponentsInChildren<Collider>();
+                    List<Collider> shell = new List<Collider>();
+                    foreach (Collider c in all)
+                        if (c != null && c.enabled && !c.isTrigger) shell.Add(c);
+                    if (shell.Count > 0)
+                    {
+                        t.Model = model; t.Shell = shell.ToArray();
+                        t.Bounds = t.Shell[0].bounds;
+                        for (int i = 1; i < t.Shell.Length; i++) t.Bounds.Encapsulate(t.Shell[i].bounds);
+                        t.Y = t.Bounds.min.y; t.HaveY = true;
+                        RevivalPlugin.L.LogInfo("FuelDepot: bound " + t.Id + " to " + model.name
+                            + " at " + t.Bounds.center + ", " + t.Shell.Length + " colliders.");
+                        return true;
+                    }
+                }
+            }
+            // Greybox fallback, also while the assembly bundle is loading.
             if (t.HaveY) return true;
             float y;
             if (!EastWorld.TerrainHeight(t.Pos, out y)) return false;
@@ -475,12 +512,21 @@ namespace NextDayRevival
 
         static Vector3 Middle(TankDef t)
         {
+            if (t.Shell != null) return t.Bounds.center;
             return new Vector3(t.Pos.x, t.Y + (t.Big ? BigH : SmallH) * 0.5f, t.Pos.z);
         }
 
         /// <summary>Distance from a point to the tank's shell (0 inside).</summary>
         static float Distance(TankDef t, Vector3 p)
         {
+            if (t.Shell != null)
+            {
+                float nearest = float.MaxValue;
+                foreach (Collider c in t.Shell)
+                    if (c != null && c.enabled)
+                        nearest = Mathf.Min(nearest, Vector3.Distance(p, c.ClosestPoint(p)));
+                return nearest;
+            }
             float top = t.Y + (t.Big ? BigH : SmallH);
             float dy = Mathf.Max(0f, Mathf.Max(t.Y - p.y, p.y - top));
             float dxz;
@@ -501,12 +547,29 @@ namespace NextDayRevival
         /// <summary>Where a ray enters the tank's shell, or -1.</summary>
         static float RayEnter(TankDef t, Vector3 o, Vector3 d, float range)
         {
+            if (t.Shell != null)
+            {
+                float nearest = range + 1f;
+                Ray ray = new Ray(o, d);
+                foreach (Collider c in t.Shell)
+                {
+                    RaycastHit hit;
+                    if (c != null && c.enabled && c.Raycast(ray, out hit, range))
+                        nearest = Mathf.Min(nearest, hit.distance);
+                }
+                return nearest <= range ? nearest : -1f;
+            }
             float top = t.Y + (t.Big ? BigH : SmallH);
             if (t.Big)
             {
                 float ox = o.x - t.Pos.x, oz = o.z - t.Pos.z;
                 float a = d.x * d.x + d.z * d.z, b = 2f * (ox * d.x + oz * d.z), c = ox * ox + oz * oz - BigR * BigR;
-                if (a < 1e-6f) return -1f;
+                if (a < 1e-6f)
+                {
+                    if (c > 0f || Mathf.Abs(d.y) < 1e-6f) return -1f;
+                    float cap = ((d.y < 0f ? top : t.Y) - o.y) / d.y;
+                    return cap >= 0f && cap <= range ? cap : -1f;
+                }
                 float disc = b * b - 4f * a * c;
                 if (disc < 0f) return -1f;
                 float s = Mathf.Sqrt(disc);
@@ -565,9 +628,10 @@ namespace NextDayRevival
             {
                 if (!Active) return;
                 Component c = __instance as Component;
-                if (c == null) return;
+                if (c == null || !Mine(c)) return;
                 Vector3 p = c.transform.position;
-                if ((p - Centre).sqrMagnitude > 400f * 400f) return;
+                Vector3 flat = p - Centre; flat.y = 0f;
+                if (flat.sqrMagnitude > 400f * 400f) return;
                 float dmg = ToFloat(AccessTools.Field(c.GetType(), "ExplosionDamage"), c, 0f);
                 float rad = ToFloat(AccessTools.Field(c.GetType(), "ExplodeDamageRadius"), c, 6f);
                 Blast(p, dmg, rad);
@@ -596,7 +660,8 @@ namespace NextDayRevival
                 Transform cam = _camera == null ? null : _camera.GetValue(__instance) as Transform;
                 if (cam == null) return;
                 Vector3 o = cam.position, d = cam.forward;
-                if ((o - Centre).sqrMagnitude > 900f * 900f) return;
+                Vector3 flat = o - Centre; flat.y = 0f;
+                if (flat.sqrMagnitude > 900f * 900f) return;
                 EnsureInit();
                 int best = -1;
                 float bestT = 800f;
@@ -686,7 +751,7 @@ namespace NextDayRevival
                 if (fresh) FireEffect.SpawnHeliBlast(Middle(t), t.Big ? 40f : 28f);
                 if (t.Fire == null && Time.time < t.BurnUntil)
                 {
-                    float top = t.Y + (t.Big ? BigH : SmallH);
+                    float top = t.Shell != null ? t.Bounds.max.y : t.Y + (t.Big ? BigH : SmallH);
                     t.Fire = new GameObject("NDR FuelDepot fire " + t.Id);
                     t.Fire.transform.position = new Vector3(t.Pos.x, top - 1.9f, t.Pos.z);
                     Anchor(t.Fire, Vector3.zero);
@@ -710,7 +775,11 @@ namespace NextDayRevival
             for (int i = 0; i < _tanks.Length; i++)
             {
                 TankDef t = _tanks[i];
-                if (t.Fire == null) continue;
+                if (t.Fire == null)
+                {
+                    if (!Intact(t) && Time.time < t.BurnUntil) Explode(i, false);
+                    continue;
+                }
                 if (Time.time < t.BurnUntil && !Intact(t)) continue;
                 FireEffect.StopEmitting(t.Fire);
                 UnityEngine.Object.Destroy(t.Fire, 30f);
@@ -725,13 +794,14 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
-            if (!Active) { if (_job) Cancel(null); _prompt = null; return; }
+            if (!Active) { if (_job) Cancel(null); _prompt = null; _status = null; _tankStatus = null; return; }
             try
             {
                 EnsureNet();
                 EnsureInit();
                 TickFire();
                 if (RevivalTroopInsertion.MasterClient()) TickMaster();
+                if (Time.time >= _nextAim) { _nextAim = Time.time + 0.1f; LookAtTank(); }
                 if (_job) TickJob(); else TickIdle();
             }
             catch (Exception ex)
@@ -788,10 +858,10 @@ namespace NextDayRevival
                 t.Health = Mathf.Max(0f, f[1 + i * 3]);
                 t.RespawnAt = f[2 + i * 3] > 0f ? Time.time + f[2 + i * 3] : 0f;
                 float burn = f[3 + i * 3];
+                t.BurnUntil = burn > 0f ? Time.time + burn : 0f;
                 // A late joiner: the wreck is still burning.
                 if (!Intact(t) && burn > 1f && t.Fire == null)
                 {
-                    t.BurnUntil = Time.time + burn;
                     Explode(i, false);
                 }
             }
@@ -803,7 +873,35 @@ namespace NextDayRevival
         static bool _job;
         static Component _jobVehicle;
         static float _jobStart, _jobLen;
-        static string _prompt, _status;
+        static string _prompt, _status, _tankStatus;
+        static float _nextAim;
+
+        static void LookAtTank()
+        {
+            _tankStatus = null;
+            Camera cam = Camera.main;
+            if (cam == null) return;
+            Vector3 o = cam.transform.position, d = cam.transform.forward;
+            Vector3 flat = o - Centre; flat.y = 0f;
+            if (flat.sqrMagnitude > 900f * 900f) return;
+            int best = -1; float nearest = 800f;
+            for (int i = 0; i < _tanks.Length; i++)
+            {
+                TankDef t = _tanks[i];
+                if (!TankY(t)) continue;
+                float enter = RayEnter(t, o, d, nearest);
+                if (enter >= 0f && enter < nearest) { nearest = enter; best = i; }
+            }
+            if (best < 0) return;
+            RaycastHit hit;
+            if (Physics.Raycast(o, d, out hit, nearest, ~0, QueryTriggerInteraction.Ignore)
+                && hit.distance < nearest - 3f && Distance(_tanks[best], hit.point) > 3f) return;
+            TankDef aimed = _tanks[best];
+            _tankStatus = Loc.T("Цистерна ", "Tank ") + aimed.Id + ": "
+                + Mathf.CeilToInt(aimed.Health) + " / " + Mathf.CeilToInt(MaxHealth(aimed))
+                + (Intact(aimed) ? " HP" : Loc.T(" - уничтожена", " - destroyed"));
+        }
+
         static float _nextLook;
         static Component _near;
         static int _nextRequest = 1, _waiting;
@@ -874,7 +972,7 @@ namespace NextDayRevival
         {
             Type vt = FuelBalance.VgsType;
             if (vt == null || !FuelBalance.LookUp()) return null;
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(vt);
+            UnityEngine.Object[] all = VehicleScan.All();
             Component best = null;
             float bestD = Mathf.Max(3f, CfgVehicleRange.Value);
             for (int i = 0; i < all.Length; i++)
@@ -988,6 +1086,7 @@ namespace NextDayRevival
             try
             {
                 if (_waiting != 0 && Time.time - _waitSince > 5f) { _waiting = 0; _waitVehicle = null; }
+                if (!string.IsNullOrEmpty(_tankStatus)) Line(_tankStatus, 0.61f);
                 if (_job) return;
                 if (!string.IsNullOrEmpty(_status)) Line(_status, 0.66f);
                 if (!string.IsNullOrEmpty(_prompt)) Line(_prompt, 0.70f);

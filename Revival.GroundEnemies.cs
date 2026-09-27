@@ -249,7 +249,7 @@ namespace NextDayRevival
             if (_npcType == null) _npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (_npcType == null) return;
             Dictionary<string, List<Component>> existing = new Dictionary<string, List<Component>>();
-            UnityEngine.Object[] actors = UnityEngine.Object.FindObjectsOfType(_npcType);
+            UnityEngine.Object[] actors = NpcScan.All();
             foreach (UnityEngine.Object actor in actors)
             {
                 Component ai = actor as Component;

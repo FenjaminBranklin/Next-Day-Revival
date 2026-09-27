@@ -89,14 +89,18 @@ namespace NextDayRevival
         }
 
         // Game units. Medium: twice today's far clip, paid for by the props
-        // between 250 and 1000 u that are not drawn any more, a slightly
-        // coarser far terrain and trees stopping at 1200 u.
+        // between 250 and 1000 u that are not drawn any more and a slightly
+        // coarser far terrain. Trees stop at 1000 u - exactly where the game's
+        // 1000 u far clip stopped them before P12 (its own tree distance of
+        // 2000 was clipped there). Q1 perf: 6.57.0 had 1200 u, i.e. 44 % more
+        // billboard area than 6.55 over the east tile's 67,738 terrain trees,
+        // and legacy terrain rebuilds billboards on the main thread.
         static readonly Profile[] Profiles = new Profile[]
         {
             null,
             new Profile { Name = "Low",    Far = 1000f, Trees =  800f, Pixel = 15f, LodBias = 1.5f,
                           Small = 150f, Medium =  450f, Items = 120f, Camp = 200f, Bush = 300f, Ragdoll = 300f },
-            new Profile { Name = "Medium", Far = 2000f, Trees = 1200f, Pixel = 12f, LodBias = 2.0f,
+            new Profile { Name = "Medium", Far = 2000f, Trees = 1000f, Pixel = 12f, LodBias = 2.0f,
                           Small = 250f, Medium =  700f, Items = 150f, Camp = 250f, Bush = 400f, Ragdoll = 500f },
             new Profile { Name = "High",   Far = 3500f, Trees = 2000f, Pixel = 10f, LodBias = 2.0f,
                           Small = 350f, Medium = 1000f, Items = 200f, Camp = 300f, Bush = 500f, Ragdoll = 600f },
@@ -387,6 +391,7 @@ namespace NextDayRevival
                 if (Mine(e.Value.Pixel, t.heightmapPixelError)) t.heightmapPixelError = e.Value.Pixel.Base;
             }
             _terrains.Clear();
+            CancelCollect();
             ClearProps();
             RestoreLods();
         }
@@ -519,9 +524,10 @@ namespace NextDayRevival
             {
                 if (now >= _scanAt) _scanAt = -1f;
                 if (now >= _scanAgainAt) _scanAgainAt = -1f;
-                Collect(p);
-                ExtendLods(p);
+                BeginCollect(p);
             }
+            if (_cAll != null) StepCollect();
+            else if (_lAll != null) StepLods();
             if (_primeFrame >= 0 && Time.frameCount > _primeFrame)
             {
                 if (_small != null) _small.Prime();
@@ -530,20 +536,60 @@ namespace NextDayRevival
             }
         }
 
-        static void Collect(Profile p)
+        // Q1 perf: the sort is TIME-SLICED. It walks every MeshRenderer of
+        // the scene (40,777 in Kevin's 6.57.0 session, three
+        // GetComponentInParent each) and then every LODGroup (9,464), and ran
+        // 8 s and 30 s after every scene load - the east content scenes load
+        // during play, so these were 35 ms + LOD frames mid-game. Now each
+        // frame does at most SliceMs of it; the finished bands replace the old
+        // ones in one step. Same filters, same bands, same log lines.
+        const double SliceMs = 2.0;
+        static MeshRenderer[] _cAll;
+        static int _cIdx, _cLarge, _cSkipped, _cFrames;
+        static double _cMs;
+        static Profile _cP;
+        static Type _cAnimator;
+        static Band _cSmall, _cMedium;
+        static readonly List<Renderer> _cProps = new List<Renderer>();
+
+        static void BeginCollect(Profile p)
         {
-            ClearProps();
-            float t0 = Time.realtimeSinceStartup;
-            _small = new Band();
-            _medium = new Band();
-            int large = 0, skipped = 0;
-            MeshRenderer[] all = UnityEngine.Object.FindObjectsOfType<MeshRenderer>();
+            _lAll = null;
+            _cP = p;
+            _cSmall = new Band();
+            _cMedium = new Band();
+            _cProps.Clear();
+            _cLarge = _cSkipped = _cFrames = _cIdx = 0;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            _cAll = UnityEngine.Object.FindObjectsOfType<MeshRenderer>();
             // Animator lives in UnityEngine.AnimationModule, which build.ps1
             // does not reference; by name, and skipped if it cannot be found.
-            Type animator = Type.GetType("UnityEngine.Animator, UnityEngine.AnimationModule");
-            for (int i = 0; i < all.Length; i++)
+            _cAnimator = Type.GetType("UnityEngine.Animator, UnityEngine.AnimationModule");
+            _cMs = Ms(t0);
+        }
+
+        static double Ms(long since)
+        {
+            return (System.Diagnostics.Stopwatch.GetTimestamp() - since) * 1000.0
+                / System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        static long Budget()
+        {
+            return (long)(SliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+        }
+
+        static void StepCollect()
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long budget = Budget();
+            _cFrames++;
+            MeshRenderer[] all = _cAll;
+            Type animator = _cAnimator;
+            while (_cIdx < all.Length)
             {
-                MeshRenderer r = all[i];
+                if ((_cIdx & 31) == 31 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
+                MeshRenderer r = all[_cIdx++];
                 if (r == null || !r.enabled || r.gameObject.layer != 0) continue;
                 Transform t = r.transform;
                 if (r.GetComponentInParent<LODGroup>() != null
@@ -551,22 +597,52 @@ namespace NextDayRevival
                     || (animator != null && r.GetComponentInParent(animator) != null)
                     || Kept(t)
                     || (_cam != null && t.IsChildOf(_cam.transform.root)))
-                { skipped++; continue; }
+                { _cSkipped++; continue; }
                 float size = r.bounds.size.magnitude;
-                if (size < SmallSize) _small.Renderers.Add(r);
-                else if (size < LargeSize) _medium.Renderers.Add(r);
-                else large++;
-                _props.Add(r);
+                if (size < SmallSize) _cSmall.Renderers.Add(r);
+                else if (size < LargeSize) _cMedium.Renderers.Add(r);
+                else _cLarge++;
+                _cProps.Add(r);
             }
-            _small.Build(_cam, p.Small);
-            _medium.Build(_cam, p.Medium);
+            _cMs += Ms(t0);
+            if (_cIdx < all.Length) return;
+
+            // Done: anything destroyed or kept visible since it was looked at
+            // leaves the bands, then the new bands replace the old ones.
+            Prune(_cSmall.Renderers);
+            Prune(_cMedium.Renderers);
+            Prune(_cProps);
+            ClearProps();
+            _small = _cSmall;
+            _medium = _cMedium;
+            _props.AddRange(_cProps);
+            _small.Build(_cam, _cP.Small);
+            _medium.Build(_cam, _cP.Medium);
             _primeFrame = Time.frameCount;
+            _cAll = null;
+            _cSmall = _cMedium = null;
+            _cProps.Clear();
             RevivalPlugin.L.LogInfo("ViewDistance: props sorted in "
-                + ((Time.realtimeSinceStartup - t0) * 1000f).ToString("0", CultureInfo.InvariantCulture)
-                + " ms - " + _small.Renderers.Count + " small (off past " + p.Small + " u), "
-                + _medium.Renderers.Count + " medium (off past " + p.Medium + " u), "
-                + large + " large (to the far clip), " + skipped
+                + _cMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _cFrames + " frame(s) - "
+                + _small.Renderers.Count + " small (off past " + _cP.Small + " u), "
+                + _medium.Renderers.Count + " medium (off past " + _cP.Medium + " u), "
+                + _cLarge + " large (to the far clip), " + _cSkipped
                 + " left alone (LODGroup, moving, animated, kept).");
+            BeginLods(_cP);
+        }
+
+        static void Prune(List<Renderer> list)
+        {
+            for (int i = list.Count - 1; i >= 0; i--)
+                if (list[i] == null || Kept(list[i].transform)) list.RemoveAt(i);
+        }
+
+        static void CancelCollect()
+        {
+            _cAll = null;
+            _lAll = null;
+            _cSmall = _cMedium = null;
+            _cProps.Clear();
         }
 
         static void Release(Transform root)
@@ -587,21 +663,40 @@ namespace NextDayRevival
 
         static readonly Dictionary<LODGroup, float[]> _lodOriginal = new Dictionary<LODGroup, float[]>();
 
+        static LODGroup[] _lAll;
+        static int _lIdx, _lExt, _lFrames;
+        static float _lFar, _lTan, _lBias;
+        static double _lMs;
+
         /// <summary>Large LODGroups keep their coarsest LOD out to the far
         /// clip. A LOD level of screen height h culls at
         /// size * lodBias / (2 tan(fov/2) h); the last level's h is lowered
-        /// until that is the far clip, never raised.</summary>
-        static void ExtendLods(Profile p)
+        /// until that is the far clip, never raised. Time-sliced like the
+        /// prop sort (StepLods).</summary>
+        static void BeginLods(Profile p)
         {
             RestoreLods();
+            _lAll = null;
             if (_cam == null) return;
-            float far = Mathf.Max(p.Far, _cam.farClipPlane);
-            float tanHalf = Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
-            int extended = 0;
-            LODGroup[] all = UnityEngine.Object.FindObjectsOfType<LODGroup>();
-            for (int i = 0; i < all.Length; i++)
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            _lFar = Mathf.Max(p.Far, _cam.farClipPlane);
+            _lTan = Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            _lBias = p.LodBias;
+            _lIdx = _lExt = _lFrames = 0;
+            _lAll = UnityEngine.Object.FindObjectsOfType<LODGroup>();
+            _lMs = Ms(t0);
+        }
+
+        static void StepLods()
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long budget = Budget();
+            _lFrames++;
+            LODGroup[] all = _lAll;
+            while (_lIdx < all.Length)
             {
-                LODGroup g = all[i];
+                if ((_lIdx & 31) == 31 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
+                LODGroup g = all[_lIdx++];
                 if (g == null || !g.enabled || g.GetComponentInParent<Rigidbody>() != null) continue;
                 Vector3 ls = g.transform.lossyScale;
                 float size = g.size * Mathf.Max(Mathf.Abs(ls.x), Mathf.Max(Mathf.Abs(ls.y), Mathf.Abs(ls.z)));
@@ -610,7 +705,7 @@ namespace NextDayRevival
                 if (lods == null || lods.Length == 0) continue;
                 int last = lods.Length - 1;
                 if (lods[last].renderers == null || lods[last].renderers.Length == 0) continue;
-                float h = size * p.LodBias / (2f * tanHalf * far);
+                float h = size * _lBias / (2f * _lTan * _lFar);
                 h = Mathf.Max(h, 0.0001f);
                 if (h >= lods[last].screenRelativeTransitionHeight) continue;
                 float[] orig = new float[lods.Length];
@@ -618,11 +713,15 @@ namespace NextDayRevival
                 _lodOriginal[g] = orig;
                 lods[last].screenRelativeTransitionHeight = h;
                 g.SetLODs(lods);
-                extended++;
+                _lExt++;
             }
-            RevivalPlugin.L.LogInfo("ViewDistance: " + extended + " of " + all.Length
+            _lMs += Ms(t0);
+            if (_lIdx < all.Length) return;
+            RevivalPlugin.L.LogInfo("ViewDistance: " + _lExt + " of " + all.Length
                 + " LODGroups (>= " + LargeSize + " u) keep their far LOD out to "
-                + far.ToString("0", CultureInfo.InvariantCulture) + " u.");
+                + _lFar.ToString("0", CultureInfo.InvariantCulture) + " u ("
+                + _lMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _lFrames + " frame(s)).");
+            _lAll = null;
         }
 
         static void RestoreLods()

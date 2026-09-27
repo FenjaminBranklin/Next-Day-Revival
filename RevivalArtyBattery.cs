@@ -2928,7 +2928,7 @@ namespace NextDayRevival
             if (!Look()) return;
             try
             {
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_npcType);
+                UnityEngine.Object[] all = NpcScan.All();
                 for (int i = 0; i < all.Length; i++)
                 {
                     Component ai = all[i] as Component;

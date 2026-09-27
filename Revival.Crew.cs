@@ -1142,10 +1142,16 @@ namespace NextDayRevival
                                       bool tank, string fraktion,
                                       List<RevivalComposition.CrewMan> composition)
         {
+            Aussteigen(car, vgs, count, tank, fraktion, composition, false);
+        }
+
+        internal static void Aussteigen(GameObject car, Component vgs, int count,
+            bool tank, string fraktion, List<RevivalComposition.CrewMan> composition, bool noFpv)
+        {
             if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
             if (car == null) return;
             GameObject settlement = Absetzen(car, vgs, count, tank ? "tank" : "BTR",
-                                             fraktion, composition);
+                                             fraktion, composition, noFpv);
             if (settlement != null
                 && !NpcWar.StartGround("patrol-crew-" + settlement.GetInstanceID(), settlement,
                     Men(settlement), settlement.transform.position, false, 0f, composition))
@@ -1169,7 +1175,7 @@ namespace NextDayRevival
             {
                 anchor.transform.position = position;
                 anchor.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-                return Absetzen(anchor, null, count, "helicopter", fraktion, loadout);
+                return Absetzen(anchor, null, count, "helicopter", fraktion, loadout, false);
             }
             finally { UnityEngine.Object.Destroy(anchor); }
         }
@@ -1264,7 +1270,7 @@ namespace NextDayRevival
 
         static GameObject Absetzen(GameObject car, Component vgs, int count,
                                    string carrier, string fraktion,
-                                   List<RevivalComposition.CrewMan> composition)
+                                   List<RevivalComposition.CrewMan> composition, bool noFpv)
         {
             GameObject settlement = null;
             try
@@ -1365,6 +1371,7 @@ namespace NextDayRevival
                 Type viewType = RevivalPlugin.TypeByName("PhotonView");
                 if (viewType != null) settlement.AddComponent(viewType);
 
+                if (noFpv || CrewDrone.GarrisonKey(_groundKey)) settlement.AddComponent<GarrisonNoFpv>();
                 Component sied = settlement.AddComponent(sType);
                 Listen(sied, 0);
                 Abschreiben(sied, VorlageSiedlung(sType, settlement));
@@ -3000,6 +3007,9 @@ namespace NextDayRevival
         }
     }
 
+    // Marks a settlement whose crew loadouts must never carry FPV drones.
+    public sealed class GarrisonNoFpv : MonoBehaviour { }
+
     /// <summary>
     /// One disposable FPV drone per dismounted crew. The master client uses
     /// the crew's real kill target, which preserves the game's faction rules.
@@ -3009,6 +3019,18 @@ namespace NextDayRevival
     /// </summary>
     public static class CrewDrone
     {
+        internal static bool GarrisonKey(string key)
+        {
+            return key != null && (key.StartsWith("mt-", StringComparison.Ordinal)
+                || key.StartsWith("airfield-", StringComparison.Ordinal));
+        }
+
+        internal static bool Garrison(Component npc)
+        {
+            return npc != null && (GarrisonKey(Crew.GroundKey(npc))
+                || npc.GetComponentInParent<GarrisonNoFpv>() != null);
+        }
+
         class Pending
         {
             public Transform Root;
@@ -3168,6 +3190,8 @@ namespace NextDayRevival
             if (RevivalPlugin.CfgPatrolCrewDrone == null
                 || !RevivalPlugin.CfgPatrolCrewDrone.Value
                 || root == null || npcs == null || npcs.Length == 0) return;
+            if (root.GetComponent<GarrisonNoFpv>() != null) return;
+            foreach (object obj in npcs) if (Garrison(obj as Component)) return;
             Pending p = new Pending();
             p.Root = root;
             p.Npcs = npcs;
@@ -3265,7 +3289,7 @@ namespace NextDayRevival
                                      float miss, float damage, float radius, string what,
                                      Component op)
         {
-            if (target == null) return 0;
+            if (target == null || Garrison(op)) return 0;
             string why;
             if (!AreaFree(from, out why))
             {

@@ -331,6 +331,10 @@ namespace NextDayRevival
         static readonly Dictionary<GameObject, float> _burning =
             new Dictionary<GameObject, float>();
         static readonly List<GameObject> _gone = new List<GameObject>();
+        // Machines shot down in the air, view -> Time.time by which the pilot's
+        // client must have started the fall (master only; ShotDownFallback).
+        static readonly Dictionary<int, float> _shotDown = new Dictionary<int, float>();
+        static readonly List<int> _shotDrop = new List<int>();
 
         static KeyCode _spawnKey, _boardKey, _viewKey, _engineKey, _jumpKey;
         static bool _keysParsed;
@@ -361,6 +365,7 @@ namespace NextDayRevival
                 Net.EnsureHooked();
                 Sweep();
                 Wrecks();
+                ShotDownFallback();
 
                 if (_heli == null)
                 {
@@ -1824,13 +1829,62 @@ namespace NextDayRevival
         // Stinger calls this only after the master validates a missile impact.
         // Every peer runs it once, so remote passengers use their own damage
         // gate too. Do not rebroadcast the ordinary crash event from here.
+        //
+        // SHOT DOWN IN THE AIR IS A FALL, NOT A WRECK IN THE SKY (Q2, after the
+        // 6.57.0 test: "the player is thrown out and the wreck teleports to the
+        // ground"). That was this method burning the machine where it was hit -
+        // Burn lays the hull on the floor in one frame - and DestroyedAboard
+        // taking everyone out of it. An airborne machine now starts the same
+        // visible crash the power loss starts (Abandon -> HeliCrashFall: no
+        // lift, a roll, nose down, the smoke and fire trail) FROM THE PILOT'S
+        // CLIENT, with the pilot's own velocity, and the reliable fall event
+        // gives every peer the same descent. The crew stays in the seats and
+        // rides it down: the ground (FinishAbandonedCrash) decides by the
+        // ordinary crash rule, unless a man jumps first. A machine on or near
+        // the ground burns where it stands, as before.
         internal static void MissileImpact(int view, Vector3 where)
         {
             GameObject go = MissileTarget(view);
             if (go == null) return;
-            Burn(go, where);
             _busyUntil.Remove(view);
+            if ((CfgCrash == null || CfgCrash.Value) && Airborne(go))
+            {
+                if (ReferenceEquals(go, _heli) && _pilot)
+                {
+                    RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
+                        + " shot down at " + where.ToString("0") + " - loss of control, going down.");
+                    Hint(Loc.T("Машина подбита!", "You are hit - the machine is going down!"), 5f);
+                    Abandon(go, _vel, true);
+                }
+                else if (RevivalTroopInsertion.MasterClient() && !_shotDown.ContainsKey(view))
+                    _shotDown[view] = Time.time + 1.5f;
+                return;
+            }
+            Burn(go, where);
             DestroyedAboard(go, "missile");
+        }
+
+        /// <summary>The master's safety net for a machine shot down in the air
+        /// whose pilot's client never started the fall (it left, or its pilot
+        /// was already gone): after 1.5 s the master starts it from here, so a
+        /// kill never leaves a live machine hanging in the sky.</summary>
+        static void ShotDownFallback()
+        {
+            if (_shotDown.Count == 0) return;
+            _shotDrop.Clear();
+            foreach (KeyValuePair<int, float> e in _shotDown)
+                if (Time.time >= e.Value) _shotDrop.Add(e.Key);
+            for (int i = 0; i < _shotDrop.Count; i++)
+            {
+                int view = _shotDrop[i];
+                _shotDown.Remove(view);
+                GameObject go = ByView(view);
+                if (go == null || Burning(go) || Falling(go)) continue;
+                RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
+                    + " shot down with no pilot's client to start the fall - the master starts it.");
+                if (Airborne(go)) Abandon(go, Vector3.zero, true);
+                else Crash(go, go.transform.position);
+            }
         }
 
         internal static GameObject MissileTarget(int view)
@@ -2850,7 +2904,9 @@ namespace NextDayRevival
                         // it from the owner's own transform stream already.
                         if (!RevivalTroopInsertion.MasterClient()) return;
                         GameObject go = ByView(view);
-                        if (go == null) return;
+                        // A late pose from the pilot must not pull a falling
+                        // or burning machine back into the air.
+                        if (go == null || Falling(go) || Burning(go)) return;
                         go.transform.position = new Vector3(f[1], f[2], f[3]);
                         go.transform.rotation = Quaternion.Euler(f[5], f[4], -f[6]);
                         return;

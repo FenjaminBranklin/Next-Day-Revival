@@ -2546,7 +2546,7 @@ namespace NextDayRevival
             _nextClient = Time.time + 5f;
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(npcType);
+            UnityEngine.Object[] all = NpcScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 Component ai = all[i] as Component;

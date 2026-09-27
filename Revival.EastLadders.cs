@@ -45,28 +45,32 @@ namespace NextDayRevival
         internal static void Tick()
         {
             if (!EastWorld.On) return;
-            float now = Time.realtimeSinceStartup;
-            if (now < _next) return;
-            _next = now + 2f;
-            if (SceneManager.sceneCount == _sceneCount) return;
-            _sceneCount = SceneManager.sceneCount;
-            try { Scan(); }
-            catch (Exception ex) { Log("scan failed: " + ex.Message); }
+            try
+            {
+                // Q1 perf: the search for "Ladders" groups is a time-sliced
+                // sweep; it used to read the name of every transform of every
+                // east scene in one frame on each scene change.
+                if (_sweep.Active) { _sweep.Step(1.5, _visit); return; }
+                float now = Time.realtimeSinceStartup;
+                if (now < _next) return;
+                _next = now + 2f;
+                if (SceneManager.sceneCount == _sceneCount) return;
+                _sceneCount = SceneManager.sceneCount;
+                _sweep.Begin("East");
+                _sweep.Step(1.5, _visit);
+            }
+            catch (Exception ex) { _sweep.Cancel(); Log("scan failed: " + ex.Message); }
         }
 
-        static void Scan()
+        static readonly SceneSweep _sweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _visit = ScanVisit;
+
+        static bool ScanVisit(Transform t, string name)
         {
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                Scene s = SceneManager.GetSceneAt(i);
-                if (!s.isLoaded || !s.name.StartsWith("East")) continue;
-                foreach (GameObject root in s.GetRootGameObjects())
-                    foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
-                    {
-                        if (t.name != "Ladders") continue;
-                        for (int k = 0; k < t.childCount; k++) Wire(s.name, t.GetChild(k));
-                    }
-            }
+            if (name != "Ladders") return true;
+            string scene = t.gameObject.scene.name;
+            for (int k = 0; k < t.childCount; k++) Wire(scene, t.GetChild(k));
+            return true;
         }
 
         static Vector3 Flat(Vector3 v)

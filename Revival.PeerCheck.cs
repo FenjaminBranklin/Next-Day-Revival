@@ -221,6 +221,9 @@ namespace NextDayRevival
         /// <summary>The current room's name, or an empty string. Used only to
         /// notice that we have moved into a room we never published into.
         /// </summary>
+        static Type _roomType;
+        static PropertyInfo _roomName;
+
         static string RoomName()
         {
             try
@@ -228,8 +231,17 @@ namespace NextDayRevival
                 if (_roomProp == null) return "";
                 object room = _roomProp.GetValue(null, null);
                 if (room == null) return "";
-                PropertyInfo name = AccessTools.Property(room.GetType(), "name");
-                if (name == null) name = AccessTools.Property(room.GetType(), "Name");
+                // Q1 perf: resolved once per room type. Asking AccessTools for
+                // the missing "name" on every tick wrote a HarmonyX warning each
+                // time (1131 of them in one 6.57.0 session log).
+                if (!ReferenceEquals(room.GetType(), _roomType))
+                {
+                    _roomType = room.GetType();
+                    _roomName = _roomType.GetProperty("name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (_roomName == null)
+                        _roomName = _roomType.GetProperty("Name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+                PropertyInfo name = _roomName;
                 if (name == null) return room.GetHashCode().ToString();
                 object v = name.GetValue(room, null);
                 return v == null ? "" : v.ToString();

@@ -672,17 +672,10 @@ namespace NextDayRevival
         // the per-frame scans above. One dictionary lookup instead. A field that
         // does not exist is remembered as null, so a missing one is not searched
         // for again either.
-        static readonly Dictionary<string, FieldInfo> _fields =
-            new Dictionary<string, FieldInfo>();
-
         static FieldInfo CachedField(Type type, string field)
         {
-            string key = type.FullName + "." + field;
-            FieldInfo fi;
-            if (_fields.TryGetValue(key, out fi)) return fi;
-            fi = AccessTools.Field(type, field);
-            _fields[key] = fi;
-            return fi;
+            // Q1 perf: no per-call "FullName.field" string key any more.
+            return FastField.Find(type, field);
         }
 
         static float GetFloat(Component c, string field, float fallback)
@@ -691,7 +684,7 @@ namespace NextDayRevival
             {
                 FieldInfo fi = CachedField(c.GetType(), field);
                 if (fi != null && fi.FieldType == typeof(float))
-                    return (float)fi.GetValue(c);
+                    return FastField.GetFloat(fi, c);
             }
             catch { }
             return fallback;

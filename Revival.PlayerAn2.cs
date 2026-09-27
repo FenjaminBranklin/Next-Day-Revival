@@ -118,10 +118,13 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             const string S = "PlayerAn2";
-            CfgEnabled = cfg.Bind(S, "Enabled", false,
-                "A flyable An-2. Off by default. On: the host parks one at the H1 "
-                + "apron of the airfield (east world only) and the board key gets "
-                + "in. Every client must have the same setting.");
+            CfgEnabled = cfg.Bind(S, "Enabled", true,
+                "A flyable An-2. On by default (an older file is switched on once): "
+                + "the host parks one at the H1 apron of the airfield (east world "
+                + "only) and the board key gets in. Every client must have the same "
+                + "setting. The admin panel's An-2 spawn switches it on for the "
+                + "session even when this is false.");
+            Settings.GameplayOn(cfg, CfgEnabled);
             CfgApronSpawn = cfg.Bind(S, "ApronSpawn", true,
                 "The host puts one An-2 on the H1 apron stand when none stands in "
                 + "the world. Needs [World] EastTile, which carries the airfield.");
@@ -210,7 +213,30 @@ namespace NextDayRevival
 
         internal static bool Enabled
         {
-            get { return CfgEnabled != null && CfgEnabled.Value; }
+            get { return _forced || (CfgEnabled != null && CfgEnabled.Value); }
+        }
+
+        /// <summary>Set by the admin panel's spawn with the key off: the An-2
+        /// runs for this session, the config file keeps its value.</summary>
+        static bool _forced;
+        static Harmony _harmony;
+
+        /// <summary>The admin panel's note on a switched-off An-2, or null.</summary>
+        internal static string OffNote()
+        {
+            if (Enabled) return null;
+            return "[PlayerAn2] Enabled = false in the config - the spawn switches it on for this session";
+        }
+
+        /// <summary>Switch the An-2 on for this session (admin spawn): the
+        /// hooks that Install skipped at start go in now.</summary>
+        static string ForceOn()
+        {
+            if (Enabled) return null;
+            _forced = true;
+            if (_harmony != null) Install(_harmony);
+            RevivalPlugin.L.LogWarning("PlayerAn2: [PlayerAn2] Enabled = false - switched on for this session by the admin spawn.");
+            return "[PlayerAn2] Enabled = false in the config - switched on for this session. ";
         }
 
         static float F(ConfigEntry<float> e, float fallback)
@@ -247,6 +273,10 @@ namespace NextDayRevival
         static readonly Dictionary<GameObject, float> _burning = new Dictionary<GameObject, float>();
         static readonly List<GameObject> _gone = new List<GameObject>();
         static readonly List<int> _drop = new List<int>();
+        // Shot down in the air, view -> Time.time by which the pilot's client
+        // must have started the fall (master only; ShotDownFallback).
+        static readonly Dictionary<int, float> _shotDown = new Dictionary<int, float>();
+        static readonly List<int> _shotDrop = new List<int>();
 
         internal static bool Aboard { get { return _plane != null; } }
         internal static bool Flying { get { return _plane != null && _pilot; } }
@@ -291,6 +321,7 @@ namespace NextDayRevival
                 Net.EnsureHooked();
                 Sweep();
                 Wrecks();
+                ShotDownFallback();
                 ApronSpawn();
                 StandIn();
 
@@ -1074,8 +1105,9 @@ namespace NextDayRevival
         /// request (fifth float).</summary>
         internal static string SpawnReadyInFront()
         {
-            if (!Enabled)
-                return "PlayerAn2 is switched off ([PlayerAn2] Enabled = false).";
+            // The admin button always spawns: a key that is off is named in
+            // the result and switched on for the session, never a silent no.
+            string off = ForceOn() + An2Bombs.ForceOn();
             Net.EnsureHooked();
             GameObject me = MapTools.LocalPlayer();
             if (me == null) return "No local player.";
@@ -1088,10 +1120,10 @@ namespace NextDayRevival
             if (!RevivalTroopInsertion.MasterClient())
             {
                 Net.Send(Net.SpawnRequest, new float[] { at.x, at.y, at.z, heading, 1f }, true);
-                return Text.Asked();
+                return off + Text.Asked();
             }
-            return Build(at, heading, true) == null ? Text.SpawnFailed()
-                : Text.Spawned(Key(CfgBoardKey, KeyCode.F).ToString());
+            return off + (Build(at, heading, true) == null ? Text.SpawnFailed()
+                : Text.Spawned(Key(CfgBoardKey, KeyCode.F).ToString()));
         }
 
         internal static GameObject Build(Vector3 at, float heading)
@@ -1380,6 +1412,67 @@ namespace NextDayRevival
             Burn(go, where);
             if (view != 0) Net.Send(Net.Crashed, new float[] { view, where.x, where.y, where.z }, true);
             DestroyedAboard(go, "crash");
+        }
+
+        /// <summary>
+        /// Brought down by a gun (GepardAir's kill: the Gepard, a ZU-23), on the
+        /// master. Q2 (after the 6.57.0 test): an aeroplane hit in the AIR no
+        /// longer burns where it is - Burn lays it on the floor in one frame and
+        /// DestroyedAboard takes the crew out of it. It loses control and goes
+        /// down under its smoke and fire (Abandon -> An2Glide), started on the
+        /// PILOT'S client with the pilot's own speed and attitude, and the ground
+        /// decides for everyone still aboard (FinishGlide). The Crashed event with
+        /// five floats { view, x, y, z, 1 } carries "shot down" to the pilot. On
+        /// the ground it is the ordinary crash.
+        /// </summary>
+        internal static void ShotDown(GameObject go, Vector3 where)
+        {
+            if (go == null || Burning(go) || Gliding(go)) return;
+            if ((CfgCrash != null && !CfgCrash.Value) || !Airborne(go))
+            {
+                Crash(go, where);
+                return;
+            }
+            int view = ViewId(go);
+            RevivalPlugin.L.LogInfo("PlayerAn2: " + view + " shot down in the air at "
+                + where.ToString("0") + ".");
+            if (view != 0) Net.Send(Net.Crashed, new float[] { view, where.x, where.y, where.z, 1f }, true);
+            ShotDownHere(go, view);
+        }
+
+        static void ShotDownHere(GameObject go, int view)
+        {
+            if (go == null || Burning(go) || Gliding(go)) return;
+            if (ReferenceEquals(go, _plane) && _pilot)
+            {
+                Hint(Loc.T("Самолёт подбит!", "You are hit - the aeroplane is going down!"), 5f);
+                Abandon(go, _vel, _rot, true);
+            }
+            else if (view == 0) Abandon(go, go.transform.forward * 30f, go.transform.rotation, true);
+            else if (RevivalTroopInsertion.MasterClient() && !_shotDown.ContainsKey(view))
+                _shotDown[view] = Time.time + 1.5f;
+        }
+
+        /// <summary>The master's safety net: a shot-down aeroplane whose
+        /// pilot's client never started the fall goes down from here after
+        /// 1.5 s, at its cruise speed along its heading.</summary>
+        static void ShotDownFallback()
+        {
+            if (_shotDown.Count == 0) return;
+            _shotDrop.Clear();
+            foreach (KeyValuePair<int, float> e in _shotDown)
+                if (Time.time >= e.Value) _shotDrop.Add(e.Key);
+            for (int i = 0; i < _shotDrop.Count; i++)
+            {
+                int view = _shotDrop[i];
+                _shotDown.Remove(view);
+                GameObject go = ByView(view);
+                if (go == null || Burning(go) || Gliding(go)) continue;
+                RevivalPlugin.L.LogInfo("PlayerAn2: " + view + " shot down with no pilot's "
+                    + "client to start the fall - the master starts it.");
+                if (Airborne(go)) Abandon(go, go.transform.forward * 30f, go.transform.rotation, true);
+                else Crash(go, go.transform.position);
+            }
         }
 
         static void DestroyedAboard(GameObject go, string how)
@@ -1958,6 +2051,7 @@ namespace NextDayRevival
 
         internal static void Install(Harmony harmony)
         {
+            if (harmony != null) _harmony = harmony;
             if (!Enabled || _installed) return;
             _installed = true;
             try
@@ -2153,6 +2247,11 @@ namespace NextDayRevival
                         GameObject wreck = ByView((int)f[0]);
                         if (wreck == null) return;
                         _busyUntil.Remove((int)f[0]);
+                        if (f.Length == 5)
+                        {
+                            ShotDownHere(wreck, (int)f[0]);
+                            return;
+                        }
                         if (f.Length >= 10)
                         {
                             wreck.transform.position = new Vector3(f[1], f[2], f[3]);

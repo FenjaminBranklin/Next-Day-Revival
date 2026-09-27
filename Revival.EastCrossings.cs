@@ -431,9 +431,25 @@ namespace NextDayRevival
 
         /// <summary>All seven lists. Re-run when a list's count changes (RoadClear
         /// and Helipads rewrite the same arrays; the plan is idempotent).</summary>
+        // Q1 perf: the 5 s tree re-check used to rebuild this map with two
+        // GetComponentsInChildren walks over the whole home scene. Terrains only
+        // come and go with a scene load, so the map is kept per load.
+        static Dictionary<string, Td> _tdCache;
+        static int _tdLoad = -1;
+
+        static Dictionary<string, Td> TerrainsCached()
+        {
+            bool stale = _tdCache == null || _tdLoad != _load;
+            if (!stale)
+                foreach (KeyValuePair<string, Td> kv in _tdCache)
+                    if (kv.Value.Data == null) { stale = true; break; }
+            if (stale) { _tdCache = Terrains(); _tdLoad = _load; }
+            return _tdCache;
+        }
+
         static void Trees(bool first)
         {
-            Dictionary<string, Td> all = Terrains();
+            Dictionary<string, Td> all = first ? Terrains() : TerrainsCached();
             string s = "";
             foreach (KeyValuePair<string, CrossingCore.TreePlan> p in _plans)
             {

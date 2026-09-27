@@ -248,6 +248,7 @@ namespace NextDayRevival
             public float Held;                   // seconds this target has been held
             public float NextShot;
             public int Burst;
+            public int BurstLen;         // rounds in the running burst, drawn at its first
             public float NextLook;
             public bool Engaged;                 // a contact is running (log only)
             public float LastContact;            // Time.time a target was last held
@@ -580,7 +581,7 @@ namespace NextDayRevival
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
             _byKey.Clear();
-            UnityEngine.Object[] actors = UnityEngine.Object.FindObjectsOfType(npcType);
+            UnityEngine.Object[] actors = NpcScan.All();
             for (int i = 0; i < actors.Length; i++)
             {
                 Component ai = actors[i] as Component;
@@ -1081,6 +1082,33 @@ namespace NextDayRevival
             t.Hidden.Clear();
             t.HandOf = null;
             t.Hand = null;
+        }
+
+        sealed class Hands { public Transform Hand; public float Next; }
+        static readonly Dictionary<int, Hands> _unarmed = new Dictionary<int, Hands>();
+
+        /// <summary>
+        /// A man who sits and operates - the crew of a ZU-23 (Revival.Flak.cs),
+        /// the radar operator in tower C1 (Revival.TowerRadar.cs) - has NO weapon
+        /// in his hands (Q2, after the 6.57.0 test: the flak crew sat at the
+        /// handwheels with their rifles out). The same switch as Entwaffnen: the
+        /// renderers under Weapons_HelperR go off on every client, no RPC.
+        /// Called from the late seat hold every frame and re-applied five times
+        /// a second, because a redraw instantiates a fresh model.
+        /// </summary>
+        internal static void Unbewaffnet(Component ai)
+        {
+            if (ai == null) return;
+            int id = ai.GetInstanceID();
+            Hands h;
+            if (!_unarmed.TryGetValue(id, out h)) { h = new Hands(); _unarmed[id] = h; }
+            if (Time.time < h.Next) return;
+            h.Next = Time.time + 0.2f;
+            if (h.Hand == null) h.Hand = WeaponHand(ai);
+            if (h.Hand == null) return;
+            Renderer[] rs = h.Hand.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < rs.Length; i++)
+                if (rs[i] != null && rs[i].enabled) rs[i].enabled = false;
         }
 
         static Transform WeaponHand(Component ai)
@@ -1597,6 +1625,9 @@ namespace NextDayRevival
 
         static Vector3 Muendung(Truck t)
         {
+            Vector3 at, bore;
+            if (t.Gun != null && BtrGun.TechnicalActive && BtrGun.TechnicalMuzzle(t.Root, out at, out bore))
+                return at;
             if (t.Gun != null) return t.Gun.TransformPoint(TechnicalModel.MuzzleLocal);
             return t.Mount == null ? t.Root.position : t.Mount.position;
         }
@@ -1614,9 +1645,14 @@ namespace NextDayRevival
         /// </summary>
         static void Feuern(Truck t, Vector3 muzzle, Vector3 bore, float dist)
         {
-            float pause = TechnicalGun.CfgDelay == null ? 0.11f : TechnicalGun.CfgDelay.Value;
+            float pause = BtrGun.TechnicalInterval(
+                TechnicalGun.CfgDelay == null ? 0.11f : TechnicalGun.CfgDelay.Value);
+            // The burst's length is drawn at its first round: the DShKM
+            // gunner's bursts (BtrGun.TechnicalBurst) or BurstRounds.
+            if (t.Burst == 0 || t.BurstLen <= 0)
+                t.BurstLen = BtrGun.TechnicalBurst(CfgBurst == null ? 8 : CfgBurst.Value);
             t.Burst++;
-            int burst = CfgBurst == null ? 8 : Mathf.Max(1, CfgBurst.Value);
+            int burst = Mathf.Max(1, t.BurstLen);
             if (t.Burst >= burst)
             {
                 t.Burst = 0;
@@ -1633,13 +1669,17 @@ namespace NextDayRevival
             string gun = "technical " + t.Key;
             float range = TechnicalGun.CfgRange == null ? 600f : TechnicalGun.CfgRange.Value;
 
-            VehicleShotSound.PlayTechnical(muzzle);
-            Turret.Net.PublishTechnicalShot(muzzle);
-
             Vector3 impact;
             GameObject struck = Strahl(t, muzzle, dir, range, out impact);
             Vector3 ende = struck == null ? muzzle + dir * range : impact;
-            Spur(muzzle, ende);
+            // The round drawn and sent by Revival.BtrGun.cs, as the player's
+            // (TechnicalGun.Fire); off: the old streak and sound.
+            if (!BtrGun.TechnicalActive || !BtrGun.FireTechnical(t.Root, ende, struck != null))
+            {
+                VehicleShotSound.PlayTechnical(muzzle);
+                Turret.Net.PublishTechnicalShot(muzzle);
+                Spur(muzzle, ende);
+            }
             t.Rounds++;
             if (struck == null)
             {

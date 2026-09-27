@@ -203,7 +203,12 @@ namespace NextDayRevival
                 if (t == null) return;
                 FieldInfo all = AccessTools.Field(t, "_all");
                 MethodInfo burning = AccessTools.Method(t, "Burning", new Type[] { typeof(GameObject) }, null);
-                MethodInfo crash = AccessTools.Method(t, "Crash",
+                MethodInfo gliding = AccessTools.Method(t, "Gliding", new Type[] { typeof(GameObject) }, null);
+                // ShotDown: an aeroplane hit in the air falls under its smoke
+                // with the crew aboard; Crash (older builds) burns it in place.
+                MethodInfo crash = AccessTools.Method(t, "ShotDown",
+                    new Type[] { typeof(GameObject), typeof(Vector3) }, null)
+                    ?? AccessTools.Method(t, "Crash",
                     new Type[] { typeof(GameObject), typeof(Vector3) }, null);
                 List<GameObject> list = all == null ? null : all.GetValue(null) as List<GameObject>;
                 if (list == null || crash == null)
@@ -218,8 +223,12 @@ namespace NextDayRevival
                     delegate(GameObject go, Vector3 at) { crash.Invoke(null, new object[] { go, at }); },
                     burning == null ? null : (Func<GameObject, bool>)delegate(GameObject go)
                     {
+                        // Down = burning, or already falling after a kill: the
+                        // guns leave a falling aeroplane alone.
                         object v = burning.Invoke(null, new object[] { go });
-                        return v is bool && (bool)v;
+                        if (v is bool && (bool)v) return true;
+                        object g = gliding == null ? null : gliding.Invoke(null, new object[] { go });
+                        return g is bool && (bool)g;
                     },
                     0);
             }
@@ -248,6 +257,7 @@ namespace NextDayRevival
         public static ConfigEntry<float> CfgReaction;
         public static ConfigEntry<float> CfgBurst;
         public static ConfigEntry<float> CfgBurstPause;
+        public static ConfigEntry<float> CfgAirInitialError, CfgAirWalk, CfgAirErrorFloor, CfgAirEvade;
 
         public static void BindConfig(ConfigFile cfg)
         {
@@ -278,6 +288,17 @@ namespace NextDayRevival
                 "Length of one burst, seconds (at Gepard/RateOfFire).");
             CfgBurstPause = cfg.Bind(S, "BurstPause", 1.0f,
                 "Seconds between two bursts.");
+            CfgAirInitialError = cfg.Bind(S, "AirInitialError", 30f,
+                "Air targets: the first burst's aiming error, milliradians of range. The "
+                + "rounds burst at the laid range as black puffs, so the pilot sees them.");
+            CfgAirWalk = cfg.Bind(S, "AirWalkFactor", 0.55f,
+                "Air targets: the part of the error left after each burst's correction "
+                + "(0..1) - the puffs walk in burst by burst.");
+            CfgAirErrorFloor = cfg.Bind(S, "AirErrorFloor", 4f,
+                "Air targets: the error the gunner never gets under, milliradians of range.");
+            CfgAirEvade = cfg.Bind(S, "AirEvadeFactor", 0.9f,
+                "Air targets: how much a change of the aircraft's velocity since the last "
+                + "burst throws the correction off (0 = evading does not help).");
         }
 
         static bool Enabled { get { return CfgEnabled == null || CfgEnabled.Value; } }
@@ -333,6 +354,11 @@ namespace NextDayRevival
             public float NextLook, Held, BurstUntil, PauseUntil, NextShot, NextPublish, LastContact;
             public int GunIdx, Rounds;
             public bool Firing, SentFiring, Engaged;
+            // Q2: the air gunner's walking-in error (world units, added to the
+            // intercept), for which target, and the fuze range it lays at.
+            public GepardGun.Contact ErrFor;
+            public Vector3 AirErr, AirLastVel;
+            public float AirFuze;
         }
 
         static readonly List<Hull> _hulls = new List<Hull>();
@@ -617,7 +643,7 @@ namespace NextDayRevival
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
             _byKey.Clear();
-            UnityEngine.Object[] actors = UnityEngine.Object.FindObjectsOfType(npcType);
+            UnityEngine.Object[] actors = NpcScan.All();
             for (int i = 0; i < actors.Length; i++)
             {
                 Component ai = actors[i] as Component;
@@ -1000,6 +1026,7 @@ namespace NextDayRevival
             {
                 h.Ground = null;
                 h.GroundNpc = null;
+                h.AirFuze = 0f;
                 if (h.Engaged && Time.time - h.LastContact > 3f) Abbrechen(h);
                 h.Held = 0f;
                 Ruhe(h, dt);
@@ -1020,6 +1047,28 @@ namespace NextDayRevival
 
             float tof;
             Vector3 aim = GepardGun.Intercept(mid, p, v, out tof);
+            if (air)
+            {
+                // Q2: the radar gun is not a laser. The first burst goes off
+                // the aircraft by AirInitialError; every burst's puffs are
+                // corrected by AirWalkFactor, down to AirErrorFloor; a pilot who
+                // changes course between bursts throws the correction off.
+                float dist = Vector3.Distance(mid, p);
+                if (h.ErrFor != h.AirTarget)
+                {
+                    h.ErrFor = h.AirTarget;
+                    h.AirErr = FlakFire.Offset(h.AirTarget, mid,
+                        dist * Mathf.Max(0f, F(CfgAirInitialError, 30f)) * 0.001f);
+                    h.AirLastVel = v;
+                }
+                aim += h.AirErr;
+                h.AirFuze = Vector3.Distance(mid, aim);
+            }
+            else
+            {
+                h.ErrFor = null;
+                h.AirFuze = 0f;
+            }
             float wantYaw, wantPitch;
             Angles(rig, aim - mid, out wantYaw, out wantPitch);
             float min = Gepard.CfgPitchMin == null ? -5f : Gepard.CfgPitchMin.Value;
@@ -1032,7 +1081,22 @@ namespace NextDayRevival
             h.Held += dt;
             bool ready = reach && h.Held >= Mathf.Max(0f, F(CfgReaction, 1.2f))
                 && error < (air ? 2.5f : 1.5f);
+            bool was = h.Firing;
             Trigger(h, ready, aim);
+            if (air && was && !h.Firing)
+            {
+                // The burst is over: correct on what he saw.
+                float dist = Vector3.Distance(mid, p);
+                float walk = Mathf.Clamp01(F(CfgAirWalk, 0.55f));
+                float floor = Mathf.Max(0f, F(CfgAirErrorFloor, 4f)) * 0.001f * dist;
+                float dv = (v - h.AirLastVel).magnitude;
+                h.AirLastVel = v;
+                h.AirErr = h.AirErr * walk
+                    + FlakFire.Offset(h.AirTarget, mid, floor) * UnityEngine.Random.value;
+                if (dv > 0.5f)
+                    h.AirErr += UnityEngine.Random.onUnitSphere * dv * tof
+                        * Mathf.Max(0f, F(CfgAirEvade, 0.9f));
+            }
             Publish(h, false);
         }
 
@@ -1059,6 +1123,8 @@ namespace NextDayRevival
             h.GroundNpc = null;
             h.Held = 0f;
             h.Firing = false;
+            h.ErrFor = null;
+            h.AirFuze = 0f;
             if (!h.Laying) return;
             h.Laying = false;
             if (h.Engaged) Abbrechen(h);
@@ -1148,7 +1214,8 @@ namespace NextDayRevival
                 Vector3 dir = h.Rig.Bore(gun);
                 Vector3 want = (aim - muzzle).normalized;
                 if (Vector3.Angle(dir, want) < 1f) dir = want;
-                GepardShots.Fire(h.Rig, gun, dir, true, h.Air);
+                if (h.AirFuze > 0f) GepardShots.FireTimed(h.Rig, gun, dir, h.AirFuze, true, h.Air);
+                else GepardShots.Fire(h.Rig, gun, dir, true, h.Air);
                 h.Rounds++;
                 h.NextShot += interval;
                 n++;
@@ -1161,7 +1228,7 @@ namespace NextDayRevival
             if (!now && h.Firing == h.SentFiring && Time.time < h.NextPublish) return;
             h.NextPublish = Time.time + 0.1f;
             h.SentFiring = h.Firing;
-            GepardNet.SendPose(h.Root, h.Rig.Yaw, h.Rig.Pitch, h.Rig.TrackYaw, h.Firing, h.Laying);
+            GepardNet.SendPose(h.Root, h.Rig.Yaw, h.Rig.Pitch, h.Rig.TrackYaw, h.Firing, h.Laying, h.AirFuze);
         }
 
         // ------------------------------------------------------------ targets

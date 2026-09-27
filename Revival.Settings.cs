@@ -379,7 +379,10 @@ namespace NextDayRevival
         // 1 (P9): [Effects], [Hints], [Settings] added.
         // 2 (6.57.0): [World] EastTile on by default - a file from before is
         //    switched on once (EastWorld.BindConfig asks FileLayout).
-        const int Layout = 2;
+        // 3 (Q4): every gameplay feature on by default - [PlayerAn2] Enabled
+        //    and [An2Repair] Enabled from a file before are switched on once
+        //    (Settings.GameplayOn, asked by their BindConfig).
+        const int Layout = 3;
         /// <summary>The layout this config file had when the plugin started,
         /// before Migrate stamps the current one: -1 until first read.</summary>
         static int _fileLayout = -1;
@@ -426,11 +429,32 @@ namespace NextDayRevival
         /// <summary>Layout 2 turned the east tile on by default.</summary>
         internal const int EastTileOnLayout = 2;
 
+        /// <summary>Layout 3 turned every gameplay feature on by default.</summary>
+        internal const int GameplayOnLayout = 3;
+
+        /// <summary>
+        /// Rule since Q4: a gameplay feature is on by default; settings only
+        /// tune graphics and performance. A key that was off by default in an
+        /// older file holds that old default, not a choice: switch it on once.
+        /// Migrate then stamps the file, so false set afterwards stays false.
+        /// </summary>
+        internal static void GameplayOn(ConfigFile cfg, ConfigEntry<bool> e)
+        {
+            if (e == null || e.Value || FileLayout(cfg) >= GameplayOnLayout) return;
+            e.Value = true;
+            if (RevivalPlugin.L != null)
+                RevivalPlugin.L.LogInfo("Settings: [" + e.Definition.Section + "] " + e.Definition.Key
+                    + " false in a config from before layout " + GameplayOnLayout
+                    + " - switched on once (gameplay features are on by default).");
+        }
+
         /// <summary>
         /// Layout 1 (P9) only adds keys, so nothing a player set is rewritten:
         /// BepInEx keeps every existing value, the new keys start at their
         /// defaults. Layout 2 rewrites one value, [World] EastTile, and does
-        /// that in EastWorld.BindConfig. The stamp lets a later layout migrate
+        /// that in EastWorld.BindConfig. Layout 3 switches the gameplay
+        /// features that used to be off ([PlayerAn2] Enabled, [An2Repair]
+        /// Enabled) on once, through GameplayOn. The stamp lets a later layout migrate
         /// from a known state.
         /// </summary>
         static void Migrate()
@@ -440,7 +464,7 @@ namespace NextDayRevival
             _version.Value = Layout;
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("Settings: config layout " + from + " -> " + Layout
-                    + " ([Effects], [Hints], [Settings] added; [World] EastTile on once; other values kept). "
+                    + " ([Effects], [Hints], [Settings] added; [World] EastTile, [PlayerAn2]/[An2Repair] Enabled on once; other values kept). "
                     + "Particles " + Fx.Names[Fx.Level] + ", hints " + Hints.Names[Hints.Mode] + ".");
         }
 

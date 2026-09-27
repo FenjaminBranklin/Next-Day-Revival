@@ -1924,6 +1924,10 @@ namespace NextDayRevival
                 // a frame behind the other two, which is what a turning gunner
                 // looks wrong from.
                 TechnicalCrew.LateFrame();
+                // The recoil kick of every technical gun that just fired
+                // (Revival.BtrGun.cs), after the gun is laid and before the
+                // hands are solved, so they ride back with the grips.
+                BtrGun.LateTechnical();
                 TechnicalGun.LateAll();
                 // The gunner's view a SECOND time, from the plugin's own
                 // LateUpdate. CameraOwner.LateTick drives it from a postfix on
@@ -2360,7 +2364,7 @@ namespace NextDayRevival
                     return;
                 }
 
-                if (Input.GetKeyDown(Key())) Toggle();
+                if (GameUi.KeyDown(Key())) Toggle();
 
                 // The pose belongs to the PLACE, not to the trigger: seat 2 is
                 // a standing place on the bed, so whoever is in it stands -
@@ -2391,7 +2395,7 @@ namespace NextDayRevival
                 Aim();
                 Nachladen();
 
-                if (Input.GetMouseButton(0) && Time.time >= _nextShot
+                if (GameUi.Button(0) && Time.time >= _nextShot
                     && Time.time >= _nextTry)
                     Feuern();
             }
@@ -2656,8 +2660,8 @@ namespace NextDayRevival
             if (_mount == null || _gun == null) return;
 
             float sens = CfgSensitivity.Value;
-            _yaw += Input.GetAxis("Mouse X") * sens;
-            _pitch += Input.GetAxis("Mouse Y") * sens;
+            _yaw += GameUi.Axis("Mouse X") * sens;
+            _pitch += GameUi.Axis("Mouse Y") * sens;
             _pitch = Mathf.Clamp(_pitch, CfgPitchMin.Value, CfgPitchMax.Value);
             if (_yaw > 180f) _yaw -= 360f;
             if (_yaw < -180f) _yaw += 360f;
@@ -3376,7 +3380,11 @@ namespace NextDayRevival
                 back.Normalize();
 
                 float u = UnitsPerMetre();
-                Vector3 eye = _gun.position
+                // From the pivot at rest: the gun's recoil kick
+                // (Revival.BtrGun.cs) must not shake the view.
+                Vector3 pivot = _gun.parent == null ? _gun.position
+                    : _gun.parent.TransformPoint(new Vector3(0f, TechnicalModel.PivotHeight, 0f));
+                Vector3 eye = pivot
                     - back * (CfgCamBack.Value * u)
                     + Vector3.up * (CfgCamUp.Value * u)
                     + right * (CfgCamSide.Value * u);
@@ -3436,7 +3444,8 @@ namespace NextDayRevival
             if (Fire())
             {
                 _belt--;
-                _nextShot = Time.time + CfgDelay.Value;
+                // The DShKM's cadence ([TechnicalGunFx] RateOfFire) or FireDelay.
+                _nextShot = Time.time + BtrGun.TechnicalInterval(CfgDelay.Value);
                 if (_belt <= 0) Ladebeginn(false);
             }
             else _nextTry = Time.time + 1f;
@@ -3471,7 +3480,7 @@ namespace NextDayRevival
                     + " Schuss in der Waffe.");
                 return;
             }
-            if (Input.GetKeyDown(ReloadKey())) Ladebeginn(true);
+            if (GameUi.KeyDown(ReloadKey())) Ladebeginn(true);
         }
 
         /// <summary>
@@ -3592,16 +3601,22 @@ namespace NextDayRevival
             Vector3 origin = cam == null ? muzzle : cam.transform.position;
             Vector3 dir = cam == null ? _gun.forward : cam.transform.forward;
 
-            // Keep the MG cadence, but give every report the game's own
-            // TAC-50/L96 sniper character instead of the synthetic BTR crack.
-            VehicleShotSound.PlayTechnical(muzzle);
-            Turret.Net.PublishTechnicalShot(muzzle);
-
             Vector3 impact;
             GameObject struck = RaycastPastVehicle(origin, dir,
                                                    CfgRange.Value, out impact);
             Vector3 ende = struck == null ? origin + dir * CfgRange.Value : impact;
-            Tracer(muzzle, ende);
+            // The round drawn by Revival.BtrGun.cs, the way the MTW's is: game
+            // flash, smoke, cases, the TAC-50/L96 report and tracer at the
+            // measured muzzle, the game's impact, the gun's kick, and the
+            // round sent to the other players. Off: the old streak and sound.
+            if (!BtrGun.TechnicalActive || !BtrGun.FireTechnical(_root, ende, struck != null))
+            {
+                // Keep the MG cadence, but give every report the game's own
+                // TAC-50/L96 sniper character instead of the synthetic BTR crack.
+                VehicleShotSound.PlayTechnical(muzzle);
+                Turret.Net.PublishTechnicalShot(muzzle);
+                Tracer(muzzle, ende);
+            }
             if (struck == null) return true;
 
             // No VehicleArmor.GunHit on purpose: this is an anti-personnel
@@ -3618,6 +3633,8 @@ namespace NextDayRevival
         static Vector3 Muzzle()
         {
             if (_gun == null) return Vector3.zero;
+            Vector3 at, bore;
+            if (BtrGun.TechnicalActive && BtrGun.TechnicalMuzzle(_root, out at, out bore)) return at;
             return _gun.TransformPoint(TechnicalModel.MuzzleLocal);
         }
 

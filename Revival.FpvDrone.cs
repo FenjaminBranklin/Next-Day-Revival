@@ -2053,7 +2053,7 @@ namespace NextDayRevival
                     RevivalPlugin.CfgDroneNpcFireRange.Value);
                 float range2 = range * range;
                 List<Shooter> closest = new List<Shooter>();
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_aiType);
+                UnityEngine.Object[] all = NpcScan.All();
                 for (int i = 0; i < all.Length; i++)
                 {
                     Component ai = all[i] as Component;

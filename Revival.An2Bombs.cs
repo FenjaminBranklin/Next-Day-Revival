@@ -160,7 +160,29 @@ namespace NextDayRevival
 
         internal static bool Enabled
         {
-            get { return PlayerAn2.Enabled && CfgGameplay != null && CfgGameplay.Value; }
+            get { return PlayerAn2.Enabled && (_forced || (CfgGameplay != null && CfgGameplay.Value)); }
+        }
+
+        /// <summary>Set by the admin panel's ready An-2 with [Gameplay]
+        /// An2Bombs off: the racks work for this session, the file keeps its
+        /// value.</summary>
+        static bool _forced;
+
+        /// <summary>The admin panel's note on switched-off bombs, or null.</summary>
+        internal static string OffNote()
+        {
+            if (CfgGameplay == null || CfgGameplay.Value || _forced) return null;
+            return "[Gameplay] An2Bombs = false in the config - the ready An-2 switches it on for this session";
+        }
+
+        /// <summary>Switch the bombs on for this session (admin ready An-2);
+        /// returns the note for the admin panel, or "" when already on.</summary>
+        internal static string ForceOn()
+        {
+            if (OffNote() == null) return "";
+            _forced = true;
+            RevivalPlugin.L.LogWarning("An2Bombs: [Gameplay] An2Bombs = false - switched on for this session by the admin spawn.");
+            return "[Gameplay] An2Bombs = false in the config - switched on for this session. ";
         }
 
         static float F(ConfigEntry<float> e, float fallback) { return e == null ? fallback : e.Value; }
@@ -280,7 +302,7 @@ namespace NextDayRevival
                 // for itself).
                 if (_sight) Solve(plane);
                 else _solved = false;
-                if (Input.GetKeyDown(PlayerAn2.KeyOf(CfgSightKey, KeyCode.Z)))
+                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgSightKey, KeyCode.Z)))
                 {
                     if (_sight) CloseSight();
                     else
@@ -291,7 +313,7 @@ namespace NextDayRevival
                             + Loc.T("сброс", "release"), 3f);
                     }
                 }
-                if (Input.GetKeyDown(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R))) Release(plane);
+                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.R))) Release(plane);
                 _errors = 0f;
             }
             catch (Exception ex)
@@ -616,6 +638,15 @@ namespace NextDayRevival
 
         static void Depot(Vector3 point)
         {
+            // The visual ExplosionObject has zero damage. Apply the vehicle
+            // profile once on the master (local Burst or RemoteBurst).
+            if (FuelDepot.Active)
+            {
+                if (RevivalTroopInsertion.MasterClient())
+                    FuelDepot.Blast(point, Mathf.Max(0f, F(CfgVehicleDamage, 1200f)),
+                        Mathf.Max(1f, F(CfgRadius, 12f)) * K);
+                return;
+            }
             if (CfgDepotHit != null && !CfgDepotHit.Value) return;
             if (!An2Repair.DepotHit(point, Mathf.Max(1f, F(CfgDepotReach, 25f)) * K)) return;
             Vector3 at = An2Repair.Depot;

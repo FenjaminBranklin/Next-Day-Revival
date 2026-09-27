@@ -22,10 +22,13 @@ using UnityEngine;
 //          when it is not of a hostile faction;
 //        - else a manned Gepard of the owning faction near the zone
 //          (GepardCrew.Defends / the Feindlich hook: NoFly.Engaged);
-//        - else scripted defensive fire: bursts of flak puffs that walk in on
-//          the aircraft, fragments through GepardGun.Hit, puffs on every
-//          client over event NetworkEventCode (197).
-//      The banner turns red: "YOU ARE UNDER DEFENSIVE FIRE - leave the zone".
+//        - else NOBODY. There is no scripted fire any more (Q2, after the
+//          6.57.0 test): a zone is defended only by real guns, whose rounds
+//          walk in burst by burst and hit through the aircraft's own damage
+//          model. A zone whose defenders are dead or absent is open sky.
+//      The banner turns red: "YOU ARE UNDER DEFENSIVE FIRE - leave the zone"
+//      while a defender is up, and stays amber ("no air defence answers")
+//      while none is.
 //
 // The map marker is a thin, finely dashed line with a small "NO FLY ZONE"
 // label - one quarter of a patrol route's stroke. The web editor draws the
@@ -44,8 +47,8 @@ namespace NextDayRevival
         const string S = "NoFly";
         internal const float K = 2.8f;                  // world units per metre
 
-        // The map style: 1024 map pixels (MapInk's frame). A patrol route is
-        // 24 / 10 / 4.75 (MapInk.DashLength, GapLength, StrokeWidth).
+        // The map style in screen pixels, independent of map zoom.
+        // Patrol ink is 22 / 12 / 4.75, deliberately much heavier.
         internal const float DashLength = 7f;
         internal const float GapLength = 5f;
         internal const float StrokeWidth = 1.2f;
@@ -53,38 +56,21 @@ namespace NextDayRevival
         internal const int LabelSize = 10;
         internal static readonly Color InkColor = new Color(0.95f, 0.84f, 0.45f, 0.8f);   // #f2d673
 
-        internal static ConfigEntry<bool> CfgEnabled, CfgHud, CfgSound, CfgMap, CfgScripted;
-        internal static ConfigEntry<float> CfgWarning, CfgBurstInterval, CfgInitialMiss, CfgWalk,
-            CfgMissFloor, CfgBurstRadius;
-        internal static ConfigEntry<int> CfgPuffs, CfgHeliHits, CfgEventCode;
+        internal static ConfigEntry<bool> CfgEnabled, CfgHud, CfgSound, CfgMap;
+        internal static ConfigEntry<float> CfgWarning;
 
         public static void BindConfig(ConfigFile cfg)
         {
             CfgEnabled = cfg.Bind(S, "Enabled", true,
                 "No-fly zones: an aircraft of another faction that enters one is warned, then "
-                + "engaged by the zone's AA guns, a Gepard of the zone's faction or scripted flak.");
+                + "engaged by the zone's AA guns or a Gepard of the zone's faction (real guns only).");
             CfgHud = cfg.Bind(S, "WarningBanner", true,
                 "The HUD banner for a player aboard an aircraft in a no-fly zone.");
             CfgSound = cfg.Bind(S, "WarningSound", true, "The warning beep with the banner.");
             CfgMap = cfg.Bind(S, "MapMarker", true,
                 "The zones on the world map: a fine dashed line with a small NO FLY ZONE label.");
-            CfgScripted = cfg.Bind(S, "ScriptedFire", true,
-                "A zone with no gun and no Gepard defends itself with scripted flak bursts.");
             CfgWarning = cfg.Bind(S, "WarningSeconds", 5f,
                 "Seconds between entering a zone (warning) and the first round.");
-            CfgBurstInterval = cfg.Bind(S, "BurstInterval", 1.8f, "Scripted fire: seconds between bursts.");
-            CfgPuffs = cfg.Bind(S, "PuffsPerBurst", 4, "Scripted fire: flak puffs per burst.");
-            CfgInitialMiss = cfg.Bind(S, "InitialMiss", 35f,
-                "Scripted fire: metres the first burst is off the aircraft.");
-            CfgWalk = cfg.Bind(S, "WalkFactor", 0.55f,
-                "Scripted fire: the miss is multiplied by this after every burst (walks in).");
-            CfgMissFloor = cfg.Bind(S, "MissFloor", 3f, "Scripted fire: metres the best burst is still off.");
-            CfgBurstRadius = cfg.Bind(S, "BurstRadius", 4f,
-                "Scripted fire: metres from a puff within which fragments hit.");
-            CfgHeliHits = cfg.Bind(S, "HeliHits", 10,
-                "Scripted fire: fragment hits that bring a helicopter or An-2 down.");
-            CfgEventCode = cfg.Bind(S, "NetworkEventCode", 197,
-                "Photon event for the scripted flak puffs (0..199, not used by another channel).");
         }
 
         static bool B(ConfigEntry<bool> c) { return c == null || c.Value; }
@@ -104,7 +90,6 @@ namespace NextDayRevival
             public float Ceiling;                 // world units above the ground, 0 = none
             public string[] Guns;                 // Flak gun ids (P4 API)
             public float Reach = GepardReach;     // a Gepard of the faction this far beyond the edge defends
-            public bool Scripted = true;          // scripted flak when no gun and no Gepard is up
             public Func<bool> Exists;             // null = always; else the zone (and its ring) only while true
             public Func<bool> Armed;              // null = always; else warned and engaged only while true
             public Func<string> Side;             // null = Faction fixed; else the owning faction, read each frame
@@ -119,6 +104,7 @@ namespace NextDayRevival
             // map (every client): the dashes in MapInk's 1024 frame
             public List<MapInk.Dash> Dashes;
             public bool DashesEast;
+            public Vector2 DashesSize;
         }
 
         internal sealed class Violator
@@ -126,10 +112,7 @@ namespace NextDayRevival
             public GepardGun.Contact C;
             public float Since, NextBurst;
             public bool Engaged;
-            public float Miss;                    // world units
-            public Vector3 LastVel;
-            public int Bursts;
-            public string By;                     // "guns", "Gepard", "scripted"
+            public string By;                     // "guns", "Gepard", "nobody"
         }
 
         /// <summary>The zones. The same list as assets/editor/nofly.json -
@@ -157,7 +140,6 @@ namespace NextDayRevival
                 new Vector2(5948f, 1198f), new Vector2(5848f, 1298f), new Vector2(5452f, 1298f),
                 new Vector2(5352f, 1198f), new Vector2(5352f, 602f) }, 700f, new string[0]);
             mt.Reach = 0f;
-            mt.Scripted = false;
             mt.Exists = MilitaryTown.NoFlyShown;
             mt.Armed = MilitaryTown.NoFlyArmed;
             mt.Side = MilitaryTown.Faction;
@@ -296,10 +278,8 @@ namespace NextDayRevival
             }
             try
             {
-                NoFlyNet.EnsureHooked();
                 for (int i = 0; i < Zones.Count; i++)
                     if (Zones[i].Side != null) Zones[i].Faction = Zones[i].Side();
-                NoFlyFire.Pending();
                 FlakSound.Tick();
                 LocalTick();
                 if (Crocodile.IsMaster()) MasterTick();
@@ -348,7 +328,6 @@ namespace NextDayRevival
                     v = new Violator();
                     v.C = c;
                     v.Since = now;
-                    v.Miss = Mathf.Max(0f, F(CfgInitialMiss, 35f)) * K;
                     zn.In.Add(v);
                     Log(zn.Id + ": " + c.Go.name + " entered (kind " + c.Kind + ") - warned, "
                         + Seconds().ToString("0.#", CultureInfo.InvariantCulture) + " s to leave.");
@@ -380,7 +359,6 @@ namespace NextDayRevival
             bool guns = GunsReady(zn, now);
             Vector3 ground = Ground(zn);
             bool gepard = !guns && GepardCrew.Defends(zn.Faction, ground, zn.Radius + zn.Reach);
-            bool scripted = zn.Scripted && B(CfgScripted);
             Violator first = null;
             for (int i = 0; i < zn.In.Count; i++)
             {
@@ -392,14 +370,13 @@ namespace NextDayRevival
                     v.NextBurst = now;
                 }
                 if (!v.Engaged) continue;
-                string by = guns ? "guns" : gepard ? "Gepard" : scripted ? "scripted fire" : "nobody";
+                string by = guns ? "guns" : gepard ? "Gepard" : "nobody";
                 if (by != v.By)
                 {
                     v.By = by;
                     Log(zn.Id + ": engaging " + v.C.Go.name + " - " + by + ".");
                 }
                 if (first == null) first = v;
-                if (!guns && !gepard && scripted) NoFlyFire.Burst(zn, v, now, ground);
             }
             // The guns lay on one violator at a time: the first engaged one.
             GameObject want = guns && first != null ? first.C.Go : null;
@@ -516,10 +493,25 @@ namespace NextDayRevival
 
             if (_local.Count > 0 && B(CfgSound) && now >= _nextBeep)
             {
-                bool engaged = now - _local[0].Since >= Seconds();
+                bool engaged = now - _local[0].Since >= Seconds() && Defended(_local[0].Zone);
                 NoFlyBeep.Play(engaged);
                 _nextBeep = now + (engaged ? 0.6f : 1.2f);
             }
+        }
+
+        /// <summary>Every client: does a real gun defend the zone? A crewed
+        /// (or player-manned) zone ZU-23, a laying Gepard of the faction in
+        /// reach, or a zone armed only while its defender stands (MT).
+        /// Without one there is no fire at all - no scripted flak.</summary>
+        static bool Defended(Zone zn)
+        {
+            if (zn.Armed != null) return true;
+            for (int g = 0; zn.Guns != null && g < zn.Guns.Length; g++)
+            {
+                FlakGunInfo info = Flak.Get(zn.Guns[g]);
+                if (info != null && (info.CrewAlive > 0 || info.PlayerManned)) return true;
+            }
+            return GepardCrew.Defends(zn.Faction, Ground(zn), zn.Radius + zn.Reach);
         }
 
         static float _leftAt = -100f;
@@ -541,7 +533,13 @@ namespace NextDayRevival
                 Local l = _local[0];
                 float left = Seconds() - (now - l.Since);
                 string where = l.Zone.Name + " - " + l.Zone.Faction + " airspace";
-                if (left > 0f)
+                if (!Defended(l.Zone))
+                {
+                    head = "NO FLY ZONE: " + where;
+                    line = "Leave the zone now - no air defence answers";
+                    col = new Color(1f, 0.78f, 0.25f, 1f);
+                }
+                else if (left > 0f)
                 {
                     head = "NO FLY ZONE: " + where;
                     line = "Leave the zone now - defensive fire in "
@@ -614,7 +612,10 @@ namespace NextDayRevival
                 {
                     Zone zn = Zones[z];
                     if (!Here(zn)) continue;
-                    if (zn.Dashes == null || zn.DashesEast != EastWorld.Extends) BuildDashes(zn);
+                    Vector2 size = new Vector2(full.width, full.height);
+                    if (size.x <= 0f || size.y <= 0f) continue;
+                    if (zn.Dashes == null || zn.DashesEast != EastWorld.Extends
+                        || (zn.DashesSize - size).sqrMagnitude > 0.01f) BuildDashes(zn, size);
                     if (zn.Dashes.Count == 0) continue;
                     if (layer == null)
                     {
@@ -637,7 +638,7 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>The label just inside the zone's northernmost point.</summary>
+        /// <summary>The small label centred on the northern boundary.</summary>
         static void DrawLabel(Zone zn, Component texture, Camera camera, Vector2 world, Vector2 map,
                               Rect full, Rect view)
         {
@@ -659,12 +660,13 @@ namespace NextDayRevival
             }
             string text = "<b>" + Label + "</b>";
             Vector2 size = _labelStyle.CalcSize(new GUIContent(text));
-            Rect r = new Rect(gui.x - size.x * 0.5f, gui.y + 2f, size.x, size.y);
+            Rect r = new Rect(gui.x - size.x * 0.5f, gui.y - size.y * 0.5f, size.x, size.y);
             if (!view.Contains(new Vector2(r.xMin, r.yMin)) || !view.Contains(new Vector2(r.xMax, r.yMax))) return;
             Color old = GUI.color;
             try
             {
                 GUI.color = new Color(0f, 0f, 0f, 0.6f);
+                GUI.DrawTexture(new Rect(r.x - 3f, r.y, r.width + 6f, r.height), Texture2D.whiteTexture);
                 GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _labelStyle);
                 GUI.color = InkColor;
                 GUI.Label(r, text, _labelStyle);
@@ -672,27 +674,31 @@ namespace NextDayRevival
             finally { GUI.color = old; }
         }
 
-        /// <summary>The outline in MapInk's artwork frame, cut into dashes of
-        /// the fine style - MapInk.Get's dash walk with this file's numbers,
-        /// kept here so the route overlay's cache never retires them.</summary>
-        static void BuildDashes(Zone zn)
+        /// <summary>Walk the closed outline in screen pixels, then convert
+        /// each mask back to the native layer's 1024-square frame. Rebuild
+        /// only on zoom/resize; panning does not change the dash spacing.</summary>
+        static void BuildDashes(Zone zn, Vector2 size)
         {
             if (zn.Dashes != null)
                 for (int i = 0; i < zn.Dashes.Count; i++)
                     if (zn.Dashes[i].Texture != null) UnityEngine.Object.Destroy(zn.Dashes[i].Texture);
             zn.Dashes = new List<MapInk.Dash>();
             zn.DashesEast = EastWorld.Extends;
+            zn.DashesSize = size;
             List<Vector2> p = new List<Vector2>();
-            foreach (Vector2 w in Outline(zn)) p.Add(MapInk.Artwork(new Vector3(w.x, 0f, w.y)));
+            float artWidth = EastWorld.Extends ? 2048f : 1024f;
+            foreach (Vector2 w in Outline(zn))
+            {
+                Vector2 a = MapInk.Artwork(new Vector3(w.x, 0f, w.y));
+                p.Add(new Vector2(a.x * size.x / artWidth, a.y * size.y / 1024f));
+            }
             p.Add(p[0]);
             float[] arc = new float[p.Count];
             for (int i = 1; i < p.Count; i++) arc[i] = arc[i - 1] + (p[i] - p[i - 1]).magnitude;
             float total = arc[arc.Length - 1], period = DashLength + GapLength;
-            int count = Mathf.FloorToInt(total / period);
-            if (count < 3) return;
+            int count = Mathf.Max(3, Mathf.RoundToInt(total / period));
             period = total / count;                       // the loop closes on a full gap
             float dash = period * DashLength / (DashLength + GapLength);
-            float outX = EastWorld.Extends ? 0.5f : 1f;   // MapInk.OutX: the east frame is 2048 wide
             for (int k = 0; k < count; k++)
             {
                 List<Vector2> samples = new List<Vector2>();
@@ -706,11 +712,9 @@ namespace NextDayRevival
                     samples.Add(Vector2.Lerp(p[at - 1], p[at], t));
                 }
                 MapInk.Dash d2 = MapInk.Raster(samples, StrokeWidth);
-                if (outX != 1f)
-                {
-                    d2.Bounds = new Rect(d2.Bounds.x * outX, d2.Bounds.y, d2.Bounds.width * outX, d2.Bounds.height);
-                    d2.Mid = new Vector2(d2.Mid.x * outX, d2.Mid.y);
-                }
+                d2.Bounds = new Rect(d2.Bounds.x * 1024f / size.x, d2.Bounds.y * 1024f / size.y,
+                    d2.Bounds.width * 1024f / size.x, d2.Bounds.height * 1024f / size.y);
+                d2.Mid = new Vector2(d2.Mid.x * 1024f / size.x, d2.Mid.y * 1024f / size.y);
                 zn.Dashes.Add(d2);
             }
         }
@@ -737,169 +741,6 @@ namespace NextDayRevival
                 for (int j = 0; j < n; j++) o.Add(Vector2.Lerp(a, b, j / (float)n));
             }
             return o;
-        }
-    }
-
-    // =====================================================================
-    /// <summary>Scripted defensive fire: bursts of flak puffs round an
-    /// engaged violator when the zone has no gun and no Gepard. The miss
-    /// starts at InitialMiss and walks in by WalkFactor per burst to
-    /// MissFloor; a straight flight is brought down after a few bursts, a
-    /// hard turn (the lead goes wrong) throws the puffs off again.</summary>
-    internal static class NoFlyFire
-    {
-        struct Puff { public float At; public Vector3 Pos; }
-        static readonly List<Puff> _pending = new List<Puff>();
-
-        internal static void Burst(NoFly.Zone zn, NoFly.Violator v, float now, Vector3 ground)
-        {
-            if (now < v.NextBurst) return;
-            GepardGun.Contact c = v.C;
-            if (c.Go == null) return;
-            float interval = Mathf.Max(0.3f, NoFly.CfgBurstInterval == null ? 1.8f : NoFly.CfgBurstInterval.Value);
-            v.NextBurst = now + interval * UnityEngine.Random.Range(0.85f, 1.15f);
-
-            // The lead: position one fuze time ahead on the estimated velocity.
-            Vector3 vel = c.Vel;
-            float tof = Vector3.Distance(ground, c.Pos) / (900f * NoFly.K);
-            Vector3 aim = c.Pos + vel * tof;
-            float walk = Mathf.Clamp(NoFly.CfgWalk == null ? 0.55f : NoFly.CfgWalk.Value, 0.05f, 1f);
-            float floor = Mathf.Max(0f, NoFly.CfgMissFloor == null ? 3f : NoFly.CfgMissFloor.Value) * NoFly.K;
-            float radius = Mathf.Max(0.5f, NoFly.CfgBurstRadius == null ? 4f : NoFly.CfgBurstRadius.Value) * NoFly.K;
-            int puffs = Mathf.Clamp(NoFly.CfgPuffs == null ? 4 : NoFly.CfgPuffs.Value, 1, 12);
-            int hits = Mathf.Max(1, NoFly.CfgHeliHits == null ? 10 : NoFly.CfgHeliHits.Value);
-
-            // A change of velocity since the last burst puts the miss back up.
-            Vector3 dv = v.Bursts == 0 ? Vector3.zero : vel - v.LastVel;
-            v.LastVel = vel;
-            v.Miss = Mathf.Max(floor, v.Miss * walk + dv.magnitude * tof * 0.8f);
-            Vector3 off = UnityEngine.Random.onUnitSphere * v.Miss;
-            float[] data = new float[3 + puffs * 3];
-            data[0] = NoFlyNet.Burst;
-            data[1] = NoFly.Zones.IndexOf(zn);
-            data[2] = puffs;
-            for (int i = 0; i < puffs; i++)
-            {
-                Vector3 p = aim + off + UnityEngine.Random.insideUnitSphere * (radius * 1.2f + v.Miss * 0.25f);
-                data[3 + i * 3] = p.x; data[4 + i * 3] = p.y; data[5 + i * 3] = p.z;
-                Schedule(p, i);
-                // Fragments: a hit when the puff is within the burst radius of
-                // the aircraft's body where it will be when the puff goes off.
-                Vector3 there = c.Pos + vel * (tof + i * 0.12f);
-                if (Vector3.Distance(p, there) - c.Radius <= radius)
-                    GepardGun.Hit(c, there, (there - ground).normalized, true, hits);
-            }
-            v.Bursts++;
-            FlakSound.Report(ground);
-            NoFlyNet.Send(data);
-        }
-
-        /// <summary>A burst's puffs one after another, 0.12 s apart.</summary>
-        internal static void Schedule(Vector3 p, int i)
-        {
-            Puff q;
-            q.At = Time.time + i * 0.12f;
-            q.Pos = p;
-            if (_pending.Count < 96) _pending.Add(q);
-        }
-
-        internal static void Pending()
-        {
-            for (int i = _pending.Count - 1; i >= 0; i--)
-            {
-                if (Time.time < _pending[i].At) continue;
-                GepardFx.Flak(_pending[i].Pos);
-                FlakSound.Burst(_pending[i].Pos);
-                _pending.RemoveAt(i);
-            }
-        }
-    }
-
-    // =====================================================================
-    /// <summary>One Photon event ([NoFly] NetworkEventCode, 197):
-    /// { 1, zone, n, x1, y1, z1, ... } - a scripted burst's puffs, from the
-    /// master to everyone else (the damage is the master's).</summary>
-    internal static class NoFlyNet
-    {
-        internal const int Burst = 1;
-        static bool _hooked, _failed;
-        static MethodInfo _raise;
-        static Type _optType;
-
-        static int Code() { return NoFly.CfgEventCode == null ? 197 : NoFly.CfgEventCode.Value; }
-
-        internal static void EnsureHooked()
-        {
-            if (_hooked || _failed) return;
-            try
-            {
-                int code = Code();
-                int drone = RevivalPlugin.CfgDroneEventCode.Value;
-                bool taken = (code >= drone && code <= drone + 4)
-                    || code == RevivalPlugin.CfgTurretEventCode.Value
-                    || (RevivalPlugin.CfgAdminEventCode != null && code == RevivalPlugin.CfgAdminEventCode.Value)
-                    || (RevivalPlugin.CfgPatrolCrewDroneEventCode != null
-                        && code == RevivalPlugin.CfgPatrolCrewDroneEventCode.Value)
-                    || (Flak.CfgEventCode != null && code == Flak.CfgEventCode.Value)
-                    || (Gepard.CfgEventCode != null && code == Gepard.CfgEventCode.Value)
-                    || (PlayerHeli.CfgEventCode != null && code >= PlayerHeli.CfgEventCode.Value
-                        && code <= PlayerHeli.CfgEventCode.Value + 5)
-                    || (PlayerAn2.CfgEventCode != null && code >= PlayerAn2.CfgEventCode.Value
-                        && code <= PlayerAn2.CfgEventCode.Value + 5)
-                    || (RevivalTroopInsertion.CfgEventCode != null && code >= RevivalTroopInsertion.CfgEventCode.Value
-                        && code <= RevivalTroopInsertion.CfgEventCode.Value + 2)
-                    || (DroneGear.CfgSurvEventCode != null && code >= DroneGear.CfgSurvEventCode.Value
-                        && code <= DroneGear.CfgSurvEventCode.Value + 3)
-                    || code == 164 || (code >= 190 && code <= 196);
-                if (code < 0 || code > 199 || taken)
-                    throw new Exception("event code " + code + " is outside 0..199 or overlaps another channel");
-                Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
-                if (photon == null) throw new Exception("PhotonNetwork missing");
-                _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
-                FieldInfo onEvent = AccessTools.Field(photon, "OnEventCall");
-                _optType = RevivalPlugin.TypeByName("RaiseEventOptions");
-                if (_raise == null || onEvent == null) throw new Exception("reflection path incomplete");
-                MethodInfo mine = typeof(NoFlyNet).GetMethod("OnPhotonEvent", BindingFlags.Public | BindingFlags.Static);
-                Delegate handler = Delegate.CreateDelegate(onEvent.FieldType, mine);
-                onEvent.SetValue(null, Delegate.Combine(onEvent.GetValue(null) as Delegate, handler));
-                _hooked = true;
-                GepardNet.EnsureHooked();     // a helicopter kill travels on the Gepard's event
-                NoFly.Log("event code " + code + " hooked.");
-            }
-            catch (Exception ex)
-            {
-                _failed = true;
-                RevivalPlugin.L.LogError("NoFly network not hooked - other players do not see the "
-                    + "scripted flak: " + ex.Message);
-            }
-        }
-
-        internal static void Send(float[] data)
-        {
-            if (!_hooked) return;
-            try
-            {
-                object opts = _optType == null ? null : Activator.CreateInstance(_optType);
-                _raise.Invoke(null, new object[] { (byte)Code(), data, false, opts });
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("NoFly network send: " + ex.Message); }
-        }
-
-        public static void OnPhotonEvent(byte code, object content, int sender)
-        {
-            if (code != (byte)Code() || !NoFly.On) return;
-            try
-            {
-                float[] f = content as float[];
-                if (f == null || f.Length < 3 || Mathf.RoundToInt(f[0]) != Burst) return;
-                for (int i = 0; i < f.Length; i++)
-                    if (float.IsNaN(f[i]) || float.IsInfinity(f[i])) return;
-                int n = Mathf.Clamp(Mathf.RoundToInt(f[2]), 0, 12);
-                if (f.Length < 3 + n * 3) return;
-                for (int i = 0; i < n; i++)
-                    NoFlyFire.Schedule(new Vector3(f[3 + i * 3], f[4 + i * 3], f[5 + i * 3]), i);
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("NoFly network receive: " + ex.Message); }
         }
     }
 

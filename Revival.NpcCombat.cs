@@ -478,6 +478,7 @@ namespace NextDayRevival
             public int RifleId, LawLeft, SwitchTo, SwitchPhase;
             public float SwitchSince, NextSwitchWarn;
             public int DroneId, DronesUsed;
+            public bool NoFpv;
             public float NextDrone, DroneHoldUntil;
             public Transform DroneTarget;
             public float LastFullOrder;     // Time.time of the last full (RPC) move order
@@ -3724,6 +3725,11 @@ namespace NextDayRevival
 
         static void Equip(Fighter f, RevivalComposition.CrewMan spec)
         {
+            // Garrison loadouts retain their LAW/rifle role but carry no FPV.
+            f.NoFpv = CrewDrone.Garrison(f.Ai) || (f.Squad != null
+                && ((f.Squad.Settlement != null && f.Squad.Settlement.GetComponent<GarrisonNoFpv>() != null)
+                    || (f.Squad.Tag != null && (f.Squad.Tag.StartsWith("ground/mt-", StringComparison.Ordinal)
+                        || f.Squad.Tag.StartsWith("ground/airfield-", StringComparison.Ordinal)))));
             f.Class = ClassOf(spec == null ? "" : spec.Class);
             f.ArmorScale = ArmorScale(spec);
             f.RifleId = f.WeaponId;
@@ -4098,6 +4104,7 @@ namespace NextDayRevival
 
         static bool CanLaunch(Fighter f, float now)
         {
+            if (f.NoFpv) return false;
             int allowed = Mathf.Clamp(CfgAntiTankDrones == null ? 1 : CfgAntiTankDrones.Value, 0, 20);
             int squad = Mathf.Clamp(CfgAntiTankSquadDrones == null ? 2 : CfgAntiTankSquadDrones.Value, 0, 20);
             if (f.Squad != null && f.Squad.Drones >= squad) return false;
@@ -4109,7 +4116,7 @@ namespace NextDayRevival
         {
             float seconds = Mathf.Clamp(CfgAntiTankDroneSeconds == null ? 150f : CfgAntiTankDroneSeconds.Value, 5f, 900f);
             f.NextDrone = now + seconds;
-            if (target == null) return;
+            if (target == null || f.NoFpv) return;
             // The player FPV drone's blast: VehicleArmor knows it (a tank takes
             // TankFpvHits), and against infantry it is what a real one does.
             float damage = RevivalPlugin.CfgDroneDamage == null ? 550f : RevivalPlugin.CfgDroneDamage.Value;
@@ -4686,7 +4693,7 @@ namespace NextDayRevival
         static List<Component> LiveNpcs()
         {
             List<Component> list = new List<Component>();
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_npcType);
+            UnityEngine.Object[] all = NpcScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 Component c = all[i] as Component;

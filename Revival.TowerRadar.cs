@@ -30,8 +30,16 @@
 //      lists new and lost tracks, guns opening fire, the siren, damage.
 //   3  FIRE CONTROL goes through the flak API on the master: AssignTarget,
 //      WeaponsFree, HoldFire and the new AssignedOnly (hold everything but
-//      the selected blip). Only an operator whose faction is the airfield's
-//      own ([Airfield] DefenderFaction) is obeyed by the crews. With an
+//      the selected blip). While the HQ's own NPC operator lives at the
+//      console the tower is held by the airfield's faction ([Airfield]
+//      DefenderFaction) and only that faction is obeyed. Once he is dead the
+//      console is free: any player may give orders, but a gun only follows a
+//      side whose crew it has - an empty gun or one a player of that side
+//      mans follows; a gun still manned by the airfield's crew follows only
+//      the airfield's own side. Orders of another side standing on a gun are
+//      dropped when the airfield's crew mans it again, and all of them when
+//      the HQ operator is back (the scope names who holds the radar and
+//      which guns follow; the ZU sight shows the radar's order). With an
 //      operator - such a player, or the HQ's own NPC operator (key
 //      radar/c1/op) - the guns are radar-directed (Flak.SetFireDirection:
 //      shorter reaction, smaller first error, faster tracking). Without one
@@ -206,6 +214,7 @@ namespace NextDayRevival
         internal static int Tier = 1;                          // 0 dark, 1 by eye, 2 directed
         internal static int AssignedKind = -1;
         internal static Vector3 AssignedPos;
+        internal static int ControlSide = -1;                  // Fraction value whose orders stand on the guns, -1 none
 
         // master only
         static float _radarHits, _consoleHits, _radarDeadAt = -1f, _consoleDeadAt = -1f;
@@ -213,6 +222,7 @@ namespace NextDayRevival
         static float _nextMaster, _nextBroadcast, _sirenSince = -100f, _lastThreat = -100f;
         static bool _dirty, _wasMaster, _directionSet;
         static readonly List<Vector4> _booms = new List<Vector4>();   // xyz + time of reported explosions
+        static readonly List<string> _foreignOrders = new List<string>();   // guns holding another side's orders
 
         internal static bool RadarAlive { get { return RadarHp > 0f; } }
         internal static bool ConsoleAlive { get { return ConsoleHp > 0f; } }
@@ -339,8 +349,11 @@ namespace NextDayRevival
                     // A new master: the flak crews start weapons free.
                     Mode = 0;
                     AssignedKind = -1;
+                    ControlSide = HomeSide();
+                    _foreignOrders.Clear();
                     _dirty = true;
                 }
+                Flak.SightOrder = SightLine;
                 _wasMaster = master;
                 RadarOperator.Tick(master);
                 if (master) MasterTick();
@@ -387,27 +400,39 @@ namespace NextDayRevival
 
         // ------------------------------------------------------ finding it all
 
+        // Q1 perf: one time-sliced pass finds the kit radar, the C1 tower and
+        // H1 together, instead of three full recursive walks in one frame every
+        // 5 s until the HQ is built.
+        static readonly SceneSweep _sweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _visit = FindVisit;
+        static Transform _sKit, _sTower, _sH1;
+
+        static bool FindVisit(Transform t, string name)
+        {
+            if (_sKit == null && name == RadarName) _sKit = t;
+            if (_sH1 == null && name == "H1") _sH1 = t;
+            if (_sTower == null && name == "C1" && IsTower(t)) _sTower = t;
+            return true;
+        }
+
         static void Find()
         {
-            if (Built || Time.realtimeSinceStartup < _nextFind) return;
-            _nextFind = Time.realtimeSinceStartup + 5f;
+            if (Built) { _sweep.Cancel(); return; }
+            if (!_sweep.Active)
+            {
+                if (Time.realtimeSinceStartup < _nextFind) return;
+                _nextFind = Time.realtimeSinceStartup + 5f;
+                Scene tile0 = SceneManager.GetSceneByName(EastWorld.SceneName);
+                if (!tile0.isLoaded) { _tileSince = -1f; return; }
+                if (_tileSince < 0f) _tileSince = Time.realtimeSinceStartup;
+                _sKit = _sTower = _sH1 = null;
+                _sweep.Begin("East");
+            }
+            if (!_sweep.Step(1.5, _visit)) return;     // continues next frame
             Scene tile = SceneManager.GetSceneByName(EastWorld.SceneName);
             if (!tile.isLoaded) { _tileSince = -1f; return; }
-            if (_tileSince < 0f) _tileSince = Time.realtimeSinceStartup;
 
-            Transform kit = null, tower = null, h1 = null;
-            for (int s = 0; s < SceneManager.sceneCount; s++)
-            {
-                Scene sc = SceneManager.GetSceneAt(s);
-                if (!sc.isLoaded || !sc.name.StartsWith("East", StringComparison.Ordinal)) continue;
-                GameObject[] roots = sc.GetRootGameObjects();
-                for (int r = 0; r < roots.Length; r++)
-                {
-                    if (kit == null) kit = Deep(roots[r].transform, RadarName);
-                    if (tower == null) tower = TowerIn(roots[r].transform);
-                    if (h1 == null) h1 = Deep(roots[r].transform, "H1");
-                }
-            }
+            Transform kit = _sKit, tower = _sTower, h1 = _sH1;
             bool fallback = Time.realtimeSinceStartup - _tileSince > 40f;
             if ((kit == null || tower == null) && !fallback) return;
             if (kit == null && !_fallbackSaid)
@@ -448,17 +473,10 @@ namespace NextDayRevival
 
         /// <summary>The C1 model: a transform named "C1" with renderers under
         /// it, near the greybox spot.</summary>
-        static Transform TowerIn(Transform t)
+        static bool IsTower(Transform t)
         {
-            if (t.name == "C1" && Mathf.Abs(t.position.x - TowerSpot.x) < 20f && Mathf.Abs(t.position.z - TowerSpot.y) < 20f
-                && t.GetComponentInChildren<Renderer>() != null)
-                return t;
-            for (int i = 0; i < t.childCount; i++)
-            {
-                Transform f = TowerIn(t.GetChild(i));
-                if (f != null) return f;
-            }
-            return null;
+            return Mathf.Abs(t.position.x - TowerSpot.x) < 20f && Mathf.Abs(t.position.z - TowerSpot.y) < 20f
+                && t.GetComponentInChildren<Renderer>() != null;
         }
 
         internal static Transform Deep(Transform t, string name)
@@ -557,7 +575,18 @@ namespace NextDayRevival
                 _dirty = true;
             }
             bool npc = RadarOperator.Alive;
-            if (npc != NpcOperatorUp) { NpcOperatorUp = npc; _dirty = true; }
+            int home = HomeSide();
+            if (ControlSide < 0) ControlSide = home;
+            if (npc != NpcOperatorUp)
+            {
+                NpcOperatorUp = npc;
+                _dirty = true;
+                RadarScope.Note(npc ? "HQ operator at the console - " + SideLabel(home) + " hold the radar."
+                    : "HQ OPERATOR DOWN - the console is free.");
+                Log(npc ? "the HQ operator holds the tower." : "the HQ operator is down: the console takes any side's orders.");
+                if (npc && ControlSide != home) GiveBack(home);
+            }
+            DropForeignOrders(home);
 
             // repair
             float repair = Mathf.Clamp(F(CfgRepair, 30f), 1f, 600f) * 60f;
@@ -583,7 +612,7 @@ namespace NextDayRevival
             // the guns' direction
             int tier;
             if (!Working) tier = 0;
-            else if (npc || (OperatorActor >= 0 && Obeyed(OperatorActor))) tier = 2;
+            else if (npc || (OperatorActor >= 0 && Obeyed(OperatorActor) && PlayerSide(OperatorActor) == home)) tier = 2;
             else tier = 1;
             if (tier != Tier || !_directionSet)
             {
@@ -634,13 +663,119 @@ namespace NextDayRevival
             return tier == 2 ? "radar-directed" : tier == 0 ? "no radar (degraded)" : "by eye";
         }
 
-        /// <summary>The crews take orders only from their own faction.</summary>
+        /// <summary>May this player give orders at the console? The airfield's
+        /// own faction always; any other side only while the tower is not held
+        /// - the HQ's NPC operator is dead (the faction lock).</summary>
         internal static bool Obeyed(int actor)
         {
+            int side = PlayerSide(actor);
+            if (side < 0) return false;
+            return side == HomeSide() || !NpcOperatorUp;
+        }
+
+        /// <summary>The game's Fraction value of a player, -1 unknown.</summary>
+        internal static int PlayerSide(int actor)
+        {
             GameObject p = Crocodile.PlayerByActor(actor);
-            if (p == null) return false;
-            string f = Fraktion.Spielerseite(p);
-            return f != null && f == Fraktion.Eigene(Airfield.Faction());
+            return p == null ? -1 : SideId(Fraktion.Spielerseite(p));
+        }
+
+        /// <summary>The airfield's own side (its crews, its HQ operator).</summary>
+        internal static int HomeSide() { return SideId(Fraktion.Eigene(Airfield.Faction())); }
+
+        internal static int SideId(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return -1;
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("Fraction");
+                if (t == null || !t.IsEnum) return -1;
+                return Convert.ToInt32(Enum.Parse(t, name), CultureInfo.InvariantCulture);
+            }
+            catch { return -1; }
+        }
+
+        internal static string SideLabel(int id)
+        {
+            if (id < 0) return "NOBODY";
+            string n = null;
+            try
+            {
+                Type t = RevivalPlugin.TypeByName("Fraction");
+                if (t != null && t.IsEnum) n = Enum.GetName(t, Enum.ToObject(t, id));
+            }
+            catch { }
+            return string.IsNullOrEmpty(n) ? "SIDE " + id : n.ToUpperInvariant();
+        }
+
+        /// <summary>Does this gun take the orders of <paramref name="side"/>?
+        /// Empty: yes. A player at the sight: if he is of that side. The
+        /// airfield's crew: only its own side's.</summary>
+        internal static bool Follows(FlakGunInfo g, int side)
+        {
+            if (g == null || side < 0) return false;
+            if (g.PlayerManned) return g.ManActor >= 0 && PlayerSide(g.ManActor) == side;
+            if (g.CrewAlive > 0) return side == HomeSide();
+            return true;
+        }
+
+        /// <summary>Why a gun does not follow <paramref name="side"/> (scope text).</summary>
+        internal static string Ignores(FlakGunInfo g, int side)
+        {
+            if (g.PlayerManned) return "IGNORES - " + SideLabel(g.ManActor >= 0 ? PlayerSide(g.ManActor) : -1) + " player at the sight";
+            if (g.CrewAlive > 0) return "IGNORES - " + SideLabel(HomeSide()) + " crew";
+            return side < 0 ? "no orders" : "IGNORES";
+        }
+
+        static List<string> Following(int side)
+        {
+            List<string> ids = new List<string>();
+            List<FlakGunInfo> guns = Flak.Guns();
+            for (int i = 0; i < guns.Count; i++)
+                if (Follows(guns[i], side)) ids.Add(guns[i].Id);
+            return ids;
+        }
+
+        /// <summary>Master: the HQ operator is back - the airfield's side holds
+        /// the radar again, every other side's orders are gone.</summary>
+        static void GiveBack(int home)
+        {
+            Flak.ClearTarget(null);
+            Flak.WeaponsFree(null);
+            _foreignOrders.Clear();
+            ControlSide = home;
+            Mode = 0;
+            AssignedKind = -1;
+            _dirty = true;
+            Log("control back with " + SideLabel(home) + ": all guns weapons free.");
+        }
+
+        /// <summary>Master: a gun the airfield's crew mans again drops the
+        /// orders another side left on it (they never obey them).</summary>
+        static void DropForeignOrders(int home)
+        {
+            if (_foreignOrders.Count == 0) return;
+            List<FlakGunInfo> guns = Flak.Guns();
+            for (int i = 0; i < guns.Count; i++)
+            {
+                FlakGunInfo g = guns[i];
+                if (!_foreignOrders.Contains(g.Id) || g.PlayerManned || g.CrewAlive <= 0) continue;
+                _foreignOrders.Remove(g.Id);
+                Flak.ClearTarget(g.Id);
+                Flak.WeaponsFree(g.Id);
+                RadarScope.Note(g.Id + " manned by the " + SideLabel(home) + " crew - it ignores the radar.");
+                Log(g.Id + ": manned by the airfield's crew again, foreign orders dropped.");
+            }
+        }
+
+        /// <summary>The line in the ZU sight of a gun that follows the radar.</summary>
+        static string SightLine(string id)
+        {
+            if (!Built || !Working || ControlSide < 0) return null;
+            FlakGunInfo g = Flak.Get(id);
+            if (g == null || !Follows(g, ControlSide)) return null;
+            return "RADAR HQ (" + SideLabel(ControlSide) + "): " + (Mode == 0 ? "WEAPONS FREE" : Mode == 1 ? "HOLD FIRE"
+                : "ENGAGE ASSIGNED TRACK ONLY");
         }
 
         internal static bool PlayerNear(Vector3 p, float r)
@@ -729,8 +864,26 @@ namespace NextDayRevival
             if (!ConsoleAlive) return;
             if (!Obeyed(actor))
             {
-                Log("command " + cmd + " from actor " + actor + " refused: not the airfield's faction.");
+                Log("command " + cmd + " from actor " + actor + " refused: the HQ operator holds the tower for "
+                    + SideLabel(HomeSide()) + ".");
                 return;
+            }
+            int side = PlayerSide(actor), home = HomeSide();
+            List<string> ids = Following(side);
+            if (side != ControlSide)
+            {
+                // Another side takes the radar: its guns start from weapons free.
+                for (int i = 0; i < ids.Count; i++) { Flak.ClearTarget(ids[i]); Flak.WeaponsFree(ids[i]); }
+                Log("the radar passes from " + SideLabel(ControlSide) + " to " + SideLabel(side) + ".");
+                RadarScope.Note("The radar is in the hands of " + SideLabel(side) + ".");
+                ControlSide = side;
+                Mode = 0;
+                AssignedKind = -1;
+            }
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (side != home) { if (!_foreignOrders.Contains(ids[i])) _foreignOrders.Add(ids[i]); }
+                else _foreignOrders.Remove(ids[i]);
             }
             switch (cmd)
             {
@@ -738,36 +891,50 @@ namespace NextDayRevival
                     {
                         GepardGun.Contact c = RadarScope.Resolve(kind, pos, 120f);
                         if (c == null || c.Go == null) return;
-                        Flak.AssignTarget(null, c.Go);
-                        if (Mode == 1) { Flak.AssignedOnly(null); Mode = 2; }
+                        for (int i = 0; i < ids.Count; i++) Flak.AssignTarget(ids[i], c.Go);
+                        if (Mode == 1)
+                        {
+                            for (int i = 0; i < ids.Count; i++) Flak.AssignedOnly(ids[i]);
+                            Mode = 2;
+                        }
                         AssignedKind = c.Kind;
                         AssignedPos = c.Pos;
                         break;
                     }
                 case CmdFree:
-                    Flak.WeaponsFree(null);
+                    for (int i = 0; i < ids.Count; i++) Flak.WeaponsFree(ids[i]);
                     Mode = 0;
                     break;
                 case CmdHold:
-                    Flak.HoldFire(null);
-                    Flak.ClearTarget(null);
+                    for (int i = 0; i < ids.Count; i++) { Flak.HoldFire(ids[i]); Flak.ClearTarget(ids[i]); }
                     AssignedKind = -1;
                     Mode = 1;
                     break;
                 case CmdClear:
-                    Flak.ClearTarget(null);
-                    if (Mode == 2) { Flak.HoldFire(null); Mode = 1; }
+                    for (int i = 0; i < ids.Count; i++) Flak.ClearTarget(ids[i]);
+                    if (Mode == 2)
+                    {
+                        for (int i = 0; i < ids.Count; i++) Flak.HoldFire(ids[i]);
+                        Mode = 1;
+                    }
                     AssignedKind = -1;
                     break;
             }
+            Log("command " + cmd + " from " + SideLabel(side) + ": " + ids.Count + " gun(s) follow.");
             _dirty = true;
         }
 
         /// <summary>The master's state arrived (every other client).</summary>
         internal static void OnState(float radar, float console, int op, bool npc, int mode, bool siren, int tier,
-                                     int kind, Vector3 assigned)
+                                     int kind, Vector3 assigned, int control)
         {
             if (Crocodile.IsMaster()) return;
+            if (npc != NpcOperatorUp)
+                RadarScope.Note(npc ? "HQ operator at the console - " + SideLabel(HomeSide()) + " hold the radar."
+                    : "HQ OPERATOR DOWN - the console is free.");
+            if (control != ControlSide && control >= 0 && ControlSide >= 0 && !npc)
+                RadarScope.Note("The radar is in the hands of " + SideLabel(control) + ".");
+            ControlSide = control;
             if (radar <= 0f && RadarHp > 0f) RadarScope.Note("RADAR DESTROYED - scope dark.");
             if (console <= 0f && ConsoleHp > 0f) RadarScope.Note("CONSOLE DESTROYED.");
             if (siren != SirenOn) RadarScope.Note(siren ? "AIR RAID SIREN on." : "Siren off - all clear.");
@@ -1346,7 +1513,7 @@ namespace NextDayRevival
         {
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
-            UnityEngine.Object[] actors = UnityEngine.Object.FindObjectsOfType(npcType);
+            UnityEngine.Object[] actors = NpcScan.All();
             Component dead = null;
             for (int i = 0; i < actors.Length; i++)
             {
@@ -1437,6 +1604,7 @@ namespace NextDayRevival
             tr.rotation = rot;
             GepardCrew.Ruhig(ai);
             if (sit) TechnicalCrew.Sitzen(ai, 0);
+            TechnicalCrew.Unbewaffnet(ai);     // he works the console, no rifle
         }
     }
 
@@ -1802,8 +1970,18 @@ namespace NextDayRevival
                 pos = c != null ? c.Pos : _selected.Pos;
                 kind = _selected.Kind;
             }
-            if (!TowerRadar.Obeyed(Crocodile.LocalActor()))
-                Hint("The crews do not take orders from your faction.", 3f);
+            int mine = Crocodile.LocalActor();
+            if (!TowerRadar.Obeyed(mine))
+            {
+                Hint("The " + TowerRadar.SideLabel(TowerRadar.HomeSide())
+                    + " HQ operator holds this console - no orders until he is down.", 4f);
+                return;
+            }
+            int side = TowerRadar.PlayerSide(mine), follow = 0;
+            List<FlakGunInfo> all = Flak.Guns();
+            for (int i = 0; i < all.Count; i++) if (TowerRadar.Follows(all[i], side)) follow++;
+            if (follow == 0)
+                Hint("No gun follows you - every gun is manned by another side's crew.", 4f);
             string what = cmd == TowerRadar.CmdEngage ? "WEAPONS FREE on track " + _selected.Id.ToString("00", CultureInfo.InvariantCulture)
                 : cmd == TowerRadar.CmdFree ? "WEAPONS FREE, all guns" : cmd == TowerRadar.CmdHold ? "HOLD FIRE, all guns"
                 : "target assignment cleared";
@@ -1998,6 +2176,14 @@ namespace NextDayRevival
             SmallLabel(x, y, "FIRE CONTROL: " + (TowerRadar.Mode == 0 ? "WEAPONS FREE" : TowerRadar.Mode == 1 ? "HOLD FIRE"
                 : "WEAPONS TIGHT - assigned track only") + "   direction: " + TowerRadar.TierName(TowerRadar.Tier)
                 + (TowerRadar.SirenOn ? "   SIREN" : ""), TowerRadar.Mode == 1 ? Amber : Green);
+            y += 18f;
+            bool obeyed = TowerRadar.Obeyed(Crocodile.LocalActor());
+            string control = TowerRadar.NpcOperatorUp
+                ? "RADAR HELD BY " + TowerRadar.SideLabel(TowerRadar.HomeSide()) + " - HQ operator at the console"
+                    + (obeyed ? "" : "   (watch only: your orders are refused)")
+                : "HQ OPERATOR DOWN - console free   orders standing: " + TowerRadar.SideLabel(TowerRadar.ControlSide)
+                    + (obeyed ? "   (you may give orders)" : "");
+            SmallLabel(x, y, control, obeyed ? Green : Foe);
             y += 24f;
 
             // the selected track
@@ -2042,16 +2228,21 @@ namespace NextDayRevival
 
             // the guns
             List<FlakGunInfo> guns = Flak.Guns();
+            int me = Crocodile.LocalActor();
+            int who = TowerRadar.Obeyed(me) ? TowerRadar.PlayerSide(me) : TowerRadar.ControlSide;
             if (guns.Count == 0) { SmallLabel(x, y, "No AA guns on the air defence net.", Amber); y += 18f; }
             for (int i = 0; i < guns.Count; i++)
             {
                 FlakGunInfo g = guns[i];
+                bool follows = TowerRadar.Follows(g, who);
                 SmallLabel(x, y, g.Id + "  ZU-23-2   " + g.State + "   crew " + g.CrewAlive + "/2   "
-                    + g.Rounds + " rds", g.State == FlakState.Firing ? Foe : g.State == FlakState.NoCrew ? Amber : Green);
+                    + g.Rounds + " rds   " + (follows ? "FOLLOWS " + TowerRadar.SideLabel(who) : TowerRadar.Ignores(g, who)),
+                    !follows ? Foe : g.State == FlakState.Firing ? Foe : g.State == FlakState.NoCrew ? Amber : Green);
                 y += 16f;
             }
             y += 8f;
-            SmallLabel(x, y, "Operator: " + (TowerRadar.OperatorActor >= 0 ? "player at the console" : TowerRadar.NpcOperatorUp ? "HQ operator" : "none"), DimGreen);
+            SmallLabel(x, y, "Operator: " + (TowerRadar.OperatorActor >= 0 ? "player at the console ("
+                + TowerRadar.SideLabel(TowerRadar.PlayerSide(TowerRadar.OperatorActor)) + ")" : TowerRadar.NpcOperatorUp ? "HQ operator" : "none"), DimGreen);
             y += 22f;
 
             // the log
@@ -2248,7 +2439,7 @@ namespace NextDayRevival
                 if (alarm == null) return;
                 float r = Mathf.Max(50f, TowerRadar.F(TowerRadar.CfgAlarmRadius, 450f)) * TowerRadar.K;
                 Vector3 c = TowerRadar.TowerPoint(Vector3.zero);
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(npcType);
+                UnityEngine.Object[] all = NpcScan.All();
                 int n = 0;
                 for (int i = 0; i < all.Length; i++)
                 {
@@ -2289,10 +2480,23 @@ namespace NextDayRevival
         internal static void Tick()
         {
             if (!TowerRadar.B(TowerRadar.CfgRunwayLights)) { if (_root != null) Clear(); return; }
+            // Q1 perf: the edge-light search is a time-sliced sweep (see
+            // SceneSweep); it used to walk every east scene in one frame, every
+            // 5 s at night until the lights stood.
+            if (_sweep.Active)
+            {
+                if (!_sweep.Step(1.5, _visit)) return;
+                if (_root == null && _night) Build();
+            }
             if (Time.time < _nextCheck) return;
             _nextCheck = Time.time + 5f;
             _night = Night();
-            if (_root == null && _night) Build();
+            if (_root == null && _night)
+            {
+                if (_since < 0f) _since = Time.time;
+                _at.Clear();
+                _sweep.Begin("East");
+            }
             bool on = _night && TowerRadar.ConsoleAlive;
             if (_root != null && on != _lit)
             {
@@ -2302,8 +2506,20 @@ namespace NextDayRevival
             }
         }
 
+        static readonly SceneSweep _sweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _visit = CollectVisit;
+        static readonly List<Vector3> _at = new List<Vector3>();
+
+        static bool CollectVisit(Transform t, string name)
+        {
+            if (!name.StartsWith("Edge light", StringComparison.Ordinal)) return true;
+            if (!Broken(t)) _at.Add(t.position);
+            return false;
+        }
+
         internal static void Clear()
         {
+            _sweep.Cancel();
             if (_root != null) UnityEngine.Object.Destroy(_root);
             _root = null;
             _lights.Clear();
@@ -2332,14 +2548,7 @@ namespace NextDayRevival
         static void Build()
         {
             if (_since < 0f) _since = Time.time;
-            List<Vector3> at = new List<Vector3>();
-            for (int s = 0; s < SceneManager.sceneCount; s++)
-            {
-                Scene sc = SceneManager.GetSceneAt(s);
-                if (!sc.isLoaded || !sc.name.StartsWith("East", StringComparison.Ordinal)) continue;
-                GameObject[] roots = sc.GetRootGameObjects();
-                for (int r = 0; r < roots.Length; r++) Collect(roots[r].transform, at);
-            }
+            List<Vector3> at = new List<Vector3>(_at);    // filled by the sweep
             if (at.Count == 0)
             {
                 if (Time.time - _since < 40f) return;
@@ -2381,16 +2590,6 @@ namespace NextDayRevival
             }
             _lit = false;
             TowerRadar.Log("runway lights: " + at.Count + " edge light(s), " + _lights.Count + " point light(s).");
-        }
-
-        static void Collect(Transform t, List<Vector3> at)
-        {
-            if (t.name.StartsWith("Edge light", StringComparison.Ordinal))
-            {
-                if (!Broken(t)) at.Add(t.position);
-                return;
-            }
-            for (int i = 0; i < t.childCount; i++) Collect(t.GetChild(i), at);
         }
 
         static bool Broken(Transform t)
@@ -2490,7 +2689,8 @@ namespace NextDayRevival
         {
             Send(new float[] { State, TowerRadar.RadarHp, TowerRadar.ConsoleHp, TowerRadar.OperatorActor,
                 TowerRadar.NpcOperatorUp ? 1f : 0f, TowerRadar.Mode, TowerRadar.SirenOn ? 1f : 0f, TowerRadar.Tier,
-                TowerRadar.AssignedKind, TowerRadar.AssignedPos.x, TowerRadar.AssignedPos.y, TowerRadar.AssignedPos.z });
+                TowerRadar.AssignedKind, TowerRadar.AssignedPos.x, TowerRadar.AssignedPos.y, TowerRadar.AssignedPos.z,
+                TowerRadar.ControlSide });
         }
 
         internal static void SendClaim(bool on) { Send(new float[] { ClaimMsg, on ? 1f : 0f }); }
@@ -2517,7 +2717,8 @@ namespace NextDayRevival
                 int kind = Mathf.RoundToInt(f[0]);
                 if (kind == State && f.Length >= 12)
                     TowerRadar.OnState(f[1], f[2], Mathf.RoundToInt(f[3]), f[4] > 0.5f, Mathf.Clamp(Mathf.RoundToInt(f[5]), 0, 2),
-                        f[6] > 0.5f, Mathf.Clamp(Mathf.RoundToInt(f[7]), 0, 2), Mathf.RoundToInt(f[8]), new Vector3(f[9], f[10], f[11]));
+                        f[6] > 0.5f, Mathf.Clamp(Mathf.RoundToInt(f[7]), 0, 2), Mathf.RoundToInt(f[8]), new Vector3(f[9], f[10], f[11]),
+                        f.Length >= 13 ? Mathf.RoundToInt(f[12]) : -1);
                 else if (kind == ClaimMsg)
                     TowerRadar.OnClaim(sender, f[1] > 0.5f);
                 else if (kind == Hit && f.Length >= 7 && Crocodile.IsMaster())

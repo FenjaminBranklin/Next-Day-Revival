@@ -136,6 +136,7 @@ namespace NextDayRevival
         public int Rounds;                // in the two boxes
         public int CrewAlive;             // 0..2
         public bool PlayerManned;
+        public int ManActor = -1;         // the player at the sight (actor number), -1 none
         public float Range;               // engagement range, world units
         public Vector3 ZoneCentre;        // ZoneDefence: the zone (horizontal circle, ceiling above ground)
         public float ZoneRadius, ZoneCeiling;
@@ -298,6 +299,7 @@ namespace NextDayRevival
             // pose (every client)
             public float Yaw, Pitch, YawVel, PitchVel;
             public float WantYaw, WantPitch = 12f;
+            public float LastWantYaw, LastWantPitch, WantYawRate, WantPitchRate;   // the target's angular rate (feed-forward)
             public readonly float[] Recoil = new float[2];
             public float WheelT, WheelE;
 
@@ -372,6 +374,7 @@ namespace NextDayRevival
                 f.Rounds = g.Rounds < 0 ? RoundsFull : g.Rounds;
                 f.CrewAlive = (Up(g.Gunner) ? 1 : 0) + (Up(g.Loader) ? 1 : 0);
                 f.PlayerManned = PlayerAt(g);
+                f.ManActor = g == _manned ? Crocodile.LocalActor() : Time.time < g.ClaimedUntil ? g.ClaimActor : -1;
                 f.Range = RangeU;
                 f.ZoneCentre = g.ZoneCentre;
                 f.ZoneRadius = g.ZoneRadius;
@@ -437,6 +440,10 @@ namespace NextDayRevival
             _dirError = Mathf.Clamp(errorScale, 0.05f, 10f);
             _dirTracking = Mathf.Clamp(trackingScale, 0.05f, 10f);
         }
+
+        /// <summary>P5: the radar HQ's order for a gun (by id) shown in the
+        /// sight of the player manning it; null or empty = no line.</summary>
+        internal static Func<string, string> SightOrder;
 
         internal static float DirReaction { get { return _dirReaction; } }
         internal static float DirError { get { return _dirError; } }
@@ -628,30 +635,43 @@ namespace NextDayRevival
 
         // ------------------------------------------------------ finding the guns
 
+        // Q1 perf: one time-sliced pass over the east scenes answers every
+        // name (the empty and all AA positions) instead of one full recursive
+        // walk per name inside a single frame, every 5 s until all guns stand.
+        static readonly SceneSweep _sweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _visit = FindVisit;
+        static Transform _sweepEmpty;
+        static Transform[] _sweepHolders;
+
+        static bool FindVisit(Transform t, string name)
+        {
+            if (_sweepEmpty == null && name == EmptyName) _sweepEmpty = t;
+            for (int k = 0; k < Ids.Length; k++)
+                if (_sweepHolders[k] == null && name == Names[k]) _sweepHolders[k] = t;
+            return true;
+        }
+
         static void Find()
         {
-            if (Time.realtimeSinceStartup < _nextFind) return;
-            _nextFind = Time.realtimeSinceStartup + 5f;
-            if (_guns.Count >= Ids.Length) return;
+            if (!_sweep.Active)
+            {
+                if (Time.realtimeSinceStartup < _nextFind) return;
+                _nextFind = Time.realtimeSinceStartup + 5f;
+                if (_guns.Count >= Ids.Length) return;
+                Scene tile0 = SceneManager.GetSceneByName(EastWorld.SceneName);
+                if (!tile0.isLoaded) { _airfieldSince = -1f; return; }
+                if (_airfieldSince < 0f) _airfieldSince = Time.realtimeSinceStartup;
+                _sweepEmpty = null;
+                _sweepHolders = new Transform[Ids.Length];
+                _sweep.Begin("East");
+            }
+            if (!_sweep.Step(1.5, _visit)) return;     // continues next frame
+
             Scene airfield = SceneManager.GetSceneByName("EastAirfield");
             Scene tile = SceneManager.GetSceneByName(EastWorld.SceneName);
             if (!tile.isLoaded) { _airfieldSince = -1f; return; }
-            if (_airfieldSince < 0f) _airfieldSince = Time.realtimeSinceStartup;
-
-            Transform empty = null;
-            Transform[] holders = new Transform[Ids.Length];
-            for (int s = 0; s < SceneManager.sceneCount; s++)
-            {
-                Scene sc = SceneManager.GetSceneAt(s);
-                if (!sc.isLoaded || !sc.name.StartsWith("East", StringComparison.Ordinal)) continue;
-                GameObject[] roots = sc.GetRootGameObjects();
-                for (int r = 0; r < roots.Length; r++)
-                {
-                    if (empty == null) empty = Deep(roots[r].transform, EmptyName);
-                    for (int k = 0; k < Ids.Length; k++)
-                        if (holders[k] == null) holders[k] = Deep(roots[r].transform, Names[k]);
-                }
-            }
+            Transform empty = _sweepEmpty;
+            Transform[] holders = _sweepHolders;
             // The greybox fallback has no named emplacement: after 40 s of a
             // loaded tile the guns stand on the ground at the assembly's spots.
             bool fallback = Time.realtimeSinceStartup - _airfieldSince > 40f;
@@ -675,17 +695,6 @@ namespace NextDayRevival
         {
             for (int i = 0; i < _guns.Count; i++) if (_guns[i].Id == id) return true;
             return false;
-        }
-
-        static Transform Deep(Transform t, string name)
-        {
-            if (t.name == name) return t;
-            for (int i = 0; i < t.childCount; i++)
-            {
-                Transform f = Deep(t.GetChild(i), name);
-                if (f != null) return f;
-            }
-            return null;
         }
 
         /// <summary>A gun whose scene went away (tile unloaded) is forgotten.</summary>
@@ -731,11 +740,27 @@ namespace NextDayRevival
             float acc = Mathf.Max(1f, F(CfgAccel, 140f));
             float min = F(CfgPitchMin, -10f), max = F(CfgPitchMax, 90f);
 
+            // Q2: the gunner cranks WITH the target, not after it. The rate at
+            // which the laying point moves (smoothed over ~0.3 s, so the ten
+            // poses a second a remote client gets read as a steady rate) is
+            // fed forward, and only the remaining error is closed by the
+            // braking law - a crossing aircraft is tracked without the lag that
+            // kept the bore behind it, and the whole motion stays within the
+            // handwheels' rate and acceleration.
+            float k = 1f - Mathf.Exp(-dt / 0.3f);
+            float ry = Mathf.Clamp(Mathf.DeltaAngle(g.LastWantYaw, g.WantYaw) / dt, -turn, turn);
+            float rp = Mathf.Clamp((g.WantPitch - g.LastWantPitch) / dt, -elev, elev);
+            if (Mathf.Abs(Mathf.DeltaAngle(g.LastWantYaw, g.WantYaw)) > 20f) ry = 0f;   // a new target, not a rate
+            if (Mathf.Abs(g.WantPitch - g.LastWantPitch) > 20f) rp = 0f;
+            g.WantYawRate = Mathf.Lerp(g.WantYawRate, ry, k);
+            g.WantPitchRate = Mathf.Lerp(g.WantPitchRate, rp, k);
+            g.LastWantYaw = g.WantYaw;
+            g.LastWantPitch = g.WantPitch;
+
             float dy = Mathf.DeltaAngle(g.Yaw, g.WantYaw);
-            float want = Mathf.Clamp(dy * 4f, -turn, turn);
             // Brake in time: never faster than what still stops on the mark.
             float stop = Mathf.Sqrt(2f * acc * Mathf.Abs(dy));
-            want = Mathf.Clamp(want, -stop, stop);
+            float want = Mathf.Clamp(g.WantYawRate + Mathf.Clamp(dy * 4f, -stop, stop), -turn, turn);
             g.YawVel = Mathf.MoveTowards(g.YawVel, want, acc * dt);
             g.Yaw += g.YawVel * dt;
             if (g.Yaw > 180f) g.Yaw -= 360f;
@@ -743,9 +768,9 @@ namespace NextDayRevival
 
             float wp = Mathf.Clamp(g.WantPitch, min, max);
             float dp = wp - g.Pitch;
-            float wantP = Mathf.Clamp(dp * 4f, -elev, elev);
             float stopP = Mathf.Sqrt(2f * acc * Mathf.Abs(dp));
-            wantP = Mathf.Clamp(wantP, -stopP, stopP);
+            float ff = (wp <= min && g.WantPitchRate < 0f) || (wp >= max && g.WantPitchRate > 0f) ? 0f : g.WantPitchRate;
+            float wantP = Mathf.Clamp(ff + Mathf.Clamp(dp * 4f, -stopP, stopP), -elev, elev);
             g.PitchVel = Mathf.MoveTowards(g.PitchVel, wantP, acc * dt);
             g.Pitch = Mathf.Clamp(g.Pitch + g.PitchVel * dt, min, max);
             if ((g.Pitch <= min && g.PitchVel < 0f) || (g.Pitch >= max && g.PitchVel > 0f)) g.PitchVel = 0f;
@@ -753,7 +778,11 @@ namespace NextDayRevival
             // One turn of a handwheel is a few degrees of gun.
             g.WheelT += g.YawVel * dt * 20f;
             g.WheelE += g.PitchVel * dt * 25f;
-            for (int i = 0; i < 2; i++) g.Recoil[i] = Mathf.MoveTowards(g.Recoil[i], 0f, dt / 0.11f);
+            // The run-out is shorter than one barrel's own interval (two rounds
+            // of the pair), so each barrel is home before it fires again and the
+            // pair visibly works left-right-left instead of both hanging back.
+            float runOut = Mathf.Clamp(Interval() * 1.6f, 0.04f, 0.11f);
+            for (int i = 0; i < 2; i++) g.Recoil[i] = Mathf.MoveTowards(g.Recoil[i], 0f, dt / runOut);
         }
 
         static void Pose(Gun g)
@@ -767,7 +796,7 @@ namespace NextDayRevival
                 Vector3 p = g.Barrel[i].localPosition;
                 // A short sharp kick and a slower run-out: the curve of a recoil.
                 float r = g.Recoil[i];
-                p.z = recoil ? -0.1f * K * r * r * (3f - 2f * r) : 0f;
+                p.z = recoil ? -0.13f * K * r * r * (3f - 2f * r) : 0f;
                 g.Barrel[i].localPosition = p;
             }
             if (B(CfgHandwheels))
@@ -1213,7 +1242,7 @@ namespace NextDayRevival
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
             _byKey.Clear();
-            UnityEngine.Object[] actors = UnityEngine.Object.FindObjectsOfType(npcType);
+            UnityEngine.Object[] actors = NpcScan.All();
             for (int i = 0; i < actors.Length; i++)
             {
                 Component ai = actors[i] as Component;
@@ -1350,6 +1379,7 @@ namespace NextDayRevival
             tr.rotation = rot;
             GepardCrew.Ruhig(ai);
             if (sit) TechnicalCrew.Sitzen(ai, clip);
+            TechnicalCrew.Unbewaffnet(ai);     // hands on the handwheels, no rifle
         }
     }
 
@@ -1409,7 +1439,7 @@ namespace NextDayRevival
                 g.Fired = 0;
                 g.Held = 0f;
                 // The first burst is laid by eye: far off.
-                g.Err = Scatter(t, mid, dist * Mathf.Max(0f, Flak.CfgInitialError == null ? 45f : Flak.CfgInitialError.Value)
+                g.Err = Offset(t, mid, dist * Mathf.Max(0f, Flak.CfgInitialError == null ? 45f : Flak.CfgInitialError.Value)
                     * Flak.DirError * 0.001f);
                 g.LastVel = t.Vel;
                 Flak.Log(g.Id + ": engages " + Describe(t) + " at "
@@ -1514,6 +1544,20 @@ namespace NextDayRevival
             Vector3 e = UnityEngine.Random.insideUnitSphere;
             e -= los * Vector3.Dot(e, los) * 0.7f;
             return e * size;
+        }
+
+        /// <summary>An aiming error of EXACTLY about <paramref name="size"/>
+        /// (0.85..1.15), across the line of sight: the first burst of a new
+        /// engagement is always visibly off - Scatter's random length could
+        /// put it on the aircraft by chance (Q2: "bursts start off-target and
+        /// walk closer").</summary>
+        internal static Vector3 Offset(GepardGun.Contact t, Vector3 mid, float size)
+        {
+            Vector3 los = (t.Pos - mid).normalized;
+            Vector3 e = Vector3.ProjectOnPlane(UnityEngine.Random.onUnitSphere, los);
+            if (e.sqrMagnitude < 1e-4f) e = Vector3.ProjectOnPlane(Vector3.up, los);
+            if (e.sqrMagnitude < 1e-4f) e = Vector3.right;
+            return e.normalized * size * UnityEngine.Random.Range(0.85f, 1.15f);
         }
 
         static string Describe(GepardGun.Contact c)
@@ -1830,7 +1874,7 @@ namespace NextDayRevival
                 break;
             }
             if (_near == null || _nearWhy != null) return;
-            if (Input.GetKeyDown(Key())) Enter(_near, me);
+            if (GameUi.KeyDown(Key())) Enter(_near, me);
         }
 
         static void Enter(Flak.Gun g, GameObject me)
@@ -1865,8 +1909,8 @@ namespace NextDayRevival
         internal static void Lay(Flak.Gun g, float dt)
         {
             float sens = Mathf.Max(0.1f, Flak.CfgSensitivity == null ? 2f : Flak.CfgSensitivity.Value) * (_zoom ? 0.35f : 1f);
-            _cmdYaw += Input.GetAxis("Mouse X") * sens;
-            _cmdPitch += Input.GetAxis("Mouse Y") * sens;
+            _cmdYaw += GameUi.Axis("Mouse X") * sens;
+            _cmdPitch += GameUi.Axis("Mouse Y") * sens;
             float min = Flak.CfgPitchMin == null ? -10f : Flak.CfgPitchMin.Value;
             float max = Flak.CfgPitchMax == null ? 90f : Flak.CfgPitchMax.Value;
             _cmdPitch = Mathf.Clamp(_cmdPitch, min, max);
@@ -1878,7 +1922,7 @@ namespace NextDayRevival
             if (Mathf.Abs(_cmdPitch - g.Pitch) > 20f) _cmdPitch = g.Pitch + Mathf.Sign(_cmdPitch - g.Pitch) * 20f;
             g.WantYaw = _cmdYaw;
             g.WantPitch = _cmdPitch;
-            _zoom = Input.GetMouseButton(1);
+            _zoom = GameUi.Button(1);
 
             if (Time.time >= _nextLook)
             {
@@ -1887,9 +1931,9 @@ namespace NextDayRevival
             }
             FlakFire.FollowAll(_air, dt, 5f);
 
-            if (Input.GetKeyDown(KeyCode.R) && !g.Reloading && g.Rounds < Mathf.Max(2, Flak.CfgRoundsPerLoad == null ? 100 : Flak.CfgRoundsPerLoad.Value))
+            if (GameUi.KeyDown(KeyCode.R) && !g.Reloading && g.Rounds < Mathf.Max(2, Flak.CfgRoundsPerLoad == null ? 100 : Flak.CfgRoundsPerLoad.Value))
                 Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f);
-            bool held = Input.GetMouseButton(0) && !g.Reloading;
+            bool held = GameUi.Button(0) && !g.Reloading;
             g.Firing = false;
             g.FuzeRange = Flak.MaxFuze;
             if (held && g.Rounds <= 0) { Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f); held = false; }
@@ -1968,6 +2012,10 @@ namespace NextDayRevival
                         : g.Rounds + " rds") + "   elev " + g.Pitch.ToString("0", CultureInfo.InvariantCulture)
                         + "   LMB fire  RMB sight  R reload  " + Key() + " leave";
                     Label(new Rect(0f, h - 70f, w, 26f), line, Amber);
+                    string order = null;
+                    try { if (Flak.SightOrder != null) order = Flak.SightOrder(g.Id); }
+                    catch { }
+                    if (!string.IsNullOrEmpty(order)) Label(new Rect(0f, h - 100f, w, 26f), order, Color.white);
                 }
                 else if (_near != null)
                 {

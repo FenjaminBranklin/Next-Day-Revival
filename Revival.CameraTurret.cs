@@ -261,6 +261,399 @@ namespace NextDayRevival
         }
     }
 
+    // ------------------------------------------------------- game windows
+
+    /// <summary>
+    /// Is one of the game's own windows open - inventory, map, pause menu,
+    /// player list, container, trader, quest? Every seat feature asks here
+    /// before it paints over the screen or reads the mouse (Q5, 6.57.0: "in
+    /// the tank the inventory is not shown", "after a vehicle the map does
+    /// not display properly").
+    ///
+    /// CONFIRMED (IL, 2026-09-27): UIController._UI_General is 0 while nothing
+    /// is open; InputControlUI writes 1 for the inventory, 8 for the map, 6 for
+    /// the player list, 3 for the pause menu, and every other window writes its
+    /// own non-zero value. The windows are NGUI, drawn by the UI camera.
+    /// Everything this plugin paints in OnGUI comes after every camera and
+    /// therefore lies ON TOP of them - and the seated sights did not ask: the
+    /// gunner's scope (an opaque scope picture, or GunnerOptics' thermal field
+    /// at 95 % opacity), the Gepard, technical and flak sights, the An-2
+    /// bombsight and the flight readouts were drawn every frame, so the
+    /// inventory or the map opened underneath and the player saw the sight.
+    /// The guns kept reading the mouse as well: a click into the inventory
+    /// fired the gun, a drag on the map slewed the turret.
+    ///
+    /// The Axis/Button/KeyDown wrappers are what the gun code reads instead of
+    /// Input while seated: with a window open they report nothing, so the
+    /// window gets the mouse and the gun holds its lay.
+    /// </summary>
+    public static class GameUi
+    {
+        static bool _looked;
+        static MethodInfo _instance;
+        static FieldInfo _general;
+        static int _frame = -1;
+        static int _state;
+
+        /// <summary>UIController._UI_General this frame, 0 when it cannot be
+        /// read (no UI yet, menu scene): then nothing counts as open.</summary>
+        public static int State
+        {
+            get
+            {
+                if (_frame == Time.frameCount) return _state;
+                _frame = Time.frameCount;
+                _state = 0;
+                try
+                {
+                    if (!_looked)
+                    {
+                        _looked = true;
+                        Type ui = RevivalPlugin.TypeByName("UIController");
+                        _instance = ui == null ? null : AccessTools.PropertyGetter(ui, "Instance");
+                        _general = ui == null ? null : AccessTools.Field(ui, "_UI_General");
+                        if (_instance == null || _general == null)
+                            RevivalPlugin.L.LogWarning("GameUi: UIController.Instance/_UI_General "
+                                + "not found - seat sights cannot see the game's windows.");
+                    }
+                    if (_instance == null || _general == null) return 0;
+                    object controller = _instance.Invoke(null, null);
+                    if (controller == null) return 0;
+                    _state = Convert.ToInt32(_general.GetValue(controller));
+                }
+                catch { _state = 0; }
+                return _state;
+            }
+        }
+
+        public static bool WindowOpen { get { return State != 0; } }
+
+        public static float Axis(string name)
+        {
+            return WindowOpen ? 0f : Input.GetAxis(name);
+        }
+
+        public static bool Button(int button)
+        {
+            return !WindowOpen && Input.GetMouseButton(button);
+        }
+
+        public static bool KeyDown(KeyCode key)
+        {
+            return !WindowOpen && Input.GetKeyDown(key);
+        }
+    }
+
+    /// <summary>
+    /// The game's vehicle page of the inventory, and a record of the window
+    /// state when inventory or map open in or after a vehicle.
+    ///
+    /// CONFIRMED (IL, 2026-09-27): in a vehicle ShowInventoryUI calls
+    /// PlayerInventoryUISystem.OpenVehicleUI, and every inventory tick
+    /// (Update -> UpdateVehicleSlotsUI) calls UpdateVehiclePlayersUI. That
+    /// method walks i up to Passengers.Length and reads PlayersInVehicle[i],
+    /// a List of the seat rows the window was built with - 12 of them
+    /// (level7, read offline). A vehicle with more seats than rows - the
+    /// 15-seat Ural - throws ArgumentOutOfRangeException at row 12. The throw
+    /// leaves ShowInventoryUI before SwitchUIManager and Update before
+    /// UpdateBackpackSlotsUI, every tick: the window stands there empty. Rows
+    /// 0..11 are filled before the throw, so the finalizer only swallows that
+    /// one exception when the seats really outnumber the rows; the seats
+    /// beyond row 12 are simply not listed.
+    ///
+    /// The other finalizers change nothing: they log the FIRST exception out
+    /// of the window code with the vehicle state, so a window that still
+    /// fails in the field names its cause in LogOutput.log.
+    /// </summary>
+    public static class VehicleUi
+    {
+        static FieldInfo _rows, _pvm, _vehicle;
+        static bool _seatsSaid;
+        static readonly Dictionary<string, bool> _reported = new Dictionary<string, bool>();
+
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type inv = RevivalPlugin.TypeByName("PlayerInventoryUISystem");
+                Type ui = RevivalPlugin.TypeByName("UIController");
+                Type map = RevivalPlugin.TypeByName("MapUIManager");
+                if (inv != null)
+                {
+                    _rows = AccessTools.Field(inv, "PlayersInVehicle");
+                    _pvm = AccessTools.Field(inv, "_plrVehicleManager");
+                }
+                Type pvm = RevivalPlugin.TypeByName("PlayerVehicleManager");
+                if (pvm != null) _vehicle = AccessTools.Field(pvm, "Vehicle");
+
+                int n = 0;
+                n += Finalize(harmony, inv, "UpdateVehiclePlayersUI", "SeatsFinalizer");
+                n += Finalize(harmony, inv, "Update", "ReportFinalizer");
+                n += Finalize(harmony, ui, "UIManager", "ReportFinalizer");
+                n += Finalize(harmony, ui, "InputControlUI", "ReportFinalizer");
+                n += Finalize(harmony, map, "OnEnable", "ReportFinalizer");
+                MethodInfo enable = map == null ? null : AccessTools.Method(map, "OnEnable", null, null);
+                if (enable != null)
+                {
+                    harmony.Patch(enable, new HarmonyMethod(typeof(VehicleUi).GetMethod("MapOpenPrefix")),
+                        null, null, null, null);
+                    n++;
+                }
+                RevivalPlugin.L.LogInfo("VehicleUi: " + n + " of 6 window hooks in place "
+                    + "(seat rows, player marker, inventory/map error report).");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("VehicleUi: " + ex.Message);
+            }
+        }
+
+        static int Finalize(Harmony harmony, Type t, string method, string finalizer)
+        {
+            try
+            {
+                MethodInfo m = t == null ? null : AccessTools.Method(t, method, null, null);
+                if (m == null)
+                {
+                    RevivalPlugin.L.LogWarning("VehicleUi: " + (t == null ? "?" : t.Name)
+                        + "." + method + " not found.");
+                    return 0;
+                }
+                harmony.Patch(m, null, null, null,
+                    new HarmonyMethod(typeof(VehicleUi).GetMethod(finalizer)), null);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("VehicleUi: " + method + ": " + ex.Message);
+                return 0;
+            }
+        }
+
+        public static Exception SeatsFinalizer(object __instance, Exception __exception)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                int seats, rows;
+                if (__exception is ArgumentOutOfRangeException
+                    && Counts(__instance, out seats, out rows) && seats > rows)
+                {
+                    if (!_seatsSaid)
+                    {
+                        _seatsSaid = true;
+                        RevivalPlugin.L.LogInfo("VehicleUi: this vehicle has " + seats
+                            + " seats, the inventory's vehicle page " + rows + " rows - the "
+                            + "first " + rows + " are listed, the window stays usable.");
+                    }
+                    return null;
+                }
+            }
+            catch { }
+            Report("PlayerInventoryUISystem.UpdateVehiclePlayersUI", __exception);
+            return __exception;
+        }
+
+        public static Exception ReportFinalizer(MethodBase __originalMethod, Exception __exception)
+        {
+            if (__exception == null) return null;
+            string where = __originalMethod == null ? "?"
+                : __originalMethod.DeclaringType.Name + "." + __originalMethod.Name;
+            Report(where, __exception);
+            return __exception;
+        }
+
+        /// <summary>
+        /// The map centres on, and draws the arrow of, MapUIManager.PlayerMarker.
+        /// CONFIRMED (IL): NetworkGameServer.SpawnPlayer is the ONLY place that
+        /// creates it (AddMapMarkerInstanceByGO(0, localPlayer, true, "", "",
+        /// false)), and UpdateMapMarkers - run by this OnEnable on every map
+        /// open - destroys any marker whose world object is inactive at that
+        /// moment. Once gone it stays gone until the next death: no arrow, no
+        /// centring, the map opens wherever it was. Before the open, put it
+        /// back the way SpawnPlayer does when it is missing and the player is
+        /// there to be marked; the game's own call refuses a duplicate
+        /// (SameMarkerIsInstanced).
+        /// </summary>
+        public static void MapOpenPrefix(object __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+                Type t = __instance.GetType();
+                FieldInfo f = AccessTools.Field(t, "PlayerMarker");
+                if (f == null) return;
+                UnityEngine.Object marker = f.GetValue(__instance) as UnityEngine.Object;
+                if (marker != null) return;
+                GameObject me = MapTools.LocalPlayer();
+                if (me == null || !me.activeSelf) return;
+                MethodInfo add = AccessTools.Method(t, "AddMapMarkerInstanceByGO", null, null);
+                ParameterInfo[] ps = add == null ? null : add.GetParameters();
+                if (ps == null || ps.Length != 6) return;
+                add.Invoke(__instance, new object[] {
+                    Enum.ToObject(ps[0].ParameterType, 0), me, true, "", "", false });
+                marker = f.GetValue(__instance) as UnityEngine.Object;
+                if (_markerSaid < 3)
+                {
+                    _markerSaid++;
+                    RevivalPlugin.L.LogWarning("VehicleUi: the map's player marker was gone - "
+                        + (marker != null ? "put back" : "could NOT be put back")
+                        + " before the map opened. " + Snapshot());
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_markerSaid < 3) { _markerSaid++; RevivalPlugin.L.LogWarning("VehicleUi: player marker: " + ex.Message); }
+            }
+        }
+        static int _markerSaid;
+
+        static bool Counts(object inv, out int seats, out int rows)
+        {
+            seats = rows = 0;
+            if (inv == null || _rows == null || _pvm == null || _vehicle == null) return false;
+            System.Collections.ICollection list = _rows.GetValue(inv) as System.Collections.ICollection;
+            object pvm = _pvm.GetValue(inv);
+            GameObject car = pvm == null ? null : _vehicle.GetValue(pvm) as GameObject;
+            if (list == null || car == null) return false;
+            Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
+            Component vgs = vgsType == null ? null : car.GetComponent(vgsType);
+            Array pass = vgs == null ? null
+                : AccessTools.Field(vgsType, "Passengers").GetValue(vgs) as Array;
+            if (pass == null) return false;
+            seats = pass.Length;
+            rows = list.Count;
+            return true;
+        }
+
+        /// <summary>Once per place and exception type: the stack is the same
+        /// every frame, and the first one is the one that says why.</summary>
+        static void Report(string where, Exception ex)
+        {
+            try
+            {
+                string key = where + "|" + ex.GetType().Name;
+                if (_reported.ContainsKey(key)) return;
+                _reported[key] = true;
+                RevivalPlugin.L.LogWarning("VehicleUi: " + where + " threw " + ex.GetType().Name
+                    + " (" + ex.Message + ") - " + Snapshot() + "\n" + ex.StackTrace);
+            }
+            catch { }
+        }
+
+        // ------------------------------------------------------ the record
+
+        static int _lastState;
+        static bool _rode;
+        static int _logged;
+        static float _checkAt = -1f;
+        const int MaxLogged = 16;
+
+        /// <summary>Once per frame: when inventory (1) or map (8) opens while
+        /// seated or at any time after the first ride, write the window state
+        /// now and once more half a second later, when the window should be
+        /// up. Bounded per session.</summary>
+        public static void Tick()
+        {
+            try
+            {
+                bool seated = Seated();
+                if (seated) _rode = true;
+                int state = GameUi.State;
+                if (state != _lastState)
+                {
+                    _lastState = state;
+                    if ((state == 1 || state == 8) && _rode && _logged < MaxLogged)
+                    {
+                        _logged++;
+                        RevivalPlugin.L.LogInfo("VehicleUi: " + (state == 1 ? "inventory" : "map")
+                            + " opened " + (seated ? "in a vehicle" : "after a vehicle") + " - "
+                            + Snapshot());
+                        _checkAt = Time.unscaledTime + 0.5f;
+                    }
+                }
+                if (_checkAt > 0f && Time.unscaledTime >= _checkAt)
+                {
+                    _checkAt = -1f;
+                    if (_logged < MaxLogged)
+                    {
+                        _logged++;
+                        RevivalPlugin.L.LogInfo("VehicleUi: half a second later - " + Snapshot());
+                    }
+                }
+            }
+            catch { }
+        }
+
+        static bool Seated()
+        {
+            return ConvoyRepair.InVehicle() || PlayerHeli.Aboard || PlayerAn2.Aboard;
+        }
+
+        /// <summary>The state a window depends on, in one line.</summary>
+        internal static string Snapshot()
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append("UI_General ").Append(GameUi.State);
+            try
+            {
+                Type uiType = RevivalPlugin.TypeByName("UIController");
+                MethodInfo get = uiType == null ? null : AccessTools.PropertyGetter(uiType, "Instance");
+                object ui = get == null ? null : get.Invoke(null, null);
+                if (ui != null)
+                {
+                    sb.Append(", left ").Append(Value(ui, "_UI_SideLeft"))
+                      .Append(", right ").Append(Value(ui, "_UI_SideRight"))
+                      .Append(", additional ").Append(Value(ui, "_UI_Additional"));
+                    sb.Append(", inventory ").Append(Active(ui, "HUD_InventoryUI"))
+                      .Append(", vehicle page ").Append(Active(ui, "VehicleUI"))
+                      .Append(", map ").Append(Active(ui, "HUD_MapUI"));
+                    Camera uiCam = AccessTools.Field(uiType, "UICam") == null ? null
+                        : AccessTools.Field(uiType, "UICam").GetValue(ui) as Camera;
+                    sb.Append(", UI camera ").Append(uiCam == null ? "none"
+                        : (uiCam.enabled && uiCam.gameObject.activeInHierarchy ? "on" : "OFF")
+                          + " mask 0x" + uiCam.cullingMask.ToString("X"));
+                }
+                Type mapType = RevivalPlugin.TypeByName("MapUIManager");
+                FieldInfo inst = mapType == null ? null : AccessTools.Field(mapType, "_instance");
+                object map = inst == null ? null : inst.GetValue(null);
+                if (map != null)
+                {
+                    UnityEngine.Object marker = AccessTools.Field(mapType, "PlayerMarker") == null ? null
+                        : AccessTools.Field(mapType, "PlayerMarker").GetValue(map) as UnityEngine.Object;
+                    sb.Append(", player marker ").Append(marker == null ? "GONE" : "ok");
+                    Component tex = AccessTools.Field(mapType, "MapTextureUI") == null ? null
+                        : AccessTools.Field(mapType, "MapTextureUI").GetValue(map) as Component;
+                    PropertyInfo main = tex == null ? null : AccessTools.Property(tex.GetType(), "mainTexture");
+                    Texture t = main == null ? null : main.GetValue(tex, null) as Texture;
+                    sb.Append(", map picture ").Append(t == null ? "none" : t.name);
+                }
+            }
+            catch (Exception ex) { sb.Append(", (").Append(ex.Message).Append(")"); }
+            sb.Append(", seated ").Append(Seated())
+              .Append(", camera holder ").Append(CameraOwner.Owner)
+              .Append(", cursor ").Append(Cursor.visible ? "visible" : "hidden")
+              .Append("/").Append(Cursor.lockState)
+              .Append(", cameras ").Append(CameraOwner.Kameraliste());
+            return sb.ToString();
+        }
+
+        static string Value(object o, string field)
+        {
+            FieldInfo f = AccessTools.Field(o.GetType(), field);
+            object v = f == null ? null : f.GetValue(o);
+            return v == null ? "?" : Convert.ToInt32(v).ToString(CultureInfo.InvariantCulture);
+        }
+
+        static string Active(object o, string field)
+        {
+            FieldInfo f = AccessTools.Field(o.GetType(), field);
+            GameObject go = f == null ? null : f.GetValue(o) as GameObject;
+            if (go == null) return "none";
+            return go.activeInHierarchy ? "shown" : (go.activeSelf ? "on, parent off" : "off");
+        }
+    }
+
     // ------------------------------------------------------- BTR-Geschuetz
 
     /// <summary>
@@ -674,7 +1067,7 @@ namespace NextDayRevival
                 }
                 if (_vgs == null) { SetManning(false); return; }
 
-                if (Input.GetKeyDown(ManKey())) ToggleManning();
+                if (GameUi.KeyDown(ManKey())) ToggleManning();
                 if (!_manning) return;
 
                 Aim();
@@ -683,7 +1076,7 @@ namespace NextDayRevival
                 // Munition hatte, bekam zwoelf Sekunden Ladebalken und nie
                 // einen Schuss - im Spiel sah das aus wie ein kaputtes
                 // Geschuetz, im Log stand die Begruendung.
-                if (Input.GetMouseButton(0) && Time.time >= _nextShot
+                if (GameUi.Button(0) && Time.time >= _nextShot
                     && Time.time >= _nextTry)
                 {
                     if (Fire()) _nextShot = Time.time + Ladezeit();
@@ -910,10 +1303,10 @@ namespace NextDayRevival
             // 2026-08-28 stand hier "+=": Maus nach rechts drehte den Turm
             // nach links.
             float sens = RevivalPlugin.CfgTurretSensitivity.Value;
-            float mx = Input.GetAxis("Mouse X") * sens;
+            float mx = GameUi.Axis("Mouse X") * sens;
             if (RevivalPlugin.CfgTurretInvertX.Value) mx = -mx;
             _yaw -= mx;
-            _pitch += Input.GetAxis("Mouse Y") * sens;
+            _pitch += GameUi.Axis("Mouse Y") * sens;
             _pitch = Mathf.Clamp(_pitch, PitchMin(), PitchMax());
             if (_yaw > 180f) _yaw -= 360f;
             if (_yaw < -180f) _yaw += 360f;
@@ -1398,16 +1791,16 @@ namespace NextDayRevival
         {
             point = Vector3.zero;
             normal = Vector3.zero;
-            if (!LookUpRaycast()) return null;
-
-            object[] args = new object[] {
-                origin, direction, Activator.CreateInstance(_hitType), range };
-            if (!(bool)_raycast.Invoke(null, args)) return null;
-
-            if (_hitPoint != null) point = (Vector3)_hitPoint.GetValue(args[2], null);
-            if (_hitNormal != null) normal = (Vector3)_hitNormal.GetValue(args[2], null);
-
-            Component hitCollider = _hitCollider.GetValue(args[2], null) as Component;
+            // Q1 perf: a direct call. build.ps1 references PhysicsModule now;
+            // the reflected Invoke allocated an object[], three boxes and a
+            // boxed RaycastHit per cast, and the patrol driver's RoadUnder casts
+            // up to 80 times per vehicle per physics step. Same overload
+            // (origin, direction, out hit, range) as the reflected one.
+            RaycastHit hit;
+            if (!Physics.Raycast(origin, direction, out hit, range)) return null;
+            point = hit.point;
+            normal = hit.normal;
+            Collider hitCollider = hit.collider;
             return hitCollider == null ? null : hitCollider.gameObject;
         }
 
@@ -1587,20 +1980,12 @@ namespace NextDayRevival
         /// onChangeInventory set - so UI and server data are updated too.
         /// It returns void, hence the count before and after.
         /// </summary>
-        // One cache entry PER id, not a single slot. A single slot
-        // (the old _hasId/_hasResult/_hasUntil) is defeated the instant two
-        // callers alternate ids within one frame: each call sees a different
-        // id than the last, misses, and runs a fresh FindObjectsOfType. The
-        // surveillance drone polls SurveillanceId and BatteryId back to back
-        // every frame (SurvDrone.TickCore), which turned this into TWO scene
-        // scans plus a List allocation every frame on foot - the 6.0.0 frame
-        // drop. A dictionary gives each id its own half-second answer, so the
-        // number of scans is bounded by the distinct ids asked, not the frame
-        // rate, no matter how many callers interleave.
-        static readonly Dictionary<int, float> _hasUntil = new Dictionary<int, float>();
-        static readonly Dictionary<int, bool> _hasResult = new Dictionary<int, bool>();
-        static List<object> _hasInventories;
-        static int _hasInventoryFrame = -1;
+        // The item-id histogram behind HasItem, rebuilt once per aligned half
+        // second. History: a single-slot cache was defeated by callers that
+        // alternate ids (6.0.0), a per-id cache still walked the inventories
+        // once per id (6.57.0); one walk now serves every id in the window.
+        static readonly Dictionary<int, int> _hasCounts = new Dictionary<int, int>();
+        static float _hasWindowEnd;
 
         /// <summary>
         /// Does item `wanted` lie in one of the local player's inventories?
@@ -1614,32 +1999,43 @@ namespace NextDayRevival
         /// </summary>
         internal static bool HasItem(int wanted)
         {
-            float until;
-            if (_hasUntil.TryGetValue(wanted, out until) && Time.time < until)
-                return _hasResult[wanted];
-            bool found = false;
-            // Several item caches expire together. Share discovery within this
-            // frame only; item consumption still uses a fresh authoritative scan.
-            if (_hasInventoryFrame != Time.frameCount)
+            // Q1 perf: ONE walk of the local inventories per half-second window
+            // builds a count of every item id, and every id asked for in that
+            // window is answered from it. Before, each id (jammer, FPV drone,
+            // recon drone, battery, extinguisher, tool kit ...) re-walked every
+            // slot with a boxed read and a reflected ObscuredInt conversion per
+            // slot - six walks on the same boundary frame, the Turret.Tick /
+            // Drone.Tick peaks. No answer is older than the half second it was.
+            if (Time.time >= _hasWindowEnd)
             {
-                _hasInventories = PlayerInventories();
-                _hasInventoryFrame = Time.frameCount;
+                _hasWindowEnd = ((int)(Time.time / 0.5f) + 1) * 0.5f;
+                _hasCounts.Clear();
+                List<object> invs = PlayerInventories();
+                for (int i = 0; i < invs.Count; i++)
+                {
+                    Tally(Field(invs[i], "_backpackData"));
+                    Tally(Field(invs[i], "_gearsData"));
+                    Tally(Field(invs[i], "_weaponsData"));
+                }
             }
-            List<object> invs = _hasInventories;
-            for (int i = 0; i < invs.Count && !found; i++)
-                if (CountItem(invs[i], wanted) > 0) found = true;
-            _hasResult[wanted] = found;
-            // EVERY id expires on the same half-second boundary, not half a
-            // second after it was last asked for. The frame-shared discovery
-            // above only helps when the expiries LAND IN THE SAME FRAME, and
-            // with a per-id deadline they drifted apart: half a dozen ids -
-            // jammer, FPV drone, recon drone, battery, extinguisher, tool kit -
-            // meant half a dozen separate whole-scene
-            // FindObjectsOfType(PlayerInventoryManager) scans per second, each
-            // in a frame of its own. Aligned, that is one scan for all of them.
-            // No answer is ever older than the half second it was before.
-            _hasUntil[wanted] = ((int)(Time.time / 0.5f) + 1) * 0.5f;
-            return found;
+            return _hasCounts.ContainsKey(wanted);
+        }
+
+        static void Tally(object data)
+        {
+            if (data == null) return;
+            Array ids = Field(data, "ItemID") as Array;
+            if (ids == null) return;
+            for (int i = 0; i < ids.Length; i++)
+            {
+                object box = ids.GetValue(i);
+                if (box == null) continue;
+                int id = Obscured(box);
+                if (id <= 0) continue;
+                int n;
+                _hasCounts.TryGetValue(id, out n);
+                _hasCounts[id] = n + 1;
+            }
         }
 
         internal static bool TakeItem(int wanted, string wer)
@@ -1990,23 +2386,29 @@ namespace NextDayRevival
         /// bleiben ueber photonView.isMine draussen, aber unter den eigenen
         /// wird nicht mehr geraten, welches das richtige ist.
         /// </summary>
+        static MethodInfo _invViewGetter, _invIsMine;
+
         internal static List<object> PlayerInventories()
         {
             List<object> found = new List<object>();
-            Type t = RevivalPlugin.TypeByName("PlayerInventoryManager");
-            if (t == null) return found;
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+            // Q1 perf: the registry (Awake/OnDestroy hooks) instead of a
+            // whole-scene FindObjectsOfType twice a second from HasItem.
+            Component[] all = InventoryScan.All();
             for (int i = 0; i < all.Length; i++)
             {
                 MonoBehaviour mb = all[i] as MonoBehaviour;
                 if (mb == null) continue;
-                MethodInfo get = AccessTools.Method(mb.GetType(), "get_photonView", null, null);
+                if (_invViewGetter == null)
+                    _invViewGetter = AccessTools.Method(mb.GetType(), "get_photonView", null, null);
+                MethodInfo get = _invViewGetter;
                 object view = null;
                 try { if (get != null) view = get.Invoke(mb, null); }
                 catch { view = null; }
                 if (view != null)
                 {
-                    MethodInfo isMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
+                    if (_invIsMine == null)
+                        _invIsMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
+                    MethodInfo isMine = _invIsMine;
                     try
                     {
                         if (isMine != null && !(bool)isMine.Invoke(view, null)) continue;
@@ -2151,7 +2553,7 @@ namespace NextDayRevival
                 }
             }
 
-            /// <summary>A BTR round with everything a peer needs to rebuild
+            /// <summary>A BTR or technical round with everything a peer needs to rebuild
             /// it on its own copy of the turret (Revival.BtrGun.cs): action
             /// -3, view id, end point, hit, tracer. False when there is no
             /// channel or view - the caller then sends the plain shot sound.</summary>
@@ -2246,7 +2648,7 @@ namespace NextDayRevival
                     }
                     if (action == -3 && data.Length >= 7)
                     {
-                        // A BTR round (Revival.BtrGun.cs): rebuilt on this copy.
+                        // A BTR or technical round (Revival.BtrGun.cs): rebuilt on this copy.
                         Transform shooter = VehicleRoot(Mathf.RoundToInt(data[1]));
                         if (shooter != null)
                             BtrGun.Remote(shooter, new Vector3(data[2], data[3], data[4]),
@@ -2577,7 +2979,7 @@ namespace NextDayRevival
         static object Field(object instance, string name)
         {
             if (instance == null) return null;
-            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            FieldInfo f = FastField.Find(instance.GetType(), name);   // Q1 perf: cached lookup
             return f == null ? null : f.GetValue(instance);
         }
 
