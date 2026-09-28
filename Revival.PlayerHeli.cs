@@ -342,6 +342,14 @@ namespace NextDayRevival
         internal static bool Aboard { get { return _heli != null; } }
         internal static bool Flying { get { return _heli != null && _pilot; } }
 
+        // Seams for the helicopter's vanilla condition (HeliCondition in
+        // Revival.VehicleCondition.cs): battery, spark plugs, key and fuel.
+        internal static GameObject NearestMachine(float metres) { return Nearest(metres * K); }
+        internal static int ViewOf(GameObject go) { return ViewId(go); }
+        internal static GameObject MachineByView(int view) { return ByView(view); }
+        internal static GameObject FlownMachine { get { return _pilot ? _heli : null; } }
+        internal static bool EngineRunning { get { return _heli != null && _engine; } }
+
         /// <summary>Is this the machine the LOCAL pilot has the controls of? Its
         /// engine is advanced by the flight, in the same frame the power is
         /// used; every other machine advances itself.</summary>
@@ -452,8 +460,16 @@ namespace NextDayRevival
                 if (Input.GetKeyDown(BoardKey())) { Why("key " + BoardKey()); Leave(true); return; }
                 if (_pilot && !falling && Input.GetKeyDown(EngineKey()))
                 {
-                    if (_engine) Why("key " + EngineKey());
-                    SetEngine(!_engine);
+                    // A cold engine starts only with the vanilla parts in and
+                    // fuel in the tank - HeliCondition says what is missing.
+                    string missing;
+                    if (!_engine && !HeliCondition.CanStart(_heli, out missing))
+                        Hint(missing, 5f);
+                    else
+                    {
+                        if (_engine) Why("key " + EngineKey());
+                        SetEngine(!_engine);
+                    }
                 }
 
                 if (_pilot)
@@ -678,7 +694,8 @@ namespace NextDayRevival
             if (!RevivalTroopInsertion.MasterClient())
             {
                 Net.Send(Net.SpawnRequest,
-                    new float[] { at.x, at.y, at.z, heading }, true);
+                    new float[] { at.x, at.y, at.z, heading,
+                                  VehicleCondition.FoundNow ? 1f : 0f }, true);
                 Hint(Text.Asked(), 3f);
                 RevivalPlugin.L.LogInfo("PlayerHeli: not the master - asked it for "
                     + "a helicopter at " + at.ToString("0") + ".");
@@ -687,12 +704,22 @@ namespace NextDayRevival
 
             GameObject go = Build(at, heading);
             if (go == null) { Hint(Text.SpawnFailed(), 4f); return; }
+            if (VehicleCondition.FoundNow) HeliCondition.MakeFound(go);
             Hint(Text.Spawned(BoardKey().ToString()), 6f);
         }
 
         /// <summary>The master's half of a spawn: cap first, then the machine.
         /// The cap is what keeps an afternoon of pressing the key from filling
         /// the region with parked helicopters.</summary>
+        internal static GameObject BuildFound(Vector3 at, float heading)
+        {
+            GameObject go = Instantiate(at, heading);
+            if (go != null) HeliCondition.MakeFound(go);
+            return go;
+        }
+        internal static GameObject[] FindMachines() { return _all.ToArray(); }
+        internal static bool FindWreck(GameObject go) { return Burning(go) || Falling(go); }
+
         internal static GameObject Build(Vector3 at, float heading)
         {
             Cap();
@@ -721,7 +748,7 @@ namespace NextDayRevival
                     GameObject go = _all[i];
                     if (go == null || ReferenceEquals(go, _heli)) continue;
                     if (Burning(go) || Falling(go)) continue;
-                    if (Busy(ViewId(go))) continue;
+                    if (Busy(ViewId(go)) || VehicleFinds.Owns(go)) continue;
                     if (!HeliHold.Empty(go)) continue;
                     oldest = go;
                     break;
@@ -1351,6 +1378,14 @@ namespace NextDayRevival
             Vector3 right = flat * Vector3.right;
 
             float power = Spool(dt);
+            // The tank runs dry in flight exactly as on the ground: the engine
+            // stops, and PowerLoss below takes the machine from there.
+            if (_engine && HeliCondition.Burn(_heli, power, dt))
+            {
+                Why("fuel tank empty");
+                SetEngine(false);
+                Hint(HeliCondition.EmptyText(), 6f);
+            }
             if (PowerLoss(power, dt)) return;
             float thrust = (CfgThrust == null ? 5.5f : CfgThrust.Value) * k * power;
             float side = (CfgSideThrust == null ? 2.6f : CfgSideThrust.Value) * k * power;
@@ -2696,6 +2731,13 @@ namespace NextDayRevival
                                        JumpKey().ToString(), BoardKey().ToString()),
                          cx, cy + 194f,
                          new Color(0.80f, 0.85f, 0.90f, 1f), 13);
+
+                bool low;
+                string fuel = HeliCondition.FuelLine(_heli, out low);
+                if (fuel != null)
+                    Line(fuel, cx, cy + 216f,
+                         low ? new Color(1f, 0.55f, 0.35f, 1f)
+                             : new Color(0.72f, 0.80f, 0.72f, 1f), 13);
             }
 
             if (hint) Line(_hint, cx, cy + 120f, warm, 16);
@@ -2898,7 +2940,10 @@ namespace NextDayRevival
                         if (!RevivalTroopInsertion.MasterClient()) return;
                         RevivalPlugin.L.LogInfo("PlayerHeli: player " + sender
                             + " asked for a helicopter.");
-                        Build(new Vector3(f[0], f[1], f[2]), f[3]);
+                        GameObject built = Build(new Vector3(f[0], f[1], f[2]), f[3]);
+                        // The admin panel's "as found" switch rides along in f[4].
+                        if (built != null && f.Length >= 5 && f[4] > 0.5f)
+                            HeliCondition.MakeFound(built);
                         return;
                     }
 
@@ -2931,6 +2976,10 @@ namespace NextDayRevival
                     if (kind == EngineState)
                     {
                         if (f.Length < 2) return;
+                        // A negative second value is not an engine state but the
+                        // machine's condition (HeliCondition): same channel, so
+                        // no new event code is taken.
+                        if (f[1] < -0.5f) { HeliCondition.OnNet(f, sender); return; }
                         GameObject go = ByView((int)f[0]);
                         if (go != null) EngineApply(go, f[1] > 0.5f);
                         return;
@@ -4432,6 +4481,16 @@ namespace NextDayRevival
         internal static void Install(Harmony harmony)
         {
             if (!On) return;
+            InstallWindow(harmony);
+        }
+
+        /// <summary>The window half on its own, patched once: the truck trunks
+        /// of Revival.VehicleCondition.cs are bigger than 42 as well, and they
+        /// must open whether or not the helicopter or its hold is switched
+        /// on.</summary>
+        internal static void InstallWindow(Harmony harmony)
+        {
+            if (_window) return;
             try
             {
                 _tUi = RevivalPlugin.TypeByName("PlayerInventoryUISystem");

@@ -186,6 +186,37 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>A weapon that destroys a registered aircraft in one hit (the
+        /// Stinger, an NPC flyover's lethal small-arms count): the owning
+        /// source's own kill, whatever its hit count.</summary>
+        internal static bool Kill(GameObject go, Vector3 point)
+        {
+            if (go == null) return false;
+            Probe();
+            for (int i = 0; i < _sources.Count; i++)
+            {
+                Source s = _sources[i];
+                _tmp.Clear();
+                try { s.List(_tmp); }
+                catch { continue; }
+                if (!_tmp.Contains(go) || IsDown(s, go)) continue;
+                _hits.Remove(go.GetInstanceID());
+                try
+                {
+                    s.Kill(go, point);
+                    RevivalPlugin.L.LogInfo("GepardAir: " + s.Name + " destroyed outright.");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("GepardAir: " + s.Name + " could not be "
+                        + "destroyed - " + ex.Message);
+                    return false;
+                }
+            }
+            return false;
+        }
+
         /// <summary>
         /// The An-2 (Revival.PlayerAn2.cs, another branch at the time of
         /// writing) is bound by reflection when the class is in this assembly:
@@ -1374,6 +1405,8 @@ namespace NextDayRevival
             // P6a: an engaged violator of a no-fly zone of this Gepard's
             // faction, whoever is aboard (Revival.NoFly.cs).
             if (h.Root != null && NoFly.Engaged(c.Go, h.Side, h.Root.position)) return true;
+            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs).
+            if (NpcAircraft.Hostile(c.Go)) return true;
             float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
             List<GameObject> players = Spieler();
             for (int i = 0; i < players.Count; i++)
@@ -1559,6 +1592,7 @@ namespace NextDayRevival
             catch { return ai.GetComponent<NavMeshAgent>(); }
         }
 
+        static readonly object[] PauseArgs = { 1.4f };
         static MethodInfo _mClearIntentions, _mPauseTime;
         static Type _mQuietOwner;
 
@@ -1579,7 +1613,7 @@ namespace NextDayRevival
             try
             {
                 if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
-                if (_mPauseTime != null) _mPauseTime.Invoke(ai, new object[] { 1.4f });
+                if (_mPauseTime != null) _mPauseTime.Invoke(ai, PauseArgs);   // shared, Invoke copies it (n01 perf)
             }
             catch { }
         }

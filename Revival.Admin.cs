@@ -664,6 +664,8 @@ namespace NextDayRevival
         static FieldInfo _localPlayerField;
         static int _localPlayerFrame = -1;
         static GameObject _framePlayer;
+        static GameObject _scanPlayer;
+        static float _scanPlayerUntil;
 
         public static GameObject LocalPlayer()
         {
@@ -695,13 +697,21 @@ namespace NextDayRevival
                     if (go != null) return go;
                 }
 
+                // n01 perf: the scene-wide fallback walks every MonoBehaviour.
+                // A miss (dead, loading, no NetworkGameServer answer) is not
+                // retried by every caller every frame, and a hit is reused
+                // for a second (Unity's null check drops a destroyed one).
+                if (_scanPlayer != null && Time.unscaledTime < _scanPlayerUntil) return _scanPlayer;
+                if (Time.unscaledTime < _scanPlayerUntil) return null;
+                _scanPlayer = null;
+                _scanPlayerUntil = Time.unscaledTime + 1f;
                 Type movement = RevivalPlugin.TypeByName("PlayerMovementController");
                 if (movement == null) return null;
                 UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(movement);
                 for (int i = 0; i < all.Length; i++)
                 {
                     MonoBehaviour mb = all[i] as MonoBehaviour;
-                    if (mb != null && IsMine(mb)) return mb.gameObject;
+                    if (mb != null && IsMine(mb)) { _scanPlayer = mb.gameObject; return _scanPlayer; }
                 }
             }
             catch (Exception ex)
@@ -853,7 +863,15 @@ namespace NextDayRevival
 
         public static void Draw()
         {
-            if (!_pending || !Enabled) return;
+            if (!Enabled) return;
+            if (!_pending)
+            {
+                // The result of the last click stays readable after the popup
+                // closed (the flyover's ETA; a teleport's failure).
+                if (!string.IsNullOrEmpty(_status) && Time.time < _statusUntil)
+                    GUI.Label(new Rect(Screen.width * 0.5f - 210f, Screen.height - 90f, 420f, 44f), _status);
+                return;
+            }
             // Confirm the map is still open before painting over it.
             Component manager, texture;
             Camera cam;
@@ -891,8 +909,28 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("Map teleport: " + message);
             }
 
+            // N3: the admin's test flyover over this point (Revival.NpcAircraft.cs).
+            if (GUI.Button(new Rect(x, y + h + 2f, w, h), Loc.T("Пролёт", "Flyover")))
+            {
+                string message = Flyover.Ask(_target);
+                _pending = false;
+                _status = message;
+                _statusUntil = Time.time + 6f;
+                RevivalPlugin.L.LogInfo("Map flyover: " + message);
+            }
+
+            // N11: an air strike (the panel's event) with its target on this point.
+            if (GUI.Button(new Rect(x, y + 2f * (h + 2f), w, h), Loc.T("Авиаудар", "Air strike")))
+            {
+                string message = AirEvents.Ask(_target);
+                _pending = false;
+                _status = message;
+                _statusUntil = Time.time + 8f;
+                RevivalPlugin.L.LogInfo("Map air strike: " + message);
+            }
+
             if (!string.IsNullOrEmpty(_status) && Time.time < _statusUntil)
-                GUI.Label(new Rect(x, y + h + 2f, 280f, 22f), _status);
+                GUI.Label(new Rect(x, y + 3f * (h + 2f), 420f, 44f), _status);
         }
     }
 
@@ -929,6 +967,8 @@ namespace NextDayRevival
         static Rect _fenster = new Rect(40f, 40f, 560f, 0f);
         static Vector2 _rollen;
         static string _menge = "";
+        static string _moneyAmount = "100000";
+        static string _moneyStatus = "";
         static string _status = "Bereit.";
         static bool _sessionGranted;
         static bool _godMode;
@@ -1170,6 +1210,19 @@ namespace NextDayRevival
 
         static void Inhalt(int id)
         {
+            GUILayout.Label(Loc.T("Деньги (только себе)", "Money (yourself only)"));
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("+100k")) GiveMoney("100000");
+            if (GUILayout.Button("+1M")) GiveMoney("1000000");
+            if (GUILayout.Button("+10M")) GiveMoney("10000000");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(Loc.T("Сумма:", "Amount:"), GUILayout.Width(70f));
+            _moneyAmount = GUILayout.TextField(_moneyAmount, 32, GUILayout.Width(150f));
+            if (GUILayout.Button(Loc.T("выдать себе", "give to myself"))) GiveMoney(_moneyAmount);
+            GUILayout.EndHorizontal();
+            if (_moneyStatus.Length > 0) GUILayout.Label(_moneyStatus);
+            GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Игрок-цель", "Target player"));
             GUILayout.BeginHorizontal();
             if (_players.Count == 0)
@@ -1262,22 +1315,50 @@ namespace NextDayRevival
             GUILayout.Label(Loc.T("случайная точка из редактора (Troop landings)",
                                   "random landing from the editor (Troop landings)"));
             GUILayout.EndHorizontal();
+            if (GUILayout.Button("Vehicle find status")) Melde(VehicleFinds.Report());
+            // N8: the vanilla condition. With the switch on, every spawn button
+            // below puts its vehicle down the way the world's own spawn points
+            // do (battery, spark plugs, key each 50 percent, a low tank);
+            // off, it comes ready as before. Convoys and F7/F9 never change.
+            GUILayout.BeginHorizontal();
+            VehicleCondition.SpawnFound = GUILayout.Toggle(VehicleCondition.SpawnFound,
+                Loc.T("спавн как найденный (ванильное состояние: АКБ/свечи/ключ 50%, мало топлива)",
+                      "spawn as found (vanilla condition: battery/plugs/key 50%, low fuel)"));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Spawn Ural", GUILayout.Width(123f)))
+                Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("ural")));
+            if (GUILayout.Button("Spawn T-72", GUILayout.Width(123f)))
+                Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("tank")));
+            if (GUILayout.Button("Spawn MTW (BTR)", GUILayout.Width(123f)))
+                Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("btr")));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // The vehicle within 15 m (a Mi-8 within 20 m first): what it has,
+            // and the two conditions put on it by hand for a test.
+            if (GUILayout.Button(Loc.T("ближайшая: состояние", "nearest: condition"), GUILayout.Width(150f)))
+                Melde(NearestCondition(0));
+            if (GUILayout.Button(Loc.T("ближайшая: как найденная", "nearest: as found"), GUILayout.Width(150f)))
+                Melde(NearestCondition(1));
+            if (GUILayout.Button(Loc.T("ближайшая: готова", "nearest: ready"), GUILayout.Width(150f)))
+                Melde(NearestCondition(2));
+            GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Spawn technical", GUILayout.Width(190f)))
-                Melde(Technical.SpawnInFront());
+                Melde(VehicleCondition.AsAdmin(() => Technical.SpawnInFront()));
             GUILayout.Label("In front of you (MG gun truck)");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             // The drivable howitzer has no key of its own: F4..F12 are all
             // taken. This button is its spawn, exactly as ArtyVehicle/Key says.
             if (GUILayout.Button("Spawn howitzer", GUILayout.Width(190f)))
-                Melde(ArtyVehicle.SpawnInFront());
+                Melde(VehicleCondition.AsAdmin(() => ArtyVehicle.SpawnInFront()));
             GUILayout.Label("In front of you (drivable 122 mm howitzer)");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             // Same as the howitzer: no free F-key, Gepard/Key is None by default.
             if (GUILayout.Button("Spawn Gepard", GUILayout.Width(190f)))
-                Melde(Gepard.SpawnInFront());
+                Melde(VehicleCondition.AsAdmin(() => Gepard.SpawnInFront()));
             GUILayout.Label(Gepard.OffNote() ?? "In front of you (35 mm anti-aircraft gun with radar)");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
@@ -1291,6 +1372,25 @@ namespace NextDayRevival
             GUILayout.Label("Ammunition belts for the Gepard into your inventory");
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
+            // The Katyusha comes with full rails, so its salvo can be tried at
+            // once; the rockets button below tests the reload.
+            if (GUILayout.Button("Spawn Katyusha", GUILayout.Width(190f)))
+                Melde(Katyusha.SpawnInFront());
+            GUILayout.Label(Katyusha.Enabled ? "In front of you (BM-13 rocket launcher, rails loaded - "
+                            + Katyusha.CfgFireKey.Value + " in the cab: map fire control)"
+                            : "[Katyusha] Enabled = false in the config");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Katyusha rockets x" + Katyusha.Capacity, GUILayout.Width(190f)))
+            {
+                string one;
+                GibItem(Katyusha.ItemId, Katyusha.Capacity, out one);
+                Melde(one);
+            }
+            GUILayout.Label("M-13 rockets into your inventory (" + Katyusha.CfgLoadKey.Value
+                            + " at a standing Katyusha loads them, one by one)");
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
             // Every PMN-2 this client knows, off the map on every client.
             if (GUILayout.Button("Clear AP mines", GUILayout.Width(190f)))
                 Melde(ApMine.ClearAll());
@@ -1300,7 +1400,7 @@ namespace NextDayRevival
             // Same both-ways press as the [PlayerHeli] spawn key: with an empty
             // machine of yours in reach it takes that one away again.
             if (GUILayout.Button("Spawn helicopter", GUILayout.Width(190f)))
-                Melde(PlayerHeli.SpawnInFront());
+                Melde(VehicleCondition.AsAdmin(() => PlayerHeli.SpawnInFront()));
             GUILayout.Label("In front of you (Mi-8 you can fly - "
                             + PlayerHeli.CfgBoardKey.Value + " to get in)");
             GUILayout.EndHorizontal();
@@ -1327,6 +1427,61 @@ namespace NextDayRevival
                             + (An2Bombs.Enabled ? "" : " - loading needs [PlayerAn2] Enabled and "
                                + "[Gameplay] An2Bombs; the ready An-2 switches both on"));
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // N2: frame cost of the NPC distance tiers at this spot (~28 s,
+            // hold still); the label is the live tier count until a result.
+            if (GUILayout.Button("NPC tier bench", GUILayout.Width(190f)))
+                Melde(NpcDistance.Bench());
+            GUILayout.Label(NpcDistance.Status());
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // N2b: frame cost of the far forest canopy at this spot (~14 s,
+            // on then off); the label is the live canopy state until a result.
+            if (GUILayout.Button("Far forest bench", GUILayout.Width(190f)))
+                Melde(FarForest.Bench());
+            GUILayout.Label(FarForest.Status());
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // N3: an NPC An-2 edge to edge over you, a target for every AA
+            // system (Revival.NpcAircraft.cs). A map point: right-click the map.
+            if (GUILayout.Button("Test flyover", GUILayout.Width(190f)))
+                Melde(Flyover.OverMe());
+            if (GUILayout.Button("Clear", GUILayout.Width(60f)))
+                Melde(Flyover.Clear());
+            GUILayout.Label("NPC An-2 from the map edge straight over you (hostile to all AA; "
+                            + "map right-click: Flyover here)");
+            GUILayout.EndHorizontal();
+            Flyover.Options();
+            // N6: what the 52-Ks make of it - fire direction, range, each
+            // gun's state (read-only; the flyover above is the target).
+            if (Flak.On)
+            {
+                List<FlakGunInfo> guns = Flak.Guns();
+                string line = "  52-K: " + (TowerRadar.On ? TowerRadar.TierName(TowerRadar.Tier) : "no radar")
+                    + ", range " + Flak.RangeMetres(TowerRadar.On && TowerRadar.Tier == 2).ToString("0") + " m" + (guns.Count == 0 ? ", no gun built yet" : "");
+                for (int i = 0; i < guns.Count; i++)
+                    line += "  |  " + guns[i].Id + " " + guns[i].State + " " + guns[i].CrewAlive + "/2";
+                GUILayout.Label(line);
+            }
+            GUILayout.BeginHorizontal();
+            // N9a: are the airfield and town loot points up, and what is the
+            // nearest one (docs/ai/tasks/n09a-east-loot-spots.md).
+            if (GUILayout.Button(Loc.T("лут востока: статус", "east loot: status"), GUILayout.Width(190f)))
+                Melde(Airfield.LootReport());
+            GUILayout.Label(Loc.T("точки лута аэродрома и городка, ближайшая к вам",
+                                  "Airfield and military town loot points, the nearest to you"));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // N11: an editor air event (Tu-95 carpet, An-2 paradrop) with its
+            // target moved onto you (Revival.AirEvents.cs). A map point: right-click the map.
+            if (GUILayout.Button("Trigger air event now", GUILayout.Width(190f)))
+                Melde(AirEvents.NowAtMe());
+            if (GUILayout.Button("Call off", GUILayout.Width(60f)))
+                Melde(AirEvents.Clear());
+            GUILayout.Label("the chosen event at your position: siren + radar, then bombers / paratroopers "
+                            + "(map right-click: Air strike here)");
+            GUILayout.EndHorizontal();
+            AirEvents.Options();
 
             GUILayout.Space(6f);
             GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));
@@ -1384,6 +1539,93 @@ namespace NextDayRevival
 
             if (GUILayout.Button(Loc.T("закрыть", "close"))) _offen = false;
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+        }
+
+        /// <summary>N8 admin tools on the nearest vehicle: 0 report, 1 as
+        /// found, 2 ready. A Mi-8 within 20 m is taken first, else the nearest
+        /// ground vehicle within 15 m.</summary>
+        static string NearestCondition(int what)
+        {
+            GameObject heli = PlayerHeli.NearestMachine(20f);
+            GameObject car = heli == null ? VehicleCondition.Nearest(15f) : null;
+            if (heli == null && car == null)
+                return Loc.T("рядом нет техники", "no vehicle nearby");
+            if (what != 0 && !RevivalTroopInsertion.MasterClient())
+                return Loc.T("только хост", "host only");
+            if (heli != null)
+            {
+                if (what == 1) HeliCondition.MakeFound(heli);
+                else if (what == 2) HeliCondition.MakeReady(heli);
+                return HeliCondition.Describe(heli);
+            }
+            if (what == 1) VehicleCondition.Found(car);
+            else if (what == 2) VehicleCondition.Ready(car);
+            // Fuel and parts arrive by RPC; the report shows this frame's values.
+            return VehicleCondition.Describe(car);
+        }
+        // Keep the native save and HUD path; never assign the obscured Money field.
+        static void GiveMoney(string text)
+        {
+            if (!RevivalPlugin.CfgAdmin.Value || !Zutritt()) return;
+            int amount;
+            if (!int.TryParse(text.Trim(), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out amount) || amount <= 0)
+            {
+                MoneyMessage(Loc.T("Введите целое число от 1 до 2147483647 (без разделителей).",
+                    "Enter a whole number from 1 to 2147483647 (digits only)."));
+                return;
+            }
+            try
+            {
+                Component inventory = InventarManager() as Component;
+                Type type = RevivalPlugin.TypeByName("PlayerStatisticsManager");
+                Component stats = inventory == null || type == null ? null : inventory.GetComponent(type);
+                MethodInfo viewGetter = stats == null ? null
+                    : AccessTools.PropertyGetter(stats.GetType(), "photonView");
+                object view = viewGetter == null ? null : viewGetter.Invoke(stats, null);
+                MethodInfo mine = view == null ? null : AccessTools.PropertyGetter(view.GetType(), "isMine");
+                if (stats == null || mine == null || !(bool)mine.Invoke(view, null)
+                    || Field(stats, "_generalStatistic") == null || Field(stats, "_backendManager") == null)
+                {
+                    MoneyMessage(Loc.T("Сначала войдите в мир и дождитесь загрузки персонажа.",
+                        "Enter the world and wait for your character to load first."));
+                    return;
+                }
+                MethodInfo get = AccessTools.Method(type, "GetPlayerMoney", Type.EmptyTypes, null);
+                MethodInfo add = AccessTools.Method(type, "AddPlayerMoney",
+                    new Type[] { typeof(int), typeof(bool), typeof(bool) }, null);
+                if (get == null || get.ReturnType != typeof(int) || add == null)
+                {
+                    MoneyMessage(Loc.T("API денег недоступен в этой версии игры.",
+                        "Money API unavailable in this game version."));
+                    return;
+                }
+                int before = (int)get.Invoke(stats, null);
+                if (before < 0 || (long)before + amount > int.MaxValue)
+                {
+                    MoneyMessage(Loc.T("Сумма превышает предел баланса; деньги не выданы.",
+                        "Amount exceeds the balance limit; no money given."));
+                    return;
+                }
+                // IL confirmed: update backend = true, show native reward message = true.
+                add.Invoke(stats, new object[] { amount, true, true });
+                int after = (int)get.Invoke(stats, null);
+                MoneyMessage(Loc.T("Выдано себе: +", "Given to yourself: +") + amount
+                    + Loc.T(". Баланс: ", ". Balance: ") + after
+                    + Loc.T(". Сохранение запрошено.", ". Save requested."));
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Admin money: " + ex);
+                MoneyMessage(Loc.T("Ошибка API денег. Проверьте баланс перед повтором; подробности в логе.",
+                    "Money API error. Check your balance before retrying; see log for details."));
+            }
+        }
+
+        static void MoneyMessage(string message)
+        {
+            _moneyStatus = message;
+            Melde(message);
         }
 
         static void Geben(ItemDef d)

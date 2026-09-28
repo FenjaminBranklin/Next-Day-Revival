@@ -537,6 +537,7 @@ namespace NextDayRevival
 
         static readonly string[] LevelRu = { "Выкл", "Низко", "Средне", "Высоко" };
         static readonly string[] LevelEn = { "Off", "Low", "Medium", "High" };
+        static readonly string[] FarRu = { "Выкл", "Низко", "Норма" };
         static readonly string[] HintRu = { "Выкл", "Авто", "Всегда" };
         static readonly string[] HintEn = { "Off", "Auto", "Always" };
 
@@ -549,6 +550,13 @@ namespace NextDayRevival
                 int lv = Fx.Level;
                 int nlv = GUILayout.Toolbar(lv, Loc.Lang() == 0 ? LevelRu : LevelEn);
                 if (nlv != lv) Fx.SetLevel(nlv);
+
+                GUILayout.Space(6f);
+                GUILayout.Label(Loc.T("Дальний лес (лес за дальностью прорисовки деревьев)",
+                                      "Far forest (forest past the tree draw distance)"));
+                int ff = FarForest.Level;
+                int nff = GUILayout.Toolbar(ff, Loc.Lang() == 0 ? FarRu : FarForest.Names);
+                if (nff != ff) FarForest.SetLevel(nff);
 
                 GUILayout.Space(6f);
                 GUILayout.Label(Loc.T("Анимации и эффекты", "Animations and effects"));

@@ -1752,7 +1752,7 @@ namespace NextDayRevival
         /// MapTools.Context gates on. Calling it from here is the one piece of
         /// this feature that has never been tried; it fails softly, and the
         /// player can always open the map himself.</summary>
-        static bool ShowMap(bool open)
+        internal static bool ShowMap(bool open)   // also the Katyusha's fire control
         {
             try
             {
@@ -1788,7 +1788,7 @@ namespace NextDayRevival
         /// there is no collider to hit (E-059) - which is precisely where a
         /// mortar is aimed. Returns false only when the cursor is off the map
         /// picture.</summary>
-        static bool MapPoint(Component texture, Camera cam, Vector2 world, out Vector3 point)
+        internal static bool MapPoint(Component texture, Camera cam, Vector2 world, out Vector3 point)
         {
             point = Vector3.zero;
             try
@@ -2546,6 +2546,10 @@ namespace NextDayRevival
         /// bombs (Revival.An2Bombs.cs) go off through exactly these rules -
         /// owner 0 on NPCs, vehicles on the master, players from the shooter
         /// and never one of his own faction.</summary>
+        /// <summary>N11: set around a Sweep by an NPC air strike, which is
+        /// nobody's faction - every player in the blast is hit.</summary>
+        internal static bool AnyFaction;
+
         internal static void Sweep(Vector3 point, bool shooter, float radius,
                                    float npcPeak, float vehiclePeak, float playerPeak,
                                    out int npcHits, out int vehicleHits, out int playerHits)
@@ -2638,7 +2642,9 @@ namespace NextDayRevival
                     // on either side the shot goes through: "unknown" is not
                     // "ours", and refusing every unreadable player would quietly
                     // turn the mortar into a blank.
-                    if (FactionShield.SameFactionAsLocal(go)) continue;
+                    // N11 air strikes (Revival.AirEvents.cs) belong to no player
+                    // faction: the master sweeps every player in the blast.
+                    if (!AnyFaction && FactionShield.SameFactionAsLocal(go)) continue;
                     float dmg = peak * Falloff(d, radius);
                     if (dmg < 1f) continue;
                     if (PlayerDamage(go, dmg, point)) playerHits++;
@@ -3262,6 +3268,8 @@ namespace NextDayRevival
             // A 152 mm gun is heard across the valley, not across the yard.
             public static void Thump(Vector3 at) { Play(at, Clip(true), 60f, 1600f); }
             public static void Whistle(Vector3 at) { Play(at, Clip(false), 25f, 500f); }
+            /// <summary>The report itself, for the N11 bomb sound pool.</summary>
+            internal static AudioClip ThumpClip() { return Clip(true); }
 
             /// <summary>tanh as a float - Mathf has none. The report is summed
             /// well past full scale on purpose (that is where its loudness comes

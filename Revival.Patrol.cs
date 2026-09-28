@@ -7415,7 +7415,7 @@ namespace NextDayRevival
         /// </summary>
         static bool MapLayoutChanged(Rect full, Vector2 world, float alpha)
         {
-            int hash = 17;
+            int hash = ShowPatrolMap ? 19 : 17;
             for (int i = 0; i < _order.Count; i++)
             {
                 Route r;
@@ -7458,8 +7458,14 @@ namespace NextDayRevival
             MapLabels.Hide();
         }
 
+        // Admin access is independent of whether the F8 window is open.
+        static bool ShowPatrolMap
+        {
+            get { return RevivalPlugin.CfgAdmin != null && RevivalPlugin.CfgAdmin.Value && Admin.HasAccess; }
+        }
+
         /// <summary>
-        /// Draws every recorded route as one faction-coloured dashed line ALONG
+        /// Admins see recorded patrol routes as faction-coloured dashed lines ALONG
         /// the road it drives, running down the middle of that road. A convoy
         /// route is drawn only while a convoy is actually out on it. Editing and
         /// deletion stay in the existing F4 route editor, whose confirmation
@@ -7557,7 +7563,7 @@ namespace NextDayRevival
                                    ref hoverText, ref hoverAt, ref hoverColor);
 
                 float f4 = Hints.Alpha("patrol.f4", "map");   // NDR P9: [Hints]
-                if (f4 > 0f)
+                if (f4 > 0f && ShowPatrolMap)
                 {
                     GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f * f4);
                     GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
@@ -7636,7 +7642,7 @@ namespace NextDayRevival
                     // or the toxic swamp is what this stops - those patrols
                     // are not there, and FitsScene below cannot tell, because
                     // two surface maps are of a similar size. See MapScene.
-                    if (!route.Here) continue;
+                    if (!route.Here || (!route.IsConvoy && !ShowPatrolMap)) continue;
 
                     // A convoy route is an EVENT, not a standing road on
                     // the map: it is drawn only while a convoy is actually
@@ -7741,6 +7747,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || !route.MapInked || route.MapProj == null) continue;
+                if (!route.IsConvoy && !ShowPatrolMap) continue;
                 if (route.IsConvoy != (pass == 0)) continue;
                 if (!route.MapBounds.Contains(mouseRel)) continue;
                 if (!NearPolyline(route.MapProj, mouseRel, RouteHoverPx)) continue;
@@ -7786,7 +7793,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || route.P.Count < 1) continue;
-                if (!route.Here) continue;          // same region gate as the ring loop
+                if (!route.Here || (!route.IsConvoy && !ShowPatrolMap)) continue;          // same region gate as the ring loop
                 if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
                 int wantedPass = labels != null && labels.Pinned(route.Name)
                     ? 0 : (route.IsConvoy ? 1 : 2);
@@ -7832,6 +7839,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || !route.MapNamed) continue;
+                if (!route.IsConvoy && !ShowPatrolMap) continue;
                 bool overName = labels != null && labels.Keep(route.Name, mouseAbs);
                 if (overMap && (overName
                         || (mouseRel - route.MapAnchor).sqrMagnitude < 196f))
@@ -8507,6 +8515,11 @@ namespace NextDayRevival
 
             public static void Tick()
             {
+                if (!ShowPatrolMap)
+                {
+                    if (_offen) { _offen = false; _fokusLoesen = true; CursorZurueck(); }
+                    return;
+                }
                 if (!Input.GetKeyDown(_editKey)) return;
                 _offen = !_offen;
                 if (_offen) Load(false);
@@ -8538,7 +8551,7 @@ namespace NextDayRevival
                     GUIUtility.keyboardControl = 0;
                     GUIUtility.hotControl = 0;
                 }
-                if (!_offen || !RevivalPlugin.CfgPatrol.Value) return;
+                if (!_offen || !RevivalPlugin.CfgPatrol.Value || !ShowPatrolMap) return;
 
                 CursorTracker.Restoring = true;
                 try

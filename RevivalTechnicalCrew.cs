@@ -1219,6 +1219,7 @@ namespace NextDayRevival
             catch { return ai.GetComponent<NavMeshAgent>(); }
         }
 
+        static readonly object[] PauseArgs = { 1.4f };
         static MethodInfo _mClearIntentions, _mPauseTime;
         static Type _mQuietOwner;
 
@@ -1244,7 +1245,7 @@ namespace NextDayRevival
             try
             {
                 if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
-                if (_mPauseTime != null) _mPauseTime.Invoke(ai, new object[] { 1.4f });
+                if (_mPauseTime != null) _mPauseTime.Invoke(ai, PauseArgs);   // shared, Invoke copies it (n01 perf)
             }
             catch { }
         }
@@ -1266,9 +1267,9 @@ namespace NextDayRevival
         static bool _clipsLogged;
         static MethodInfo _sample;
         static PropertyInfo _clipLength;
+        static MethodInfo _clipLengthGet;
         static FieldInfo _fAnim;
         static Type _fAnimOwner;
-        static readonly object[] _sampleArgs = new object[2];
 
         /// <summary>
         /// Pose one cab man SITTING, this frame, after the game's animation ran.
@@ -1305,17 +1306,16 @@ namespace NextDayRevival
                 float laenge = 0f;
                 if (_clipLength != null)
                 {
-                    object v = _clipLength.GetValue(clip, null);
-                    if (v is float) laenge = (float)v;
+                    if (_clipLengthGet == null) _clipLengthGet = _clipLength.GetGetMethod();
+                    laenge = FastCall.Float(_clipLengthGet, clip);
                 }
                 // Each man on his own phase of the loop: two men breathing in
                 // step read as one animation copied twice.
                 float t = laenge > 0.01f
                     ? Mathf.Repeat(Time.time + (ai.GetInstanceID() & 255) * 0.13f, laenge)
                     : 0f;
-                _sampleArgs[0] = model;
-                _sampleArgs[1] = t;
-                _sample.Invoke(clip, _sampleArgs);
+                // No boxed float per man per frame (n01 perf).
+                FastCall.ObjFloat(_sample, clip, model, t);
             }
             catch { }
         }

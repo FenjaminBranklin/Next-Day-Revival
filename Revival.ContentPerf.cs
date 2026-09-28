@@ -40,12 +40,20 @@
 //                not readable stays as it is).
 // One log line per scene: "ContentPerf: EastAfH1 ...".
 //
+// n01 perf: the pass above used to run inside ONE frame per scene (42 ms peak
+// in Kevin's 6.59.0 F6 at the airfield, the MergeBoxes pair loop and the
+// static batching the heaviest parts). It is now an iterator stepped from
+// Tick with a SliceMs budget a frame: the same steps in the same order with
+// the same numbers, spread over as many frames as it takes. A scene unloaded
+// mid-pass ends its job; Occlusion keeps running meanwhile.
+//
 // Measure before/after with [Research] FrameBench, FrameBenchSpots = airfield,
 // once with ContentPerf off and once on (read at load: re-enter the world).
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments. ASCII only.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using BepInEx.Configuration;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -132,7 +140,8 @@ namespace NextDayRevival
             try
             {
                 float now = Time.realtimeSinceStartup;
-                if (now >= _scanAt)
+                if (_run != null) Step();
+                else if (now >= _scanAt)
                 {
                     _scanAt = now + 1f;
                     Scan();
@@ -146,11 +155,59 @@ namespace NextDayRevival
             }
         }
 
+        // ------------------------------------------------------------ the job
+
+        const double SliceMs = 1.5;
+        static IEnumerator<bool> _run;
+        static Scene _runScene;
+        static string _runName;
+        static int _runFrames;
+        static double _runMs;
+        static long _sliceStart, _sliceBudget;
+
+        sealed class SceneGone : Exception { }
+
+        /// <summary>True when this frame's slice is spent: the caller yields.</summary>
+        static bool Over()
+        {
+            return Stopwatch.GetTimestamp() - _sliceStart > _sliceBudget;
+        }
+
+        /// <summary>After a yield: the scene may have been unloaded meanwhile.</summary>
+        static void Still()
+        {
+            if (!_runScene.isLoaded) throw new SceneGone();
+        }
+
+        static void Start(Scene s, Profile p)
+        {
+            _runScene = s;
+            _runName = s.name;
+            _runFrames = 0;
+            _runMs = 0;
+            _run = Apply(s, p).GetEnumerator();
+            Step();
+        }
+
+        static void Step()
+        {
+            _sliceStart = Stopwatch.GetTimestamp();
+            _sliceBudget = (long)(SliceMs * Stopwatch.Frequency / 1000.0);
+            _runFrames++;
+            bool more;
+            try { more = _run.MoveNext(); }
+            catch (SceneGone) { Log(_runName + ": unloaded mid-pass - stopped."); more = false; }
+            catch (Exception ex) { Log(_runName + ": failed: " + ex); more = false; }
+            _runMs += (Stopwatch.GetTimestamp() - _sliceStart) * 1000.0 / Stopwatch.Frequency;
+            if (!more) _run = null;
+        }
+
         // ------------------------------------------------------------ per scene
 
         static void Scan()
         {
-            HashSet<int> live = new HashSet<int>();
+            HashSet<int> live = _live;                          // no garbage once a second
+            live.Clear();
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
                 Scene s = SceneManager.GetSceneAt(i);
@@ -160,14 +217,17 @@ namespace NextDayRevival
                 Profile p = ProfileOf(s.name);
                 if (p == null) continue;
                 _done.Add(s.GetHashCode());
-                try { Apply(s, p); }
-                catch (Exception ex) { Log(s.name + ": failed: " + ex); }
+                Start(s, p);
                 return;                                         // one scene per scan
             }
-            _done.RemoveWhere(delegate(int h) { return !live.Contains(h); });
-            _interiors.RemoveAll(delegate(Interior it) { return !live.Contains(it.Scene); });
+            _done.RemoveWhere(_notLive);
+            _interiors.RemoveAll(_interiorGone);
             if (_next >= _interiors.Count) _next = 0;
         }
+
+        static readonly HashSet<int> _live = new HashSet<int>();
+        static readonly Predicate<int> _notLive = delegate(int h) { return !_live.Contains(h); };
+        static readonly Predicate<Interior> _interiorGone = delegate(Interior it) { return !_live.Contains(it.Scene); };
 
         static Profile ProfileOf(string scene)
         {
@@ -177,41 +237,65 @@ namespace NextDayRevival
             return null;
         }
 
-        static void Apply(Scene s, Profile p)
+        /// <summary>The counters of one pass (iterators take no out/ref).</summary>
+        sealed class Counts
         {
-            float t0 = Time.realtimeSinceStartup;
+            internal int Pulled, Groups, Tightened, Before, After, Interiors, InteriorRenderers, Batched;
+        }
+
+        static IEnumerable<bool> Apply(Scene s, Profile p)
+        {
+            _tan = TanHalfFovNow();
+            Counts n = new Counts();
             GameObject[] roots = s.GetRootGameObjects();
             List<Renderer> all = new List<Renderer>();
-            foreach (GameObject r in roots) all.AddRange(r.GetComponentsInChildren<Renderer>());
+            foreach (GameObject r in roots)
+            {
+                all.AddRange(r.GetComponentsInChildren<Renderer>());
+                if (Over()) { yield return true; Still(); }
+            }
             Dictionary<Renderer, Bounds> rb = new Dictionary<Renderer, Bounds>();
-            foreach (Renderer r in all) rb[r] = r.bounds;
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (all[i] != null) rb[all[i]] = all[i].bounds;
+                if (Over()) { yield return true; Still(); }
+            }
+            // Destroyed between the frames: out before anything reads them.
+            for (int i = all.Count - 1; i >= 0; i--) if (!rb.ContainsKey(all[i])) all.RemoveAt(i);
 
             int shadows = 0;
             foreach (Renderer r in all)
-                if (Size(rb[r]) < p.ShadowMaxU && r.shadowCastingMode != ShadowCastingMode.Off)
+            {
+                if (r != null && Size(rb[r]) < p.ShadowMaxU && r.shadowCastingMode != ShadowCastingMode.Off)
                 {
                     r.shadowCastingMode = ShadowCastingMode.Off;
                     shadows++;
                 }
+                if (Over()) { yield return true; Still(); }
+            }
 
-            int pulled, groups, tightened;
-            Cull(roots, all, rb, p, out pulled, out groups, out tightened);
-            int before, after;
-            MergeBoxes(s, roots, p, out before, out after);
-            int nIn = 0, nInR = 0;
-            foreach (GameObject r in roots) FindShells(r.transform, rb, p, s.GetHashCode(), ref nIn, ref nInR);
-            int batched = p.Batch ? Batch(roots) : 0;
+            foreach (bool y in Cull(roots, all, rb, p, n)) yield return y;
+            foreach (bool y in MergeBoxes(s, roots, p, n)) yield return y;
+            foreach (GameObject r in roots)
+                if (r != null)
+                    foreach (bool y in FindShells(r.transform, rb, p, s.GetHashCode(), n)) yield return y;
+            if (p.Batch) foreach (bool y in Batch(roots, n)) yield return y;
 
             Log(s.name + " (" + p.Name + "): " + all.Count + " renderers, " + shadows + " stop casting shadows, "
-                + groups + " cull groups added (" + pulled + " renderers out of building LODGroups, " + tightened
-                + " authored culls pulled in), box colliders " + before + " -> " + after + ", " + nIn
-                + " interior(s) with " + nInR + " renderers, " + batched + " renderers statically batched; "
-                + ((Time.realtimeSinceStartup - t0) * 1000f).ToString("F0") + " ms.");
+                + n.Groups + " cull groups added (" + n.Pulled + " renderers out of building LODGroups, " + n.Tightened
+                + " authored culls pulled in), box colliders " + n.Before + " -> " + n.After + ", " + n.Interiors
+                + " interior(s) with " + n.InteriorRenderers + " renderers, " + n.Batched + " renderers statically batched; "
+                + (_runMs + (Stopwatch.GetTimestamp() - _sliceStart) * 1000.0 / Stopwatch.Frequency).ToString("F0")
+                + " ms over " + _runFrames + " frame(s).");
         }
 
         static float Size(Bounds b) { return Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z)); }
 
-        static float TanHalfFov()
+        static float _tan = 0.57735f;
+
+        static float TanHalfFov() { return _tan; }
+
+        static float TanHalfFovNow()
         {
             Camera c = Camera.main;
             float fov = c != null ? c.fieldOfView : 60f;
@@ -236,16 +320,18 @@ namespace NextDayRevival
             return lg.size * Mathf.Max(Mathf.Abs(s.x), Mathf.Max(Mathf.Abs(s.y), Mathf.Abs(s.z)));
         }
 
-        static void Cull(GameObject[] roots, List<Renderer> all, Dictionary<Renderer, Bounds> rb, Profile p,
-                         out int pulled, out int groups, out int tightened)
+        static IEnumerable<bool> Cull(GameObject[] roots, List<Renderer> all, Dictionary<Renderer, Bounds> rb, Profile p,
+                                      Counts n)
         {
-            pulled = groups = tightened = 0;
+            int pulled = 0, groups = 0, tightened = 0;
             // renderer -> the distance its LODGroup last shows it; -1 = stays in its group
             Dictionary<Renderer, float> inGroup = new Dictionary<Renderer, float>();
             List<LODGroup> lgs = new List<LODGroup>();
-            foreach (GameObject r in roots) lgs.AddRange(r.GetComponentsInChildren<LODGroup>());
+            foreach (GameObject r in roots) if (r != null) lgs.AddRange(r.GetComponentsInChildren<LODGroup>());
             foreach (LODGroup lg in lgs)
             {
+                if (Over()) { yield return true; Still(); }
+                if (lg == null) continue;
                 LOD[] lods = lg.GetLODs();
                 if (lods.Length == 0) continue;
                 float ws = WorldSize(lg);
@@ -303,6 +389,7 @@ namespace NextDayRevival
             List<Renderer> free = new List<Renderer>();
             foreach (Renderer r in all)
             {
+                if (r == null) continue;
                 float far;
                 if (!inGroup.TryGetValue(r, out far)) free.Add(r);
                 else if (far > 0f) { free.Add(r); pulled++; }
@@ -311,18 +398,26 @@ namespace NextDayRevival
             Dictionary<Transform, Bounds> tb = new Dictionary<Transform, Bounds>();
             HashSet<Transform> hasLod = new HashSet<Transform>();
             foreach (LODGroup lg in lgs)
-                for (Transform t = lg.transform; t != null; t = t.parent) hasLod.Add(t);
+                if (lg != null)
+                    for (Transform t = lg.transform; t != null; t = t.parent) hasLod.Add(t);
+            if (Over()) { yield return true; Still(); }
             foreach (Renderer r in all)
+            {
+                if (Over()) { yield return true; Still(); }
+                if (r == null) continue;
                 for (Transform t = r.transform; t != null; t = t.parent)
                 {
                     Bounds b;
                     if (tb.TryGetValue(t, out b)) { b.Encapsulate(rb[r]); tb[t] = b; }
                     else tb[t] = rb[r];
                 }
+            }
 
             Dictionary<Transform, List<Renderer>> pieces = new Dictionary<Transform, List<Renderer>>();
             foreach (Renderer r in free)
             {
+                if (Over()) { yield return true; Still(); }
+                if (r == null) continue;
                 if (hasLod.Contains(r.transform)) continue;       // a LODGroup on it or below: leave it
                 Transform piece = r.transform;
                 while (piece.parent != null && piece.parent.parent != null && !hasLod.Contains(piece.parent)
@@ -334,6 +429,8 @@ namespace NextDayRevival
             }
             foreach (KeyValuePair<Transform, List<Renderer>> kv in pieces)
             {
+                if (Over()) { yield return true; Still(); }
+                if (kv.Key == null) continue;
                 Bounds b = rb[kv.Value[0]];
                 float limit = float.MaxValue;
                 foreach (Renderer r in kv.Value)
@@ -354,6 +451,9 @@ namespace NextDayRevival
                 lg.SetLODs(one);
                 groups++;
             }
+            n.Pulled = pulled;
+            n.Groups = groups;
+            n.Tightened = tightened;
         }
 
         // ------------------------------------------------------------ colliders
@@ -366,15 +466,18 @@ namespace NextDayRevival
             public bool Gone;
         }
 
-        static void MergeBoxes(Scene s, GameObject[] roots, Profile p, out int before, out int after)
+        static IEnumerable<bool> MergeBoxes(Scene s, GameObject[] roots, Profile p, Counts n)
         {
-            before = after = 0;
+            int before = 0, after = 0;
             Dictionary<string, List<Span>> groups = new Dictionary<string, List<Span>>();
             Dictionary<string, Quaternion> rots = new Dictionary<string, Quaternion>();
             foreach (GameObject root in roots)
+            {
+                if (root == null) continue;
                 foreach (BoxCollider bc in root.GetComponentsInChildren<BoxCollider>())
                 {
-                    if (!bc.enabled || bc.isTrigger || bc.attachedRigidbody != null) continue;
+                    if (Over()) { yield return true; Still(); }
+                    if (bc == null || !bc.enabled || bc.isTrigger || bc.attachedRigidbody != null) continue;
                     before++;
                     Transform t = bc.transform;
                     Quaternion q = t.rotation;
@@ -397,6 +500,7 @@ namespace NextDayRevival
                     if (!groups.TryGetValue(key, out l)) groups[key] = l = new List<Span>();
                     l.Add(sp);
                 }
+            }
             after = before;
             foreach (KeyValuePair<string, List<Span>> kv in groups)
             {
@@ -408,6 +512,7 @@ namespace NextDayRevival
                     changed = false;
                     for (int i = 0; i < a.Length; i++)
                     {
+                        if (Over()) { yield return true; Still(); }
                         if (a[i].Gone) continue;
                         for (int j = 0; j < a.Length; j++)
                         {
@@ -425,9 +530,11 @@ namespace NextDayRevival
                 Quaternion q = rots[kv.Key];
                 for (int i = 0; i < a.Length; i++)
                 {
+                    if (Over()) { yield return true; Still(); }
                     if (a[i].Gone) { UnityEngine.Object.Destroy(a[i].Box); after--; continue; }
                     if (a[i].Members < 2) continue;
                     BoxCollider src = a[i].Box;
+                    if (src == null) continue;
                     GameObject g = new GameObject("MergedBoxes_" + src.gameObject.name);
                     SceneManager.MoveGameObjectToScene(g, s);
                     g.layer = src.gameObject.layer;
@@ -440,6 +547,8 @@ namespace NextDayRevival
                     UnityEngine.Object.Destroy(src);
                 }
             }
+            n.Before = before;
+            n.After = after;
         }
 
         /// <summary>The union of two boxes of one frame when it is a box (or one
@@ -465,19 +574,25 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ interiors
 
-        static void FindShells(Transform n, Dictionary<Renderer, Bounds> rb, Profile p, int scene, ref int count, ref int rend)
+        static IEnumerable<bool> FindShells(Transform n, Dictionary<Renderer, Bounds> rb, Profile p, int scene, Counts cn)
         {
+            if (Over()) { yield return true; Still(); }
+            if (n == null) yield break;
             Renderer[] rs = n.GetComponentsInChildren<Renderer>();
-            if (rs.Length == 0) return;
+            if (rs.Length == 0) yield break;
             Bounds all = rb.ContainsKey(rs[0]) ? rb[rs[0]] : rs[0].bounds;
             foreach (Renderer r in rs) all.Encapsulate(rb.ContainsKey(r) ? rb[r] : r.bounds);
             float w = Mathf.Min(all.size.x, all.size.z), wmax = Mathf.Max(all.size.x, all.size.z);
             if (wmax > p.ShellMaxU)
             {
-                foreach (Transform c in n) FindShells(c, rb, p, scene, ref count, ref rend);
-                return;
+                // The children as they are now (the list stays put across yields).
+                Transform[] kids = new Transform[n.childCount];
+                for (int i = 0; i < kids.Length; i++) kids[i] = n.GetChild(i);
+                foreach (Transform c in kids)
+                    foreach (bool y in FindShells(c, rb, p, scene, cn)) yield return y;
+                yield break;
             }
-            if (w < p.ShellMinU || all.size.y < p.ShellMinHeightU) return;
+            if (w < p.ShellMinU || all.size.y < p.ShellMinHeightU) yield break;
             // the shell: the widest solid collider that covers most of the footprint
             Bounds shell = new Bounds();
             bool found = false;
@@ -489,11 +604,11 @@ namespace NextDayRevival
                 if (!found) { shell = b; found = true; }
                 else shell.Encapsulate(b);
             }
-            if (!found) return;
+            if (!found) yield break;
             // the top of the shell: the renderers' top when the shell collider is a floor or pad
             if (shell.max.y < all.max.y - p.InsetU)
                 shell.SetMinMax(shell.min, new Vector3(shell.max.x, all.max.y, shell.max.z));
-            if (shell.size.y < p.ShellMinHeightU) return;
+            if (shell.size.y < p.ShellMinHeightU) yield break;
             Vector3 lo = shell.min + new Vector3(p.InsetU, 0f, p.InsetU), hi = shell.max - Vector3.one * p.InsetU;
             float big = 0.6f * Mathf.Min(shell.size.x, shell.size.z);
             List<Renderer> inner = new List<Renderer>();
@@ -504,7 +619,7 @@ namespace NextDayRevival
                 if (b.min.x < lo.x || b.min.z < lo.z || b.max.x > hi.x || b.max.z > hi.z || b.max.y > hi.y) continue;
                 inner.Add(r);
             }
-            if (inner.Count < 3) return;
+            if (inner.Count < 3) yield break;
             Interior it = new Interior();
             it.Name = n.name;
             it.Shell = shell;
@@ -521,8 +636,8 @@ namespace NextDayRevival
                         pts.Add(new Vector3(Mathf.Lerp(lo.x, hi.x, x), Mathf.Lerp(shell.min.y, hi.y, y), Mathf.Lerp(lo.z, hi.z, z)));
             it.Points = pts.ToArray();
             _interiors.Add(it);
-            count++;
-            rend += inner.Count;
+            cn.Interiors++;
+            cn.InteriorRenderers += inner.Count;
         }
 
         static void Occlusion(float now)
@@ -562,26 +677,45 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ batching
 
-        static int Batch(GameObject[] roots)
+        // One Combine call per root was the longest single step (every mesh of
+        // a building bundle in one frame); a root with more than this many
+        // pieces is combined in runs of it, each its own frame at most.
+        const int BatchRun = 64;
+
+        static IEnumerable<bool> Batch(GameObject[] roots, Counts cn)
         {
             int n = 0;
             foreach (GameObject root in roots)
             {
+                if (root == null) continue;
                 List<GameObject> gos = new List<GameObject>();
                 foreach (MeshRenderer mr in root.GetComponentsInChildren<MeshRenderer>())
                 {
-                    if (mr.isPartOfStaticBatch) continue;
+                    if (Over()) { yield return true; Still(); }
+                    if (mr == null || mr.isPartOfStaticBatch) continue;
                     MeshFilter mf = mr.GetComponent<MeshFilter>();
                     if (mf == null || mf.sharedMesh == null || !mf.sharedMesh.isReadable) continue;
                     if (mr.sharedMaterials.Length > mf.sharedMesh.subMeshCount) continue;
                     gos.Add(mr.gameObject);
                 }
                 if (gos.Count < 2) continue;
-                StaticBatchingUtility.Combine(gos.ToArray(), root);
-                n += gos.Count;
+                for (int at = 0; at < gos.Count; )
+                {
+                    if (at > 0 && Over()) { yield return true; Still(); }
+                    int len = gos.Count - at;
+                    if (len > BatchRun) len = len - BatchRun == 1 ? BatchRun + 1 : BatchRun;   // never a lone last piece
+                    List<GameObject> run = gos.GetRange(at, len);
+                    at += len;
+                    run.RemoveAll(_gone);
+                    if (run.Count < 2) continue;
+                    StaticBatchingUtility.Combine(run.ToArray(), root);
+                    n += run.Count;
+                }
             }
-            return n;
+            cn.Batched = n;
         }
+
+        static readonly Predicate<GameObject> _gone = delegate(GameObject g) { return g == null; };
 
         static void Log(string s) { RevivalPlugin.L.LogInfo("ContentPerf: " + s); }
     }

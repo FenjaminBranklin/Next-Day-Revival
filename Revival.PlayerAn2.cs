@@ -74,6 +74,7 @@ using System.Text;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace NextDayRevival
 {
@@ -250,6 +251,9 @@ namespace NextDayRevival
             RevivalPlugin.L.LogWarning("PlayerAn2: [PlayerAn2] Enabled = false - switched on for this session by the admin spawn.");
             return "[PlayerAn2] Enabled = false in the config - switched on for this session. ";
         }
+
+        /// <summary>ForceOn for the NPC flights (Revival.NpcAircraft.cs).</summary>
+        internal static string EnsureOn() { return ForceOn(); }
 
         static float F(ConfigEntry<float> e, float fallback)
         {
@@ -1270,6 +1274,52 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>An NPC aeroplane (Revival.NpcAircraft.cs), master only: the
+        /// carrier with the caller's instantiation data (index 0 must be
+        /// Marker, 1 the fuel), no repair mask, set in the air at once.</summary>
+        internal static GameObject BuildNpc(Vector3 at, Quaternion rot, object[] data)
+        {
+            if (data == null || data.Length < 2 || !An2Model.Load() || !LookUp()) return null;
+            try
+            {
+                Net.EnsureHooked();
+                ParameterInfo[] ps = _instantiate.GetParameters();
+                object group = Convert.ChangeType(0, ps[3].ParameterType);
+                GameObject go = _instantiate.Invoke(null, new object[] { Prefab, at, rot, group, data })
+                    as GameObject;
+                if (go == null)
+                {
+                    RevivalPlugin.L.LogWarning("PlayerAn2: Photon returned null for an NPC flight - not in a room?");
+                    return null;
+                }
+                Prepare(go);
+                Idle(go);
+                go.transform.position = at;
+                go.transform.rotation = rot;
+                RevivalPlugin.L.LogInfo("PlayerAn2: NPC An-2 " + ViewId(go) + " at " + at.ToString("0") + ".");
+                return go;
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerAn2: NPC spawn failed - "
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                return null;
+            }
+        }
+
+        /// <summary>Master: an NPC aeroplane at the end of its path, gone on every client.</summary>
+        internal static void RemoveNpc(GameObject go)
+        {
+            if (go == null || !RevivalTroopInsertion.MasterClient()) return;
+            int view = ViewId(go);
+            Forget(go);
+            HeliFlight.NetDestroy(go);
+            RevivalPlugin.L.LogInfo("PlayerAn2: NPC An-2 " + view + " left the map.");
+        }
+
+        /// <summary>Shot down and going down, or a burning wreck.</summary>
+        internal static bool Down(GameObject go) { return Burning(go) || Gliding(go); }
+
         static void Remove(GameObject go, bool say)
         {
             if (go == null) return;
@@ -1290,14 +1340,32 @@ namespace NextDayRevival
         static int Alive()
         {
             int n = 0;
-            for (int i = 0; i < _all.Count; i++) if (_all[i] != null) n++;
+            // An NPC flyover is not the apron's aeroplane (Revival.NpcAircraft.cs).
+            for (int i = 0; i < _all.Count; i++) if (_all[i] != null && !NpcAircraft.Is(_all[i])) n++;
             return n;
         }
 
         // ------------------------------------------------ the greybox stand-in
 
         static GameObject _standIn;
-        static float _nextStandIn;
+        static float _nextStandIn, _nextStandInSearch;
+        const string StandInScene = "EastAirfield";          // east_airfield.json "scene"
+        static readonly SceneSweep _standInSweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _standInVisit = StandInVisit;
+
+        static bool StandInVisit(Transform t, string name)
+        {
+            // GameObject.Find's answer: the first ACTIVE object of that name.
+            if (_standIn == null && name == StandInName && t.gameObject.activeInHierarchy) _standIn = t.gameObject;
+            return _standIn == null;
+        }
+
+        static void StandInStep()
+        {
+            if (!_standInSweep.Step(0.5, _standInVisit) && _standIn == null) return;
+            _standInSweep.Cancel();
+            if (_standIn != null) _nextStandIn = 0f;         // hide it at once
+        }
 
         /// <summary>The airfield greybox carries a static An-2 stand-in on the
         /// same stand. While a flyable An-2 exists it is hidden (it would be a
@@ -1305,12 +1373,25 @@ namespace NextDayRevival
         /// back.</summary>
         static void StandIn()
         {
+            if (_standInSweep.Active) { StandInStep(); return; }
             if (Time.time < _nextStandIn) return;
             _nextStandIn = Time.time + 2f;
             try
             {
                 bool any = Alive() > 0;
-                if (_standIn == null && any) _standIn = GameObject.Find(StandInName);
+                if (_standIn == null && any && Time.time >= _nextStandInSearch)
+                {
+                    // n01 perf: GameObject.Find walked every object of every
+                    // scene every 2 s while no stand-in was found (another map,
+                    // the tile not loaded) - a PlayerAn2.Tick peak. Now a
+                    // sliced walk over the airfield greybox scene, again 10 s
+                    // after one that found nothing.
+                    _nextStandInSearch = Time.time + 10f;
+                    if (!SceneManager.GetSceneByName(StandInScene).isLoaded) return;
+                    _standInSweep.Begin(StandInScene);
+                    StandInStep();
+                    return;
+                }
                 if (_standIn == null) return;
                 if (_standIn.activeSelf == any)
                 {
@@ -1542,6 +1623,14 @@ namespace NextDayRevival
                 Hint(Loc.T("Самолёт подбит!", "You are hit - the aeroplane is going down!"), 5f);
                 Abandon(go, _vel, _rot, true);
             }
+            else if (RevivalTroopInsertion.MasterClient() && NpcAircraft.Is(go))
+            {
+                // An NPC aeroplane is flown by the master (Revival.NpcAircraft.cs):
+                // it goes down at once with the speed and heading of its path.
+                Vector3 vel;
+                if (!NpcAircraft.Velocity(go, out vel)) vel = go.transform.forward * 30f;
+                Abandon(go, vel, go.transform.rotation, true);
+            }
             else if (view == 0) Abandon(go, go.transform.forward * 30f, go.transform.rotation, true);
             else if (RevivalTroopInsertion.MasterClient() && !_shotDown.ContainsKey(view))
                 _shotDown[view] = Time.time + 1.5f;
@@ -1586,7 +1675,7 @@ namespace NextDayRevival
             if (go == null || Burning(go)) return;
             try
             {
-                _burning[go] = Time.time + Mathf.Max(5f, F(CfgWreckSeconds, 180f));
+                _burning[go] = Time.time + Mathf.Max(5f, AirEvents.WreckSeconds(go, F(CfgWreckSeconds, 180f)));
                 An2Repair.Wrecked(go);
                 An2Glide glide = go.GetComponent<An2Glide>();
                 if (glide != null) UnityEngine.Object.Destroy(glide);
@@ -1614,6 +1703,7 @@ namespace NextDayRevival
                 anchor.transform.localPosition = new Vector3(-2.5f, 0.6f, -8.5f);
                 if (!FireEffect.SpawnHeliFire(anchor)) FireEffect.SpawnWreck(go, false);
                 HeliCrashSound.Play(where);
+                AirEvents.Burned(go);               // N11: the Tu-95 wreck, its loot
             }
             catch (Exception ex)
             {
@@ -1866,6 +1956,8 @@ namespace NextDayRevival
                     : Mathf.Clamp01(F(CfgStartFuel, 0.6f)) * F(CfgFuelCapacity, 1200f);
                 bool built = An2Model.Build(go.transform, vis);
                 An2Repair.Prepared(go, data);
+                NpcAircraft.Prepared(go, data);     // an NPC flight's path, every client
+                AirEvents.Prepared(go, data);       // N11: a Tu-95 bomber on this carrier
 
                 if (_tBox == null) _tBox = RevivalPlugin.TypeByName("BoxCollider");
                 if (_tBox != null)
@@ -1924,7 +2016,8 @@ namespace NextDayRevival
             for (int i = 0; i < _all.Count; i++)
             {
                 GameObject go = _all[i];
-                if (go == null || Burning(go) || Gliding(go)) continue;
+                // NPC aircraft (Revival.NpcAircraft.cs) are nobody's to board.
+                if (go == null || Burning(go) || Gliding(go) || NpcAircraft.Is(go)) continue;
                 // Measured from the middle of the fuselage, not the axle.
                 Vector3 c = go.transform.position + go.transform.rotation * (new Vector3(0f, 1.5f, -2f) * K);
                 float d = Vector3.Distance(p, c);
@@ -2010,7 +2103,7 @@ namespace NextDayRevival
         }
 
         static Transform _rootCache;
-        static float _rootRetry;
+        static float _rootRetry, _rootScanAt;
 
         static Transform LocalPlayerRoot()
         {
@@ -2021,6 +2114,15 @@ namespace NextDayRevival
             {
                 Type t = RevivalPlugin.TypeByName("PlayerMovementController");
                 if (t == null) return null;
+                // n01 perf: the game's own local player first (NetworkGameServer,
+                // no scene walk); the scene-wide FindObjectsOfType only when
+                // that has no controller of ours, and then every 2 s, not every
+                // 0.5 s (while dead or loading it walked every MonoBehaviour).
+                GameObject me = MapTools.LocalPlayer();
+                MonoBehaviour own = me == null ? null : me.GetComponentInChildren(t) as MonoBehaviour;
+                if (own != null && IsMine(own)) { _rootCache = own.transform; return _rootCache; }
+                if (Time.time < _rootScanAt) return null;
+                _rootScanAt = Time.time + 2f;
                 UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
                 for (int i = 0; i < all.Length; i++)
                 {

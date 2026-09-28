@@ -57,6 +57,24 @@ namespace NextDayRevival
         static string _padFailure = "", _padLastFailure = "";
         internal static string[] Pads;
         internal static string PadsRevision = "";
+        static float _vehicleNext;
+        static bool _vehicleBusy;
+        static volatile bool _vehicleFinished;
+        static string[] _vehiclePending;
+        static string _vehiclePendingRevision;
+        static string _vehicleFailure = "", _vehicleLastFailure = "";
+        internal static string[] Vehicles;
+        internal static string VehiclesRevision = "";
+        // N11 air events (Revival.AirEvents.cs): their own endpoint, like the
+        // pads; only the master launches them, every client keeps the table.
+        static float _airNext;
+        static bool _airBusy;
+        static volatile bool _airFinished;
+        static string[] _airPending;
+        static string _airPendingRevision;
+        static string _airFailure = "", _airLastFailure = "";
+        internal static string[] Air;
+        internal static string AirRevision = "";
         internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
@@ -98,6 +116,8 @@ namespace NextDayRevival
             TickTroops();
             TickGround();
             TickPads();
+            TickVehicles();
+            TickAir();
             if (_busy || Time.realtimeSinceStartup < _next || _url == null) return;
             _next = Time.realtimeSinceStartup + 3f;
             _busy = true;
@@ -216,6 +236,63 @@ namespace NextDayRevival
             });
         }
 
+        static void TickAir()
+        {
+            if (_airFinished)
+            {
+                _airFinished = false; _airBusy = false;
+                if (_airPending != null && _airPendingRevision != AirRevision)
+                {
+                    Air = _airPending; AirRevision = _airPendingRevision;
+                    AirEvents.Load(true);
+                    RevivalPlugin.L.LogInfo("LiveRoutes: applied air events " + AirRevision);
+                }
+                if (_airFailure != _airLastFailure)
+                {
+                    _airLastFailure = _airFailure;
+                    if (_airFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes air events: "
+                        + _airFailure + "; keeping the last verified air events.");
+                }
+                _airPending = null;
+            }
+            if (_airBusy || Time.realtimeSinceStartup < _airNext || _url == null) return;
+            _airNext = Time.realtimeSinceStartup + 10f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _airBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/air", pin = _pin.Value;
+            string revision = AirRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _airPending = null;
+                    else _airPending = ParseAir(body, out _airPendingRevision);
+                    _airFailure = "";
+                }
+                catch (Exception ex) { _airPending = null; _airFailure = ex.Message; }
+                finally { _airFinished = true; }
+            });
+        }
+
+        /// <summary>NDR-AIR-1 envelope (routeeditor.air_snapshot). The whole
+        /// table is rejected before anything changes if one row is invalid.</summary>
+        internal static string[] ParseAir(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-AIR-1" || envelope[3] != ""
+                || !HexHash(envelope[1])) throw new IOException("Invalid air event envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 200000 || Hash(tsv) != envelope[1])
+                throw new IOException("Air event snapshot hash mismatch");
+            foreach (byte b in tsv) if (b > 127) throw new IOException("Air event snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            AirEvents.Parse(lines);
+            revision = envelope[1];
+            return lines;
+        }
+
         internal static string[] ParsePads(string body, out string revision)
         {
             string[] envelope = body.Split('\n');
@@ -229,6 +306,62 @@ namespace NextDayRevival
             // Reject the whole update before a single deck is moved if any value
             // is invalid - the same fail-closed rule the ground channel follows.
             Helipads.Parse(lines);
+            revision = envelope[1];
+            return lines;
+        }
+
+        static void TickVehicles()
+        {
+            if (_vehicleFinished)
+            {
+                _vehicleFinished = false; _vehicleBusy = false;
+                if (_vehiclePending != null && _vehiclePendingRevision != VehiclesRevision)
+                {
+                    Vehicles = _vehiclePending; VehiclesRevision = _vehiclePendingRevision;
+                    VehicleFinds.Load(Vehicles);
+                }
+                if (_vehicleFailure != _vehicleLastFailure)
+                {
+                    _vehicleLastFailure = _vehicleFailure;
+                    if (_vehicleFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes vehicle finds: "
+                        + _vehicleFailure + "; keeping the last verified vehicle finds.");
+                }
+                _vehiclePending = null;
+            }
+            if (_vehicleBusy || Time.realtimeSinceStartup < _vehicleNext || _url == null) return;
+            _vehicleNext = Time.realtimeSinceStartup + 10f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _vehicleBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/vehicles", pin = _pin.Value;
+            string revision = VehiclesRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _vehiclePending = null;
+                    else _vehiclePending = ParseVehicles(body, out _vehiclePendingRevision);
+                    _vehicleFailure = "";
+                }
+                catch (Exception ex) { _vehiclePending = null; _vehicleFailure = ex.Message; }
+                finally { _vehicleFinished = true; }
+            });
+        }
+
+        internal static string[] ParseVehicles(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-VEHICLES-1" || envelope[3] != ""
+                || !HexHash(envelope[1])) throw new IOException("Invalid vehicle find envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 200000 || Hash(tsv) != envelope[1])
+                throw new IOException("Vehicle find snapshot hash mismatch");
+            foreach (byte b in tsv) if (b > 127) throw new IOException("Vehicle find snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            // Reject the whole update before any spawn is changed if any value
+            // is invalid - the same fail-closed rule the ground channel follows.
+            VehicleFinds.Parse(lines);
             revision = envelope[1];
             return lines;
         }

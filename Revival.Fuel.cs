@@ -114,6 +114,21 @@ namespace NextDayRevival
         internal static float Fuel(Component v) { return v == null || !LookUp() ? 0f : (float)_fuel.GetValue(v); }
         internal static float FuelMax(Component v) { return v == null || !LookUp() ? 0f : (float)_fuelMax.GetValue(v); }
 
+        /// <summary>The tank this vehicle WILL have once Tick has tuned it - the
+        /// class size when the balance is on and sets one, else the vehicle's
+        /// own FuelMax. VehicleCondition asks it right after a spawn, before
+        /// the four-second tick has been round.</summary>
+        internal static float TankSize(Component v)
+        {
+            if (v == null) return 0f;
+            string cls = ClassOf(v.transform.root);
+            ConfigEntry<float> max;
+            if (CfgEnabled != null && CfgEnabled.Value && cls != null
+                && _max.TryGetValue(cls, out max) && max.Value > 0f)
+                return max.Value;
+            return FuelMax(v);
+        }
+
         internal static void Tick()
         {
             if (CfgEnabled == null || !CfgEnabled.Value) return;
@@ -395,7 +410,6 @@ namespace NextDayRevival
             internal GameObject Model;
             internal Collider[] Shell;
             internal Bounds Bounds;
-            internal float NextBind;
         }
 
         // unity/EastTile/Content/east_af_fuel_water.json; the torn horizontal
@@ -473,41 +487,72 @@ namespace NextDayRevival
             "pol_tank_horizontal 1", "pol_tank_horizontal 2", "pol_tank_horizontal 3"
         };
 
+        // n01 perf: TankY looked each unbound tank up with GameObject.Find -
+        // a walk over every object of every scene, for up to five tanks in the
+        // same frame, every 5 s while the depot's content scene was not there
+        // (FuelDepot.Tick peaks). One sliced walk over the airfield content
+        // scenes (east_af_fuel_water.json: EastAfFuelWater) now answers all
+        // five names, from Tick, at most every 5 s while a tank is unbound.
+        const string ModelScenes = "EastAf";
+        static readonly SceneSweep _bindSweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _bindVisit = BindVisit;
+        static readonly GameObject[] _found = new GameObject[5];
+        static float _nextBind;
+
+        static bool BindVisit(Transform t, string name)
+        {
+            // GameObject.Find's answer: the first ACTIVE object of the name.
+            for (int k = 0; k < ModelNames.Length; k++)
+                if (_found[k] == null && name == ModelNames[k] && t.gameObject.activeInHierarchy) _found[k] = t.gameObject;
+            return true;
+        }
+
+        static void BindModels()
+        {
+            if (!_bindSweep.Active)
+            {
+                if (Time.time < _nextBind) return;
+                _nextBind = Time.time + 5f;
+                bool unbound = false;
+                for (int i = 0; i < _tanks.Length; i++)
+                    if (_tanks[i].Model == null || !_tanks[i].Model.activeInHierarchy) unbound = true;
+                if (!unbound) return;
+                for (int k = 0; k < _found.Length; k++) _found[k] = null;
+                _bindSweep.Begin(ModelScenes);
+            }
+            if (!_bindSweep.Step(0.5, _bindVisit)) return;
+            for (int i = 0; i < _tanks.Length; i++)
+                if (_found[i] != null) Bind(_tanks[i], _found[i]);
+        }
+
         static bool TankY(TankDef t)
         {
             // Use the assembled tank's real collision geometry: its seating
             // height includes the bund and model pivot, not just the terrain.
             if (t.Model != null && t.Model.activeInHierarchy) return true;
             t.Shell = null;
-            if (Time.time >= t.NextBind)
-            {
-                t.NextBind = Time.time + 5f;
-                int index = Array.IndexOf(_tanks, t);
-                GameObject model = GameObject.Find(ModelNames[index]);
-                if (model != null)
-                {
-                    Collider[] all = model.GetComponentsInChildren<Collider>();
-                    List<Collider> shell = new List<Collider>();
-                    foreach (Collider c in all)
-                        if (c != null && c.enabled && !c.isTrigger) shell.Add(c);
-                    if (shell.Count > 0)
-                    {
-                        t.Model = model; t.Shell = shell.ToArray();
-                        t.Bounds = t.Shell[0].bounds;
-                        for (int i = 1; i < t.Shell.Length; i++) t.Bounds.Encapsulate(t.Shell[i].bounds);
-                        t.Y = t.Bounds.min.y; t.HaveY = true;
-                        RevivalPlugin.L.LogInfo("FuelDepot: bound " + t.Id + " to " + model.name
-                            + " at " + t.Bounds.center + ", " + t.Shell.Length + " colliders.");
-                        return true;
-                    }
-                }
-            }
             // Greybox fallback, also while the assembly bundle is loading.
             if (t.HaveY) return true;
             float y;
             if (!EastWorld.TerrainHeight(t.Pos, out y)) return false;
             t.Y = y; t.HaveY = true;
             return true;
+        }
+
+        static void Bind(TankDef t, GameObject model)
+        {
+            if (t.Model != null && t.Model.activeInHierarchy) return;
+            Collider[] all = model.GetComponentsInChildren<Collider>();
+            List<Collider> shell = new List<Collider>();
+            foreach (Collider c in all)
+                if (c != null && c.enabled && !c.isTrigger) shell.Add(c);
+            if (shell.Count == 0) return;
+            t.Model = model; t.Shell = shell.ToArray();
+            t.Bounds = t.Shell[0].bounds;
+            for (int i = 1; i < t.Shell.Length; i++) t.Bounds.Encapsulate(t.Shell[i].bounds);
+            t.Y = t.Bounds.min.y; t.HaveY = true;
+            RevivalPlugin.L.LogInfo("FuelDepot: bound " + t.Id + " to " + model.name
+                + " at " + t.Bounds.center + ", " + t.Shell.Length + " colliders.");
         }
 
         static Vector3 Middle(TankDef t)
@@ -799,6 +844,7 @@ namespace NextDayRevival
             {
                 EnsureNet();
                 EnsureInit();
+                BindModels();
                 TickFire();
                 if (RevivalTroopInsertion.MasterClient()) TickMaster();
                 if (Time.time >= _nextAim) { _nextAim = Time.time + 0.1f; LookAtTank(); }
@@ -1058,6 +1104,11 @@ namespace NextDayRevival
 
         /// <summary>A canister (10001) in the local pack with room in it:
         /// the game's own FindItemJerryCan(true) and the slot's ItemEnergy.</summary>
+        static Type _canOwner, _canDataOwner;
+        static MethodInfo _canFind;
+        static FieldInfo _canBackpack, _canEnergy;
+        static readonly object[] CanArgs = { true };        // Invoke copies it
+
         static bool FindCan(out object inv, out int slot, out float energy)
         {
             inv = null; slot = -1; energy = 0f;
@@ -1065,13 +1116,25 @@ namespace NextDayRevival
             for (int i = 0; i < invs.Count; i++)
             {
                 object pim = invs[i];
-                MethodInfo find = AccessTools.Method(pim.GetType(), "FindItemJerryCan", new Type[] { typeof(bool) }, null);
+                Type pt = pim.GetType();
+                if (!ReferenceEquals(pt, _canOwner))
+                {
+                    _canOwner = pt;
+                    _canFind = AccessTools.Method(pt, "FindItemJerryCan", new Type[] { typeof(bool) }, null);
+                    _canBackpack = AccessTools.Field(pt, "_backpackData");
+                }
+                MethodInfo find = _canFind;
                 if (find == null) continue;
-                int s = (int)find.Invoke(pim, new object[] { true });
+                int s = (int)find.Invoke(pim, CanArgs);
                 if (s < 0) continue;
-                FieldInfo bp = AccessTools.Field(pim.GetType(), "_backpackData");
+                FieldInfo bp = _canBackpack;
                 object data = bp == null ? null : bp.GetValue(pim);
-                FieldInfo en = data == null ? null : AccessTools.Field(data.GetType(), "ItemEnergy");
+                if (data != null && !ReferenceEquals(data.GetType(), _canDataOwner))
+                {
+                    _canDataOwner = data.GetType();
+                    _canEnergy = AccessTools.Field(_canDataOwner, "ItemEnergy");
+                }
+                FieldInfo en = data == null ? null : _canEnergy;
                 Array arr = en == null ? null : en.GetValue(data) as Array;
                 if (arr == null || s >= arr.Length) continue;
                 inv = pim; slot = s; energy = Mathf.Clamp(ToFloat(arr.GetValue(s), 0f), 0f, 100f);

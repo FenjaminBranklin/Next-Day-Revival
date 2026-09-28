@@ -1102,9 +1102,9 @@ def check_editor_heights():
 
 
 def check_flak():
-    """[34] East airfield flak: ZU-23-2 guns on the AA positions (Revival.Flak.cs).
+    """[34] East airfield flak: 52-K 85 mm guns on the AA positions (Revival.Flak.cs).
 
-    Pinned statically (docs/ai/tasks/airfield-flak-p4.md): the file is plain
+    Pinned statically (docs/ai/tasks/airfield-flak-p4.md, N6 k52-flak.md): the file is plain
     ASCII and wired into the plugin, the camera and the public package; the
     rounds, damage and puffs go through the Gepard's code paths; the crew keys
     carry the slash GroundEnemies needs; every effect and animation has its
@@ -1113,7 +1113,7 @@ def check_flak():
     API is there. How it looks and feels is the in-game checklist.
     """
     import re
-    print("[34] East airfield flak (ZU-23-2)")
+    print("[34] East airfield flak (52-K 85 mm)")
 
     def read(name):
         path = os.path.join(ROOT, name)
@@ -1141,18 +1141,18 @@ def check_flak():
         need(seam in plug, "seam " + seam + " in RevivalPlugin.cs", "seam missing in RevivalPlugin.cs: " + seam)
     need("public const int Flak = 8;" in cam and "NextDayRevival.Flak.LateTick();" in cam,
          "the sight camera is an owner of CameraOwner (8)",
-         "the ZU-23 sight is not dispatched by CameraOwner")
+         "the flak sight is not dispatched by CameraOwner")
     need('"Revival.Flak.cs"' in sync, "Revival.Flak.cs goes to the public repository",
          "sync_public.py does not ship Revival.Flak.cs - the public repo would not build")
 
     # the Gepard's code paths
     need("GepardShots.Fire(Spec()" in s and "internal sealed class Spec" in gep
          and "spec.Gravity" in gep,
-         "rounds fly in the Gepard's round loop with the ZU-23's ballistics",
+         "rounds fly in the Gepard's round loop with the 52-K's ballistics",
          "the flak does not fire through GepardShots with its own Spec")
     need("GepardGun.Hit(c, at, dir, true, spec.HeliHits)" in gep and "GepardGun.Nearest(" in gep
-         and "GepardFx.Flak(at)" in gep,
-         "direct hits and timed bursts damage through GepardGun.Hit, the puff is GepardFx.Flak",
+         and "GepardFx.Flak(at, spec.PuffScale)" in gep and "_spec.PuffScale = PuffScale;" in s,
+         "direct hits and timed bursts damage through GepardGun.Hit, the puff is GepardFx.Flak at the 85 mm scale",
          "the burst does not reach the Gepard's damage path or the puff effect")
     need("GepardNet.EnsureHooked();" in s,
          "a helicopter kill travels on the Gepard's event even with the Gepard off",
@@ -1176,49 +1176,81 @@ def check_flak():
 
     # switches
     for key in ("Tracers", "MuzzleFlash", "BarrelRecoil", "Casings", "FlakPuffs", "GunSound",
-                "BurstSound", "SeatedCrew", "HandwheelAnimation"):
+                "BurstSound", "SeatedCrew", "MilitaryTownBattery"):
         need('cfg.Bind(S, "%s", true' % key in s, "switch [Flak] %s" % key,
              "effect/animation switch [Flak] %s missing" % key)
 
-    # numbers
+    # numbers ([Flak52K], N6: a section of its own so old ZU values cannot drive it)
     def num(key):
-        m = re.search(r'cfg\.Bind\(S, "%s", (-?[0-9.]+)f?' % key, s)
+        m = re.search(r'cfg\.Bind\(G, "%s", (-?[0-9.]+)f?' % key, s)
         return float(m.group(1)) if m else None
 
     def gnum(key):
         m = re.search(r'"%s",\s*([0-9.]+)f?' % key, gep)
         return float(m.group(1)) if m else None
 
+    need('const string G = "Flak52K";' in s, "the 52-K's numbers live in [Flak52K]",
+         "the gun's numbers still share the ZU-23's [Flak] keys")
     need("internal const float K = 2.8f;" in s and "* K" in s,
          "metres go to world units at 2.8", "the 2.8 u/m conversion is missing")
-    v, r, d = num("MuzzleVelocity"), num("EngageRange"), num("Dispersion")
-    need(v is not None and 900 <= v <= 1000, "muzzle velocity %s m/s" % v, "MuzzleVelocity is not the real ~970 m/s")
-    need(r is not None and 1500 <= r <= 2500, "engage range %s m (x 2.8 in the world)" % r,
-         "EngageRange is not a real 23 mm range")
+    v, r, rr, d = num("MuzzleVelocity"), num("VisualRange"), num("RadarRange"), num("Dispersion")
+    need(v is not None and 400 <= v <= 800, "muzzle velocity %s m/s (slow on purpose, the real 800 at most)" % v,
+         "MuzzleVelocity is not a slow 85 mm shell (400..800 m/s)")
+    need(r is not None and rr is not None and 1000 <= r < rr <= 8000,
+         "visual range %s m < radar range %s m" % (r, rr),
+         "VisualRange / RadarRange missing or the radar does not reach further")
     need(d is not None and gnum("Dispersion") is not None and d > gnum("Dispersion"),
          "dispersion %s mil, above the Gepard's %s" % (d, gnum("Dispersion")),
-         "the ZU-23 is not less accurate than the Gepard")
-    need((num("InitialError") or 0) > (num("ErrorFloor") or 0) > 0 and 0 < (num("WalkFactor") or 0) < 1
-         and (num("EvadeFactor") or 0) > 0,
-         "bursts walk in (initial error > floor, walk factor < 1) and evading throws them off",
-         "the walking-in error model is missing or inert")
+         "the 52-K is not less accurate than the Gepard")
+    rpm = num("RateOfFire")
+    need(rpm is not None and 5 <= rpm <= 25, "rate of fire %s shots a minute" % rpm,
+         "RateOfFire is not an 85 mm gun's (5..25 a minute)")
+    w, rw = num("WalkFactor"), num("RadarWalkFactor")
+    need((num("InitialError") or 0) > (num("ErrorFloor") or 0) > 0 and w is not None and rw is not None
+         and 0 < rw < w < 1 and (num("EvadeFactor") or 0) > 0,
+         "bursts walk in (initial error > floor), faster radar-directed (%s) than by eye (%s), evading throws them off"
+         % (rw, w),
+         "the bracketing error model is missing, inert, or not faster with the radar")
+    need("g.Err = g.Err * Flak.Walk + Scatter(" in s and "Flak.SetRadarDirected(tier == 2);" in read("Revival.TowerRadar.cs"),
+         "every shot is a bracketing step; the radar tier sets range and walk (SetRadarDirected)",
+         "the bracketing step or the radar coupling is missing")
     tr, el = num("TraverseSpeed"), num("ElevationSpeed")
-    need(tr is not None and el is not None and 0 < tr <= 100 and 0 < el <= 80
-         and num("PitchMin") == -10 and num("PitchMax") == 90,
-         "slew limits %s / %s deg/s, elevation -10..+90" % (tr, el),
-         "slew limits or the elevation range are not the ZU-23-2's")
-    need("i == 0 ? -0.2f : 0.2f" in s or "b == 0 ? -0.2f : 0.2f" in s,
-         "two barrels", "the model has not two barrels")
-    need("g.GunIdx = 1 - b;" in s and "g.Recoil[barrel] = 1f;" in s,
-         "the barrels fire and recoil alternately", "the barrels do not alternate")
+    need(tr is not None and el is not None and 0 < tr <= 40 and 0 < el <= 30
+         and num("PitchMin") == -3 and num("PitchMax") == 82,
+         "slew limits %s / %s deg/s, elevation -3..+82" % (tr, el),
+         "slew limits or the elevation range are not the 52-K's")
+
+    # the model: k52_build.py's parts at four LODs under a LODGroup, the recoil
+    parts = ["k52_%s_lod%d.ndmesh" % (p, l) for p in ("base", "mount", "cradle", "barrel") for l in range(4)]
+    parts += ["k52_diffuse.png", "k52_normal.png", "k52_rig.txt"]
+    missing = [f for f in parts if not os.path.exists(os.path.join(ROOT, "assets", f))]
+    need(not missing, "the 52-K's 16 meshes, atlas and rig are in assets/", "52-K assets missing: %s" % missing)
+    bps = read("build.ps1")
+    need(all('"%s"' % f in bps for f in parts), "build.ps1 installs every 52-K asset",
+         "build.ps1 does not install every 52-K asset")
+    need("group.SetLODs(lods);" in s and "k52_rig.txt" in s,
+         "the gun is four parts at four LODs under one LODGroup, pivots from k52_rig.txt",
+         "the 52-K model is not loaded with its LODs and rig")
+    need("-g.Stroke * r * r * (3f - 2f * r)" in s and "g.Recoil = 1f;" in s and "const float RunOut" in s,
+         "the barrel recoils its stroke and runs out again", "the barrel does not recoil")
+    need("GepardFx.Muzzle(muzzle, dir);" in s and "GepardFx.Smoke(" in s and "FlakSound.Report(muzzle);" in s,
+         "muzzle flash, smoke and report on every shot", "the shot's flash, smoke or report is missing")
+    need('"MT-AA2a"' in s and "MilitaryTown.Faction()" in s,
+         "the military town's battery fights for the town's faction",
+         "the town battery or its faction is missing")
 
     # Q2 (after the 6.57.0 test): tracking, fair engagements, the crash, the crew
     heli, an2, crew, tech, radar, gepard = (read("Revival.PlayerHeli.cs"), read("Revival.PlayerAn2.cs"),
         read("RevivalGepardCrew.cs"), read("RevivalTechnicalCrew.cs"), read("Revival.TowerRadar.cs"),
         read("RevivalGepard.cs"))
-    need("g.WantYawRate + Mathf.Clamp(dy * 4f, -stop, stop)" in s and "Interval() * 1.6f" in s,
-         "the mount tracks with feed-forward inside the slew limits; each barrel runs out before its next round",
-         "the slew feed-forward or the alternating recoil run-out is missing")
+    need("g.WantYawRate + Mathf.Clamp(dy * 4f, -stop, stop)" in s,
+         "the mount tracks with feed-forward inside the slew limits",
+         "the slew feed-forward is missing")
+    # N6: a wounded man is not at his post (the radar operator stayed "manned")
+    need("!NpcWar.GroundDowned(ai)" in s and "internal static bool GroundDowned(" in read("Revival.NpcCombat.cs")
+         and "Flak.Up(_man)" in radar,
+         "a wounded crewman or radar operator counts as gone (the console is free)",
+         "the wounded state still counts as manned")
     need("internal static Vector3 Offset(" in s and "g.Err = Offset(" in s,
          "the first burst of an engagement is always visibly off the target",
          "the first burst can land on the target by chance")
@@ -1405,6 +1437,207 @@ def check_tower_radar():
          "the tower radar's event code overlaps another channel")
 
 
+def check_air_events():
+    """Editor air events (task N11, Revival.AirEvents.cs, airdef.py,
+    editor/air.js, docs/ai/tasks/n11-air-events.md).
+
+    Pinned statically: the plugin file is wired (plugin, An-2 carrier, live
+    channel, admin panel, public package), the editor channel exists end to
+    end, editor and plugin agree on the columns and the limits, the default
+    airfield raid is valid and shipped, the carpet is realistic (40-60
+    FAB-250 over 800-1000 m by default), damage is swept once on the master,
+    the bursts are pooled, safe zones are held, and the Tu-95 assets ship.
+    How it looks and plays is the in-game list.
+    """
+    import re
+    print("[N11] Air events (Tu-95 bombers, An-2 paratroopers)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("AirEvents: " + why)
+
+    path = os.path.join(ROOT, "Revival.AirEvents.cs")
+    if not os.path.exists(path):
+        bad("AirEvents: Revival.AirEvents.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf"), "Revival.AirEvents.cs has no BOM",
+         "Revival.AirEvents.cs starts with a BOM")
+    src = raw.decode("utf-8", "replace")
+    plug, an2, live = read("RevivalPlugin.cs"), read("Revival.PlayerAn2.cs"), read("Revival.LiveRoutes.cs")
+    admin, sync, build = read("Revival.Admin.cs"), read("sync_public.py"), read("build.ps1")
+    need("AirEvents.BindConfig(Config);" in plug and "AirEvents.Tick();" in plug and "AirEvents.Draw();" in plug,
+         "bound, ticked and drawn by the plugin", "RevivalPlugin.cs does not bind/tick/draw AirEvents")
+    need("AirEvents.Prepared(go, data);" in an2 and "AirEvents.Burned(go);" in an2
+         and "AirEvents.WreckSeconds(go," in an2,
+         "the An-2 carrier builds the Tu-95, its wreck and its hold",
+         "Revival.PlayerAn2.cs lacks the Tu-95 seams (Prepared / Burned / WreckSeconds)")
+    need('"/runtime/air"' in live and "AirEvents.Parse(lines);" in live and "AirEvents.Load(true);" in live,
+         "the live channel /runtime/air is validated and applied",
+         "Revival.LiveRoutes.cs does not fetch/validate /runtime/air")
+    need("AirEvents.NowAtMe()" in admin and "AirEvents.Ask(_target)" in admin and "AirEvents.Options();" in admin,
+         "admin panel: trigger now at my position, map right-click, options",
+         "Revival.Admin.cs lacks the air event button or the map right-click")
+    need('"Revival.AirEvents.cs"' in sync, "the public package ships Revival.AirEvents.cs",
+         "sync_public.py does not ship Revival.AirEvents.cs - the public repo would not build")
+
+    # Photon channel: its default is no other channel's default.
+    codes = {}
+    for name in os.listdir(ROOT):
+        if name.endswith(".cs"):
+            for m in re.finditer(r'"NetworkEventCode",\s*(\d+)', read(name)):
+                codes.setdefault(m.group(1), []).append(name)
+    need(codes.get("163") == ["Revival.AirEvents.cs"], "event code 163 is its own",
+         "Photon event 163 is shared: %s" % codes.get("163"))
+
+    # Numbers: a real Tu-95 stick, the warning, damage once, pooled bursts.
+    need("WarnSeconds = 60f" in src, "the siren sounds ~60 s before the first aircraft",
+         "the air raid warning is not 60 s")
+    need("if (!master) return;" in src and "Mortar.AnyFaction = true;" in src
+         and "!AnyFaction && FactionShield.SameFactionAsLocal(go)" in read("RevivalMortar.cs"),
+         "one damage sweep per impact, on the master, every player's faction",
+         "bomb damage is not swept once on the master")
+    need("_flash.Emit(p, 1);" in src and "_dust.Emit(p, 1);" in src and "BombPool.Take()" in src
+         and "Fx.Apply(ps);" in src,
+         "bursts and bomb bodies are pooled and follow the particle density",
+         "the bomb bursts are not pooled")
+    need(src.count("Safe(") >= 5 and "if (Safe(p)) { safe++; continue; }" in src,
+         "safe zones are never bombed, dropped on or targeted",
+         "a bomb can be released over a safe zone")
+    need("f.Toughness = 3;" in src and "PlayerAn2.Down(plane)" in src,
+         "a Tu-95 is a real, tougher target and a downed one drops nothing more",
+         "a shot-down bomber still bombs, or the Tu-95 is not toughened")
+
+    # Editor and plugin agree.
+    adef = read("airdef.py")
+    cols = re.search(r"TSV_COLUMNS = \[(.*?)\]", adef, re.S)
+    need(cols is not None and len(re.findall(r'"[A-Za-z]+"', cols.group(1))) == 18
+         and "if (c.Length < 17)" in src,
+         "editor and plugin count the same columns", "airdef.py and AirEvents.Parse disagree on the columns")
+    need("MIN_BOMBS, MAX_BOMBS, DEFAULT_BOMBS = 20, 60, 48" in adef
+         and "Mathf.Clamp(Mathf.RoundToInt(F(p[3])), 20, 60)" in src
+         and "MIN_TROOPS, MAX_TROOPS, DEFAULT_TROOPS = 1, 12, 10" in adef
+         and "Mathf.Clamp(Mathf.RoundToInt(F(p[3])), 1, 12)" in src
+         and "MIN_LENGTH, MAX_LENGTH = 200.0, 1500.0" in adef and "Mathf.Clamp(F(c[5]), 200f, 1500f)" in src,
+         "bombs, paratroopers and line length share their limits",
+         "airdef.py and the plugin allow different bombs/troops/lengths")
+    try:
+        import sys as _sys
+        if ROOT not in _sys.path:
+            _sys.path.insert(0, ROOT)
+        import airdef
+        import compdef
+        probs = []
+        airdef.validate_events({"airEvents": airdef.DEFAULT_EVENTS}, lambda w, m: probs.append(w + ": " + m))
+        need(not probs, "the default airfield raid validates", "default air event invalid: %s" % probs)
+        d = airdef.DEFAULT_EVENTS[0]
+        waves = [w["type"] for w in d["waves"]]
+        need(d["intervalMinHours"] == 2.5 and d["intervalMaxHours"] == 3.5 and waves == ["bomber", "transport"]
+             and 40 <= d["waves"][0]["load"] <= 60 and 800 <= d["length"] <= 1000,
+             "default: one airfield raid every 2.5-3.5 h, bomber then paratroopers, 40-60 FAB-250 over 800-1000 m",
+             "the default air event is not the airfield raid every ~3 h")
+        definition = compdef.load_definition()
+        shipped = read(os.path.join("assets", "ndr_airevents.tsv"))
+        need(definition is not None and shipped == airdef.to_airevents_tsv(definition),
+             "assets/ndr_airevents.tsv is the editor's current runtime view",
+             "assets/ndr_airevents.tsv is stale - save in the editor or rerun airdef.to_airevents_tsv")
+    except Exception as ex:
+        bad("AirEvents: airdef/compdef not importable: %s" % ex)
+    comp, route = read("compdef.py"), read("routeeditor.py")
+    need("airdef.validate_events(" in comp and "airdef.to_airevents_tsv(" in comp,
+         "the editor save validates and derives the air events",
+         "compdef.py saves air events unchecked or writes no runtime view")
+    need('path == "/runtime/air"' in route and 'path == "/air.js"' in route and '"airDefaults"' in route,
+         "the editor server serves the air channel and page", "routeeditor.py lacks /runtime/air or /air.js")
+    ajs, app, html = read("editor/air.js"), read("editor/app.js"), read("editor/index.html")
+    need('<script src="air.js"></script>' in html and "NDRAir.init();" in app and "NDRAir.draw();" in app
+         and "NDRAir.mousedown(ev)" in app and "function setLine(d, a, b)" in ajs,
+         "the air event page hangs in page, drawing and mouse, the target is dragged on the map",
+         "editor/air.js is not hooked in, or the target cannot be dragged")
+
+    # The Tu-95 ships.
+    names = ["tu95_body.ndmesh", "tu95_glass.ndmesh", "tu95_decals.ndmesh", "tu95_prop.ndmesh",
+             "tu95_bay_l.ndmesh", "tu95_bay_r.ndmesh", "tu95_wreck.ndmesh", "tu95_atlas.png",
+             "tu95_rig.txt", "ndr_airevents.tsv"]
+    missing = [n for n in names if not os.path.exists(os.path.join(ROOT, "assets", n)) or '"%s"' % n not in build]
+    need(not missing, "the Tu-95 meshes, atlas, rig and the air table are built and installed",
+         "assets missing or not in build.ps1: %s (python tu95_import.py)" % missing)
+    rig = read(os.path.join("assets", "tu95_rig.txt"))
+    need(len(re.findall(r"^prop \d (Front|Rear) ", rig, re.M)) == 8 and rig.count("\nbox ") >= 3,
+         "the rig has eight contra-rotating props and hull boxes", "assets/tu95_rig.txt is incomplete")
+
+
+def check_npc_aircraft():
+    """NPC aircraft on a flight path and the admin test flyover (task N3,
+    Revival.NpcAircraft.cs, docs/ai/tasks/admin-flyover.md).
+
+    Pinned statically: the file is plain ASCII, wired into the plugin, the
+    admin panel and the public package; the seams that make the NPC An-2 a
+    target for every AA system are in place (hostile for the Gepard crew, the
+    ZU-23 and the no-fly zones; the Stinger lists GepardAir aircraft; the
+    shot-down An-2 path flies an NPC one down at once); event 159 is not the
+    default of another channel. How it flies and falls is the in-game list.
+    """
+    import re
+    print("[N3] NPC aircraft / test flyover")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("NpcAircraft: " + why)
+
+    path = os.path.join(ROOT, "Revival.NpcAircraft.cs")
+    if not os.path.exists(path):
+        bad("NpcAircraft: Revival.NpcAircraft.cs missing")
+        return
+    raw = open(path, "rb").read()
+    need(not raw.startswith(b"\xef\xbb\xbf") and all(b < 128 for b in raw),
+         "Revival.NpcAircraft.cs is ASCII without a BOM", "Revival.NpcAircraft.cs is not plain ASCII")
+    src = raw.decode("ascii", "replace")
+    plug, admin, an2 = read("RevivalPlugin.cs"), read("Revival.Admin.cs"), read("Revival.PlayerAn2.cs")
+    gep, flak, nofly, sting = (read("RevivalGepardCrew.cs"), read("Revival.Flak.cs"),
+                               read("Revival.NoFly.cs"), read("Revival.Stinger.cs"))
+    for seam in ("NpcAircraft.BindConfig(Config);", "NpcAircraft.Install(_harmony);", "NpcAircraft.Tick();"):
+        need(seam in plug, "seam " + seam + " in RevivalPlugin.cs", "seam missing in RevivalPlugin.cs: " + seam)
+    need('"Revival.NpcAircraft.cs"' in read("sync_public.py"), "Revival.NpcAircraft.cs goes to the public repository",
+         "sync_public.py does not ship Revival.NpcAircraft.cs - the public repo would not build")
+    need('"Test flyover"' in admin and "Flyover.OverMe()" in admin and "Flyover.Ask(_target)" in admin,
+         "admin panel: Test flyover button and the map right-click Flyover",
+         "the admin panel lacks the Test flyover button or the map right-click Flyover")
+    need("NpcAircraft.Prepared(go, data);" in an2 and "NpcAircraft.Is(go)" in an2
+         and "NpcAircraft.Velocity(go, out vel)" in an2 and "internal static GameObject BuildNpc(" in an2,
+         "PlayerAn2 prepares, excludes and shoots down NPC aeroplanes",
+         "a PlayerAn2 seam for NPC aeroplanes is missing (BuildNpc / Prepared / Is / Velocity)")
+    need("NpcAircraft.Hostile(c.Go)" in gep and "NpcAircraft.Hostile(c.Go)" in flak
+         and "NpcAircraft.Hostile(c.Go)" in nofly,
+         "NPC aeroplanes are hostile to the Gepard crew, the ZU-23 and the no-fly zones",
+         "a hostility seam (GepardCrew / Flak / NoFly) for NPC aeroplanes is missing")
+    need("GepardAir.Collect(_planes)" in sting and "GepardAir.Kill(f.Target.Go, f.Position)" in sting,
+         "the Stinger locks and kills registered aircraft",
+         "Revival.Stinger.cs does not list GepardAir aircraft")
+    need("internal static bool Kill(GameObject go, Vector3 point)" in gep, "GepardAir.Kill exists",
+         "GepardAir.Kill is missing")
+    need('"NetworkEventCode", 159' in src, "event code 159 by default", "the event code default is not 159")
+    others = []
+    for name in os.listdir(ROOT):
+        if name.endswith(".cs") and name != "Revival.NpcAircraft.cs":
+            text = read(name)
+            others += [int(m) for m in re.findall(r'EventCode", (\d+)', text)]
+    need(159 not in others, "event 159 is no other channel's default",
+         "another channel defaults to event 159")
+
+
 def check_nofly():
     """[35] No-fly zones (Revival.NoFly.cs, P6a).
 
@@ -1490,7 +1723,7 @@ def check_nofly():
          "zone N12 over the neutral settlement NPC_Settlement[Neutrals] (1446.6, 1703.2)",
          "the neutral settlement's zone is missing or not over Point N12")
 
-    # the style: the same numbers, finer than a patrol route
+    # the style: N04 supersedes the thin marker with patrol-weight red ink
     st = data.get("style") or {}
 
     def const(src, name):
@@ -1505,9 +1738,14 @@ def check_nofly():
          "the map style differs between Revival.NoFly.cs and nofly.json")
     need(st.get("label") == "NO FLY ZONE", "the label reads NO FLY ZONE", "the label is not NO FLY ZONE")
     pw, pd = const(ink, "StrokeWidth"), const(ink, "DashLength")
-    need(None not in (width, pw, dash, pd) and width <= pw * 0.4 and dash < pd,
-         "finer than a patrol route (stroke %s vs %s, dash %s vs %s)" % (width, pw, dash, pd),
-         "the no-fly line is not finer than the patrol route")
+    need(None not in (width, pw, dash, pd) and width == pw and dash == pd and gap == const(ink, "GapLength"),
+         "same weight as a patrol route (stroke %s vs %s, dash %s vs %s)" % (width, pw, dash, pd),
+         "the no-fly line must match the patrol border style")
+    need(st.get("color") == "#ca2020" and st.get("alpha") == 1
+         and "202f / 255f, 32f / 255f, 32f / 255f, 1f" in s
+         and "BuildHatch(zn, p, size)" in s and "ctx.clip()" in js,
+         "native target red with clipped light hatch fill in both maps",
+         "no-fly red or clipped hatch fill missing")
     need("internal static Dash Raster(List<Vector2> points, float strokeWidth)" in ink
          and "MapInk.Raster(samples, StrokeWidth)" in s and 'MapInkLayer.Begin("nofly"' in s,
          "drawn in the native map ink with its own stroke width", "the map ink path is missing")
@@ -5324,6 +5562,99 @@ def check_player_an2():
              "event codes collide: " + ", ".join("%d is %s" % (c, w) for c, w in clash))
 
 
+def check_vehicle_spawns():
+    """[22f] N9a - the find locations of the new vehicles
+    (assets/editor/vehicle_spawns.json, docs/ai/tasks/vehicle-spawns.md).
+
+    Data for N9b. research/vehicle_spawns_check.py proves every kind has an
+    east and a main-map spot, trucks are common, and every measured east spot
+    keeps its vehicle clear of the airfield and town greybox blocks.
+    """
+    print("[22f] Vehicle find locations (N9a)")
+    import subprocess
+    data = os.path.join(ROOT, "assets", "editor", "vehicle_spawns.json")
+    check = os.path.join(ROOT, "research", "vehicle_spawns_check.py")
+    if not (os.path.exists(data) and os.path.exists(check)):
+        bad("assets/editor/vehicle_spawns.json or research/vehicle_spawns_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip().endswith("PASS"):
+        ok("vehicle find locations pass research/vehicle_spawns_check.py")
+    else:
+        bad("research/vehicle_spawns_check.py fails: "
+            + "; ".join(l for l in r.stdout.splitlines() if l.startswith("FAIL "))[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_vehicle_condition():
+    """[22e] N8 - the new vehicles on the vanilla condition system
+    (Revival.VehicleCondition.cs, docs/ai/tasks/n08-vehicles-vanilla.md).
+
+    What can be held without the game: the parts are the game's own ids and
+    go through LocalSetVehicleComponent; "as found" is the world's 50 percent
+    roll and only reaches an admin spawn (AsAdmin scope), never a convoy; the
+    CarSpawn paths call AfterSpawn; truck trunks are bigger than the game's 42
+    slots and the window that shows them is installed independent of the Mi-8;
+    the Mi-8 engine refuses without parts or fuel and burns fuel in flight.
+    """
+    print("[22e] Vehicle condition (N8)")
+    src_p = os.path.join(ROOT, "Revival.VehicleCondition.cs")
+    if not os.path.exists(src_p):
+        bad("Revival.VehicleCondition.cs is missing - no vanilla condition for the new vehicles")
+        return
+    raw = io.open(src_p, "rb").read()
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad(why)
+
+    def read(name):
+        return io.open(os.path.join(ROOT, name), encoding="utf-8").read()
+
+    BOM = bytes([0xEF, 0xBB, 0xBF])
+    need(not raw.startswith(BOM), "Revival.VehicleCondition.cs has no BOM",
+         "Revival.VehicleCondition.cs starts with a BOM")
+    code = raw.decode("utf-8", "replace")
+    tank = read("Revival.Tank.cs")
+    heli = read("Revival.PlayerHeli.cs")
+    plug = read("RevivalPlugin.cs")
+    adm = read("Revival.Admin.cs")
+    sync = read("sync_public.py")
+    for n in ("BatteryId = 10002", "KeyId = 10003", "SparkId = 10004", "KeyAltId = 1306",
+              "CanisterId = 10001"):
+        need(n in code, "vanilla item " + n, "the vanilla item constant " + n + " changed")
+    need('"LocalSetVehicleComponent"' in code, "parts go through the game's LocalSetVehicleComponent",
+         "VehicleCondition no longer sets parts through LocalSetVehicleComponent")
+    need("UnityEngine.Random.value > 0.5f" in code, "as found = the world's 50 percent roll",
+         "the as-found roll is no longer 50 percent per part")
+    need("return _scope && SpawnFound;" in code, "as found only inside an admin spawn",
+         "FoundNow is not limited to the AsAdmin scope - a convoy could come as found")
+    need(tank.count("VehicleCondition.AfterSpawn(car);") == 2,
+         "both CarSpawn paths call VehicleCondition.AfterSpawn",
+         "CarSpawn.SpawnAt/SpawnPrefab lost VehicleCondition.AfterSpawn")
+    m = re.search(r"TruckSlots = (\d+);", code)
+    need(m is not None and int(m.group(1)) > 42, "truck trunk bigger than the game's 42 slots",
+         "TruckSlots is missing or not above the vanilla 42")
+    need("HeliHold.InstallWindow(harmony);" in code and "internal static void InstallWindow(" in heli,
+         "the >42-slot container window is installed for the trucks",
+         "the container window growth is no longer installed by VehicleCondition")
+    need("HeliCondition.CanStart(_heli, out missing)" in heli and "HeliCondition.Burn(_heli, power, dt)" in heli,
+         "the Mi-8 engine needs parts and fuel and burns fuel",
+         "PlayerHeli lost the HeliCondition engine gate or the fuel burn")
+    need("if (f[1] < -0.5f) { HeliCondition.OnNet(f, sender); return; }" in heli,
+         "Mi-8 condition rides on the helicopter's own event",
+         "PlayerHeli EngineState no longer forwards the condition message")
+    for n in ("VehicleCondition.Install(_harmony);", "VehicleCondition.Tick();", "VehicleCondition.Draw();"):
+        need(n in plug, "RevivalPlugin calls " + n, "RevivalPlugin.cs lost " + n)
+    need("VehicleCondition.SpawnFound = GUILayout.Toggle(" in adm and "NearestCondition(" in adm,
+         "admin panel: as-found switch and nearest-vehicle tools",
+         "the admin panel lost the N8 condition controls")
+    need('"Revival.VehicleCondition.cs"' in sync, "sync_public.py ships Revival.VehicleCondition.cs",
+         "Revival.VehicleCondition.cs is missing in sync_public.py - the public repo does not build")
+
+
 def check_fuel_economy():
     """[22d] Fuel economy and the airfield POL depot (Revival.Fuel.cs,
     docs/ai/tasks/fuel-economy.md, task 75462e6f82).
@@ -6577,6 +6908,136 @@ def check_gepard_npc():
          "sync_public.py kennt RevivalGepardCrew.cs nicht - dort baut das Repo nicht")
 
 
+def check_katyusha():
+    """[28k] The Katyusha rocket launcher (RevivalKatyusha.cs,
+    docs/ai/tasks/n07-katyusha.md). What holds without the game:
+      - on by default, its own item id (2075) and event code (188) free;
+      - the art exists and the rail slots in the plugin are the generator's;
+      - the fire control is the MAP and a large AREA: the impact point is
+        drawn uniformly over the ellipse (sqrt of a uniform radius), the salvo
+        takes every loaded rocket, and a centre is refused (never clamped) out
+        of range or touching a safe zone;
+      - effects are pooled hand-emitted particles (no network explosion per
+        rocket), the depot is set off by the master only;
+      - every seam and file list.
+    The picture on the truck, the feel of the lay and the salvo, and the
+    damage in the field are in-game acceptance items.
+    """
+    import re
+    import glob
+    print("[28k] Katyusha")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Katyusha: " + why)
+
+    path_k = os.path.join(ROOT, "RevivalKatyusha.cs")
+    if not os.path.exists(path_k):
+        bad("RevivalKatyusha.cs is missing")
+        return
+    raw_k = io.open(path_k, "rb").read()
+    need(not raw_k.startswith(b"\xef\xbb\xbf"), "RevivalKatyusha.cs has no BOM",
+         "RevivalKatyusha.cs starts with a BOM")
+    code = _code(raw_k.decode("utf-8", "replace"))
+
+    need(re.search(r'cfg\.Bind\(S, "Enabled", true,', code) is not None,
+         "[Katyusha] Enabled is on by default", "[Katyusha] Enabled is not on by default")
+    need("internal const int ItemId = 2075;" in code, "the M-13 rocket is item 2075",
+         "the M-13 item id moved away from 2075")
+    claimed = []
+    for p in glob.glob(os.path.join(ROOT, "*.cs")):
+        if os.path.basename(p) == "RevivalKatyusha.cs":
+            continue
+        if re.search(r"\b2075\s*,\s*[0-9]{4}\s*,\s*(true|false)", io.open(p, encoding="utf-8").read()):
+            claimed.append(os.path.basename(p))
+    need(not claimed, "no other ItemDef claims 2075", "2075 also defined in " + ", ".join(claimed))
+    game = set()
+    tsv = os.path.join(ROOT, "research", "items.tsv")
+    if os.path.exists(tsv):
+        for line in io.open(tsv, encoding="utf-8", errors="replace"):
+            p = line.split("\t")
+            if len(p) > 1 and p[1].isdigit():
+                game.add(int(p[1]))
+    need(2075 not in game, "2075 is not an id of the game", "2075 is already an item of the game")
+    need(re.search(r"SellOnlyIds[^;]*2075", read("Revival.Items.cs")) is not None,
+         "the M-13 has a trader's sell price", "2075 is missing from SellOnlyIds")
+    codes = []
+    for p in glob.glob(os.path.join(ROOT, "*.cs")):
+        if os.path.basename(p) == "RevivalKatyusha.cs":
+            continue
+        for m in re.finditer(r'"[A-Za-z]*(?:EventCode|Code)"\s*,\s*([0-9]+)', io.open(p, encoding="utf-8").read()):
+            codes.append(int(m.group(1)))
+    need('"NetworkEventCode", 188,' in code and 188 not in codes,
+         "event code 188 is the Katyusha's alone", "event code 188 is not free: %s" % sorted(set(codes)))
+
+    for f in ("katyusha_mount.ndmesh", "katyusha_base.ndmesh", "katyusha_rack.ndmesh",
+              "katyusha_diffuse.png", "m13.ndmesh", "m13_diffuse.png", "m13_normal.png", "m13_icon.png"):
+        need(os.path.exists(os.path.join(ASSETS, f)) and '"' + f + '"' in read("build.ps1"),
+             f + " built and packaged", f + " missing from assets/ or build.ps1")
+    gen = read("katyusha_build.py")
+    pairs = (("RAIL_PITCH", "RailPitch"), ("ROCKET_OFF", "RocketOff"), ("ROCKET_Z", "RocketZ"),
+             ("TRUNNION_Y", "TrunnionY"))
+    for py, cs in pairs:
+        a = re.search(r"^%s = (-?[0-9.]+)" % py, gen, re.M)
+        b = re.search(r"const float %s = (-?[0-9.]+)f;" % cs, code)
+        need(a is not None and b is not None and abs(float(a.group(1)) - float(b.group(1))) < 1e-6,
+             "rail slot %s matches katyusha_build.py" % cs,
+             "%s in the plugin differs from %s in katyusha_build.py" % (cs, py))
+    z1 = re.search(r"RAIL_Z0, RAIL_Z1 = (-?[0-9.]+), (-?[0-9.]+)", gen)
+    front = re.search(r"const float RailFront = (-?[0-9.]+)f;", code)
+    need(z1 is not None and front is not None and abs(float(z1.group(2)) - float(front.group(1))) < 1e-6,
+         "rail front matches katyusha_build.py", "RailFront differs from RAIL_Z1")
+    need('("katyusha", ["katyusha_build.py"])' in read("make_assets.py"),
+         "make_assets.py has the katyusha group", "make_assets.py lacks the katyusha group")
+
+    rnd = _body(code, "internal static Vector3 RandomInEllipse(")
+    need("Math.Sqrt(rng.NextDouble())" in rnd and "semiLength" in rnd and "semiWidth" in rnd,
+         "impact points are uniform over the ellipse area",
+         "RandomInEllipse no longer draws uniformly per area")
+    fire = _body(code, "static void Fire(Launcher l, Vector3 centre, float bearing)")
+    need("int n = CountOf(l);" in fire and "RandomInEllipse(" in fire and "KatyushaNet.Send(msg, true);" in fire,
+         "the salvo takes every loaded rocket and sends the points reliably",
+         "Fire no longer fires all loaded rockets into the ellipse")
+    ref = _body(code, "internal static string Refusal(Launcher l, Vector3 centre)")
+    need("MinRange" in ref and "MaxRange" in ref and "SafeZones.Overlaps(" in ref and "SafeZones.Inside(" in ref,
+         "minimum/maximum range and safe zones refuse a salvo",
+         "Refusal lost the range or safe-zone rule")
+    need("Mortar.ShowMap(true)" in code and "Mortar.MapPoint(" in code
+         and "internal static bool ShowMap(bool open)" in read("RevivalMortar.cs"),
+         "the fire control is the game's map (the howitzer's map seams)",
+         "the fire control no longer opens the map")
+    need("RocketHook.Detonate" not in _body(code, "internal static void Burst(Vector3 point, bool mine)")
+         and "Fx.Keep()" in code and "ps.Emit(e, 1);" in code,
+         "bursts are pooled local effects, not a network explosion per rocket",
+         "a rocket burst spawns a network explosion")
+    need("if (master) Depot(point);" in code and "FuelDepot.Blast(" in code,
+         "the fuel depots take rocket bursts on the master", "the depot hit is gone or not master-only")
+    need("KatyushaTravel" in code and '"InputAxis"' in code,
+         "travel lock: the truck does not drive with the rack out", "the travel lock is gone")
+
+    plug = read("RevivalPlugin.cs")
+    for seam in ("Katyusha.BindConfig(Config);", "Katyusha.Install(_harmony);", "Katyusha.AddItems(Items);",
+                 "Katyusha.Tick();", "Katyusha.Draw();"):
+        need(seam in plug, "RevivalPlugin: " + seam, "RevivalPlugin lost " + seam)
+    need('Add(Make("katyusha", KatyushaText.Label(),' in read("RevivalUralTruck.cs"),
+         "VehicleRegistry has the katyusha", "the katyusha is not in VehicleRegistry")
+    adm = read("Revival.Admin.cs")
+    need("Katyusha.SpawnInFront()" in adm and "GibItem(Katyusha.ItemId" in adm,
+         "admin panel: spawn a Katyusha and its rockets", "an admin button for the Katyusha is gone")
+    need("Katyusha.Pool(pool, entries)" in read("Revival.Airfield.cs"),
+         "the airfield loot rolls M-13 rockets", "the airfield loot lost the M-13")
+    need('"RevivalKatyusha.cs", "katyusha_build.py"' in read("sync_public.py"),
+         "sync_public ships the Katyusha", "sync_public.py does not ship RevivalKatyusha.cs")
+    need(os.path.exists(os.path.join(ROOT, "docs", "ai", "tasks", "n07-katyusha.md")),
+         "task report docs/ai/tasks/n07-katyusha.md", "docs/ai/tasks/n07-katyusha.md is missing")
+
+
 def check_airfield():
     """[33] East airfield phase 1 (Revival.Airfield.cs).
 
@@ -6641,7 +7102,7 @@ def check_airfield():
     need(not unknown, "jeder Lootpunkt nennt eine Greybox-ID",
          "Lootpunkte an IDs, die es im Greybox-Rezept nicht gibt: " + ", ".join(unknown))
     used = set(s[0] for s in slots)
-    for must in ("H1", "C1", "F1", "D1", "D2a", "D3", "S1", "S2", "S4"):
+    for must in ("H1", "H2", "C1", "F1", "B1", "D1", "D2a", "D3", "S1", "S2", "S4", "W1", "M1a", "AN"):
         need(must in used, "Loot in " + must, "kein Lootpunkt in " + must)
     need("S3" not in used and "D2b" not in used,
          "S3 und D2b bleiben verschlossen (spaetere Phase)",
@@ -7672,6 +8133,8 @@ if __name__ == "__main__":
     check_player_an2()
     check_an2_repair()
     check_fuel_economy()
+    check_vehicle_condition()
+    check_vehicle_spawns()
     check_parachute()
     check_stinger()
     check_crocodile()
@@ -7680,6 +8143,7 @@ if __name__ == "__main__":
     check_road_clear()
     check_gepard()
     check_gepard_npc()
+    check_katyusha()
     check_east_world()
     check_east_crossings()
     check_east_roads()
@@ -7691,6 +8155,8 @@ if __name__ == "__main__":
     check_flak()
     check_tower_radar()
     check_nofly()
+    check_npc_aircraft()
+    check_air_events()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

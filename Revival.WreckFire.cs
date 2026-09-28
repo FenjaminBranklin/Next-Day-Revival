@@ -1190,6 +1190,11 @@ namespace NextDayRevival
 
         // ------------------------------------------------------ Werkstoffe
 
+        /// <summary>The shared blob materials, for effects that pool their
+        /// own particle systems (N11 bomb bursts, Revival.AirEvents.cs).</summary>
+        internal static Material SharedAdditive() { return Additive(); }
+        internal static Material SharedBlended() { return Blended(); }
+
         static Material Additive()
         {
             if (_additive != null) return _additive;

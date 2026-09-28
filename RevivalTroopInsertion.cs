@@ -963,7 +963,7 @@ namespace NextDayRevival
 
         // ---------------------------------------------------------- map square
 
-        static string GridCell(Vector3 pos)
+        internal static string GridCell(Vector3 pos)
         {
             // The east world draws its own 20 x 10 grid (vanilla cells
             // continued east): name the square that is drawn there.

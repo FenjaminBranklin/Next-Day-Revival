@@ -2240,6 +2240,7 @@ namespace NextDayRevival
             public bool Tracer = true;
             public bool Flak;                    // self-destruct as a black flak puff with its own sound
             public bool PuffFx = true;           // Flak: draw the puff (the burst still happens)
+            public float PuffScale = 1f;         // Flak: the puff's size (1 = 23 mm, the 52-K's 85 mm: larger)
             public Action<Vector3> BurstSound;   // the far bang of a puff; null = silent
         }
 
@@ -2465,7 +2466,7 @@ namespace NextDayRevival
 
         static void Puff(Spec spec, Vector3 at)
         {
-            if (spec.PuffFx) GepardFx.Flak(at);
+            if (spec.PuffFx) GepardFx.Flak(at, spec.PuffScale);
             if (spec.BurstSound == null) return;
             try { spec.BurstSound(at); }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak burst sound: " + ex.Message); }
@@ -2715,19 +2716,27 @@ namespace NextDayRevival
                      UnityEngine.Random.Range(0.15f, 0.35f), new Color(1f, 0.65f, 0.3f, 1f));
         }
 
-        /// <summary>A timed 23 mm flak burst (Revival.Flak.cs): a short
-        /// flash and a ball of black smoke that hangs in the sky for seconds
-        /// and drifts - the puff a pilot sees walking toward him.</summary>
-        internal static void Flak(Vector3 at)
+        /// <summary>A timed flak burst (Revival.Flak.cs): a short flash and a
+        /// ball of black smoke that hangs in the sky for seconds and drifts -
+        /// the puff a pilot sees walking toward him.</summary>
+        internal static void Flak(Vector3 at) { Flak(at, 1f); }
+
+        /// <summary>The same at <paramref name="scale"/> (1 = a 23 mm burst;
+        /// the 52-K's 85 mm shell: larger, darker, longer in the sky).</summary>
+        internal static void Flak(Vector3 at, float scale)
         {
             if (!Ready()) return;
-            Emit(_flash, at, Vector3.zero, 6f, 0.06f, new Color(1f, 0.72f, 0.38f, 1f));
-            for (int i = 0; i < 4; i++)
-                Emit(_smoke, at + Rnd() * 1.4f, Rnd() * 0.8f + Vector3.up * 0.3f,
-                     UnityEngine.Random.Range(4.5f, 7f), UnityEngine.Random.Range(4f, 5.5f),
+            scale = Mathf.Clamp(scale, 0.3f, 5f);
+            float hang = Mathf.Sqrt(scale);
+            Emit(_flash, at, Vector3.zero, 6f * scale, 0.06f + 0.02f * scale, new Color(1f, 0.72f, 0.38f, 1f));
+            int puffs = scale > 1.5f ? 7 : 4;
+            for (int i = 0; i < puffs; i++)
+                Emit(_smoke, at + Rnd() * 1.4f * scale, Rnd() * 0.8f * hang + Vector3.up * 0.3f,
+                     UnityEngine.Random.Range(4.5f, 7f) * scale, UnityEngine.Random.Range(4f, 5.5f) * hang,
                      new Color(0.05f, 0.05f, 0.05f, 0.85f));
-            for (int i = 0; i < 5; i++)
-                Emit(_sparks, at, Rnd() * UnityEngine.Random.Range(12f, 26f), 0.07f,
+            int sparks = scale > 1.5f ? 10 : 5;
+            for (int i = 0; i < sparks; i++)
+                Emit(_sparks, at, Rnd() * UnityEngine.Random.Range(12f, 26f) * hang, 0.07f * hang,
                      UnityEngine.Random.Range(0.12f, 0.3f), new Color(1f, 0.65f, 0.3f, 1f));
         }
     }

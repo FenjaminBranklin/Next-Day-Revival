@@ -1,0 +1,29 @@
+# Written by tu95_import.py from tu95_build.py. Do not edit.
+# REAL METRES, Unity axes (+x starboard, +y up, +z nose); origin on the ground
+# under the main gear centre (the N10 root).
+span 50.100 46.901
+prop 1 Front -13.4000 3.2491 5.8262
+prop 1 Rear -13.4000 3.2491 5.0262
+prop 2 Front -6.2750 3.3857 11.1985
+prop 2 Rear -6.2750 3.3857 10.3985
+prop 3 Front 6.2750 3.3857 11.1985
+prop 3 Rear 6.2750 3.3857 10.3985
+prop 4 Front 13.4000 3.2491 5.8262
+prop 4 Rear 13.4000 3.2491 5.0262
+bay L -0.9500 3.0046 2.0798
+bay R 0.9500 3.0046 2.0798
+socket Socket_Bomb_1 -0.0000 3.5000 5.5798
+socket Socket_Bomb_2 -0.0000 3.5000 4.1798
+socket Socket_Bomb_3 -0.0000 3.5000 2.7798
+socket Socket_Bomb_4 -0.0000 3.5000 1.3798
+socket Socket_Bomb_5 -0.0000 3.5000 -0.0202
+socket Socket_Bomb_6 -0.0000 3.5000 -1.4202
+socket Socket_Exhaust_1 -13.4000 3.4491 -3.2690
+socket Socket_Exhaust_2 -6.2750 3.5857 1.0383
+socket Socket_Exhaust_3 6.2750 3.5857 1.0383
+socket Socket_Exhaust_4 13.4000 3.4491 -3.2690
+box Part_Fuselage 0.000 4.288 0.480 2.856 3.285 46.200
+box Part_Wing_L -13.025 3.762 -0.341 24.050 1.357 21.334
+box Part_Wing_R 13.025 3.762 -0.341 24.050 1.357 21.334
+box Part_Fin -0.000 8.579 -17.584 0.832 7.082 9.528
+box Part_Tailplane -0.000 4.640 -18.708 14.780 0.485 7.352

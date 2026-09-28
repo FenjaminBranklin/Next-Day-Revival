@@ -349,13 +349,15 @@ namespace NextDayRevival
             for (int i = 0; i < _targets.Count; i++) if (_targets[i].Go == go) return;
             Target t = new Target(); t.Go = go; t.Kind = kind; t.Actor = actor;
             if (kind == 1) t.Vehicle = go.GetComponent(RevivalPlugin.TypeByName("VehicleGameSystem"));
-            if (kind < 2)
+            if (kind < 2 || kind == 6)
             {
                 Renderer[] renderers = go.GetComponentsInChildren<Renderer>();
                 bool found = false; Bounds bounds = new Bounds(go.transform.position, Vector3.zero);
                 for (int i = 0; i < renderers.Length; i++)
                 {
                     if (!(renderers[i] is MeshRenderer) && !(renderers[i] is SkinnedMeshRenderer)) continue;
+                    // The An-2's hidden Mi-8 carrier meshes are off: only the drawn model counts.
+                    if (kind == 6 && !renderers[i].enabled) continue;
                     if (!found) { bounds = renderers[i].bounds; found = true; }
                     else bounds.Encapsulate(renderers[i].bounds);
                 }
@@ -389,7 +391,11 @@ namespace NextDayRevival
             Collection(typeof(CrewDrone), "_remote", "Go", 4);
             Collection(typeof(ArtyBattery), "_posts", "DroneModel", 5);
             Collection(typeof(ArtyBattery), "_ghosts", "DroneModel", 5);
+            // Registered aircraft (GepardAir: the An-2, NPC flyovers), kind 6.
+            _planes.Clear(); GepardAir.Collect(_planes);
+            for (int i = 0; i < _planes.Count; i++) Add(_planes[i].Go, 6, 0);
         }
+        static readonly List<GepardAir.Found> _planes = new List<GepardAir.Found>();
 
         /// <summary>
         /// The live half of the sight picture. The fixed half - lens, mount,
@@ -638,6 +644,8 @@ namespace NextDayRevival
                              new Vector3(f.Target.Actor, 0, 0), Lethal, true);
             else if (f.Target.Kind == 4)
                 CrewDrone.Beschuss(f.Target.Point - f.Direction * 4f, f.Direction, 8f, Lethal);
+            else if (f.Target.Kind == 6)
+                GepardAir.Kill(f.Target.Go, f.Position);
             else if (f.Target.Kind == 5)
             {
                 // ArtyBattery.Shoot removes ONE of Post.DroneHits (3) and

@@ -1,0 +1,6 @@
+# ndr_airevents.tsv - written by the map editor (Air events).
+# name	enabled	x	z	heading	length	width	edge	dropX	dropZ	attackX	attackZ	faction	patrolMinutes	intervalMin	intervalMax	waves	scene
+# heading = degrees clockwise from +Z; length/width metres; edge one of auto N E S W random.
+# waves = type:count:delay:load;... (b = Tu-95 bomber, load bombs; t = An-2, load paratroopers).
+# interval hours 0/0 = admin panel only; scene empty = the default map.
+Airfield-raid	1	4632.00	0.00	180.0	900.0	150.0	auto	4380.00	-500.00	4250.00	1250.00	traitor	60	2.500	3.500	b:1:0:48;t:2:90:10	

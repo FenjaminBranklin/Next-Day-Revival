@@ -44,6 +44,11 @@ GROUPS = [
     ("an2parts", ["an2_parts_build.py"]),
     # The An-2's FAB-50 bomb (2072) for Revival.An2Bombs.cs.
     ("fab50", ["fab50_build.py"]),
+    # The 52-K 85 mm AA gun (N6) for Revival.Flak.cs.
+    ("k52", ["k52_build.py"]),
+    # The Katyusha (BM-13 style launcher on the Ural) and its M-13 rocket
+    # item (2075) for RevivalKatyusha.cs.
+    ("katyusha", ["katyusha_build.py"]),
     # Vehicle modules (2060 thermal, 2061 night vision, 2062 large jammer):
     # own art, replacing the portable jammer all three used to wear.
     ("modules", ["vehicle_modules_build.py"]),

@@ -1,7 +1,8 @@
 // Next Day: Survival - Revival Toolkit
 //
-// THE AIRFIELD FLAK (P4): the two gunned AA positions of the east airfield
-// fight as ZU-23-2 twin 23 mm guns.
+// THE HEAVY FLAK (P4, N6): the two gunned AA positions of the east airfield
+// and a two-gun battery in the military town fight as Soviet 85 mm 52-K
+// (M1939) anti-aircraft guns. The Gepard stays the short-range gun.
 //
 // WHAT THIS IS, and what it is built from:
 //
@@ -9,60 +10,67 @@
 //      airfield_assembly.py: "AA position north" at (4385, 1320) and "AA
 //      position S2-S3" at (4300, -550), both yaw 90) carry a derelict ZU-23-2
 //      merged into the ring's mesh. At runtime that mesh is swapped for the
-//      bundle's own gunless twin (the renderers of "AA position V3 (empty)",
-//      aa_position_empty.fbx: same ring, bare platform with four bolts) and a
-//      live gun is built on the platform from primitives, to the measures of
-//      the derelict (zu23_parts in assets/src/airfield_shelters.py), metres x
-//      2.8. It has the moving parts the derelict could not have: the upper
-//      carriage traverses (360 degrees), the cradle elevates (-10 to +90), the
-//      two barrels recoil ALTERNATELY and the handwheels turn. No bundle
-//      rebuild and no pivots from a kit are needed: every pivot is built here.
-//      Without the shelters bundle (greybox fallback) the gun stands on the
-//      ground at the same two points.
+//      bundle's own gunless twin (the renderers of "AA position V3 (empty)")
+//      and a live 52-K is set on the platform: the meshes of k52_build.py
+//      (assets/k52_{base,mount,cradle,barrel}_lod0-3.ndmesh, one texture
+//      atlas, pivots in k52_rig.txt), four parts at their real pivots under
+//      one LODGroup: the cruciform carriage with its levelling jacks stands,
+//      the top carriage with the small shield traverses (360 degrees), the
+//      cradle elevates (-3 to +82), the long L/55 barrel RECOILS along the
+//      cradle and runs out again. The military town's battery (MT-AA2a/b, on
+//      the school sports ground) stands on the ground. Without the shelters
+//      bundle (greybox fallback) the airfield guns stand on the ground at the
+//      same two points.
 //   2  THE ROUNDS are the Gepard's round loop (GepardShots.Fire with a Spec):
-//      real projectiles at 970 m/s with gravity, in world units (1 m = 2.8 u),
-//      tracer on every round, a direct hit within Fuze of an aircraft, and a
-//      timed burst: the gunner sets the fuze to the range he aims at, so every
-//      round that misses bursts as a black puff near the target and its
-//      fragments hit within Splash. Damage per target class is the Gepard's
-//      (GepardGun.Hit): a drone dies to one hit, a helicopter or the An-2 to
-//      HeliHits of them, the kill travels on the Gepard's own event.
-//   3  THE CREW. Two men of the airfield's defender faction ([Airfield]
-//      DefenderFaction), spawned by the master with the keys "flak/<id>/g" and
-//      "flak/<id>/c" (THE SLASH IS LOAD BEARING: Revival.GroundEnemies.cs
-//      deletes keyed NPCs without one). Every client puts them on the two
-//      seats of the traversing carriage after the animator and samples the
-//      game's seated clip onto them (TechnicalCrew.Sitzen) - the gunner sits
-//      at the handwheels, the loader beside him, and both turn with the gun.
+//      real projectiles with gravity in world units (1 m = 2.8 u), one every
+//      few seconds, deliberately SLOW (MuzzleVelocity) so the fight can be
+//      read from the cockpit. Every round is time-fused: the crew sets the
+//      fuze to the range it aims at, and a round that meets nothing bursts
+//      there as a big black puff with a far-carrying bang (delayed by the
+//      speed of sound); its fragments hit an aircraft within BurstRadius.
+//      Damage per target class is the Gepard's (GepardGun.Hit): a helicopter
+//      or the An-2 goes down after HeliHits of them.
+//   3  THE CREW. Two men of the defender faction ([Airfield] DefenderFaction,
+//      the town's [MilitaryTown] faction for its guns), spawned by the master
+//      with the keys "flak/<id>/g" and "flak/<id>/c" (THE SLASH IS LOAD
+//      BEARING: Revival.GroundEnemies.cs deletes keyed NPCs without one).
+//      Every client puts them on the layers' seats of the top carriage after
+//      the animator with the game's seated clip, turning with the gun.
 //   4  THE GUNNER (master only). Air targets only - a helicopter or the An-2
-//      with a player of a hostile faction aboard, or a drone flown by one -
-//      airborne and within EngageRange. Never an aircraft with a player of
-//      his own faction aboard. He lays the mount at the handwheels' rates
-//      (TraverseSpeed, ElevationSpeed, SlewAcceleration), leads the target by
-//      eye from a lagging velocity estimate, and fires bursts. His first
-//      burst is far off (InitialError); after every burst he corrects by what
-//      he saw (WalkFactor) down to ErrorFloor - the puffs visibly walk in. A
-//      pilot who turns hard (a change of velocity since the last burst) throws
-//      the correction off again (EvadeFactor), so evading works and flying
-//      straight is deadly.
-//   5  A PLAYER takes the gun over when its crew is dead: walk up to the
+//      with a player of a hostile faction aboard, a drone flown by one, or
+//      the admin's NPC flyover - airborne and within range. BRACKETING: the
+//      first shot is far off (InitialError); after every shot the crew
+//      corrects by the puff it saw (the error shrinks by the walk factor)
+//      down to ErrorFloor, so the puffs visibly walk toward the aircraft,
+//      seconds apart. A pilot who changes course between two shots throws
+//      the correction off again (EvadeFactor).
+//   5  THE RADAR (Revival.TowerRadar.cs). With an operator at the tower's
+//      console the guns are radar-directed (SetRadarDirected + the direction
+//      scales): RadarRange and RadarWalkFactor - long range, fast bracketing.
+//      With the radar down, dark or unmanned (a dead or WOUNDED operator
+//      counts as gone - Up) the crews lay by eye: VisualRange and
+//      WalkFactor - visual range only, slow bracketing.
+//   6  A PLAYER takes a gun over when its crew is dead: walk up to the
 //      gunner's seat, press the turret key (G). The mouse cranks the mount at
 //      the same slew limits, the left button fires, the right button zooms
-//      the sight, R reloads, G leaves. The body stays standing beside the gun
-//      (movement is locked while at the sight).
-//   6  THE WIRE. One Photon event (FlakNet, code 198): the pose, trigger and
-//      fuze range of a gun ten times a second from whoever lays it (the master
-//      for a crew, the manning player's client), so every client sees the gun
-//      turn, the barrels recoil and the same bursts in the sky. Rounds are
-//      drawn by every client; only the layer's rounds do damage.
-//   7  THE API for P5 (tower radar) and P6a (no-fly zones): Flak.Guns() lists
+//      the sight, the mouse wheel sets the fuze range (F: back to the
+//      automatic fuze, the range of the aircraft nearest the bore), R
+//      brings up a fresh rack, G leaves.
+//   7  THE WIRE. One Photon event (FlakNet, code 198): pose, shot counter
+//      and fuze range of a gun ten times a second and on every shot from
+//      whoever lays it (the master for a crew, the manning player's client),
+//      so every client sees the gun turn, the barrel recoil and the same
+//      puffs in the sky. Rounds are drawn by every client; only the layer's
+//      rounds do damage.
+//   8  THE API for P5 (tower radar) and P6a (no-fly zones): Flak.Guns() lists
 //      each gun with its state; AssignTarget / ClearTarget / WeaponsFree /
 //      HoldFire / ZoneDefence command one gun or all. Commands act where the
 //      fire control runs - on the master (Flak.Authority).
 //
-// WHAT IS NOT PROVEN WITHOUT THE GAME: how the gun sits in the ring, whether
-// the seated clip reaches the handwheels, the look of the puffs and the feel
-// of the walking bursts. docs/ai/tasks/airfield-flak-p4.md lists the checks.
+// WHAT IS NOT PROVEN WITHOUT THE GAME: how the gun sits in the ring and on
+// the sports ground, whether the seated clip reaches the handwheels, the look
+// of the recoil and the puffs and the feel of the bracketing.
+// docs/ai/tasks/k52-flak.md lists the checks and the tuning numbers.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree
 // lambdas. ASCII only, no BOM.
@@ -72,11 +80,15 @@
 //   Revival.CameraTurret.cs   CameraOwner.Flak and its LateTick dispatch.
 //   RevivalGepard.cs          GepardShots.Spec + Fire(Spec, ...), the Proximity
 //                             fuze overload, GepardGun.Nearest, Hit(heliHits),
-//                             GepardFx.Flak, the once-a-frame round Tick.
+//                             GepardFx.Flak(at, scale), Spec.PuffScale, the
+//                             once-a-frame round Tick.
 //   RevivalGepardCrew.cs      GepardAir.Hit(gunHits); Steht/Parken/Agent/Ruhig/
 //                             Spieler internal.
 //   RevivalTechnicalCrew.cs   Sitzen internal (the seated clip).
 //   Revival.Airfield.cs       Faction internal (the crew's side).
+//   Revival.MilitaryTown.cs   On, Faction (the town battery's side).
+//   Revival.TowerRadar.cs     SetFireDirection + SetRadarDirected by tier.
+//   Revival.NpcCombat.cs      NpcWar.GroundDowned (the wounded state, N6).
 
 using System;
 using System.Collections.Generic;
@@ -144,7 +156,8 @@ namespace NextDayRevival
     }
 
     /// <summary>
-    /// The airfield's ZU-23-2 guns: config, the public API, and the frame
+    /// The 52-K 85 mm guns of the airfield and the military town: config,
+    /// the public API, and the frame
     /// (find the emplacements, build the guns, crews, fire control, a manning
     /// player, the wire).
     /// </summary>
@@ -156,91 +169,47 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ config
 
-        internal static ConfigEntry<bool> CfgEnabled, CfgNpcCrew, CfgTakeover,
+        internal static ConfigEntry<bool> CfgEnabled, CfgTown, CfgNpcCrew, CfgTakeover,
             CfgTracers, CfgMuzzleFlash, CfgRecoil, CfgCasings, CfgPuffs, CfgGunSound,
-            CfgBurstSound, CfgSeated, CfgHandwheels;
-        internal static ConfigEntry<float> CfgVelocity, CfgRange, CfgSelfDestruct, CfgCeiling,
+            CfgBurstSound, CfgSeated;
+        internal static ConfigEntry<float> CfgVelocity, CfgRange, CfgRadarRange, CfgSelfDestruct, CfgCeiling,
             CfgRpm, CfgDispersion, CfgFuze, CfgSplash, CfgTurn, CfgElev, CfgAccel, CfgPitchMin,
-            CfgPitchMax, CfgInitialError, CfgWalk, CfgFloor, CfgEvade, CfgLag, CfgReaction,
-            CfgBurst, CfgPause, CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity,
-            CfgMinHeight;
+            CfgPitchMax, CfgInitialError, CfgWalk, CfgRadarWalk, CfgFloor, CfgEvade, CfgLag, CfgReaction,
+            CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity, CfgMinHeight;
         internal static ConfigEntry<int> CfgHeliHits, CfgRoundsPerLoad, CfgEventCode;
 
         public static void BindConfig(ConfigFile cfg)
         {
+            // [Flak]: switches and plumbing. [Flak52K]: the gun's numbers - a
+            // section of its own since N6, so a config file that still holds
+            // the ZU-23-2's numbers (1600 rounds a minute...) cannot drive the
+            // 85 mm gun.
             const string S = "Flak";
+            const string G = "Flak52K";
             CfgEnabled = cfg.Bind(S, "Enabled", true,
-                "The ZU-23-2 guns on the east airfield's AA positions (acting only with "
+                "The 52-K 85 mm guns on the east airfield's AA positions (acting only with "
                 + "[World] EastTile and [Airfield] Enabled).");
+            CfgTown = cfg.Bind(S, "MilitaryTownBattery", true,
+                "Two more 52-Ks on the military town's school sports ground (with [MilitaryTown] Enabled).");
             CfgNpcCrew = cfg.Bind(S, "NpcCrew", true,
-                "Two men of the airfield's defender faction man each gun (master spawns them).");
+                "Two men of the defender faction man each gun (master spawns them).");
             CfgTakeover = cfg.Bind(S, "PlayerTakeover", true,
                 "A player can take a gun over when its crew is dead (turret key, G).");
-            CfgTracers = cfg.Bind(S, "Tracers", true, "Effect: a tracer line on every round.");
-            CfgMuzzleFlash = cfg.Bind(S, "MuzzleFlash", true, "Effect: muzzle flash and gun smoke.");
+            CfgTracers = cfg.Bind(S, "Tracers", true,
+                "Effect: a short streak on every shell in flight, so it can be seen coming.");
+            CfgMuzzleFlash = cfg.Bind(S, "MuzzleFlash", true,
+                "Effect: muzzle flash, the muzzle brake's side blast, gun smoke and ground dust.");
             CfgRecoil = cfg.Bind(S, "BarrelRecoil", true,
-                "Animation: the two barrels recoil alternately with every round.");
-            CfgCasings = cfg.Bind(S, "Casings", true, "Effect: spent cases thrown out of the breeches.");
+                "Animation: the barrel runs back with every shot and out again.");
+            CfgCasings = cfg.Bind(S, "Casings", true, "Effect: the spent case thrown out of the breech.");
             CfgPuffs = cfg.Bind(S, "FlakPuffs", true,
-                "Effect: the black puff of a bursting round in the sky.");
-            CfgGunSound = cfg.Bind(S, "GunSound", true, "Sound: the report of every round.");
+                "Effect: the black puff of a bursting shell in the sky.");
+            CfgGunSound = cfg.Bind(S, "GunSound", true, "Sound: the report of every shot.");
             CfgBurstSound = cfg.Bind(S, "BurstSound", true,
                 "Sound: the far-carrying bang of a burst, delayed by the speed of sound.");
             CfgSeated = cfg.Bind(S, "SeatedCrew", true,
                 "Animation: the crew sit on the gun's seats with the game's seated clip "
                 + "and turn with the mount. Off: they stand on the seat points.");
-            CfgHandwheels = cfg.Bind(S, "HandwheelAnimation", true,
-                "Animation: the traverse and elevation handwheels turn while the gun slews.");
-            CfgVelocity = cfg.Bind(S, "MuzzleVelocity", 970f,
-                "Muzzle velocity in metres per second (the real HEI-T: 970). World speed is x 2.8.");
-            CfgRange = cfg.Bind(S, "EngageRange", 2000f,
-                "Slant range in metres the crew opens fire at (the real effective range "
-                + "against aircraft: 2000 m).");
-            CfgSelfDestruct = cfg.Bind(S, "SelfDestructRange", 2500f,
-                "A round that meets nothing bursts after this many metres at the latest.");
-            CfgCeiling = cfg.Bind(S, "Ceiling", 1500f,
-                "Highest target altitude above the gun in metres (the real effective ceiling).");
-            CfgMinHeight = cfg.Bind(S, "MinTargetHeight", 3f,
-                "An aircraft lower than this over the ground (metres) is not airborne and "
-                + "not engaged - the guns are for air targets only.");
-            CfgRpm = cfg.Bind(S, "RateOfFire", 1600f,
-                "Rounds per minute from both barrels together (2 x 800, the real cyclic "
-                + "rate). The barrels alternate.");
-            CfgDispersion = cfg.Bind(S, "Dispersion", 3.5f,
-                "Dispersion of a single round in milliradians (the Gepard: 1.5).");
-            CfgFuze = cfg.Bind(S, "DirectHitDistance", 1.5f,
-                "A round passing this close to an aircraft (beyond its own size, world "
-                + "units) hits it.");
-            CfgSplash = cfg.Bind(S, "BurstRadius", 2.5f,
-                "Metres from a burst within which its fragments hit an aircraft (beyond "
-                + "the aircraft's size).");
-            CfgHeliHits = cfg.Bind(S, "HeliHits", 12,
-                "23 mm hits a helicopter or the An-2 survives (the Gepard's 35 mm: 10).");
-            CfgTurn = cfg.Bind(S, "TraverseSpeed", 70f, "Highest traverse rate, degrees per second.");
-            CfgElev = cfg.Bind(S, "ElevationSpeed", 50f, "Highest elevation rate, degrees per second.");
-            CfgAccel = cfg.Bind(S, "SlewAcceleration", 140f,
-                "How fast the hand-cranked mount gets up to speed, degrees per second squared.");
-            CfgPitchMin = cfg.Bind(S, "PitchMin", -10f, "Lowest elevation, degrees (the real -10).");
-            CfgPitchMax = cfg.Bind(S, "PitchMax", 90f, "Highest elevation, degrees (the real +90).");
-            CfgInitialError = cfg.Bind(S, "InitialError", 45f,
-                "The crew's aiming error on a new target, milliradians of range.");
-            CfgWalk = cfg.Bind(S, "WalkFactor", 0.55f,
-                "The part of the aiming error left after each burst's correction (0..1). "
-                + "Smaller: the bursts walk in faster.");
-            CfgFloor = cfg.Bind(S, "ErrorFloor", 7f,
-                "The aiming error the crew never gets under, milliradians of range.");
-            CfgEvade = cfg.Bind(S, "EvadeFactor", 0.9f,
-                "How much a target's change of velocity since the last burst throws the "
-                + "correction off (0 = evading does not help).");
-            CfgLag = cfg.Bind(S, "TrackingLag", 2.0f,
-                "How fast the crew's estimate of the target's velocity follows it, per "
-                + "second (the Gepard's radar: 5).");
-            CfgReaction = cfg.Bind(S, "Reaction", 1.5f, "Seconds on a new target before the first burst.");
-            CfgBurst = cfg.Bind(S, "Burst", 0.6f, "Length of a crew's burst in seconds.");
-            CfgPause = cfg.Bind(S, "BurstPause", 1.4f, "Pause between bursts in seconds.");
-            CfgRoundsPerLoad = cfg.Bind(S, "Rounds", 100, "Rounds in the two boxes (2 x 50).");
-            CfgReload = cfg.Bind(S, "ReloadSeconds", 12f,
-                "Changing both boxes, seconds (one man left alone: x 1.5).");
             CfgRespawn = cfg.Bind(S, "CrewRespawnMinutes", 35f,
                 "A dead crew is replaced after this many minutes, never with a player "
                 + "within 150 u or at the gun.");
@@ -252,8 +221,61 @@ namespace NextDayRevival
             CfgSensitivity = cfg.Bind(S, "Sensitivity", 2.0f,
                 "At the sight: degrees of laying per unit of mouse movement.");
             CfgEventCode = cfg.Bind(S, "NetworkEventCode", 198,
-                "Photon event code for the guns' pose and trigger. Must not overlap any "
+                "Photon event code for the guns' pose and shots. Must not overlap any "
                 + "other channel (0..199).");
+
+            CfgVelocity = cfg.Bind(G, "MuzzleVelocity", 550f,
+                "Muzzle velocity in metres per second. The real 52-K: 800; slowed on "
+                + "purpose so a pilot sees the puffs come (5 s to 2750 m). World speed is x 2.8.");
+            CfgRange = cfg.Bind(G, "VisualRange", 1800f,
+                "Slant range in metres the crews open fire at when they lay by eye (radar "
+                + "down, dark or unmanned).");
+            CfgRadarRange = cfg.Bind(G, "RadarRange", 4000f,
+                "Slant range in metres with the tower radar manned (radar-directed).");
+            CfgSelfDestruct = cfg.Bind(G, "MaxFuzeRange", 4500f,
+                "The longest fuze setting: a shell that meets nothing bursts after this many metres at the latest.");
+            CfgCeiling = cfg.Bind(G, "Ceiling", 3000f,
+                "Highest target altitude above the gun in metres engaged.");
+            CfgMinHeight = cfg.Bind(G, "MinTargetHeight", 3f,
+                "An aircraft lower than this over the ground (metres) is not airborne and "
+                + "not engaged - the guns are for air targets only.");
+            CfgRpm = cfg.Bind(G, "RateOfFire", 15f,
+                "Shots per minute (the real 52-K: 15 to 20). Every shot is one bracketing step.");
+            CfgDispersion = cfg.Bind(G, "Dispersion", 2.0f,
+                "Dispersion of a single shell in milliradians (the Gepard: 1.5).");
+            CfgFuze = cfg.Bind(G, "DirectHitDistance", 1.5f,
+                "A shell passing this close to an aircraft (beyond its own size, world "
+                + "units) hits it.");
+            CfgSplash = cfg.Bind(G, "BurstRadius", 12f,
+                "Metres from a burst within which its fragments hit an aircraft (beyond "
+                + "the aircraft's size).");
+            CfgHeliHits = cfg.Bind(G, "HeliHits", 2,
+                "85 mm hits (direct or fragments) that bring down a helicopter or the An-2.");
+            CfgTurn = cfg.Bind(G, "TraverseSpeed", 20f, "Highest traverse rate, degrees per second.");
+            CfgElev = cfg.Bind(G, "ElevationSpeed", 12f, "Highest elevation rate, degrees per second.");
+            CfgAccel = cfg.Bind(G, "SlewAcceleration", 40f,
+                "How fast the heavy mount gets up to speed, degrees per second squared.");
+            CfgPitchMin = cfg.Bind(G, "PitchMin", -3f, "Lowest elevation, degrees (the real -3).");
+            CfgPitchMax = cfg.Bind(G, "PitchMax", 82f, "Highest elevation, degrees (the real +82).");
+            CfgInitialError = cfg.Bind(G, "InitialError", 60f,
+                "The crew's aiming error on a new target, milliradians of range.");
+            CfgWalk = cfg.Bind(G, "WalkFactor", 0.75f,
+                "Laying by eye: the part of the aiming error left after each shot's "
+                + "correction (0..1). Larger: the puffs walk in slower.");
+            CfgRadarWalk = cfg.Bind(G, "RadarWalkFactor", 0.45f,
+                "Radar-directed: the part of the aiming error left after each shot (0..1).");
+            CfgFloor = cfg.Bind(G, "ErrorFloor", 5f,
+                "The aiming error the crew never gets under, milliradians of range.");
+            CfgEvade = cfg.Bind(G, "EvadeFactor", 1.0f,
+                "How much a target's change of velocity since the last shot throws the "
+                + "correction off (0 = evading does not help).");
+            CfgLag = cfg.Bind(G, "TrackingLag", 1.5f,
+                "How fast the crew's estimate of the target's velocity follows it, per "
+                + "second (the Gepard's radar: 5).");
+            CfgReaction = cfg.Bind(G, "Reaction", 3f, "Seconds on a new target before the first shot.");
+            CfgRoundsPerLoad = cfg.Bind(G, "Rounds", 20, "Ready rounds at the gun before the next rack is brought up.");
+            CfgReload = cfg.Bind(G, "ReloadSeconds", 25f,
+                "Bringing up the next rack, seconds (one man left alone: x 1.5).");
         }
 
         internal static bool On
@@ -265,22 +287,46 @@ namespace NextDayRevival
         internal static bool B2(ConfigEntry<bool> c) { return c == null || c.Value; }
         static float F(ConfigEntry<float> c, float fallback) { return c == null ? fallback : c.Value; }
 
-        internal static float Speed { get { return Mathf.Max(100f, F(CfgVelocity, 970f)) * K; } }
+        internal static float Speed { get { return Mathf.Max(100f, F(CfgVelocity, 550f)) * K; } }
         internal static float Gravity { get { return 9.81f * K; } }
-        internal static float RangeU { get { return Mathf.Max(100f, F(CfgRange, 2000f)) * K; } }
-        static float SelfDestructU { get { return Mathf.Max(F(CfgRange, 2000f), F(CfgSelfDestruct, 2500f)) * K; } }
-        static float CeilingU { get { return Mathf.Max(50f, F(CfgCeiling, 1500f)) * K; } }
-        static int RoundsFull { get { return Mathf.Max(2, CfgRoundsPerLoad == null ? 100 : CfgRoundsPerLoad.Value); } }
+        /// <summary>The engagement range now: the radar's with an operator at
+        /// the console, the eye's without (SetRadarDirected).</summary>
+        internal static float RangeU { get { return RangeMetres(_radar) * K; } }
+
+        /// <summary>The engagement range in metres, radar-directed or by eye.</summary>
+        internal static float RangeMetres(bool radar)
+        {
+            float eye = Mathf.Max(100f, F(CfgRange, 1800f));
+            return radar ? Mathf.Max(eye, F(CfgRadarRange, 4000f)) : eye;
+        }
+        static float SelfDestructU
+        {
+            get { return Mathf.Max(Mathf.Max(F(CfgRange, 1800f), F(CfgRadarRange, 4000f)), F(CfgSelfDestruct, 4500f)) * K; }
+        }
+        internal static float CeilingU { get { return Mathf.Max(50f, F(CfgCeiling, 3000f)) * K; } }
+        static int RoundsFull { get { return Mathf.Max(1, CfgRoundsPerLoad == null ? 20 : CfgRoundsPerLoad.Value); } }
+        internal static int RoundsPerLoad { get { return RoundsFull; } }
+        /// <summary>The walk factor now: fast bracketing radar-directed, slow by eye.</summary>
+        internal static float Walk
+        {
+            get { return Mathf.Clamp01(_radar ? F(CfgRadarWalk, 0.45f) : F(CfgWalk, 0.75f)); }
+        }
 
         // ------------------------------------------------------ the emplacements
 
         /// <summary>The gunned AA positions of the assembly (airfield_assembly.py):
         /// id, holder name, x, z, yaw. The third, "AA position V3 (empty)",
-        /// has no gun and lends its mesh.</summary>
-        static readonly string[] Ids = { "AA-N", "AA-S" };
-        static readonly string[] Names = { "AA position north", "AA position S2-S3" };
-        static readonly Vector2[] Spots = { new Vector2(4385f, 1320f), new Vector2(4300f, -550f) };
-        const float SpotYaw = 90f;
+        /// has no gun and lends its mesh. The last two are the military
+        /// town's battery on the school sports ground (MT-S1f, 50 x 80 u open
+        /// pad at (5605, 660), docs/ai/tasks/military-town.md): no holder,
+        /// they stand on the ground facing west, toward the airfield.</summary>
+        static readonly string[] Ids = { "AA-N", "AA-S", "MT-AA2a", "MT-AA2b" };
+        static readonly string[] Names = { "AA position north", "AA position S2-S3",
+            "Town battery west", "Town battery east" };
+        static readonly Vector2[] Spots = { new Vector2(4385f, 1320f), new Vector2(4300f, -550f),
+            new Vector2(5598f, 642f), new Vector2(5612f, 686f) };
+        static readonly float[] SpotYaws = { 90f, 90f, 270f, 270f };
+        static readonly bool[] TownSpot = { false, false, true, true };
         const string EmptyName = "AA position V3 (empty)";
 
         // ------------------------------------------------------------- the gun
@@ -289,19 +335,19 @@ namespace NextDayRevival
         {
             public int Index;
             public string Id, Name;
-            public Transform Holder;            // the emplacement; null in the greybox fallback
-            public Transform Root, Mount, Cradle;
-            public readonly Transform[] Barrel = new Transform[2];
-            public readonly Transform[] Muzzle = new Transform[2];
-            public Transform SeatGunner, SeatLoader, Eye, WheelTraverse, WheelElevation;
+            public bool Town;                   // the military town's battery (its faction)
+            public Transform Holder;            // the emplacement; null on the ground
+            public Transform Root, Mount, Cradle, Barrel, Muzzle;
+            public Transform SeatGunner, SeatLoader, Eye;
             public Transform Owner;             // what the rounds step past
+            public float Stroke;                // recoil stroke, world units (k52_rig.txt)
 
             // pose (every client)
             public float Yaw, Pitch, YawVel, PitchVel;
             public float WantYaw, WantPitch = 12f;
             public float LastWantYaw, LastWantPitch, WantYawRate, WantPitchRate;   // the target's angular rate (feed-forward)
-            public readonly float[] Recoil = new float[2];
-            public float WheelT, WheelE;
+            public float Recoil;                // 1 at the shot, runs out to 0
+            public bool CaseDue;                // the case comes out as the barrel runs out
 
             // crew (every client finds them by key; the master spawns them)
             public Component Gunner, Loader;
@@ -319,23 +365,22 @@ namespace NextDayRevival
             public readonly List<GepardGun.Contact> Air = new List<GepardGun.Contact>();
             public readonly List<GepardGun.Contact> Hostile = new List<GepardGun.Contact>();
             public GepardGun.Contact Target;
-            public bool Laying, Firing, SentFiring, Engaged, Reloading;
-            public float Held, NextLook, BurstUntil, PauseUntil, NextShot, LastContact, NextPublish, ReloadUntil;
-            public int GunIdx, Rounds = -1, Fired;
+            public bool Laying, Firing, Engaged, Reloading;
+            public float Held, NextLook, NextShot, LastContact, LastShot = -100f, NextPublish, ReloadUntil;
+            public int Rounds = -1, Fired, Seq;
             public Vector3 Err, LastVel, Aim;
             public float FuzeRange;
 
             // the wire (what the others see)
-            public bool RemoteFiring;
-            public float RemoteAt = -100f, RemoteFuze, RemoteNextShot;
-            public int RemoteGun;
+            public float RemoteAt = -100f, RemoteFuze, RemoteShotAt = -100f;
+            public int RemoteSeq = -1;
             public float ClaimedUntil = -100f;  // a player at this gun on another client
             public int ClaimActor;
         }
 
         static readonly List<Gun> _guns = new List<Gun>();
         static float _nextFind, _airfieldSince = -1f;
-        static bool _fallbackSaid;
+        static bool _fallbackSaid, _radar;
         static GepardShots.Spec _spec;
 
         // --------------------------------------------------------------- the API
@@ -441,6 +486,33 @@ namespace NextDayRevival
             _dirTracking = Mathf.Clamp(trackingScale, 0.05f, 10f);
         }
 
+        /// <summary>
+        /// N6 radar coupling (Revival.TowerRadar.cs, tier 2): with an operator
+        /// at the console the guns fight at RadarRange and bracket with
+        /// RadarWalkFactor; without (radar down, dark, operator dead or
+        /// wounded) at VisualRange with WalkFactor. Acts on the master.
+        /// </summary>
+        public static void SetRadarDirected(bool on)
+        {
+            if (_radar == on) return;
+            _radar = on;
+            for (int i = 0; i < _guns.Count; i++) _guns[i].NextLook = 0f;
+            Log(on ? "radar-directed: range " + (RangeU / K).ToString("0", CultureInfo.InvariantCulture)
+                    + " m, walk factor " + Walk.ToString("0.00", CultureInfo.InvariantCulture) + "."
+                : "laying by eye: range " + (RangeU / K).ToString("0", CultureInfo.InvariantCulture)
+                    + " m, walk factor " + Walk.ToString("0.00", CultureInfo.InvariantCulture) + ".");
+        }
+
+        /// <summary>True while the guns are radar-directed.</summary>
+        public static bool RadarDirected { get { return _radar; } }
+
+        /// <summary>The side a gun's crew fights for: the town's battery the
+        /// military town's faction, the airfield guns the airfield's.</summary>
+        internal static string Side(Gun g)
+        {
+            return g != null && g.Town ? MilitaryTown.Faction() : Airfield.Faction();
+        }
+
         /// <summary>P5: the radar HQ's order for a gun (by id) shown in the
         /// sight of the player manning it; null or empty = no line.</summary>
         internal static Func<string, string> SightOrder;
@@ -500,7 +572,7 @@ namespace NextDayRevival
         {
             if (PlayerAt(g)) return FlakState.PlayerManned;
             if (!Up(g.Gunner) && !Up(g.Loader)) return FlakState.NoCrew;
-            bool firing = g.Laying ? g.Firing : (g.RemoteFiring && Time.time - g.RemoteAt < 0.5f);
+            bool firing = Time.time - Mathf.Max(g.LastShot, g.RemoteShotAt) < 1.5f;
             if (g.Reloading) return FlakState.Reloading;
             if (firing) return FlakState.Firing;
             if (g.Target != null && g.Target.Go != null) return FlakState.Tracking;
@@ -647,7 +719,7 @@ namespace NextDayRevival
         {
             if (_sweepEmpty == null && name == EmptyName) _sweepEmpty = t;
             for (int k = 0; k < Ids.Length; k++)
-                if (_sweepHolders[k] == null && name == Names[k]) _sweepHolders[k] = t;
+                if (!TownSpot[k] && _sweepHolders[k] == null && name == Names[k]) _sweepHolders[k] = t;
             return true;
         }
 
@@ -657,7 +729,7 @@ namespace NextDayRevival
             {
                 if (Time.realtimeSinceStartup < _nextFind) return;
                 _nextFind = Time.realtimeSinceStartup + 5f;
-                if (_guns.Count >= Ids.Length) return;
+                if (_guns.Count >= Wanted()) return;
                 Scene tile0 = SceneManager.GetSceneByName(EastWorld.SceneName);
                 if (!tile0.isLoaded) { _airfieldSince = -1f; return; }
                 if (_airfieldSince < 0f) _airfieldSince = Time.realtimeSinceStartup;
@@ -678,6 +750,15 @@ namespace NextDayRevival
             for (int k = 0; k < Ids.Length; k++)
             {
                 if (Has(Ids[k])) continue;
+                if (TownSpot[k])
+                {
+                    // The town battery stands on the ground: once the tile's
+                    // content had the same 40 s to load as the fallback.
+                    if (!fallback || !B(CfgTown) || !MilitaryTown.On) continue;
+                    Gun t = FlakModel.Build(k, Ids[k], Names[k], null, null, Spots[k], SpotYaws[k], tile);
+                    if (t != null) { t.Town = true; _guns.Add(t); }
+                    continue;
+                }
                 if (holders[k] == null && !fallback) continue;
                 if (holders[k] == null && !_fallbackSaid)
                 {
@@ -685,10 +766,20 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogWarning("Flak: the shelters bundle's AA positions are not in the "
                         + "world - the guns stand on the ground at the assembly's spots.");
                 }
-                Gun g = FlakModel.Build(k, Ids[k], Names[k], holders[k], empty, Spots[k], SpotYaw,
+                Gun g = FlakModel.Build(k, Ids[k], Names[k], holders[k], empty, Spots[k], SpotYaws[k],
                     airfield.isLoaded ? airfield : tile);
                 if (g != null) _guns.Add(g);
             }
+        }
+
+        /// <summary>How many guns this world should have: the airfield's two,
+        /// and the town's two while its battery is on.</summary>
+        static int Wanted()
+        {
+            int n = 0;
+            bool town = B(CfgTown) && MilitaryTown.On;
+            for (int k = 0; k < Ids.Length; k++) if (!TownSpot[k] || town) n++;
+            return n;
         }
 
         static bool Has(string id)
@@ -735,10 +826,10 @@ namespace NextDayRevival
         static void Slew(Gun g, float dt)
         {
             if (dt <= 0f) return;
-            float turn = Mathf.Max(1f, F(CfgTurn, 70f));
-            float elev = Mathf.Max(1f, F(CfgElev, 50f));
-            float acc = Mathf.Max(1f, F(CfgAccel, 140f));
-            float min = F(CfgPitchMin, -10f), max = F(CfgPitchMax, 90f);
+            float turn = Mathf.Max(1f, F(CfgTurn, 20f));
+            float elev = Mathf.Max(1f, F(CfgElev, 12f));
+            float acc = Mathf.Max(1f, F(CfgAccel, 40f));
+            float min = F(CfgPitchMin, -3f), max = F(CfgPitchMax, 82f);
 
             // Q2: the gunner cranks WITH the target, not after it. The rate at
             // which the laying point moves (smoothed over ~0.3 s, so the ten
@@ -775,34 +866,38 @@ namespace NextDayRevival
             g.Pitch = Mathf.Clamp(g.Pitch + g.PitchVel * dt, min, max);
             if ((g.Pitch <= min && g.PitchVel < 0f) || (g.Pitch >= max && g.PitchVel > 0f)) g.PitchVel = 0f;
 
-            // One turn of a handwheel is a few degrees of gun.
-            g.WheelT += g.YawVel * dt * 20f;
-            g.WheelE += g.PitchVel * dt * 25f;
-            // The run-out is shorter than one barrel's own interval (two rounds
-            // of the pair), so each barrel is home before it fires again and the
-            // pair visibly works left-right-left instead of both hanging back.
-            float runOut = Mathf.Clamp(Interval() * 1.6f, 0.04f, 0.11f);
-            for (int i = 0; i < 2; i++) g.Recoil[i] = Mathf.MoveTowards(g.Recoil[i], 0f, dt / runOut);
+            // The 85 mm barrel: back in a blink, out again in RunOut seconds
+            // (the recuperator), the case thrown out halfway home.
+            if (g.Recoil > 0f)
+            {
+                g.Recoil = Mathf.MoveTowards(g.Recoil, 0f, dt / RunOut);
+                if (g.CaseDue && g.Recoil < 0.55f)
+                {
+                    g.CaseDue = false;
+                    if (B(CfgCasings) && g.Barrel != null && g.Cradle != null)
+                    {
+                        Vector3 breech = g.Cradle.position - g.Cradle.forward * 0.9f * K;
+                        Vector3 v = -g.Cradle.forward * UnityEngine.Random.Range(4f, 6f)
+                            + g.Mount.right * UnityEngine.Random.Range(-1f, 1f) + Vector3.up * 1.5f;
+                        GepardFx.Casing(breech, v, 0.35f);
+                    }
+                }
+            }
         }
+
+        /// <summary>Seconds the barrel takes to run out again after a shot.</summary>
+        const float RunOut = 0.9f;
 
         static void Pose(Gun g)
         {
             if (g.Mount != null) g.Mount.localRotation = Quaternion.Euler(0f, g.Yaw, 0f);
             if (g.Cradle != null) g.Cradle.localRotation = Quaternion.Euler(-g.Pitch, 0f, 0f);
-            bool recoil = B(CfgRecoil);
-            for (int i = 0; i < 2; i++)
+            if (g.Barrel != null)
             {
-                if (g.Barrel[i] == null) continue;
-                Vector3 p = g.Barrel[i].localPosition;
-                // A short sharp kick and a slower run-out: the curve of a recoil.
-                float r = g.Recoil[i];
-                p.z = recoil ? -0.13f * K * r * r * (3f - 2f * r) : 0f;
-                g.Barrel[i].localPosition = p;
-            }
-            if (B(CfgHandwheels))
-            {
-                if (g.WheelTraverse != null) g.WheelTraverse.localRotation = Quaternion.Euler(0f, 0f, g.WheelT) * Quaternion.Euler(90f, 0f, 0f);
-                if (g.WheelElevation != null) g.WheelElevation.localRotation = Quaternion.Euler(0f, 0f, g.WheelE) * Quaternion.Euler(90f, 0f, 0f);
+                // The recoil curve: the shot throws the barrel the whole stroke
+                // back at once, the recuperator eases it home (smoothstep).
+                float r = B(CfgRecoil) ? g.Recoil : 0f;
+                g.Barrel.localPosition = new Vector3(0f, 0f, -g.Stroke * r * r * (3f - 2f * r));
             }
         }
 
@@ -843,24 +938,30 @@ namespace NextDayRevival
             if (_spec == null) _spec = new GepardShots.Spec();
             _spec.Speed = Speed;
             _spec.Gravity = -Gravity;
-            _spec.Dispersion = Mathf.Max(0f, F(CfgDispersion, 3.5f));
+            _spec.Dispersion = Mathf.Max(0f, F(CfgDispersion, 2f));
             _spec.Fuze = Mathf.Max(0f, F(CfgFuze, 1.5f));
-            _spec.Splash = Mathf.Max(0f, F(CfgSplash, 2.5f)) * K;
-            _spec.HeliHits = Mathf.Max(1, CfgHeliHits == null ? 12 : CfgHeliHits.Value);
+            _spec.Splash = Mathf.Max(0f, F(CfgSplash, 12f)) * K;
+            _spec.HeliHits = Mathf.Max(1, CfgHeliHits == null ? 2 : CfgHeliHits.Value);
             _spec.Tracer = B(CfgTracers);
             _spec.Flak = true;
             _spec.PuffFx = B(CfgPuffs);
+            _spec.PuffScale = PuffScale;
             _spec.BurstSound = B(CfgBurstSound) ? (Action<Vector3>)FlakSound.Burst : null;
             return _spec;
         }
 
-        /// <summary>One round from the barrel whose turn it is, with its
-        /// flash, recoil, case and report. <paramref name="fuze"/> is the range
-        /// the round bursts at if it meets nothing (world units).</summary>
-        internal static void Shoot(Gun g, int barrel, Vector3 aim, bool aimValid, float fuze, bool live,
+        /// <summary>The 85 mm puff against the 23 mm one (GepardFx.Flak): a
+        /// ball of black smoke some 15 m across that hangs for seconds.</summary>
+        const float PuffScale = 2.4f;
+
+        /// <summary>One shell, with its flash, the muzzle brake's side blast,
+        /// smoke, dust off the ground, the recoil and the report.
+        /// <paramref name="fuze"/> is the range the shell bursts at if it
+        /// meets nothing (world units).</summary>
+        internal static void Shoot(Gun g, Vector3 aim, bool aimValid, float fuze, bool live,
                                    List<GepardGun.Contact> contacts)
         {
-            Transform m = g.Muzzle[barrel];
+            Transform m = g.Muzzle;
             if (m == null) return;
             Vector3 muzzle = m.position;
             Vector3 dir = g.Cradle != null ? g.Cradle.forward : m.forward;
@@ -870,44 +971,52 @@ namespace NextDayRevival
                 if (Vector3.Angle(dir, want) < 1f) dir = want;
             }
             float range = Mathf.Clamp(fuze, 30f, SelfDestructU);
-            // The fuze is set, not exact: a few per cent either way.
+            // The fuze is set by hand, not exact: a few per cent either way.
             float life = range / Speed * UnityEngine.Random.Range(0.97f, 1.03f);
             GepardShots.Fire(Spec(), g.Owner, muzzle, dir, life, live, contacts);
-            g.Recoil[barrel] = 1f;
-            if (B(CfgMuzzleFlash)) GepardFx.Muzzle(muzzle, dir);
-            if (B(CfgCasings) && g.Barrel[barrel] != null)
-                GepardFx.Casing(g.Barrel[barrel], barrel == 0 ? -1f : 1f);
+            g.Recoil = 1f;
+            g.CaseDue = true;
+            g.LastShot = Time.time;
+            if (B(CfgMuzzleFlash))
+            {
+                // The Gepard's flash, twice over for the bigger gun, and the
+                // muzzle brake throws its blast out to both sides.
+                GepardFx.Muzzle(muzzle, dir);
+                GepardFx.Muzzle(muzzle + dir * 0.6f * K, dir);
+                Vector3 side = g.Cradle != null ? g.Cradle.right : Vector3.Cross(Vector3.up, dir).normalized;
+                GepardFx.Smoke(muzzle, side, 2.2f);
+                GepardFx.Smoke(muzzle, -side, 2.2f);
+                GepardFx.Smoke(muzzle, dir, 3.2f);
+                // Dust kicked up under the muzzle by the blast.
+                Vector3 under = new Vector3(muzzle.x, g.Root.position.y + 0.2f * K, muzzle.z);
+                GepardFx.Dust(under, Vector3.up, 3f);
+                GepardFx.Dust(under + dir * 2f * K, Vector3.up, 2.5f);
+            }
             if (B(CfgGunSound)) FlakSound.Report(muzzle);
         }
 
         internal static float Interval()
         {
-            return 60f / Mathf.Max(60f, F(CfgRpm, 1600f));
+            return 60f / Mathf.Clamp(F(CfgRpm, 15f), 1f, 60f);
         }
 
         internal static float MaxFuze { get { return SelfDestructU; } }
 
-        /// <summary>Another client lays this gun: follow its pose and draw its
-        /// rounds (not live) at the same rate and fuze range.</summary>
+        /// <summary>Another client lays this gun: follow its pose and fire the
+        /// shells it fired (not live), one per step of its shot counter.</summary>
         static void Remote(Gun g, float dt)
         {
-            bool fresh = Time.time - g.RemoteAt < 0.5f;
-            if (!fresh || !g.RemoteFiring) return;
-            float now = Time.time;
-            float interval = Interval();
-            if (g.RemoteNextShot < now - 0.1f) g.RemoteNextShot = now;
-            int n = 0;
-            while (now >= g.RemoteNextShot && n < 4)
-            {
-                int b = g.RemoteGun;
-                g.RemoteGun = 1 - b;
-                Shoot(g, b, Vector3.zero, false, g.RemoteFuze, false, null);
-                g.RemoteNextShot += interval;
-                n++;
-            }
+            if (g.RemoteSeq < 0 || g.Seq == g.RemoteSeq) return;
+            int behind = g.RemoteSeq - g.Seq;
+            // A first sample, a new layer or a counter that went back: take it
+            // as it is, fire nothing.
+            if (g.Seq < 0 || behind < 0 || behind > 3) { g.Seq = g.RemoteSeq; return; }
+            g.Seq++;
+            g.RemoteShotAt = Time.time;
+            Shoot(g, Vector3.zero, false, g.RemoteFuze, false, null);
         }
 
-        internal static void OnPose(int index, float yaw, float pitch, bool firing, float fuze, bool player, int sender)
+        internal static void OnPose(int index, float yaw, float pitch, int seq, float fuze, bool player, int sender)
         {
             Gun g = ByIndex(index);
             if (g == null) return;
@@ -921,17 +1030,33 @@ namespace NextDayRevival
             if (_manned == g) return;
             g.WantYaw = yaw;
             g.WantPitch = pitch;
-            g.RemoteFiring = firing;
+            if (g.RemoteAt < -50f) g.Seq = seq;     // the first word from the layer: nothing to replay
+            g.RemoteSeq = seq;
             g.RemoteFuze = fuze;
             g.RemoteAt = Time.time;
         }
 
+        /// <summary>The layer's pose ten times a second, and at once after a
+        /// shot (<paramref name="now"/>).</summary>
         internal static void Publish(Gun g, bool player, bool now)
         {
-            if (!now && g.Firing == g.SentFiring && Time.time < g.NextPublish) return;
+            if (!now && Time.time < g.NextPublish) return;
             g.NextPublish = Time.time + 0.1f;
-            g.SentFiring = g.Firing;
-            FlakNet.SendPose(g.Index, g.WantYaw, g.WantPitch, g.Firing, g.FuzeRange, player);
+            FlakNet.SendPose(g.Index, g.WantYaw, g.WantPitch, g.Seq, g.FuzeRange, player);
+        }
+
+        /// <summary>The layer fires: one shell, the shot counter on, the wire
+        /// told at once.</summary>
+        internal static void Fire(Gun g, Vector3 aim, bool aimValid, float fuze, List<GepardGun.Contact> contacts,
+                                  bool player)
+        {
+            if (g.Seq < 0) g.Seq = 0;
+            g.Seq++;
+            g.FuzeRange = fuze;
+            Shoot(g, aim, aimValid, fuze, true, contacts);
+            g.Rounds--;
+            g.Fired++;
+            Publish(g, player, true);
         }
 
         // ------------------------------------------------------------- reload
@@ -953,7 +1078,13 @@ namespace NextDayRevival
 
         internal static float ReloadSeconds() { return Mathf.Max(0.5f, F(CfgReload, 12f)); }
 
-        internal static bool Up(Component ai) { return ai != null && GepardCrew.Steht(ai); }
+        /// <summary>A crewman (or the radar operator) at his post: alive AND
+        /// not lying in the game's wounded state - a wounded man has IsAlive()
+        /// true but is out of the fight for good (N6 radar fix).</summary>
+        internal static bool Up(Component ai)
+        {
+            return ai != null && GepardCrew.Steht(ai) && !NpcWar.GroundDowned(ai);
+        }
 
         internal static void RaiseEngaging(Gun g, GameObject target)
         {
@@ -968,28 +1099,37 @@ namespace NextDayRevival
     // The model
 
     /// <summary>
-    /// The live ZU-23-2 on an emplacement's platform: the derelict swapped
-    /// out of the ring's mesh, the gun built from primitives to the
-    /// derelict's measures (zu23_parts, metres; x K here) with its pivots.
+    /// The live 52-K: on an emplacement's platform (the derelict ZU swapped
+    /// out of the ring's mesh) or on the ground. The meshes and pivots of
+    /// k52_build.py, already in world units (x 2.8): base, mount, cradle and
+    /// barrel, four LODs each under one LODGroup.
     /// </summary>
     internal static class FlakModel
     {
         const float K = Flak.K;
-        static Material _olive, _rust, _steel, _black;
+        const int Lods = 4;
+        static readonly string[] PartNames = { "base", "mount", "cradle", "barrel" };
+        /// <summary>Screen heights the LODs hand over at, the last one culls
+        /// (the gun is ~6 m: LOD0 inside ~60 m, culled beyond ~2 km).</summary>
+        static readonly float[] LodHeights = { 0.35f, 0.14f, 0.05f, 0.008f };
+
+        static bool _loaded, _ok;
+        static Mesh[,] _mesh;
+        static Material _skin, _olive, _steel;
+        static readonly Dictionary<string, Vector3> _rig = new Dictionary<string, Vector3>();
 
         internal static Flak.Gun Build(int index, string id, string name, Transform holder, Transform empty,
                                        Vector2 spot, float yaw, Scene scene)
         {
             try
             {
-                Materials();
                 Flak.Gun g = new Flak.Gun();
                 g.Index = index;
                 g.Id = id;
                 g.Name = name;
                 g.Holder = holder;
 
-                GameObject root = new GameObject("NDR Flak ZU-23-2 " + id);
+                GameObject root = new GameObject("NDR Flak 52-K " + id);
                 if (holder != null)
                 {
                     root.transform.SetParent(holder, false);
@@ -1013,11 +1153,12 @@ namespace NextDayRevival
                     }
                     root.transform.position = at;
                     root.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-                    Flak.Log(id + ": built on the ground at " + at + " (no emplacement).");
+                    Flak.Log(id + ": built on the ground at " + at + " (" + name + ").");
                 }
                 g.Root = root.transform;
                 g.Owner = holder != null ? holder : root.transform;
-                Parts(g);
+                if (Load()) Parts(g);
+                else Fallback(g);
                 g.BuiltAt = Time.time;
                 g.Rounds = -1;
                 return g;
@@ -1046,7 +1187,7 @@ namespace NextDayRevival
             for (int i = 0; i < rs.Length; i++)
             {
                 MeshRenderer r = rs[i];
-                if (r.transform.IsChildOf(holder) && r.name.StartsWith("NDR Flak", StringComparison.Ordinal)) continue;
+                if (IsOurs(r.transform, holder)) continue;
                 int lod = Lod(r.gameObject.name);
                 MeshRenderer d;
                 if (lod < 0 || !donors.TryGetValue(lod, out d)) continue;
@@ -1060,6 +1201,15 @@ namespace NextDayRevival
             return n > 0 ? "swapped on " + n + " LOD renderer(s)" : "kept (no LOD renderer matched)";
         }
 
+        /// <summary>A renderer of our own gun under the holder (its part
+        /// names end in _LOD&lt;n&gt; too and must not be swapped).</summary>
+        static bool IsOurs(Transform t, Transform holder)
+        {
+            for (Transform p = t; p != null && p != holder; p = p.parent)
+                if (p.name.StartsWith("NDR Flak", StringComparison.Ordinal)) return true;
+            return false;
+        }
+
         static int Lod(string name)
         {
             int i = name.LastIndexOf("_LOD", StringComparison.OrdinalIgnoreCase);
@@ -1071,145 +1221,184 @@ namespace NextDayRevival
             return end > 0 && int.TryParse(rest.Substring(0, end), out k) ? k : -1;
         }
 
-        static void Materials()
+        /// <summary>The sixteen meshes, the atlas and the rig, once.</summary>
+        static bool Load()
         {
-            if (_olive != null) return;
-            _olive = Mat("NDR_Flak_Olive", new Color(0.29f, 0.32f, 0.21f), 0.15f, 0.25f);
-            _rust = Mat("NDR_Flak_Rust", new Color(0.27f, 0.2f, 0.14f), 0.1f, 0.15f);
-            _steel = Mat("NDR_Flak_Steel", new Color(0.13f, 0.13f, 0.13f), 0.6f, 0.45f);
-            _black = Mat("NDR_Flak_Black", new Color(0.07f, 0.07f, 0.06f), 0.0f, 0.2f);
+            if (_loaded) return _ok;
+            _loaded = true;
+            try
+            {
+                ReadRig(System.IO.Path.Combine(RevivalPlugin.AssetDir, "k52_rig.txt"));
+                _mesh = new Mesh[PartNames.Length, Lods];
+                for (int p = 0; p < PartNames.Length; p++)
+                    for (int l = 0; l < Lods; l++)
+                    {
+                        _mesh[p, l] = Assets.Load("k52_" + PartNames[p] + "_lod" + l + ".ndmesh");
+                        if (_mesh[p, l] == null && l == 0)
+                            throw new InvalidOperationException("k52_" + PartNames[p] + "_lod0.ndmesh missing");
+                    }
+                Texture2D tex = Assets.Texture("k52_diffuse.png", false, true);
+                Texture2D nrm = Assets.Texture("k52_normal.png", true, true);
+                if (tex == null) throw new InvalidOperationException("k52_diffuse.png missing");
+                Shader shader = Shader.Find("Standard");
+                if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
+                _skin = new Material(shader);
+                _skin.name = "NDR_Flak_52K";
+                tex.anisoLevel = 4;
+                tex.filterMode = FilterMode.Trilinear;
+                _skin.mainTexture = tex;
+                _skin.color = Color.white;
+                if (nrm != null && _skin.HasProperty("_BumpMap"))
+                {
+                    _skin.SetTexture("_BumpMap", nrm);
+                    _skin.EnableKeyword("_NORMALMAP");
+                }
+                if (_skin.HasProperty("_Glossiness")) _skin.SetFloat("_Glossiness", 0.25f);
+                if (_skin.HasProperty("_Metallic")) _skin.SetFloat("_Metallic", 0.15f);
+                _skin.hideFlags = HideFlags.HideAndDontSave;
+                _ok = true;
+                Flak.Log("52-K model loaded: " + _mesh[0, 0].vertexCount + " base vertices, rig of " + _rig.Count + " marks.");
+            }
+            catch (Exception ex)
+            {
+                _ok = false;
+                RevivalPlugin.L.LogError("Flak: the 52-K model did not load (" + ex.Message
+                    + ") - the guns are drawn as plain boxes; repair the client package (python k52_build.py).");
+            }
+            return _ok;
         }
 
-        static Material Mat(string name, Color c, float metal, float gloss)
+        static void ReadRig(string path)
+        {
+            _rig.Clear();
+            if (!System.IO.File.Exists(path)) throw new InvalidOperationException("k52_rig.txt missing");
+            string[] lines = System.IO.File.ReadAllLines(path);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string l = lines[i].Trim();
+                if (l.Length == 0 || l[0] == '#') continue;
+                string[] p = l.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (p.Length < 4) continue;
+                float x, y, z;
+                if (float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                    && float.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+                    && float.TryParse(p[3], NumberStyles.Float, CultureInfo.InvariantCulture, out z))
+                    _rig[p[0]] = new Vector3(x, y, z);
+            }
+        }
+
+        /// <summary>A rig mark in world units; the metres of k52_build.py x K
+        /// if the file lacks it.</summary>
+        static Vector3 Rig(string key, Vector3 metres)
+        {
+            Vector3 v;
+            return _rig.TryGetValue(key, out v) ? v : metres * K;
+        }
+
+        static Transform Node(Transform parent, string name, Vector3 local)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = local;
+            go.transform.localRotation = Quaternion.identity;
+            return go.transform;
+        }
+
+        /// <summary>
+        /// The gun at its real pivots (k52_rig.txt): the carriage stands, the
+        /// mount traverses on the pedestal, the cradle elevates on the
+        /// trunnions, the barrel slides back along the cradle's +z.
+        /// </summary>
+        static void Parts(Flak.Gun g)
+        {
+            Transform root = g.Root;
+            Transform mount = Node(root, "mount", Rig("mount", new Vector3(0f, 0.92f, 0f)));
+            Transform cradle = Node(mount, "cradle", Rig("cradle", new Vector3(0f, 0.78f, 0.18f)));
+            Transform barrel = Node(cradle, "barrel", Rig("barrel", Vector3.zero));
+            g.Mount = mount;
+            g.Cradle = cradle;
+            g.Barrel = barrel;
+            g.Muzzle = Node(barrel, "muzzle", Rig("muzzle", new Vector3(0f, 0f, 4.55f)));
+            g.SeatGunner = Node(mount, "seat gunner", Rig("seat_gunner", new Vector3(-0.78f, 0.47f, -0.36f)));
+            g.SeatLoader = Node(mount, "seat loader", Rig("seat_loader", new Vector3(0.78f, 0.47f, -0.36f)));
+            g.Eye = Node(cradle, "eye", Rig("eye", new Vector3(-0.46f, 0.38f, -0.25f)));
+            g.Stroke = Rig("recoil", new Vector3(0f, 0f, 0.65f)).z;
+
+            Transform[] parents = { root, mount, cradle, barrel };
+            List<Renderer>[] byLod = new List<Renderer>[Lods];
+            for (int l = 0; l < Lods; l++) byLod[l] = new List<Renderer>();
+            for (int p = 0; p < PartNames.Length; p++)
+                for (int l = 0; l < Lods; l++)
+                {
+                    Mesh mesh = _mesh[p, l];
+                    if (mesh == null) continue;
+                    GameObject go = new GameObject("k52_" + PartNames[p] + "_LOD" + l);
+                    go.transform.SetParent(parents[p], false);
+                    go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                    MeshRenderer r = go.AddComponent<MeshRenderer>();
+                    r.sharedMaterial = _skin;
+                    r.shadowCastingMode = l >= 2 ? UnityEngine.Rendering.ShadowCastingMode.Off
+                        : UnityEngine.Rendering.ShadowCastingMode.On;
+                    byLod[l].Add(r);
+                }
+            LODGroup group = root.gameObject.AddComponent<LODGroup>();
+            LOD[] lods = new LOD[Lods];
+            for (int l = 0; l < Lods; l++) lods[l] = new LOD(LodHeights[l], byLod[l].ToArray());
+            group.SetLODs(lods);
+            group.RecalculateBounds();
+        }
+
+        /// <summary>Without the model files: the same pivots with plain boxes,
+        /// so the guns still fight and can be seen.</summary>
+        static void Fallback(Flak.Gun g)
+        {
+            if (_olive == null)
+            {
+                _olive = Mat("NDR_Flak_Olive", new Color(0.29f, 0.32f, 0.21f));
+                _steel = Mat("NDR_Flak_Steel", new Color(0.13f, 0.13f, 0.13f));
+            }
+            Transform root = g.Root;
+            Box(root, new Vector3(0f, 0.3f, 0f), new Vector3(0.35f, 0.3f, 5.8f), _olive);
+            Box(root, new Vector3(0f, 0.3f, 0f), new Vector3(5.4f, 0.3f, 0.35f), _olive);
+            Transform mount = Node(root, "mount", new Vector3(0f, 0.92f, 0f) * K);
+            Box(mount, new Vector3(0f, 0.35f, 0f), new Vector3(1.4f, 0.7f, 1.4f), _olive);
+            Box(mount, new Vector3(0f, 1.0f, 1.0f), new Vector3(1.9f, 1.25f, 0.05f), _olive);   // shield
+            Transform cradle = Node(mount, "cradle", new Vector3(0f, 0.78f, 0.18f) * K);
+            Transform barrel = Node(cradle, "barrel", Vector3.zero);
+            Box(barrel, new Vector3(0f, 0f, 2.1f), new Vector3(0.14f, 0.14f, 5.1f), _steel);
+            g.Mount = mount;
+            g.Cradle = cradle;
+            g.Barrel = barrel;
+            g.Muzzle = Node(barrel, "muzzle", new Vector3(0f, 0f, 4.55f) * K);
+            g.SeatGunner = Node(mount, "seat gunner", new Vector3(-0.78f, 0.47f, -0.36f) * K);
+            g.SeatLoader = Node(mount, "seat loader", new Vector3(0.78f, 0.47f, -0.36f) * K);
+            g.Eye = Node(cradle, "eye", new Vector3(-0.46f, 0.38f, -0.25f) * K);
+            g.Stroke = 0.65f * K;
+        }
+
+        static Material Mat(string name, Color c)
         {
             Shader shader = Shader.Find("Standard");
             if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
             Material m = new Material(shader);
             m.name = name;
             m.color = c;
-            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", metal);
-            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", gloss);
             m.hideFlags = HideFlags.HideAndDontSave;
             return m;
         }
 
-        static Transform Node(Transform parent, string name, Vector3 metres)
-        {
-            GameObject go = new GameObject(name);
-            go.transform.SetParent(parent, false);
-            go.transform.localPosition = metres * K;
-            go.transform.localRotation = Quaternion.identity;
-            return go.transform;
-        }
-
         /// <summary>A box from its centre and size in metres.</summary>
-        static Transform Box(Transform parent, Vector3 centre, Vector3 size, Material m)
+        static void Box(Transform parent, Vector3 centre, Vector3 size, Material m)
         {
-            return Prim(PrimitiveType.Cube, parent, centre, size, Quaternion.identity, m);
-        }
-
-        /// <summary>A cylinder along local z from its centre, radius and length in metres.</summary>
-        static Transform Tube(Transform parent, Vector3 centre, float radius, float length, Material m)
-        {
-            return Prim(PrimitiveType.Cylinder, parent, centre, new Vector3(radius * 2f, length * 0.5f, radius * 2f),
-                        Quaternion.Euler(90f, 0f, 0f), m);
-        }
-
-        static Transform Prim(PrimitiveType type, Transform parent, Vector3 centre, Vector3 scale,
-                              Quaternion rot, Material m)
-        {
-            GameObject go = GameObject.CreatePrimitive(type);
+            GameObject go = GameObject.CreatePrimitive(PrimitiveType.Cube);
             go.name = "NDR Flak part";
             Collider c = go.GetComponent<Collider>();
             if (c != null) UnityEngine.Object.DestroyImmediate(c);
             go.transform.SetParent(parent, false);
             go.transform.localPosition = centre * K;
-            go.transform.localRotation = rot;
-            go.transform.localScale = scale * K;
+            go.transform.localScale = size * K;
             Renderer r = go.GetComponent<Renderer>();
-            if (r != null)
-            {
-                r.sharedMaterial = m;
-                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
-            }
-            return go.transform;
-        }
-
-        /// <summary>
-        /// The measures of zu23_parts (metres, y up from the ground under the
-        /// emplacement, +z the bore at rest), split at the real pivots: the
-        /// lower carriage stands, the upper carriage traverses on the pivot
-        /// above it, the cradle elevates on the trunnions 1.35 m up, each
-        /// barrel slides back in the cradle.
-        /// </summary>
-        static void Parts(Flak.Gun g)
-        {
-            Transform root = g.Root;
-            // lower carriage on the platform: base and three legs, rust
-            Box(root, new Vector3(0f, 0.23f, 0f), new Vector3(1.6f, 0.22f, 1.6f), _rust);
-            for (int i = 0; i < 3; i++)
-            {
-                Transform leg = Node(root, "leg", Vector3.zero);
-                leg.localRotation = Quaternion.Euler(0f, i * 120f, 0f);
-                Box(leg, new Vector3(0f, 0.19f, 1.1f), new Vector3(0.2f, 0.14f, 1.0f), _rust);
-                Box(leg, new Vector3(0f, 0.13f, 1.55f), new Vector3(0.3f, 0.04f, 0.3f), _rust);   // foot pad
-            }
-
-            // upper carriage: traverses about the vertical axis on the base
-            Transform mount = Node(root, "mount", new Vector3(0f, 0.34f, 0f));
-            g.Mount = mount;
-            Tube(mount, new Vector3(0f, 0.04f, 0f), 0.55f, 0.08f, _olive).localRotation = Quaternion.identity;
-            Box(mount, new Vector3(0f, 0.3f, 0f), new Vector3(1.2f, 0.52f, 1.0f), _olive);
-            for (int s = -1; s <= 1; s += 2)
-                Box(mount, new Vector3(s * 0.42f, 0.78f, 0.0f), new Vector3(0.08f, 0.5f, 0.6f), _olive);   // trunnion cheeks
-            // the two seats: gunner left (the sight's side), loader right
-            for (int s = -1; s <= 1; s += 2)
-            {
-                Box(mount, new Vector3(s * 0.85f, 0.445f, -0.425f), new Vector3(0.4f, 0.07f, 0.35f), _black);
-                Box(mount, new Vector3(s * 0.85f, 0.64f, -0.61f), new Vector3(0.4f, 0.32f, 0.05f), _black);
-                Box(mount, new Vector3(s * 0.85f, 0.2f, -0.42f), new Vector3(0.06f, 0.41f, 0.06f), _rust);
-                Box(mount, new Vector3(s * 0.72f, 0.3f, -0.42f), new Vector3(0.28f, 0.05f, 0.05f), _rust);
-            }
-            g.SeatGunner = Node(mount, "seat gunner", new Vector3(-0.85f, 0.48f, -0.4f));
-            g.SeatLoader = Node(mount, "seat loader", new Vector3(0.85f, 0.48f, -0.4f));
-            // the handwheels in front of the gunner: traverse (outer) and elevation (inner)
-            g.WheelTraverse = Node(mount, "wheel traverse", new Vector3(-1.02f, 0.92f, -0.08f));
-            g.WheelTraverse.localRotation = Quaternion.Euler(90f, 0f, 0f);   // the disc faces the gunner
-            Tube(g.WheelTraverse, Vector3.zero, 0.13f, 0.03f, _black).localRotation = Quaternion.identity;
-            Box(g.WheelTraverse, new Vector3(0.1f, 0f, 0f), new Vector3(0.1f, 0.025f, 0.025f), _steel);        // spoke
-            Box(g.WheelTraverse, new Vector3(0.12f, 0.05f, 0f), new Vector3(0.025f, 0.1f, 0.025f), _steel);    // crank handle
-            g.WheelElevation = Node(mount, "wheel elevation", new Vector3(-0.64f, 0.92f, -0.08f));
-            g.WheelElevation.localRotation = Quaternion.Euler(90f, 0f, 0f);   // the disc faces the gunner
-            Tube(g.WheelElevation, Vector3.zero, 0.13f, 0.03f, _black).localRotation = Quaternion.identity;
-            Box(g.WheelElevation, new Vector3(0.1f, 0f, 0f), new Vector3(0.1f, 0.025f, 0.025f), _steel);        // spoke
-            Box(g.WheelElevation, new Vector3(0.12f, 0.05f, 0f), new Vector3(0.025f, 0.1f, 0.025f), _steel);    // crank handle
-            Box(mount, new Vector3(-0.83f, 0.78f, -0.02f), new Vector3(0.44f, 0.08f, 0.08f), _olive);   // wheel shafts housing
-
-            // cradle: elevates about the trunnions
-            Transform cradle = Node(mount, "cradle", new Vector3(0f, 1.01f, 0f));
-            g.Cradle = cradle;
-            Box(cradle, new Vector3(0f, 0f, 0.15f), new Vector3(0.7f, 0.36f, 1.5f), _olive);
-            Box(cradle, new Vector3(0f, 0.2f, -0.35f), new Vector3(0.5f, 0.06f, 0.5f), _olive);
-            for (int s = -1; s <= 1; s += 2)
-                Box(cradle, new Vector3(s * 0.49f, 0.08f, 0.1f), new Vector3(0.24f, 0.38f, 0.55f), _olive);   // ammunition boxes
-            // the sight on the gunner's side, moving with the guns
-            Box(cradle, new Vector3(-0.55f, 0.28f, -0.1f), new Vector3(0.06f, 0.3f, 0.06f), _steel);
-            Box(cradle, new Vector3(-0.55f, 0.46f, -0.1f), new Vector3(0.12f, 0.12f, 0.22f), _black);
-            g.Eye = Node(cradle, "eye", new Vector3(-0.55f, 0.5f, -0.45f));
-
-            // the barrels: left 0, right 1; each slides back in its cradle slot
-            for (int b = 0; b < 2; b++)
-            {
-                float x = b == 0 ? -0.2f : 0.2f;
-                Transform barrel = Node(cradle, b == 0 ? "barrel left" : "barrel right", new Vector3(x, 0.05f, 0f));
-                g.Barrel[b] = barrel;
-                Box(barrel, new Vector3(0f, 0f, 0.45f), new Vector3(0.14f, 0.16f, 0.9f), _steel);   // receiver
-                Tube(barrel, new Vector3(0f, 0f, 1.25f), 0.07f, 0.7f, _steel);                       // barrel jacket
-                Tube(barrel, new Vector3(0f, 0f, 2.25f), 0.045f, 1.9f, _steel);                      // barrel
-                Tube(barrel, new Vector3(0f, 0f, 3.3f), 0.07f, 0.3f, _black);                        // flash hider
-                Transform muzzle = Node(barrel, "muzzle", new Vector3(0f, 0f, 3.47f));
-                g.Muzzle[b] = muzzle;
-            }
+            if (r != null) r.sharedMaterial = m;
         }
     }
 
@@ -1298,7 +1487,7 @@ namespace NextDayRevival
             g.Tries++;
             try
             {
-                string side = Airfield.Faction();
+                string side = Flak.Side(g);
                 Vector3 pg = Ground(g, g.SeatGunner);
                 Vector3 pl = Ground(g, g.SeatLoader);
                 g.GunSquad = Crew.DropGroundSquad(pg, new Vector3[] { pg }, side, null, Key(g) + KeyGunner);
@@ -1402,7 +1591,7 @@ namespace NextDayRevival
             if (!g.Laying)
             {
                 g.Laying = true;
-                g.Rounds = g.Rounds < 0 ? Mathf.Max(2, Flak.CfgRoundsPerLoad == null ? 100 : Flak.CfgRoundsPerLoad.Value) : g.Rounds;
+                g.Rounds = g.Rounds < 0 ? Flak.RoundsPerLoad : g.Rounds;
             }
             if (Time.time >= g.NextLook)
             {
@@ -1438,12 +1627,13 @@ namespace NextDayRevival
                 g.Engaged = true;
                 g.Fired = 0;
                 g.Held = 0f;
-                // The first burst is laid by eye: far off.
-                g.Err = Offset(t, mid, dist * Mathf.Max(0f, Flak.CfgInitialError == null ? 45f : Flak.CfgInitialError.Value)
+                // The first shot is laid on a rough range and lead: far off.
+                g.Err = Offset(t, mid, dist * Mathf.Max(0f, Flak.CfgInitialError == null ? 60f : Flak.CfgInitialError.Value)
                     * Flak.DirError * 0.001f);
                 g.LastVel = t.Vel;
                 Flak.Log(g.Id + ": engages " + Describe(t) + " at "
-                    + dist.ToString("0", CultureInfo.InvariantCulture) + " u (" + g.Mode + ").");
+                    + dist.ToString("0", CultureInfo.InvariantCulture) + " u (" + g.Mode + ", "
+                    + (Flak.RadarDirected ? "radar-directed" : "by eye") + ").");
                 Flak.RaiseEngaging(g, t.Go);
             }
 
@@ -1451,8 +1641,8 @@ namespace NextDayRevival
             Vector3 aim = Flak.Intercept(mid, t.Pos, t.Vel, out tof) + g.Err;
             float wantYaw, wantPitch;
             Flak.Angles(g, aim - mid, out wantYaw, out wantPitch);
-            float min = Flak.CfgPitchMin == null ? -10f : Flak.CfgPitchMin.Value;
-            float max = Flak.CfgPitchMax == null ? 90f : Flak.CfgPitchMax.Value;
+            float min = Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
+            float max = Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
             bool reach = wantPitch >= min - 0.5f && wantPitch <= max + 0.5f;
             g.WantYaw = wantYaw;
             g.WantPitch = Mathf.Clamp(wantPitch, min, max);
@@ -1462,8 +1652,8 @@ namespace NextDayRevival
             Vector3 bore = g.Cradle != null ? g.Cradle.forward : g.Root.forward;
             float error = Vector3.Angle(bore, aim - mid);
             g.Held += dt;
-            float reaction = Mathf.Max(0f, Flak.CfgReaction == null ? 1.5f : Flak.CfgReaction.Value) * Flak.DirReaction;
-            bool ready = reach && g.Held >= reaction && error < 3f && g.Mode != FlakMode.HoldFire
+            float reaction = Mathf.Max(0f, Flak.CfgReaction == null ? 3f : Flak.CfgReaction.Value) * Flak.DirReaction;
+            bool ready = reach && g.Held >= reaction && error < 1.5f && g.Mode != FlakMode.HoldFire
                 && !g.Reloading;
             Trigger(g, ready, aim, t, mid, tof, gunner && loader);
             Flak.Publish(g, false, false);
@@ -1480,54 +1670,35 @@ namespace NextDayRevival
             Flak.Publish(g, false, true);
         }
 
-        /// <summary>Bursts at the gun's rate, the barrels in turn. Between
-        /// bursts the gunner corrects on what he saw - the error shrinks by
-        /// WalkFactor - and a target that changed its velocity since the last
-        /// burst throws the correction off again.</summary>
+        /// <summary>BRACKETING, one shell a step (RateOfFire). After every
+        /// shot the crew corrects by the puff it saw - the error shrinks by the
+        /// walk factor (fast radar-directed, slow by eye) down to ErrorFloor -
+        /// and a target that changed its velocity since the last shot throws
+        /// the correction off again. The puffs walk toward the aircraft
+        /// seconds apart: the pilot sees them come.</summary>
         static void Trigger(Flak.Gun g, bool ready, Vector3 aim, GepardGun.Contact t, Vector3 mid, float tof, bool both)
         {
             float now = Time.time;
-            float dist = Vector3.Distance(mid, t.Pos);
-            if (g.Firing && now >= g.BurstUntil)
+            g.Firing = ready && !g.Reloading;
+            if (!g.Firing || now < g.NextShot) return;
+            if (g.Rounds <= 0)
             {
                 g.Firing = false;
-                g.PauseUntil = now + Mathf.Max(0.2f, Flak.CfgPause == null ? 1.4f : Flak.CfgPause.Value)
-                    * UnityEngine.Random.Range(0.8f, 1.3f);
-                float walk = Mathf.Clamp01(Flak.CfgWalk == null ? 0.55f : Flak.CfgWalk.Value);
-                float floor = Mathf.Max(0f, Flak.CfgFloor == null ? 7f : Flak.CfgFloor.Value) * 0.001f * dist;
-                g.Err = g.Err * walk + Scatter(t, mid, floor);
+                Flak.StartReload(g, Flak.ReloadSeconds() * (both ? 1f : 1.5f));
+                return;
             }
-            if (!g.Firing)
-            {
-                if (!ready || now < g.PauseUntil) return;
-                if (g.Rounds <= 0)
-                {
-                    Flak.StartReload(g, Flak.ReloadSeconds() * (both ? 1f : 1.5f));
-                    return;
-                }
-                // A new burst: how much did the target change course since the last?
-                float evade = Mathf.Max(0f, Flak.CfgEvade == null ? 0.9f : Flak.CfgEvade.Value);
-                float dv = (t.Vel - g.LastVel).magnitude;
-                g.LastVel = t.Vel;
-                if (dv > 0.5f) g.Err += UnityEngine.Random.onUnitSphere * dv * tof * evade;
-                g.Firing = true;
-                g.BurstUntil = now + Mathf.Max(0.1f, Flak.CfgBurst == null ? 0.6f : Flak.CfgBurst.Value)
-                    * UnityEngine.Random.Range(0.8f, 1.25f);
-                g.NextShot = now;
-            }
-            float interval = Flak.Interval();
-            if (g.NextShot < now - 0.1f) g.NextShot = now;
-            int n = 0;
-            while (now >= g.NextShot && n < 4 && g.Rounds > 0)
-            {
-                int b = g.GunIdx;
-                g.GunIdx = 1 - b;
-                Flak.Shoot(g, b, aim, true, g.FuzeRange, true, g.Hostile);
-                g.Rounds--;
-                g.Fired++;
-                g.NextShot += interval;
-                n++;
-            }
+            // How much did the target change course since the last shot?
+            float evade = Mathf.Max(0f, Flak.CfgEvade == null ? 1f : Flak.CfgEvade.Value);
+            float dv = (t.Vel - g.LastVel).magnitude;
+            g.LastVel = t.Vel;
+            if (g.Fired > 0 && dv > 0.5f) g.Err += UnityEngine.Random.onUnitSphere * dv * tof * evade;
+            Flak.Fire(g, aim, true, g.FuzeRange, g.Hostile, false);
+            // One man alone loads and lays: half the rate.
+            g.NextShot = now + Flak.Interval() * (both ? 1f : 2f) * UnityEngine.Random.Range(0.9f, 1.15f);
+            // The correction for the next shot, from where this one bursts.
+            float dist = Vector3.Distance(mid, t.Pos);
+            float floor = Mathf.Max(0f, Flak.CfgFloor == null ? 5f : Flak.CfgFloor.Value) * 0.001f * dist;
+            g.Err = g.Err * Flak.Walk + Scatter(t, mid, floor);
             if (g.Rounds <= 0)
             {
                 g.Firing = false;
@@ -1582,7 +1753,7 @@ namespace NextDayRevival
             float range = Flak.RangeU;
             Collect(g.Air, eye, range);
 
-            string side = Airfield.Faction();
+            string side = Flak.Side(g);
             g.Hostile.Clear();
             GepardGun.Contact best = null, assigned = null;
             float bestD = float.MaxValue;
@@ -1620,10 +1791,7 @@ namespace NextDayRevival
             g.Target = best;
         }
 
-        static float Flak_Ceiling()
-        {
-            return Mathf.Max(50f, Flak.CfgCeiling == null ? 1500f : Flak.CfgCeiling.Value) * Flak.K;
-        }
+        static float Flak_Ceiling() { return Flak.CeilingU; }
 
         internal static void Collect(List<GepardGun.Contact> air, Vector3 eye, float range)
         {
@@ -1688,7 +1856,7 @@ namespace NextDayRevival
         /// eye, not by radar (TrackingLag, the Gepard's radar: 5).</summary>
         static void Follow(Flak.Gun g, float dt)
         {
-            float lag = Mathf.Max(0.2f, Flak.CfgLag == null ? 2f : Flak.CfgLag.Value) * Flak.DirTracking;
+            float lag = Mathf.Max(0.2f, Flak.CfgLag == null ? 1.5f : Flak.CfgLag.Value) * Flak.DirTracking;
             FollowAll(g.Air, dt, lag);
         }
 
@@ -1726,6 +1894,8 @@ namespace NextDayRevival
                 else hostile = Fraktion.Feind(side, f);
                 return;
             }
+            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs).
+            if (NpcAircraft.Hostile(c.Go)) { hostile = true; return; }
             float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
             List<GameObject> players = GepardCrew.Spieler();
             for (int i = 0; i < players.Count; i++)
@@ -1826,8 +1996,8 @@ namespace NextDayRevival
         static bool _zoom;
         static Vector3 _stoodAt;
         static readonly List<GepardGun.Contact> _air = new List<GepardGun.Contact>();
-        static float _nextLook, _nextShot;
-        static bool _firing;
+        static float _nextLook, _nextShot, _fuzeM;
+        static bool _autoLocked;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
         static string _hint;
@@ -1879,15 +2049,15 @@ namespace NextDayRevival
 
         static void Enter(Flak.Gun g, GameObject me)
         {
-            if (!CameraOwner.Request(CameraOwner.Flak, true, "ZU-23-2")) { Hint("The camera is busy.", 2f); return; }
+            if (!CameraOwner.Request(CameraOwner.Flak, true, "52-K")) { Hint("The camera is busy.", 2f); return; }
             Flak._manned = g;
             _stoodAt = me.transform.position;
             _cmdYaw = g.Yaw;
             _cmdPitch = g.Pitch;
             _zoom = false;
-            _firing = false;
+            _fuzeM = 0f;
             _air.Clear();
-            if (g.Rounds < 0) g.Rounds = Mathf.Max(2, Flak.CfgRoundsPerLoad == null ? 100 : Flak.CfgRoundsPerLoad.Value);
+            if (g.Rounds < 0) g.Rounds = Flak.RoundsPerLoad;
             g.WantYaw = g.Yaw;
             g.WantPitch = g.Pitch;
             Flak.Log("the local player mans " + g.Id + " (" + g.Rounds + " rounds).");
@@ -1900,7 +2070,6 @@ namespace NextDayRevival
             Flak._manned = null;
             g.Firing = false;
             Flak.Publish(g, true, true);
-            _firing = false;
             CameraOwner.Release(CameraOwner.Flak);
             Flak.Log("the local player left " + g.Id + " (" + why + ").");
         }
@@ -1911,8 +2080,8 @@ namespace NextDayRevival
             float sens = Mathf.Max(0.1f, Flak.CfgSensitivity == null ? 2f : Flak.CfgSensitivity.Value) * (_zoom ? 0.35f : 1f);
             _cmdYaw += GameUi.Axis("Mouse X") * sens;
             _cmdPitch += GameUi.Axis("Mouse Y") * sens;
-            float min = Flak.CfgPitchMin == null ? -10f : Flak.CfgPitchMin.Value;
-            float max = Flak.CfgPitchMax == null ? 90f : Flak.CfgPitchMax.Value;
+            float min = Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
+            float max = Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
             _cmdPitch = Mathf.Clamp(_cmdPitch, min, max);
             if (_cmdYaw > 180f) _cmdYaw -= 360f;
             if (_cmdYaw < -180f) _cmdYaw += 360f;
@@ -1931,32 +2100,54 @@ namespace NextDayRevival
             }
             FlakFire.FollowAll(_air, dt, 5f);
 
-            if (GameUi.KeyDown(KeyCode.R) && !g.Reloading && g.Rounds < Mathf.Max(2, Flak.CfgRoundsPerLoad == null ? 100 : Flak.CfgRoundsPerLoad.Value))
+            if (GameUi.KeyDown(KeyCode.R) && !g.Reloading && g.Rounds < Flak.RoundsPerLoad)
                 Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f);
-            bool held = GameUi.Button(0) && !g.Reloading;
-            g.Firing = false;
-            g.FuzeRange = Flak.MaxFuze;
-            if (held && g.Rounds <= 0) { Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f); held = false; }
-            if (held)
+
+            // The fuze setter. Automatic: the range of the aircraft nearest
+            // the bore (within 4 degrees), else the longest setting. The
+            // mouse wheel sets it by hand in 100 m steps; F goes back to auto.
+            float wheel = GameUi.Axis("Mouse ScrollWheel");
+            if (wheel > 0.01f || wheel < -0.01f)
             {
-                float now = Time.time;
-                float interval = Flak.Interval();
-                if (_nextShot < now - 0.1f) _nextShot = now;
-                int n = 0;
-                while (now >= _nextShot && n < 4 && g.Rounds > 0)
-                {
-                    int b = g.GunIdx;
-                    g.GunIdx = 1 - b;
-                    // A player's rounds are not set: they burst at the end of their flight.
-                    Flak.Shoot(g, b, Vector3.zero, false, Flak.MaxFuze, true, _air);
-                    g.Rounds--;
-                    _nextShot += interval;
-                    n++;
-                }
-                g.Firing = g.Rounds > 0;
+                if (_fuzeM <= 0f) _fuzeM = Mathf.Round(Mathf.Min(AutoFuze(g), Flak.MaxFuze) / Flak.K / 100f) * 100f;
+                _fuzeM = Mathf.Clamp(_fuzeM + (wheel > 0f ? 100f : -100f), 200f, Flak.MaxFuze / Flak.K);
             }
-            if (_firing != g.Firing) { _firing = g.Firing; Flak.Publish(g, true, true); }
+            if (GameUi.KeyDown(KeyCode.F)) _fuzeM = 0f;
+            g.FuzeRange = _fuzeM > 0f ? _fuzeM * Flak.K : AutoFuze(g);
+
+            bool held = GameUi.Button(0) && !g.Reloading;
+            if (held && g.Rounds <= 0) { Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f); held = false; }
+            g.Firing = held;
+            if (held && Time.time >= _nextShot)
+            {
+                // The player is gunner and loader in one: half the crew's rate.
+                Flak.Fire(g, Vector3.zero, false, g.FuzeRange, _air, true);
+                _nextShot = Time.time + Flak.Interval() * 2f;
+            }
             else Flak.Publish(g, true, false);
+        }
+
+        /// <summary>The automatic fuze: slant range to the aircraft nearest
+        /// the bore within 4 degrees, else the longest setting.</summary>
+        static float AutoFuze(Flak.Gun g)
+        {
+            Vector3 mid = Flak.Mid(g);
+            Vector3 bore = g.Cradle != null ? g.Cradle.forward : g.Root.forward;
+            float best = 4f, range = Flak.MaxFuze;
+            _autoLocked = false;
+            for (int i = 0; i < _air.Count; i++)
+            {
+                GepardGun.Contact c = _air[i];
+                if (c.Go == null) continue;
+                float tof;
+                Vector3 aim = Flak.Intercept(mid, c.Pos, c.Vel, out tof);
+                float a = Vector3.Angle(bore, aim - mid);
+                if (a >= best) continue;
+                best = a;
+                range = Vector3.Distance(mid, aim);
+                _autoLocked = true;
+            }
+            return range;
         }
 
         /// <summary>The sight camera, after the game has written its own: at
@@ -2007,10 +2198,12 @@ namespace NextDayRevival
                 if (g != null)
                 {
                     Reticle(w * 0.5f, h * 0.5f, Mathf.Min(w, h) * (_zoom ? 0.3f : 0.1f));
-                    string line = "ZU-23-2   " + (g.Reloading
-                        ? "RELOADING " + Mathf.Max(0f, g.ReloadUntil - Time.time).ToString("0", CultureInfo.InvariantCulture) + " s"
+                    string fuze = "fuze " + (g.FuzeRange / Flak.K).ToString("0", CultureInfo.InvariantCulture) + " m "
+                        + (_fuzeM > 0f ? "(set)" : _autoLocked ? "(auto: on target)" : "(auto: max)");
+                    string line = "52-K 85 mm   " + (g.Reloading
+                        ? "NEXT RACK " + Mathf.Max(0f, g.ReloadUntil - Time.time).ToString("0", CultureInfo.InvariantCulture) + " s"
                         : g.Rounds + " rds") + "   elev " + g.Pitch.ToString("0", CultureInfo.InvariantCulture)
-                        + "   LMB fire  RMB sight  R reload  " + Key() + " leave";
+                        + "   " + fuze + "   LMB fire  RMB sight  wheel fuze  F auto fuze  R rack  " + Key() + " leave";
                     Label(new Rect(0f, h - 70f, w, 26f), line, Amber);
                     string order = null;
                     try { if (Flak.SightOrder != null) order = Flak.SightOrder(g.Id); }
@@ -2019,7 +2212,7 @@ namespace NextDayRevival
                 }
                 else if (_near != null)
                 {
-                    string s = _nearWhy ?? ("[" + Key() + "] Man the ZU-23-2");
+                    string s = _nearWhy ?? ("[" + Key() + "] Man the 52-K 85 mm gun");
                     Label(new Rect(0f, h * 0.62f, w, 26f), s, Color.white);
                 }
                 if (_hint != null && Time.time <= _hintUntil)
@@ -2086,12 +2279,13 @@ namespace NextDayRevival
         internal static void Report(Vector3 at)
         {
             if (_report == null) _report = Make(false);
-            Play(_report, at, 25f, 2800f, 0.85f);
+            // An 85 mm gun: heard across the whole airfield.
+            Play(_report, at, 90f, 12000f, 1f);
         }
 
         internal static void Burst(Vector3 at)
         {
-            // Twenty-seven puffs a second would be a roar, not bangs: a few a second.
+            // Four guns can burst in the same instant: one bang per 0.09 s.
             if (Time.time - _lastBurst < 0.09f) return;
             _lastBurst = Time.time;
             Camera cam = Camera.main;
@@ -2157,12 +2351,13 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>The report: a sharp crack over a short low thump. The
-        /// burst: a crack and a long rolling rumble.</summary>
+        /// <summary>The report of the 85 mm gun: a hard crack, a deep blast
+        /// and a rolling tail. The burst: a crack and a long rolling
+        /// rumble.</summary>
         static AudioClip Make(bool burst)
         {
             const int rate = 44100;
-            float seconds = burst ? 2.2f : 0.32f;
+            float seconds = burst ? 2.2f : 1.6f;
             float[] data = new float[Mathf.RoundToInt(rate * seconds)];
             int seed = burst ? 2311 : 23;
             float low = 0f, low2 = 0f;
@@ -2184,14 +2379,15 @@ namespace NextDayRevival
                 }
                 else
                 {
-                    float crack = noise * 1.2f * Mathf.Exp(-t * 90f);
-                    float body = low * 2.2f * Mathf.Exp(-t * 22f);
-                    float thump = Mathf.Sin(2f * Mathf.PI * 95f * t) * 0.7f * Mathf.Exp(-t * 26f);
-                    v = crack + body + thump;
+                    float crack = noise * 1.4f * Mathf.Exp(-t * 70f);
+                    float body = low * 3.2f * Mathf.Exp(-t * 9f);
+                    float rumble = low2 * 6f * Mathf.Exp(-t * 2.4f);
+                    float thump = Mathf.Sin(2f * Mathf.PI * (38f + 30f * Mathf.Exp(-t * 12f)) * t) * 0.9f * Mathf.Exp(-t * 7f);
+                    v = crack + body + rumble + thump;
                 }
                 data[i] = Mathf.Clamp(v * 0.6f, -1f, 1f);
             }
-            AudioClip clip = AudioClip.Create(burst ? "NDR flak burst" : "NDR flak report", data.Length, 1, rate, false);
+            AudioClip clip = AudioClip.Create(burst ? "NDR flak burst" : "NDR 52-K report", data.Length, 1, rate, false);
             clip.SetData(data, 0);
             return clip;
         }
@@ -2202,8 +2398,9 @@ namespace NextDayRevival
 
     /// <summary>
     /// One Photon event (Flak NetworkEventCode, 198): { 1, gun, yaw, pitch,
-    /// firing, fuze range, player } ten times a second and on every trigger
-    /// change, unreliable, from whoever lays the gun. The same reflection path
+    /// shot counter, fuze range, player } ten times a second and at once on
+    /// every shot, unreliable, from whoever lays the gun - a lost message is
+    /// caught up by the next one's counter. The same reflection path
     /// as GepardNet (PhotonNetwork.RaiseEvent, the OnEventCall field).
     /// </summary>
     internal static class FlakNet
@@ -2265,13 +2462,13 @@ namespace NextDayRevival
             }
         }
 
-        internal static void SendPose(int gun, float yaw, float pitch, bool firing, float fuze, bool player)
+        internal static void SendPose(int gun, float yaw, float pitch, int seq, float fuze, bool player)
         {
             if (!_hooked) return;
             try
             {
                 object opts = _optType == null ? null : Activator.CreateInstance(_optType);
-                float[] data = new float[] { Pose, gun, yaw, pitch, firing ? 1f : 0f, fuze, player ? 1f : 0f };
+                float[] data = new float[] { Pose, gun, yaw, pitch, seq, fuze, player ? 1f : 0f };
                 _raise.Invoke(null, new object[] { (byte)Code(), data, false, opts });
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak network send: " + ex.Message); }
@@ -2288,7 +2485,8 @@ namespace NextDayRevival
                     if (float.IsNaN(f[i]) || float.IsInfinity(f[i])) return;
                 if (Mathf.RoundToInt(f[0]) != Pose) return;
                 Flak.OnPose(Mathf.RoundToInt(f[1]), Mathf.Repeat(f[2] + 180f, 360f) - 180f,
-                    Mathf.Clamp(f[3], -15f, 90f), f[4] > 0.5f, Mathf.Clamp(f[5], 30f, 20000f), f[6] > 0.5f, sender);
+                    Mathf.Clamp(f[3], -15f, 90f), Mathf.Max(0, Mathf.RoundToInt(f[4])),
+                    Mathf.Clamp(f[5], 30f, 20000f), f[6] > 0.5f, sender);
             }
             catch (Exception ex)
             {

@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.59.0";
+        public const string VERSION = "6.60.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -478,6 +478,8 @@ namespace NextDayRevival
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
             ContentPerf.BindConfig(Config);      // east world: LOD/cull, shadows, colliders, interiors, batching of content scenes
             ViewDistance.BindConfig(Config);     // view distance Low/Medium/High/Ultra (far clip, prop culling, fog)
+            NpcDistance.BindConfig(Config);      // N2: NPC distance tiers (wake at aircraft range, mid tier, forest mask)
+            FarForest.BindConfig(Config);        // N2b: forest canopy past the tree draw distance (same mask)
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
@@ -499,6 +501,8 @@ namespace NextDayRevival
             PlayerAn2.BindConfig(Config);        // NDR the An-2 a player flies (on by default)
             An2Repair.BindConfig(Config);        // NDR An-2 repair loop: four stages, fuel (on by default)
             An2Bombs.BindConfig(Config);         // NDR An-2 bombs: racks, bombsight, release ([Gameplay] An2Bombs)
+            AirEvents.BindConfig(Config);        // NDR N11 air events (editor air strikes)
+            NpcAircraft.BindConfig(Config);      // NDR NPC aircraft on a flight path (admin test flyover)
             FuelBalance.BindConfig(Config);      // NDR fuel use and tank size per vehicle class
             FuelStations.BindConfig(Config);     // NDR fuel columns: a few canisters, slow refill
             FuelDepot.BindConfig(Config);        // NDR airfield POL depot: damageable tanks, finite pool
@@ -511,6 +515,7 @@ namespace NextDayRevival
             ArtyBattery.BindConfig(Config);      // NDR settlement artillery (crew, recon drone)
             ArtyVehicle.BindConfig(Config);      // NDR drivable howitzer (the settlement gun on a chassis)
             Gepard.BindConfig(Config);           // NDR Gepard anti-aircraft gun (radar fire control)
+            Katyusha.BindConfig(Config);         // NDR Katyusha rocket launcher (map fire control, ripple salvo)
             GepardCrew.BindConfig(Config);       // NDR Gepard as an NPC vehicle: riding crew, air-first gunner
             Flak.BindConfig(Config);             // east airfield: ZU-23-2 flak guns on the AA positions (P4)
             TowerRadar.BindConfig(Config);       // east airfield: the tower C1 as air defence HQ, radar + console (P5)
@@ -549,10 +554,13 @@ namespace NextDayRevival
             DroneNpcHook.Install(_harmony);
             SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
+            NpcDistance.Install(_harmony);       // N2: settlement wake at range, mid-tier AI rate
             RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
             PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
             PlayerAn2.Install(_harmony);         // NDR player-flown An-2: carrier prepare, shared body lock
+            NpcAircraft.Install(_harmony);       // NDR NPC aircraft: rounds and blasts on the airframe
             An2Repair.Install(_harmony);         // NDR An-2 repair: the body freeze while fitting
+            VehicleCondition.Install(_harmony);  // N8 vanilla condition: the container window for big truck trunks
             FuelDepot.Install(_harmony);         // NDR POL depot: explosion and firearm hits on the tanks
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Admin.Install(_harmony);
@@ -564,6 +572,7 @@ namespace NextDayRevival
             Technical.Install(_harmony);         // NDR technical (gun truck)
             ArtyVehicle.Install(_harmony);       // NDR drivable howitzer (spawn marker, registry entry)
             Gepard.Install(_harmony);            // NDR Gepard (spawn marker, event channel, explosion armour)
+            Katyusha.Install(_harmony);          // NDR Katyusha (spawn marker, registry entry, travel lock)
             GepardCrew.Install(_harmony);        // NDR Gepard crew: the men inside cannot be hurt through the hull
             MilitaryTown.Install(_harmony);      // east world: explosions on the town guns (only with the town on)
             Flak.Install(_harmony);              // east airfield flak: event channel, the manning player's input lock
@@ -1729,6 +1738,8 @@ namespace NextDayRevival
             An2Repair.AddItems(Items);
             // FAB-50 bomb for the An-2's racks (own file).
             An2Bombs.AddItems(Items);
+            // M-13 rocket for the Katyusha's rails (own file).
+            Katyusha.AddItems(Items);
             // Anti-tank mine (own file).
             AntiTankMine.AddItems(Items);
             // PMN-2 anti-personnel mine, Blender model (own file).
@@ -2198,7 +2209,7 @@ namespace NextDayRevival
             // then everything below is measured against this frame's gap. The S/E
             // pairs are no-ops unless the F6 diagnostics overlay is toggled on.
             FrameProf.NewFrame();
-            FrameProf.S(FrameProf.S_LiveRoutesT); LiveRoutes.Tick(); FrameProf.E(FrameProf.S_LiveRoutesT);
+            FrameProf.S(FrameProf.S_LiveRoutesT); LiveRoutes.Tick(); VehicleFinds.Tick(); FrameProf.E(FrameProf.S_LiveRoutesT);
             FrameProf.S(FrameProf.S_ClientIntegrityT); ClientIntegrity.Tick(); FrameProf.E(FrameProf.S_ClientIntegrityT);
             // Before the features run: an action whose own loop stopped gets
             // the interaction bar taken from it here, and a bar that survived
@@ -2237,6 +2248,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_UralTruckT); UralTruck.Tick(); FrameProf.E(FrameProf.S_UralTruckT);                    // NDR 15-seat Ural cargo truck (own spawn key)
             FrameProf.S(FrameProf.S_TechnicalT); Technical.Tick(); FrameProf.E(FrameProf.S_TechnicalT);                    // NDR technical: spawn key, durability cap, the MG
             FrameProf.S(FrameProf.S_ArtyVehicleT); ArtyVehicle.Tick(); FrameProf.E(FrameProf.S_ArtyVehicleT);                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
+            FrameProf.S(FrameProf.S_KatyushaT); Katyusha.Tick(); FrameProf.E(FrameProf.S_KatyushaT);                   // NDR Katyusha: fire control, salvo, loading
             FrameProf.S(FrameProf.S_GepardT); Gepard.Tick(); FrameProf.E(FrameProf.S_GepardT);                       // NDR Gepard: spawn key, gunner station, rounds in flight
             FrameProf.S(FrameProf.S_FlakT); Flak.Tick(); FrameProf.E(FrameProf.S_FlakT);                         // east airfield flak: guns, crews, fire control, a manning player
             FrameProf.S(FrameProf.S_TowerRadarT); TowerRadar.Tick(); FrameProf.E(FrameProf.S_TowerRadarT);                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
@@ -2257,7 +2269,10 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_PlayerAn2T); PlayerAn2.Tick(); FrameProf.E(FrameProf.S_PlayerAn2T);                    // NDR player-flown An-2 (apron spawn, boarding, flight)
             FrameProf.S(FrameProf.S_An2RepairT); An2Repair.Tick(); FrameProf.E(FrameProf.S_An2RepairT);                    // NDR An-2 repair: fit parts, refuel, save the state
             FrameProf.S(FrameProf.S_An2BombsT); An2Bombs.Tick(); FrameProf.E(FrameProf.S_An2BombsT);                     // NDR An-2 bombs: load, sight, release, falling bombs
+            AirEvents.Tick();                                                                                            // NDR N11 air events: schedule, bombs, paratroopers, warnings
+            NpcAircraft.Tick();                                                                                          // NDR NPC aircraft: the master flies the flight paths
             FrameProf.S(FrameProf.S_FuelBalanceT); FuelBalance.Tick(); FrameProf.E(FrameProf.S_FuelBalanceT);                  // NDR fuel balance per vehicle class
+            FrameProf.S(FrameProf.S_VehicleConditionT); VehicleCondition.Tick(); FrameProf.E(FrameProf.S_VehicleConditionT);   // N8 truck trunks, Mi-8 parts and fuel
             FrameProf.S(FrameProf.S_FuelStationsT); FuelStations.Tick(); FrameProf.E(FrameProf.S_FuelStationsT);                 // NDR fuel columns: stock, refill, sync
             FrameProf.S(FrameProf.S_FuelDepotT); FuelDepot.Tick(); FrameProf.E(FrameProf.S_FuelDepotT);                    // NDR POL depot: pool, tanks, refuelling
             FrameProf.S(FrameProf.S_WindSoundT); WindSound.Tick(); FrameProf.E(FrameProf.S_WindSoundT);                    // NDR high-altitude wind: heli and open-canopy descent
@@ -2270,6 +2285,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
             FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
             FrameProf.S(FrameProf.S_NpcWarT); NpcWar.Tick(); FrameProf.E(FrameProf.S_NpcWarT);                       // NDR NPC-vs-NPC combat for troop squads
+            FrameProf.S(FrameProf.S_NpcDistT); NpcDistance.Tick(); FrameProf.E(FrameProf.S_NpcDistT);             // N2: NPC distance tiers + forest mask
+            FrameProf.S(FrameProf.S_FarForestT); FarForest.Tick(); FrameProf.E(FrameProf.S_FarForestT);           // N2b: far forest canopy
         }
 
         void FixedUpdate()
@@ -2334,12 +2351,14 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); Stinger.Draw(); FrameProf.E(FrameProf.OtherDraw);
             FrameProf.S(FrameProf.ConvoyDraw);  RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
+            AirEvents.Draw();                                                                                            // NDR N11 air raid banner
             FrameProf.S(FrameProf.S_TroopInsertionD); RevivalTroopInsertion.Draw(); FrameProf.E(FrameProf.S_TroopInsertionD);        // NDR heli troop insertion banner
             FrameProf.S(FrameProf.S_EastZonesD); EastZones.Draw(); FrameProf.E(FrameProf.S_EastZonesD);                    // east world: the marker id the player stands in
             FrameProf.S(FrameProf.S_HelipadsD); Helipads.Draw(); FrameProf.E(FrameProf.S_HelipadsD);                     // NDR helicopter landing pads on the world map
             FrameProf.S(FrameProf.S_PlayerHeliD); if (seatHud) PlayerHeli.Draw(); FrameProf.E(FrameProf.S_PlayerHeliD);                   // NDR player-flown Mi-8: readout and notices
             FrameProf.S(FrameProf.S_PlayerAn2D); if (seatHud) PlayerAn2.Draw(); FrameProf.E(FrameProf.S_PlayerAn2D);                    // NDR player-flown An-2: instruments, fuel gauge, stall
             FrameProf.S(FrameProf.S_An2RepairD); An2Repair.Draw(); FrameProf.E(FrameProf.S_An2RepairD);                    // NDR An-2 repair: the stage panel and the key prompt
+            FrameProf.S(FrameProf.S_VehicleConditionD); VehicleCondition.Draw(); FrameProf.E(FrameProf.S_VehicleConditionD);   // N8 Mi-8 fit/refuel prompt on foot
             FrameProf.S(FrameProf.S_An2BombsD); if (seatHud) An2Bombs.Draw(); FrameProf.E(FrameProf.S_An2BombsD);                     // NDR An-2 bombs: the bombsight and the load prompt
             FrameProf.S(FrameProf.S_FuelDepotD); FuelDepot.Draw(); FrameProf.E(FrameProf.S_FuelDepotD);                    // NDR POL depot: remaining fuel and the key prompt
             FrameProf.S(FrameProf.S_NewSettlementD); NewSettlement.Draw(); FrameProf.E(FrameProf.S_NewSettlementD);                // NDR bottom-left traitor settlement (Phase 1, isolated)
@@ -2347,6 +2366,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_MortarD); Mortar.Draw(); FrameProf.E(FrameProf.S_MortarD);                       // NDR settlement mortar (prompt and map fire control)
             FrameProf.S(FrameProf.S_ArtyBatteryD); ArtyBattery.Draw(); FrameProf.E(FrameProf.S_ArtyBatteryD);                  // NDR settlement artillery (recon drone on the map)
             FrameProf.S(FrameProf.S_TechnicalD); if (seatHud) Technical.Draw(); FrameProf.E(FrameProf.S_TechnicalD);                    // NDR technical: gunner crosshair and notices
+            FrameProf.S(FrameProf.S_KatyushaD); Katyusha.Draw(); FrameProf.E(FrameProf.S_KatyushaD);                   // NDR Katyusha: map target area (map open), seat line (checks GameUi itself)
             FrameProf.S(FrameProf.S_GepardD); if (seatHud) Gepard.Draw(); FrameProf.E(FrameProf.S_GepardD);                       // NDR Gepard: sight reticle, radar scope, target boxes
             FrameProf.S(FrameProf.S_FlakD); if (seatHud) Flak.Draw(); FrameProf.E(FrameProf.S_FlakD);                         // east airfield flak: the man-the-gun prompt and the ZU-23 sight
             FrameProf.S(FrameProf.S_TowerRadarD); TowerRadar.Draw(); FrameProf.E(FrameProf.S_TowerRadarD);                   // tower radar HQ: the console prompt and the PPI radar view

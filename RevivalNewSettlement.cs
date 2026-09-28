@@ -624,6 +624,7 @@ namespace NextDayRevival
         public static void Draw()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            DrawMilitaryTownRing();
             if (_cfgEnabled == null || !_cfgEnabled.Value)
             { MapInkLayer.Hide("settlement"); return; }
             // THE RING MARKS A PLACE ON ONE MAP. The size test further down only
@@ -716,6 +717,49 @@ namespace NextDayRevival
                 return false;
             gui = MapArt(gui, full);
             return true;
+        }
+
+        // The ring of the military town, which is a Traitor settlement since N5
+        // (Revival.MilitaryTown.cs, MilitaryTown.Side): the same orange stamp as
+        // the Litvinovka camp. Drawing only - the garrison is MilitaryTown's.
+        // Centre and radius are the town's own (MilitaryTown.Centre and
+        // MapRingRadius, which covers the fence corners).
+        static void DrawMilitaryTownRing()
+        {
+            MapInkLayer layer = null;
+            try
+            {
+                if (!EastWorld.Extends || !MapScene.Owns(MapScene.Home)) return;
+                Component manager, texture; Camera camera; Vector2 world, map;
+                if (!MapTools.Context(out manager, out texture, out camera, out world, out map)) return;
+                if (world.x < 4900f || world.y < 4900f) return;
+                Rect full;
+                if (!MapTools.MapScreenRect(texture, camera, out full)) return;
+                Vector3 centre = MilitaryTown.Centre;
+                float radius = MilitaryTown.MapRingRadius;
+                Vector2 mid, east, north;
+                if (!Project(centre, texture, camera, world, map, full, out mid)
+                    || !Project(centre + new Vector3(radius, 0f, 0f), texture, camera, world, map, full, out east)
+                    || !Project(centre + new Vector3(0f, 0f, radius), texture, camera, world, map, full, out north)) return;
+                if (_ringStamp == null) _ringStamp = MapInkLayer.SettlementStamp();
+                if (_ringStamp == null) return;
+                layer = MapInkLayer.Begin("military-town-ring", texture);
+                if (layer == null) return;
+                float rx = Mathf.Abs(east.x - mid.x), ry = Mathf.Abs(north.y - mid.y);
+                Rect ring = new Rect((mid.x - rx - full.x) * 1024f / full.width,
+                    (mid.y - ry - full.y) * 1024f / full.height,
+                    2f * rx * 1024f / full.width, 2f * ry * 1024f / full.height);
+                layer.Draw(ring, _ringStamp, RingColor);
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null) RevivalPlugin.L.LogWarning("Military town map ring: " + ex.Message);
+            }
+            finally
+            {
+                if (layer != null) layer.End();
+                else MapInkLayer.Hide("military-town-ring");
+            }
         }
 
         static Vector2 MapArt(Vector2 g, Rect full)

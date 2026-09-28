@@ -34,6 +34,22 @@
 //                 posts, a patrol round the fence, the watchtowers - and the
 //                 town's no-fly zone: Revival.MilitaryTownRing.cs.
 //
+//   SIDE (N5)     the town is a TRAITOR settlement: every part above is
+//                 spawned on the plugin's "traitor" side (Fraktion: MyFraction
+//                 Traitor, hates every faction but Traitor). This is the
+//                 game's own hook, the same one the Litvinovka camp uses:
+//                 hostility is the per-NPC HatedFractions array checked
+//                 against the player's fraction (RE 23), so a player who took
+//                 the Traitor side is left alone by the garrison, the guns
+//                 (ArtyBattery.HostileToBattery), the Gepard and the no-fly
+//                 zone (an owning-faction player aboard is no violator), and
+//                 everyone else is shot. The game has no reputation value and
+//                 level7 no standing traitor base or traitor trader (RE, the
+//                 settlement inventory); the toolkit's traitor trader stays
+//                 in Litvinovka. The side is not a setting any more: the old
+//                 [MilitaryTown] Faction key (default looter) is not bound,
+//                 an existing line in a config file is inert.
+//
 // Everything keys on the MT building ids of the markers EastZones reads, so it
 // works on the greybox now and on the real models later.
 //
@@ -59,7 +75,6 @@ namespace NextDayRevival
     {
         // ============================================================= config
         internal static ConfigEntry<bool>   CfgEnabled;
-        internal static ConfigEntry<string> CfgFaction;
         internal static ConfigEntry<bool>   CfgLoot;
         internal static ConfigEntry<float>  CfgArmouryReset;
         internal static ConfigEntry<bool>   CfgDefenders;
@@ -82,9 +97,6 @@ namespace NextDayRevival
                 "East military town gameplay: artillery batteries with spotters, the "
                 + "Gepard AA site, defenders, loot, reinforcements. Acts only with "
                 + "[World] EastTile = true; on the home map alone it does nothing.");
-            CfgFaction = cfg.Bind("MilitaryTown", "Faction", "looter",
-                "Side of the whole garrison (defenders, gun crews, Gepard, patrol, "
-                + "convoy): civilian, looter, traitor or neutral.");
             CfgLoot = cfg.Bind("MilitaryTown", "Loot", true,
                 "Loot points in the town's buildings by MT id; the HQ armoury is tier 4.");
             CfgArmouryReset = cfg.Bind("MilitaryTown", "ArmouryResetMinutes", 240f,
@@ -135,11 +147,11 @@ namespace NextDayRevival
 
         internal static bool LootOn { get { return On && B(CfgLoot); } }
 
-        internal static string Faction()
-        {
-            string f = CfgFaction == null ? "looter" : CfgFaction.Value.Trim().ToLowerInvariant();
-            return f == "civilian" || f == "traitor" || f == "neutral" ? f : "looter";
-        }
+        /// <summary>N5: the whole garrison (defenders, gun crews, Gepard,
+        /// patrol, convoy, no-fly owner) is Traitor - see the file header.</summary>
+        internal const string Side = "traitor";
+
+        internal static string Faction() { return Side; }
 
         internal static float ArmourySeconds() { return F(CfgArmouryReset, 240f, 5f, 1440f) * 60f; }
 
@@ -149,6 +161,11 @@ namespace NextDayRevival
         // z 602 / 1198. The town centre is the parade's west edge.
         internal const float MinX = 5452f, MaxX = 5848f, MinZ = 602f, MaxZ = 1198f;
         internal static readonly Vector3 Centre = new Vector3(5650f, 0f, 900f);
+
+        /// <summary>N4/N5: radius of the settlement ring round Centre on the
+        /// map (NewSettlement.DrawMilitaryTownRing; editor/pois.js draws the
+        /// same 380): it covers every corner of the fence MT-F1.</summary>
+        internal const float MapRingRadius = 380f;
 
         internal static bool Inside(Vector3 p, float margin)
         {
@@ -285,6 +302,9 @@ namespace NextDayRevival
             l.Add(S("MT-S2", 2, "medical", 0.00f, 0.00f, 0f));
             l.Add(S("MT-S1", 0, "dressing", -0.25f, 0.00f, 0f));
             l.Add(S("MT-S1", 0, "dressing",  0.25f, 0.00f, 0f));
+            // N9a: the school's staff room - civilian kit, the town's
+            // nearest thing to a village house.
+            l.Add(S("MT-S1", 1, "flat", 0.00f, 0.30f, 0f));
             // B1 boiler house, the garages: tools, fuel, vehicle parts.
             l.Add(S("MT-B1", 2, "tools", -0.25f, 0.00f, 0f));
             l.Add(S("MT-B1", 3, "fuel",   0.25f, 0.00f, 0.4f));
@@ -1131,6 +1151,7 @@ namespace NextDayRevival
                     }
                 }
                 Warn(now);
+                Arrive(now);
             }
             catch (Exception ex)
             {
@@ -1152,11 +1173,43 @@ namespace NextDayRevival
                 bool s;
                 if (Guns[i].Raised && !Guns[i].Wrecked && ArtyBattery.TownCrew(Guns[i].Id, out s) >= 0 && s) serves = true;
             }
-            if (!serves || !Sees(me.transform.position, me)) return;
+            if (!serves || OwnSide(me) || !Sees(me.transform.position, me)) return;
             _nextWarn = now + 25f;
             string line = Mortar.TextSpotted();
             if (!NativeMessage.Warn(line)) Turret.Hinweis(line, 3.5f);
             RevivalPlugin.L.LogInfo("MilitaryTown: a spotter has us at " + me.transform.position.ToString("0") + ".");
+        }
+
+        /// <summary>N5: the local player fights for the Traitors - the
+        /// garrison and its guns leave him alone (their HatedFractions).</summary>
+        static bool OwnSide(GameObject me)
+        {
+            return Fraktion.Spielerseite(me) == Fraktion.Eigene(Side);
+        }
+
+        static bool _inRing;
+        static float _nextArrive;
+
+        /// <summary>N5, every client: crossing into the map ring says whose
+        /// place this is and whether the garrison will shoot - once per entry
+        /// (out again past the ring plus 60 u re-arms it).</summary>
+        static void Arrive(float now)
+        {
+            if (now < _nextArrive) return;
+            _nextArrive = now + 1f;
+            GameObject me = MapTools.LocalPlayer();
+            if (me == null) return;
+            float d = Flat(me.transform.position - Centre);
+            if (_inRing) { if (d > MapRingRadius + 60f) _inRing = false; return; }
+            if (d > MapRingRadius) return;
+            _inRing = true;
+            bool own = OwnSide(me);
+            string line = own
+                ? Loc.T("\u0412\u043e\u0435\u043d\u043d\u044b\u0439 \u0433\u043e\u0440\u043e\u0434\u043e\u043a - \u043f\u043e\u0441\u0435\u043b\u0435\u043d\u0438\u0435 \u043f\u0440\u0435\u0434\u0430\u0442\u0435\u043b\u0435\u0439. \u0413\u0430\u0440\u043d\u0438\u0437\u043e\u043d \u043d\u0430 \u0432\u0430\u0448\u0435\u0439 \u0441\u0442\u043e\u0440\u043e\u043d\u0435.", "Military town - Traitor settlement. The garrison is on your side.")
+                : Loc.T("\u0412\u043e\u0435\u043d\u043d\u044b\u0439 \u0433\u043e\u0440\u043e\u0434\u043e\u043a - \u043f\u043e\u0441\u0435\u043b\u0435\u043d\u0438\u0435 \u043f\u0440\u0435\u0434\u0430\u0442\u0435\u043b\u0435\u0439. \u0413\u0430\u0440\u043d\u0438\u0437\u043e\u043d \u0441\u0442\u0440\u0435\u043b\u044f\u0435\u0442 \u0431\u0435\u0437 \u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u044f.", "Military town - Traitor settlement. The garrison shoots on sight.");
+            if (!NativeMessage.Warn(line)) Turret.Hinweis(line, 5f);
+            RevivalPlugin.L.LogInfo("MilitaryTown: entered the Traitor settlement ring"
+                + (own ? " as a Traitor - the garrison holds fire." : " - the garrison is hostile."));
         }
     }
 }

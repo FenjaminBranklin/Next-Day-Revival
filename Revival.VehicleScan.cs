@@ -58,7 +58,7 @@ namespace NextDayRevival
         Type _type;
         bool _typeTried;
         bool _hooked;
-        bool _seeded;
+        bool _seeded, _seededEarly;
         float _verifyAt = -1f;
         int _verifyTries;
         readonly Dictionary<int, Component> _live = new Dictionary<int, Component>();
@@ -105,6 +105,15 @@ namespace NextDayRevival
                 _hooked = n > 0;
                 RevivalPlugin.L.LogInfo("SceneRegistry: " + _typeName + " hooked (" + n
                     + " add hook(s), OnDestroy " + (destroy != null ? "yes" : "no") + ").");
+                // n01 perf: the seed scan runs here, in the plugin's Awake
+                // before the first game scene (a handful of objects), instead
+                // of at the first All() in the middle of play, where it walked
+                // every MonoBehaviour of the loaded world in one frame.
+                if (_hooked)
+                {
+                    Adopt(Scan(t), "seed");
+                    _seededEarly = true;
+                }
             }
             catch (Exception ex)
             {
@@ -171,7 +180,7 @@ namespace NextDayRevival
                 {
                     _seeded = true;
                     _verifyAt = now + VerifyAfter;
-                    Adopt(Scan(t), "seed");
+                    if (!_seededEarly) Adopt(Scan(t), "seed");
                 }
                 else if (_verifyAt > 0f && now >= _verifyAt)
                 {

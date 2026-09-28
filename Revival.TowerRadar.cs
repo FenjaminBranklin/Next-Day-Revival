@@ -39,11 +39,14 @@
 //      the airfield's own side. Orders of another side standing on a gun are
 //      dropped when the airfield's crew mans it again, and all of them when
 //      the HQ operator is back (the scope names who holds the radar and
-//      which guns follow; the ZU sight shows the radar's order). With an
+//      which guns follow; the gun's sight shows the radar's order). With an
 //      operator - such a player, or the HQ's own NPC operator (key
 //      radar/c1/op) - the guns are radar-directed (Flak.SetFireDirection:
-//      shorter reaction, smaller first error, faster tracking). Without one
-//      they lay by eye (the P4 numbers). With the radar or the console
+//      shorter reaction, smaller first error, faster tracking; N6
+//      Flak.SetRadarDirected: [Flak52K] RadarRange and the fast
+//      RadarWalkFactor). Without one they lay by eye: VisualRange, the slow
+//      WalkFactor. A dead or WOUNDED operator (the game's wounded state,
+//      NpcWar.GroundDowned) counts as none: the console is free. With the radar or the console
 //      destroyed they are worse than that (no warning at all).
 //   4  DAMAGE. The antenna head, the mast, the KUNG shelter and the console
 //      are targets: the local player's rounds (a postfix on the game's
@@ -113,7 +116,7 @@ namespace NextDayRevival
             const string S = "TowerRadar";
             CfgEnabled = cfg.Bind(S, "Enabled", true,
                 "The air defence HQ in the airfield tower C1: P-18 radar, console with a PPI scope, "
-                + "fire control of the ZU-23 guns (acting only with [World] EastTile, [Airfield] "
+                + "fire control of the 52-K guns (acting only with [World] EastTile, [Airfield] "
                 + "Enabled and [Flak] Enabled for the guns).");
             CfgRotation = cfg.Bind(S, "AntennaRotation", true,
                 "Animation: the radar antenna turns (the scope's sweep turns either way).");
@@ -394,7 +397,7 @@ namespace NextDayRevival
             Screen = null;
             Elements.Clear();
             Built = KitRadar = false;
-            if (_directionSet) { Flak.SetFireDirection(1f, 1f, 1f); _directionSet = false; }
+            if (_directionSet) { Flak.SetFireDirection(1f, 1f, 1f); Flak.SetRadarDirected(false); _directionSet = false; }
             Log("cleared (" + why + ").");
         }
 
@@ -623,6 +626,9 @@ namespace NextDayRevival
                 if (tier == 2) Flak.SetFireDirection(F(CfgDirReaction, 0.45f), F(CfgDirError, 0.55f), F(CfgDirTracking, 2f));
                 else if (tier == 0) Flak.SetFireDirection(F(CfgDarkReaction, 1.4f), F(CfgDarkError, 1.3f), F(CfgDarkTracking, 0.8f));
                 else Flak.SetFireDirection(1f, 1f, 1f);
+                // N6: an operator at the console = radar range and fast
+                // bracketing; anything else = visual range, slow bracketing.
+                Flak.SetRadarDirected(tier == 2);
             }
 
             // the assigned blip follows its aircraft
@@ -768,7 +774,7 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>The line in the ZU sight of a gun that follows the radar.</summary>
+        /// <summary>The line in the sight of a gun that follows the radar.</summary>
         static string SightLine(string id)
         {
             if (!Built || !Working || ControlSide < 0) return null;
@@ -2235,7 +2241,7 @@ namespace NextDayRevival
             {
                 FlakGunInfo g = guns[i];
                 bool follows = TowerRadar.Follows(g, who);
-                SmallLabel(x, y, g.Id + "  ZU-23-2   " + g.State + "   crew " + g.CrewAlive + "/2   "
+                SmallLabel(x, y, g.Id + "  52-K   " + g.State + "   crew " + g.CrewAlive + "/2   "
                     + g.Rounds + " rds   " + (follows ? "FOLLOWS " + TowerRadar.SideLabel(who) : TowerRadar.Ignores(g, who)),
                     !follows ? Foe : g.State == FlakState.Firing ? Foe : g.State == FlakState.NoCrew ? Amber : Green);
                 y += 16f;
@@ -2405,7 +2411,7 @@ namespace NextDayRevival
 
         /// <summary>Eight seconds: up from 280 to 620 Hz and down again, a
         /// rotor's chopped harmonics over it.</summary>
-        static AudioClip Clip()
+        internal static AudioClip Clip()
         {
             const int rate = 22050;
             const float seconds = 8f;

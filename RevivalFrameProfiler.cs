@@ -166,7 +166,13 @@ namespace NextDayRevival
         public const int S_ClientIntegrityD = 102;
         public const int S_NpcWarD = 103;
         public const int S_SettingsD = 104;
-        public const int Count = 105;
+        public const int S_NpcDistT = 105;
+        public const int S_FarForestT = 106;
+        public const int S_KatyushaT = 107;
+        public const int S_KatyushaD = 108;
+        public const int S_VehicleConditionT = 109;
+        public const int S_VehicleConditionD = 110;
+        public const int Count = 111;
 
         static readonly string[] Names = new string[]
         {
@@ -253,6 +259,12 @@ namespace NextDayRevival
             "ClientIntegrity.Draw",
             "NpcWar.Draw",
             "Settings.Draw",
+            "NpcDistance.Tick",
+            "FarForest.Tick",
+            "Katyusha.Tick",
+            "Katyusha.Draw",
+            "VehicleCondition.Tick",
+            "VehicleCondition.Draw",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI.

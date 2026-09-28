@@ -175,14 +175,7 @@ namespace NextDayRevival
         {
             if (go == null) return;
             _keep.Add(go.GetInstanceID());
-            if (_props.Count > 0) Release(go.transform);
-        }
-
-        static bool Kept(Transform t)
-        {
-            for (; t != null; t = t.parent)
-                if (_keep.Contains(t.gameObject.GetInstanceID())) return true;
-            return false;
+            if (_propCount > 0 || _job != JobNone) Release(go.transform);
         }
 
         // ============================================================ slots
@@ -417,6 +410,26 @@ namespace NextDayRevival
 
         // ============================================================ props
 
+        // n01 perf (6.59.0 F6 at the airfield: LateTick 2.8 ms EVERY frame).
+        // The east content scenes load one by one during play and every load
+        // restarted the whole-scene sort (FindObjectsOfType over ~40,000
+        // MeshRenderers, three GetComponentInParent walks each) at 2 ms a
+        // frame; the finished sort then built both bands, primed ~30,000
+        // renderers and restored/re-extended every large LODGroup inside ONE
+        // frame each. Now:
+        //   - the sort walks the loaded scenes' hierarchies top-down: a
+        //     LODGroup, Rigidbody, Animator, kept object or the camera's rig
+        //     skips its whole subtree (the same filter as the three parent
+        //     walks, evaluated once per node instead of once per renderer);
+        //   - every phase (walk, prime, orphans, LODs) runs in SliceMs slices;
+        //   - a scan asked for while one runs waits for it instead of
+        //     restarting it (loads every few seconds never let it finish);
+        //   - the renderers this file switched off are one set (_hidden), so
+        //     new bands take over from old ones without switching thousands
+        //     of props on and off again. That also fixes the second pass (30 s
+        //     after a load) dropping every prop the first pass had hidden -
+        //     it skipped disabled renderers, which were exactly those.
+
         /// <summary>One CullingGroup over one size class: the engine tests the
         /// distance of each sphere to the camera, and a renderer is switched
         /// off past the band and on again inside it. Only renderers this file
@@ -424,30 +437,34 @@ namespace NextDayRevival
         sealed class Band
         {
             public readonly List<Renderer> Renderers = new List<Renderer>();
-            public bool[] Hidden;
+            public readonly List<BoundingSphere> Pending = new List<BoundingSphere>();
             public CullingGroup Group;
             public BoundingSphere[] Spheres;
-            public bool Primed;
+            /// <summary>-1: not primed yet; the renderers below it follow
+            /// the group's events.</summary>
+            public int PrimeIdx = -1;
             public float Distance;
+
+            public void Add(Renderer r, Bounds b)
+            {
+                Renderers.Add(r);
+                Pending.Add(new BoundingSphere(b.center, b.extents.magnitude));
+            }
 
             public void Build(Camera cam, float distance)
             {
                 Distance = distance;
                 int n = Renderers.Count;
-                Hidden = new bool[n];
                 Spheres = new BoundingSphere[Mathf.Max(1, n)];
-                for (int i = 0; i < n; i++)
-                {
-                    Bounds b = Renderers[i].bounds;
-                    Spheres[i] = new BoundingSphere(b.center, b.extents.magnitude);
-                }
+                Pending.CopyTo(Spheres);
+                Pending.Clear();
                 Group = new CullingGroup();
                 Group.SetBoundingSpheres(Spheres);
                 Group.SetBoundingSphereCount(n);
                 Group.SetBoundingDistances(new float[] { distance });
                 Group.onStateChanged = Changed;
                 Target(cam);
-                Primed = false;
+                PrimeIdx = -1;
             }
 
             public void Target(Camera cam)
@@ -459,112 +476,130 @@ namespace NextDayRevival
 
             void Changed(CullingGroupEvent ev)
             {
-                if (!Primed) return;
-                Set(ev.index, ev.currentDistance >= 1);
+                if (ev.index >= PrimeIdx || ev.index >= Renderers.Count) return;
+                SetHidden(Renderers[ev.index], ev.currentDistance >= 1);
             }
 
-            /// <summary>The first frame after the group has run once: every
-            /// sphere's band is known, apply them all.</summary>
-            public void Prime()
+            /// <summary>After the group has run once every sphere's band is
+            /// known: apply them, a slice at a time. True when done.</summary>
+            public bool PrimeStep(long t0, long budget)
             {
-                if (Primed || Group == null) return;
-                Primed = true;
-                for (int i = 0; i < Renderers.Count; i++) Set(i, Group.GetDistance(i) >= 1);
+                if (Group == null) return true;
+                if (PrimeIdx < 0) PrimeIdx = 0;
+                int n = Renderers.Count;
+                while (PrimeIdx < n)
+                {
+                    if ((PrimeIdx & 63) == 63 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) return false;
+                    int i = PrimeIdx++;
+                    SetHidden(Renderers[i], Group.GetDistance(i) >= 1);
+                }
+                return true;
             }
 
-            void Set(int i, bool hide)
-            {
-                if (i < 0 || i >= Renderers.Count) return;
-                Renderer r = Renderers[i];
-                if (r == null) { Hidden[i] = false; return; }
-                if (hide)
-                {
-                    if (!Hidden[i] && r.enabled) { r.enabled = false; Hidden[i] = true; }
-                }
-                else if (Hidden[i])
-                {
-                    if (!r.enabled) r.enabled = true;
-                    Hidden[i] = false;
-                }
-            }
-
-            public void Release(Transform root)
-            {
-                for (int i = 0; i < Renderers.Count; i++)
-                {
-                    Renderer r = Renderers[i];
-                    if (r == null || !r.transform.IsChildOf(root)) continue;
-                    if (Hidden[i]) r.enabled = true;
-                    Hidden[i] = false;
-                    Renderers[i] = null;
-                }
-            }
-
+            /// <summary>The group goes; the renderers stay as they are (the
+            /// caller shows them or hands them to new bands).</summary>
             public void Dispose()
             {
                 if (Group != null) { Group.Dispose(); Group = null; }
-                if (Hidden != null)
-                    for (int i = 0; i < Renderers.Count; i++)
-                        if (Hidden[i] && Renderers[i] != null) Renderers[i].enabled = true;
                 Renderers.Clear();
-                Hidden = null;
+                Pending.Clear();
             }
         }
 
         static Band _small, _medium;
-        static readonly List<Renderer> _props = new List<Renderer>();
+        static readonly HashSet<Renderer> _hidden = new HashSet<Renderer>();     // switched off by this file
+        static readonly HashSet<Renderer> _released = new HashSet<Renderer>();   // KeepVisible since the sort
+        static HashSet<Renderer> _members = new HashSet<Renderer>();              // in _small or _medium
+        static int _propCount;
         static float _scanAt = -1f, _scanAgainAt = -1f;
+
+        static void SetHidden(Renderer r, bool hide)
+        {
+            if (r == null) return;
+            if (hide)
+            {
+                if (!_hidden.Contains(r) && r.enabled && !_released.Contains(r)) { r.enabled = false; _hidden.Add(r); }
+            }
+            else if (_hidden.Remove(r))
+            {
+                if (!r.enabled) r.enabled = true;
+            }
+        }
+
+        static void ShowAll()
+        {
+            foreach (Renderer r in _hidden)
+                if (r != null && !r.enabled) r.enabled = true;
+            _hidden.Clear();
+        }
+
+        // The job after a scan: walk, then (next frame) prime, orphans, LODs.
+        const int JobNone = 0, JobWalk = 1, JobPrime = 2, JobOrphans = 3, JobLods = 4;
+        static int _job;
         static int _primeFrame = -1;
 
         static void Props(Profile p)
         {
             float now = Time.unscaledTime;
             bool scan = (_scanAt >= 0f && now >= _scanAt) || (_scanAgainAt >= 0f && now >= _scanAgainAt);
-            if (scan && _cam != null)
+            // A scan asked for while one runs waits for it (see above).
+            if (scan && _cam != null && _job == JobNone)
             {
                 if (now >= _scanAt) _scanAt = -1f;
                 if (now >= _scanAgainAt) _scanAgainAt = -1f;
                 BeginCollect(p);
             }
-            if (_cAll != null) StepCollect();
-            else if (_lAll != null) StepLods();
-            if (_primeFrame >= 0 && Time.frameCount > _primeFrame)
+            if (_job == JobNone) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long budget = Budget();
+            switch (_job)
             {
-                if (_small != null) _small.Prime();
-                if (_medium != null) _medium.Prime();
-                _primeFrame = -1;
+                case JobWalk: StepCollect(t0, budget); break;
+                case JobPrime:
+                    if (Time.frameCount <= _primeFrame) break;      // the groups have not run yet
+                    if ((_small == null || _small.PrimeStep(t0, budget))
+                        && (_medium == null || _medium.PrimeStep(t0, budget)))
+                        BeginOrphans();
+                    break;
+                case JobOrphans: StepOrphans(t0, budget); break;
+                case JobLods: StepLods(t0, budget); break;
             }
         }
 
-        // Q1 perf: the sort is TIME-SLICED. It walks every MeshRenderer of
-        // the scene (40,777 in Kevin's 6.57.0 session, three
-        // GetComponentInParent each) and then every LODGroup (9,464), and ran
-        // 8 s and 30 s after every scene load - the east content scenes load
-        // during play, so these were 35 ms + LOD frames mid-game. Now each
-        // frame does at most SliceMs of it; the finished bands replace the old
-        // ones in one step. Same filters, same bands, same log lines.
-        const double SliceMs = 2.0;
-        static MeshRenderer[] _cAll;
-        static int _cIdx, _cLarge, _cSkipped, _cFrames;
+        const double SliceMs = 0.2;
+        static readonly List<Transform> _wStack = new List<Transform>();
+        static Transform _cCamRoot;
+        static int _cLarge, _cSkipped, _cFrames, _cNodes;
         static double _cMs;
         static Profile _cP;
         static Type _cAnimator;
         static Band _cSmall, _cMedium;
-        static readonly List<Renderer> _cProps = new List<Renderer>();
+        static HashSet<Renderer> _cMembers = new HashSet<Renderer>();
+        static readonly List<LODGroup> _cLods = new List<LODGroup>();
 
         static void BeginCollect(Profile p)
         {
-            _lAll = null;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             _cP = p;
             _cSmall = new Band();
             _cMedium = new Band();
-            _cProps.Clear();
-            _cLarge = _cSkipped = _cFrames = _cIdx = 0;
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            _cAll = UnityEngine.Object.FindObjectsOfType<MeshRenderer>();
+            _cMembers.Clear();
+            _cLods.Clear();
+            _cLarge = _cSkipped = _cFrames = _cNodes = 0;
+            _wStack.Clear();
+            // Pushed in reverse so they pop in scene order, roots in order.
+            for (int s = SceneManager.sceneCount - 1; s >= 0; s--)
+            {
+                Scene sc = SceneManager.GetSceneAt(s);
+                if (!sc.isLoaded) continue;
+                GameObject[] roots = sc.GetRootGameObjects();
+                for (int r = roots.Length - 1; r >= 0; r--) _wStack.Add(roots[r].transform);
+            }
+            _cCamRoot = _cam != null ? _cam.transform.root : null;
             // Animator lives in UnityEngine.AnimationModule, which build.ps1
             // does not reference; by name, and skipped if it cannot be found.
             _cAnimator = Type.GetType("UnityEngine.Animator, UnityEngine.AnimationModule");
+            _job = JobWalk;
             _cMs = Ms(t0);
         }
 
@@ -579,83 +614,138 @@ namespace NextDayRevival
             return (long)(SliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
         }
 
-        static void StepCollect()
+        /// <summary>This node and everything under it are left alone: the
+        /// old GetComponentInParent tests (LODGroup, Rigidbody, Animator),
+        /// KeepVisible and the camera's own rig.</summary>
+        static bool SkipsSubtree(Transform t, GameObject go)
         {
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            long budget = Budget();
+            if (ReferenceEquals(t, _cCamRoot)) return true;
+            LODGroup lg = t.GetComponent<LODGroup>();
+            bool body = t.GetComponent<Rigidbody>() != null;
+            // The LOD pass's list comes from the same walk (no second
+            // FindObjectsOfType): the first LODGroup down a branch that no
+            // Rigidbody carries.
+            if (lg != null && !body) _cLods.Add(lg);
+            return lg != null || body
+                || (_cAnimator != null && t.GetComponent(_cAnimator) != null)
+                || _keep.Contains(go.GetInstanceID());
+        }
+
+        static void StepCollect(long t0, long budget)
+        {
             _cFrames++;
-            MeshRenderer[] all = _cAll;
-            Type animator = _cAnimator;
-            while (_cIdx < all.Length)
+            int n = 0;
+            while (_wStack.Count > 0)
             {
-                if ((_cIdx & 31) == 31 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
-                MeshRenderer r = all[_cIdx++];
-                if (r == null || !r.enabled || r.gameObject.layer != 0) continue;
-                Transform t = r.transform;
-                if (r.GetComponentInParent<LODGroup>() != null
-                    || r.GetComponentInParent<Rigidbody>() != null
-                    || (animator != null && r.GetComponentInParent(animator) != null)
-                    || Kept(t)
-                    || (_cam != null && t.IsChildOf(_cam.transform.root)))
-                { _cSkipped++; continue; }
-                float size = r.bounds.size.magnitude;
-                if (size < SmallSize) _cSmall.Renderers.Add(r);
-                else if (size < LargeSize) _cMedium.Renderers.Add(r);
-                else _cLarge++;
-                _cProps.Add(r);
+                if ((++n & 7) == 0 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
+                int last = _wStack.Count - 1;
+                Transform t = _wStack[last];
+                _wStack.RemoveAt(last);
+                if (t == null) continue;                        // destroyed since it was queued
+                GameObject go = t.gameObject;
+                if (!go.activeSelf) continue;                   // FindObjectsOfType saw active objects only
+                _cNodes++;
+                if (SkipsSubtree(t, go)) { _cSkipped++; continue; }
+                MeshRenderer r = t.GetComponent<MeshRenderer>();
+                // One this file switched off is still a prop (enabled = false is ours).
+                if (r != null && go.layer == 0 && (r.enabled || _hidden.Contains(r)))
+                {
+                    Bounds b = r.bounds;
+                    float size = b.size.magnitude;
+                    if (size < SmallSize) { _cSmall.Add(r, b); _cMembers.Add(r); }
+                    else if (size < LargeSize) { _cMedium.Add(r, b); _cMembers.Add(r); }
+                    else _cLarge++;
+                }
+                for (int c = t.childCount - 1; c >= 0; c--) _wStack.Add(t.GetChild(c));
             }
             _cMs += Ms(t0);
-            if (_cIdx < all.Length) return;
+            if (_wStack.Count > 0) return;
 
-            // Done: anything destroyed or kept visible since it was looked at
-            // leaves the bands, then the new bands replace the old ones.
-            Prune(_cSmall.Renderers);
-            Prune(_cMedium.Renderers);
-            Prune(_cProps);
-            ClearProps();
+            // Done: the new bands replace the old ones in one step. Renderers
+            // stay as they are; the prime and orphan passes correct them.
+            if (_small != null) _small.Dispose();
+            if (_medium != null) _medium.Dispose();
             _small = _cSmall;
             _medium = _cMedium;
-            _props.AddRange(_cProps);
+            HashSet<Renderer> old = _members;
+            _members = _cMembers;
+            _cMembers = old;
+            _cMembers.Clear();
+            _propCount = _small.Renderers.Count + _medium.Renderers.Count + _cLarge;
             _small.Build(_cam, _cP.Small);
             _medium.Build(_cam, _cP.Medium);
             _primeFrame = Time.frameCount;
-            _cAll = null;
+            _job = JobPrime;
             _cSmall = _cMedium = null;
-            _cProps.Clear();
+            _cCamRoot = null;
             RevivalPlugin.L.LogInfo("ViewDistance: props sorted in "
-                + _cMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _cFrames + " frame(s) - "
-                + _small.Renderers.Count + " small (off past " + _cP.Small + " u), "
+                + _cMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _cFrames + " frame(s), "
+                + _cNodes + " nodes - " + _small.Renderers.Count + " small (off past " + _cP.Small + " u), "
                 + _medium.Renderers.Count + " medium (off past " + _cP.Medium + " u), "
                 + _cLarge + " large (to the far clip), " + _cSkipped
-                + " left alone (LODGroup, moving, animated, kept).");
-            BeginLods(_cP);
+                + " subtree(s) left alone (LODGroup, moving, animated, kept).");
         }
 
-        static void Prune(List<Renderer> list)
+        // A renderer this file switched off that is in no band any more
+        // (destroyed, moved into a LODGroup, kept) is switched on again.
+        static readonly List<Renderer> _orphans = new List<Renderer>();
+        static int _oIdx;
+
+        static void BeginOrphans()
         {
-            for (int i = list.Count - 1; i >= 0; i--)
-                if (list[i] == null || Kept(list[i].transform)) list.RemoveAt(i);
+            _orphans.Clear();
+            foreach (Renderer r in _hidden) _orphans.Add(r);
+            _oIdx = 0;
+            _job = JobOrphans;
+        }
+
+        static void StepOrphans(long t0, long budget)
+        {
+            while (_oIdx < _orphans.Count)
+            {
+                if ((_oIdx & 63) == 63 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) return;
+                Renderer r = _orphans[_oIdx++];
+                if (_members.Contains(r)) continue;
+                _hidden.Remove(r);
+                if (r != null && !r.enabled) r.enabled = true;
+            }
+            _orphans.Clear();
+            BeginLods(_cP);
         }
 
         static void CancelCollect()
         {
-            _cAll = null;
+            _job = JobNone;
+            _wStack.Clear();
+            _orphans.Clear();
             _lAll = null;
+            _cLods.Clear();
             _cSmall = _cMedium = null;
-            _cProps.Clear();
+            _cMembers.Clear();
+            _cCamRoot = null;
         }
 
+        /// <summary>A kept object's renderers: on again if this file hid
+        /// them, and never hidden again by the current bands.</summary>
         static void Release(Transform root)
         {
-            if (_small != null) _small.Release(root);
-            if (_medium != null) _medium.Release(root);
+            Renderer[] rs = root.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < rs.Length; i++)
+            {
+                Renderer r = rs[i];
+                _released.Add(r);
+                if (_hidden.Remove(r) && r != null && !r.enabled) r.enabled = true;
+            }
         }
 
         static void ClearProps()
         {
             if (_small != null) { _small.Dispose(); _small = null; }
             if (_medium != null) { _medium.Dispose(); _medium = null; }
-            _props.Clear();
+            ShowAll();
+            _members.Clear();
+            _released.Clear();
+            _propCount = 0;
             _primeFrame = -1;
         }
 
@@ -672,48 +762,67 @@ namespace NextDayRevival
         /// clip. A LOD level of screen height h culls at
         /// size * lodBias / (2 tan(fov/2) h); the last level's h is lowered
         /// until that is the far clip, never raised. Time-sliced like the
-        /// prop sort (StepLods).</summary>
+        /// prop sort (StepLods); a group extended before is measured against
+        /// its original heights and only written when its value changes (no
+        /// restore-everything frame before the pass any more).</summary>
         static void BeginLods(Profile p)
         {
-            RestoreLods();
             _lAll = null;
-            if (_cam == null) return;
+            _job = JobNone;
+            if (_cam == null || p == null) return;
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             _lFar = Mathf.Max(p.Far, _cam.farClipPlane);
             _lTan = Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
             _lBias = p.LodBias;
             _lIdx = _lExt = _lFrames = 0;
-            _lAll = UnityEngine.Object.FindObjectsOfType<LODGroup>();
+            _lAll = _cLods.ToArray();
+            _cLods.Clear();
+            _job = JobLods;
             _lMs = Ms(t0);
         }
 
-        static void StepLods()
+        static void StepLods(long t0, long budget)
         {
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            long budget = Budget();
             _lFrames++;
             LODGroup[] all = _lAll;
             while (_lIdx < all.Length)
             {
                 if ((_lIdx & 31) == 31 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
                 LODGroup g = all[_lIdx++];
-                if (g == null || !g.enabled || g.GetComponentInParent<Rigidbody>() != null) continue;
+                if (g == null || !g.enabled) continue;
+                float[] orig;
+                bool had = _lodOriginal.TryGetValue(g, out orig);
                 Vector3 ls = g.transform.lossyScale;
                 float size = g.size * Mathf.Max(Mathf.Abs(ls.x), Mathf.Max(Mathf.Abs(ls.y), Mathf.Abs(ls.z)));
-                if (size < LargeSize) continue;
+                if (size < LargeSize || g.GetComponentInParent<Rigidbody>() != null)
+                {
+                    if (had) { Restore(g, orig); _lodOriginal.Remove(g); }
+                    continue;
+                }
                 LOD[] lods = g.GetLODs();
                 if (lods == null || lods.Length == 0) continue;
+                if (had && orig.Length != lods.Length) { _lodOriginal.Remove(g); had = false; }
                 int last = lods.Length - 1;
-                if (lods[last].renderers == null || lods[last].renderers.Length == 0) continue;
+                float baseH = had ? orig[last] : lods[last].screenRelativeTransitionHeight;
                 float h = size * _lBias / (2f * _lTan * _lFar);
                 h = Mathf.Max(h, 0.0001f);
-                if (h >= lods[last].screenRelativeTransitionHeight) continue;
-                float[] orig = new float[lods.Length];
-                for (int k = 0; k < lods.Length; k++) orig[k] = lods[k].screenRelativeTransitionHeight;
-                _lodOriginal[g] = orig;
+                bool extend = lods[last].renderers != null && lods[last].renderers.Length > 0 && h < baseH;
+                if (!extend)
+                {
+                    if (had) { Restore(g, orig); _lodOriginal.Remove(g); }
+                    continue;
+                }
+                _lExt++;
+                if (had && Mathf.Abs(lods[last].screenRelativeTransitionHeight - h) < 1e-6f) continue;   // already so
+                if (!had)
+                {
+                    orig = new float[lods.Length];
+                    for (int k = 0; k < lods.Length; k++) orig[k] = lods[k].screenRelativeTransitionHeight;
+                    _lodOriginal[g] = orig;
+                }
+                else for (int k = 0; k < last; k++) lods[k].screenRelativeTransitionHeight = orig[k];
                 lods[last].screenRelativeTransitionHeight = h;
                 g.SetLODs(lods);
-                _lExt++;
             }
             _lMs += Ms(t0);
             if (_lIdx < all.Length) return;
@@ -722,19 +831,21 @@ namespace NextDayRevival
                 + _lFar.ToString("0", CultureInfo.InvariantCulture) + " u ("
                 + _lMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _lFrames + " frame(s)).");
             _lAll = null;
+            _job = JobNone;
+        }
+
+        static void Restore(LODGroup g, float[] orig)
+        {
+            LOD[] lods = g.GetLODs();
+            if (lods == null || lods.Length != orig.Length) return;
+            for (int k = 0; k < lods.Length; k++) lods[k].screenRelativeTransitionHeight = orig[k];
+            g.SetLODs(lods);
         }
 
         static void RestoreLods()
         {
             foreach (KeyValuePair<LODGroup, float[]> e in _lodOriginal)
-            {
-                LODGroup g = e.Key;
-                if (g == null) continue;
-                LOD[] lods = g.GetLODs();
-                if (lods == null || lods.Length != e.Value.Length) continue;
-                for (int k = 0; k < lods.Length; k++) lods[k].screenRelativeTransitionHeight = e.Value[k];
-                g.SetLODs(lods);
-            }
+                if (e.Key != null) Restore(e.Key, e.Value);
             _lodOriginal.Clear();
         }
 

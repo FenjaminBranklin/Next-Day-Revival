@@ -393,7 +393,21 @@ namespace NextDayRevival
             // V1-V3 revetments: sparse field caches.
             new Slot("V1", 0, "dressing", -0.20f, 0.00f, 0f),
             new Slot("V2", 0, "dressing", -0.20f, 0.00f, 0f),
-            new Slot("V3", 0, "dressing", -0.20f, 0.00f, 0f)
+            new Slot("V3", 0, "dressing", -0.20f, 0.00f, 0f),
+            // N9a (docs/ai/tasks/n09a-east-loot-spots.md): the buildings and
+            // hulks phase 1 left bare. M1 radio/radar compound: what the
+            // signallers left. The wrecks: vanilla-style car loot beside the
+            // hulk (the point moves off a solid hull onto walkable ground).
+            new Slot("M1a", 2, "comms",   0.30f,  0.30f, 0f),
+            new Slot("M1b", 2, "comms",  -0.30f,  0.00f, 0f),
+            new Slot("W1a", 3, "parts",   0.45f,  0.00f, 0.2f),
+            new Slot("W1c", 2, "salvage", 0.45f,  0.00f, 0f),
+            new Slot("W2a", 1, "salvage", 0.45f,  0.00f, 0f),
+            new Slot("W2b", 1, "medical", 0.45f,  0.00f, 0f),
+            new Slot("W2c", 2, "fuel",    0.45f,  0.00f, 0f),
+            new Slot("W2d", 1, "salvage", 0.45f,  0.00f, 0f),
+            // The An-2 stand: a toolbox under the wing for the repair loop.
+            new Slot("AN", 2, "tools",   -0.45f, -0.45f, 0f)
         };
 
         // What each pool rolls: ItemSpawnCategory names of the game's own
@@ -466,6 +480,39 @@ namespace NextDayRevival
         static bool _started, _fresh;
         static MethodInfo _roomGetter, _masterGetter;
 
+        /// <summary>Admin panel (N9a): how many east loot points stand and hold
+        /// a pickup, and the nearest point to the local player with its
+        /// building, pool and state. Only the master places the points, so a
+        /// client just says so.</summary>
+        internal static string LootReport()
+        {
+            if (Slots.Length == 0) return "East loot is off ([Airfield] Loot / [MilitaryTown] Loot or [World] EastTile).";
+            int placed = 0, full = 0;
+            Slot near = null;
+            float best = float.MaxValue;
+            GameObject me = MapTools.LocalPlayer();
+            for (int i = 0; i < Slots.Length; i++)
+            {
+                Slot s = Slots[i];
+                if (!s.Placed) continue;
+                placed++;
+                if (s.Item != null) full++;
+                if (me == null) continue;
+                float d = Vector3.Distance(me.transform.position, s.At);
+                if (d < best) { best = d; near = s; }
+            }
+            if (placed == 0)
+                return "No east loot points placed here (the host places them, in the east world).";
+            string r = "East loot: " + placed + "/" + Slots.Length + " points placed ("
+                + _airfieldCount + " airfield), " + full + " hold an item";
+            if (near != null)
+                r += "; nearest " + near.Building + " tier " + near.Tier + " " + near.Pool + " "
+                    + Mathf.RoundToInt(best) + " u away, "
+                    + (near.Item != null ? "item lying" : "empty, next roll in "
+                       + Mathf.Max(0, Mathf.RoundToInt((near.NextAt - Time.time) / 60f)) + " min");
+            return r;
+        }
+
         internal static void Tick()
         {
             if (!(On && CfgLoot != null && CfgLoot.Value) && !MilitaryTown.LootOn) return;
@@ -498,7 +545,11 @@ namespace NextDayRevival
                 if (_masterSince < 0f) _masterSince = now;
                 // Ownership and the cached scene objects arrive first.
                 if (now - _masterSince < 8f || MapTools.LocalPlayer() == null) return;
-                if (!Place()) return;
+                if (!Place())
+                {
+                    if (_placeAt > 0) _next = now;                // the pass goes on next frame
+                    return;
+                }
                 if (!_started) { Start(now); _started = true; }
                 Run(now);
             }
@@ -512,18 +563,36 @@ namespace NextDayRevival
         /// <summary>Resolve every slot on its marker. False while the airfield
         /// content scene is not loaded, and for its first seconds, while the
         /// carving obstacles are still cutting the NavMesh.</summary>
+        // n01 perf: the pass below resolved every unplaced point in one frame
+        // (RaycastAll + two NavMesh samples, 40 u radius, each) and repeated
+        // that every 2 s for points that never resolve - the 33 ms
+        // Airfield.Tick peak. It now stops after PlaceSliceMs and goes on
+        // next frame from the same point; the counts and log lines are those
+        // of a whole pass, as before.
+        const double PlaceSliceMs = 1.5;
+        static int _placeAt, _passPlaced, _passMissing, _passBeside;
+
         static bool Place()
         {
             Vector3 c0, h0;
             Quaternion r0;
             // The first point's building stands for its scene: H1 for the
             // airfield, the town's first id when the airfield's loot is off.
-            if (!EastZones.Find(Slots[0].Building, out c0, out h0, out r0)) { _markersAt = -1f; return false; }
+            if (!EastZones.Find(Slots[0].Building, out c0, out h0, out r0)) { _markersAt = -1f; _placeAt = 0; return false; }
             if (_markersAt < 0f) _markersAt = Time.time;
             if (Time.time - _markersAt < 15f) return false;
-            int placed = 0, missing = 0, beside = 0;
-            for (int i = 0; i < Slots.Length; i++)
+            if (_placeAt == 0) _passPlaced = _passMissing = _passBeside = 0;
+            int placed = _passPlaced, missing = _passMissing, beside = _passBeside;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long budget = (long)(PlaceSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+            for (int i = _placeAt; i < Slots.Length; i++)
             {
+                if (i > _placeAt && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget)
+                {
+                    _placeAt = i;
+                    _passPlaced = placed; _passMissing = missing; _passBeside = beside;
+                    return false;
+                }
                 Slot s = Slots[i];
                 if (s.Placed) { placed++; continue; }
                 Vector3 centre, half;
@@ -551,6 +620,7 @@ namespace NextDayRevival
                 s.Placed = true;
                 placed++;
             }
+            _placeAt = 0;
             if (placed == 0) return false;
             if (!_placedSaid && missing == 0)
             {
@@ -628,32 +698,42 @@ namespace NextDayRevival
 
         /// <summary>The LOWEST solid surface under the point: the floor of a
         /// hall, bunker or shelter rather than its roof or earth cover.</summary>
+        static readonly RaycastHit[] _hits = new RaycastHit[64];
+
         static bool Floor(Vector3 top, float depth, out Vector3 floor)
         {
             floor = top;
-            RaycastHit[] hits = Physics.RaycastAll(top, Vector3.down, depth, ~0, QueryTriggerInteraction.Ignore);
-            if (hits == null || hits.Length == 0) return false;
+            RaycastHit[] hits = _hits;                      // no array per ray (n01 perf)
+            int n = Physics.RaycastNonAlloc(top, Vector3.down, hits, depth, ~0, QueryTriggerInteraction.Ignore);
+            if (n == 0) return false;
             float best = float.MaxValue;
-            for (int i = 0; i < hits.Length; i++)
+            for (int i = 0; i < n; i++)
                 if (hits[i].point.y < best) { best = hits[i].point.y; floor = hits[i].point; }
             return best < float.MaxValue;
         }
 
         /// <summary>First run as master: adopt what lies there already. A
         /// fresh round rolls every slot soon; a master change waits a reset.</summary>
+        const float AdoptRadius = 12f;                       // > sqrt(3^2 + 8^2) and an item's own size
+        static readonly Collider[] _near = new Collider[256];
+
         static void Start(float now)
         {
             int adopted = 0;
             Type spawned = RevivalPlugin.TypeByName("ItemSpawned");
-            UnityEngine.Object[] items = spawned == null
-                ? new UnityEngine.Object[0] : UnityEngine.Object.FindObjectsOfType(spawned);
             for (int i = 0; i < Slots.Length; i++)
             {
                 Slot s = Slots[i];
                 s.Item = null;
-                for (int k = 0; s.Placed && k < items.Length; k++)
+                // n01 perf: the pickups near the point (a loose item has a
+                // collider - the rays of PlayerAn2.Through meet them), not a
+                // FindObjectsOfType over every MonoBehaviour of the scene. The
+                // same 3 u / 8 u test on the item's own position follows.
+                int found = spawned == null || !s.Placed ? 0
+                    : Physics.OverlapSphereNonAlloc(s.At, AdoptRadius, _near, ~0, QueryTriggerInteraction.Collide);
+                for (int k = 0; k < found; k++)
                 {
-                    Component c = items[k] as Component;
+                    Component c = _near[k] == null ? null : _near[k].GetComponentInParent(spawned);
                     if (c == null) continue;
                     Vector3 d = c.transform.position - s.At;
                     if (Mathf.Abs(d.y) > 8f) continue;
@@ -685,7 +765,10 @@ namespace NextDayRevival
                     s.NextAt = now + ResetSeconds(s.Tier);
                     continue;
                 }
-                if (now < s.NextAt || spawnedThisTick >= 3) continue;
+                if (now < s.NextAt) continue;
+                // n01 perf: one Photon spawn (a prefab load) per tick, the next
+                // due point 0.5 s later instead of three in one frame.
+                if (spawnedThisTick >= 1) { _next = Mathf.Min(_next, now + 0.5f); continue; }
                 // Never refill a point in front of someone.
                 if (PlayerNear(s.At, 45f)) { s.NextAt = now + 60f; continue; }
                 float chance = s.Chance > 0f ? s.Chance : TierChance(s.Tier);
@@ -742,6 +825,31 @@ namespace NextDayRevival
             return _random != null && _instantiate != null;
         }
 
+        /// <summary>N11: one roll from a pool as an item id, for a container
+        /// that is filled by id (the Tu-95 wreck's hold). 0 when nothing.</summary>
+        internal static int LootItemId(string pool)
+        {
+            try
+            {
+                if (!LookUpLoot()) return 0;
+                object item = Draw(pool);
+                if (item == null) return 0;
+                string[] names = { "ID", "Id", "ItemID", "ItemId" };
+                for (int i = 0; i < names.Length; i++)
+                {
+                    FieldInfo f = AccessTools.Field(item.GetType(), names[i]);
+                    PropertyInfo p = f == null ? AccessTools.Property(item.GetType(), names[i]) : null;
+                    object v = f != null ? f.GetValue(item) : (p != null ? p.GetValue(item, null) : null);
+                    if (v == null) continue;
+                    int id;
+                    if (v is int) return (int)v;
+                    if (Int32.TryParse(v.ToString(), out id)) return id;
+                }
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Airfield loot id: " + ex.Message); }
+            return 0;
+        }
+
         /// <summary>One roll from the slot's pool: a category of the game's
         /// loot tables, or a fixed id. Null when nothing could be drawn.</summary>
         static object Draw(string pool)
@@ -750,6 +858,7 @@ namespace NextDayRevival
             if (!Pools.TryGetValue(pool, out entries) || entries.Length == 0) return null;
             entries = An2Repair.Pool(pool, entries);   // the An-2 repair parts, when on
             entries = An2Bombs.Pool(pool, entries);    // FAB-50 bombs in the bunkers, when on
+            entries = Katyusha.Pool(pool, entries);    // an M-13 rocket now and then, when on
             for (int attempt = 0; attempt < 4; attempt++)
             {
                 string e = entries[UnityEngine.Random.Range(0, entries.Length)];

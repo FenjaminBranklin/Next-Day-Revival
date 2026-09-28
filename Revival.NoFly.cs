@@ -30,8 +30,8 @@ using UnityEngine;
 //      while a defender is up, and stays amber ("no air defence answers")
 //      while none is.
 //
-// The map marker is a thin, finely dashed line with a small "NO FLY ZONE"
-// label - one quarter of a patrol route's stroke. The web editor draws the
+// The map marker is a red patrol-weight dashed line with a "NO FLY ZONE"
+// label and light red hatch fill. The web editor draws the
 // same zones in the same style from assets/editor/nofly.json (editor/nofly.js);
 // python verify.py [35] keeps the two copies equal.
 //
@@ -48,13 +48,13 @@ namespace NextDayRevival
         internal const float K = 2.8f;                  // world units per metre
 
         // The map style in screen pixels, independent of map zoom.
-        // Patrol ink is 22 / 12 / 4.75, deliberately much heavier.
-        internal const float DashLength = 7f;
-        internal const float GapLength = 5f;
-        internal const float StrokeWidth = 1.2f;
+        // Match patrol ink, with the native TargetAreaMarkerCut red (#ca2020).
+        internal const float DashLength = 22f;
+        internal const float GapLength = 12f;
+        internal const float StrokeWidth = 4.75f;
         internal const string Label = "NO FLY ZONE";
-        internal const int LabelSize = 10;
-        internal static readonly Color InkColor = new Color(0.95f, 0.84f, 0.45f, 0.8f);   // #f2d673
+        internal const int LabelSize = 12;
+        internal static readonly Color InkColor = new Color(202f / 255f, 32f / 255f, 32f / 255f, 1f); // #ca2020
 
         internal static ConfigEntry<bool> CfgEnabled, CfgHud, CfgSound, CfgMap;
         internal static ConfigEntry<float> CfgWarning;
@@ -68,7 +68,7 @@ namespace NextDayRevival
                 "The HUD banner for a player aboard an aircraft in a no-fly zone.");
             CfgSound = cfg.Bind(S, "WarningSound", true, "The warning beep with the banner.");
             CfgMap = cfg.Bind(S, "MapMarker", true,
-                "The zones on the world map: a fine dashed line with a small NO FLY ZONE label.");
+                "The zones on the world map: a red dashed border, light hatch fill and NO FLY ZONE label.");
             CfgWarning = cfg.Bind(S, "WarningSeconds", 5f,
                 "Seconds between entering a zone (warning) and the first round.");
         }
@@ -103,6 +103,8 @@ namespace NextDayRevival
 
             // map (every client): the dashes in MapInk's 1024 frame
             public List<MapInk.Dash> Dashes;
+            public Texture2D Hatch;
+            public Rect HatchBounds;
             public bool DashesEast;
             public Vector2 DashesSize;
         }
@@ -135,7 +137,7 @@ namespace NextDayRevival
             // the garrison's faction; defended by a Gepard standing IN the
             // town (the AA1 site) and nobody else - with it dead the sky over
             // the town is open.
-            Zone mt = Polygon("MT", "Military town", "GW_Scene_1", "looter", new Vector2[] {
+            Zone mt = Polygon("MT", "Military town", "GW_Scene_1", "traitor", new Vector2[] {
                 new Vector2(5452f, 502f), new Vector2(5848f, 502f), new Vector2(5948f, 602f),
                 new Vector2(5948f, 1198f), new Vector2(5848f, 1298f), new Vector2(5452f, 1298f),
                 new Vector2(5352f, 1198f), new Vector2(5352f, 602f) }, 700f, new string[0]);
@@ -228,6 +230,9 @@ namespace NextDayRevival
                 owner = Fraktion.Spielerseite(pilot) == own;
                 return;
             }
+            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs)
+            // violates every zone: flown, and of no faction that owns one.
+            if (NpcAircraft.Hostile(c.Go)) { anyone = true; return; }
             float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
             List<GameObject> players = GepardCrew.Spieler();
             for (int i = 0; i < players.Count; i++)
@@ -590,7 +595,7 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ the map
 
-        /// <summary>Every zone of the loaded map as a fine dashed outline in
+        /// <summary>Every zone of the loaded map as a red dashed outline in
         /// the native map ink (clipped and faded with the map), with a small
         /// "NO FLY ZONE" label on its north edge.</summary>
         static void DrawMap()
@@ -622,6 +627,7 @@ namespace NextDayRevival
                         layer = MapInkLayer.Begin("nofly", texture);
                         if (layer == null) return;
                     }
+                    if (zn.Hatch != null) layer.Draw(zn.HatchBounds, zn.Hatch, InkColor);
                     for (int i = 0; i < zn.Dashes.Count; i++)
                         layer.Draw(zn.Dashes[i].Bounds, zn.Dashes[i].Texture, InkColor);
                     DrawLabel(zn, texture, camera, world, map, full, view);
@@ -692,6 +698,7 @@ namespace NextDayRevival
                 Vector2 a = MapInk.Artwork(new Vector3(w.x, 0f, w.y));
                 p.Add(new Vector2(a.x * size.x / artWidth, a.y * size.y / 1024f));
             }
+            BuildHatch(zn, p, size);
             p.Add(p[0]);
             float[] arc = new float[p.Count];
             for (int i = 1; i < p.Count; i++) arc[i] = arc[i - 1] + (p[i] - p[i - 1]).magnitude;
@@ -717,6 +724,50 @@ namespace NextDayRevival
                 d2.Mid = new Vector2(d2.Mid.x * 1024f / size.x, d2.Mid.y * 1024f / size.y);
                 zn.Dashes.Add(d2);
             }
+        }
+
+        // A single bounded coverage mask per zone. Scanline clipping supports
+        // concave polygons; spacing stays in screen pixels while zooming.
+        static void BuildHatch(Zone zn, List<Vector2> p, Vector2 size)
+        {
+            if (zn.Hatch != null) UnityEngine.Object.Destroy(zn.Hatch);
+            float x0 = p[0].x, x1 = x0, y0 = p[0].y, y1 = y0;
+            for (int i = 1; i < p.Count; i++)
+            {
+                x0 = Mathf.Min(x0, p[i].x); x1 = Mathf.Max(x1, p[i].x);
+                y0 = Mathf.Min(y0, p[i].y); y1 = Mathf.Max(y1, p[i].y);
+            }
+            float sx = Mathf.Max(1f, (x1 - x0) / 1024f);
+            float sy = Mathf.Max(1f, (y1 - y0) / 1024f);
+            int w = Mathf.Max(1, Mathf.CeilToInt((x1 - x0) / sx));
+            int h = Mathf.Max(1, Mathf.CeilToInt((y1 - y0) / sy));
+            Color32[] pixels = new Color32[w * h];
+            List<float> cuts = new List<float>();
+            for (int row = 0; row < h; row++)
+            {
+                float y = y0 + (row + .5f) * sy;
+                cuts.Clear();
+                for (int i = 0, j = p.Count - 1; i < p.Count; j = i++)
+                    if ((p[i].y > y) != (p[j].y > y))
+                        cuts.Add(p[i].x + (y - p[i].y) * (p[j].x - p[i].x) / (p[j].y - p[i].y));
+                cuts.Sort();
+                for (int k = 0; k + 1 < cuts.Count; k += 2)
+                {
+                    int start = Mathf.Max(0, Mathf.CeilToInt((cuts[k] - x0) / sx - .5f));
+                    int end = Mathf.Min(w, Mathf.CeilToInt((cuts[k + 1] - x0) / sx - .5f));
+                    for (int col = start; col < end; col++)
+                    {
+                        float phase = Mathf.Repeat(x0 + (col + .5f) * sx + y, 12f);
+                        byte alpha = phase < 1.5f ? (byte)46 : (byte)7;
+                        pixels[(h - 1 - row) * w + col] = new Color32(255, 255, 255, alpha);
+                    }
+                }
+            }
+            zn.Hatch = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            zn.Hatch.wrapMode = TextureWrapMode.Clamp;
+            zn.Hatch.SetPixels32(pixels); zn.Hatch.Apply(false, true);
+            zn.HatchBounds = new Rect(x0 * 1024f / size.x, y0 * 1024f / size.y,
+                w * sx * 1024f / size.x, h * sy * 1024f / size.y);
         }
 
         /// <summary>The outline in world x, z: a circle every ~6 u, a

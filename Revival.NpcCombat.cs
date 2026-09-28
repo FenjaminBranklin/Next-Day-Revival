@@ -423,6 +423,7 @@ namespace NextDayRevival
         // fires standing still, exactly like every vanilla NPC.
         const int MainIdle = 0, MainWalk = 1, MainRun = 2;
         const int MainRegen = 12;            // NPCMainState.Regeneration
+        const int MainWounded = 7;           // NPCMainState.Wounded (OnWoundedAction)
         const int AddNone = 0, AddAim = 1, AddFire = 3;
         const int AddReload = 2;
         const int PoseStand = 0, PoseCrouch = 1;
@@ -786,7 +787,7 @@ namespace NextDayRevival
         static bool IsMaster()
         {
             if (_mMasterGetter == null) return true;
-            try { return (bool)_mMasterGetter.Invoke(null, null); }
+            try { return FastCall.Bool(_mMasterGetter, null); }
             catch { return true; }
         }
 
@@ -976,6 +977,18 @@ namespace NextDayRevival
         }
 
         internal static bool GroundAlive(Component ai) { return LookUp() && Alive(ai); }
+
+        /// <summary>Down in the game's wounded state (NPCMainState.Wounded 7).
+        /// NPC_AI2.ApplyDamage sends a man left with 0..25 health there half
+        /// the time (OnWoundedAction): NotifyNpcDead, collider off, the
+        /// respawn timer runs - he is out of the fight and cannot be shot
+        /// again, but IsAlive() stays true because Health is above 0. A post
+        /// that asks "is my man still there" must ask this too (N6: the radar
+        /// operator lay wounded and the console still counted him).</summary>
+        internal static bool GroundDowned(Component ai)
+        {
+            return LookUp() && ai != null && IntField(ai, _fMainState, -1) == MainWounded;
+        }
 
         // One shared scene scan for infantry and vehicle guns, including when
         // no helicopter operation is active. Never walk the scene per vehicle.
@@ -1291,7 +1304,9 @@ namespace NextDayRevival
                 }
             }
 
-            _status = "NpcWar: " + _squads.Count + " operation(s), "
+            // Only the debug line reads it: no string per frame otherwise (n01 perf).
+            _status = CfgDebug == null || !CfgDebug.Value ? "NpcWar"
+                : "NpcWar: " + _squads.Count + " operation(s), "
                 + _defenders.Count + " defender(s)" + DebugTail();
         }
 
@@ -2453,7 +2468,7 @@ namespace NextDayRevival
                 if (IntField(f.Wm, _fWeaponCategory, 0) == 0) return false;
                 Component weapon = WeaponOf(f);
                 return weapon != null && _mCantWork != null
-                    && !(bool)_mCantWork.Invoke(weapon, null);
+                    && !FastCall.Bool(_mCantWork, weapon);
             }
             catch { return false; }
         }
@@ -3015,20 +3030,20 @@ namespace NextDayRevival
                 return -1;
             try
             {
-                if (_mCantWork != null && (bool)_mCantWork.Invoke(weapon, null)) return -1;
+                if (_mCantWork != null && FastCall.Bool(_mCantWork, weapon)) return -1;
                 // FireTo advances its delay even with an empty magazine, so
                 // ammunition must be checked BEFORE using the delay as proof.
-                if (!(bool)_mHasBullets.Invoke(weapon, null))
+                if (!FastCall.Bool(_mHasBullets, weapon))
                 {
                     StartReload(f);
                     return 0;
                 }
-                float before = (float)_fRofDelay.GetValue(weapon);
+                float before = FastField.GetFloat(_fRofDelay, weapon);
                 if (before >= Time.time) return 0;
                 if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
                     _fAimingPoint.SetValue(f.Ai, aim);
                 _mFireTo.Invoke(weapon, new object[] { aim, true });
-                float after = (float)_fRofDelay.GetValue(weapon);
+                float after = FastField.GetFloat(_fRofDelay, weapon);
                 return after != before ? 1 : 0;
             }
             catch (Exception ex)
@@ -3439,6 +3454,9 @@ namespace NextDayRevival
         /// IdleStateAction queues its own intentions on the tactical task and
         /// returns early while GetCalculatedPauseTime is positive, so a short
         /// pause refreshed twice a second is enough to hold a pose.</summary>
+        // Shared, never written: Invoke copies the arguments (n01 perf).
+        static readonly object[] PauseNone = { 0f }, PauseHold = { 1.1f };
+
         static void Quiet(Fighter f, bool pause)
         {
             float now = Time.time;
@@ -3452,11 +3470,11 @@ namespace NextDayRevival
                     // A man who has just been sent somewhere must not sit out
                     // the pause his last aim hold left behind.
                     f.PauseUntil = 0f;
-                    _mPauseTime.Invoke(f.Ai, new object[] { 0f });
+                    _mPauseTime.Invoke(f.Ai, PauseNone);
                     return;
                 }
                 f.PauseUntil = now + 0.5f;
-                _mPauseTime.Invoke(f.Ai, new object[] { 1.1f });
+                _mPauseTime.Invoke(f.Ai, PauseHold);
             }
             catch { }
         }
@@ -4707,8 +4725,7 @@ namespace NextDayRevival
             if (ai == null) return false;
             try
             {
-                object r = _mIsAlive.Invoke(ai, null);
-                return r is bool && (bool)r;
+                return FastCall.Bool(_mIsAlive, ai);
             }
             catch { return false; }
         }
@@ -4740,8 +4757,8 @@ namespace NextDayRevival
                 if (_fHealth == null) _fHealth = AccessTools.Field(specs.GetType(), "Health");
                 if (_fHealthMax == null) _fHealthMax = AccessTools.Field(specs.GetType(), "HealthMax");
                 if (_fHealth == null || _fHealthMax == null) return 1f;
-                float have = Convert.ToSingle(_fHealth.GetValue(specs));
-                float full = Convert.ToSingle(_fHealthMax.GetValue(specs));
+                float have = ReadFloat(_fHealth, specs);
+                float full = ReadFloat(_fHealthMax, specs);
                 return full <= 0.01f ? 1f : Mathf.Clamp01(have / full);
             }
             catch { return 1f; }
@@ -4757,7 +4774,7 @@ namespace NextDayRevival
                 if (specs == null) return -1f;
                 if (_fHealthMax == null) _fHealthMax = AccessTools.Field(specs.GetType(), "HealthMax");
                 if (_fHealthMax == null) return -1f;
-                return Convert.ToSingle(_fHealthMax.GetValue(specs));
+                return ReadFloat(_fHealthMax, specs);
             }
             catch { return -1f; }
         }
@@ -4833,7 +4850,7 @@ namespace NextDayRevival
         static bool Reloading(Fighter f)
         {
             if (_fReloading == null || f.Ai == null) return false;
-            try { object v = _fReloading.GetValue(f.Ai); return v is bool && (bool)v; }
+            try { return ReadBool(_fReloading, f.Ai); }
             catch { return false; }
         }
 
@@ -4854,12 +4871,27 @@ namespace NextDayRevival
             {
                 try
                 {
-                    object v = _mMuzzle.Invoke(weapon, null);
-                    if (v is Vector3 && (Vector3)v != Vector3.zero) return (Vector3)v;
+                    Vector3 v = FastCall.Vector3(_mMuzzle, weapon);
+                    if (v != Vector3.zero) return v;
                 }
                 catch { }
             }
             return Vector3.zero;
+        }
+
+        /// <summary>A bool field; a non-bool reads false, as the old
+        /// <c>v is bool &amp;&amp; (bool)v</c> did.</summary>
+        static bool ReadBool(FieldInfo f, object o)
+        {
+            if (f.FieldType == typeof(bool)) return FastField.GetBool(f, o);
+            object v = f.GetValue(o);
+            return v is bool && (bool)v;
+        }
+
+        static float ReadFloat(FieldInfo f, object o)
+        {
+            if (f.FieldType == typeof(float)) return FastField.GetFloat(f, o);
+            return Convert.ToSingle(f.GetValue(o));
         }
 
         static int IntField(Component c, FieldInfo f, int fallback)
@@ -4867,8 +4899,7 @@ namespace NextDayRevival
             if (c == null || f == null) return fallback;
             try
             {
-                object v = f.GetValue(c);
-                return v == null ? fallback : Convert.ToInt32(v);
+                return FastField.GetInt(f, c);
             }
             catch { return fallback; }
         }
@@ -4896,12 +4927,12 @@ namespace NextDayRevival
         {
             try
             {
-                if (_fInitialized != null && !(bool)_fInitialized.GetValue(ai)) return false;
+                if (_fInitialized != null && !ReadBool(_fInitialized, ai)) return false;
                 if (IntField(ai, _fBehavior, -1) == BehaviorStoreKeeper) return false;
                 if (_fMySettlement != null && _fSafeSettlement != null)
                 {
                     object home = _fMySettlement.GetValue(ai);
-                    if (home != null && (bool)_fSafeSettlement.GetValue(home)) return false;
+                    if (home != null && ReadBool(_fSafeSettlement, home)) return false;
                 }
             }
             catch { }
@@ -4919,8 +4950,7 @@ namespace NextDayRevival
                 if (_mIsMine == null)
                     _mIsMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
                 if (_mIsMine == null) return true;
-                object r = _mIsMine.Invoke(view, null);
-                return r is bool && (bool)r;
+                return FastCall.Bool(_mIsMine, view);
             }
             catch { return false; }
         }
@@ -4948,7 +4978,7 @@ namespace NextDayRevival
                 _boolFields[field] = fi;
             }
             if (fi == null) return false;
-            try { return (bool)fi.GetValue(c); }
+            try { return FastField.GetBool(fi, c); }
             catch { return false; }
         }
 

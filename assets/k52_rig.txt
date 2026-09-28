@@ -1,0 +1,10 @@
+# 52-K rig, game units (x 2.8), written by k52_build.py
+# key x y z   (in the parent part's frame)
+mount 0.0000 2.5760 0.0000
+cradle 0.0000 2.1840 0.5040
+barrel 0.0000 0.0000 0.0000
+muzzle 0.0000 0.0000 12.7400
+seat_gunner -2.1840 1.3160 -1.0080
+seat_loader 2.1840 1.3160 -1.0080
+eye -1.2880 1.0640 -0.7000
+recoil 0.0000 0.0000 1.8200

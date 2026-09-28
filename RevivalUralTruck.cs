@@ -545,6 +545,11 @@ namespace NextDayRevival
             Add(Make("gepard", GepardText.Label(),
                 Gepard.Prefab, false, false, Gepard.Umbauen,
                 GepardNet.SpawnData));
+            // The Katyusha rocket launcher (RevivalKatyusha.cs): the Ural as a
+            // custom prefab plus rebuild, like the howitzer.
+            Add(Make("katyusha", KatyushaText.Label(),
+                Katyusha.Prefab, false, false, Katyusha.Umbauen,
+                KatyushaNet.SpawnData));
         }
 
         static Entry Make(string kind, string label, string prefab, bool isTank,

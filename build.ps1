@@ -87,7 +87,10 @@ $refs = @(
     # in Revival.Helipads.cs; without these references the compiler knows
     # neither Terrain, TerrainData, TreeInstance nor TerrainCollider.
     (Join-Path $managed "UnityEngine.TerrainModule.dll"),
-    (Join-Path $managed "UnityEngine.TerrainPhysicsModule.dll")
+    (Join-Path $managed "UnityEngine.TerrainPhysicsModule.dll"),
+    # AnimationModule: the NPCs' legacy Animation (cullingType, restart after
+    # the bind pose) in Revival.NpcDistance.cs.
+    (Join-Path $managed "UnityEngine.AnimationModule.dll")
 ) | Where-Object { Test-Path $_ }
 
 # /codepage:65001 - plugin sources are UTF-8 (no BOM) and may carry Russian
@@ -204,7 +207,24 @@ $assets = @(
     # The An-2's FAB-50 bomb (2072), fab50_build.py; Revival.An2Bombs.cs
     # (the item and the falling bomb in the world).
     "fab50.ndmesh", "fab50_diffuse.png", "fab50_normal.png", "fab50_icon.png",
+    # The Katyusha: launcher mount, turntable and rail rack on the Ural, and
+    # the M-13 rocket item (2075); katyusha_build.py, RevivalKatyusha.cs.
+    "katyusha_mount.ndmesh", "katyusha_base.ndmesh", "katyusha_rack.ndmesh",
+    "katyusha_diffuse.png", "katyusha_normal.png",
+    "m13.ndmesh", "m13_diffuse.png", "m13_normal.png", "m13_icon.png",
+    # The N11 air events' Tu-95 (tu95_import.py from the N10 tu95_build.py
+    # geometry; Revival.AirEvents.cs) and the editor-written air event table.
+    "tu95_body.ndmesh", "tu95_glass.ndmesh", "tu95_decals.ndmesh", "tu95_prop.ndmesh",
+    "tu95_bay_l.ndmesh", "tu95_bay_r.ndmesh", "tu95_wreck.ndmesh", "tu95_atlas.png",
+    "tu95_rig.txt", "ndr_airevents.tsv",
     "scope50.png",
+    # The 52-K 85 mm AA gun (N6), k52_build.py; Revival.Flak.cs: four moving
+    # parts at four LODs, one atlas, the pivots.
+    "k52_base_lod0.ndmesh", "k52_base_lod1.ndmesh", "k52_base_lod2.ndmesh", "k52_base_lod3.ndmesh",
+    "k52_mount_lod0.ndmesh", "k52_mount_lod1.ndmesh", "k52_mount_lod2.ndmesh", "k52_mount_lod3.ndmesh",
+    "k52_cradle_lod0.ndmesh", "k52_cradle_lod1.ndmesh", "k52_cradle_lod2.ndmesh", "k52_cradle_lod3.ndmesh",
+    "k52_barrel_lod0.ndmesh", "k52_barrel_lod1.ndmesh", "k52_barrel_lod2.ndmesh", "k52_barrel_lod3.ndmesh",
+    "k52_diffuse.png", "k52_normal.png", "k52_rig.txt",
     # Helipad decks: one painted texture per built surface, mapped
     # radius-relative over the whole pad (helipad_texture.py). Without them the
     # pad falls back to flat colours, so they are assets and not a hard

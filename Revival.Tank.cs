@@ -1034,6 +1034,7 @@ namespace NextDayRevival
 
             Prepare(car);
             if (panzer && !Tank.IstPanzer(car.transform)) Tank.Umbauen(car);
+            VehicleCondition.AfterSpawn(car);
             return car;
         }
 
@@ -1080,6 +1081,9 @@ namespace NextDayRevival
                         + prefabName + "\" fehlgeschlagen: " + ex);
                 }
             }
+            // After the rebuild: the technical and the howitzer cap their
+            // durability there, and "as found" must not be undone by it.
+            VehicleCondition.AfterSpawn(car);
             return car;
         }
 
