@@ -839,7 +839,7 @@ namespace NextDayRevival
         static int[] _mapIdx = new int[0], _mapStamp = new int[0];
         static int _stamp;
 
-        static bool HandsOff(Transform t, Dictionary<Transform, bool> cache)
+        static bool HandsOff(Transform t, Dictionary<Transform, bool> cache, bool batching)
         {
             if (t == null) return false;
             bool v;
@@ -847,9 +847,14 @@ namespace NextDayRevival
             string name = t.name;
             v = Array.IndexOf(HandsOffNames, name) >= 0;
             for (int i = 0; i < HandsOffPrefixes.Length && !v; i++)
+            {
+                // Our merged static output is protected from merging again,
+                // but must still reach the final static batching pass.
+                if (batching && HandsOffPrefixes[i] == "P2 ") continue;
                 if (name.StartsWith(HandsOffPrefixes[i], StringComparison.Ordinal)) v = true;
+            }
             if (!v) v = t.GetComponent<MonoBehaviour>() != null || t.GetComponent<Rigidbody>() != null;
-            if (!v) v = HandsOff(t.parent, cache);
+            if (!v) v = HandsOff(t.parent, cache, batching);
             cache[t] = v;
             return v;
         }
@@ -874,7 +879,7 @@ namespace NextDayRevival
                 if (!string.IsNullOrEmpty(tag) && !string.Equals(tag, "False", StringComparison.OrdinalIgnoreCase)) return null;
                 if (m.GetTopology(i) != MeshTopology.Triangles) return null;
             }
-            if (HandsOff(mr.transform, cache)) return null;
+            if (HandsOff(mr.transform, cache, false)) return null;
             return m;
         }
 
@@ -1257,6 +1262,7 @@ namespace NextDayRevival
         static IEnumerable<bool> Batch(GameObject[] roots, Counts cn)
         {
             int n = 0;
+            Dictionary<Transform, bool> cache = new Dictionary<Transform, bool>();
             foreach (GameObject root in roots)
             {
                 if (root == null) continue;
@@ -1265,6 +1271,9 @@ namespace NextDayRevival
                 {
                     if (Over()) { yield return true; Still(); }
                     if (mr == null || mr.isPartOfStaticBatch || _retired.Contains(mr)) continue;
+                    // Moving guns and switchable content keep their own
+                    // transforms; static batching would freeze their meshes.
+                    if (HandsOff(mr.transform, cache, true)) continue;
                     MeshFilter mf = mr.GetComponent<MeshFilter>();
                     if (mf == null || mf.sharedMesh == null || !mf.sharedMesh.isReadable) continue;
                     if (mr.sharedMaterials.Length > mf.sharedMesh.subMeshCount) continue;
