@@ -355,7 +355,7 @@ namespace NextDayRevival
                 if (player == null)
                 { RevivalPlugin.L.LogInfo("ConvoyRepair diag: no local player."); return; }
                 Vector3 me = player.transform.position;
-                Camera cam = Camera.main;
+                Camera cam = CameraOwner.MainCamera();
                 Vector3 look = cam != null ? cam.transform.forward : player.transform.forward;
 
                 Type t = RevivalPlugin.TypeByName("VehicleGameSystem");
@@ -563,7 +563,7 @@ namespace NextDayRevival
             if (player == null) return false;
             Vector3 me = player.transform.position;
 
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             Vector3 look = cam != null ? cam.transform.forward : player.transform.forward;
 
             float range = Mathf.Max(1f, CfgRange.Value);
@@ -649,7 +649,7 @@ namespace NextDayRevival
                 }
                 // Fallback: write the field directly (local-visual only, no smoke
                 // handling and no RPC) if the method is missing on some build.
-                FieldInfo fi = AccessTools.Field(vgs.GetType(), "Durability");
+                FieldInfo fi = FastField.Find(vgs.GetType(), "Durability");
                 if (fi != null && fi.FieldType == typeof(float))
                 {
                     fi.SetValue(vgs, value);

@@ -39,6 +39,9 @@
 //      further than the game's, the start scaled with it - the far edge fades
 //      into the haze instead of being cut, and the air in between is clearer.
 //      Exponential fog (never set by GW_Scene_1) is left alone.
+//      P2 haze: the end never goes past HazeEndU (1.6 km), so every level is
+//      at least half haze by 800 m, and step 3 keeps a far LOD only to where
+//      the haze is HazeDetailFog thick - far detail drops inside the haze.
 //
 // AIRCRAFT, FLAK, TRACERS: nothing that moves is ever culled here - roots with
 // a Rigidbody (every vehicle and aircraft), SkinnedMeshRenderers, particle
@@ -113,6 +116,15 @@ namespace NextDayRevival
         const float SmallSize = 8f;          // bounds diagonal, u
         const float LargeSize = 40f;         // bounds diagonal / LODGroup size, u
         const float FogOverFar = 1.07f;
+        // P2 haze (docs/ai/tasks/p2-render-batching.md): the linear fog ends no
+        // farther than HazeEndU on the ground, so on every level the air is at
+        // least half haze by 800 m (2240 u) - Low and Medium already were, High
+        // stays as it was, Ultra's 6420 u comes in. The far clip is untouched:
+        // aircraft stay drawn to it (FlightView thins the fog again in the air).
+        // The large LODGroups' far LOD is kept only to where the haze reaches
+        // HazeDetailFog; past that the groups cull at their own distance.
+        const float HazeEndU = 4480f;        // 1.6 km
+        const float HazeDetailFog = 0.85f;
 
         // Layers (TagManager): 11/12 ragdoll bones, 16 campfire items,
         // 18 Bush_Tree, 19 ItemSpawned, 21-24 berry bushes, 30 TerrainBushes.
@@ -176,6 +188,14 @@ namespace NextDayRevival
             if (go == null) return;
             _keep.Add(go.GetInstanceID());
             if (_propCount > 0 || _job != JobNone) Release(go.transform);
+        }
+
+        /// <summary>P2: another module switched this renderer off for good
+        /// (ContentPerf merged it into a combined mesh). It is forgotten here,
+        /// so no band ever switches it back on.</summary>
+        internal static void Retire(Renderer r)
+        {
+            if (r != null) _hidden.Remove(r);
         }
 
         // ============================================================ slots
@@ -298,7 +318,8 @@ namespace NextDayRevival
                 _cullBase = now;
                 _cullSet = true;
             }
-            float[] want = new float[32];
+            float[] want = _want;                       // P1b: reused, the setter copies it
+            for (int i = 0; i < 32; i++) want[i] = 0f;
             Fill(want, ItemLayers, p.Items);
             Fill(want, CampLayers, p.Camp);
             Fill(want, BushLayers, p.Bush);
@@ -318,6 +339,8 @@ namespace NextDayRevival
             }
         }
 
+        static readonly float[] _want = new float[32];
+
         static void Fill(float[] into, int[] layers, float d)
         {
             for (int i = 0; i < layers.Length; i++) into[layers[i]] = d;
@@ -328,7 +351,7 @@ namespace NextDayRevival
             if (!RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear || _cam == null) return;
             Settle(_fogEnd, RenderSettings.fogEndDistance);
             Settle(_fogStart, RenderSettings.fogStartDistance);
-            float end = Mathf.Max(_fogEnd.Base, _cam.farClipPlane * FogOverFar);
+            float end = Mathf.Max(_fogEnd.Base, Mathf.Min(_cam.farClipPlane * FogOverFar, HazeEndU));
             float k = _fogEnd.Base > 1f ? end / _fogEnd.Base : 1f;
             float start = _fogStart.Base * k;
             if (Put(_fogEnd, end)) RenderSettings.fogEndDistance = end;
@@ -566,8 +589,14 @@ namespace NextDayRevival
             }
         }
 
-        const double SliceMs = 0.2;
+        // P1b: 0.2 -> 0.15 ms, and the clock is read before every step (a
+        // step is one node or one child push), not every 8th node: a node
+        // with thousands of children (a map root) is expanded one child a
+        // step through the (node, next child) cursor below, so no single
+        // node overruns the slice. Same nodes, same depth-first order.
+        const double SliceMs = 0.15;
         static readonly List<Transform> _wStack = new List<Transform>();
+        static readonly List<int> _wNext = new List<int>();     // -1: visit the node; k: expand its children from k
         static Transform _cCamRoot;
         static int _cLarge, _cSkipped, _cFrames, _cNodes;
         static double _cMs;
@@ -587,13 +616,14 @@ namespace NextDayRevival
             _cLods.Clear();
             _cLarge = _cSkipped = _cFrames = _cNodes = 0;
             _wStack.Clear();
+            _wNext.Clear();
             // Pushed in reverse so they pop in scene order, roots in order.
             for (int s = SceneManager.sceneCount - 1; s >= 0; s--)
             {
                 Scene sc = SceneManager.GetSceneAt(s);
                 if (!sc.isLoaded) continue;
                 GameObject[] roots = sc.GetRootGameObjects();
-                for (int r = roots.Length - 1; r >= 0; r--) _wStack.Add(roots[r].transform);
+                for (int r = roots.Length - 1; r >= 0; r--) { _wStack.Add(roots[r].transform); _wNext.Add(-1); }
             }
             _cCamRoot = _cam != null ? _cam.transform.root : null;
             // Animator lives in UnityEngine.AnimationModule, which build.ps1
@@ -634,14 +664,24 @@ namespace NextDayRevival
         static void StepCollect(long t0, long budget)
         {
             _cFrames++;
-            int n = 0;
             while (_wStack.Count > 0)
             {
-                if ((++n & 7) == 0 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
+                if (System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
                 int last = _wStack.Count - 1;
                 Transform t = _wStack[last];
+                int next = _wNext[last];
                 _wStack.RemoveAt(last);
+                _wNext.RemoveAt(last);
                 if (t == null) continue;                        // destroyed since it was queued
+                if (next >= 0)
+                {
+                    // Child 'next' first, then the rest of t's children.
+                    if (next >= t.childCount) continue;
+                    if (next + 1 < t.childCount) { _wStack.Add(t); _wNext.Add(next + 1); }
+                    _wStack.Add(t.GetChild(next));
+                    _wNext.Add(-1);
+                    continue;
+                }
                 GameObject go = t.gameObject;
                 if (!go.activeSelf) continue;                   // FindObjectsOfType saw active objects only
                 _cNodes++;
@@ -656,7 +696,7 @@ namespace NextDayRevival
                     else if (size < LargeSize) { _cMedium.Add(r, b); _cMembers.Add(r); }
                     else _cLarge++;
                 }
-                for (int c = t.childCount - 1; c >= 0; c--) _wStack.Add(t.GetChild(c));
+                if (t.childCount > 0) { _wStack.Add(t); _wNext.Add(0); }
             }
             _cMs += Ms(t0);
             if (_wStack.Count > 0) return;
@@ -717,6 +757,7 @@ namespace NextDayRevival
         {
             _job = JobNone;
             _wStack.Clear();
+            _wNext.Clear();
             _orphans.Clear();
             _lAll = null;
             _cLods.Clear();
@@ -771,7 +812,7 @@ namespace NextDayRevival
             _job = JobNone;
             if (_cam == null || p == null) return;
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            _lFar = Mathf.Max(p.Far, _cam.farClipPlane);
+            _lFar = Mathf.Min(Mathf.Max(p.Far, _cam.farClipPlane), HazeDetailDistance());
             _lTan = Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
             _lBias = p.LodBias;
             _lIdx = _lExt = _lFrames = 0;
@@ -781,13 +822,22 @@ namespace NextDayRevival
             _lMs = Ms(t0);
         }
 
+        /// <summary>P2: where the linear haze reaches HazeDetailFog; no limit
+        /// without linear fog.</summary>
+        static float HazeDetailDistance()
+        {
+            if (!RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear) return float.MaxValue;
+            float a = RenderSettings.fogStartDistance, b = RenderSettings.fogEndDistance;
+            return b > a ? a + HazeDetailFog * (b - a) : float.MaxValue;
+        }
+
         static void StepLods(long t0, long budget)
         {
             _lFrames++;
             LODGroup[] all = _lAll;
             while (_lIdx < all.Length)
             {
-                if ((_lIdx & 31) == 31 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;
+                if (System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget) break;   // P1b: every group, not every 32nd
                 LODGroup g = all[_lIdx++];
                 if (g == null || !g.enabled) continue;
                 float[] orig;
@@ -827,7 +877,7 @@ namespace NextDayRevival
             _lMs += Ms(t0);
             if (_lIdx < all.Length) return;
             RevivalPlugin.L.LogInfo("ViewDistance: " + _lExt + " of " + all.Length
-                + " LODGroups (>= " + LargeSize + " u) keep their far LOD out to "
+                + " LODGroups (>= " + LargeSize + " u) keep their far LOD out to the haze, "
                 + _lFar.ToString("0", CultureInfo.InvariantCulture) + " u ("
                 + _lMs.ToString("0", CultureInfo.InvariantCulture) + " ms over " + _lFrames + " frame(s)).");
             _lAll = null;

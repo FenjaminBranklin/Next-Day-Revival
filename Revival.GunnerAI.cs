@@ -397,7 +397,7 @@ namespace NextDayRevival
         }
 
         const float Cell = 10f;
-        static readonly Dictionary<long, List<Veg>> _grid = new Dictionary<long, List<Veg>>();
+        static Dictionary<long, List<Veg>> _grid = new Dictionary<long, List<Veg>>();
         static readonly HashSet<long> _seen = new HashSet<long>();
         static float _nextGridCheck;
         static int _gridSignature = int.MinValue;
@@ -422,6 +422,7 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogWarning("GunnerAI: vegetation grid failed - sight is raycast "
                     + "only. " + ex.Message);
                 _grid.Clear();
+                _gridJob = null;
                 _gridSignature = int.MaxValue;
                 _nextGridCheck = float.MaxValue;
             }
@@ -522,8 +523,32 @@ namespace NextDayRevival
         /// count on any of them changed (RoadClear and Helipads edit trees at
         /// runtime). Checked every five seconds; a rebuild is O(trees) once.
         /// </summary>
+        // P1b script budget: the grid used to be built inside the first
+        // Transmit call after a terrain change - data.treeInstances copied
+        // (67,738 trees on the east tile alone) and every tree put into the
+        // dictionary in ONE frame, 10+ ms charged to whichever gunner asked
+        // first (the Patrol.Tick and Mortar.Tick peaks). It is now built in
+        // GridSliceMs slices, one per frame, tree by tree (GetTreeInstance, as
+        // the forest mask does), into a new dictionary swapped in whole when
+        // done. Until then the previous grid answers; before the very first
+        // one exists sight is raycast only (Transmit's "no grid" answer), for
+        // the second or two the build takes.
+        const double GridSliceMs = 0.15;
+        static IEnumerator<bool> _gridJob;
+        static int _gridFrame = -1;
+
         static void Grid()
         {
+            if (_gridJob != null)
+            {
+                if (_gridFrame == Time.frameCount) return;
+                _gridFrame = Time.frameCount;
+                bool more;
+                try { more = _gridJob.MoveNext(); }
+                catch { _gridJob = null; throw; }
+                if (!more) _gridJob = null;
+                return;
+            }
             if (Time.time < _nextGridCheck) return;
             _nextGridCheck = Time.time + 5f;
             Terrain[] all = Terrain.activeTerrains;
@@ -537,11 +562,19 @@ namespace NextDayRevival
                 }
             if (sig == _gridSignature) return;
             _gridSignature = sig;
-            _grid.Clear();
-            _maxR = 4f;
-            if (all == null) return;
+            if (all == null) { _grid = new Dictionary<long, List<Veg>>(); _maxR = 4f; return; }
+            _gridJob = BuildGrid(all).GetEnumerator();
+            _gridFrame = -1;
+            Grid();
+        }
 
-            int trees = 0, bushes = 0;
+        static IEnumerable<bool> BuildGrid(Terrain[] all)
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long budget = (long)(GridSliceMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+            Dictionary<long, List<Veg>> grid = new Dictionary<long, List<Veg>>();
+            float maxR = 4f;
+            int trees = 0, bushes = 0, frames = 1;
             for (int i = 0; i < all.Length; i++)
             {
                 Terrain terrain = all[i];
@@ -552,10 +585,18 @@ namespace NextDayRevival
                 TreePrototype[] protos = data.treePrototypes;
                 Veg[] shapes = new Veg[protos == null ? 0 : protos.Length];
                 for (int p = 0; p < shapes.Length; p++) shapes[p] = Shape(protos[p]);
-                TreeInstance[] inst = data.treeInstances;
-                for (int n = 0; n < inst.Length; n++)
+                int count = data.treeInstanceCount;
+                for (int n = 0; n < count; n++)
                 {
-                    TreeInstance ti = inst[n];
+                    if ((n & 63) == 63 && System.Diagnostics.Stopwatch.GetTimestamp() - t0 > budget)
+                    {
+                        frames++;
+                        yield return true;
+                        t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                        if (terrain == null || data == null) break;       // unloaded meanwhile
+                        if (n >= data.treeInstanceCount) break;
+                    }
+                    TreeInstance ti = data.GetTreeInstance(n);
                     if (ti.prototypeIndex < 0 || ti.prototypeIndex >= shapes.Length) continue;
                     Veg shape = shapes[ti.prototypeIndex];
                     if (shape.Density <= 0f) continue;
@@ -567,16 +608,18 @@ namespace NextDayRevival
                     v.Trunk = shape.Trunk * ti.widthScale;
                     v.Lo = shape.Lo * ti.heightScale;
                     v.Hi = shape.Hi * ti.heightScale;
-                    if (v.R > _maxR) _maxR = Mathf.Min(v.R, 12f);
+                    if (v.R > maxR) maxR = Mathf.Min(v.R, 12f);
                     long k = Key(Mathf.FloorToInt(v.X / Cell), Mathf.FloorToInt(v.Z / Cell));
                     List<Veg> list;
-                    if (!_grid.TryGetValue(k, out list)) { list = new List<Veg>(); _grid.Add(k, list); }
+                    if (!grid.TryGetValue(k, out list)) { list = new List<Veg>(); grid.Add(k, list); }
                     list.Add(v);
                     if (shape.Trunk > 0f) trees++; else bushes++;
                 }
             }
+            _grid = grid;
+            _maxR = maxR;
             RevivalPlugin.L.LogInfo("GunnerAI: vegetation for gunner sight - " + trees
-                + " trees, " + bushes + " bushes in " + _grid.Count + " cells.");
+                + " trees, " + bushes + " bushes in " + grid.Count + " cells (" + frames + " frame(s)).");
         }
 
         /// <summary>The size of one prototype, out of its meshes. A name with

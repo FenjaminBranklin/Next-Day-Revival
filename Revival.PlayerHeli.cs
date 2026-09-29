@@ -358,6 +358,17 @@ namespace NextDayRevival
             return go != null && _pilot && ReferenceEquals(go, _heli);
         }
 
+        // B3c mercenaries (Revival.MercsRide.cs): the machine the local player
+        // is aboard, the cabin seat he holds (-1 at the controls) and a cabin
+        // seat of any machine in world space - LateFrame's own formula.
+        internal static GameObject Machine { get { return _heli; } }
+        internal static int CabinSeatTaken { get { return _heli != null && !_pilot ? _seat : -1; } }
+        internal static Vector3 CabinSeatWorld(GameObject go, int index)
+        {
+            Transform tr = go.transform;
+            return tr.position + tr.rotation * (Seat(index) * K);
+        }
+
         internal static float SpoolTime()
         {
             return CfgSpoolSeconds == null ? 12f : Mathf.Max(0.5f, CfgSpoolSeconds.Value);
@@ -1403,6 +1414,24 @@ namespace NextDayRevival
 
             bool up = Input.GetKey(KeyCode.Space);
             bool down = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.C);
+
+            // B6 soft map edge: past it a countdown, then the pedals bring the
+            // nose round towards the map and the disc pulls that way - with
+            // the pilot's keys still on top, weaker the deeper he is out. Too
+            // low over the skirt (no collider), the collective lifts.
+            Vector3 flatVel = new Vector3(_vel.x, 0f, _vel.z);
+            float edgeTarget, edgeTurn, edgeK;
+            bool edgeClimb;
+            if (AirBoundary.Guide(pos, _vel, _yaw, flatVel.magnitude * 2f,
+                                  out edgeTarget, out edgeTurn, out edgeK, out edgeClimb))
+            {
+                if (edgeK > 0f)
+                {
+                    _yaw += Mathf.Clamp(edgeTurn * 1.5f, -35f, 35f) * edgeK * dt;
+                    accel += Quaternion.Euler(0f, edgeTarget, 0f) * Vector3.forward * (thrust * edgeK);
+                }
+                if (edgeClimb) { up = true; down = false; }
+            }
             if (up) accel += Vector3.up * lift * power;
             else if (down) accel -= Vector3.up * lift;
 
@@ -2709,6 +2738,7 @@ namespace NextDayRevival
 
             if (_heli != null && _pilot)
             {
+                AirBoundary.Draw();
                 float k = K;
                 float speed = new Vector3(_vel.x, 0f, _vel.z).magnitude / k * 3.6f;
                 float floor;
@@ -3197,6 +3227,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_HeliCrashFall_Update);
+            try
+            {
             if (!_begun || _landed) return;
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float k = PlayerHeli.K;
@@ -3225,6 +3258,8 @@ namespace NextDayRevival
             // last integration step from burying the hull before Burn lays it
             // on the exact floor.
             if (at.y <= _floor + 0.7f * k || _life >= MaxFall) Land();
+            }
+            finally { FrameProf.E(FrameProf.S_HeliCrashFall_Update); }
         }
 
         void TrailAt()
@@ -3360,6 +3395,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_HeliWreckSettle_Update);
+            try
+            {
             if (!_begun) return;
             _t += Mathf.Min(Time.deltaTime, 0.1f);
             float u = Mathf.Clamp01(_t / Seconds);
@@ -3369,6 +3407,8 @@ namespace NextDayRevival
             if (u < 1f) return;
             Drop();
             UnityEngine.Object.Destroy(this);
+            }
+            finally { FrameProf.E(FrameProf.S_HeliWreckSettle_Update); }
         }
 
         /// <summary>The floor under each of the eight hull corners, in the pose
@@ -4050,10 +4090,15 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_HeliEngine_Update);
+            try
+            {
             // The pilot's own machine is advanced by the flight, at the same
             // moment the power is used. This is for all the others.
             if (PlayerHeli.Flown(gameObject)) return;
             Advance(Time.deltaTime, PlayerHeli.SpoolTime());
+            }
+            finally { FrameProf.E(FrameProf.S_HeliEngine_Update); }
         }
 
         void Write(float power)

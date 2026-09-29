@@ -1061,6 +1061,35 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>B1: a player who can still hold a post - present, active
+        /// and not in character state 8 (Death). Seats, consoles and gun
+        /// sights ask this before they let a recorded owner lock them.</summary>
+        internal static bool PlayerUp(GameObject player)
+        {
+            if (player == null || !player.activeInHierarchy) return false;
+            Players();      // the reflection lookups
+            try
+            {
+                if (_statesType != null && _characterState != null)
+                {
+                    Component states = player.GetComponent(_statesType);
+                    if (states != null
+                        && Convert.ToInt32(_characterState.GetValue(states)) == 8) return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        /// <summary>B1: this actor's player is known here and dead or
+        /// inactive. An actor whose player is not found is NOT down: a
+        /// disconnect ends his claims, so the post's lease runs out.</summary>
+        internal static bool ActorDown(int actor)
+        {
+            GameObject p = PlayerByActor(actor);
+            return p != null && !PlayerUp(p);
+        }
+
         static void LookUpView()
         {
             if (_photonViewType != null) return;
@@ -1293,7 +1322,7 @@ namespace NextDayRevival
                                                       _swimmer.transform.position);
                     if (distance < 280f && distance > 25f)
                     {
-                        Camera camera = Camera.main;
+                        Camera camera = CameraOwner.MainCamera();
                         if (camera != null)
                         {
                             Vector3 screen = camera.WorldToScreenPoint(
@@ -2130,6 +2159,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_CrocodileSwimmer_Update);
+            try
+            {
             if (!_ready || _dead || !Crocodile.Primary(this)) return;
             float now = Time.time;
             _brainOwner = Crocodile.IsMaster() || !CrocodileNet.Hooked;
@@ -2146,6 +2178,8 @@ namespace NextDayRevival
             TrackLocal(now);
             JudgeBite(now);
             Toxin(now);
+            }
+            finally { FrameProf.E(FrameProf.S_CrocodileSwimmer_Update); }
         }
 
         void Toxin(float now)
@@ -2592,6 +2626,9 @@ namespace NextDayRevival
 
         void LateUpdate()
         {
+            FrameProf.S(FrameProf.S_CrocodileSwimmer_LateUpdate);
+            try
+            {
             if (!_ready) return;
             if (_dead)
             {
@@ -2655,6 +2692,8 @@ namespace NextDayRevival
             _yawRate = Mathf.Lerp(_yawRate, yawRate, Mathf.Clamp01(dt * 5f));
 
             Pose(now, dt);
+            }
+            finally { FrameProf.E(FrameProf.S_CrocodileSwimmer_LateUpdate); }
         }
 
         /// <summary>Model placement and the rig: every client, every frame the
@@ -2714,7 +2753,7 @@ namespace NextDayRevival
             if (_gait > 1000f) _gait -= 1000f;
 
             if (_renderer != null && !_renderer.isVisible) return;
-            Camera camera = Camera.main;
+            Camera camera = CameraOwner.MainCamera();
             float distance = camera == null ? 0f
                 : Vector3.Distance(camera.transform.position, transform.position);
             if (distance > 220f) return;

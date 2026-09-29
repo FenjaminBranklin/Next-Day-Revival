@@ -299,7 +299,7 @@ namespace NextDayRevival
             }
             if (vgs != null)
             {
-                FieldInfo fPass = AccessTools.Field(vgs.GetType(), "Passengers");
+                FieldInfo fPass = FastField.Find(vgs.GetType(), "Passengers");
                 if (fPass != null) fPass.SetValue(vgs, new GameObject[seats.childCount]);
             }
             RevivalPlugin.L.LogInfo("Gepard: seats " + before + " -> " + seats.childCount
@@ -363,6 +363,7 @@ namespace NextDayRevival
             // min/max are in the ROOT's frame; the body hangs under the chassis.
             modell.transform.position = root.TransformPoint(wanted);
             rig.Vehicle = root;
+            ModelLod.Apply(modell, ModelLod.Kind.Vehicle);   // P2: the donor's LODs are off
 
             string crew = seats == null ? "no seat table" : Crew(rig, seats);
 
@@ -495,7 +496,7 @@ namespace NextDayRevival
             if (vgs == null) fail.Add("VehicleGameSystem missing");
             else
             {
-                FieldInfo fPass = AccessTools.Field(vgs.GetType(), "Passengers");
+                FieldInfo fPass = FastField.Find(vgs.GetType(), "Passengers");
                 Array pass = fPass == null ? null : fPass.GetValue(vgs) as Array;
                 if (pass == null) fail.Add("Passengers array missing");
                 else if (pass.Length != seatN)
@@ -530,7 +531,7 @@ namespace NextDayRevival
             if (vgsType == null) return null;
             vgs = car.GetComponent(vgsType);
             if (vgs == null) return null;
-            FieldInfo fSeats = AccessTools.Field(vgsType, "SeatPoints");
+            FieldInfo fSeats = FastField.Find(vgsType, "SeatPoints");
             Transform seats = fSeats == null ? null : fSeats.GetValue(vgs) as Transform;
             if (seats == null)
             {
@@ -598,7 +599,7 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogWarning("Gepard: [Gepard] Enabled = false - switched on for this session by the spawn.");
                 off = "[Gepard] Enabled = false in the config - switched on for this session. ";
             }
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return "No player camera available.";
             Vector3 ahead = cam.transform.forward;
             ahead.y = 0f;
@@ -882,6 +883,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_GepardRig_Update);
+            try
+            {
             float dt = Time.deltaTime;
             CheckAlive();
             if (RadarSearch != null && Alive)
@@ -896,6 +900,8 @@ namespace NextDayRevival
             if (SlideL != null) SlideL.localPosition = new Vector3(0f, 0f, recoil ? -Recoil(Time.time - _shotL) : 0f);
             Glow(FlashR, flash ? Time.time - _shotR : -1f);
             Glow(FlashL, flash ? Time.time - _shotL : -1f);
+            }
+            finally { FrameProf.E(FrameProf.S_GepardRig_Update); }
         }
 
         static float Recoil(float age)
@@ -925,7 +931,7 @@ namespace NextDayRevival
                 if (t != null) _vgs = Vehicle.GetComponent(t);
             }
             if (_vgs == null) return;
-            FieldInfo f = AccessTools.Field(_vgs.GetType(), "Durability");
+            FieldInfo f = FastField.Find(_vgs.GetType(), "Durability");
             object v = f == null ? null : f.GetValue(_vgs);
             if (v is float) Alive = (float)v > 0f;
         }
@@ -1210,7 +1216,9 @@ namespace NextDayRevival
             Array passengers = Field(_vgs, "Passengers") as Array;
             if (m == null || passengers == null || index >= passengers.Length) return false;
             GameObject sitting = passengers.GetValue(index) as GameObject;
-            if (sitting != null) return false;
+            // B1: a dead or gone occupant does not hold the seat; the game
+            // decides the change (SetManning drops again after _seatWait).
+            if (sitting != null && Crocodile.PlayerUp(sitting)) return false;
             m.Invoke(pvm, new object[] { index });
             return true;
         }
@@ -1379,7 +1387,7 @@ namespace NextDayRevival
 
         static void Collection(Type type, string name, string goField, int kind, Vector3 radar, float reach)
         {
-            FieldInfo f = type == null ? null : AccessTools.Field(type, name);
+            FieldInfo f = type == null ? null : FastField.Find(type, name);
             object collection = f == null ? null : f.GetValue(null);
             System.Collections.IDictionary dict = collection as System.Collections.IDictionary;
             if (dict != null)
@@ -2188,14 +2196,15 @@ namespace NextDayRevival
         static object Field(object instance, string name)
         {
             if (instance == null) return null;
-            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            FieldInfo f = FastField.Find(instance.GetType(), name);
             return f == null ? null : f.GetValue(instance);
         }
 
         static int IntField(object instance, string name)
         {
-            object v = Field(instance, name);
-            return v is int ? (int)v : -1;
+            if (instance == null) return -1;
+            FieldInfo f = FastField.Find(instance.GetType(), name);
+            return f != null && f.FieldType == typeof(int) ? FastField.GetInt(f, instance) : -1;
         }
     }
 
@@ -2858,7 +2867,7 @@ namespace NextDayRevival
                 if (photon == null || viewType == null || ext == null)
                     throw new Exception("PhotonNetwork, PhotonView or Extensions missing");
                 _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
-                FieldInfo onEvent = AccessTools.Field(photon, "OnEventCall");
+                FieldInfo onEvent = FastField.Find(photon, "OnEventCall");
                 _optType = RevivalPlugin.TypeByName("RaiseEventOptions");
                 _getView = AccessTools.Method(ext, "GetPhotonView", new Type[] { typeof(GameObject) }, null);
                 _getViewId = AccessTools.PropertyGetter(viewType, "viewID");

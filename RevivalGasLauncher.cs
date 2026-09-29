@@ -404,7 +404,7 @@ namespace NextDayRevival
         {
             GameObject player = MapTools.LocalPlayer();
             if (player == null) return;
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             Vector3 fwd = cam != null ? cam.transform.forward : player.transform.forward;
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
@@ -438,7 +438,7 @@ namespace NextDayRevival
         static void Shoot(Component ctrl)
         {
             GameObject player = MapTools.LocalPlayer();
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null && player == null) return;
             Vector3 origin;
             Vector3 dir;
@@ -2081,6 +2081,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_GasRound_Update);
+            try
+            {
             if (_done) return;
             if (Time.time > _deadline) { Arrive(); return; }
             try
@@ -2110,6 +2113,8 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogError("Gas round: " + ex);
                 Arrive();
             }
+            }
+            finally { FrameProf.E(FrameProf.S_GasRound_Update); }
         }
 
         void Arrive()
@@ -2347,6 +2352,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_GasCloud_Update);
+            try
+            {
             if (_stopped) return;
             float age = Time.time - _born;
             if (age >= _life) { Stop(); return; }
@@ -2393,6 +2401,8 @@ namespace NextDayRevival
                     }
                 }
             }
+            }
+            finally { FrameProf.E(FrameProf.S_GasCloud_Update); }
         }
 
         void Player(float dt, float strength)

@@ -384,7 +384,7 @@ namespace NextDayRevival
             pos = Vector3.zero;
             normal = Vector3.up;
             GameObject player = MapTools.LocalPlayer();
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (player == null) return false;
 
             Vector3 fwd = cam != null ? cam.transform.forward : player.transform.forward;
@@ -538,6 +538,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_MineObject_Update);
+            try
+            {
             if (_fired) return;
             if (Time.time < _armed) return;
             if (Time.time < _nextScan) return;
@@ -552,6 +555,8 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogError("Mine.Update: " + ex);
             }
+            }
+            finally { FrameProf.E(FrameProf.S_MineObject_Update); }
         }
 
         /// <summary>The first vehicle whose body (any wheel, chassis or child

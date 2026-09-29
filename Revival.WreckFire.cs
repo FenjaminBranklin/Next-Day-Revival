@@ -1295,11 +1295,16 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_NdrFlash_Update);
+            try
+            {
             if (_light == null) { UnityEngine.Object.Destroy(gameObject); return; }
             _t += Time.deltaTime;
             if (_t >= Life) { UnityEngine.Object.Destroy(gameObject); return; }
             float k = 1f - _t / Life;
             _light.intensity = _start * k * k * (0.78f + 0.22f * Mathf.Sin(_t * 70f));
+            }
+            finally { FrameProf.E(FrameProf.S_NdrFlash_Update); }
         }
     }
 }

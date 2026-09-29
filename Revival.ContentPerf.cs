@@ -31,7 +31,7 @@
 //   4. interior  a building (a node 20..260 u across with a collider covering
 //                most of its footprint: shell mesh or pad) hides the renderers
 //                that lie wholly inside its shell while no line from the camera
-//                reaches inside: one building per frame, 18 linecasts to points
+//                reaches inside: at most 6 linecasts a frame (P1b), 18 to points
 //                inside the shell; visible when one ray gets in (nothing hit,
 //                or the hit is inside the shell), when the camera is within
 //                NearU of the shell, and for HoldSeconds after the last hit.
@@ -70,10 +70,19 @@ namespace NextDayRevival
             internal string[] Prefixes;
             internal float ShadowMaxU = 4f;      // smaller renderers cast no shadow (~1.4 m)
             internal float DetailMaxU = 8f;      // smaller renderers leave a building's LODGroup
-            internal float LargeU = 20f;         // pieces this big get no new cull
-            internal float CullPerU = 80f;       // cull distance per unit of size
-            internal float CullMinU = 150f;      // ~54 m
-            internal float CullMaxU = 1500f;     // ~540 m
+            internal float LargeU = 20f;         // pieces this big get the large cull, not the piece cull
+            // P2: real camera distances (lodBias folded in, see Height). 6.60
+            // wrote 80 / 150 / 1500 "before lodBias", which the game's lodBias
+            // 2 doubled; the doubled values keep Medium's piece culls as they were.
+            internal float CullPerU = 160f;      // cull distance per unit of size
+            internal float CullMinU = 300f;      // ~107 m
+            internal float CullMaxU = 3000f;     // ~1070 m
+            internal float SmallCullU = 420f;    // P2: a piece under DetailMaxU is never drawn farther (150 m)
+            internal float LargeMaxU = 150f;     // P2: free pieces LargeU..this get a cull by size ...
+            internal float LargeCullMaxU = 2800f; // ... at most this far (1 km; past the Medium far clip)
+            internal bool Combine = true;        // P2: merge meshes per building LOD level / prop cluster / interior
+            internal float ClusterU = 64f;       // P2: one-level prop groups merge per square cell of this edge
+            internal int CombineMaxVerts = 16000; // P2: one merged mesh; also bounds its one-frame build cost
             internal float ShellMinU = 20f, ShellMaxU = 260f, ShellMinHeightU = 8f;
             internal float ShellCover = 0.7f;    // collider share of the footprint that makes a shell
             internal float InsetU = 1f;          // inside = at least this far inside the shell
@@ -97,6 +106,9 @@ namespace NextDayRevival
             internal Bounds Shell;
             internal Renderer[] Renderers;
             internal Vector3[] Points;
+            internal int Ray;                   // P1b: next point of a test spread over frames
+            internal float TestedAt = -100f;    // P1b: last complete test that found no line in
+            internal Vector3 TestedEye;
             internal bool Shown = true;
             internal float LastSeen;
             internal Profile P;
@@ -117,6 +129,11 @@ namespace NextDayRevival
                 + "merge, building interiors hide while no line of sight reaches in, "
                 + "readable meshes are statically batched. Read when a scene loads. "
                 + "Off = the bundles exactly as built (the FrameBench 'before').");
+            _cfgCombine = cfg.Bind("World", "ContentPerfCombine", true,
+                "P2 performance: with ContentPerf on, the readable meshes of one building LOD "
+                + "level, one interior or one cluster of small props are merged into one mesh "
+                + "per material (far fewer renderers for the CPU). Read when a scene loads. "
+                + "Off = 6.60's static batching only (for a FrameBench before/after).");
         }
 
         internal static bool On { get { return EastWorld.On && _cfg != null && _cfg.Value; } }
@@ -157,7 +174,7 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ the job
 
-        const double SliceMs = 1.5;
+        const double SliceMs = 0.15;
         static IEnumerator<bool> _run;
         static Scene _runScene;
         static string _runName;
@@ -241,11 +258,13 @@ namespace NextDayRevival
         sealed class Counts
         {
             internal int Pulled, Groups, Tightened, Before, After, Interiors, InteriorRenderers, Batched;
+            internal int Merged, MergedInto, Clusters, Kept;   // P2 combine
         }
 
         static IEnumerable<bool> Apply(Scene s, Profile p)
         {
             _tan = TanHalfFovNow();
+            _bias = Mathf.Clamp(QualitySettings.lodBias, 0.25f, 8f);
             Counts n = new Counts();
             GameObject[] roots = s.GetRootGameObjects();
             List<Renderer> all = new List<Renderer>();
@@ -279,12 +298,22 @@ namespace NextDayRevival
             foreach (GameObject r in roots)
                 if (r != null)
                     foreach (bool y in FindShells(r.transform, rb, p, s.GetHashCode(), n)) yield return y;
+            _retired.Clear();
+            if (p.Combine && CombineOn)
+                foreach (bool y in Combine(s, roots, all, p, n)) yield return y;
             if (p.Batch) foreach (bool y in Batch(roots, n)) yield return y;
+            _retired.Clear();
+            // merged meshes the batch did not take stay readable; forget them
+            foreach (KeyValuePair<MeshFilter, Mesh> kv in _madeMeshes)
+                if (kv.Value != null && kv.Key != null && kv.Key.sharedMesh == kv.Value) kv.Value.UploadMeshData(true);
+            _madeMeshes.Clear();
 
             Log(s.name + " (" + p.Name + "): " + all.Count + " renderers, " + shadows + " stop casting shadows, "
                 + n.Groups + " cull groups added (" + n.Pulled + " renderers out of building LODGroups, " + n.Tightened
                 + " authored culls pulled in), box colliders " + n.Before + " -> " + n.After + ", " + n.Interiors
-                + " interior(s) with " + n.InteriorRenderers + " renderers, " + n.Batched + " renderers statically batched; "
+                + " interior(s) with " + n.InteriorRenderers + " renderers, " + n.Merged + " renderers merged into "
+                + n.MergedInto + " (" + n.Clusters + " prop clusters, " + n.Kept + " left as they are), "
+                + n.Batched + " renderers statically batched; "
                 + (_runMs + (Stopwatch.GetTimestamp() - _sliceStart) * 1000.0 / Stopwatch.Frequency).ToString("F0")
                 + " ms over " + _runFrames + " frame(s).");
         }
@@ -292,26 +321,38 @@ namespace NextDayRevival
         static float Size(Bounds b) { return Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z)); }
 
         static float _tan = 0.57735f;
+        static float _bias = 2f;
 
         static float TanHalfFov() { return _tan; }
 
         static float TanHalfFovNow()
         {
-            Camera c = Camera.main;
+            Camera c = CameraOwner.MainCamera();
             float fov = c != null ? c.fieldOfView : 60f;
             return Mathf.Tan(Mathf.Clamp(fov, 20f, 120f) * 0.5f * Mathf.Deg2Rad);
         }
 
-        /// <summary>Screen relative height for a cull at distance d of a group
-        /// this big (Unity: size / (2 d tan(fov/2)), before lodBias).</summary>
+        /// <summary>Screen relative height for a cull at camera distance d of a
+        /// group this big. Unity compares size / (2 d tan(fov/2)) x lodBias
+        /// with the height, so the bias of the pass is folded in (P2: 6.60 left
+        /// it out and every cull landed lodBias times farther than written).</summary>
         static float Height(float size, float d)
         {
-            return Mathf.Clamp(size / (2f * Mathf.Max(d, 1f) * TanHalfFov()), 0.0005f, 0.99f);
+            return Mathf.Clamp(size * _bias / (2f * Mathf.Max(d, 1f) * TanHalfFov()), 0.0005f, 0.99f);
         }
 
         static float Distance(float size, float h)
         {
-            return size / (2f * Mathf.Max(h, 0.0001f) * TanHalfFov());
+            return size * _bias / (2f * Mathf.Max(h, 0.0001f) * TanHalfFov());
+        }
+
+        /// <summary>P2: the cull distance of a piece this big: by size between
+        /// CullMinU and CullMaxU, a small one (under DetailMaxU) never past
+        /// SmallCullU.</summary>
+        static float PieceCull(float size, Profile p)
+        {
+            float d = Mathf.Min(p.CullMaxU, Mathf.Max(p.CullMinU, p.CullPerU * size));
+            return size < p.DetailMaxU ? Mathf.Min(d, p.SmallCullU) : d;
         }
 
         static float WorldSize(LODGroup lg)
@@ -336,10 +377,12 @@ namespace NextDayRevival
                 if (lods.Length == 0) continue;
                 float ws = WorldSize(lg);
                 bool changed = false;
-                // an authored cull beyond CullMaxU comes in to it (large groups keep theirs)
-                if (ws < p.LargeU && Distance(ws, lods[lods.Length - 1].screenRelativeTransitionHeight) > p.CullMaxU)
+                // an authored cull beyond CullMaxU comes in to it (large groups keep
+                // theirs); P2: a small group's beyond SmallCullU comes in to that
+                float cap = ws < p.DetailMaxU ? p.SmallCullU : p.CullMaxU;
+                if (ws < p.LargeU && Distance(ws, lods[lods.Length - 1].screenRelativeTransitionHeight) > cap)
                 {
-                    float h = Height(ws, p.CullMaxU);
+                    float h = Height(ws, cap);
                     if (lods.Length == 1 || h < lods[lods.Length - 2].screenRelativeTransitionHeight)
                     {
                         lods[lods.Length - 1].screenRelativeTransitionHeight = h;
@@ -368,7 +411,7 @@ namespace NextDayRevival
                     while ((m >> (last + 1)) != 0) last++;
                     if (m != (1 << (last + 1)) - 1) continue;
                     float far = Distance(ws, lods[last].screenRelativeTransitionHeight);
-                    if (Mathf.Min(p.CullMaxU, Mathf.Max(p.CullMinU, p.CullPerU * Size(b))) >= far) continue;
+                    if (PieceCull(Size(b), p) >= far) continue;
                     pull.Add(kv.Key);
                     inGroup[kv.Key] = far;
                 }
@@ -440,9 +483,11 @@ namespace NextDayRevival
                     if (inGroup.TryGetValue(r, out f) && f > 0f) limit = Mathf.Min(limit, f);
                 }
                 float size = Size(b);
-                if (size >= p.LargeU && limit == float.MaxValue) continue;
+                float d;
+                if (size < p.LargeU || limit != float.MaxValue) d = Mathf.Min(limit, PieceCull(size, p));
+                else if (size < p.LargeMaxU) d = Mathf.Min(p.LargeCullMaxU, p.CullPerU * size);   // P2: by size
+                else continue;                                  // slabs, pads, whole ruins: drawn to the far clip
                 if (kv.Key.GetComponent<LODGroup>() != null) continue;
-                float d = Mathf.Min(limit, Mathf.Min(p.CullMaxU, Mathf.Max(p.CullMinU, p.CullPerU * size)));
                 LODGroup lg = kv.Key.gameObject.AddComponent<LODGroup>();
                 lg.SetLODs(new LOD[] { new LOD(0.5f, kv.Value.ToArray()) });
                 lg.RecalculateBounds();
@@ -640,39 +685,566 @@ namespace NextDayRevival
             cn.InteriorRenderers += inner.Count;
         }
 
+        // P1b: the 18 linecasts of one building used to run in one frame, one
+        // building per frame. Now at most RaysPerFrame linecasts a frame: a
+        // building's test resumes at its next point in the following frame,
+        // buildings that need no ray (near, beyond FarU) cost nothing and do
+        // not stop the round. A hidden building the camera has not moved
+        // RetestMoveU away from since its last full test keeps its answer for
+        // RetestSeconds (vehicles and doors still get a fresh test then).
+        const int RaysPerFrame = 6;
+        const float RetestMoveU = 1f;
+        const float RetestSeconds = 2f;
+
         static void Occlusion(float now)
         {
-            if (_interiors.Count == 0) return;
-            Camera cam = Camera.main;
+            int count = _interiors.Count;
+            if (count == 0) return;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return;
-            if (_next >= _interiors.Count) _next = 0;
-            Interior it = _interiors[_next++];
             Vector3 eye = cam.transform.position;
-            bool seen = See(it, eye);
-            if (seen) it.LastSeen = now;
-            bool show = seen || now - it.LastSeen < it.P.HoldSeconds;
-            if (show == it.Shown) return;
-            it.Shown = show;
-            foreach (Renderer r in it.Renderers)
-                if (r != null) r.enabled = show;
+            int rays = RaysPerFrame;
+            for (int visits = 0; visits < count && rays > 0; visits++)
+            {
+                if (_next >= count) _next = 0;
+                Interior it = _interiors[_next];
+                int r = See(it, eye, now, ref rays);
+                if (r < 0) return;                          // budget spent mid-building: resume here
+                _next++;
+                bool seen = r > 0;
+                if (seen) it.LastSeen = now;
+                bool show = seen || now - it.LastSeen < it.P.HoldSeconds;
+                if (show == it.Shown) continue;
+                it.Shown = show;
+                Renderer[] rs = it.Renderers;
+                for (int i = 0; i < rs.Length; i++)
+                    if (rs[i] != null) rs[i].enabled = show;
+            }
         }
 
-        static bool See(Interior it, Vector3 eye)
+        /// <summary>1 = a ray gets in, 0 = none does, -1 = the frame's rays
+        /// ran out first (the next call resumes at the same point).</summary>
+        static int See(Interior it, Vector3 eye, float now, ref int rays)
         {
             Bounds near = it.Shell;
             near.Expand(it.P.NearU * 2f);
-            if (near.Contains(eye)) return true;
-            if (it.Shell.SqrDistance(eye) > it.P.FarU * it.P.FarU) return false;
+            if (near.Contains(eye)) { it.Ray = 0; return 1; }
+            if (it.Shell.SqrDistance(eye) > it.P.FarU * it.P.FarU) { it.Ray = 0; return 0; }
+            if (it.Ray == 0 && !it.Shown && now < it.TestedAt + RetestSeconds
+                && (eye - it.TestedEye).sqrMagnitude < RetestMoveU * RetestMoveU)
+                return 0;                                   // nothing moved: still no line in
             Bounds inside = it.Shell;
-            inside.Expand(-it.P.InsetU * 4f);           // 2 u in from every side
-            for (int i = 0; i < it.Points.Length; i++)
+            inside.Expand(-it.P.InsetU * 4f);               // 2 u in from every side
+            while (it.Ray < it.Points.Length)
             {
+                if (rays <= 0) return -1;
+                rays--;
                 RaycastHit hit;
-                if (!Physics.Linecast(eye, it.Points[i], out hit, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
-                    return true;
-                if (inside.Contains(hit.point)) return true;
+                Vector3 pt = it.Points[it.Ray++];
+                if (!Physics.Linecast(eye, pt, out hit, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
+                    || inside.Contains(hit.point))
+                {
+                    it.Ray = 0;
+                    return 1;
+                }
             }
-            return false;
+            it.Ray = 0;
+            it.TestedAt = now;
+            it.TestedEye = eye;
+            return 0;
+        }
+
+        // ------------------------------------------------------------ combine (P2)
+
+        // P2 (docs/ai/tasks/p2-render-batching.md): the frame is CPU bound, and
+        // static batching (step 5) saves draw calls but not the per-renderer
+        // cost - every batched renderer is still culled, sorted and submitted
+        // on its own, and a town block brings ~410 of them. The combine bakes
+        // real meshes instead: per OWNER (one level mask of a building's
+        // LODGroup, one interior, or one cluster of small one-level prop
+        // groups in a ClusterU cell and cull band) and per material, the
+        // sub-meshes are copied into merged meshes of at most CombineMaxVerts
+        // vertices (only the vertices each sub-mesh uses; mirrored parts get
+        // their winding turned). The merged renderer takes the originals'
+        // place in the LODGroup / interior; a cluster gets one LODGroup that
+        // culls where its nearest-culling member did. The originals are
+        // switched off (not destroyed: game code may still read them).
+        //
+        // Never merged: objects other modules bind by name and then move,
+        // swap, hide or re-skin - keep HandsOffNames in step with them:
+        // Flak Names/EmptyName (AA holders, derelict ZU swapped), FuelDepot
+        // ModelNames (tanks blown), PlayerAn2 StandInName (SetActive),
+        // TowerRadar RadarName with its Head (turns) and Elements (switched),
+        // EastWorld's Fallback group, EastZones Markers, the content ladders.
+        // Also anything under a MonoBehaviour or Rigidbody, transparent or
+        // DisableBatching materials, lightmapped or non-triangle meshes, and
+        // renderers switched off when the pass comes (another module's).
+        static readonly string[] HandsOffNames = {
+            "AA position north", "AA position S2-S3", "Town battery west", "Town battery east",
+            "AA position V3 (empty)",
+            "pol_tank_vertical 1", "pol_tank_vertical_split_roof 1",
+            "pol_tank_horizontal 1", "pol_tank_horizontal 2", "pol_tank_horizontal 3",
+            "AN An-2 (nose east)", TowerRadar.RadarName, "Head", "Elements", "Fallback", "Markers", "Ladder",
+        };
+        static readonly string[] HandsOffPrefixes = { "NDR", "Edge light", "Ladder_", "P2 " };
+        static readonly float[] Bands = { 300f, 420f, 700f, 1000f, 1500f, 2200f, 3000f };
+
+        static ConfigEntry<bool> _cfgCombine;
+        static bool CombineOn { get { return _cfgCombine == null || _cfgCombine.Value; } }
+        static readonly HashSet<Renderer> _retired = new HashSet<Renderer>();
+        static readonly Dictionary<MeshFilter, Mesh> _madeMeshes = new Dictionary<MeshFilter, Mesh>();
+
+        sealed class Src
+        {
+            internal MeshRenderer R;
+            internal Mesh M;
+            internal int Sub;
+            internal Vector3 C;
+            internal int Verts;
+        }
+
+        sealed class Group
+        {
+            internal Material Mat;
+            internal MeshRenderer First;
+            internal readonly List<Src> Items = new List<Src>();
+        }
+
+        sealed class Owner
+        {
+            internal LODGroup Lod;          // the existing group the sources are in (not for a cluster)
+            internal int Mask;              // its levels the sources are in
+            internal Interior In;
+            internal bool Cluster;
+            internal float Cull = float.MaxValue;
+            internal Transform Parent;
+            internal Scene Scene;
+            internal readonly List<Group> Groups = new List<Group>();
+            internal readonly Dictionary<string, Group> ByKey = new Dictionary<string, Group>();
+            internal readonly HashSet<MeshRenderer> Renderers = new HashSet<MeshRenderer>();
+            internal readonly HashSet<LODGroup> Pieces = new HashSet<LODGroup>();   // a cluster's members' groups
+            internal readonly List<Renderer> Made = new List<Renderer>();
+        }
+
+        sealed class MeshData
+        {
+            internal Vector3[] V, N;
+            internal Vector4[] T;
+            internal Vector2[] U, U2;
+            internal Color32[] C;
+            internal int[][] Tris;
+        }
+
+        static readonly Dictionary<Mesh, MeshData> _meshData = new Dictionary<Mesh, MeshData>();
+        static int[] _mapIdx = new int[0], _mapStamp = new int[0];
+        static int _stamp;
+
+        static bool HandsOff(Transform t, Dictionary<Transform, bool> cache)
+        {
+            if (t == null) return false;
+            bool v;
+            if (cache.TryGetValue(t, out v)) return v;
+            string name = t.name;
+            v = Array.IndexOf(HandsOffNames, name) >= 0;
+            for (int i = 0; i < HandsOffPrefixes.Length && !v; i++)
+                if (name.StartsWith(HandsOffPrefixes[i], StringComparison.Ordinal)) v = true;
+            if (!v) v = t.GetComponent<MonoBehaviour>() != null || t.GetComponent<Rigidbody>() != null;
+            if (!v) v = HandsOff(t.parent, cache);
+            cache[t] = v;
+            return v;
+        }
+
+        /// <summary>The renderer's mesh when every sub-mesh it draws can be
+        /// merged, else null.</summary>
+        static Mesh Mergeable(MeshRenderer mr, Profile p, Dictionary<Transform, bool> cache)
+        {
+            if (mr == null || !mr.gameObject.activeInHierarchy || mr.isPartOfStaticBatch) return null;
+            if (mr.lightmapIndex >= 0 && mr.lightmapIndex < 65534) return null;
+            if (mr.additionalVertexStreams != null) return null;
+            MeshFilter mf = mr.GetComponent<MeshFilter>();
+            Mesh m = mf != null ? mf.sharedMesh : null;
+            if (m == null || !m.isReadable || m.vertexCount == 0 || m.vertexCount > p.CombineMaxVerts) return null;
+            Material[] mats = mr.sharedMaterials;
+            if (mats.Length == 0 || mats.Length > m.subMeshCount) return null;
+            for (int i = 0; i < mats.Length; i++)
+            {
+                Material mat = mats[i];
+                if (mat == null || mat.renderQueue >= 2500) return null;
+                string tag = mat.GetTag("DisableBatching", false);
+                if (!string.IsNullOrEmpty(tag) && !string.Equals(tag, "False", StringComparison.OrdinalIgnoreCase)) return null;
+                if (m.GetTopology(i) != MeshTopology.Triangles) return null;
+            }
+            if (HandsOff(mr.transform, cache)) return null;
+            return m;
+        }
+
+        static int Band(float d)
+        {
+            for (int i = 0; i < Bands.Length; i++) if (d <= Bands[i] + 0.5f) return i;
+            return Bands.Length;
+        }
+
+        static IEnumerable<bool> Combine(Scene s, GameObject[] roots, List<Renderer> all, Profile p, Counts n)
+        {
+            int scene = s.GetHashCode();
+            _meshData.Clear();
+            // Every renderer's LODGroup and levels (bit i = LOD i); one in two groups stays as it is.
+            Dictionary<Renderer, LODGroup> lodOf = new Dictionary<Renderer, LODGroup>();
+            Dictionary<Renderer, int> maskOf = new Dictionary<Renderer, int>();
+            HashSet<Renderer> twice = new HashSet<Renderer>();
+            Dictionary<LODGroup, LOD[]> lodsOf = new Dictionary<LODGroup, LOD[]>();
+            List<LODGroup> lgs = new List<LODGroup>();
+            foreach (GameObject r in roots) if (r != null) lgs.AddRange(r.GetComponentsInChildren<LODGroup>());
+            foreach (LODGroup lg in lgs)
+            {
+                if (Over()) { yield return true; Still(); }
+                if (lg == null) continue;
+                LOD[] lods = lg.GetLODs();
+                lodsOf[lg] = lods;
+                for (int i = 0; i < lods.Length && i < 30; i++)
+                    foreach (Renderer r in lods[i].renderers)
+                    {
+                        if (r == null) continue;
+                        LODGroup had;
+                        if (lodOf.TryGetValue(r, out had) && had != lg) { twice.Add(r); continue; }
+                        if (!lg.enabled) twice.Add(r);
+                        lodOf[r] = lg;
+                        int m;
+                        maskOf.TryGetValue(r, out m);
+                        maskOf[r] = m | (1 << i);
+                    }
+            }
+            Dictionary<Renderer, Interior> inOf = new Dictionary<Renderer, Interior>();
+            Dictionary<Interior, int> inIdx = new Dictionary<Interior, int>();
+            foreach (Interior it in _interiors)
+            {
+                if (it.Scene != scene) continue;
+                inIdx[it] = inIdx.Count;
+                foreach (Renderer r in it.Renderers) if (r != null) inOf[r] = it;
+            }
+
+            // The renderers that can go, and the one-level prop groups whose every renderer can.
+            Dictionary<Transform, bool> cache = new Dictionary<Transform, bool>();
+            Dictionary<MeshRenderer, Mesh> ok = new Dictionary<MeshRenderer, Mesh>();
+            foreach (Renderer r in all)
+            {
+                if (Over()) { yield return true; Still(); }
+                MeshRenderer mr = r as MeshRenderer;
+                if (mr == null || twice.Contains(mr)) continue;
+                Interior it;
+                bool inside = inOf.TryGetValue(mr, out it);
+                if (!mr.enabled && !inside) continue;            // switched off by somebody else
+                Mesh m = Mergeable(mr, p, cache);
+                if (m != null) ok[mr] = m;
+            }
+            Dictionary<LODGroup, bool> piece = new Dictionary<LODGroup, bool>();
+            foreach (KeyValuePair<LODGroup, LOD[]> kv in lodsOf)
+            {
+                if (Over()) { yield return true; Still(); }
+                LODGroup lg = kv.Key;
+                LOD[] lods = kv.Value;
+                bool can = lg != null && lg.enabled && lods.Length == 1 && WorldSize(lg) < p.LargeU
+                           && lods[0].renderers.Length > 0;
+                Interior first = null;
+                for (int i = 0; can && i < lods[0].renderers.Length; i++)
+                {
+                    MeshRenderer mr = lods[0].renderers[i] as MeshRenderer;
+                    Interior it;
+                    if (mr == null || !ok.ContainsKey(mr)) { can = false; break; }
+                    inOf.TryGetValue(mr, out it);
+                    if (i == 0) first = it;
+                    else if (it != first) can = false;
+                }
+                piece[lg] = can;
+            }
+
+            // Owners and their per-material groups.
+            Dictionary<string, Owner> owners = new Dictionary<string, Owner>();
+            List<Owner> order = new List<Owner>();
+            foreach (KeyValuePair<MeshRenderer, Mesh> kv in ok)
+            {
+                if (Over()) { yield return true; Still(); }
+                MeshRenderer mr = kv.Key;
+                if (mr == null) continue;
+                LODGroup lg;
+                lodOf.TryGetValue(mr, out lg);
+                Interior it;
+                inOf.TryGetValue(mr, out it);
+                int ii = it != null ? inIdx[it] : -1;
+                Bounds b = mr.bounds;
+                string key;
+                bool cluster = false;
+                float cull = 0f;
+                bool isPiece;
+                if (lg != null && piece.TryGetValue(lg, out isPiece) && isPiece)
+                {
+                    cull = Distance(WorldSize(lg), lodsOf[lg][0].screenRelativeTransitionHeight);
+                    Vector3 at = lg.transform.TransformPoint(lg.localReferencePoint);
+                    key = "C" + Mathf.FloorToInt(at.x / p.ClusterU) + "," + Mathf.FloorToInt(at.z / p.ClusterU)
+                          + "," + Band(cull) + "," + ii;
+                    cluster = true;
+                }
+                else if (lg != null) key = "L" + lg.GetInstanceID() + "," + maskOf[mr] + "," + ii;
+                else if (it != null) key = "I" + ii;
+                else continue;                                  // a free large piece: static batching's
+                Owner o;
+                if (!owners.TryGetValue(key, out o))
+                {
+                    o = new Owner();
+                    o.Cluster = cluster;
+                    o.Lod = cluster ? null : lg;
+                    o.Mask = cluster || lg == null ? 0 : maskOf[mr];
+                    o.In = it;
+                    o.Scene = s;
+                    o.Parent = cluster ? null : lg != null ? lg.transform : mr.transform.root;
+                    owners[key] = o;
+                    order.Add(o);
+                }
+                if (cluster) { o.Cull = Mathf.Min(o.Cull, cull); o.Pieces.Add(lg); }
+                o.Renderers.Add(mr);
+                Mesh mesh = kv.Value;
+                Material[] mats = mr.sharedMaterials;
+                for (int k = 0; k < mats.Length; k++)
+                {
+                    string gk = mats[k].GetInstanceID() + "," + (int)mr.shadowCastingMode + "," + (mr.receiveShadows ? 1 : 0)
+                                + "," + mr.gameObject.layer;
+                    Group g;
+                    if (!o.ByKey.TryGetValue(gk, out g))
+                    {
+                        g = new Group();
+                        g.Mat = mats[k];
+                        g.First = mr;
+                        o.ByKey[gk] = g;
+                        o.Groups.Add(g);
+                    }
+                    Src src = new Src();
+                    src.R = mr;
+                    src.M = mesh;
+                    src.Sub = k;
+                    src.C = b.center;
+                    src.Verts = Mathf.Min(mesh.vertexCount, (int)mesh.GetIndexCount(k));
+                    g.Items.Add(src);
+                }
+            }
+
+            foreach (Owner o in order)
+            {
+                if (o.Renderers.Count < 2) { n.Kept += o.Renderers.Count; continue; }
+                if (o.Cluster)
+                {
+                    GameObject root = new GameObject("P2 cluster");
+                    SceneManager.MoveGameObjectToScene(root, o.Scene);
+                    o.Parent = root.transform;
+                }
+                if (o.Parent == null || Mathf.Abs(o.Parent.localToWorldMatrix.determinant) < 1e-9f)
+                {
+                    n.Kept += o.Renderers.Count;
+                    continue;
+                }
+                foreach (Group g in o.Groups)
+                {
+                    g.Items.Sort(_near);
+                    int at = 0;
+                    while (at < g.Items.Count)
+                    {
+                        int end = at, verts = 0;
+                        while (end < g.Items.Count && (end == at || verts + g.Items[end].Verts <= p.CombineMaxVerts))
+                            verts += g.Items[end++].Verts;
+                        foreach (bool y in Build(o, g, at, end)) yield return y;
+                        at = end;
+                    }
+                }
+                Swap(o, n);
+                if (Over()) { yield return true; Still(); }
+            }
+            _meshData.Clear();
+        }
+
+        /// <summary>Chunk order: 32 u cells, x-major, so a chunk stays compact.</summary>
+        static readonly Comparison<Src> _near = delegate(Src a, Src b)
+        {
+            int c = Mathf.FloorToInt(a.C.x / 32f).CompareTo(Mathf.FloorToInt(b.C.x / 32f));
+            if (c != 0) return c;
+            c = Mathf.FloorToInt(a.C.z / 32f).CompareTo(Mathf.FloorToInt(b.C.z / 32f));
+            return c != 0 ? c : a.C.y.CompareTo(b.C.y);
+        };
+
+        static MeshData Data(Mesh m)
+        {
+            MeshData d;
+            if (_meshData.TryGetValue(m, out d)) return d;
+            d = new MeshData();
+            d.V = m.vertices;
+            int n = d.V.Length;
+            Vector3[] nn = m.normals;
+            d.N = nn != null && nn.Length == n ? nn : null;
+            Vector4[] tt = m.tangents;
+            d.T = tt != null && tt.Length == n ? tt : null;
+            Vector2[] uu = m.uv;
+            d.U = uu != null && uu.Length == n ? uu : null;
+            Vector2[] u2 = m.uv2;
+            d.U2 = u2 != null && u2.Length == n ? u2 : null;
+            Color32[] cc = m.colors32;
+            d.C = cc != null && cc.Length == n ? cc : null;
+            d.Tris = new int[m.subMeshCount][];
+            _meshData[m] = d;
+            return d;
+        }
+
+        /// <summary>One merged mesh from g.Items[from..to): the vertices are
+        /// copied one source per slice, the mesh is made in the last step.</summary>
+        static IEnumerable<bool> Build(Owner o, Group g, int from, int to)
+        {
+            bool hasN = false, hasT = false, hasU = false, hasU2 = false, hasC = false;
+            for (int i = from; i < to; i++)
+            {
+                if (Over()) { yield return true; Still(); }
+                if (g.Items[i].M == null) continue;
+                MeshData d = Data(g.Items[i].M);
+                hasN |= d.N != null; hasT |= d.T != null; hasU |= d.U != null; hasU2 |= d.U2 != null; hasC |= d.C != null;
+            }
+            List<Vector3> vs = new List<Vector3>(), ns = new List<Vector3>();
+            List<Vector4> ts = new List<Vector4>();
+            List<Vector2> us = new List<Vector2>(), u2s = new List<Vector2>();
+            List<Color32> cs = new List<Color32>();
+            List<int> tris = new List<int>();
+            Matrix4x4 w2l = o.Parent.worldToLocalMatrix;
+            for (int i = from; i < to; i++)
+            {
+                if (Over()) { yield return true; Still(); }
+                Src src = g.Items[i];
+                if (src.R == null || src.M == null) continue;
+                MeshData d = Data(src.M);
+                int[] st = d.Tris[src.Sub];
+                if (st == null) st = d.Tris[src.Sub] = src.M.GetTriangles(src.Sub);
+                Matrix4x4 m = w2l * src.R.localToWorldMatrix;
+                Matrix4x4 nm = m.inverse.transpose;
+                bool flip = m.determinant < 0f;
+                int nv = d.V.Length;
+                if (_mapIdx.Length < nv) { _mapIdx = new int[nv]; _mapStamp = new int[nv]; }
+                _stamp++;
+                for (int t = 0; t + 2 < st.Length; t += 3)
+                {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int v = st[t + c];
+                        if (_mapStamp[v] == _stamp) continue;
+                        _mapStamp[v] = _stamp;
+                        _mapIdx[v] = vs.Count;
+                        vs.Add(m.MultiplyPoint3x4(d.V[v]));
+                        if (hasN) ns.Add(d.N != null ? nm.MultiplyVector(d.N[v]).normalized : Vector3.up);
+                        if (hasT)
+                        {
+                            if (d.T != null)
+                            {
+                                Vector4 tg = d.T[v];
+                                Vector3 x = m.MultiplyVector(new Vector3(tg.x, tg.y, tg.z)).normalized;
+                                ts.Add(new Vector4(x.x, x.y, x.z, flip ? -tg.w : tg.w));
+                            }
+                            else ts.Add(new Vector4(1f, 0f, 0f, 1f));
+                        }
+                        if (hasU) us.Add(d.U != null ? d.U[v] : Vector2.zero);
+                        if (hasU2) u2s.Add(d.U2 != null ? d.U2[v] : Vector2.zero);
+                        if (hasC) cs.Add(d.C != null ? d.C[v] : new Color32(255, 255, 255, 255));
+                    }
+                    int a = _mapIdx[st[t]], b = _mapIdx[st[t + 1]], e = _mapIdx[st[t + 2]];
+                    tris.Add(a);
+                    if (flip) { tris.Add(e); tris.Add(b); }
+                    else { tris.Add(b); tris.Add(e); }
+                }
+            }
+            if (Over()) { yield return true; Still(); }
+            if (vs.Count == 0 || o.Parent == null) yield break;
+            Mesh cm = new Mesh();
+            cm.name = "P2 merged " + g.Mat.name;
+            if (vs.Count > 65535) cm.indexFormat = IndexFormat.UInt32;
+            cm.SetVertices(vs);
+            if (hasN) cm.SetNormals(ns);
+            if (hasT) cm.SetTangents(ts);
+            if (hasU) cm.SetUVs(0, us);
+            if (hasU2) cm.SetUVs(1, u2s);
+            if (hasC) cm.SetColors(cs);
+            cm.SetTriangles(tris, 0);
+            cm.RecalculateBounds();
+            // Readable on purpose: step 5 statically batches the merged meshes
+            // too (same material across buildings = one draw) and then frees
+            // every merged mesh it copied (Batch, _madeMeshes).
+            GameObject go = new GameObject("P2 merged " + o.Made.Count);
+            go.layer = g.First.gameObject.layer;
+            go.transform.SetParent(o.Parent, false);
+            MeshFilter cmf = go.AddComponent<MeshFilter>();
+            cmf.sharedMesh = cm;
+            _madeMeshes[cmf] = cm;
+            MeshRenderer mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = g.Mat;
+            mr.shadowCastingMode = g.First.shadowCastingMode;
+            mr.receiveShadows = g.First.receiveShadows;
+            mr.lightProbeUsage = g.First.lightProbeUsage;
+            mr.reflectionProbeUsage = g.First.reflectionProbeUsage;
+            mr.enabled = false;                                 // on in Swap, with the originals off
+            o.Made.Add(mr);
+        }
+
+        /// <summary>The merged renderers take the originals' place, in one frame.</summary>
+        static void Swap(Owner o, Counts n)
+        {
+            if (o.Made.Count == 0) { n.Kept += o.Renderers.Count; return; }
+            Renderer[] made = o.Made.ToArray();
+            if (o.Lod != null)
+            {
+                LOD[] lods = o.Lod.GetLODs();
+                for (int i = 0; i < lods.Length && i < 30; i++)
+                    if ((o.Mask & (1 << i)) != 0) lods[i].renderers = Replace(lods[i].renderers, o.Renderers, made);
+                o.Lod.SetLODs(lods);
+            }
+            if (o.Cluster)
+            {
+                LODGroup lg = o.Parent.gameObject.AddComponent<LODGroup>();
+                lg.SetLODs(new LOD[] { new LOD(0.5f, made) });
+                lg.RecalculateBounds();
+                LOD[] one = lg.GetLODs();
+                one[0].screenRelativeTransitionHeight = Height(WorldSize(lg), o.Cull);
+                lg.SetLODs(one);
+                // the members' own one-level groups go when nothing is left in them
+                foreach (LODGroup g in o.Pieces)
+                {
+                    if (g == null) continue;
+                    LOD[] ls = g.GetLODs();
+                    bool empty = true;
+                    for (int i = 0; i < ls.Length; i++)
+                    {
+                        ls[i].renderers = Replace(ls[i].renderers, o.Renderers, new Renderer[0]);
+                        if (ls[i].renderers.Length > 0) empty = false;
+                    }
+                    if (empty) UnityEngine.Object.Destroy(g);
+                    else g.SetLODs(ls);
+                }
+                n.Clusters++;
+            }
+            bool show = o.In == null || o.In.Shown;
+            if (o.In != null) o.In.Renderers = Replace(o.In.Renderers, o.Renderers, made);
+            for (int i = 0; i < made.Length; i++) made[i].enabled = show;
+            foreach (MeshRenderer r in o.Renderers)
+            {
+                if (r == null) continue;
+                ViewDistance.Retire(r);
+                r.enabled = false;
+                _retired.Add(r);
+            }
+            n.Merged += o.Renderers.Count;
+            n.MergedInto += made.Length;
+        }
+
+        static Renderer[] Replace(Renderer[] had, HashSet<MeshRenderer> gone, Renderer[] add)
+        {
+            List<Renderer> l = new List<Renderer>(had.Length + add.Length);
+            for (int i = 0; i < had.Length; i++)
+            {
+                MeshRenderer mr = had[i] as MeshRenderer;
+                if (had[i] != null && (mr == null || !gone.Contains(mr))) l.Add(had[i]);
+            }
+            l.AddRange(add);
+            return l.ToArray();
         }
 
         // ------------------------------------------------------------ batching
@@ -692,7 +1264,7 @@ namespace NextDayRevival
                 foreach (MeshRenderer mr in root.GetComponentsInChildren<MeshRenderer>())
                 {
                     if (Over()) { yield return true; Still(); }
-                    if (mr == null || mr.isPartOfStaticBatch) continue;
+                    if (mr == null || mr.isPartOfStaticBatch || _retired.Contains(mr)) continue;
                     MeshFilter mf = mr.GetComponent<MeshFilter>();
                     if (mf == null || mf.sharedMesh == null || !mf.sharedMesh.isReadable) continue;
                     if (mr.sharedMaterials.Length > mf.sharedMesh.subMeshCount) continue;
@@ -709,6 +1281,15 @@ namespace NextDayRevival
                     run.RemoveAll(_gone);
                     if (run.Count < 2) continue;
                     StaticBatchingUtility.Combine(run.ToArray(), root);
+                    // P2: a merged mesh the batch copied is not needed any more
+                    foreach (GameObject g in run)
+                    {
+                        MeshFilter mf = g.GetComponent<MeshFilter>();
+                        Mesh made;
+                        if (mf == null || !_madeMeshes.TryGetValue(mf, out made)) continue;
+                        _madeMeshes.Remove(mf);
+                        if (made != null && mf.sharedMesh != made) UnityEngine.Object.Destroy(made);
+                    }
                     n += run.Count;
                 }
             }

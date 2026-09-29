@@ -75,6 +75,15 @@ namespace NextDayRevival
         static string _airFailure = "", _airLastFailure = "";
         internal static string[] Air;
         internal static string AirRevision = "";
+        // B3 mercenary hire profiles (Revival.Mercs.cs): their own endpoint;
+        // until the first answer the plugin offers its built-in defaults.
+        static float _mercNext;
+        static bool _mercBusy;
+        static volatile bool _mercFinished;
+        static string[] _mercPending;
+        static string _mercPendingRevision;
+        static string _mercFailure = "", _mercLastFailure = "";
+        internal static string MercsRevision = "";
         internal static string LastError { get { return _lastFailure; } }
         internal static bool Ready { get { return Current != null; } }
         internal sealed class Snapshot
@@ -118,6 +127,7 @@ namespace NextDayRevival
             TickPads();
             TickVehicles();
             TickAir();
+            TickMercs();
             if (_busy || Time.realtimeSinceStartup < _next || _url == null) return;
             _next = Time.realtimeSinceStartup + 3f;
             _busy = true;
@@ -234,6 +244,61 @@ namespace NextDayRevival
                 catch (Exception ex) { _padPending = null; _padFailure = ex.Message; }
                 finally { _padFinished = true; }
             });
+        }
+
+        static void TickMercs()
+        {
+            if (_mercFinished)
+            {
+                _mercFinished = false; _mercBusy = false;
+                if (_mercPending != null && _mercPendingRevision != MercsRevision)
+                {
+                    MercsRevision = _mercPendingRevision;
+                    Mercs.LoadProfiles(_mercPending, "editor " + MercsRevision.Substring(0, 8));
+                }
+                if (_mercFailure != _mercLastFailure)
+                {
+                    _mercLastFailure = _mercFailure;
+                    if (_mercFailure.Length > 0) RevivalPlugin.L.LogWarning("LiveRoutes mercenaries: "
+                        + _mercFailure + "; keeping the last verified hire profiles.");
+                }
+                _mercPending = null;
+            }
+            if (_mercBusy || Time.realtimeSinceStartup < _mercNext || _url == null) return;
+            _mercNext = Time.realtimeSinceStartup + 30f;
+            string address = _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            if (cut < 0) return;
+            _mercBusy = true;
+            string url = address.Substring(0, cut) + "/runtime/mercs", pin = _pin.Value;
+            string revision = MercsRevision;
+            ThreadPool.QueueUserWorkItem(delegate(object unused) {
+                try
+                {
+                    string body = Fetch(url, pin, revision);
+                    if (body == null) _mercPending = null;
+                    else _mercPending = ParseMercs(body, out _mercPendingRevision);
+                    _mercFailure = "";
+                }
+                catch (Exception ex) { _mercPending = null; _mercFailure = ex.Message; }
+                finally { _mercFinished = true; }
+            });
+        }
+
+        internal static string[] ParseMercs(string body, out string revision)
+        {
+            string[] envelope = body.Split('\n');
+            if (envelope.Length != 4 || envelope[0] != "NDR-MERCS-1" || envelope[3] != ""
+                || !HexHash(envelope[1])) throw new IOException("Invalid mercenary envelope");
+            byte[] tsv = Convert.FromBase64String(envelope[2]);
+            if (tsv.Length > 20000 || Hash(tsv) != envelope[1])
+                throw new IOException("Mercenary snapshot hash mismatch");
+            foreach (byte b in tsv) if (b > 127) throw new IOException("Mercenary snapshot is not ASCII");
+            string[] lines = Encoding.ASCII.GetString(tsv).Split('\n');
+            // Fail closed: the whole table is parsed before a card changes.
+            Mercs.ParseProfiles(lines);
+            revision = envelope[1];
+            return lines;
         }
 
         static void TickAir()

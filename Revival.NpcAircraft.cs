@@ -29,7 +29,7 @@
 //                from are panel options. A non-master admin asks the master.
 //
 // Photon event [NpcAircraft] NetworkEventCode (159), float[] with the kind first:
-//   0 request  { 0, x, y, z, altitude m, speed km/h, bearing deg }  -> master
+//   0 request  { 0, x, y, z, altitude m, speed km/h, bearing deg[, tu95] } -> master
 //   1 hit      { 1, view, x, y, z, lethal }                         -> master
 //   2 clear    { 2 }                                                -> master
 //
@@ -324,6 +324,10 @@ namespace NextDayRevival
                 f = Find(go);
                 if (f == null) return null;
             }
+            // The same for the model (B8a): the master's first Prepare can run
+            // before Photon hands the view its data, and then no Tu-95 was built
+            // on the master. Idempotent; every other client builds it in Start.
+            AirEvents.Prepared(go, data);
             f.Path = path;          // the master's own profile, not a second one
             f.S = 0f;
             f.Driving = true;
@@ -643,7 +647,9 @@ namespace NextDayRevival
                     int kind = (int)f[0];
                     if (kind == Request && f.Length >= 7)
                     {
-                        string said = Flyover.LaunchHere(new Vector3(f[1], f[2], f[3]), f[4], f[5], f[6]);
+                        // Index 7 (B8a) is the aircraft; an older client's request is an An-2.
+                        string said = Flyover.LaunchHere(new Vector3(f[1], f[2], f[3]), f[4], f[5], f[6],
+                            f.Length >= 8 && f[7] > 0.5f);
                         RevivalPlugin.L.LogInfo("NpcAircraft: flyover for player " + sender + " - " + said);
                     }
                     else if (kind == Hit && f.Length >= 6)
@@ -675,11 +681,15 @@ namespace NextDayRevival
     internal static class Flyover
     {
         internal const int MinAltitude = 30, MaxAltitude = 1500;
-        internal const int MinSpeed = 120, MaxSpeed = 320;
+        // 450 km/h so the Tu-95 option (B8a) can fly at its own 420.
+        internal const int MinSpeed = 120, MaxSpeed = 450;
         /// <summary>-1 random, else the edge it comes from: 0 N, 1 E, 2 S, 3 W.</summary>
         internal static int From = -1;
         internal static int AltitudeM = 150;
         internal static int SpeedKmh = 200;
+        /// <summary>B8a: fly the Tu-95 instead of the An-2 (no bombs; the
+        /// model, its far draw and its drone, for a look and a listen).</summary>
+        internal static bool Bomber;
         static readonly string[] Edges = { "Random", "N", "E", "S", "W" };
         static readonly string[] EdgeNames = { "north", "east", "south", "west" };
 
@@ -704,17 +714,17 @@ namespace NextDayRevival
         {
             float bearing = From >= 0 ? From * 90f : UnityEngine.Random.Range(0f, 360f);
             if (RevivalTroopInsertion.MasterClient())
-                return LaunchHere(point, AltitudeM, SpeedKmh, bearing);
+                return LaunchHere(point, AltitudeM, SpeedKmh, bearing, Bomber);
             if (!NpcAircraft.Net.Send(new float[] { NpcAircraft.Net.Request, point.x, point.y, point.z,
-                    AltitudeM, SpeedKmh, bearing }, true))
+                    AltitudeM, SpeedKmh, bearing, Bomber ? 1f : 0f }, true))
                 return "Flyover: the network channel is not up - see the log.";
-            return "Flyover asked of the host: from " + Compass(bearing) + ", "
+            return (Bomber ? "Tu-95" : "An-2") + " flyover asked of the host: from " + Compass(bearing) + ", "
                 + AltitudeM + " m AGL, " + SpeedKmh + " km/h.";
         }
 
         /// <summary>Master: launch one. Altitude in metres above the ground,
         /// speed in km/h, bearing the direction it comes from.</summary>
-        internal static string LaunchHere(Vector3 over, float altitudeM, float speedKmh, float bearing)
+        internal static string LaunchHere(Vector3 over, float altitudeM, float speedKmh, float bearing, bool bomber)
         {
             if (!RevivalTroopInsertion.MasterClient()) return "Flyover: only the host can launch.";
             float alt = Mathf.Clamp(altitudeM, MinAltitude, MaxAltitude) * PlayerAn2.K;
@@ -722,10 +732,13 @@ namespace NextDayRevival
             Vector2 from, to;
             FlightPath.AcrossMap(over, bearing, out from, out to);
             FlightPath path = FlightPath.Straight(from, to, alt, speed);
-            NpcAircraft.Flight f = NpcAircraft.Launch(path, true, "test flyover", null, null);
-            if (f == null) return "Flyover: the An-2 did not appear - see the log.";
+            // The bomber tag makes every client build the Tu-95 on the carrier.
+            NpcAircraft.Flight f = NpcAircraft.Launch(path, true,
+                bomber ? AirEvents.BomberTag + "test flyover" : "test flyover", null, null);
+            if (f == null) return "Flyover: the " + (bomber ? "Tu-95" : "An-2") + " did not appear - see the log.";
+            if (bomber) f.Toughness = 3;
             float eta = (new Vector2(over.x, over.z) - from).magnitude / speed;
-            return "Flyover from " + Compass(bearing) + ": " + Mathf.RoundToInt(Mathf.Clamp(altitudeM, MinAltitude, MaxAltitude))
+            return (bomber ? "Tu-95 flyover" : "Flyover") + " from " + Compass(bearing) + ": " + Mathf.RoundToInt(Mathf.Clamp(altitudeM, MinAltitude, MaxAltitude))
                 + " m AGL, " + Mathf.RoundToInt(Mathf.Clamp(speedKmh, MinSpeed, MaxSpeed)) + " km/h, overhead in "
                 + Mathf.RoundToInt(eta) + " s, " + Mathf.RoundToInt(path.Seconds) + " s edge to edge.";
         }
@@ -771,6 +784,17 @@ namespace NextDayRevival
                     From = i - 1;
             }
             GUILayout.Label("  in the air: " + NpcAircraft.Airborne());
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("  Aircraft", GUILayout.Width(70f));
+            if (GUILayout.Toggle(!Bomber, "An-2", "Button", GUILayout.Width(64f)) && Bomber) Bomber = false;
+            if (GUILayout.Toggle(Bomber, "Tu-95", "Button", GUILayout.Width(64f)) && !Bomber)
+            {
+                Bomber = true;
+                // A bomber's own height and speed: the air events' numbers.
+                AltitudeM = Mathf.RoundToInt(AirEvents.BomberAltitude(null));
+                SpeedKmh = Mathf.Clamp(Mathf.RoundToInt(AirEvents.BomberKmh), MinSpeed, MaxSpeed);
+            }
             GUILayout.EndHorizontal();
         }
     }

@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.60.0";
+        public const string VERSION = "6.61.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -480,6 +480,8 @@ namespace NextDayRevival
             ViewDistance.BindConfig(Config);     // view distance Low/Medium/High/Ultra (far clip, prop culling, fog)
             NpcDistance.BindConfig(Config);      // N2: NPC distance tiers (wake at aircraft range, mid tier, forest mask)
             FarForest.BindConfig(Config);        // N2b: forest canopy past the tree draw distance (same mask)
+            Mercs.BindConfig(Config);            // B3: mercenary keys and hints (no gameplay switch)
+            AirBoundary.BindConfig(Config);      // B6: soft map edge for player aircraft + terrain skirt beyond it
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
             ConvoyRepair.BindConfig(Config);     // NDR convoy vehicle repair
@@ -533,7 +535,9 @@ namespace NextDayRevival
             _harmony = new Harmony(GUID);
             ClientIntegrity.Install(_harmony);
             VehicleScan.Install(_harmony);       // Q1 perf: vehicle/NPC/inventory registries instead of scene scans
+            GunnerOptics.Install(_harmony);      // P1b: explosion hooks instead of a 10 Hz scene scan in the optics
             PatchCursor();
+            GameplayCursor.Install(_harmony);   // B5: group/window close and guarded gameplay recovery
             PatchResourcesLoad();
             PatchLocalization();
             PatchBackpackDiagnostics();
@@ -554,7 +558,8 @@ namespace NextDayRevival
             DroneNpcHook.Install(_harmony);
             SurvCombat.Install(_harmony);        // NDR surveillance-drone relevance + shot hooks
             Crew.Install(_harmony);
-            NpcDistance.Install(_harmony);       // N2: settlement wake at range, mid-tier AI rate
+            NpcDistance.Install(_harmony);
+            FarForest.Install(_harmony);         // P3: canopy splat layer counts as its source layer for footsteps       // N2: settlement wake at range, mid-tier AI rate
             RevivalTroopInsertion.Install(_harmony); // NDR troop helicopter size/hull on every client
             PlayerHeli.Install(_harmony);        // NDR player-flown Mi-8: size/hull and the body lock
             PlayerAn2.Install(_harmony);         // NDR player-flown An-2: carrier prepare, shared body lock
@@ -563,6 +568,7 @@ namespace NextDayRevival
             VehicleCondition.Install(_harmony);  // N8 vanilla condition: the container window for big truck trunks
             FuelDepot.Install(_harmony);         // NDR POL depot: explosion and firearm hits on the tanks
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
+            Mercs.Install(_harmony);             // B3: roster channel (storage 7700), owner damage drop, target veto
             Admin.Install(_harmony);
             EastWorld.Install(_harmony);         // east world: nothing is patched while [World] EastTile is off
             TankNetwork.Install(_harmony);
@@ -2224,7 +2230,7 @@ namespace NextDayRevival
             // man kann keinen Knopf treffen.
             FrameProf.S(FrameProf.Cursor);
             Settings.Tick();                     // NDR P9: settings window key and the hint key
-            if (Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen) CursorGuard.Release();
+            if (Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen || MercUi.ListOpen) CursorGuard.Release();
             else CursorGuard.Tick();
             FrameProf.E(FrameProf.Cursor);
             FrameProf.S(FrameProf.Regions);     Regions.Tick();          FrameProf.E(FrameProf.Regions);
@@ -2286,7 +2292,10 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
             FrameProf.S(FrameProf.S_NpcWarT); NpcWar.Tick(); FrameProf.E(FrameProf.S_NpcWarT);                       // NDR NPC-vs-NPC combat for troop squads
             FrameProf.S(FrameProf.S_NpcDistT); NpcDistance.Tick(); FrameProf.E(FrameProf.S_NpcDistT);             // N2: NPC distance tiers + forest mask
+            FrameProf.S(FrameProf.S_MercsT); Mercs.Tick(); FrameProf.E(FrameProf.S_MercsT);                         // B3: mercenaries (keys per frame, roster/upkeep at 4 Hz)
+            FrameProf.S(FrameProf.S_MercCoverT); MercCoverService.Tick(); FrameProf.E(FrameProf.S_MercCoverT);   // M1: merc cover mapping (budgeted rays, 0 once mapped)
             FrameProf.S(FrameProf.S_FarForestT); FarForest.Tick(); FrameProf.E(FrameProf.S_FarForestT);           // N2b: far forest canopy
+            AirBoundary.Tick();                                                                                 // B6: terrain skirt beyond the map edge (built once per world)
         }
 
         void FixedUpdate()
@@ -2325,6 +2334,10 @@ namespace NextDayRevival
             // the game's own animator and movement controller have written.
             FrameProf.S(FrameProf.S_PlayerHeliL); PlayerHeli.LateFrame(); FrameProf.E(FrameProf.S_PlayerHeliL);
             FrameProf.S(FrameProf.S_PlayerAn2L); PlayerAn2.LateFrame(); FrameProf.E(FrameProf.S_PlayerAn2L);               // NDR player-flown An-2: the crew in their seats
+            // B3c: mercenaries riding a vehicle, on their seats after the
+            // animator and after every vehicle has moved; the owner's gunners
+            // lay and fire here (Revival.MercsRide.cs).
+            FrameProf.S(FrameProf.S_MercsL); MercRide.LateFrame(); FrameProf.E(FrameProf.S_MercsL);
             // NDR traitor settlement trader: held behind his counter for the
             // same reason - a man placed in Update is back where the animation
             // put him before anything is drawn.
@@ -2375,6 +2388,8 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_PeerCheckD); PeerCheck.Draw(); FrameProf.E(FrameProf.S_PeerCheckD);                    // NDR version badge + mismatch banner
             FrameProf.S(FrameProf.S_ClientIntegrityD); ClientIntegrity.Draw(); FrameProf.E(FrameProf.S_ClientIntegrityD);              // Required verified-launch recovery message
             FrameProf.S(FrameProf.S_NpcWarD); NpcWar.Draw(); FrameProf.E(FrameProf.S_NpcWarD);                       // NDR NPC-vs-NPC combat debug status
+            FrameProf.S(FrameProf.S_MercsD); MercUi.Draw(); FrameProf.E(FrameProf.S_MercsD);                         // B3: trader Mercenaries tab, order wheel, merc list, HUD strip
+            FrameProf.S(FrameProf.S_MercCoverD); MercCoverService.Draw(); FrameProf.E(FrameProf.S_MercCoverD);   // M1: F8 "Show merc cover" overlay (off: one bool)
             FrameProf.S(FrameProf.S_SettingsD); Settings.Draw(); FrameProf.E(FrameProf.S_SettingsD);                     // NDR P9: the in-game settings window
             FrameProf.DrawOverlay();
         }

@@ -947,6 +947,8 @@ namespace NextDayRevival
             }
         }
 
+        static readonly Action<Material> _darken = delegate(Material m) { m.color = m.color * 0.22f; };
+
         static void Wreck(Gun g)
         {
             g.Wrecked = true;
@@ -959,10 +961,12 @@ namespace NextDayRevival
                 for (int i = 0; i < rs.Length; i++)
                 {
                     if (rs[i] == null) continue;
-                    Material[] ms = rs[i].materials;
+                    // P2: one darkened copy per material, not a clone per renderer
+                    Material[] ms = rs[i].sharedMaterials;
                     for (int k = 0; k < ms.Length; k++)
                         if (ms[k] != null && ms[k].HasProperty("_Color"))
-                            ms[k].color = ms[k].color * 0.22f;
+                            ms[k] = ModelLod.SharedCopy(ms[k], "town gun wrecked", _darken);
+                    rs[i].sharedMaterials = ms;
                 }
             }
             try { FireEffect.Spawn(g.Spot + Vector3.up * 2f, 8f); } catch { }

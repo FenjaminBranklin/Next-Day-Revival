@@ -14,12 +14,18 @@ import math
 
 G = 9.81
 CFG = {
-    'StallSpeed': 60.0, 'CriticalAngle': 15.0, 'Thrust': 2.6, 'Power': 90.0,
+    'StallSpeed': 60.0, 'CriticalAngle': 15.0, 'Thrust': 4.0, 'Power': 90.0,
     'TopSpeed': 250.0, 'PitchRate': 40.0, 'RollFriction': 0.04,
     'GrassFriction': 0.08, 'Parked': 8.21, 'CrashSinkRate': 4.0,
 }
 INDUCED = 0.3
 DT = 1.0 / 60.0
+# World units per metre (PlayerAn2.K): the map and the runway are measured in
+# units, so the takeoff roll is printed in both.
+K = 2.8
+# B6: with the flight assist, W/S released and the throttle over 70 % the tail
+# comes down (rotation) at this multiple of the stall speed (PlayerAn2.RotateAt).
+ROTATE = 1.15
 
 
 def vs():
@@ -54,7 +60,7 @@ class Plane(object):
         self.max_aoa = 0.0
         self.stalled_s = 0.0
 
-    def step(self, throttle, pitch_in, paved=True):
+    def step(self, throttle, pitch_in, paved=True, assist=False):
         v = math.hypot(self.vx, self.vy)
         gamma = math.degrees(math.atan2(self.vy, self.vx)) if v > 0.5 else 0.0
         aoa = self.theta - gamma if self.vx > 1.0 else 0.0
@@ -67,6 +73,8 @@ class Plane(object):
         if self.ground:
             able = min(1.0, max(0.0, (v - 8.0) / 14.0))
             lifted = able * min(1.0, max(0.0, 0.45 - 0.55 * pitch_in))
+            if assist and pitch_in > -0.1 and throttle > 0.7 and v > ROTATE * vs():
+                lifted = 0.0
             want = CFG['Parked'] * (1.0 - lifted)
             step = 10.0 * DT
             self.theta += max(-step, min(step, want - self.theta))
@@ -111,11 +119,16 @@ class Plane(object):
         return arrival
 
 
-def takeoff(paved, stick):
+def takeoff(paved, stick, assist=False):
+    """Full throttle from standstill until the wheels are 0.3 m up. With
+    assist, the stick is the plugin's WASD assist: on the ground the rotation
+    rule above; in the air a released W/S climbs out, flown here as a gentle
+    back stick (the plugin's Assist asks for a climb angle instead)."""
     p = Plane()
     t = 0.0
     while t < 60.0:
-        p.step(1.0, stick, paved)
+        s = stick if (p.ground or not assist or stick != 0.0) else 0.5
+        p.step(1.0, s, paved, assist)
         t += DT
         if not p.ground and p.h > 0.3:
             return p.x, p.vx * 3.6, t
@@ -195,12 +208,13 @@ def landing(sink):
 def main():
     print('Cd0 %.3e (top speed %.0f km/h at full throttle)' % (cd0(), CFG['TopSpeed']))
     for paved in (True, False):
-        for stick, what in ((1.0, 'back stick'), (0.0, 'neutral')):
-            r = takeoff(paved, stick)
+        for stick, what, assist in ((1.0, 'back stick', False), (0.0, 'neutral', False),
+                                    (0.0, 'WASD free', True)):
+            r = takeoff(paved, stick, assist)
             surface = 'concrete' if paved else 'grass   '
             if r:
-                print('takeoff %s %-10s: roll %4.0f m, liftoff %3.0f km/h after %4.1f s'
-                      % (surface, what, r[0], r[1], r[2]))
+                print('takeoff %s %-10s: roll %4.0f m (%4.0f u), liftoff %3.0f km/h after %4.1f s'
+                      % (surface, what, r[0], r[0] * K, r[1], r[2]))
             else:
                 print('takeoff %s %-10s: no liftoff in 60 s' % (surface, what))
     vz, v = climb()

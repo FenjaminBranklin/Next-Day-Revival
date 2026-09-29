@@ -520,6 +520,9 @@ namespace NextDayRevival
                 {
                     try { RunningGear.Build(car, hull, _mat != null ? _mat : Panzermaterial(null), Trackmaterial()); }
                     catch (Exception ex) { RevivalPlugin.L.LogError("Panzer, Laufwerk: " + ex); }
+                    // P2: 16 wheel and track renderers were drawn at every distance
+                    // (the BTR's own LODGroup does not know them); the hull stays its.
+                    ModelLod.Apply(hull.gameObject, ModelLod.Kind.Vehicle);
                 }
                 else RevivalPlugin.L.LogWarning("Panzer: kein hull-Transform fuer das Laufwerk gefunden.");
             }
@@ -843,6 +846,9 @@ namespace NextDayRevival
 
         void LateUpdate()
         {
+            FrameProf.S(FrameProf.S_T72RunningGear_LateUpdate);
+            try
+            {
             if (!_have) return;
             float dt = Time.deltaTime;
             if (dt <= 1e-5f) return;
@@ -884,6 +890,8 @@ namespace NextDayRevival
                 o.x = _trackOffset;
                 _track.mainTextureOffset = o;
             }
+            }
+            finally { FrameProf.E(FrameProf.S_T72RunningGear_LateUpdate); }
         }
     }
 
@@ -1090,7 +1098,7 @@ namespace NextDayRevival
         static void Spawn(bool panzer)
         {
             float started = Time.realtimeSinceStartup;
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null)
             {
                 RevivalPlugin.L.LogWarning("Fahrzeugspawn: keine Kamera gefunden.");

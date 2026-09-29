@@ -1238,6 +1238,27 @@ def check_flak():
     need('"MT-AA2a"' in s and "MilitaryTown.Faction()" in s,
          "the military town's battery fights for the town's faction",
          "the town battery or its faction is missing")
+    # B2 (Kevin on 6.60.0: no visible aiming, the sight inside the model):
+    # colliders from the rig, the ring's derelict ZU box off, the gunner
+    # camera on the mount (shoulder / sight, never the old cradle eye), the
+    # idle crew watching the sky, the shot's kick
+    rig = open(os.path.join(ROOT, "assets", "k52_rig.txt"), encoding="utf-8").read() \
+        if os.path.exists(os.path.join(ROOT, "assets", "k52_rig.txt")) else ""
+    boxes = [l.split() for l in rig.splitlines() if l.startswith("box ")]
+    need(len(boxes) >= 10 and all(len(b) == 8 and b[1] in ("base", "mount", "cradle") for b in boxes)
+         and "\nshoulder " in rig and "\nsight " in rig,
+         "k52_rig.txt carries %d collider boxes and the shoulder / sight marks" % len(boxes),
+         "k52_rig.txt lacks the B2 colliders or camera marks (python k52_build.py --preview)")
+    need("static void Colliders(Flak.Gun g, Transform[] parents)" in s and "rb.isKinematic = true;" in s
+         and "static int Unblock(Transform holder)" in s,
+         "the gun has colliders (kinematic compound on the mount) and the ring's derelict box is off",
+         "the 52-K colliders or the derelict collider fix are missing")
+    need("g.Sight.position" in s and "Clear(g, g.Shoulder != null" in s and "g.Eye.position" not in s,
+         "the gunner looks over the shoulder or through the sight, clear of the gun",
+         "the gunner camera still sits at the old eye inside the shield")
+    need("static void Watch(Flak.Gun g)" in s and "if (Time.time - g.LastContact > 3f) Watch(g);" in s,
+         "an idle crew sweeps the sky instead of parking the gun",
+         "the idle 52-K stands still")
 
     # Q2 (after the 6.57.0 test): tracking, fair engagements, the crash, the crew
     heli, an2, crew, tech, radar, gepard = (read("Revival.PlayerHeli.cs"), read("Revival.PlayerAn2.cs"),
@@ -1436,6 +1457,43 @@ def check_tower_radar():
          "event code %s is free" % (m.group(1) if m else "?"),
          "the tower radar's event code overlaps another channel")
 
+    # B8b: the siren is a mechanical motor siren from assets/ndr_siren.wav
+    # (research/siren_synth.py), spin-up / wail loop / spin-down by its smpl
+    # loop, for the tower and the air events alike; the old synth is the fallback.
+    need("internal sealed class SirenVoice" in s and 'FileName = "ndr_siren.wav"' in s
+         and "PlayScheduled(" in s and "SetScheduledEndTime(" in s and "_loop = RadarSiren.Clip();" in s
+         and 'SirenVoice.Make("NDR tower siren"' in s
+         and 'SirenVoice.Make("NDR air raid siren (air event)"' in read("Revival.AirEvents.cs"),
+         "siren: SirenVoice plays assets/ndr_siren.wav (tower + air events), synth fallback",
+         "the siren does not go through SirenVoice / ndr_siren.wav")
+    need('"ndr_siren.wav"' in read("build.ps1"), "siren: build.ps1 installs ndr_siren.wav",
+         "build.ps1 does not install assets/ndr_siren.wav")
+    synth = read(os.path.join("research", "siren_synth.py"))
+    need("def town_ir(" in synth and "fft_convolve(" in synth and "PORTS2" in synth and "def check(" in synth,
+         "siren: research/siren_synth.py (rotor/stator harmonics, town convolution, --check)",
+         "research/siren_synth.py is missing or incomplete")
+    wav = os.path.join(ROOT, "assets", "ndr_siren.wav")
+    raw = open(wav, "rb").read() if os.path.exists(wav) else b""
+    # A recording may replace it: any PCM/float WAV the game reads; a loop,
+    # when there is one, lies inside the data.
+    loop, fmt, size_data, pos = None, None, 0, 12
+    while raw[:4] == b"RIFF" and raw[8:12] == b"WAVE" and pos + 8 <= len(raw):
+        cid, size = raw[pos:pos + 4], struct.unpack("<I", raw[pos + 4:pos + 8])[0]
+        if cid == b"fmt " and size >= 16:
+            fmt = struct.unpack("<HHIIHH", raw[pos + 8:pos + 24])
+        elif cid == b"data":
+            size_data = size
+        elif cid == b"smpl" and size >= 60 and struct.unpack("<I", raw[pos + 36:pos + 40])[0] > 0:
+            loop = struct.unpack("<II", raw[pos + 8 + 44:pos + 8 + 52])
+        pos += 8 + size + (size & 1)
+    frames = size_data // (fmt[1] * fmt[5] // 8) if fmt and fmt[1] and fmt[5] >= 8 else 0
+    need(fmt is not None and fmt[0] in (1, 3, 0xFFFE) and frames > 0
+         and (loop is None or 0 <= loop[0] < loop[1] < frames),
+         "siren: ndr_siren.wav readable, %d samples, %s" % (frames, "smpl loop %d..%d" % loop if loop
+                                                              else "no loop (played whole)"),
+         "assets/ndr_siren.wav missing, not a PCM/float WAV, or its smpl loop lies outside the data "
+         "(python research/siren_synth.py)")
+
 
 def check_air_events():
     """Editor air events (task N11, Revival.AirEvents.cs, airdef.py,
@@ -1517,8 +1575,8 @@ def check_air_events():
     # Editor and plugin agree.
     adef = read("airdef.py")
     cols = re.search(r"TSV_COLUMNS = \[(.*?)\]", adef, re.S)
-    need(cols is not None and len(re.findall(r'"[A-Za-z]+"', cols.group(1))) == 18
-         and "if (c.Length < 17)" in src,
+    need(cols is not None and len(re.findall(r'"[A-Za-z]+"', cols.group(1))) == 19
+         and "if (c.Length < 17)" in src and "c.Length > 18" in src,
          "editor and plugin count the same columns", "airdef.py and AirEvents.Parse disagree on the columns")
     need("MIN_BOMBS, MAX_BOMBS, DEFAULT_BOMBS = 20, 60, 48" in adef
          and "Mathf.Clamp(Mathf.RoundToInt(F(p[3])), 20, 60)" in src
@@ -1571,6 +1629,18 @@ def check_air_events():
     rig = read(os.path.join("assets", "tu95_rig.txt"))
     need(len(re.findall(r"^prop \d (Front|Rear) ", rig, re.M)) == 8 and rig.count("\nbox ") >= 3,
          "the rig has eight contra-rotating props and hull boxes", "assets/tu95_rig.txt is incomplete")
+
+    # B8a (6.60.0: nobody saw it): drawn past the far clip, built on the master
+    # too, a real altitude, heard for km. research/tu95_visibility_check.py
+    # proves the numbers over the heightmap; here only the seams.
+    npc = read("Revival.NpcAircraft.cs")
+    launch = npc[npc.find("internal static Flight Launch("):npc.find("internal static void Prepared(")]
+    need("Camera.onPreCull += PreCull;" in src and "internal static float ProxyU(" in src
+         and "AirEvents.Prepared(go, data);" in launch
+         and 'cfg.Bind("AirEvents", "BomberAltitude"' in src and "AudioRolloffMode.Custom" in src
+         and os.path.exists(os.path.join(ROOT, "research", "tu95_visibility_check.py")),
+         "B8a: the Tu-95 is drawn along the whole route (proxy), built on the master, 550 m, heard for km",
+         "B8a seams missing: far-draw proxy, master Prepared fallback, BomberAltitude or the drone rolloff")
 
 
 def check_npc_aircraft():
@@ -1690,7 +1760,7 @@ def check_nofly():
     zones = data.get("zones") or []
     need(len(zones) > 0, "%d zone(s) in assets/editor/nofly.json" % len(zones), "no zone in nofly.json")
     code = {}
-    for m in re.finditer(r'Zones\.Add\(Circle\("([^"]+)", "([^"]+)", "([^"]+)", "([^"]+)", '
+    for m in re.finditer(r'(?:Zones\.Add\(|Zone \w+ = )Circle\("([^"]+)", "([^"]+)", "([^"]+)", "([^"]+)", '
                          r'(-?[0-9.]+)f, (-?[0-9.]+)f, ([0-9.]+)f, ([0-9.]+)f', s):
         code[m.group(1)] = m.groups()
     # polygon zones (P6b): Polygon("id", "name", "scene", "faction", new Vector2[] {...}, ceiling f
@@ -1718,12 +1788,13 @@ def check_nofly():
     need(len(code) + len(poly) == len(zones), "the plugin has no zone the editor lacks",
          "Revival.NoFly.cs and nofly.json list different zones")
     n12 = [z for z in zones if z.get("id") == "N12"]
+    # B4: about 1.5 x the ~340 u settlement ring, a visible gap between them
     need(n12 and n12[0]["scene"] == "GW_Scene_1" and abs(n12[0]["x"] - 1446.6) < 60
-         and abs(n12[0]["z"] - 1703.2) < 60 and 250 <= n12[0]["radius"] <= 600,
+         and abs(n12[0]["z"] - 1703.2) < 60 and 450 <= n12[0]["radius"] <= 600,
          "zone N12 over the neutral settlement NPC_Settlement[Neutrals] (1446.6, 1703.2)",
          "the neutral settlement's zone is missing or not over Point N12")
 
-    # the style: N04 supersedes the thin marker with patrol-weight red ink
+    # the style: B4 supersedes N04's patrol-weight ink with fine even dashes
     st = data.get("style") or {}
 
     def const(src, name):
@@ -1738,14 +1809,19 @@ def check_nofly():
          "the map style differs between Revival.NoFly.cs and nofly.json")
     need(st.get("label") == "NO FLY ZONE", "the label reads NO FLY ZONE", "the label is not NO FLY ZONE")
     pw, pd = const(ink, "StrokeWidth"), const(ink, "DashLength")
-    need(None not in (width, pw, dash, pd) and width == pw and dash == pd and gap == const(ink, "GapLength"),
-         "same weight as a patrol route (stroke %s vs %s, dash %s vs %s)" % (width, pw, dash, pd),
-         "the no-fly line must match the patrol border style")
-    need(st.get("color") == "#ca2020" and st.get("alpha") == 1
-         and "202f / 255f, 32f / 255f, 32f / 255f, 1f" in s
-         and "BuildHatch(zn, p, size)" in s and "ctx.clip()" in js,
-         "native target red with clipped light hatch fill in both maps",
-         "no-fly red or clipped hatch fill missing")
+    need(None not in (width, pw, dash, pd) and width < pw and dash < pd and gap < dash,
+         "finer than a patrol route, even dashes (stroke %s vs %s, dash %s vs %s)" % (width, pw, dash, pd),
+         "the no-fly line must be finer than a patrol route (B4)")
+    m = re.search(r'internal const float InkAlpha = ([0-9.]+)f;', s)
+    need(st.get("color") == "#ca2020" and m is not None and 0.6 <= float(m.group(1)) < 1
+         and abs(float(m.group(1)) - st.get("alpha", 0)) < 1e-6
+         and "202f / 255f, 32f / 255f, 32f / 255f, InkAlpha" in s
+         and "Hatch" not in s and "ctx.clip()" not in js and "fillRect" not in js,
+         "native target red, toned down, without hatch fill in both maps",
+         "no-fly red/alpha differs or a hatch/fill came back (B4)")
+    need("gui.y - StrokeWidth - 2f - size.y" in s and "var y = s[1] - st.width - 2;" in js,
+         "the NO FLY ZONE label sits outside the ring's top edge in both maps",
+         "the NO FLY ZONE label is not above the ring (B4)")
     need("internal static Dash Raster(List<Vector2> points, float strokeWidth)" in ink
          and "MapInk.Raster(samples, StrokeWidth)" in s and 'MapInkLayer.Begin("nofly"' in s,
          "drawn in the native map ink with its own stroke width", "the map ink path is missing")
@@ -1915,10 +1991,18 @@ def check_military_town_ring():
     except (OSError, ValueError):
         pass
     mt = [z for z in zones if z.get("id") == "MT"]
-    if not mt or mt[0].get("shape") != "polygon":
-        bad("MT ring: no polygon zone MT in assets/editor/nofly.json")
+    if not mt or mt[0].get("shape") not in ("polygon", "circle"):
+        bad("MT ring: no zone MT in assets/editor/nofly.json")
         return
-    poly = [(float(p[0]), float(p[1])) for p in mt[0]["points"]]
+    if mt[0]["shape"] == "circle":
+        # B4: a circle round the 380 u town map ring, as a 72-gon here
+        cx, cz, cr = float(mt[0]["x"]), float(mt[0]["z"]), float(mt[0]["radius"])
+        need(abs(cx - 5650.0) < 1 and abs(cz - 900.0) < 1 and cr >= 380.0 * 1.3,
+             "zone MT stands clearly outside the town's 380 u map ring (%.0f u)" % cr,
+             "zone MT is not concentric with or not clearly larger than the town ring")
+        poly = [(cx + cr * math.sin(k * math.pi / 36), cz + cr * math.cos(k * math.pi / 36)) for k in range(72)]
+    else:
+        poly = [(float(p[0]), float(p[1])) for p in mt[0]["points"]]
 
     def inside(x, z):
         c = False
@@ -3215,6 +3299,13 @@ def check_mortar():
     need("FactionShield.Arm();" in s and "const int Traitor = 6;" in s,
          "Fraktionsnetz bewacht jeden Feuerauftrag",
          "das Fraktionsnetz wird nicht mehr bewaffnet")
+    # B1: GetPlayerInfo() is an instance method without arguments on the
+    # player's own component (REVERSE_ENGINEERING 40); without this path
+    # every player's faction reads unknown and the radar refuses all orders.
+    need('AccessTools.Method(t, "GetPlayerInfo", Type.EmptyTypes, null)' in s
+         and "_getInfo.Invoke(stats, null)" in s,
+         "Spielerfraktion ueber GetPlayerInfo() am Spieler lesbar (B1)",
+         "FactionShield liest GetPlayerInfo() nicht am Spieler - jede Spielerfraktion ist unbekannt")
 
     # --- the owner-0 price: StatsOnNpcKilled throws on PhotonPlayer.Find(0).
     need("BreakKillStreak(ai);" in s and '"_lastKillerId"' in s,
@@ -5584,6 +5675,58 @@ def check_vehicle_spawns():
         bad("research/vehicle_spawns_check.py fails: "
             + "; ".join(l for l in r.stdout.splitlines() if l.startswith("FAIL "))[-400:]
             + r.stderr.strip()[-200:])
+
+
+def check_mercs():
+    """[22g] B3 - mercenaries phase 1 (docs/ai/tasks/mercenaries.md, B3 report).
+
+    The shipped hire profiles (assets/editor/mercs.json) pass the same rules
+    the web editor saves with (mercdef.py: ids in the catalogue with the right
+    slot, prices > 0, upkeep <= price, traits 0..50, cap 1..10), and the
+    plugin's built-in fallback table is exactly their runtime TSV, so a client
+    that never reached /runtime/mercs offers the same cards the editor shows.
+    """
+    print("[22g] Mercenaries (B3 phase 1)")
+
+    def read(name):
+        path = os.path.join(ROOT, name)
+        return io.open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+
+    def need(cond, good, why):
+        if cond:
+            ok(good)
+        else:
+            bad("Mercenaries: " + why)
+
+    try:
+        sys.path.insert(0, ROOT)
+        import mercdef
+    except Exception as ex:
+        bad("mercdef.py does not import: %s" % ex)
+        return
+    problems = mercdef.validate_section(mercdef.defaults(), mercdef._catalogue())
+    if problems:
+        bad("assets/editor/mercs.json: " + "; ".join(problems)[:400])
+    else:
+        ok("assets/editor/mercs.json passes mercdef (catalogue ids, prices, traits, cap)")
+    src = read("Revival.Mercs.cs")
+    start = src.find("static readonly string[] DefaultProfiles")
+    block = src[start:src.find("};", start)] if start >= 0 else ""
+    rows = re.findall(r'"((?:[^"\\]|\\.)*)"', block)
+    rows = [r.replace("\\t", "\t") for r in rows]
+    want = [l for l in mercdef.to_tsv({}).splitlines() if l and not l.startswith("#")]
+    need(rows == want, "plugin fallback profiles equal mercdef.to_tsv(defaults)",
+         "Revival.Mercs.cs DefaultProfiles differ from assets/editor/mercs.json - "
+         "regenerate the block from python mercdef.py")
+    need("7700" in src and "MsgStorageListRecieve" in src,
+         "roster channel on storageId 7700 (server-side roster, phase 1S)",
+         "Revival.Mercs.cs lost the storageId 7700 roster channel")
+    need("NDR-MERCS-1" in read("Revival.LiveRoutes.cs") and "/runtime/mercs" in read("routeeditor.py"),
+         "editor profiles published on /runtime/mercs and read by LiveRoutes",
+         "the /runtime/mercs channel is not wired on both ends")
+    need('"Mercs.Tick"' in read("RevivalFrameProfiler.cs") and "Mercs.Tick()" in read("RevivalPlugin.cs"),
+         "Mercs.Tick has its own F6 slot",
+         "Mercs.Tick is not measured in F6")
 
 
 def check_vehicle_condition():
@@ -8012,6 +8155,32 @@ def check_east_crossings():
     need(wall == ["Revival.EastCrossings.cs"] and 'Find("EastTileSeamWall")' in _body(code, "static void TickSeam()"),
          "only the crossings take the tile's seam walls down (switch off = walls up)",
          "EastTileSeamWall is handled in %s, not only in EastCrossings.TickSeam" % wall)
+    # B7a (6.60.0): a seam wall left standing is an invisible wall from the
+    # vanilla side - it must not wait for the pipeline, and it goes for good
+    tick = _body(code, "internal static void Tick()")
+    seam_body = _body(code, "static void TickSeam()")
+    need("TickSeam();" in tick and "if (_doneLoad != _load || _refused) return;" in tick
+         and tick.index("TickSeam();") < tick.index("if (_doneLoad != _load || _refused) return;")
+         and "SceneManager.sceneCount" in seam_body and "EdgeRise(" in seam_body
+         and "UnityEngine.Object.Destroy(cols[c]);" in seam_body,
+         "the seam walls go by the live heights on every tile scene, before the crossings pipeline, colliders destroyed",
+         "EastCrossings.TickSeam waits for the pipeline, handles one tile scene only or only switches the wall off")
+    # B7b (6.60.0): S2's approach lowers the floor under the tile bundle's cut
+    # road piece - it is laid onto the live floor before it comes on
+    need("ReseatCutRoads(st.CutRoads)" in seam_body
+         and seam_body.index("ReseatCutRoads(st.CutRoads)") < seam_body.index("st.CutRoads.gameObject.SetActive(true);")
+         and "mc.sharedMesh = m;" in _body(code, "static string ReseatCutRoads(Transform cutRoads)"),
+         "the cut road pieces are laid onto the live cut floor (collider re-cooked) before they come on",
+         "EastCrossings.TickSeam switches the cut road pieces on without ReseatCutRoads - S2's piece floats")
+    # B7b: level7's invisible map bound (ServerObjects/Colliders/Collider) has
+    # its east wall at x 2394.4 across all three cut roads, solid from the
+    # vanilla side only - the one-way wall of the B7a report
+    bound = _body(code, "static string OpenEastBound(GameObject[] roots)")
+    need("OpenEastBound(" in _body(code, "static void Props(Scene scene)")
+         and 'BoundPath = "ServerObjects/Colliders/Collider"' in code and "mc.sharedMesh = open;" in bound
+         and "keep.Add(" in bound and "BoundEastX" in bound,
+         "level7's map bound loses its east wall (x 2394.4, one-way) with the cuts in; the other walls stay",
+         "EastCrossings does not open level7's east map bound - an invisible wall at x 2394 on every crossing road")
     # the generated data
     need("GENERATED by research/east_crossings.py -emit" in data,
          "Revival.EastCrossingsData.cs is generated", "Revival.EastCrossingsData.cs is not the generator's")
@@ -8073,9 +8242,11 @@ def check_east_crossings():
              "%s: paint records inconsistent" % key)
     props = "\n".join(re.findall(r'"(GW_Scene_1[^"]*)"', data))
     hides = set(re.findall(r"/([^/\\]+)\\t[-\d.]+\\t[-\d.]+\\t[-\d.]+\\thide\\t", props))
-    need({"Tonel_GD_LOD_Group", "Zaval_1_LOD_Group", "Tonel_Avto_LOD_Group", "Tonel_Gate_LOD_Group (2)"} <= hides
+    need({"Tonel_GD_LOD_Group", "Zaval_1_LOD_Group", "Tonel_Avto_LOD_Group", "Tonel_Gate_LOD_Group (2)",
+          "Tonel_Avto_LOD_Group (1)", "Zaval_2_LOD_Group (1)"} <= hides
          and not {"Railroad_Section12_LOD_Group", "electric_train_LOD_Group"} & hides,
-         "both tunnels go (S1 Tonel_GD + Zaval_1, S3 Tonel_Avto + gate); the S1 track and train stay",
+         "the tunnels on the crossing roads go (S1 Tonel_GD + Zaval_1, S2 Tonel_Avto (1) + Zaval_2 (1) - B7b, "
+         "S3 Tonel_Avto + gate); the S1 track and train stay",
          "the tunnel hides / track-and-train keeps are not in the data")
     place = re.search(r"Place = \{(.*?)\};", data, re.S)
     cond = re.search(r'"GW_Scene_1\\tServerObjects/Triggers/ChangeLocationTriggers/Marauder_Conductor_02\\t'
@@ -8135,6 +8306,7 @@ if __name__ == "__main__":
     check_fuel_economy()
     check_vehicle_condition()
     check_vehicle_spawns()
+    check_mercs()
     check_parachute()
     check_stinger()
     check_crocodile()

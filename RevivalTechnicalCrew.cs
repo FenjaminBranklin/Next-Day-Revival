@@ -1084,7 +1084,12 @@ namespace NextDayRevival
             t.Hand = null;
         }
 
-        sealed class Hands { public Transform Hand; public float Next; }
+        sealed class Hands
+        {
+            public Transform Hand;
+            public float Next;
+            public readonly List<Renderer> Renderers = new List<Renderer>();
+        }
         static readonly Dictionary<int, Hands> _unarmed = new Dictionary<int, Hands>();
 
         /// <summary>
@@ -1106,9 +1111,12 @@ namespace NextDayRevival
             h.Next = Time.time + 0.2f;
             if (h.Hand == null) h.Hand = WeaponHand(ai);
             if (h.Hand == null) return;
-            Renderer[] rs = h.Hand.GetComponentsInChildren<Renderer>(true);
-            for (int i = 0; i < rs.Length; i++)
-                if (rs[i] != null && rs[i].enabled) rs[i].enabled = false;
+            // Reuse storage while still discovering replacement weapon models
+            // at the existing 5 Hz cadence. Do not cache membership permanently.
+            h.Renderers.Clear();
+            h.Hand.GetComponentsInChildren<Renderer>(true, h.Renderers);
+            for (int i = 0; i < h.Renderers.Count; i++)
+                if (h.Renderers[i] != null && h.Renderers[i].enabled) h.Renderers[i].enabled = false;
         }
 
         static Transform WeaponHand(Component ai)
@@ -1219,7 +1227,7 @@ namespace NextDayRevival
             catch { return ai.GetComponent<NavMeshAgent>(); }
         }
 
-        static readonly object[] PauseArgs = { 1.4f };
+        const float PauseSeconds = 1.4f;
         static MethodInfo _mClearIntentions, _mPauseTime;
         static Type _mQuietOwner;
 
@@ -1244,8 +1252,9 @@ namespace NextDayRevival
             }
             try
             {
-                if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
-                if (_mPauseTime != null) _mPauseTime.Invoke(ai, PauseArgs);   // shared, Invoke copies it (n01 perf)
+                // P1b: compiled calls, no reflection Invoke per man per frame.
+                if (_mClearIntentions != null) FastCall.Void(_mClearIntentions, ai);
+                if (_mPauseTime != null) FastCall.VoidFloat(_mPauseTime, ai, PauseSeconds);
             }
             catch { }
         }
@@ -1302,6 +1311,7 @@ namespace NextDayRevival
                 if (clip == null) return;
                 GameObject model = Modell(ai);
                 if (model == null) return;
+                if (!Gesehen(ai, model)) return;
 
                 float laenge = 0f;
                 if (_clipLength != null)
@@ -1318,6 +1328,68 @@ namespace NextDayRevival
                 FastCall.ObjFloat(_sample, clip, model, t);
             }
             catch { }
+        }
+
+        // P1b script budget: SampleAnimation poses the whole skeleton and ran
+        // for every seated man every frame (the flak crews alone were most of
+        // Flak.LateFrame's 0.7 ms). A man no camera can see is not posed: a
+        // body mesh the engine drew last frame (any camera, shadows included)
+        // or a body inside the view camera's frustum now (the frame he comes on
+        // screen) keeps the sampling exactly as before. Off screen the game's
+        // own animation holds him, as Animation's BasedOnRenderers culling
+        // does for every other man.
+        sealed class SitView
+        {
+            public GameObject Model;
+            public float Refresh;
+            public readonly List<SkinnedMeshRenderer> Skins = new List<SkinnedMeshRenderer>();
+        }
+        static readonly Dictionary<int, SitView> _sitView = new Dictionary<int, SitView>();
+        static readonly List<int> _sitDrop = new List<int>();
+        static readonly Plane[] _planes = new Plane[6];
+        static int _planesFrame = -1;
+        static bool _planesOk;
+        static float _sitPurge;
+
+        static bool Gesehen(Component ai, GameObject model)
+        {
+            float now = Time.time;
+            if (now >= _sitPurge)
+            {
+                _sitPurge = now + 30f;
+                _sitDrop.Clear();
+                foreach (KeyValuePair<int, SitView> e in _sitView)
+                    if (e.Value.Model == null) _sitDrop.Add(e.Key);
+                for (int i = 0; i < _sitDrop.Count; i++) _sitView.Remove(_sitDrop[i]);
+            }
+            int id = ai.GetInstanceID();
+            SitView v;
+            if (!_sitView.TryGetValue(id, out v)) { v = new SitView(); _sitView[id] = v; }
+            if (!ReferenceEquals(v.Model, model) || now >= v.Refresh)
+            {
+                // Character LOD swaps meshes and a redraw can bring new ones.
+                v.Model = model;
+                v.Refresh = now + 1f;
+                v.Skins.Clear();
+                model.GetComponentsInChildren<SkinnedMeshRenderer>(true, v.Skins);
+            }
+            if (v.Skins.Count == 0) return true;
+            for (int i = 0; i < v.Skins.Count; i++)
+            {
+                SkinnedMeshRenderer s = v.Skins[i];
+                if (s != null && s.isVisible) return true;
+            }
+            if (_planesFrame != Time.frameCount)
+            {
+                _planesFrame = Time.frameCount;
+                Camera cam = CameraOwner.ViewCamera();
+                _planesOk = cam != null;
+                if (_planesOk) GeometryUtility.CalculateFrustumPlanes(cam, _planes);
+            }
+            if (!_planesOk) return true;
+            // 3 m around the body (Flak.K units): a sitting or standing man.
+            return GeometryUtility.TestPlanesAABB(_planes,
+                new Bounds(ai.transform.position + Vector3.up * (1f * Flak.K), Vector3.one * (3f * Flak.K)));
         }
 
         /// <summary>Find the three clips among everything loaded, once. They are

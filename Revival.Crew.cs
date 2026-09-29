@@ -358,6 +358,21 @@ namespace NextDayRevival
                                  typeof(byte), typeof(object[]) }),
                          "PhotonNetwork.InstantiateSceneObject",
                          "CrewInstantiatePrefix", null)) installed++;
+                // B3: owned squads (mercenaries) - after the block above.
+                try
+                {
+                    MethodInfo sceneObject = Look(RevivalPlugin.TypeByName("PhotonNetwork"),
+                        "InstantiateSceneObject", new Type[] { typeof(string), typeof(Vector3),
+                            typeof(Quaternion), typeof(byte), typeof(object[]) });
+                    HarmonyMethod owned = new HarmonyMethod(typeof(Crew).GetMethod("OwnerInstantiatePrefix"));
+                    owned.priority = Priority.Low;
+                    if (sceneObject != null) harmony.Patch(sceneObject, owned, null, null, null, null);
+                }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogError("Crew: owned squad hook NOT installed - " + ex.Message
+                        + ". Mercenaries cannot spawn.");
+                }
                 foreach (string method in new string[] { "SetStateWithAnimAndSync",
                     "NetworkSendPointsStatesData", "SetHealthValue", "DeathAction" })
                     if (Hook(harmony, Look(npc, method, null), "NPC_AI2." + method,
@@ -1253,6 +1268,82 @@ namespace NextDayRevival
             finally { _pointHook = null; _quietSquad = false; }
         }
 
+        /// <summary>
+        /// B3 mercenaries: the same squad, but the men are the CALLING
+        /// client's own Photon objects (PhotonNetwork.Instantiate), not scene
+        /// objects. Scene objects are master-only and outlive their spawner;
+        /// a player's objects are destroyed on every client when he leaves or
+        /// drops (PUN autoCleanUp), which is exactly the mercenary's
+        /// "vanish with the owner". StartMainInit builds men only on the
+        /// master, so on any other client OwnerInit runs its two builders
+        /// directly. The extended crew block (CrewInstantiatePrefix) is still
+        /// appended, so peers rebuild the body through CrewReplica.
+        /// </summary>
+        internal static GameObject DropOwnedSquad(Vector3 home, Vector3[] positions,
+            string faction, List<RevivalComposition.CrewMan> loadout, string key,
+            Action<Component, int> point)
+        {
+            _ownerSpawn = true;
+            try { return DropCustomSquad(home, positions, faction, loadout, key, point, false); }
+            finally { _ownerSpawn = false; }
+        }
+
+        static bool _ownerSpawn;
+        static MethodInfo _photonInstantiate, _photonMaster;
+        static bool _photonLooked;
+
+        static void PhotonLook()
+        {
+            if (_photonLooked) return;
+            _photonLooked = true;
+            Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
+            if (photon == null) return;
+            _photonMaster = AccessTools.PropertyGetter(photon, "isMasterClient");
+            foreach (MethodInfo m in photon.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (m.Name != "Instantiate" || m.IsGenericMethod) continue;
+                ParameterInfo[] ps = m.GetParameters();
+                if (ps.Length == 5 && ps[0].ParameterType == typeof(string)
+                    && ps[1].ParameterType == typeof(Vector3) && ps[2].ParameterType == typeof(Quaternion)
+                    && ps[3].ParameterType == typeof(byte) && ps[4].ParameterType == typeof(object[]))
+                { _photonInstantiate = m; break; }
+            }
+        }
+
+        /// <summary>StartMainInit with the settlement's own spawn step skipped
+        /// off-master (SettlementType 2 skips NetworkInitPointsAndNpc, CONFIRMED
+        /// IL StartMainInit IL_00DA), then InitSpawnNpc(true) + InitSetupNpc.</summary>
+        static void OwnerInit(Component sied)
+        {
+            PhotonLook();
+            bool master = _photonMaster != null && (bool)_photonMaster.Invoke(null, null);
+            if (master) { Invoke(sied, "StartMainInit"); return; }
+            float type = GetNumber(sied, "SettlementType");
+            SetNumber(sied, "SettlementType", 2f);
+            try { Invoke(sied, "StartMainInit"); }
+            finally { SetNumber(sied, "SettlementType", type); }
+            MethodInfo spawn = AccessTools.Method(sied.GetType(), "InitSpawnNpc", null, null);
+            if (spawn == null) throw new MissingMethodException("NPC_Settlement.InitSpawnNpc");
+            object[] args = new object[spawn.GetParameters().Length];
+            for (int i = 0; i < args.Length; i++)
+                args[i] = spawn.GetParameters()[i].ParameterType == typeof(bool) ? (object)true
+                    : Activator.CreateInstance(spawn.GetParameters()[i].ParameterType);
+            spawn.Invoke(sied, args);
+            Invoke(sied, "InitSetupNpc");
+        }
+
+        /// <summary>Prefix on PhotonNetwork.InstantiateSceneObject, after
+        /// CrewInstantiatePrefix (low priority): while an owned squad is built,
+        /// the man becomes this client's object instead of a scene object.</summary>
+        public static bool OwnerInstantiatePrefix(object[] __args, ref GameObject __result)
+        {
+            if (!_ownerSpawn || __args == null || __args.Length != 5) return true;
+            PhotonLook();
+            if (_photonInstantiate == null) return true;
+            __result = _photonInstantiate.Invoke(null, __args) as GameObject;
+            return false;
+        }
+
         /// <summary>The men of a spawned crew settlement, alive or dead.</summary>
         internal static Array Men(GameObject settlement)
         {
@@ -1371,7 +1462,7 @@ namespace NextDayRevival
                 Type viewType = RevivalPlugin.TypeByName("PhotonView");
                 if (viewType != null) settlement.AddComponent(viewType);
 
-                if (noFpv || CrewDrone.GarrisonKey(_groundKey)) settlement.AddComponent<GarrisonNoFpv>();
+                if (noFpv || _ownerSpawn || CrewDrone.GarrisonKey(_groundKey)) settlement.AddComponent<GarrisonNoFpv>();
                 Component sied = settlement.AddComponent(sType);
                 Listen(sied, 0);
                 Abschreiben(sied, VorlageSiedlung(sType, settlement));
@@ -1383,7 +1474,11 @@ namespace NextDayRevival
                 _spawningFraction = fraktion;
                 _spawningCar = car.transform;
                 _spawningCount = count;
-                try { Invoke(sied, "StartMainInit"); }
+                try
+                {
+                    if (_ownerSpawn) OwnerInit(sied);
+                    else Invoke(sied, "StartMainInit");
+                }
                 finally { _spawningSettlement = null; _spawningCar = null; }
                 _appearance.Clear();
                 if (!_quietSquad) ArmNativeWeapons(sied);
@@ -2865,6 +2960,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_CrewRemoteFix_Update);
+            try
+            {
             if (Time.time < _next) return;
             _next = Time.time + 0.25f;
             if (Crew.ApplyRemoteAppearance(_ai, _appearance, _weapon,
@@ -2883,6 +2981,8 @@ namespace NextDayRevival
             Crew.GiveUpRemoteRepair(_ai, _problem.Length == 0
                 ? "native context was not ready within 6 s" : _problem);
             UnityEngine.Object.Destroy(this);
+            }
+            finally { FrameProf.E(FrameProf.S_CrewRemoteFix_Update); }
         }
     }
 
@@ -2908,11 +3008,16 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_CrewAnimationKeeper_Update);
+            try
+            {
             if (_ai == null) { UnityEngine.Object.Destroy(this); return; }
             if (Time.time < _next) return;
             _next = Time.time + 0.5f;
             Crew.MinimalRemoteRepair(_ai);
             if (Time.time >= _deadline) UnityEngine.Object.Destroy(this);
+            }
+            finally { FrameProf.E(FrameProf.S_CrewAnimationKeeper_Update); }
         }
     }
 
@@ -2940,6 +3045,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_CrewAlarm_Update);
+            try
+            {
             if (Time.time < _next) return;
             _next = Time.time + 0.25f;
 
@@ -2957,6 +3065,8 @@ namespace NextDayRevival
                 + "state did not start within 10 s"
                 + (_lastProblem.Length == 0 ? "." : " - " + _lastProblem + "."));
             UnityEngine.Object.Destroy(this);
+            }
+            finally { FrameProf.E(FrameProf.S_CrewAlarm_Update); }
         }
     }
 
@@ -2990,6 +3100,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_CrewLawSwap_Update);
+            try
+            {
             if (_ai == null) { UnityEngine.Object.Destroy(this); return; }
             if (Time.time < _drawAt) return;
             try
@@ -3004,6 +3117,8 @@ namespace NextDayRevival
                     + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
             }
             UnityEngine.Object.Destroy(this);
+            }
+            finally { FrameProf.E(FrameProf.S_CrewLawSwap_Update); }
         }
     }
 

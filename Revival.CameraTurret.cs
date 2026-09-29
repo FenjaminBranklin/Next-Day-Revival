@@ -97,18 +97,45 @@ namespace NextDayRevival
         /// koennten Kameralage, Fadenkreuz und Schuss auf drei verschiedene
         /// Kameras zeigen.
         /// </summary>
+        static Camera[] _activeCameras = new Camera[8];
+        static Camera _mainCamera, _fallbackCamera;
+        static int _cameraFrame = -1;
+
+        // Camera.main performs a tagged scene search in this Unity version.
+        // Enumerate the small native camera registry once per frame instead.
+        // Cache misses as well as hits; the buffer only grows on camera creation.
+        internal static Camera MainCamera()
+        {
+            RefreshCameras();
+            return _mainCamera;
+        }
+
+        static void RefreshCameras()
+        {
+            if (_cameraFrame == Time.frameCount) return;
+            _cameraFrame = Time.frameCount;
+            int count = Camera.allCamerasCount;
+            if (count > _activeCameras.Length)
+                _activeCameras = new Camera[Mathf.Max(count, _activeCameras.Length * 2)];
+            count = Camera.GetAllCameras(_activeCameras);
+            _mainCamera = null;
+            _fallbackCamera = null;
+            for (int i = 0; i < count; i++)
+            {
+                Camera cam = _activeCameras[i];
+                if (cam == null || !cam.enabled || !cam.gameObject.activeInHierarchy) continue;
+                if (_mainCamera == null && cam.CompareTag("MainCamera")) _mainCamera = cam;
+                if (_fallbackCamera == null || cam.depth > _fallbackCamera.depth) _fallbackCamera = cam;
+            }
+            // Do not retain cameras removed from the native list.
+            for (int i = count; i < _activeCameras.Length; i++) _activeCameras[i] = null;
+        }
+
         public static Camera ViewCamera()
         {
             if (_cam != null) return _cam;
-            Camera cam = Camera.main;
-            if (cam != null) return cam;
-            Camera[] all = Camera.allCameras;
-            Camera best = null;
-            for (int i = 0; i < all.Length; i++)
-                if (all[i] != null && all[i].enabled
-                    && (best == null || all[i].depth > best.depth))
-                    best = all[i];
-            return best;
+            RefreshCameras();
+            return _mainCamera != null ? _mainCamera : _fallbackCamera;
         }
 
         /// <summary>
@@ -2614,6 +2641,22 @@ namespace NextDayRevival
             /// <summary>The vehicle (its VehicleGameSystem) a view id belongs to.</summary>
             static Transform VehicleRoot(int viewId)
             {
+                // P1b: remembered per view id - every turret message of a
+                // manned gun (10+ a second) did a PhotonView.Find by reflection
+                // and a parent walk. A destroyed root reads null and is looked
+                // up again.
+                Transform known;
+                if (_rootOf.TryGetValue(viewId, out known) && known != null) return known;
+                Transform found = VehicleRootLookup(viewId);
+                if (found != null) _rootOf[viewId] = found;
+                else _rootOf.Remove(viewId);
+                return found;
+            }
+
+            static readonly Dictionary<int, Transform> _rootOf = new Dictionary<int, Transform>();
+
+            static Transform VehicleRootLookup(int viewId)
+            {
                 object view = _findView.Invoke(null, new object[] { viewId });
                 Component component = view as Component;
                 if (component == null) return null;
@@ -2665,11 +2708,14 @@ namespace NextDayRevival
                         return;
                     }
 
-                    Transform[] turrets = FindTurrets(root);
-                    if (turrets.Length == 0) return;
-
                     Remote state;
                     bool first = !_remote.TryGetValue(viewId, out state);
+                    // P1b: the turret list of a vehicle already synchronised is
+                    // reused (a Transform walk and a list per message before).
+                    Transform[] turrets = !first && ReferenceEquals(state.Root, root) && state.Turrets != null
+                        && state.Turrets.Length > 0 && state.Turrets[0] != null
+                        ? state.Turrets : FindTurrets(root);
+                    if (turrets.Length == 0) return;
                     if (first)
                     {
                         state = new Remote();

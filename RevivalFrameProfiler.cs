@@ -172,7 +172,36 @@ namespace NextDayRevival
         public const int S_KatyushaD = 108;
         public const int S_VehicleConditionT = 109;
         public const int S_VehicleConditionD = 110;
-        public const int Count = 111;
+        public const int S_Tu95Visual_Update = 111;
+        public const int S_CrewRemoteFix_Update = 112;
+        public const int S_CrewAnimationKeeper_Update = 113;
+        public const int S_CrewAlarm_Update = 114;
+        public const int S_CrewLawSwap_Update = 115;
+        public const int S_CrocodileSwimmer_Update = 116;
+        public const int S_CrocodileSwimmer_LateUpdate = 117;
+        public const int S_MapInkLayer_LateUpdate = 118;
+        public const int S_MapLabels_LateUpdate = 119;
+        public const int S_An2Visual_Update = 120;
+        public const int S_An2Glide_Update = 121;
+        public const int S_HeliCrashFall_Update = 122;
+        public const int S_HeliWreckSettle_Update = 123;
+        public const int S_HeliEngine_Update = 124;
+        public const int S_RoadClear_Update = 125;
+        public const int S_T72RunningGear_LateUpdate = 126;
+        public const int S_NdrFlash_Update = 127;
+        public const int S_MineObject_Update = 128;
+        public const int S_ArtyDroneCrash_Update = 129;
+        public const int S_ArtyRecoil_LateUpdate = 130;
+        public const int S_GasRound_Update = 131;
+        public const int S_GasCloud_Update = 132;
+        public const int S_GepardRig_Update = 133;
+        public const int S_TechnicalTracerStreak_Update = 134;
+        public const int S_MercCoverT = 135;
+        public const int S_MercCoverD = 136;
+        public const int S_MercsT = 137;
+        public const int S_MercsD = 138;
+        public const int S_MercsL = 139;
+        public const int Count = 140;
 
         static readonly string[] Names = new string[]
         {
@@ -265,6 +294,35 @@ namespace NextDayRevival
             "Katyusha.Draw",
             "VehicleCondition.Tick",
             "VehicleCondition.Draw",
+            "Tu95Visual.Update",
+            "CrewRemoteFix.Update",
+            "CrewAnimationKeeper.Update",
+            "CrewAlarm.Update",
+            "CrewLawSwap.Update",
+            "CrocodileSwimmer.Update",
+            "CrocodileSwimmer.LateUpdate",
+            "MapInkLayer.LateUpdate",
+            "MapLabels.LateUpdate",
+            "An2Visual.Update",
+            "An2Glide.Update",
+            "HeliCrashFall.Update",
+            "HeliWreckSettle.Update",
+            "HeliEngine.Update",
+            "RoadClear.Update",
+            "T72RunningGear.LateUpdate",
+            "NdrFlash.Update",
+            "MineObject.Update",
+            "ArtyDroneCrash.Update",
+            "ArtyRecoil.LateUpdate",
+            "GasRound.Update",
+            "GasCloud.Update",
+            "GepardRig.Update",
+            "TechnicalTracerStreak.Update",
+            "MercCover.Tick",
+            "MercCover.Draw",
+            "Mercs.Tick",
+            "Mercs.Draw",
+            "Mercs.LateFrame",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI.
@@ -278,8 +336,8 @@ namespace NextDayRevival
                 if ((i >= TurretScope && i <= DroneAlrtD) || i == OtherDraw
                     || n.EndsWith(".Draw") || n.EndsWith(".DrawScope") || n.EndsWith(".DrawMap"))
                     Kind[i] = 3;
-                else if (i == PatrolFixed) Kind[i] = 1;
-                else if (i == CameraLate || n.EndsWith(".LateFrame") || n.EndsWith(".LateTick"))
+                else if (i == PatrolFixed || n.EndsWith(".FixedUpdate")) Kind[i] = 1;
+                else if (i == CameraLate || n.EndsWith(".LateFrame") || n.EndsWith(".LateTick") || n.EndsWith(".LateUpdate"))
                     Kind[i] = 2;
             }
         }
@@ -540,7 +598,7 @@ namespace NextDayRevival
         {
             try
             {
-                Camera cam = Camera.main;
+                Camera cam = CameraOwner.MainCamera();
                 Terrain t = Terrain.activeTerrain;
                 Terrain[] all = Terrain.activeTerrains;
                 return string.Format(

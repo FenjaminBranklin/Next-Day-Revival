@@ -28,6 +28,7 @@ using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace NextDayRevival
 {
@@ -95,9 +96,9 @@ namespace NextDayRevival
             if (_vgs != null) return _fuel != null;
             _vgs = RevivalPlugin.TypeByName("VehicleGameSystem");
             if (_vgs == null) return false;
-            _fuel = AccessTools.Field(_vgs, "Fuel");
-            _fuelMax = AccessTools.Field(_vgs, "FuelMax");
-            _cons = AccessTools.Field(_vgs, "FuelConsumption");
+            _fuel = FastField.Find(_vgs, "Fuel");
+            _fuelMax = FastField.Find(_vgs, "FuelMax");
+            _cons = FastField.Find(_vgs, "FuelConsumption");
             if (_fuel == null || _fuelMax == null || _cons == null
                 || _fuel.FieldType != typeof(float) || _fuelMax.FieldType != typeof(float)
                 || _cons.FieldType != typeof(float))
@@ -234,6 +235,8 @@ namespace NextDayRevival
         static Type _type;
         static FieldInfo _stock;
         static float _nextScan, _nextBeat, _lastTick;
+        static int _scanSig;
+        static float _scanAt = -100f;
 
         static float Cap { get { return Mathf.Max(0f, CfgCanisters.Value) * 100f; } }
 
@@ -244,13 +247,26 @@ namespace NextDayRevival
             {
                 _type = RevivalPlugin.TypeByName("FuelCollumObject");
                 if (_type == null) return;
-                _stock = AccessTools.Field(_type, "FuelStock");
+                _stock = FastField.Find(_type, "FuelStock");
                 if (_stock != null && _stock.FieldType != typeof(float)) _stock = null;
                 if (_stock == null) { RevivalPlugin.L.LogWarning("Fuel: FuelCollumObject.FuelStock missing - stations unchanged."); return; }
             }
             if (_stock == null) return;
             FuelDepot.EnsureNet();             // receive the master's stocks
-            if (Time.time >= _nextScan) { _nextScan = Time.time + 10f; Scan(); }
+            // P1b: the columns are map objects - FindObjectsOfType (a walk over
+            // every MonoBehaviour) again when a scene came or went, else once a
+            // minute, instead of every 10 s.
+            if (Time.time >= _nextScan)
+            {
+                _nextScan = Time.time + 10f;
+                int sig = SceneSweep.LoadedSignature();
+                if (sig != _scanSig || Time.time >= _scanAt + 60f)
+                {
+                    _scanSig = sig;
+                    _scanAt = Time.time;
+                    Scan();
+                }
+            }
 
             float dt = Time.realtimeSinceStartup - _lastTick;
             _lastTick = Time.realtimeSinceStartup;
@@ -260,7 +276,7 @@ namespace NextDayRevival
             {
                 Column c = _cols[i];
                 if (c.C == null) { _cols.RemoveAt(i); continue; }
-                float now = (float)_stock.GetValue(c.C);
+                float now = FastField.GetFloat(_stock, c.C);         // P1b: no boxed float per column per frame
                 if (now < c.Seen - 1f)
                 {
                     // A canister was filled here, on this client.
@@ -273,7 +289,7 @@ namespace NextDayRevival
                 {
                     float add = Cap * dt / (Mathf.Max(1f, CfgRefillMinutes.Value) * 60f);
                     now = Mathf.Min(Cap, now + add);
-                    _stock.SetValue(c.C, now);
+                    FastField.SetFloat(_stock, c.C, now);
                     c.Seen = now;
                 }
             }
@@ -498,6 +514,20 @@ namespace NextDayRevival
         static readonly SceneSweep.Visitor _bindVisit = BindVisit;
         static readonly GameObject[] _found = new GameObject[5];
         static float _nextBind;
+        static int _bindSig;
+        static float _bindSigAt = -100f;
+
+        static int ModelSceneSig()
+        {
+            int sig = 17;
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene sc = SceneManager.GetSceneAt(i);
+                if (sc.isLoaded && sc.name.StartsWith(ModelScenes, StringComparison.Ordinal))
+                    sig = sig * 31 + sc.GetHashCode();
+            }
+            return sig;
+        }
 
         static bool BindVisit(Transform t, string name)
         {
@@ -517,10 +547,19 @@ namespace NextDayRevival
                 for (int i = 0; i < _tanks.Length; i++)
                     if (_tanks[i].Model == null || !_tanks[i].Model.activeInHierarchy) unbound = true;
                 if (!unbound) return;
+                // P1b: a tank the last complete sweep did not find (greybox, a
+                // model missing from the bundle) made a new sweep over every
+                // airfield node - and a name string per node - every 5 s for the
+                // whole session. Again at once when the loaded airfield scenes
+                // change, else every 30 s.
+                int sig = ModelSceneSig();
+                if (sig == _bindSig && Time.time < _bindSigAt + 30f) return;
+                _bindSig = sig;
+                _bindSigAt = Time.time;
                 for (int k = 0; k < _found.Length; k++) _found[k] = null;
                 _bindSweep.Begin(ModelScenes);
             }
-            if (!_bindSweep.Step(0.5, _bindVisit)) return;
+            if (!_bindSweep.Step(0.1, _bindVisit)) return;
             for (int i = 0; i < _tanks.Length; i++)
                 if (_found[i] != null) Bind(_tanks[i], _found[i]);
         }
@@ -677,8 +716,8 @@ namespace NextDayRevival
                 Vector3 p = c.transform.position;
                 Vector3 flat = p - Centre; flat.y = 0f;
                 if (flat.sqrMagnitude > 400f * 400f) return;
-                float dmg = ToFloat(AccessTools.Field(c.GetType(), "ExplosionDamage"), c, 0f);
-                float rad = ToFloat(AccessTools.Field(c.GetType(), "ExplodeDamageRadius"), c, 6f);
+                float dmg = ToFloat(FastField.Find(c.GetType(), "ExplosionDamage"), c, 0f);
+                float rad = ToFloat(FastField.Find(c.GetType(), "ExplodeDamageRadius"), c, 6f);
                 Blast(p, dmg, rad);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("FuelDepot explosion: " + ex.Message); }
@@ -700,7 +739,7 @@ namespace NextDayRevival
                 if (!_cameraLooked)
                 {
                     _cameraLooked = true;
-                    _camera = AccessTools.Field(__instance.GetType(), "MainCamera");
+                    _camera = FastField.Find(__instance.GetType(), "MainCamera");
                 }
                 Transform cam = _camera == null ? null : _camera.GetValue(__instance) as Transform;
                 if (cam == null) return;
@@ -925,7 +964,7 @@ namespace NextDayRevival
         static void LookAtTank()
         {
             _tankStatus = null;
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return;
             Vector3 o = cam.transform.position, d = cam.transform.forward;
             Vector3 flat = o - Centre; flat.y = 0f;
@@ -956,10 +995,19 @@ namespace NextDayRevival
         /// <summary>The body freeze of ConvoyFreezeHook holds while refuelling.</summary>
         internal static bool Busy { get { return _job; } }
 
+        static string _keyText;
+        static KeyCode _key = KeyCode.G;
+
+        /// <summary>P1b: parsed when the setting changes, not every frame the
+        /// prompt shows (Enum.Parse allocates).</summary>
         static KeyCode Key()
         {
-            try { return (KeyCode)Enum.Parse(typeof(KeyCode), CfgKey.Value, true); }
-            catch { return KeyCode.G; }
+            string v = CfgKey.Value;
+            if (ReferenceEquals(v, _keyText)) return _key;
+            _keyText = v;
+            try { _key = (KeyCode)Enum.Parse(typeof(KeyCode), v, true); }
+            catch { _key = KeyCode.G; }
+            return _key;
         }
 
         static void TickIdle()
@@ -1121,7 +1169,7 @@ namespace NextDayRevival
                 {
                     _canOwner = pt;
                     _canFind = AccessTools.Method(pt, "FindItemJerryCan", new Type[] { typeof(bool) }, null);
-                    _canBackpack = AccessTools.Field(pt, "_backpackData");
+                    _canBackpack = FastField.Find(pt, "_backpackData");
                 }
                 MethodInfo find = _canFind;
                 if (find == null) continue;
@@ -1132,7 +1180,7 @@ namespace NextDayRevival
                 if (data != null && !ReferenceEquals(data.GetType(), _canDataOwner))
                 {
                     _canDataOwner = data.GetType();
-                    _canEnergy = AccessTools.Field(_canDataOwner, "ItemEnergy");
+                    _canEnergy = FastField.Find(_canDataOwner, "ItemEnergy");
                 }
                 FieldInfo en = data == null ? null : _canEnergy;
                 Array arr = en == null ? null : en.GetValue(data) as Array;
@@ -1210,7 +1258,7 @@ namespace NextDayRevival
             try
             {
                 Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
-                FieldInfo ev = photon == null ? null : AccessTools.Field(photon, "OnEventCall");
+                FieldInfo ev = photon == null ? null : FastField.Find(photon, "OnEventCall");
                 if (ev == null) return;
                 _raise = AccessTools.Method(photon, "RaiseEvent", null, null);
                 _options = RevivalPlugin.TypeByName("RaiseEventOptions");

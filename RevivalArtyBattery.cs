@@ -1106,8 +1106,7 @@ namespace NextDayRevival
             try
             {
                 if (!Look() || _mIsAlive == null) return true;
-                object r = _mIsAlive.Invoke(ai, null);
-                return r is bool && (bool)r;
+                return FastCall.Bool(_mIsAlive, ai);     // P1b: no boxed bool per call
             }
             catch { return false; }
         }
@@ -1740,6 +1739,10 @@ namespace NextDayRevival
                 if (anim == null) return;
                 string clip = WorkClip(anim, pick);
                 if (clip == null) return;
+                // P1b: the every-frame answer ("still playing") without a
+                // reflection call and an argument array per man per frame.
+                Animation direct = anim as Animation;
+                if (direct != null && direct.IsPlaying(clip)) return;
                 object playing = _mIsPlaying == null ? null
                     : _mIsPlaying.Invoke(anim, new object[] { clip });
                 if (playing is bool && (bool)playing) return;
@@ -1937,6 +1940,8 @@ namespace NextDayRevival
         {
             try
             {
+                Animation direct = anim as Animation;     // P1b: every frame per man, no Invoke
+                if (direct != null && _mClipOf != null) return direct[clip] != null;
                 return _mClipOf != null
                     && _mClipOf.Invoke(anim, new object[] { clip }) != null;
             }
@@ -2933,7 +2938,9 @@ namespace NextDayRevival
                 {
                     Component ai = all[i] as Component;
                     if (ai == null || ai.gameObject == null) continue;
-                    if (!Alive(ai)) continue;
+                    // B1 (as N6 for the flak): a man down in the wounded
+                    // state no longer holds the gun's sight.
+                    if (!Alive(ai) || NpcWar.GroundDowned(ai)) continue;
                     _npcs.Add(ai);
                 }
             }
@@ -3514,6 +3521,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_ArtyDroneCrash_Update);
+            try
+            {
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             if (_landed) { Burn(); return; }
             _life += dt;
@@ -3542,6 +3552,8 @@ namespace NextDayRevival
             if (_model != null) _model.Rotate(_tumble * dt, Space.Self);
 
             if (at.y <= _ground + _rest || _life > MaxFall) Land();
+            }
+            finally { FrameProf.E(FrameProf.S_ArtyDroneCrash_Update); }
         }
 
         /// <summary>Down. The trail stops being made but is left to drift and
@@ -3623,9 +3635,14 @@ namespace NextDayRevival
         }
         void LateUpdate()
         {
+            FrameProf.S(FrameProf.S_ArtyRecoil_LateUpdate);
+            try
+            {
             // Local +Z is the bore; elevation may change while it returns.
             if (Slide != null) Slide.localPosition = Anim.Recoil   // NDR P9: [Effects] Recoil
                 ? -Vector3.forward * Stroke(Time.time - _shot) : Vector3.zero;
+            }
+            finally { FrameProf.E(FrameProf.S_ArtyRecoil_LateUpdate); }
         }
         internal static void Smoke(Vector3 muzzle, Vector3 forward)
         {

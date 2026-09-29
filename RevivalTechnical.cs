@@ -1504,7 +1504,7 @@ namespace NextDayRevival
             // (network rebuild). Sizing Passengers here is correct in the first
             // case and harmless in the second, where InitCar sizes it again from
             // the same child count.
-            FieldInfo fPass = AccessTools.Field(vgs.GetType(), "Passengers");
+            FieldInfo fPass = FastField.Find(vgs.GetType(), "Passengers");
             if (fPass != null) fPass.SetValue(vgs, new GameObject[seats.childCount]);
 
             RevivalPlugin.L.LogInfo("Technical: Sitze " + before + " -> "
@@ -1553,6 +1553,7 @@ namespace NextDayRevival
             mount.transform.localPosition = Vector3.zero;
             mount.transform.localRotation = Quaternion.identity;
             mount.transform.localScale = Vector3.one;
+            ModelLod.Apply(mount, ModelLod.Kind.Gun);        // P2
         }
 
         public const string BodyName = "NDR_TechnicalBody";
@@ -1645,6 +1646,7 @@ namespace NextDayRevival
                 min.y - b.min.y * scale,
                 (min.z + max.z) * 0.5f - b.center.z * scale);
             go.transform.position = root.TransformPoint(wanted);
+            ModelLod.Apply(go, ModelLod.Kind.Vehicle);       // P2: the donor's LODs are off
 
             RevivalPlugin.L.LogInfo("Technical: geliefertes Modell eingesetzt - "
                 + hidden + " Karosserieteile ausgeblendet, " + groups
@@ -1740,7 +1742,7 @@ namespace NextDayRevival
             if (vgs == null || CfgDurability == null) return;
             float cap = CfgDurability.Value;
             if (cap <= 0f) return;
-            FieldInfo f = AccessTools.Field(vgs.GetType(), "Durability");
+            FieldInfo f = FastField.Find(vgs.GetType(), "Durability");
             if (f == null || f.FieldType != typeof(float)) return;
             float have = (float)f.GetValue(vgs);
             if (have <= cap) return;
@@ -1787,13 +1789,13 @@ namespace NextDayRevival
             if (vgs == null) fail.Add("VehicleGameSystem fehlt");
             else
             {
-                FieldInfo fPass = AccessTools.Field(vgs.GetType(), "Passengers");
+                FieldInfo fPass = FastField.Find(vgs.GetType(), "Passengers");
                 Array pass = fPass == null ? null : fPass.GetValue(vgs) as Array;
                 if (pass == null) fail.Add("Passengers-Array fehlt");
                 else if (pass.Length != seatN)
                     fail.Add("Passengers-Laenge " + pass.Length + " != Sitze " + seatN);
 
-                FieldInfo fDur = AccessTools.Field(vgs.GetType(), "Durability");
+                FieldInfo fDur = FastField.Find(vgs.GetType(), "Durability");
                 if (fDur != null && fDur.FieldType == typeof(float)
                     && CfgDurability != null
                     && (float)fDur.GetValue(vgs) > CfgDurability.Value + 0.5f)
@@ -1833,7 +1835,7 @@ namespace NextDayRevival
             if (vgsType == null) return null;
             vgs = car.GetComponent(vgsType);
             if (vgs == null) return null;
-            FieldInfo fSeats = AccessTools.Field(vgsType, "SeatPoints");
+            FieldInfo fSeats = FastField.Find(vgsType, "SeatPoints");
             Transform seats = fSeats == null ? null : fSeats.GetValue(vgs) as Transform;
             if (seats == null)
             {
@@ -1847,11 +1849,28 @@ namespace NextDayRevival
         internal static Transform MountOf(Transform root)
         {
             if (root == null) return null;
+            // P1b: a found mount is remembered (SlewRemote asks every frame for a
+            // truck without a station); a miss is never cached, so a truck being
+            // built is looked at fresh.
+            int id = root.GetInstanceID();
+            Transform known;
+            if (_mountOf.TryGetValue(id, out known))
+            {
+                if (known != null && known.IsChildOf(root)) return known;
+                _mountOf.Remove(id);
+            }
             Transform[] all = root.GetComponentsInChildren<Transform>(true);
             for (int i = 0; i < all.Length; i++)
-                if (all[i] != null && all[i].name == MountName) return all[i];
+                if (all[i] != null && all[i].name == MountName)
+                {
+                    if (_mountOf.Count > 256) _mountOf.Clear();
+                    _mountOf[id] = all[i];
+                    return all[i];
+                }
             return null;
         }
+
+        static readonly Dictionary<int, Transform> _mountOf = new Dictionary<int, Transform>();
 
         /// <summary>The elevation pivot of a rebuilt technical, or null.</summary>
         internal static Transform GunOf(Transform root)
@@ -1974,7 +1993,7 @@ namespace NextDayRevival
         internal static string SpawnInFront()
         {
             if (!Enabled) return "Technical is disabled in the configuration.";
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return "No player camera available.";
 
             Vector3 ahead = cam.transform.forward;
@@ -3316,7 +3335,7 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogInfo("Technical-MG: standing idle_alert pose for " + body.name);
                 }
                 if (st.SampleStand != null)
-                    st.SampleStand.Invoke(st.StandClip, new object[] { st.AnimationObject, 0f });
+                    FastCall.ObjFloat(st.SampleStand, st.StandClip, st.AnimationObject, 0f);   // P1b: no array + boxed float per frame
             }
             catch (Exception ex)
             {
@@ -3854,7 +3873,7 @@ namespace NextDayRevival
             if (!ReferenceEquals(t, _passType))
             {
                 _passType = t;
-                _passField = AccessTools.Field(t, "Passengers");
+                _passField = FastField.Find(t, "Passengers");
             }
             Array passengers = _passField == null ? null
                                                   : _passField.GetValue(vgs) as Array;
@@ -3865,14 +3884,15 @@ namespace NextDayRevival
         static object Field(object owner, string name)
         {
             if (owner == null) return null;
-            FieldInfo f = AccessTools.Field(owner.GetType(), name);
+            FieldInfo f = FastField.Find(owner.GetType(), name);
             return f == null ? null : f.GetValue(owner);
         }
 
         static int IntField(object owner, string name)
         {
-            object v = Field(owner, name);
-            return v is int ? (int)v : -1;
+            if (owner == null) return -1;
+            FieldInfo f = FastField.Find(owner.GetType(), name);
+            return f != null && f.FieldType == typeof(int) ? FastField.GetInt(f, owner) : -1;
         }
     }
 
@@ -3949,6 +3969,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_TechnicalTracerStreak_Update);
+            try
+            {
             if (_fertig) return;
             _t += Time.deltaTime;
             if (_t > Timeout) { Destroy(gameObject); return; }
@@ -3970,6 +3993,8 @@ namespace NextDayRevival
                 _fertig = true;
                 Destroy(gameObject, Nachleuchten);
             }
+            }
+            finally { FrameProf.E(FrameProf.S_TechnicalTracerStreak_Update); }
         }
     }
 

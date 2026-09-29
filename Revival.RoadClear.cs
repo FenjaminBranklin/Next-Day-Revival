@@ -157,6 +157,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_RoadClear_Update);
+            try
+            {
             if (!enabledConfig.Value || Time.realtimeSinceStartup < nextCheck) return;
             nextCheck = Time.realtimeSinceStartup + 5f;
             // Helipads.Restore switches its own clearing back on, and a road
@@ -170,6 +173,8 @@ namespace NextDayRevival
             }
             if (again > 0) RevivalPlugin.L.LogInfo("RoadClear: " + again + " road object(s) switched off again.");
             if (treesConfig.Value) FilterTrees();
+            }
+            finally { FrameProf.E(FrameProf.S_RoadClear_Update); }
         }
 
         /// <summary>Every TerrainData in the scene - the visible terrains and

@@ -1144,6 +1144,9 @@ namespace NextDayRevival
         {
             Array seats = Field(h.Vgs, "Passengers") as Array;
             if (seats == null || Gepard.GunnerSeat >= seats.Length) return false;
+            // B1: only a living player holds the gun against the crew.
+            GameObject p = seats.GetValue(Gepard.GunnerSeat) as GameObject;
+            if (p != null) return Crocodile.PlayerUp(p);
             return seats.GetValue(Gepard.GunnerSeat) as UnityEngine.Object != null;
         }
 
@@ -1592,7 +1595,7 @@ namespace NextDayRevival
             catch { return ai.GetComponent<NavMeshAgent>(); }
         }
 
-        static readonly object[] PauseArgs = { 1.4f };
+        const float PauseSeconds = 1.4f;
         static MethodInfo _mClearIntentions, _mPauseTime;
         static Type _mQuietOwner;
 
@@ -1612,8 +1615,9 @@ namespace NextDayRevival
             }
             try
             {
-                if (_mClearIntentions != null) _mClearIntentions.Invoke(ai, null);
-                if (_mPauseTime != null) _mPauseTime.Invoke(ai, PauseArgs);   // shared, Invoke copies it (n01 perf)
+                // P1b: compiled calls, no reflection Invoke per man per frame.
+                if (_mClearIntentions != null) FastCall.Void(_mClearIntentions, ai);
+                if (_mPauseTime != null) FastCall.VoidFloat(_mPauseTime, ai, PauseSeconds);
             }
             catch { }
         }
@@ -1621,7 +1625,7 @@ namespace NextDayRevival
         static object Field(object instance, string name)
         {
             if (instance == null) return null;
-            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            FieldInfo f = FastField.Find(instance.GetType(), name);
             return f == null ? null : f.GetValue(instance);
         }
 

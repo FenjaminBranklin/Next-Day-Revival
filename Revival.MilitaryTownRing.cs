@@ -23,8 +23,8 @@
 // the garrison's faction and respawn, NpcWar behaviour, master adoption. A
 // wiped ring group waits while a player is within RingHold of the fence.
 //
-// THE NO-FLY ZONE is P6a's (Revival.NoFly.cs, zone "MT"): an octagon 100 u
-// outside the fence, owned by the garrison's faction, defended by the Gepard
+// THE NO-FLY ZONE is P6a's (Revival.NoFly.cs, zone "MT"): since B4 a 530 u
+// circle round the town's map ring, owned by the garrison's faction, defended by the Gepard
 // on AA1 and by nothing else - no scripted flak. NoFlyShown gates it with the
 // town, NoFlyArmed with that Gepard: once it is burnt out, its gun dead or
 // its gunner gone, nobody is warned any more and the sky over the town is

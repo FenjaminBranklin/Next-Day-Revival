@@ -421,6 +421,13 @@ namespace NextDayRevival
             return new Vector3(x, 0f, z);
         }
 
+        /// <summary>The map ring's radius in world units (the config, clamped);
+        /// Patrol hides routes that lie inside it (B4).</summary>
+        internal static float MapRingRadius()
+        {
+            return Mathf.Clamp(_cfgMapRadius == null ? 200f : _cfgMapRadius.Value, 20f, 1200f);
+        }
+
         /// <summary>Is the configured map the one that is loaded? See MapScene:
         /// an empty setting means the home map, and an unreadable scene name
         /// answers true so the camp is never withheld by this test alone.
@@ -608,7 +615,7 @@ namespace NextDayRevival
             if (!Here()) return;   // another region's map reserves nothing here
             Vector3 centre = Centre();
             if (Mathf.Abs(centre.x) > world.x || Mathf.Abs(centre.z) > world.y) return;
-            float radius = Mathf.Clamp(_cfgMapRadius == null ? 200f : _cfgMapRadius.Value, 20f, 1200f);
+            float radius = MapRingRadius();
             Vector2 mid, east, north;
             if (!Project(centre, texture, camera, world, map, full, out mid)
                 || !Project(centre + new Vector3(radius, 0f, 0f), texture, camera, world, map, full, out east)
@@ -658,8 +665,7 @@ namespace NextDayRevival
                     clip = Intersect(clip, view);
                 if (clip.width < 2f || clip.height < 2f) return;
 
-                float radius = Mathf.Clamp(
-                    _cfgMapRadius == null ? 200f : _cfgMapRadius.Value, 20f, 1200f);
+                float radius = MapRingRadius();
                 Vector2 mid, east, north;
                 if (!Project(centre, texture, camera, world, map, full, out mid)) return;
                 if (!Project(centre + new Vector3(radius, 0f, 0f), texture, camera,

@@ -32,14 +32,20 @@
 //              where they landed (Crew.DropSquadAt) and gives it the arrow
 //              (NpcWar.StartOperation) - the heli troop landing's own path.
 //   Warning    every client: the air raid siren at the target (the tower
-//              radar's siren clip), a distant engine drone from the entry
-//              side, the radar's contact log ("inbound"), a banner.
+//              radar's SirenVoice, assets/ndr_siren.wav), a distant engine
+//              drone from the entry side, the radar's contact log
+//              ("inbound"), a banner.
 //   Tu95       every client: the N10 model (tu95_import.py) on the NPC
 //              carrier in place of the An-2 model: eight contra-rotating
 //              props, bay doors that open for the release, hull boxes for
 //              rifle rays, a deep four-engine drone. Shot down it glides in
 //              (the An-2's crash) and lies as the N10 wreck with a lootable
 //              hold (the Mi-8 cargo hold's ItemsContainer) for 20 minutes.
+//              B8a: it flies [AirEvents] BomberAltitude (550 m) or the
+//              event's editor altitude over the ground; drawn along the whole
+//              route whatever the far clip (Tu95Visual's scaled proxy), its
+//              drone carries ~5 km with Doppler and fades.
+//              Offline proof: python research/tu95_visibility_check.py.
 //
 // SAFE ZONES are never hit: a bomb whose impact lies within SafeRadius of a
 // safe settlement (IsSafeSettlement, N12) is not released, a drop zone there
@@ -62,7 +68,7 @@
 //   Revival.LiveRoutes.cs    TickAir / ParseAir -> Load / Parse
 //   RevivalMortar.cs         Mortar.AnyFaction, Sound.ThumpClip
 //   Revival.WreckFire.cs     FireEffect.SharedAdditive / SharedBlended
-//   Revival.TowerRadar.cs    RadarSiren.Clip, RadarScope.Note
+//   Revival.TowerRadar.cs    SirenVoice, RadarScope.Note
 //   Revival.Airfield.cs      Airfield.LootItemId (the wreck's hold)
 //   Revival.Admin.cs         the panel rows and the map right-click button
 //   RevivalPlugin.cs         BindConfig / Tick / Draw
@@ -82,7 +88,12 @@ namespace NextDayRevival
     {
         // ------------------------------------------------------------ numbers
         // Real metres and km/h; the world is PlayerAn2.K (2.8) times real size.
-        internal const float BomberAltitudeM = 350f;
+        /// <summary>Default Tu-95 height above the ground, real metres (B8a:
+        /// low enough to be seen and heard from the ground, high enough for
+        /// a level carpet). [AirEvents] BomberAltitude on the master, or the
+        /// event's own altitude from the editor.</summary>
+        internal const float BomberAltitudeM = 550f;
+        internal const float MinBomberAltitudeM = 150f, MaxBomberAltitudeM = 1500f;
         internal const float BomberKmh = 420f;
         internal const float TransportAltitudeM = 150f;
         internal const float TransportKmh = 190f;
@@ -109,12 +120,17 @@ namespace NextDayRevival
 
         internal static ConfigEntry<int> CfgEventCode;
         internal static ConfigEntry<bool> CfgBanner;
+        internal static ConfigEntry<int> CfgBomberAltitude;
 
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgEventCode = cfg.Bind("AirEvents", "NetworkEventCode", 163,
                 "Photon event code (0..199) of the editor air events (bomb sticks, paradrops, "
                 + "warnings, admin requests). Every client must use the same value.");
+            CfgBomberAltitude = cfg.Bind("AirEvents", "BomberAltitude", (int)BomberAltitudeM,
+                "Tu-95 height above the ground in real metres (" + (int)MinBomberAltitudeM + ".."
+                + (int)MaxBomberAltitudeM + "), read by the host when a bomber takes off. An air event "
+                + "with its own altitude in the map editor uses that one instead.");
             CfgBanner = cfg.Bind("Hints", "AirRaidBanner", true,
                 "Hint: the air raid warning and the paratroop landing are shown as a banner.");
         }
@@ -141,6 +157,9 @@ namespace NextDayRevival
             public float IntervalMin, IntervalMax;
             public readonly List<Wave> Waves = new List<Wave>();
             public string Scene = "";
+            /// <summary>Tu-95 height above the ground, real metres; 0 = the
+            /// host's [AirEvents] BomberAltitude.</summary>
+            public float AltitudeM;
             internal float Next = -1f;
             public bool Here { get { return MapScene.Owns(Scene); } }
             public int Bombers { get { int n = 0; for (int i = 0; i < Waves.Count; i++) if (Waves[i].Bomber) n += Waves[i].Count; return n; } }
@@ -205,6 +224,9 @@ namespace NextDayRevival
                 }
                 if (e.Waves.Count == 0) throw new FormatException("air event " + e.Name + ": no waves");
                 e.Scene = c.Length > 17 ? c[17].Trim() : "";
+                // Column 18 (B8a) is optional: an older table flies at the host's default.
+                float alt = c.Length > 18 && c[18].Trim().Length > 0 ? F(c[18]) : 0f;
+                e.AltitudeM = alt > 0f ? Mathf.Clamp(alt, MinBomberAltitudeM, MaxBomberAltitudeM) : 0f;
                 list.Add(e);
             }
             return list;
@@ -315,10 +337,10 @@ namespace NextDayRevival
                 Type st = RevivalPlugin.TypeByName("NPC_Settlement");
                 FieldInfo flag = st == null ? null : AccessTools.Field(st, "IsSafeSettlement");
                 if (flag == null || flag.FieldType != typeof(bool)) return;
-                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(st);
+                Component[] all = SettlementScan.All();          // P1b: no world walk
                 for (int i = 0; i < all.Length; i++)
                 {
-                    Component c = all[i] as Component;
+                    Component c = all[i];
                     if (c != null && (bool)flag.GetValue(c)) _safe.Add(c.transform.position);
                 }
             }
@@ -437,6 +459,15 @@ namespace NextDayRevival
                 + Mathf.RoundToInt(lead + firstEta) + " s (" + Cell(alarm) + ").";
         }
 
+        /// <summary>Real metres above the ground a Tu-95 of <paramref name="e"/>
+        /// flies at: the event's own, else the host's config, else the default.</summary>
+        internal static float BomberAltitude(Event e)
+        {
+            if (e != null && e.AltitudeM > 0f) return Mathf.Clamp(e.AltitudeM, MinBomberAltitudeM, MaxBomberAltitudeM);
+            float cfg = CfgBomberAltitude != null ? CfgBomberAltitude.Value : BomberAltitudeM;
+            return Mathf.Clamp(cfg > 0f ? cfg : BomberAltitudeM, MinBomberAltitudeM, MaxBomberAltitudeM);
+        }
+
         static float Eta(Vector3 over, float heading, bool bomber)
         {
             Vector2 from, to;
@@ -488,7 +519,7 @@ namespace NextDayRevival
             Vector2 d = Dir(r.Heading);
             Vector3 fwd = new Vector3(d.x, 0f, d.y), right = new Vector3(d.y, 0f, -d.x);
             Vector3 centre = r.Target + right * Offset(s.Index, s.W.Count, r.E.Width);
-            FlightPath path = PathOver(centre, r.Heading, BomberAltitudeM, BomberKmh);
+            FlightPath path = PathOver(centre, r.Heading, BomberAltitude(r.E), BomberKmh);
             Vector3 lineStart = centre - fwd * (r.E.Length * 0.5f);
             Vector3 lineEnd = centre + fwd * (r.E.Length * 0.5f);
             int bombs = s.W.Load;
@@ -547,7 +578,7 @@ namespace NextDayRevival
             for (int i = 0; i < n; i++)
             {
                 Vector3 p = Vector3.Lerp(lineStart, lineEnd, (i + 0.5f) / n);
-                // Dispersion of a level release from 350 m: a few metres along,
+                // Dispersion of a level release from ~550 m: a few metres along,
                 // a little more across (the bombs leave a swaying bay).
                 p += fwd * (Gauss() * 3f * K) + right * (Gauss() * 4f * K);
                 if (Safe(p)) { safe++; continue; }
@@ -618,7 +649,7 @@ namespace NextDayRevival
                     if (plane != null && PlayerAn2.Down(plane)) { _bombs.RemoveAt(i); continue; }
                     b.Dropped = true;
                     b.From = plane != null ? plane.transform.position + Vector3.down * (2f * K)
-                        : b.Impact + Vector3.up * (BomberAltitudeM * K);
+                        : b.Impact + Vector3.up * (BomberAltitude(null) * K);
                     b.Go = BombPool.Take();
                 }
                 float t = now - b.Release;
@@ -811,7 +842,8 @@ namespace NextDayRevival
 
         static string _banner = "";
         static float _bannerUntil;
-        static AudioSource _siren, _drone;
+        static SirenVoice _siren;
+        static AudioSource _drone;
         static float _sirenUntil, _droneUntil, _warnAt;
         static Vector3 _droneFrom, _droneTo;
 
@@ -831,14 +863,14 @@ namespace NextDayRevival
             _sirenUntil = Time.time + siren;
             try
             {
-                if (_siren == null) _siren = Source("NDR air raid siren (air event)", RadarSiren.Clip(), 150f, 4500f);
+                if (_siren == null) _siren = SirenVoice.Make("NDR air raid siren (air event)", 150f, 4500f);
                 if (_siren != null)
                 {
-                    _siren.transform.position = at + Vector3.up * (12f * K);
-                    if (!_siren.isPlaying) _siren.Play();
+                    _siren.Position = at + Vector3.up * (12f * K);
+                    _siren.Tick(true);
                 }
                 Vector2 d = Dir(from);
-                _droneTo = at + Vector3.up * (BomberAltitudeM * K);
+                _droneTo = at + Vector3.up * (BomberAltitude(null) * K);
                 _droneFrom = _droneTo + new Vector3(d.x, 0f, d.y) * 4200f;
                 _droneUntil = Time.time + Mathf.Max(8f, f[7]);
                 if (_drone == null) _drone = Source("NDR air raid drone", Tu95Visual.DroneClip(), 400f, 9000f);
@@ -889,16 +921,8 @@ namespace NextDayRevival
         static void TickWarning()
         {
             float now = Time.time;
-            if (_siren != null)
-            {
-                float left = _sirenUntil - now;
-                if (left <= 0f) { if (_siren.isPlaying) _siren.Stop(); }
-                else
-                {
-                    _siren.volume = Mathf.Clamp01(Mathf.Min((now - _warnAt) / 3f, left / 5f));
-                    _siren.pitch = 0.7f + 0.3f * _siren.volume;
-                }
-            }
+            // spin-up, wail, and after the warning's time the spin-down
+            if (_siren != null) _siren.Tick(_sirenUntil - now > 0f);
             if (_drone != null)
             {
                 if (now > _droneUntil + 6f) { if (_drone.isPlaying) _drone.Stop(); }
@@ -1756,22 +1780,65 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>The Tu-95 on its carrier: props, bay, drone, hull, wreck.</summary>
+    /// <summary>
+    /// The Tu-95 on its carrier: props, bay, drone, hull, wreck.
+    ///
+    /// B8a - DRAWN ALONG THE WHOLE ROUTE. The bomber flies ~550 m (1540 u)
+    /// over the ground, the camera's far clip is 1000 u (the game) to 2000 u
+    /// (ViewDistance Medium) and the fog ends just past it, so the real
+    /// airframe was beyond the far plane for nearly all of its flight. Before
+    /// each camera culls (Camera.onPreCull) a flying Tu-95 farther than ProxyU
+    /// is drawn as a PROXY: the same model, uniformly scaled about the eye by
+    /// ProxyU / distance, so it covers exactly the pixels the real one would,
+    /// inside the far clip and in light fog. The carrier, its hull boxes, the
+    /// drone's AudioSource and every game system keep the real position. A
+    /// proxy is hidden while the terrain stands between the eye and the real
+    /// aircraft (one ray every OccludeEvery seconds); nearer than ProxyU the
+    /// depth buffer does that as before.
+    ///
+    /// B8a - HEARD FOR KILOMETRES: a custom rolloff out to HearM, Doppler at
+    /// the world's scale (1 / K), a fade in after the spawn and out before the
+    /// path's end, the engines dying away when it is shot down.
+    /// </summary>
     public sealed class Tu95Visual : MonoBehaviour
     {
+        /// <summary>Nearest and farthest world units the proxy is drawn at,
+        /// and its share of the camera's far clip in between.</summary>
+        internal const float ProxyMinU = 300f, ProxyMaxU = 600f, ProxyShare = 0.45f;
+        /// <summary>Seconds between two terrain line-of-sight rays.</summary>
+        internal const float OccludeEvery = 0.25f;
+        /// <summary>World units short of the airframe the ray stops (its own
+        /// hull boxes are no hill) and past the eye it starts.</summary>
+        const float HullMarginU = 120f, EyeMarginU = 8f;
+        /// <summary>Real metres the drone carries to; silent from there.</summary>
+        internal const float HearM = 6000f;
+        /// <summary>The rolloff: gain at real metres from the aircraft.</summary>
+        internal static readonly float[] RolloffM = { 0f, 400f, 1000f, 2000f, 3500f, 5000f, 6000f };
+        internal static readonly float[] RolloffGain = { 1f, 1f, 0.85f, 0.6f, 0.32f, 0.12f, 0f };
+        /// <summary>Seconds of fade in after the spawn, out before the path's
+        /// end, and of the engines dying when shot down.</summary>
+        internal const float FadeSeconds = 6f, DieSeconds = 3f;
+
         Transform _fly, _wreck, _bayL, _bayR, _an2;
         AudioSource _an2Audio;
         readonly List<Transform> _props = new List<Transform>();
         readonly List<float> _spin = new List<float>();
         readonly List<GameObject> _hull = new List<GameObject>();
+        readonly List<Renderer> _drawn = new List<Renderer>();
         AudioSource _audio;
-        float _bayUntil, _bay;
-        bool _dead;
+        float _bayUntil, _bay, _born, _engines = 1f, _occludeAt;
+        bool _dead, _proxied, _hidden, _occluded;
         static AudioClip _clip;
+
+        static readonly List<Tu95Visual> _live = new List<Tu95Visual>();
+        static bool _hooked;
+        static int _mask, _errors;
+        static float _maskAt = -1f;
 
         internal void Build(Transform an2)
         {
             _an2 = an2;
+            _born = Time.time;
             float K = PlayerAn2.K;
             GameObject fly = new GameObject("NDR_Tu95Fly");
             _fly = fly.transform;
@@ -1789,6 +1856,8 @@ namespace NextDayRevival
             }
             if (Tu95Model.BayL != null) _bayL = Part(_fly, "BayL", Tu95Model.BayL, Tu95Model.Skin, Tu95Model.BayLAt);
             if (Tu95Model.BayR != null) _bayR = Part(_fly, "BayR", Tu95Model.BayR, Tu95Model.Skin, Tu95Model.BayRAt);
+            _fly.GetComponentsInChildren<Renderer>(true, _drawn);
+            for (int i = 0; i < _drawn.Count; i++) _drawn[i].enabled = true;
             // Hull boxes: rifle rays find the carrier through them (NpcAircraft.Owner).
             for (int i = 0; i < Tu95Model.Boxes.Count; i++)
             {
@@ -1800,20 +1869,47 @@ namespace NextDayRevival
                 box.size = b.size * K;
                 _hull.Add(h);
             }
+            ModelLod.Apply(fly, ModelLod.Kind.Aircraft);     // P2: glass, decals, props, bays off far away
+            _live.Add(this);
+            if (!_hooked)
+            {
+                _hooked = true;
+                Camera.onPreCull += PreCull;
+            }
             try
             {
                 _audio = gameObject.AddComponent<AudioSource>();
                 _audio.clip = DroneClip();
                 _audio.loop = true;
+                _audio.playOnAwake = false;
                 _audio.spatialBlend = 1f;
-                _audio.dopplerLevel = 0.4f;
-                _audio.rolloffMode = AudioRolloffMode.Logarithmic;
-                _audio.minDistance = 220f;
-                _audio.maxDistance = 9000f;
-                _audio.volume = 1f;
+                _audio.priority = 16;
+                // Real Doppler: the world is K times real size, sound is not.
+                _audio.dopplerLevel = 1f / K;
+                _audio.spread = 40f;
+                _audio.rolloffMode = AudioRolloffMode.Custom;
+                _audio.minDistance = 1f;
+                _audio.maxDistance = HearM * K;
+                _audio.SetCustomCurve(AudioSourceCurveType.CustomRolloff, Rolloff());
+                _audio.volume = 0f;
                 _audio.Play();
+                // Wingmen out of step, not one comb-filtered note.
+                _audio.time = UnityEngine.Random.Range(0f, _audio.clip.length * 0.95f);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("AirEvents Tu-95 drone: " + ex.Message); }
+            RevivalPlugin.L.LogInfo("AirEvents: Tu-95 visual on carrier " + PlayerAn2.View(transform.parent.gameObject)
+                + " - " + _drawn.Count + " renderers, far draw on, drone "
+                + (_audio != null && _audio.isPlaying ? "playing" : "silent") + ".");
+        }
+
+        /// <summary>The gain over distance / maxDistance, Unity's custom curve.</summary>
+        static AnimationCurve Rolloff()
+        {
+            Keyframe[] keys = new Keyframe[RolloffM.Length];
+            for (int i = 0; i < keys.Length; i++) keys[i] = new Keyframe(RolloffM[i] / HearM, RolloffGain[i]);
+            AnimationCurve c = new AnimationCurve(keys);
+            for (int i = 0; i < keys.Length; i++) c.SmoothTangents(i, 0f);
+            return c;
         }
 
         static Transform Part(Transform parent, string name, Mesh mesh, Material mat, Vector3 at)
@@ -1836,6 +1932,7 @@ namespace NextDayRevival
         {
             if (_dead) return;
             _dead = true;
+            _live.Remove(this);
             if (_audio != null) _audio.Stop();
             for (int i = 0; i < _hull.Count; i++) if (_hull[i] != null) Destroy(_hull[i]);
             _hull.Clear();
@@ -1854,10 +1951,114 @@ namespace NextDayRevival
             _wreck.position = p;
             _wreck.rotation = Quaternion.Euler(0f, yaw, 0f);
             Part(_wreck, "Wreck", Tu95Model.WreckMesh, Tu95Model.Skin, Vector3.zero);
+            ModelLod.Apply(w, ModelLod.Kind.Wreck);          // P2
         }
+
+        // ------------------------------------------------------- far draw
+
+        /// <summary>Every camera, before it culls: each flying Tu-95 real or
+        /// as its proxy for this eye.</summary>
+        static void PreCull(Camera cam)
+        {
+            if (_live.Count == 0 || cam == null) return;
+            try
+            {
+                // UI and map cameras (orthographic, or blind to layer 0) have no sky.
+                if (cam.orthographic || (cam.cullingMask & 1) == 0) return;
+                for (int i = _live.Count - 1; i >= 0; i--)
+                {
+                    Tu95Visual v = _live[i];
+                    if (v == null) { _live.RemoveAt(i); continue; }
+                    v.Place(cam);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (++_errors <= 3) RevivalPlugin.L.LogWarning("AirEvents Tu-95 far draw: " + ex.Message);
+            }
+        }
+
+        /// <summary>World units from the eye inside which the Tu-95 is drawn
+        /// where it is; beyond, the proxy at this distance.</summary>
+        internal static float ProxyU(float farClip)
+        {
+            return Mathf.Clamp(farClip * ProxyShare, ProxyMinU, ProxyMaxU);
+        }
+
+        void Place(Camera cam)
+        {
+            if (_dead || _fly == null || !_fly.gameObject.activeInHierarchy) return;
+            float K = PlayerAn2.K;
+            Vector3 eye = cam.transform.position;
+            Vector3 real = transform.position;
+            Vector3 d = real - eye;
+            float dist = d.magnitude;
+            float near = ProxyU(cam.farClipPlane);
+            bool proxy = dist > near;
+            if (proxy)
+            {
+                // Scaled about the eye: the same pixels, inside the far clip.
+                float k = near / dist;
+                _fly.position = eye + d * k;
+                _fly.localScale = Vector3.one * (K * k);
+            }
+            else if (_proxied)
+            {
+                _fly.localPosition = Vector3.zero;
+                _fly.localScale = Vector3.one * K;
+            }
+            if (proxy != _proxied)
+            {
+                _proxied = proxy;
+                // A proxy's shadow would fall in the wrong place; the real one
+                // is far beyond any shadow distance anyway.
+                UnityEngine.Rendering.ShadowCastingMode mode = proxy
+                    ? UnityEngine.Rendering.ShadowCastingMode.Off : UnityEngine.Rendering.ShadowCastingMode.On;
+                for (int i = 0; i < _drawn.Count; i++) if (_drawn[i] != null) _drawn[i].shadowCastingMode = mode;
+            }
+            bool hide = proxy && Occluded(eye, d, dist);
+            if (hide != _hidden)
+            {
+                _hidden = hide;
+                for (int i = 0; i < _drawn.Count; i++) if (_drawn[i] != null) _drawn[i].enabled = !hide;
+            }
+        }
+
+        /// <summary>Terrain between the eye and the real aircraft (throttled).</summary>
+        bool Occluded(Vector3 eye, Vector3 d, float dist)
+        {
+            float now = Time.unscaledTime;
+            if (now < _occludeAt) return _occluded;
+            _occludeAt = now + OccludeEvery;
+            int mask = TerrainMask();
+            float reach = dist - HullMarginU - EyeMarginU;
+            if (mask == 0 || reach <= 1f) { _occluded = false; return false; }
+            Vector3 dir = d / dist;
+            _occluded = Physics.Raycast(eye + dir * EyeMarginU, dir, reach, mask, QueryTriggerInteraction.Ignore);
+            return _occluded;
+        }
+
+        /// <summary>The layers the loaded terrains are on (main map, east tile).</summary>
+        static int TerrainMask()
+        {
+            float now = Time.unscaledTime;
+            if (now < _maskAt) return _mask;
+            _maskAt = now + 5f;
+            int m = 0;
+            Terrain[] all = Terrain.activeTerrains;
+            for (int i = 0; all != null && i < all.Length; i++)
+                if (all[i] != null) m |= 1 << all[i].gameObject.layer;
+            _mask = m;
+            return m;
+        }
+
+        // ------------------------------------------------------------ frame
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_Tu95Visual_Update);
+            try
+            {
             // The An-2's radial is added once it runs: silence it for good.
             if (_an2Audio == null && _an2 != null) _an2Audio = _an2.GetComponent<AudioSource>();
             if (_an2Audio != null && !_an2Audio.mute) _an2Audio.mute = true;
@@ -1865,40 +2066,121 @@ namespace NextDayRevival
             float dt = Time.deltaTime;
             // Readable blades: ~4 rev/s, not the strobing 12 of the real NK-12.
             for (int i = 0; i < _props.Count; i++)
-                if (_props[i] != null) _props[i].Rotate(0f, 0f, _spin[i] * 1440f * dt, Space.Self);
+                if (_props[i] != null) _props[i].Rotate(0f, 0f, _spin[i] * 1440f * dt * _engines, Space.Self);
             _bay = Mathf.MoveTowards(_bay, Time.time < _bayUntil ? 1f : 0f, dt * 0.7f);
             if (_bayL != null) _bayL.localRotation = Quaternion.AngleAxis(-90f * _bay, Vector3.forward);
             if (_bayR != null) _bayR.localRotation = Quaternion.AngleAxis(90f * _bay, Vector3.forward);
+            Drone(dt);
+            }
+            finally { FrameProf.E(FrameProf.S_Tu95Visual_Update); }
+        }
+
+        /// <summary>The drone's volume: in after the spawn, out before the
+        /// path's end (every client knows the path), dying when shot down.</summary>
+        void Drone(float dt)
+        {
+            if (_audio == null) return;
+            GameObject carrier = transform.parent != null ? transform.parent.gameObject : null;
+            if (carrier != null && PlayerAn2.Down(carrier))
+                _engines = Mathf.MoveTowards(_engines, 0f, dt / DieSeconds);
+            float gain = Mathf.Clamp01((Time.time - _born) / FadeSeconds) * _engines;
+            NpcAircraft.Flight f = NpcAircraft.Find(carrier);
+            if (f != null && f.Path != null)
+            {
+                float left = f.Path.Length - f.Path.Project(carrier.transform.position);
+                gain *= Mathf.Clamp01(left / Mathf.Max(1f, f.Path.Speed * FadeSeconds));
+            }
+            _audio.volume = gain;
+            _audio.pitch = 0.6f + 0.4f * _engines;
         }
 
         void OnDestroy()
         {
+            _live.Remove(this);
             for (int i = 0; i < _hull.Count; i++) if (_hull[i] != null) Destroy(_hull[i]);
         }
 
-        /// <summary>Four NK-12s with contra-rotating props: a deep throb with a
-        /// slow beat, the turbines' whine faint over it. Four seconds, looping
-        /// cleanly (whole cycles of every partial).</summary>
+        // ------------------------------------------------------------ sound
+
+        /// <summary>Blade-pass rate of each NK-12's AV-60 pair, Hz: 750 rpm x
+        /// 4 blades, the four engines a little out of sync (the Bear's slow
+        /// beat). Whole quarter-hertz, so every partial closes the loop.</summary>
+        internal static readonly float[] DroneEngines = { 50.00f, 50.25f, 49.75f, 50.50f };
+        /// <summary>Partials per engine; partial h at 1 / h^DroneTilt - the
+        /// growl sits in the audible 100-900 Hz, not only at 50 Hz.</summary>
+        internal const int DroneHarmonics = 18;
+        internal const float DroneTilt = 0.75f;
+        /// <summary>The turbines' whine (Hz, raw amplitude) over it.</summary>
+        internal static readonly float[] DroneWhineHz = { 1837.5f, 2400f };
+        internal static readonly float[] DroneWhineAmp = { 0.12f, 0.08f };
+        /// <summary>Air rush: white noise (LCG) through a one-pole low-pass.</summary>
+        internal const float DroneNoise = 3f, DroneNoisePole = 0.9f;
+        internal const float DroneSeconds = 4f, DronePeak = 0.95f;
+        internal const int DroneRate = 22050;
+        const int DroneTable = 2048;
+
+        /// <summary>Partial h of engine e: its fixed phase (radians), so the
+        /// crest stays low and research/tu95_visibility_check.py can rebuild it.</summary>
+        internal static double DronePhase(int e, int h)
+        {
+            double u = 0.6180339887 * (h * h + 7 * e);
+            return (u - Math.Floor(u)) * 2.0 * Math.PI;
+        }
+
+        /// <summary>Four NK-12s with contra-rotating props: a loud, deep
+        /// growl with a slow beat, the turbines' whine faint over it.
+        /// DroneSeconds, looping without a seam, peak DronePeak.</summary>
         internal static AudioClip DroneClip()
         {
             if (_clip != null) return _clip;
-            const int rate = 22050;
-            const float seconds = 4f;
-            int n = Mathf.RoundToInt(rate * seconds);
+            int n = Mathf.RoundToInt(DroneRate * DroneSeconds);
             float[] data = new float[n];
-            System.Random rnd = new System.Random(95);
-            float noise = 0f;
+            float[] table = new float[DroneTable + 1];
+            for (int e = 0; e < DroneEngines.Length; e++)
+            {
+                // One period of this engine's note, read at its own rate.
+                for (int k = 0; k < DroneTable; k++)
+                {
+                    double v = 0.0, x = 2.0 * Math.PI * k / DroneTable;
+                    for (int h = 1; h <= DroneHarmonics; h++)
+                        v += Math.Pow(h, -DroneTilt) * Math.Sin(h * x + DronePhase(e, h));
+                    table[k] = (float)v;
+                }
+                table[DroneTable] = table[0];
+                double step = DroneEngines[e] * DroneTable / (double)DroneRate, ph = 0.0;
+                for (int i = 0; i < n; i++)
+                {
+                    int j = (int)ph;
+                    float f = (float)(ph - j);
+                    data[i] += table[j] + (table[j + 1] - table[j]) * f;
+                    ph += step;
+                    if (ph >= DroneTable) ph -= DroneTable;
+                }
+            }
+            for (int w = 0; w < DroneWhineHz.Length; w++)
+                for (int i = 0; i < n; i++)
+                    data[i] += DroneWhineAmp[w] * (float)Math.Sin(2.0 * Math.PI * DroneWhineHz[w] * i / DroneRate);
+            // Noise filtered around the loop twice: the second pass starts from
+            // the state the first ended in, so the loop point has no seam.
+            float[] white = new float[n];
+            uint seed = 95u;
             for (int i = 0; i < n; i++)
             {
-                float t = (float)i / rate;
-                float w = 2f * Mathf.PI * t;
-                float s = 0.42f * Mathf.Sin(w * 55f) + 0.22f * Mathf.Sin(w * 56.25f) + 0.18f * Mathf.Sin(w * 110f)
-                    + 0.10f * Mathf.Sin(w * 165.5f) + 0.035f * Mathf.Sin(w * 412.5f);
-                float beat = 0.75f + 0.25f * Mathf.Sin(w * 1.25f);
-                noise = noise * 0.97f + (float)(rnd.NextDouble() * 2.0 - 1.0) * 0.03f;
-                data[i] = Mathf.Clamp((s * beat + noise * 1.5f) * 0.8f, -1f, 1f);
+                seed = seed * 1664525u + 1013904223u;
+                white[i] = (seed >> 8) / 16777216f * 2f - 1f;
             }
-            _clip = AudioClip.Create("NDR Tu-95 drone", n, 1, rate, false);
+            float y = 0f;
+            for (int pass = 0; pass < 2; pass++)
+                for (int i = 0; i < n; i++)
+                {
+                    y = DroneNoisePole * y + (1f - DroneNoisePole) * white[i];
+                    if (pass == 1) data[i] += DroneNoise * y;
+                }
+            float peak = 1e-6f;
+            for (int i = 0; i < n; i++) peak = Mathf.Max(peak, Mathf.Abs(data[i]));
+            float scale = DronePeak / peak;
+            for (int i = 0; i < n; i++) data[i] *= scale;
+            _clip = AudioClip.Create("NDR Tu-95 drone", n, 1, DroneRate, false);
             _clip.SetData(data, 0);
             return _clip;
         }

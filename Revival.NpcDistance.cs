@@ -23,15 +23,14 @@
 //   ObjectOptimizer (on no NPC prefab).
 //
 // WHAT THIS FILE DOES (units: config in real metres, x K = 2.8 u):
-//   Wake   HasBesideDistance postfix: the LOCAL player's row also counts as
-//          beside a settlement while the CAMERA is within the wake range
-//          (AirRange while flying / 30 m over the ground, else GroundRange).
-//          The game's own path then switches animation, colliders, ragdoll
-//          and AI on - and off again when the camera leaves. Same pattern as
-//          DroneNpcHook, which answers for the drone.
+//   Wake   P1: only a local aircraft/elevated/optic/gunner viewer enables
+//          the middle tier, and only inside that camera's view cone. The
+//          per-NPC safety net wakes animation and colliders individually;
+//          HasBesideDistance is no longer extended for whole settlements.
+//          Inactive viewers drain restoration once, then skip NPC passes.
 //   Tiers  every NPC_AI2 (settlement men, convoys, patrols, heli troops,
 //          airfield/town defenders, anything spawned later) is sorted by its
-//          distance to the camera, 16 per frame:
+//          distance to the camera, at most 16 per frame / 0.1 ms per slice:
 //            near  < NearRange: untouched (the game as before).
 //            mid   NearRange..wake range: legacy Animation culled by its
 //                  renderers (no pose update off screen), skinning with two
@@ -83,7 +82,7 @@ namespace NextDayRevival
         const int PerFrame = 16;
         const float CheckSeconds = 3f;          // safety-net recheck per NPC
         const float HideMarginM = 15f;          // forest: hide past trees + this
-        const float BuildSliceMs = 1.0f;        // forest mask build budget
+        const float BuildSliceMs = 0.15f;        // forest mask build budget
 
         // ============================================================ config
 
@@ -98,12 +97,12 @@ namespace NextDayRevival
                 + "this and the wake range they are the middle tier: animated at a "
                 + "lower cost, AI thinking less often, still hittable.");
             _cfgAir = cfg.Bind("NpcDistance", "AirRange", 900f,
-                "Metres. While flying (aircraft, drone, or the camera 30 m over the "
-                + "ground) NPCs are woken, drawn and hittable out to this distance. "
+                "Metres. Aircraft, elevated, scope/binocular and manned-gun viewers "
+                + "wake NPCs inside their view cone out to this distance. "
                 + "0 = the game's own distance shutdown.");
             _cfgGround = cfg.Bind("NpcDistance", "GroundRange", 400f,
-                "Metres. The same on foot and in ground vehicles. 0 = the game's own "
-                + "distance shutdown.");
+                "Legacy setting, retained for config compatibility. Ground viewers now use "
+                + "AirRange only with a scope, binoculars or a manned gun.");
             _cfgElevated = cfg.Bind("NpcDistance", "AirborneHeight", 30f,
                 "Metres of camera height over the terrain from which AirRange applies.");
             _cfgAiEvery = cfg.Bind("NpcDistance", "AiEveryNthFrame", 4,
@@ -121,6 +120,8 @@ namespace NextDayRevival
         {
             public readonly List<Renderer> Off = new List<Renderer>();
             public bool Active;
+            public readonly List<Renderer> Renderers = new List<Renderer>();
+            public float RefreshAt;
         }
 
         sealed class Npc
@@ -151,7 +152,6 @@ namespace NextDayRevival
         static readonly Dictionary<int, Npc> _npcs = new Dictionary<int, Npc>();
         static readonly Dictionary<int, Player> _remote = new Dictionary<int, Player>();
         static readonly HashSet<int> _throttled = new HashSet<int>();
-        static readonly List<Renderer> _tmp = new List<Renderer>();
         static readonly List<Vector3> _playerPos = new List<Vector3>();
         static readonly List<GameObject> _players = new List<GameObject>();
         static readonly List<int> _drop = new List<int>();
@@ -159,6 +159,14 @@ namespace NextDayRevival
         static Vector3 _view;
         static bool _haveView;
         static bool _airborne;
+        static Vector3 _forward;
+        static float _coneCos2;
+        static bool _viewerWasActive;
+        static int _restoreIndex;
+        static readonly List<Npc> _known = new List<Npc>();
+        static FieldInfo _aimType, _aimCamera, _aimWeapons, _weaponCategory;
+        static bool _scopeViewer;
+        static int _scopeFrame = -10;
         static float _nextAirCheck;
         static float _wakeU;             // wake range in u, 0 = off
         static int _aiEvery = 4;
@@ -182,6 +190,7 @@ namespace NextDayRevival
         static FieldInfo _ngsPlayers;
         static readonly object[] _argTrue = new object[] { true };
         static readonly object[] _argFalse = new object[] { false };
+        static readonly object[] _argSwitch = new object[3];
 
         internal static void Install(Harmony harmony)
         {
@@ -190,7 +199,6 @@ namespace NextDayRevival
                 _aiType = RevivalPlugin.TypeByName("NPC_AI2");
                 _lodType = RevivalPlugin.TypeByName("CharacterLODController");
                 _vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
-                Type settlement = RevivalPlugin.TypeByName("NPC_Settlement");
                 Type ngs = RevivalPlugin.TypeByName("NetworkGameServer");
                 if (_aiType == null)
                 {
@@ -213,19 +221,20 @@ namespace NextDayRevival
                     _ngsPlayers = AccessTools.Field(ngs, "NetworkPlayers");
                 }
 
+                // IL: AimType 2 is scope; type 1 plus weapon category 8 is binoculars.
+                Type aiming = RevivalPlugin.TypeByName("CameraAimingSystem");
+                Type weapons = RevivalPlugin.TypeByName("PlayerWeaponsManager");
+                _aimType = aiming == null ? null : AccessTools.Field(aiming, "_AimType");
+                _aimCamera = aiming == null ? null : AccessTools.Field(aiming, "MainCamera");
+                _aimWeapons = aiming == null ? null : AccessTools.Field(aiming, "_plrWpnManager");
+                _weaponCategory = weapons == null ? null : AccessTools.Field(weapons, "_WeaponCategoryEquiped");
+                MethodInfo aim = aiming == null ? null : AccessTools.Method(aiming, "CameraAimController", Type.EmptyTypes, null);
+                if (aim != null && _aimType != null && _aimCamera != null)
+                    harmony.Patch(aim, null, new HarmonyMethod(typeof(NpcDistance).GetMethod("AimPostfix")), null, null, null);
+
                 int hooks = 0;
-                MethodInfo beside = settlement == null ? null
-                    : AccessTools.Method(settlement, "HasBesideDistance", null, null);
-                if (beside != null && beside.ReturnType == typeof(bool))
-                {
-                    harmony.Patch(beside, null,
-                        new HarmonyMethod(typeof(NpcDistance).GetMethod("BesidePostfix")),
-                        null, null, null);
-                    hooks++;
-                }
-                else RevivalPlugin.L.LogWarning("NpcDistance: NPC_Settlement.HasBesideDistance "
-                    + "not found - settlements are not woken at range (the per-NPC safety net "
-                    + "still keeps mid-tier men animated and hittable).");
+                // Do not extend HasBesideDistance: it wakes the entire settlement,
+                // including men behind the viewer. SafetyNet wakes individual men.
 
                 MethodInfo update = AccessTools.DeclaredMethod(_aiType, "Update", Type.EmptyTypes, null);
                 if (update != null)
@@ -239,9 +248,9 @@ namespace NextDayRevival
                     + "the middle tier's AI runs at full rate.");
 
                 _installed = true;
-                RevivalPlugin.L.LogInfo("NpcDistance: " + hooks + " of 2 hook(s); near < "
-                    + _cfgNear.Value + " m, wake " + _cfgGround.Value + " m on the ground / "
-                    + _cfgAir.Value + " m in the air, AI every " + _cfgAiEvery.Value
+                RevivalPlugin.L.LogInfo("NpcDistance: " + hooks + " AI hook(s); viewer-gated near < "
+                    + _cfgNear.Value + " m, viewer wake "
+                    + _cfgAir.Value + " m in view, AI every " + _cfgAiEvery.Value
                     + " frame(s) in the middle tier, forest mask " + (_cfgForest.Value ? "on" : "off")
                     + (_fLod3 == null ? "; CharacterLODController.LOD3_Distance missing" : "") + ".");
             }
@@ -252,27 +261,6 @@ namespace NextDayRevival
         }
 
         // ============================================================ hooks
-
-        /// <summary>__0 = settlement position (y = 0), __1 = a network player's
-        /// position (y = 0), __2 = radius squared. Only the LOCAL player's row
-        /// is answered, and only "yes": the camera is within the wake range.</summary>
-        public static void BesidePostfix(Vector3 __0, Vector3 __1, float __2, ref bool __result)
-        {
-            if (__result || !_haveView || _wakeU <= 0f) return;
-            try
-            {
-                GameObject me = MapTools.LocalPlayer();
-                if (me == null) return;
-                Vector3 body = me.transform.position;
-                body.y = 0f;
-                if ((body - __1).sqrMagnitude > 4f) return;
-                Vector3 v = _view;
-                v.y = 0f;
-                float r = Mathf.Max(Mathf.Sqrt(Mathf.Max(0f, __2)), _wakeU);
-                if ((v - __0).sqrMagnitude < r * r) __result = true;
-            }
-            catch { }
-        }
 
         /// <summary>Middle tier: the AI update of a man no player is near runs
         /// every Nth frame (staggered by instance id). Bench "frozen": never.</summary>
@@ -304,26 +292,76 @@ namespace NextDayRevival
             if (_bench != BenchNone && _benchSampling) _benchOwn += ms;
         }
 
+        public static void AimPostfix(object __instance)
+        {
+            FrameProf.S(FrameProf.S_NpcDistT);
+            try
+            {
+                if (_aimCamera.GetValue(__instance) as Camera != CameraOwner.MainCamera()) return;
+                int mode = FastField.GetInt(_aimType, __instance);
+                object weapons = _aimWeapons == null ? null : _aimWeapons.GetValue(__instance);
+                _scopeViewer = mode == 2 || (mode == 1 && weapons != null
+                    && _weaponCategory != null && FastField.GetInt(_weaponCategory, weapons) == 8);
+                _scopeFrame = Time.frameCount;
+            }
+            finally { FrameProf.E(FrameProf.S_NpcDistT); }
+        }
+
+        static bool InViewCone(Vector3 delta)
+        {
+            float dot = Vector3.Dot(delta, _forward);
+            return dot > 0f && dot * dot >= delta.sqrMagnitude * _coneCos2;
+        }
+
         static void Step()
         {
-            Camera cam = Camera.main;
-            if (cam == null) { _haveView = false; return; }
-            _view = cam.transform.position;
-            _haveView = true;
+            Camera cam = CameraOwner.ViewCamera();
+            _haveView = cam != null;
+            if (_haveView)
+            {
+                _view = cam.transform.position;
+                _forward = cam.transform.forward;
+                float half = cam.fieldOfView * Mathf.Deg2Rad * 0.5f;
+                float diagonal = Mathf.Atan(Mathf.Tan(half) * Mathf.Sqrt(1f + cam.aspect * cam.aspect));
+                float cosine = Mathf.Cos(Mathf.Min(89f * Mathf.Deg2Rad, diagonal + 5f * Mathf.Deg2Rad));
+                _coneCos2 = cosine * cosine;
+            }
             _aiEvery = Mathf.Max(1, _cfgAiEvery.Value);
-
-            if (Time.time >= _nextAirCheck)
+            if (_haveView && Time.time >= _nextAirCheck)
             {
                 _nextAirCheck = Time.time + 0.5f;
-                _airborne = FlightView.Active || Drone.Flying
-                    || HeightOverTerrain(_view) > Mathf.Max(0f, _cfgElevated.Value) * K;
+                _airborne = HeightOverTerrain(_view) > Mathf.Max(0f, _cfgElevated.Value) * K;
             }
-            float m = _airborne ? _cfgAir.Value : _cfgGround.Value;
+            int owner = CameraOwner.Owner;
+            bool viewer = _haveView && (_airborne || PlayerAn2.Aboard || PlayerHeli.Aboard
+                || Drone.Flying || (_scopeViewer && Time.frameCount - _scopeFrame <= 1)
+                || owner == CameraOwner.Turm || owner == CameraOwner.GunTruck
+                || owner == CameraOwner.Gepard || owner == CameraOwner.Flak || Katyusha.Aiming
+                // P1b: the surveillance drone and the aircraft owners in their own
+                // right (a camera handover can precede Aboard), and a manned gun
+                // whose TakeCamera is off.
+                || owner == CameraOwner.Aufklaerer || owner == CameraOwner.Drohne
+                || owner == CameraOwner.An2 || owner == CameraOwner.Heli
+                || TechnicalGun.Manning || GepardGun.Manning);
+            float m = viewer ? _cfgAir.Value : 0f;
             _wakeU = m <= 0f ? 0f : Mathf.Max(m, _cfgNear.Value) * K;
-
             PumpMask();
             BenchStep();
 
+            if (!viewer && _bench == BenchNone)
+            {
+                if (_viewerWasActive) { _restoreIndex = 0; _viewerWasActive = false; }
+                // Restore only objects we changed. Once drained, idle is O(1).
+                int stop = Mathf.Min(_known.Count, _restoreIndex + PerFrame);
+                for (; _restoreIndex < stop; _restoreIndex++) Apply(_known[_restoreIndex], false);
+                if (_restoreIndex == _known.Count && _pass != null)
+                {
+                    for (int i = 0; i < _players.Count; i++) ProcessPlayer(_players[i]);
+                    _pass = null;
+                }
+                return;
+            }
+            _viewerWasActive = true;
             if (_pass == null || _passIndex >= _pass.Length)
             {
                 EndPass();
@@ -332,7 +370,13 @@ namespace NextDayRevival
                 GatherPlayers();
             }
             int end = Mathf.Min(_pass.Length, _passIndex + PerFrame);
-            for (; _passIndex < end; _passIndex++) Process(_pass[_passIndex]);
+            long start = Stopwatch.GetTimestamp();
+            long budget = Stopwatch.Frequency / 10000; // 0.1 ms, cooperative between NPCs.
+            for (; _passIndex < end; _passIndex++)
+            {
+                Process(_pass[_passIndex]);
+                if (Stopwatch.GetTimestamp() - start >= budget) { _passIndex++; break; }
+            }
         }
 
         static void EndPass()
@@ -353,6 +397,8 @@ namespace NextDayRevival
             foreach (KeyValuePair<int, Npc> e in _npcs)
                 if (e.Value.Ai == null) _drop.Add(e.Key);
             for (int i = 0; i < _drop.Count; i++) { _npcs.Remove(_drop[i]); _throttled.Remove(_drop[i]); }
+            for (int i = _known.Count - 1; i >= 0; i--)
+                if (_known[i].Ai == null) _known.RemoveAt(i);
             _drop.Clear();
             foreach (KeyValuePair<int, Player> e in _remote)
                 if (e.Value.Go == null) _drop.Add(e.Key);
@@ -408,7 +454,7 @@ namespace NextDayRevival
             if (ai == null) return;
             int id = ai.GetInstanceID();
             Npc n;
-            if (!_npcs.TryGetValue(id, out n)) { n = Make(ai, id); _npcs.Add(id, n); }
+            if (!_npcs.TryGetValue(id, out n)) { n = Make(ai, id); _npcs.Add(id, n); _known.Add(n); }
             Apply(n, true);
         }
 
@@ -419,7 +465,7 @@ namespace NextDayRevival
             Vector3 p = ai.transform.position;
             float d = (p - _view).magnitude;
             float near = _cfgNear.Value * K;
-            byte tier = _wakeU <= 0f ? Far : d < near ? Near : d < _wakeU ? Mid : Far;
+            byte tier = d < near ? Near : _wakeU > 0f && d < _wakeU && InViewCone(p - _view) ? Mid : Far;
             if (_bench == BenchFull) tier = Near;
             else if (_bench == BenchMid) tier = Mid;
             else if (_bench == BenchFrozen) tier = Far;
@@ -427,7 +473,7 @@ namespace NextDayRevival
             // The coarsest mesh as far as the tier reaches (vanilla: 350 u).
             if (n.Lod != null)
             {
-                float want = Mathf.Max(n.Lod3, _wakeU);
+                float want = tier == Mid ? Mathf.Max(n.Lod3, _wakeU) : n.Lod3;
                 if (Mathf.Abs(want - n.LodSet) > 1f)
                 {
                     FastField.SetFloat(_fLod3, n.Lod, want);
@@ -438,7 +484,7 @@ namespace NextDayRevival
             if (tier != n.Tier)
             {
                 if (tier == Mid) Cheap(n); else Restore(n);
-                if (n.Tier == Mid && tier == Far && n.Forced) Unforce(n);
+                if (tier == Far && n.Forced) Unforce(n);
                 n.Tier = tier;
                 n.NextCheck = 0f;
             }
@@ -464,7 +510,7 @@ namespace NextDayRevival
                 if (n.Anim != null) n.Anim.enabled = true;
             }
 
-            bool hide = _bench == BenchFrozen || InForest(p, d, n.Hide.Active);
+            bool hide = _bench == BenchFrozen || (_wakeU > 0f && InForest(p, d, n.Hide.Active));
             if (hide && !n.Hide.Active && _bench != BenchFrozen && InVehicle(ai)) hide = false;
             SetHidden(n.Hide, ai.gameObject, hide);
 
@@ -517,7 +563,11 @@ namespace NextDayRevival
                 {
                     try
                     {
-                        _mSwitch.Invoke(ai, new object[] { _fMain.GetValue(ai), _fAdd.GetValue(ai), _fPose.GetValue(ai) });
+                        // P1b: one argument array for every wake, not one per call.
+                        _argSwitch[0] = _fMain.GetValue(ai);
+                        _argSwitch[1] = _fAdd.GetValue(ai);
+                        _argSwitch[2] = _fPose.GetValue(ai);
+                        _mSwitch.Invoke(ai, _argSwitch);
                         played = a.isPlaying;
                     }
                     catch { }
@@ -564,7 +614,7 @@ namespace NextDayRevival
             Player pl;
             if (!_remote.TryGetValue(id, out pl)) { pl = new Player(); pl.Go = go; _remote.Add(id, pl); }
             Vector3 p = go.transform.position;
-            bool hide = _bench == BenchNone && InForest(p, (p - _view).magnitude, pl.Hide.Active);
+            bool hide = _wakeU > 0f && _bench == BenchNone && InForest(p, (p - _view).magnitude, pl.Hide.Active);
             SetHidden(pl.Hide, go, hide);
             if (pl.Hide.Active) _wHiddenPlayer++;
         }
@@ -585,17 +635,22 @@ namespace NextDayRevival
         {
             if (hide)
             {
-                // Re-applied every pass: the character LOD switches meshes on.
-                root.GetComponentsInChildren<Renderer>(true, _tmp);
-                for (int i = 0; i < _tmp.Count; i++)
+                // Re-apply to cached renderers: character LOD can enable them again.
+                // Refresh clothing/weapon membership at low frequency, not per pass.
+                if (!h.Active || Time.time >= h.RefreshAt)
                 {
-                    Renderer r = _tmp[i];
+                    h.RefreshAt = Time.time + 1f;
+                    h.Renderers.Clear();
+                    root.GetComponentsInChildren<Renderer>(true, h.Renderers);
+                }
+                for (int i = 0; i < h.Renderers.Count; i++)
+                {
+                    Renderer r = h.Renderers[i];
                     if (r == null || !r.enabled) continue;
                     if (r is ParticleSystemRenderer || r is LineRenderer || r is TrailRenderer) continue;
                     r.enabled = false;
                     if (!h.Off.Contains(r)) h.Off.Add(r);
                 }
-                _tmp.Clear();
                 h.Active = true;
             }
             else if (h.Active)
@@ -616,7 +671,7 @@ namespace NextDayRevival
             public int W, H, Cells;
             public byte[] Bits;
             /// <summary>Average top of the counted trees over the ground, u
-            /// (0 = unknown). N2b's far canopy sits just under it.</summary>
+            /// (0 = unknown). Was N2b's canopy height; P3 does not use it.</summary>
             public float TreeTop;
 
             public bool At(int x, int z)

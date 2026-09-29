@@ -19,10 +19,13 @@
 //               anybody on the ground (it runs inside GW_Scene_1's Awake), so a
 //               player saved in a cut is never spawned inside the old berm.
 //   2. trees    the listed entries removed / re-seated on all seven.
-//   3. props    the listed scene objects hidden or moved - both tunnels (S1
-//               railway, S3 road) and their plug/gate go - and the Conductor
-//               (the location-change NPC at the S3 tunnel mouth) is placed
-//               beside the road; his arrival spawn points stay where they are.
+//   3. props    the listed scene objects hidden or moved - the tunnels on the
+//               crossing roads (S1 railway, S2 and S3 road) and their plugs /
+//               gate go - and the Conductor (the location-change NPC at the S3
+//               tunnel mouth) is placed beside the road; his arrival spawn
+//               points stay where they are. level7's invisible map bound loses
+//               its east wall (x 2394.4, across all three roads, solid from the
+//               vanilla side only - B7b); its other three walls stay.
 //   4. paint    GWTerrain2's alphamap on the exposed cut faces and
 //               embankments: scree and rock (the tile's own layers), and the
 //               grass taken off the rock. Deterministic bytes, so every client
@@ -36,7 +39,8 @@
 //               colliders there streams in or out.
 //   6. seam     the tile's temporary seam walls off (they stood where the cuts
 //               now meet the tile), the tile's road and railway pieces on the
-//               cut floors on (EastTileCutRoads, docs/ai/tasks/east-roads.md),
+//               cut floors on (EastTileCutRoads, docs/ai/tasks/east-roads.md;
+//               a road piece off the live floor is laid onto it first - S2),
 //               and per saddle one link from the patch to the tile's own NavMesh.
 // Every step logs what it found against what the generator expected, so the
 // in-world session reads the result from the log (prefix "EastCrossings:").
@@ -117,7 +121,9 @@ namespace NextDayRevival
         static readonly Dictionary<int, int> _treeCounts = new Dictionary<int, int>();
         static readonly Dictionary<int, long> _painted = new Dictionary<int, long>();  // GWTerrain2 id * 4 + saddle -> byte sum
         static GameObject _carveRoot;
-        static bool _wallOff;               // per tile load
+        // per loaded tile scene (by handle): its seam walls and cut roads
+        static readonly Dictionary<int, SeamState> _seams = new Dictionary<int, SeamState>();
+        static float _nextSeam, _seamErrAt = -100f;
         static bool _hooked;
 
         internal static void BindConfig(ConfigFile cfg)
@@ -231,11 +237,18 @@ namespace NextDayRevival
                 Scene home = SceneManager.GetSceneByName(MapScene.Home);
                 if (!home.isLoaded) return;
                 if (_doneLoad != _load && Time.realtimeSinceStartup >= _nextTry) Apply();
+                // B7a: the tile's seam walls go by the live heights, before
+                // anything that waits (Apply) or can throw (trees, NavMesh)
+                try { TickSeam(); }
+                catch (Exception ex)
+                {
+                    if (Time.realtimeSinceStartup - _seamErrAt > 10f) { _seamErrAt = Time.realtimeSinceStartup; Log("seam error: " + ex); }
+                }
                 if (_doneLoad != _load || _refused) return;
                 if (_groundAt > 0f && Time.realtimeSinceStartup >= _groundAt) { _groundAt = 0f; Ground("after the cut"); }
                 if (Time.realtimeSinceStartup >= _nextTrees) { _nextTrees = Time.realtimeSinceStartup + 5f; Trees(false); }
                 TickNav();
-                TickSeam();
+                TickLinks();
             }
             catch (Exception ex)
             {
@@ -517,6 +530,82 @@ namespace NextDayRevival
                 placed += " " + Leaf(f[1]) + " " + from + " -> " + to + (f[5].Length > 0 ? " (" + f[5] + " stay)" : "") + ";";
             }
             if (want > 0) Log("props in " + scene.name + ": " + done + "/" + want + " handled." + placed);
+            if (scene.name == MapScene.Home)
+            {
+                string b;
+                try { b = OpenEastBound(roots ?? scene.GetRootGameObjects()); }
+                catch (Exception e) { b = " failed: " + e.Message; }
+                if (b.Length > 0) Log("east bound (" + BoundPath + "):" + b);
+            }
+        }
+
+        /// <summary>level7's own map bound: an invisible box (mesh Box001,
+        /// renderer off, four walls facing inward) at x -2433.2..2394.4,
+        /// z -2402.5..2416.5, y -66..644.</summary>
+        const string BoundPath = "ServerObjects/Colliders/Collider";
+        const float BoundEastX = 2500f;         // the seam: the north/south walls end here
+
+        /// <summary>
+        /// A MeshCollider face is solid only from its front, and the bound's
+        /// east wall stands at x 2394.4 - 106 m short of the seam, across all
+        /// three cut roads: walking or driving east you hit it, coming from the
+        /// tile you pass its back. The one-way invisible wall of the B7a report,
+        /// found by research/east_crossing_check.py --road (B7b); the older
+        /// check only walked x 2440..2560. With the cuts in the collider gets
+        /// the same box without its east wall and with the north and south
+        /// walls carried on to the seam; the tile bounds the east (its edge
+        /// fence, EastWorld.Guard while it is not loaded). A new mesh, so a
+        /// reloaded scene starts from the game's own box again.
+        /// </summary>
+        static string OpenEastBound(GameObject[] roots)
+        {
+            Transform t = null;
+            for (int r = 0; r < roots.Length && t == null; r++)
+                if (roots[r].name == "ServerObjects") t = roots[r].transform.Find("Colliders/Collider");
+            if (t == null) return " not found - left alone.";
+            MeshCollider mc = t.GetComponent<MeshCollider>();
+            Mesh m = mc == null ? null : mc.sharedMesh;
+            if (m == null || !m.isReadable) return " no readable MeshCollider - left alone.";
+            Vector3[] v = m.vertices;
+            int[] tri = m.triangles;
+            Vector3[] w = new Vector3[v.Length];
+            float east = float.MinValue;
+            for (int i = 0; i < v.Length; i++)
+            {
+                w[i] = t.TransformPoint(v[i]);
+                east = Mathf.Max(east, w[i].x);
+            }
+            if (east > BoundEastX - 1f) return "";                     // open already (this load)
+            if (east < 2300f) return " its east wall stands at x " + east.ToString("F1") + ", not the known box - left alone.";
+            List<int> keep = new List<int>();
+            int dropped = 0;
+            for (int i = 0; i + 2 < tri.Length; i += 3)
+            {
+                if (w[tri[i]].x > east - 0.5f && w[tri[i + 1]].x > east - 0.5f && w[tri[i + 2]].x > east - 0.5f)
+                {
+                    dropped++;
+                    continue;
+                }
+                keep.Add(tri[i]);
+                keep.Add(tri[i + 1]);
+                keep.Add(tri[i + 2]);
+            }
+            for (int i = 0; i < v.Length; i++)
+            {
+                if (w[i].x <= east - 0.5f) continue;
+                Vector3 p = w[i];
+                p.x = BoundEastX;
+                v[i] = t.InverseTransformPoint(p);
+            }
+            Mesh open = new Mesh();
+            open.name = m.name + "_open_east";
+            open.vertices = v;
+            open.triangles = keep.ToArray();
+            open.RecalculateNormals();
+            open.RecalculateBounds();
+            mc.sharedMesh = open;
+            return " its east wall at x " + east.ToString("F1") + " taken out (" + dropped
+                   + " triangle(s)), the north and south walls carried on to the seam; " + keep.Count / 3 + " triangle(s) left.";
         }
 
         /// <summary>LocationChangeTrigger.Start registers its map marker from
@@ -601,7 +690,9 @@ namespace NextDayRevival
         static void Paint(Dictionary<string, Td> all)
         {
             TerrainData g = all[Names[0]].Data;
-            if (g.alphamapLayers != EastCrossingsData.PaintLayerCount || g.alphamapWidth != EastCrossingsData.AlphaRes)
+            // P3: the far forest's canopy layer sits after the vanilla ones.
+            if (g.alphamapLayers - FarForest.AddedLayers(g) != EastCrossingsData.PaintLayerCount
+                || g.alphamapWidth != EastCrossingsData.AlphaRes)
             {
                 Log("paint: GWTerrain2 has " + g.alphamapLayers + " layers at " + g.alphamapWidth + ", expected "
                     + EastCrossingsData.PaintLayerCount + " at " + EastCrossingsData.AlphaRes + " - not painted.");
@@ -825,36 +916,216 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------- 6. seam
 
+        /// <summary>One loaded tile scene: its seam wall strips (children of
+        /// EastTileSeamWall), its cut-floor road/rail group, what is done.</summary>
+        sealed class SeamState
+        {
+            internal bool Found, Done, RoadsOn;
+            internal Transform WallRoot, CutRoads;
+            internal readonly List<Transform> Strips = new List<Transform>();
+            internal string Logged = "";
+        }
+
+        /// <summary>A strip may come down when the vanilla edge stands no
+        /// higher over the tile than the player can step (stepOffset 0.3 m).</summary>
+        const float WallStep = 0.3f;
+
+        /// <summary>
+        /// The tile's seam walls and cut-floor road pieces, on EVERY loaded
+        /// EastTile scene, every 2 s until done - called from Tick before the
+        /// crossings pipeline's gate.
+        ///
+        /// EastTileSeamWall (BuildTile.SeamWall) is a one-sided rock strip at
+        /// x 2500 facing the tile, built for the UNCUT berm: from the tile side
+        /// a rock face, from the vanilla side invisible, and solid for a
+        /// vehicle both ways (research/east_crossing_check.py --engine --state
+        /// bundle: cars stuck or rolled at S1/S3 driving vanilla -> east, the
+        /// walker blocked east -> vanilla). Until B7a (6.60.0) it came down
+        /// only after the whole pipeline had run (Apply, trees, NavMesh -
+        /// anything that waited or threw kept it up), only on the first scene
+        /// of that name, and only by switching its object off. Now each strip
+        /// is judged from the LIVE heights on both sides of x 2500 over its z
+        /// range: where the vanilla edge is at most WallStep over the tile (the
+        /// cut is in) it is taken down for good - its colliders destroyed, the
+        /// object off. Where the vanilla edge is still higher (the cut not in
+        /// yet, or refused) it stays and closes the drop. The cut road pieces
+        /// lie on the cut floor: they come on with the last strip, once the
+        /// crossings have handled this load.
+        /// </summary>
         static void TickSeam()
         {
-            Scene tile = SceneManager.GetSceneByName(EastWorld.SceneName);
-            if (!tile.isLoaded) return;
-            if (!_wallOff)
+            if (Time.realtimeSinceStartup < _nextSeam) return;
+            _nextSeam = Time.realtimeSinceStartup + 2f;
+            for (int i = 0; i < SceneManager.sceneCount; i++)
             {
-                _wallOff = true;
-                GameObject[] roots = tile.GetRootGameObjects();
-                string s = "no EastTileSeamWall in the tile scene";
-                for (int r = 0; r < roots.Length; r++)
+                Scene tile = SceneManager.GetSceneAt(i);
+                if (!tile.isLoaded || tile.name != EastWorld.SceneName) continue;
+                SeamState st;
+                if (!_seams.TryGetValue(tile.GetHashCode(), out st)) { st = new SeamState(); _seams.Add(tile.GetHashCode(), st); }
+                if (st.Done) continue;
+                if (!st.Found)
                 {
-                    Transform w = roots[r].transform.Find("EastTileSeamWall");
-                    if (w == null) continue;
-                    w.gameObject.SetActive(false);
-                    s = "the tile's seam wall (" + w.childCount + " strip(s)) switched off - the cuts meet the tile";
+                    st.Found = true;
+                    GameObject[] roots = tile.GetRootGameObjects();
+                    for (int r = 0; r < roots.Length; r++)
+                    {
+                        Transform w = roots[r].transform.Find("EastTileSeamWall");
+                        if (w != null)
+                        {
+                            st.WallRoot = w;
+                            for (int c = 0; c < w.childCount; c++) st.Strips.Add(w.GetChild(c));
+                        }
+                        Transform g = roots[r].transform.Find("EastTileCutRoads");
+                        if (g != null) st.CutRoads = g;
+                    }
                 }
-                Log("seam: " + s + ".");
+                int standing = 0;
+                string s = "";
+                for (int k = 0; k < st.Strips.Count; k++)
+                {
+                    Transform strip = st.Strips[k];
+                    if (strip == null) continue;
+                    if (!strip.gameObject.activeSelf && strip.GetComponentsInChildren<Collider>(true).Length == 0) continue;
+                    float rise;
+                    int n;
+                    if (!EdgeRise(strip, out rise, out n))
+                    {
+                        standing++;
+                        s += " " + strip.name + " stays (no heights on both sides yet);";
+                        continue;
+                    }
+                    if (rise > WallStep)
+                    {
+                        standing++;
+                        s += " " + strip.name + " stays: the vanilla edge up to " + rise.ToString("F2") + " m over the tile;";
+                        continue;
+                    }
+                    Collider[] cols = strip.GetComponentsInChildren<Collider>(true);
+                    for (int c = 0; c < cols.Length; c++) UnityEngine.Object.Destroy(cols[c]);
+                    strip.gameObject.SetActive(false);
+                    s += " " + strip.name + " taken down (" + cols.Length + " collider(s); vanilla edge at most "
+                         + rise.ToString("F2") + " m over the tile in " + n + " samples);";
+                }
+                if (standing == 0 && st.WallRoot != null) st.WallRoot.gameObject.SetActive(false);
                 // The road and railway pieces the tile carries for GW_Scene_1's
                 // side of the seam lie on the CUT floor (x < 2500): shown only
-                // now, with the cuts in (docs/ai/tasks/east-roads.md).
-                string cr = "no EastTileCutRoads in the tile scene (a tile built before the roads)";
-                for (int r = 0; r < roots.Length; r++)
+                // with the cuts in (docs/ai/tasks/east-roads.md).
+                if (standing == 0 && !st.RoadsOn && _doneLoad == _load && !_refused)
                 {
-                    Transform g = roots[r].transform.Find("EastTileCutRoads");
-                    if (g == null) continue;
-                    g.gameObject.SetActive(true);
-                    cr = g.childCount + " road/rail piece(s) in the cuts switched on";
+                    st.RoadsOn = true;
+                    if (st.CutRoads != null)
+                    {
+                        try { s += ReseatCutRoads(st.CutRoads); }
+                        catch (Exception e) { s += " cut road re-seat failed: " + e.Message + ";"; }
+                        st.CutRoads.gameObject.SetActive(true);
+                    }
+                    s += " " + (st.CutRoads == null ? "no EastTileCutRoads in the tile scene (a tile built before the roads)"
+                                                    : st.CutRoads.childCount + " road/rail piece(s) in the cuts switched on") + ";";
                 }
-                Log("seam: " + cr + ".");
+                st.Done = standing == 0 && st.RoadsOn;
+                if (st.WallRoot == null && st.Logged.Length == 0) s = " no EastTileSeamWall in the tile scene;" + s;
+                if (s.Length > 0 && s != st.Logged)
+                {
+                    st.Logged = s;
+                    Log("seam (tile scene " + tile.GetHashCode() + "):" + s.TrimEnd(';') + ".");
+                }
             }
+        }
+
+        /// <summary>A cut road piece further than this off the live ground
+        /// anywhere is re-seated (m) - a floor that moved, not the builder's
+        /// own few decimetres at a cut's rim (S3 0.38 m); BuildTile.RoadLift is
+        /// the builder's lift.</summary>
+        const float ReseatTolerance = 1f, RoadLift = 0.05f;
+
+        /// <summary>
+        /// The tile bundle lays its cut-floor road pieces (EastTileRoad_*) on
+        /// the cut floor it was built for. When the crossing data moves a floor
+        /// - B7b: S2's approach runs the cut on west to the valley and lowers
+        /// its vanilla side by up to 20 m - a piece built before would float.
+        /// Each piece is compared with the LIVE ground (the cut GWTerrain2 west
+        /// of x 2500, the tile east of it); one off it anywhere by more than
+        /// ReseatTolerance is laid back onto it: every vertex on the ground +
+        /// RoadLift (the builder's rule; the floor is flat across the road),
+        /// normals and bounds recalculated, the collider re-cooked. Pieces
+        /// that fit are left alone, so a tile rebuilt on the new floor changes
+        /// nothing here. The railway pieces are not touched.
+        /// </summary>
+        static string ReseatCutRoads(Transform cutRoads)
+        {
+            int moved = 0;
+            float worst = 0f;
+            string names = "";
+            for (int c = 0; c < cutRoads.childCount; c++)
+            {
+                Transform p = cutRoads.GetChild(c);
+                if (!p.name.StartsWith("EastTileRoad_", StringComparison.Ordinal)) continue;
+                MeshFilter mf = p.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null || !mf.sharedMesh.isReadable) continue;
+                Mesh m = mf.sharedMesh;
+                Vector3[] v = m.vertices;
+                float[] want = new float[v.Length];
+                float off = 0f;
+                bool ground = v.Length > 0;
+                for (int i = 0; i < v.Length && ground; i++)
+                {
+                    Vector3 w = p.TransformPoint(v[i]);
+                    float g;
+                    ground = EastWorld.TerrainHeight(w, out g);
+                    want[i] = g + RoadLift;
+                    off = Mathf.Max(off, Mathf.Abs(w.y - want[i]));
+                }
+                if (!ground || off <= ReseatTolerance) continue;
+                for (int i = 0; i < v.Length; i++)
+                {
+                    Vector3 w = p.TransformPoint(v[i]);
+                    w.y = want[i];
+                    v[i] = p.InverseTransformPoint(w);
+                }
+                m.vertices = v;
+                m.RecalculateNormals();
+                m.RecalculateTangents();
+                m.RecalculateBounds();
+                MeshCollider mc = p.GetComponent<MeshCollider>();
+                if (mc != null) { mc.sharedMesh = null; mc.sharedMesh = m; }
+                moved++;
+                worst = Mathf.Max(worst, off);
+                names += (names.Length > 0 ? ", " : "") + p.name;
+            }
+            return moved == 0 ? "" : " " + moved + " cut road piece(s) re-seated on the live cut floor ("
+                                     + names + "; up to " + worst.ToString("F1") + " m off);";
+        }
+
+        /// <summary>The highest the vanilla edge (x 2499.9) stands over the tile
+        /// (x 2500.1) along a wall strip's z range, from the terrain data both
+        /// sides collide with (EastWorld.TerrainHeight: GW_Scene_1's terrain west
+        /// of the seam, the tile's east of it). False while either is missing.</summary>
+        static bool EdgeRise(Transform strip, out float rise, out int n)
+        {
+            rise = 0f;
+            n = 0;
+            MeshFilter mf = strip.GetComponent<MeshFilter>();
+            if (mf == null || mf.sharedMesh == null) return false;
+            Bounds b = mf.sharedMesh.bounds;
+            float z0 = strip.TransformPoint(b.min).z, z1 = strip.TransformPoint(b.max).z;
+            if (z1 < z0) { float t = z0; z0 = z1; z1 = t; }
+            rise = float.MinValue;
+            for (float z = z0; z <= z1 + 0.01f; z += 2.44140625f)
+            {
+                float v, e;
+                if (!EastWorld.TerrainHeight(new Vector3(2499.9f, 0f, z), out v)) return false;
+                if (!EastWorld.TerrainHeight(new Vector3(2500.1f, 0f, z), out e)) return false;
+                rise = Mathf.Max(rise, v - e);
+                n++;
+            }
+            return n > 0;
+        }
+
+        /// <summary>Per saddle, once the patch is up: the seam link onto the
+        /// tile's NavMesh, then the seam checks.</summary>
+        static void TickLinks()
+        {
+            if (!SceneManager.GetSceneByName(EastWorld.SceneName).isLoaded) return;
             for (int k = 0; k < _cuts.Length; k++)
             {
                 Cut c = _cuts[k];
@@ -908,12 +1179,43 @@ namespace NextDayRevival
             Vector3 a = new Vector3(w[0], y1, w[1]), b = new Vector3(e[0], y2, e[1]), snapped;
             if (CrossingCore.NavAt(a, 30f, CrossingCore.VanillaMask, out snapped)) a = snapped;
             Log("seam " + c.D.Key + ": largest step across x 2500 on the road " + worst.ToString("F2") + " m; path west -> "
-                + "east " + CrossingCore.PathCheck(a, b) + "; east -> west " + CrossingCore.PathCheck(b, a) + ".");
+                + "east " + CrossingCore.PathCheck(a, b) + "; east -> west " + CrossingCore.PathCheck(b, a) + "; player "
+                + "capsule on the road west -> east " + Probe(zc, true) + ", east -> west " + Probe(zc, false) + ".");
+        }
+
+        /// <summary>
+        /// B7a field probe: the player's capsule (Player_GO's CharacterController,
+        /// radius 0.8, 0.3 m step, 5.2 m tall) swept 24 m along the road over
+        /// x 2500 at three lanes. Terrain, the road strips and triggers are
+        /// ground or nothing; anything else it meets is named, so a wall at a
+        /// crossing shows up in the log with its path.
+        /// </summary>
+        static string Probe(float zc, bool east)
+        {
+            string hit = "";
+            for (int lane = -1; lane <= 1; lane++)
+            {
+                float z = zc + lane * 4f, x0 = east ? 2488f : 2512f, y;
+                if (!EastWorld.TerrainHeight(new Vector3(x0, 0f, z), out y)) return "no ground";
+                Vector3 p0 = new Vector3(x0, y + 1.1f + 0.5f, z), p1 = new Vector3(x0, y + 4.4f + 0.5f, z);
+                RaycastHit[] hits = Physics.CapsuleCastAll(p0, p1, 0.8f, east ? Vector3.right : Vector3.left, 24f,
+                                                           Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+                for (int i = 0; i < hits.Length; i++)
+                {
+                    Collider c = hits[i].collider;
+                    if (c == null || c is TerrainCollider || c.name.StartsWith("EastTileRoad_") || c.GetComponentInParent<CharacterController>() != null)
+                        continue;
+                    string path = c.name;
+                    for (Transform t = c.transform.parent; t != null; t = t.parent) path = t.name + "/" + path;
+                    if (hit.IndexOf(path) < 0) hit += (hit.Length > 0 ? ", " : "") + path + " at x " + hits[i].point.x.ToString("F1");
+                }
+            }
+            return hit.Length == 0 ? "clear" : "BLOCKED by " + hit;
         }
 
         static void DropSeam(string why)
         {
-            _wallOff = false;
+            _seams.Clear();
             if (_cuts == null) return;
             for (int k = 0; k < _cuts.Length; k++)
             {

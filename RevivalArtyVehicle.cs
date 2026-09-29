@@ -386,6 +386,7 @@ namespace NextDayRevival
                 min.y - b.min.y * scale + lift,
                 (min.z + max.z) * 0.5f - b.center.z * scale);
             modell.transform.position = root.TransformPoint(wanted);
+            ModelLod.Apply(modell, ModelLod.Kind.Vehicle);   // P2: the donor's LODs are off
 
             RevivalPlugin.L.LogInfo("ArtyVehicle: donor box x "
                 + min.x.ToString("0.00") + ".." + max.x.ToString("0.00") + ", y "
@@ -770,7 +771,7 @@ namespace NextDayRevival
         internal static string SpawnInFront()
         {
             if (!Enabled) return "The howitzer is disabled in the configuration.";
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return "No player camera available.";
 
             Vector3 ahead = cam.transform.forward;

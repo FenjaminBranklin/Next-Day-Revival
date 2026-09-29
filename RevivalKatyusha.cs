@@ -278,7 +278,7 @@ namespace NextDayRevival
         internal static string SpawnInFront()
         {
             if (!Enabled) return "The Katyusha is disabled in the configuration ([Katyusha] Enabled).";
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return "No player camera available.";
             Vector3 ahead = cam.transform.forward;
             ahead.y = 0f;
@@ -1137,6 +1137,7 @@ namespace NextDayRevival
                 r.transform.localPosition = Slot(i);
                 r.SetActive(false);
             }
+            ModelLod.Apply(mount, ModelLod.Kind.Vehicle);    // P2: rockets and small parts go first
             RevivalPlugin.L.LogInfo("Katyusha: launcher built - donor box z " + min.z.ToString("0.00") + ".."
                 + max.z.ToString("0.00") + ", bed " + (bed ? "flatbed" : "estimated") + " top "
                 + bmax.y.ToString("0.00") + ", scale " + scale.ToString("0.000") + ", " + hidden
@@ -1610,10 +1611,10 @@ namespace NextDayRevival
                 if (t != null && r > 0f)
                 {
                     FieldInfo safe = AccessTools.Field(t, "IsSafeSettlement");
-                    UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
+                    Component[] all = SettlementScan.All();      // P1b: no world walk
                     for (int i = 0; i < all.Length; i++)
                     {
-                        Component s = all[i] as Component;
+                        Component s = all[i];
                         if (s == null || safe == null || safe.FieldType != typeof(bool)) continue;
                         if (!(bool)safe.GetValue(s)) continue;
                         Circles.Add(new Vector2(s.transform.position.x, s.transform.position.z));
@@ -1968,7 +1969,7 @@ namespace NextDayRevival
 
         internal static void Boom(Vector3 at)
         {
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             float d = cam == null ? 0f : Vector3.Distance(cam.transform.position, at);
             Pending p;
             p.At = Time.time + d / (343f * PlayerAn2.K);

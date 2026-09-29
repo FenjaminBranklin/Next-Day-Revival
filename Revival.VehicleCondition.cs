@@ -287,7 +287,7 @@ namespace NextDayRevival
         {
             if (!RevivalTroopInsertion.MasterClient())
                 return Loc.T("спавн техники - только хост", "vehicle spawns are host only");
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return "No player camera available.";
             Vector3 ahead = cam.transform.forward;
             ahead.y = 0f;

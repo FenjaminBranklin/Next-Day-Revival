@@ -41,8 +41,10 @@ is a judgement and says so):
     elevation -3..+82 deg, traverse 360 deg, recoil 0.55-0.70 m
     shield 1.9 m wide, 1.25 m high (the small one of the later guns)
 
---preview also writes docs/ai/tasks/k52-flak/k52.glb (the whole gun at LOD0,
-barrel at 20 deg) for style_compare.py and the review sheets.
+--preview also writes docs/ai/tasks/k52-flak/k52.glb (the whole gun at every
+LOD as k52_LOD<n> nodes plus its UCX_ collider boxes, barrel at 20 deg) for
+style_compare.py, and review/b2_poses.png: the rig in three poses beside the
+1.8 m NPC figure (B2).
 """
 import json
 import math
@@ -68,6 +70,35 @@ CRADLE_AT = (0.0, 0.78, 0.18)        # in the mount frame: trunnion 1.70 m up
 BARREL_AT = (0.0, 0.0, 0.0)          # in the cradle frame
 MUZZLE_Z = 4.55                      # muzzle brake face, barrel frame
 RECOIL = 0.65                        # metres, at zero elevation
+
+# B2: the gunner's two views, in the MOUNT frame (they traverse with the gun,
+# they do not elevate): over the shoulder behind the breech, high enough to
+# clear the shield and the AA ring's sandbags; the sight, left of the barrel
+# and above the shield top (1.62 m), so no part of the gun is ever between
+# the camera and its near plane.
+SHOULDER = (-1.10, 2.25, -2.70)
+SIGHT = (-0.62, 1.86, 0.30)
+
+# B2: box colliders (centre, size), metres, in the frame of the part named.
+# None on the seats (the crew sits there) and none that recoils: the barrel's
+# boxes ride on the cradle. The mount's and the cradle's are one kinematic
+# compound at runtime.
+COLLIDERS = [
+    ("base", (0.0, 0.31, 0.0), (0.72, 0.62, 6.20)),        # long beam, jacks and feet
+    ("base", (0.0, 0.28, 0.0), (5.84, 0.56, 0.36)),        # side outriggers
+    ("base", (0.0, 0.74, 0.0), (1.10, 0.36, 1.10)),        # pedestal and traverse ring
+    ("mount", (0.0, 0.14, -0.125), (1.10, 0.28, 1.65)),    # turntable and deck
+    ("mount", (0.0, 0.63, -0.175), (0.82, 0.70, 1.55)),    # the cheeks
+    ("mount", (0.50, 0.81, 0.42), (0.20, 1.06, 0.20)),     # equilibrators
+    ("mount", (-0.50, 0.81, 0.42), (0.20, 1.06, 0.20)),
+    ("mount", (-0.645, 0.96, 0.785), (0.95, 1.32, 0.04)),  # shield left of the slot
+    ("mount", (0.645, 0.96, 0.785), (0.95, 1.32, 0.04)),   # shield right of the slot
+    ("mount", (0.0, 0.41, 0.785), (0.34, 0.22, 0.04)),     # shield under the slot
+    ("mount", (0.60, 0.515, -0.875), (0.36, 0.47, 0.35)),  # fuze setter
+    ("cradle", (0.0, 0.02, 0.50), (0.34, 0.64, 2.24)),     # sleeve, recuperator, buffer
+    ("cradle", (0.0, 0.0, -0.93), (0.36, 0.36, 0.64)),     # breech ring and tray
+    ("cradle", (0.0, 0.0, 2.90), (0.22, 0.22, 3.32)),      # the tube and muzzle brake
+]
 
 # UV regions in the 2 x 2 atlas (u0, v0, u1, v1), v up (Unity).
 REG = {
@@ -497,15 +528,17 @@ def _region_px(name):
 
 def texture():
     """Olive 4BO paint worn to primer at edges, dust at the foot, oily gun
-    steel, black fittings. Muted (style bible section 4: value 0.2-0.5,
-    saturation under 0.2 except rust)."""
+    steel, black fittings. B2: tuned to the style bible's "military paint,
+    worn" row (section 4: value p50 ~0.21-0.27, saturation ~0.2, grime
+    patches and rust runs painted into the albedo, never in the mesh), the
+    way the H1 hangar's kit sheets carry their wear."""
     img = np.zeros((ATLAS, ATLAS, 3), np.float32)
     height = np.zeros((ATLAS, ATLAS), np.float32)
     base = {
-        "paint": np.array([0.345, 0.365, 0.285]),
-        "shield": np.array([0.315, 0.335, 0.262]),
-        "steel": np.array([0.215, 0.215, 0.205]),
-        "black": np.array([0.105, 0.105, 0.100]),
+        "paint": np.array([0.285, 0.290, 0.222]),
+        "shield": np.array([0.262, 0.268, 0.205]),
+        "steel": np.array([0.195, 0.195, 0.186]),
+        "black": np.array([0.095, 0.095, 0.090]),
     }
     for k, name in enumerate(("paint", "shield", "steel", "black")):
         x0, y0, x1, y1 = _region_px(name)
@@ -530,6 +563,16 @@ def texture():
             streak = np.asarray(Image.fromarray((streak * 255).astype(np.uint8)).resize((w, h // 8 or 1)).resize((w, h)),
                                 np.float32) / 255.0
             col *= (0.94 + 0.08 * streak)[:, :, None]
+            # rust runs from the chips downwards (v runs top to bottom here)
+            run = np.zeros_like(chips)
+            for dy in range(1, 40, 3):
+                run[dy:] = np.maximum(run[dy:], chips[:-dy] * (1.0 - dy / 40.0))
+            run *= np.clip((streak - 0.35) * 2.5, 0, 1)
+            rust2 = np.array([0.30, 0.19, 0.12])
+            col = col * (1 - run[:, :, None] * 0.45) + rust2 * run[:, :, None] * 0.45
+            # grime: oil and soot patches where the big noise is low
+            grime = np.clip((0.34 - big) * 5.0, 0, 1) * np.clip((0.6 - mid) * 3.0, 0, 1)
+            col *= (1.0 - 0.55 * grime)[:, :, None]
             hgt = 0.5 + 0.3 * mid - chips * 0.4
         elif name == "steel":
             oil = np.clip((big - 0.55) * 3.0, 0, 1)
@@ -552,48 +595,62 @@ def texture():
 # ======================================================================
 # the preview GLB (right-handed glTF: x negated, winding reversed)
 
-def glb(path, parts_world, tex_png):
-    pos, nor, uv, idx = [], [], [], []
-    for p in parts_world:
-        base = len(pos)
-        pos.extend([(-x, y, z) for x, y, z in p.V])
-        nor.extend([(-x, y, z) for x, y, z in p.N])
-        uv.extend([(u, 1.0 - v) for u, v in p.T])
-        for i in range(0, len(p.I), 3):
-            idx.extend((base + p.I[i], base + p.I[i + 2], base + p.I[i + 1]))
-    P = np.asarray(pos, "<f4")
-    Nn = np.asarray(nor, "<f4")
-    U = np.asarray(uv, "<f4")
-    Ix = np.asarray(idx, "<u4")
-    png = open(tex_png, "rb").read()
-    chunks, views, off = [], [], 0
-    for arr, target in ((P, 34962), (Nn, 34962), (U, 34962), (Ix, 34963), (np.frombuffer(png, np.uint8), None)):
-        b = arr.tobytes()
+def glb(path, groups, tex_png):
+    """`groups`: (node name, [parts in world metres x K]); one node and one
+    mesh per group, so style_compare.py sees the LODs (*_LOD<n>) and the
+    colliders (UCX_*) by their node names."""
+    chunks, views, accessors, meshes, nodes = [], [], [], [], []
+    off = [0]
+
+    def view(b, target):
         pad = (4 - len(b) % 4) % 4
-        v = {"buffer": 0, "byteOffset": off, "byteLength": len(b)}
+        v = {"buffer": 0, "byteOffset": off[0], "byteLength": len(b)}
         if target:
             v["target"] = target
         views.append(v)
         chunks.append(b + b"\0" * pad)
-        off += len(b) + pad
+        off[0] += len(b) + pad
+        return len(views) - 1
+
+    for name, parts_world in groups:
+        pos, nor, uv, idx = [], [], [], []
+        for p in parts_world:
+            base = len(pos)
+            pos.extend([(-x, y, z) for x, y, z in p.V])
+            nor.extend([(-x, y, z) for x, y, z in p.N])
+            uv.extend([(u, 1.0 - v) for u, v in p.T])
+            for i in range(0, len(p.I), 3):
+                idx.extend((base + p.I[i], base + p.I[i + 2], base + p.I[i + 1]))
+        P = np.asarray(pos, "<f4")
+        Nn = np.asarray(nor, "<f4")
+        U = np.asarray(uv, "<f4")
+        Ix = np.asarray(idx, "<u4")
+        a0 = len(accessors)
+        accessors.append({"bufferView": view(P.tobytes(), 34962), "componentType": 5126, "count": len(P),
+                          "type": "VEC3", "min": P.min(0).tolist(), "max": P.max(0).tolist()})
+        accessors.append({"bufferView": view(Nn.tobytes(), 34962), "componentType": 5126, "count": len(Nn),
+                          "type": "VEC3"})
+        accessors.append({"bufferView": view(U.tobytes(), 34962), "componentType": 5126, "count": len(U),
+                          "type": "VEC2"})
+        accessors.append({"bufferView": view(Ix.tobytes(), 34963), "componentType": 5125, "count": len(Ix),
+                          "type": "SCALAR"})
+        meshes.append({"name": name, "primitives": [{"attributes": {"POSITION": a0, "NORMAL": a0 + 1,
+                                                                    "TEXCOORD_0": a0 + 2},
+                                                     "indices": a0 + 3, "material": 0}]})
+        nodes.append({"name": name, "mesh": len(meshes) - 1})
+    png = open(tex_png, "rb").read()
+    img_view = view(png, None)
     binary = b"".join(chunks)
     doc = {
         "asset": {"version": "2.0", "generator": "k52_build.py"},
-        "scene": 0, "scenes": [{"nodes": [0]}],
-        "nodes": [{"name": "52-K", "mesh": 0}],
-        "meshes": [{"name": "k52", "primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
-                                                   "indices": 3, "material": 0}]}],
+        "scene": 0, "scenes": [{"nodes": [len(nodes)]}],
+        "nodes": nodes + [{"name": "52-K", "children": list(range(len(nodes)))}],
+        "meshes": meshes,
         "materials": [{"name": "k52_paint", "pbrMetallicRoughness": {
             "baseColorTexture": {"index": 0}, "metallicFactor": 0.15, "roughnessFactor": 0.7}}],
         "textures": [{"source": 0}],
-        "images": [{"bufferView": 4, "mimeType": "image/png"}],
-        "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": len(P), "type": "VEC3",
-             "min": P.min(0).tolist(), "max": P.max(0).tolist()},
-            {"bufferView": 1, "componentType": 5126, "count": len(Nn), "type": "VEC3"},
-            {"bufferView": 2, "componentType": 5126, "count": len(U), "type": "VEC2"},
-            {"bufferView": 3, "componentType": 5125, "count": len(Ix), "type": "SCALAR"},
-        ],
+        "images": [{"bufferView": img_view, "mimeType": "image/png"}],
+        "accessors": accessors,
         "bufferViews": views,
         "buffers": [{"byteLength": len(binary)}],
     }
@@ -606,25 +663,100 @@ def glb(path, parts_world, tex_png):
         f.write(struct.pack("<II", len(binary), 0x004E4942) + binary)
 
 
-def posed(pitch_deg):
-    """The whole gun at LOD0 in one frame (metres): the parts at their
-    pivots, the cradle at `pitch_deg`."""
-    out = []
-    mb = base(0)
-    out.append(mb)
+def _moved(p, m, at):
+    q = Part(p.name)
+    q.V = [tuple(a + b for a, b in zip(apply(m, v), at)) for v in p.V]
+    q.N = [apply(m, n) for n in p.N]
+    q.T, q.I = list(p.T), list(p.I)
+    return q
 
-    def moved(p, m, at):
-        q = Part(p.name)
-        q.V = [tuple(a + b for a, b in zip(apply(m, v), at)) for v in p.V]
-        q.N = [apply(m, n) for n in p.N]
-        q.T, q.I = list(p.T), list(p.I)
-        return q
-    out.append(moved(mount(0), IDENT, MOUNT_AT))
-    rc = rot_x(-pitch_deg)
-    ca = tuple(a + b for a, b in zip(MOUNT_AT, CRADLE_AT))
-    out.append(moved(cradle(0), rc, ca))
-    out.append(moved(barrel(0), rc, ca))
+
+def _frames(pitch_deg, yaw_deg, recoil):
+    """(rotation, origin) of each part in the gun's frame (metres)."""
+    rm = rot_y(yaw_deg)
+    rc = mul(rm, rot_x(-pitch_deg))
+    ca = tuple(a + b for a, b in zip(MOUNT_AT, apply(rm, CRADLE_AT)))
+    ba = tuple(a + b for a, b in zip(ca, apply(rc, (0.0, 0.0, -RECOIL * recoil))))
+    return {"base": (IDENT, (0.0, 0.0, 0.0)), "mount": (rm, MOUNT_AT), "cradle": (rc, ca), "barrel": (rc, ba)}
+
+
+def posed(pitch_deg, yaw_deg=0.0, recoil=0.0, L=0):
+    """The whole gun at LOD `L` in one frame (metres): the parts at their
+    pivots, the mount at `yaw_deg`, the cradle at `pitch_deg`, the barrel
+    `recoil` (0..1) of its stroke back."""
+    f = _frames(pitch_deg, yaw_deg, recoil)
+    out = []
+    for name, fn in (("base", base), ("mount", mount), ("cradle", cradle), ("barrel", barrel)):
+        m, at = f[name]
+        out.append(_moved(fn(L), m, at))
     return out
+
+
+def posed_colliders(pitch_deg, yaw_deg=0.0):
+    """COLLIDERS as box meshes in the gun's frame, posed like posed()."""
+    f = _frames(pitch_deg, yaw_deg, 0.0)
+    out = []
+    for i, (part, c, sz) in enumerate(COLLIDERS):
+        b = Part("UCX_k52_%s_%02d" % (part, i))
+        b.box(c, sz, "black")
+        m, at = f[part]
+        out.append(_moved(b, m, at))
+    return out
+
+
+POSES = [
+    ("ready: yaw 0, 12 deg", 12.0, 0.0, 0.0),
+    ("firing: yaw 35, 45 deg, recoiled", 45.0, 35.0, 1.0),
+    ("max: yaw -60, 82 deg", 82.0, -60.0, 0.0),
+]
+
+
+def preview_sheet(path):
+    """B2 review: the rig in three poses beside the 1.8 m NPC figure (5.0 u),
+    side and three-quarter views, one orthographic scale for every tile, the
+    style_compare.py renderer (GW_Scene_1 light, flat shading)."""
+    import tempfile
+    import style_compare as sc
+    from PIL import ImageDraw
+    tmp = tempfile.mkdtemp(prefix="k52_")
+    models = []
+    for k, (label, pitch, yaw, rec) in enumerate(POSES):
+        g = os.path.join(tmp, "pose%d.glb" % k)
+        glb(g, [("k52_LOD0", [q.scaled(K) for q in posed(pitch, yaw, rec, 0)])],
+            os.path.join(OUT, "k52_diffuse.png"))
+        models.append((label, sc.load_gltf(g)))
+    views = [("side", -np.pi / 2, 0.0), ("three-quarter", -np.pi / 2 + 0.62, 0.42)]
+    px = 420
+    fig_z = -3.1 * K - 3.5          # beside the rear foot, clear of the gun in every view
+    lo_all = np.min([sc.bounds(sc.lod0(m))[0] for _l, m in models], axis=0)
+    hi_all = np.max([sc.bounds(sc.lod0(m))[1] for _l, m in models], axis=0)
+    lo_all[2] = min(lo_all[2], fig_z)
+    ext = []
+    for _n2, yaw, pitch in views:
+        R = sc.view_matrix(yaw, pitch)
+        corners = np.array([[x, y, z] for x in (lo_all[0], hi_all[0]) for y in (lo_all[1], hi_all[1])
+                            for z in (lo_all[2], hi_all[2])])
+        q = corners @ R.T
+        ext.append(max(np.ptp(q[:, 0]), np.ptp(q[:, 1])))
+    mpp = max(ext) / (px * 0.92)
+    origin = (lo_all + hi_all) / 2
+    W, H = px * len(models) + 20, px * len(views) + 90
+    img = Image.new("RGB", (W, H), (24, 26, 28))
+    d = ImageDraw.Draw(img)
+    font = sc._font(15)
+    d.text((10, 8), "52-K rig (B2): base / mount (yaw) / cradle (pitch) / barrel (recoil), LOD0, "
+                    "red block = NPC 5.0 u (1.8 m x 2.8)", fill=(240, 200, 120), font=font)
+    d.text((10, 28), "one orthographic scale %.3f u/px; trunnion 1.70 m, muzzle 4.74 m ahead of the pedestal, "
+                     "shield top 2.54 m" % mpp, fill=(200, 200, 200), font=sc._font(13))
+    for c, (label, m) in enumerate(models):
+        d.text((10 + c * px, 52), label, fill=(150, 210, 240), font=font)
+        fig = sc.figure_part(-0.75, fig_z, 0.0)
+        for r, (vname, yaw, pitch) in enumerate(views):
+            R = sc.view_matrix(yaw, pitch)
+            tile, _ = sc.render_view(m, R, mpp, origin, px, px, [fig])
+            img.paste(Image.fromarray(tile), (10 + c * px, 76 + r * px))
+            d.text((14 + c * px, 80 + r * px), vname, fill=(20, 20, 20), font=sc._font(13))
+    img.save(path)
 
 
 def main():
@@ -655,6 +787,12 @@ def main():
         line("seat_loader", (0.78, 0.47, -0.36))
         line("eye", (-0.46, 0.38, -0.25))
         line("recoil", (0.0, 0.0, RECOIL))
+        line("shoulder", SHOULDER)
+        line("sight", SIGHT)
+        f.write("# box <part> cx cy cz sx sy sz   (collider, in the part's frame)\n")
+        for part, c, s in COLLIDERS:
+            f.write("box %s %.4f %.4f %.4f %.4f %.4f %.4f\n"
+                    % (part, c[0] * K, c[1] * K, c[2] * K, s[0] * K, s[1] * K, s[2] * K))
     total = [sum(c[L] for _n2, c in report) for L in range(LODS)]
     for name, counts in report:
         print("  %-7s %s" % (name, " / ".join(str(c) for c in counts)))
@@ -662,9 +800,14 @@ def main():
                                        " : ".join("%.2f" % (t / float(total[0])) for t in total)))
     if "--preview" in sys.argv:
         os.makedirs(REVIEW, exist_ok=True)
-        world = [p.scaled(K) for p in posed(20.0)]
-        glb(os.path.join(REVIEW, "k52.glb"), world, os.path.join(OUT, "k52_diffuse.png"))
+        groups = [("k52_LOD%d" % L, [q.scaled(K) for q in posed(20.0, 0.0, 0.0, L)]) for L in range(LODS)]
+        groups += [(c.name, [c.scaled(K)]) for c in posed_colliders(20.0)]
+        glb(os.path.join(REVIEW, "k52.glb"), groups, os.path.join(OUT, "k52_diffuse.png"))
         print("  preview  %s" % os.path.join(REVIEW, "k52.glb"))
+        os.makedirs(os.path.join(REVIEW, "review"), exist_ok=True)
+        sheet = os.path.join(REVIEW, "review", "b2_poses.png")
+        preview_sheet(sheet)
+        print("  poses    %s" % sheet)
 
 
 if __name__ == "__main__":

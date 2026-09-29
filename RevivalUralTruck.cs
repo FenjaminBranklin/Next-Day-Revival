@@ -350,7 +350,7 @@ namespace NextDayRevival
 
         static void SpawnInFront()
         {
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) { RevivalPlugin.L.LogWarning("Ural: keine Kamera."); return; }
 
             Vector3 ahead = cam.transform.forward;

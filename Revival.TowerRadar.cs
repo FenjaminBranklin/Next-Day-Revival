@@ -570,12 +570,23 @@ namespace NextDayRevival
             if (Time.time < _nextMaster) return;
             _nextMaster = Time.time + 0.5f;
 
-            // the operator
-            if (OperatorActor >= 0 && Time.time > _opUntil && OperatorActor != Crocodile.LocalActor())
+            // the operator: B1 - the claim ends with its owner, not only on a
+            // clean leave. A remote claimant must renew it (disconnect, crash,
+            // logout: the lease runs out), a dead one loses it at once, and
+            // the master's own claim (also after a master change) needs him
+            // in the radar view.
+            if (OperatorActor >= 0)
             {
-                Log("the console's operator (actor " + OperatorActor + ") is gone.");
-                OperatorActor = -1;
-                _dirty = true;
+                string gone = null;
+                if (OperatorActor == Crocodile.LocalActor()) { if (!RadarScope.InView) gone = "is not at the console"; }
+                else if (Time.time > _opUntil) gone = "is gone";
+                if (gone == null && Crocodile.ActorDown(OperatorActor)) gone = "is down";
+                if (gone != null)
+                {
+                    Log("the console's operator (actor " + OperatorActor + ") " + gone + ": the console is free.");
+                    OperatorActor = -1;
+                    _dirty = true;
+                }
             }
             bool npc = RadarOperator.Alive;
             int home = HomeSide();
@@ -679,11 +690,19 @@ namespace NextDayRevival
             return side == HomeSide() || !NpcOperatorUp;
         }
 
-        /// <summary>The game's Fraction value of a player, -1 unknown.</summary>
+        /// <summary>B1: a player whose faction cannot be read. He is still a
+        /// side of his own ("PLAYERS"), never nobody: an unreadable faction
+        /// used to refuse every order at a free console.</summary>
+        internal const int UnreadSide = 999;
+
+        /// <summary>The game's Fraction value of a player, -1 no such player,
+        /// <see cref="UnreadSide"/> a player whose faction is unreadable.</summary>
         internal static int PlayerSide(int actor)
         {
             GameObject p = Crocodile.PlayerByActor(actor);
-            return p == null ? -1 : SideId(Fraktion.Spielerseite(p));
+            if (p == null) return -1;
+            int side = SideId(Fraktion.Spielerseite(p));
+            return side < 0 ? UnreadSide : side;
         }
 
         /// <summary>The airfield's own side (its crews, its HQ operator).</summary>
@@ -704,6 +723,7 @@ namespace NextDayRevival
         internal static string SideLabel(int id)
         {
             if (id < 0) return "NOBODY";
+            if (id == UnreadSide) return "PLAYERS";
             string n = null;
             try
             {
@@ -846,7 +866,10 @@ namespace NextDayRevival
             if (!Crocodile.IsMaster()) return;
             if (on)
             {
-                if (OperatorActor >= 0 && OperatorActor != actor && Time.time < _opUntil) return;
+                if (Crocodile.ActorDown(actor)) return;
+                // B1: a recorded operator who is dead is no operator.
+                if (OperatorActor >= 0 && OperatorActor != actor && Time.time < _opUntil
+                    && !Crocodile.ActorDown(OperatorActor)) return;
                 if (OperatorActor != actor) { _dirty = true; Log("actor " + actor + " is at the console."); }
                 OperatorActor = actor;
                 _opUntil = Time.time + 3f;
@@ -1898,7 +1921,8 @@ namespace NextDayRevival
                 if (Vector3.Distance(me.transform.position, TowerRadar.ConsoleRoot.position) > 12f) { Leave("moved away"); return; }
                 if (!TowerRadar.ConsoleAlive) { Leave("the console is destroyed"); return; }
                 int mine = Crocodile.LocalActor();
-                if (TowerRadar.OperatorActor >= 0 && TowerRadar.OperatorActor != mine && Time.time - _enteredAt > 3f)
+                if (TowerRadar.OperatorActor >= 0 && TowerRadar.OperatorActor != mine && Time.time - _enteredAt > 3f
+                    && !Crocodile.ActorDown(TowerRadar.OperatorActor))
                 {
                     Leave("another player has the console");
                     return;
@@ -1911,6 +1935,7 @@ namespace NextDayRevival
                 if (Time.time >= _nextClaim)
                 {
                     _nextClaim = Time.time + 1f;
+                    if (!Crocodile.PlayerUp(me)) { Leave("the local player is down"); return; }
                     Claim(true);
                 }
                 float sens = Mathf.Max(1f, TowerRadar.F(TowerRadar.CfgCursor, 14f));
@@ -1930,7 +1955,8 @@ namespace NextDayRevival
             if (dd.magnitude > reach) return;
             _near = true;
             if (!TowerRadar.ConsoleAlive) _nearWhy = "The radar console is destroyed.";
-            else if (TowerRadar.OperatorActor >= 0 && TowerRadar.OperatorActor != Crocodile.LocalActor())
+            else if (TowerRadar.OperatorActor >= 0 && TowerRadar.OperatorActor != Crocodile.LocalActor()
+                     && !Crocodile.ActorDown(TowerRadar.OperatorActor))
                 _nearWhy = "Another player is at the radar console.";
             if (_nearWhy == null && Input.GetKeyDown(Key())) Enter();
         }
@@ -2359,57 +2385,30 @@ namespace NextDayRevival
     // =====================================================================
     // The siren
 
-    /// <summary>The air raid siren on the tower roof (synthesised: a
-    /// motor siren's rising and falling wail) and the NPCs it alarms.</summary>
+    /// <summary>The air raid siren on the tower roof and the NPCs it alarms.
+    /// Its sound is a <see cref="SirenVoice"/> (assets/ndr_siren.wav).</summary>
     internal static class RadarSiren
     {
-        static AudioSource _source;
-        static AudioClip _clip;
-        static float _volume;
+        static SirenVoice _voice;
 
         internal static void Tick()
         {
             bool on = TowerRadar.SirenOn && TowerRadar.B(TowerRadar.CfgSiren);
-            if (!on && _source == null) return;
-            if (_source == null) Make();
-            if (_source == null) return;
-            _source.transform.position = TowerRadar.TowerPoint(new Vector3(7.9f, TowerRadar.RoofM + 0.8f, 0f));
-            _volume = Mathf.MoveTowards(_volume, on ? 1f : 0f, Time.deltaTime / (on ? 3f : 5f));
-            _source.volume = _volume;
-            _source.pitch = 0.7f + 0.3f * _volume;     // the motor spins up and runs down
-            if (_volume > 0f && !_source.isPlaying) _source.Play();
-            if (_volume <= 0f && _source.isPlaying) _source.Stop();
+            if (!on && _voice == null) return;
+            if (_voice == null) _voice = SirenVoice.Make("NDR tower siren", 90f, 7000f);
+            if (_voice == null) return;
+            _voice.Position = TowerRadar.TowerPoint(new Vector3(7.9f, TowerRadar.RoofM + 0.8f, 0f));
+            _voice.Tick(on);
         }
 
         internal static void Stop()
         {
-            if (_source != null) UnityEngine.Object.Destroy(_source.gameObject);
-            _source = null;
-            _volume = 0f;
+            if (_voice != null) _voice.Destroy();
+            _voice = null;
         }
 
-        static void Make()
-        {
-            try
-            {
-                if (_clip == null) _clip = Clip();
-                GameObject go = new GameObject("NDR tower siren");
-                UnityEngine.Object.DontDestroyOnLoad(go);
-                _source = go.AddComponent<AudioSource>();
-                _source.clip = _clip;
-                _source.loop = true;
-                _source.playOnAwake = false;
-                _source.spatialBlend = 1f;
-                _source.dopplerLevel = 0f;
-                _source.rolloffMode = AudioRolloffMode.Logarithmic;
-                _source.minDistance = 90f;
-                _source.maxDistance = 7000f;
-                _source.volume = 0f;
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerRadar siren: " + ex.Message); }
-        }
-
-        /// <summary>Eight seconds: up from 280 to 620 Hz and down again, a
+        /// <summary>The fallback when assets/ndr_siren.wav is missing or
+        /// unreadable. Eight seconds: up from 280 to 620 Hz and down again, a
         /// rotor's chopped harmonics over it.</summary>
         internal static AudioClip Clip()
         {
@@ -2462,6 +2461,276 @@ namespace NextDayRevival
                 TowerRadar.Log("siren: " + n + " NPC(s) alarmed within " + r.ToString("0", CultureInfo.InvariantCulture) + " u.");
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerRadar alarm: " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// A motor siren's voice (task B8b): assets/ndr_siren.wav, synthesised by
+    /// research/siren_synth.py or a recording put in its place. The file's
+    /// WAV 'smpl' loop splits it in three - the spin-up played once, the wail
+    /// looped while the alarm lasts, the spin-down after the all clear - and
+    /// the parts are scheduled on the audio clock, so they join sample-exact:
+    /// the spin-down begins where the loop ends (the top of a wail), up to one
+    /// wail cycle after the all clear. A file without loop points loops whole
+    /// with a pitch/volume run-up and run-down; without the file the
+    /// synthesised RadarSiren.Clip() does the same.
+    /// </summary>
+    internal sealed class SirenVoice
+    {
+        internal const string FileName = "ndr_siren.wav";
+
+        static bool _loaded, _parts;
+        static AudioClip _up, _loop, _down;
+
+        GameObject _go;
+        AudioSource _upSrc, _loopSrc, _downSrc;
+        int _state;                 // 0 silent, 1 sounding, 2 running down (parts)
+        double _loopAt, _downAt, _endAt;
+        bool _loopCut;              // the all clear came during the spin-up
+        float _volume;              // whole-clip mode
+
+        internal Vector3 Position
+        {
+            set { if (_go != null) _go.transform.position = value; }
+        }
+
+        internal static SirenVoice Make(string name, float min, float max)
+        {
+            try
+            {
+                Load();
+                if (_loop == null) return null;
+                SirenVoice v = new SirenVoice();
+                v._go = new GameObject(name);
+                UnityEngine.Object.DontDestroyOnLoad(v._go);
+                v._loopSrc = v.Source(_loop, true, min, max);
+                if (_up != null) v._upSrc = v.Source(_up, false, min, max);
+                if (_down != null) v._downSrc = v.Source(_down, false, min, max);
+                return v;
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Siren: " + ex.Message); return null; }
+        }
+
+        AudioSource Source(AudioClip clip, bool loop, float min, float max)
+        {
+            AudioSource s = _go.AddComponent<AudioSource>();
+            s.clip = clip;
+            s.loop = loop;
+            s.playOnAwake = false;
+            s.spatialBlend = 1f;
+            s.dopplerLevel = 0f;
+            s.rolloffMode = AudioRolloffMode.Logarithmic;
+            s.minDistance = min;
+            s.maxDistance = max;
+            s.volume = _parts ? 1f : 0f;
+            return s;
+        }
+
+        /// <summary>Every frame; <paramref name="on"/> is the alarm as the
+        /// caller's trigger logic has it.</summary>
+        internal void Tick(bool on)
+        {
+            if (_go == null) return;
+            if (!_parts) { TickWhole(on); return; }
+            double now = AudioSettings.dspTime;
+            if (on)
+            {
+                if (_state == 1)
+                {
+                    // a loop end that could not be taken back: wail on
+                    if (!_loopCut && now > _loopAt + 0.2 && !_loopSrc.isPlaying) _loopSrc.Play();
+                    return;
+                }
+                if (_state == 2 && now < _downAt - 0.05)
+                {
+                    // the alarm again before the run-down began: keep wailing
+                    if (_loopCut) _loopSrc.PlayScheduled(_loopAt);
+                    else _loopSrc.SetScheduledEndTime(now + 1e7);
+                    if (_downSrc != null) _downSrc.Stop();
+                    _state = 1;
+                    return;
+                }
+                StopAll();
+                double at = now + 0.1;
+                if (_upSrc != null) _upSrc.PlayScheduled(at);
+                _loopAt = at + Seconds(_up);
+                _loopSrc.PlayScheduled(_loopAt);
+                _loopCut = false;
+                _state = 1;
+                return;
+            }
+            if (_state == 1)
+            {
+                double down = now + 0.1;
+                if (down <= _loopAt)
+                {
+                    // still spinning up: the loop is skipped, straight into the spin-down
+                    _loopSrc.Stop();
+                    _loopCut = true;
+                    down = _loopAt;
+                }
+                else
+                {
+                    double len = Seconds(_loop);
+                    down = _loopAt + Math.Ceiling((down - _loopAt) / len) * len;
+                    _loopSrc.SetScheduledEndTime(down);
+                    _loopCut = false;
+                }
+                if (_downSrc != null) _downSrc.PlayScheduled(down);
+                _downAt = down;
+                _endAt = down + Seconds(_down) + 0.2;
+                _state = 2;
+                return;
+            }
+            if (_state == 2 && now > _endAt)
+            {
+                StopAll();
+                _state = 0;
+            }
+        }
+
+        void TickWhole(bool on)
+        {
+            _volume = Mathf.MoveTowards(_volume, on ? 1f : 0f, Time.deltaTime / (on ? 3f : 5f));
+            _loopSrc.volume = _volume;
+            _loopSrc.pitch = 0.7f + 0.3f * _volume;     // the motor spins up and runs down
+            if (_volume > 0f && !_loopSrc.isPlaying) _loopSrc.Play();
+            if (_volume <= 0f && _loopSrc.isPlaying) _loopSrc.Stop();
+        }
+
+        void StopAll()
+        {
+            if (_upSrc != null) _upSrc.Stop();
+            if (_loopSrc != null) _loopSrc.Stop();
+            if (_downSrc != null) _downSrc.Stop();
+        }
+
+        internal void Destroy()
+        {
+            if (_go != null) UnityEngine.Object.Destroy(_go);
+            _go = null;
+            _state = 0;
+        }
+
+        static double Seconds(AudioClip c)
+        {
+            return c == null ? 0.0 : (double)c.samples / c.frequency;
+        }
+
+        static void Load()
+        {
+            if (_loaded) return;
+            _loaded = true;
+            string path = RevivalPlugin.AssetDir == null ? null : System.IO.Path.Combine(RevivalPlugin.AssetDir, FileName);
+            try
+            {
+                float[] data;
+                int rate, a, b;
+                if (path != null && System.IO.File.Exists(path)
+                    && ReadWav(System.IO.File.ReadAllBytes(path), out data, out rate, out a, out b))
+                {
+                    if (a >= 0 && b <= data.Length && b - a >= rate / 2)
+                    {
+                        _up = Part("NDR siren spin-up", data, 0, a, rate);
+                        _loop = Part("NDR siren wail", data, a, b, rate);
+                        _down = Part("NDR siren spin-down", data, b, data.Length, rate);
+                        _parts = true;
+                        RevivalPlugin.L.LogInfo("Siren: " + FileName + " " + Sec(data.Length, rate) + " s, lead-in (spin-up) "
+                            + Sec(a, rate) + " s, wail loop " + Sec(b - a, rate) + " s, spin-down "
+                            + Sec(data.Length - b, rate) + " s.");
+                        return;
+                    }
+                    _loop = Part("NDR siren", data, 0, data.Length, rate);
+                    RevivalPlugin.L.LogInfo("Siren: " + FileName + " " + Sec(data.Length, rate)
+                        + " s without loop points - looped whole.");
+                    return;
+                }
+                RevivalPlugin.L.LogWarning("Siren: " + FileName + " missing or unreadable - synthesised fallback.");
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("Siren: " + FileName + ": " + ex.Message + " - synthesised fallback.");
+            }
+            _up = _down = null;
+            _parts = false;
+            _loop = RadarSiren.Clip();
+        }
+
+        static string Sec(int samples, int rate)
+        {
+            return ((float)samples / rate).ToString("0.0", CultureInfo.InvariantCulture);
+        }
+
+        static AudioClip Part(string name, float[] data, int from, int to, int rate)
+        {
+            if (to - from < 16) return null;
+            float[] part = new float[to - from];
+            Array.Copy(data, from, part, 0, part.Length);
+            AudioClip clip = AudioClip.Create(name, part.Length, 1, rate, false);
+            clip.SetData(part, 0);
+            return clip;
+        }
+
+        /// <summary>RIFF/WAVE, PCM 8/16/24/32 bit or 32-bit float, any rate,
+        /// channels mixed to mono; the first 'smpl' loop as [a, b), -1 without
+        /// one.</summary>
+        internal static bool ReadWav(byte[] raw, out float[] data, out int rate, out int loopA, out int loopB)
+        {
+            data = null;
+            rate = 0;
+            loopA = loopB = -1;
+            if (raw.Length < 12 || Tag(raw, 0) != "RIFF" || Tag(raw, 8) != "WAVE") return false;
+            int format = 0, channels = 0, bits = 0, dataAt = -1, dataLen = 0;
+            int pos = 12;
+            while (pos + 8 <= raw.Length)
+            {
+                string id = Tag(raw, pos);
+                int body = pos + 8;
+                int size = BitConverter.ToInt32(raw, pos + 4);
+                if (size < 0 || size > raw.Length - body) size = raw.Length - body;
+                if (id == "fmt " && size >= 16)
+                {
+                    format = BitConverter.ToUInt16(raw, body);
+                    channels = BitConverter.ToUInt16(raw, body + 2);
+                    rate = BitConverter.ToInt32(raw, body + 4);
+                    bits = BitConverter.ToUInt16(raw, body + 14);
+                    if (format == 0xFFFE && size >= 26) format = BitConverter.ToUInt16(raw, body + 24);
+                }
+                else if (id == "data") { dataAt = body; dataLen = size; }
+                else if (id == "smpl" && size >= 60 && loopB < 0 && BitConverter.ToInt32(raw, body + 28) > 0)
+                {
+                    loopA = BitConverter.ToInt32(raw, body + 44);
+                    loopB = BitConverter.ToInt32(raw, body + 48) + 1;     // the file's loop end is inclusive
+                }
+                pos = body + size + (size & 1);
+            }
+            int bytes = bits / 8;
+            bool pcm = format == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+            bool single = format == 3 && bits == 32;
+            if (dataAt < 0 || channels < 1 || rate < 8000 || (!pcm && !single)) return false;
+            int frames = dataLen / (bytes * channels);
+            if (frames <= 0) return false;
+            data = new float[frames];
+            for (int i = 0; i < frames; i++)
+            {
+                float sum = 0f;
+                for (int c = 0; c < channels; c++)
+                {
+                    int o = dataAt + (i * channels + c) * bytes;
+                    if (single) sum += BitConverter.ToSingle(raw, o);
+                    else if (bits == 8) sum += (raw[o] - 128) / 128f;
+                    else if (bits == 16) sum += BitConverter.ToInt16(raw, o) / 32768f;
+                    else if (bits == 24) sum += (((raw[o] | (raw[o + 1] << 8) | (raw[o + 2] << 16)) << 8) >> 8) / 8388608f;
+                    else sum += BitConverter.ToInt32(raw, o) / 2147483648f;
+                }
+                data[i] = sum / channels;
+            }
+            return true;
+        }
+
+        static string Tag(byte[] b, int at)
+        {
+            return System.Text.Encoding.ASCII.GetString(b, at, 4);
         }
     }
 

@@ -701,11 +701,16 @@ namespace NextDayRevival
 
         void LateUpdate()
         {
+            FrameProf.S(FrameProf.S_MapLabels_LateUpdate);
+            try
+            {
             if (source == null) { Destroy(gameObject); return; }
             Follow();
             Behaviour behaviour = source as Behaviour;
             if (!source.gameObject.activeInHierarchy || (behaviour != null && !behaviour.enabled)
                 || Time.frameCount - frame > 1) Hide();
+            }
+            finally { FrameProf.E(FrameProf.S_MapLabels_LateUpdate); }
         }
     }
 }

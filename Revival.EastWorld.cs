@@ -870,6 +870,13 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>FarForest appended its canopy layer to `d`: map the
+        /// tile's layers again on the next call.</summary>
+        internal static void ForgetLayers(TerrainData d)
+        {
+            if (d != null) _layerMaps.Remove(d);
+        }
+
         static int[] Layers(TerrainData tile, TerrainData vanilla)
         {
             LayerMap m;

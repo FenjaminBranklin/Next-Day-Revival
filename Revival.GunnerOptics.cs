@@ -43,6 +43,56 @@ namespace NextDayRevival
         static readonly List<int> _boomPurge = new List<int>();
         static float _nextBoom;   // next explosion sample (see ScanExplosions)
 
+        // P1b script budget: ScanExplosions was a FindObjectsOfType over every
+        // MonoBehaviour of the world ten times a second while an optic was up.
+        // ExplosionObject declares no Awake/OnEnable for a SceneRegistry, so
+        // its own start calls report the instance instead: StartExplosion (the
+        // owner, at the blast), Explode and the NetworkVisualizeExplode RPC
+        // (every other client). The sampler reads this short list.
+        static readonly List<Component> _boomLive = new List<Component>();
+        static readonly List<float> _boomAt = new List<float>();
+        const float BoomKeep = 2f;          // a blast object lives a second or two
+        const int BoomMax = 64;
+        static bool _boomHooked;
+
+        internal static void Install(Harmony h)
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("ExplosionObject");
+                if (t == null) return;
+                MethodInfo post = typeof(GunnerOptics).GetMethod("BoomPostfix", BindingFlags.Static | BindingFlags.Public);
+                int n = 0;
+                foreach (string name in new string[] { "StartExplosion", "Explode", "NetworkVisualizeExplode" })
+                {
+                    MethodInfo m = AccessTools.DeclaredMethod(t, name, null, null);
+                    if (m == null) continue;
+                    h.Patch(m, null, new HarmonyMethod(post), null, null, null);
+                    n++;
+                }
+                _boomHooked = n > 0;
+                RevivalPlugin.L.LogInfo("GunnerOptics: " + n + " explosion hook(s)"
+                    + (_boomHooked ? "" : " - the thermal flare falls back to the scene scan") + ".");
+            }
+            catch (Exception ex)
+            {
+                _boomHooked = false;
+                RevivalPlugin.L.LogWarning("GunnerOptics: explosion hooks failed, scene scan fallback: " + ex.Message);
+            }
+        }
+
+        public static void BoomPostfix(object __instance)
+        {
+            Component c = __instance as Component;
+            if (c == null) return;
+            float now = Time.time;
+            for (int i = 0; i < _boomLive.Count; i++)
+                if (ReferenceEquals(_boomLive[i], c)) { _boomAt[i] = now; return; }
+            if (_boomLive.Count >= BoomMax) { _boomLive.RemoveAt(0); _boomAt.RemoveAt(0); }
+            _boomLive.Add(c);
+            _boomAt.Add(now);
+        }
+
         const float VehRange = 900f;
         const float PplRange = 600f;
         const float PplNear = 2.5f;
@@ -251,7 +301,7 @@ namespace NextDayRevival
             VisionMode mode = VehicleModules.CurrentMode(veh);
             try
             {
-                DrawVision(mode, Camera.main);
+                DrawVision(mode, CameraOwner.MainCamera());
                 DrawFrame(mode);
                 DrawReticle(mode);
                 DrawStatus(veh, mode);
@@ -587,6 +637,26 @@ namespace NextDayRevival
             float now = Time.time;
             if (now < _nextBoom) return;
             _nextBoom = now + 0.10f;
+            if (_boomHooked)
+            {
+                for (int i = _boomLive.Count - 1; i >= 0; i--)
+                {
+                    Component c = _boomLive[i];
+                    if (c == null || now - _boomAt[i] > BoomKeep) { _boomLive.RemoveAt(i); _boomAt.RemoveAt(i); continue; }
+                    int id = c.GetInstanceID();
+                    if (!_boomSeen.ContainsKey(id))
+                    {
+                        Flash f = new Flash();
+                        f.pos = c.transform.position + new Vector3(0f, 1.0f, 0f);
+                        f.born = now;
+                        f.dur = 1.1f;
+                        _flash.Add(f);
+                    }
+                    _boomSeen[id] = now;
+                }
+                PurgeBooms(now);
+                return;
+            }
             UnityEngine.Object[] objs;
             try { objs = UnityEngine.Object.FindObjectsOfType(_explType); }
             catch { return; }
@@ -605,6 +675,11 @@ namespace NextDayRevival
                 }
                 _boomSeen[id] = now;
             }
+            PurgeBooms(now);
+        }
+
+        static void PurgeBooms(float now)
+        {
             _boomPurge.Clear();
             foreach (KeyValuePair<int, float> kv in _boomSeen)
                 if (kv.Value < now) _boomPurge.Add(kv.Key);
@@ -669,7 +744,11 @@ namespace NextDayRevival
             // list when he crosses it rather than popping in at the next tick.
             float far = PplRange + 60f;
             float far2 = far * far;
-            UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(t);
+            // P1b: the NPC and player lists come from the shared registries
+            // (no world walk every 0.35 s while the optic is up).
+            UnityEngine.Object[] objs = ReferenceEquals(t, NpcScan.Registry.Type) ? NpcScan.All()
+                : ReferenceEquals(t, PlayerScan.Registry.Type) ? PlayerScan.All()
+                : UnityEngine.Object.FindObjectsOfType(t);
             for (int i = 0; i < objs.Length; i++)
             {
                 Component c = objs[i] as Component;
@@ -681,8 +760,7 @@ namespace NextDayRevival
                 {
                     try
                     {
-                        object alive = _npcAlive.Invoke(c, null);
-                        if (alive is bool && !(bool)alive) continue;
+                        if (!FastCall.Bool(_npcAlive, c)) continue;     // P1b: no boxed bool
                     }
                     catch { }
                 }

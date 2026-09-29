@@ -500,7 +500,7 @@ namespace NextDayRevival
             normal = Vector3.up;
             GameObject player = MapTools.LocalPlayer();
             if (player == null) return false;
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             Vector3 fwd = cam != null ? cam.transform.forward : player.transform.forward;
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;

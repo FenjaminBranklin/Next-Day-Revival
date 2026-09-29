@@ -729,7 +729,7 @@ namespace NextDayRevival
             Vector3 me = player.transform.position;
             bool pending = false;
 
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_settlementType);
+            UnityEngine.Object[] all = SettlementScan.All();    // P1b: no world walk every 1-5 s
             for (int i = 0; i < all.Length; i++)
             {
                 Component s = all[i] as Component;
@@ -1073,6 +1073,7 @@ namespace NextDayRevival
             go.transform.up = normal;
             float sc = Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f);
             go.transform.localScale = new Vector3(sc, sc, sc);
+            ModelLod.Apply(go, ModelLod.Kind.Gun);           // P2
 
             Tube t = new Tube();
             t.Go = go;
@@ -1143,6 +1144,7 @@ namespace NextDayRevival
             go.transform.up = normal;
             float sc = Mathf.Clamp(F(_cfgScale, 1f), 0.2f, 4f);
             go.transform.localScale = new Vector3(sc, sc, sc);
+            ModelLod.Apply(go, ModelLod.Kind.Gun);           // P2
 
             Tube t = new Tube();
             t.Go = go;
@@ -2104,7 +2106,9 @@ namespace NextDayRevival
                         + "travel and its truck is never held back.");
                 }
             }
-            return Driver(body) != null;
+            // B1: a dead or gone driver no longer stows the gun.
+            GameObject d = Driver(body);
+            return d != null && Crocodile.PlayerUp(d);
         }
 
         /// <summary>The player in the driver's seat, or null.</summary>
@@ -3645,6 +3649,8 @@ namespace NextDayRevival
             static bool _looked;
             static MethodInfo _getInfo;
             static bool _infoStatic;
+            static bool _onPlayer;          // B1: player.GetComponent(stats).GetPlayerInfo()
+            static Type _statsType;
             static object _manager;
             static FieldInfo _fraction;
             static PropertyInfo _fractionProp;
@@ -3753,6 +3759,15 @@ namespace NextDayRevival
                 if (!Look()) return null;
                 try
                 {
+                    if (_onPlayer)
+                    {
+                        // B1: the game's own form - the player's component,
+                        // no arguments (REVERSE_ENGINEERING 40).
+                        if (player == null) return null;
+                        Component stats = player.GetComponent(_statsType);
+                        if (stats == null) stats = player.GetComponentInChildren(_statsType);
+                        return stats == null ? null : _getInfo.Invoke(stats, null);
+                    }
                     return _infoStatic
                         ? _getInfo.Invoke(null, new object[] { player })
                         : _getInfo.Invoke(_manager, new object[] { player });
@@ -3782,8 +3797,20 @@ namespace NextDayRevival
                         _infoStatic = ms[i].IsStatic;
                         break;
                     }
-                    if (_getInfo == null) { Miss("GetPlayerInfo(GameObject) not found"); return false; }
-                    if (!_infoStatic)
+                    if (_getInfo == null)
+                    {
+                        // B1: GetPlayerInfo() is an INSTANCE method with no
+                        // arguments on each player's own component (IL:
+                        // ldarg.0; ldfld _playerInfo; ret). The GameObject
+                        // form above never existed, so every player's side
+                        // read as unknown (radar console refused all orders).
+                        _getInfo = AccessTools.Method(t, "GetPlayerInfo", Type.EmptyTypes, null);
+                        _onPlayer = _getInfo != null && !_getInfo.IsStatic;
+                        _statsType = t;
+                        if (!_onPlayer) _getInfo = null;
+                    }
+                    if (_getInfo == null) { Miss("GetPlayerInfo not found"); return false; }
+                    if (!_infoStatic && !_onPlayer)
                     {
                         UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(t);
                         if (all.Length > 0) _manager = all[0];

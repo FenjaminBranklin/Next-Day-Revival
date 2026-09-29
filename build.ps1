@@ -90,7 +90,10 @@ $refs = @(
     (Join-Path $managed "UnityEngine.TerrainPhysicsModule.dll"),
     # AnimationModule: the NPCs' legacy Animation (cullingType, restart after
     # the bind pose) in Revival.NpcDistance.cs.
-    (Join-Path $managed "UnityEngine.AnimationModule.dll")
+    (Join-Path $managed "UnityEngine.AnimationModule.dll"),
+    # ScreenCaptureModule: the far forest's before/after shots
+    # (Revival.FarForest.cs, admin "Far forest shots").
+    (Join-Path $managed "UnityEngine.ScreenCaptureModule.dll")
 ) | Where-Object { Test-Path $_ }
 
 # /codepage:65001 - plugin sources are UTF-8 (no BOM) and may carry Russian
@@ -259,7 +262,11 @@ $assets = @(
     "east_map_en.png", "east_map_ru.png",
     # Its map window (Revival.EastMapPanel.cs): frame, legend icons, the
     # 20 x 10 grid in RU/EN - research/east_map_panel.py.
-    "east_map_form.png", "east_map_legend.png", "east_map_grid_en.png", "east_map_grid_ru.png"
+    "east_map_form.png", "east_map_legend.png", "east_map_grid_en.png", "east_map_grid_ru.png",
+    # The air raid siren (tower radar, air events): spin-up, wail loop and
+    # spin-down in one WAV with a smpl loop - research/siren_synth.py, or a
+    # recording in its place. Missing, the game synthesises its old siren.
+    "ndr_siren.wav"
 )
 
 # Alte Dateien, die es nicht mehr gibt - sonst liegt die Metallic-Map von 0.2.0

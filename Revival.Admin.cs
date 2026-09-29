@@ -90,7 +90,7 @@ namespace NextDayRevival
 
         static void Build()
         {
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null)
             {
                 RevivalPlugin.L.LogWarning("Testflaeche: keine Kamera gefunden.");
@@ -975,6 +975,7 @@ namespace NextDayRevival
         static bool _teleportArmed;
         static int _targetActor = -1;
         static float _nextPlayers;
+        static int _mercPick;
 
         // Server-defined items can be granted before their full client-side
         // ItemDef is integrated. Registered definitions take precedence below,
@@ -1093,6 +1094,7 @@ namespace NextDayRevival
         public static void MapClickPostfix()
         {
             if (Helipads.ClearAreaMapClick()) return;
+            if (MercUi.MapClick()) return;           // B3b: a merc patrol route being set
             if (!_teleportArmed || !Zutritt()) return;
             Vector3 point;
             if (!MapTools.MouseWorld(out point))
@@ -1111,6 +1113,20 @@ namespace NextDayRevival
         // Steamworks.SteamUser (liegt in Assembly-CSharp-firstpass, nicht in
         // Assembly-CSharp). Zurueck kommt ein CSteamID; die Zahl steht in
         // dessen Feld m_SteamID - belegt mit ildasm gegen beide Assemblies.
+        /// <summary>This client's Steam id, or null (B3 mercenaries: the
+        /// roster owner and the whitelist key).</summary>
+        internal static string LocalSteamId() { return SteamId(); }
+
+        /// <summary>The local PlayerStatisticsManager (money, faction), or null
+        /// before the character has loaded. Not per frame: it walks the
+        /// player inventories.</summary>
+        internal static Component LocalStats()
+        {
+            Component inventory = InventarManager() as Component;
+            Type type = RevivalPlugin.TypeByName("PlayerStatisticsManager");
+            return inventory == null || type == null ? null : inventory.GetComponent(type);
+        }
+
         static string SteamId()
         {
             try
@@ -1435,11 +1451,62 @@ namespace NextDayRevival
             GUILayout.Label(NpcDistance.Status());
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            // N2b: frame cost of the far forest canopy at this spot (~14 s,
-            // on then off); the label is the live canopy state until a result.
+            // P3: frame cost of the far forest at this spot (~14 s, on then
+            // off); the label is the live state until a result.
             if (GUILayout.Button("Far forest bench", GUILayout.Width(190f)))
                 Melde(FarForest.Bench());
             GUILayout.Label(FarForest.Status());
+            GUILayout.EndHorizontal();
+            // B3: mercenaries for testing (Revival.Mercs.cs). With the server
+            // roster the grant is a real saved contract; without it a
+            // session-only test merc. The status line says which.
+            GUILayout.Label("Mercenaries: " + Mercs.Status());
+            // M1: the merc cover field (Revival.MercCover.cs) and its overlay.
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(MercCoverService.Show ? "Hide merc cover" : "Show merc cover", GUILayout.Width(125f)))
+                MercCoverService.Show = !MercCoverService.Show;
+            GUILayout.Label("Merc cover: " + MercCoverService.Status());
+            GUILayout.EndHorizontal();
+            // M2: what their fight loops do (Revival.MercFight.cs); the
+            // overlay above shows each merc's state over his head.
+            GUILayout.Label("Merc fights: " + MercFightStats.Status());
+            GUILayout.BeginHorizontal();
+            List<Mercs.Profile> mercProfiles = Mercs.AllProfiles;
+            if (mercProfiles.Count > 0)
+            {
+                _mercPick = Mathf.Clamp(_mercPick, 0, mercProfiles.Count - 1);
+                Mercs.Profile mp = mercProfiles[_mercPick];
+                if (GUILayout.Button("<", GUILayout.Width(28f)))
+                    _mercPick = (_mercPick + mercProfiles.Count - 1) % mercProfiles.Count;
+                GUILayout.Label(mp.Name + " (" + mp.Settlement + ", " + mp.Price + ")", GUILayout.Width(210f));
+                if (GUILayout.Button(">", GUILayout.Width(28f)))
+                    _mercPick = (_mercPick + 1) % mercProfiles.Count;
+                if (GUILayout.Button("Give me this merc", GUILayout.Width(150f)))
+                    Melde(Mercs.AdminGive(mp.Id));
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Bill upkeep now", GUILayout.Width(125f))) Melde(Mercs.AdminBillNow());
+            if (GUILayout.Button("+24 in-game h", GUILayout.Width(110f))) Melde(Mercs.AdminAddHours(24.0));
+            if (GUILayout.Button("Kill selected merc", GUILayout.Width(130f))) Melde(Mercs.AdminKillSelected());
+            if (GUILayout.Button("Clear my roster", GUILayout.Width(115f))) Melde(Mercs.AdminClear());
+            if (GUILayout.Button("Roster to log", GUILayout.Width(100f))) Melde(Mercs.AdminDump());
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // P3: before/after screenshots from this spot into <game>/NDR_Shots.
+            if (GUILayout.Button("Far forest shots", GUILayout.Width(190f)))
+                Melde(FarForest.Shots());
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            // P2: frame time and draw load at the ten render viewpoints
+            // (vanilla towns, airfield, military town, tile; ~150 s, teleports
+            // and returns you); pressed again, aborts. "Count here": the same
+            // numbers at this spot, now.
+            if (GUILayout.Button(FrameBench.Running ? "Render bench (abort)" : "Render bench", GUILayout.Width(190f)))
+                Melde(FrameBench.StartRender());
+            if (GUILayout.Button("Count here", GUILayout.Width(90f)))
+                Melde(FrameBench.CountHere());
+            GUILayout.Label(FrameBench.Status());
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             // N3: an NPC An-2 edge to edge over you, a target for every AA

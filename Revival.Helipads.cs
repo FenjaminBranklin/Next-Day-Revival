@@ -1213,7 +1213,7 @@ namespace NextDayRevival
             if (Time.realtimeSinceStartup < _nextSweep) return;
             _nextSweep = Time.realtimeSinceStartup + 3f;
             _hidden.RemoveAll(delegate(GameObject go) { return go == null; });
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             foreach (Pad p in _pads)
             {
                 if (!p.Enabled || !MapScene.Owns(p.Scene) || p.Deck == 0f) continue;

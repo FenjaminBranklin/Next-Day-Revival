@@ -191,11 +191,16 @@ namespace NextDayRevival
         delegate float CallF(object o);
         delegate UnityEngine.Vector3 CallV(object o);
         delegate void CallOF(object o, object a, float b);
+        delegate void Call0(object o);
+        delegate void CallF1(object o, float a);
 
         static readonly Dictionary<MethodInfo, CallB> _b = new Dictionary<MethodInfo, CallB>();
         static readonly Dictionary<MethodInfo, CallF> _f = new Dictionary<MethodInfo, CallF>();
         static readonly Dictionary<MethodInfo, CallV> _v = new Dictionary<MethodInfo, CallV>();
         static readonly Dictionary<MethodInfo, CallOF> _of = new Dictionary<MethodInfo, CallOF>();
+        static readonly Dictionary<MethodInfo, Call0> _v0 = new Dictionary<MethodInfo, Call0>();
+        static readonly Dictionary<MethodInfo, CallF1> _vf = new Dictionary<MethodInfo, CallF1>();
+        static readonly object[] _oneArg = new object[1];
 
         /// <summary>A bool method (or property getter) without arguments; the
         /// same as <c>r = m.Invoke(o, null); r is bool &amp;&amp; (bool)r</c>.</summary>
@@ -252,6 +257,62 @@ namespace NextDayRevival
                 catch (Exception ex) { if (!Unusable(ex)) throw; _of[m] = null; }
             }
             m.Invoke(o, new object[] { a, b });
+        }
+
+        /// <summary>A void method without arguments (P1b: the crews' per-frame
+        /// ClearIntentions); the same as <c>m.Invoke(o, null)</c>.</summary>
+        public static void Void(MethodInfo m, object o)
+        {
+            Call0 d;
+            if (!_v0.TryGetValue(m, out d)) { d = (Call0)EmitOne(m, null, typeof(Call0)); _v0[m] = d; }
+            if (d != null)
+            {
+                try { d(o); return; }
+                catch (Exception ex) { if (!Unusable(ex)) throw; _v0[m] = null; }
+            }
+            m.Invoke(o, null);
+        }
+
+        /// <summary>A void method taking one float (P1b: the crews' per-frame
+        /// SetCalculatedPauseTime); the same as <c>m.Invoke(o, new object[] { a })</c>.</summary>
+        public static void VoidFloat(MethodInfo m, object o, float a)
+        {
+            CallF1 d;
+            if (!_vf.TryGetValue(m, out d)) { d = (CallF1)EmitOne(m, typeof(float), typeof(CallF1)); _vf[m] = d; }
+            if (d != null)
+            {
+                try { d(o, a); return; }
+                catch (Exception ex) { if (!Unusable(ex)) throw; _vf[m] = null; }
+            }
+            _oneArg[0] = a;
+            m.Invoke(o, _oneArg);
+        }
+
+        /// <summary>Compiles a void call with no argument (<paramref name="arg"/>
+        /// null) or one argument of exactly that value type; null when it cannot.</summary>
+        static Delegate EmitOne(MethodInfo m, Type arg, Type del)
+        {
+            if (FastField.EmitBroken || m == null || m.ReturnType != typeof(void) || m.IsGenericMethodDefinition) return null;
+            Type owner = m.DeclaringType;
+            if (owner == null || (!m.IsStatic && owner.IsValueType)) return null;
+            ParameterInfo[] ps = m.GetParameters();
+            if (arg == null ? ps.Length != 0 : (ps.Length != 1 || ps[0].ParameterType != arg)) return null;
+            try
+            {
+                Type[] args = arg == null ? new Type[] { typeof(object) } : new Type[] { typeof(object), arg };
+                DynamicMethod dm = new DynamicMethod("ndr_call_" + m.Name, typeof(void), args, owner, true);
+                ILGenerator il = dm.GetILGenerator();
+                if (!m.IsStatic)
+                {
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, owner);
+                }
+                if (arg != null) il.Emit(OpCodes.Ldarg_1);
+                il.Emit(m.IsStatic ? OpCodes.Call : OpCodes.Callvirt, m);
+                il.Emit(OpCodes.Ret);
+                return dm.CreateDelegate(del);
+            }
+            catch (Exception ex) { FastField.Broken(ex); return null; }
         }
 
         /// <summary>The compiled call itself failed (the runtime refused the

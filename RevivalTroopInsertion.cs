@@ -625,7 +625,7 @@ namespace NextDayRevival
                 }
                 float terrainY;
                 string height = TerrainHeight(mark, out terrainY) ? terrainY.ToString("0.0") : "none";
-                Camera cam = Camera.main;
+                Camera cam = CameraOwner.MainCamera();
                 string camera = "none";
                 if (cam != null)
                 {

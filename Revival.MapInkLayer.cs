@@ -158,6 +158,9 @@ namespace NextDayRevival
 
         void LateUpdate()
         {
+            FrameProf.S(FrameProf.S_MapInkLayer_LateUpdate);
+            try
+            {
             if (Source == null) { Destroy(gameObject); return; }
             Follow();
             // OnGUI submissions stop when the map closes or a feature is disabled.
@@ -166,6 +169,8 @@ namespace NextDayRevival
             if (!Source.gameObject.activeInHierarchy || (behaviour != null && !behaviour.enabled)
                 || Time.frameCount - LastFrame > 1)
             { Used = 0; End(); }
+            }
+            finally { FrameProf.E(FrameProf.S_MapInkLayer_LateUpdate); }
         }
 
         internal static Texture SettlementStamp()

@@ -594,6 +594,8 @@ namespace NextDayRevival
         /// one is chosen from what remains until the convoy is boxed or down to one.
         /// The gun keeps scanning and firing underneath, held or not.
         /// </summary>
+        static readonly List<Member> _live = new List<Member>();
+
         static void Behaviour()
         {
             for (int ci = 0; ci < _convoys.Count; ci++)
@@ -601,7 +603,8 @@ namespace NextDayRevival
                 Convoy c = _convoys[ci];
                 if (!c.LostOne) continue;          // intact: never held
 
-                List<Member> live = new List<Member>();
+                List<Member> live = _live;         // P1b: reused every tick (Report reads it, keeps nothing)
+                live.Clear();
                 for (int k = 0; k < c.Members.Count; k++)
                     if (c.Members[k].IsAlive) live.Add(c.Members[k]);
 

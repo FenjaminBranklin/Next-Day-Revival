@@ -155,9 +155,14 @@ namespace NextDayRevival
             CfgCritAoa = cfg.Bind(S, "CriticalAngle", 15f,
                 "Degrees of angle of attack where the wing stalls. Past it lift "
                 + "falls away, the nose drops and a wing may go.");
-            CfgThrust = cfg.Bind(S, "Thrust", 2.6f,
+            CfgThrust = cfg.Bind(S, "Thrust", 4.0f,
                 "Static thrust at full throttle, m/s^2 of acceleration. With the "
-                + "friction below it gives a takeoff roll of about 180 m on concrete, 200 m on grass.");
+                + "friction below it gives a takeoff roll of about 250 m (map "
+                + "metres) on concrete, 265 m on grass (B6; 2.6 before). Above "
+                + "Power/Thrust m/s the power caps it, so climb and top speed do not change.");
+            // B6: 2.6 was the old default, not a choice - the short takeoff
+            // needs the new one. Any other value is the player's and stays.
+            if (Mathf.Abs(CfgThrust.Value - 2.6f) < 0.001f) CfgThrust.Value = 4.0f;
             CfgPower = cfg.Bind(S, "Power", 90f,
                 "Engine power reaching the air, watts per kilogram of aeroplane "
                 + "(the ASh-62's 745 kW at 80 % propeller efficiency over 5.25 t "
@@ -308,6 +313,10 @@ namespace NextDayRevival
         {
             return go != null && _pilot && ReferenceEquals(go, _plane);
         }
+
+        // B3c mercenaries (Revival.MercsRide.cs): the cabin seat the local
+        // player holds in his An-2, -1 at the controls or on foot.
+        internal static int CabinSeatTaken { get { return _plane != null && !_pilot ? _seat : -1; } }
 
         // ---- for the repair loop (Revival.An2Repair.cs)
         internal static float Capacity { get { return F(CfgFuelCapacity, 1200f); } }
@@ -538,7 +547,7 @@ namespace NextDayRevival
         /// pull up to where the engine's power runs out, Power/speed above.</summary>
         static float ThrustAt(float v)
         {
-            float tmax = Mathf.Max(0.2f, F(CfgThrust, 2.6f));
+            float tmax = Mathf.Max(0.2f, F(CfgThrust, 4.0f));
             return Mathf.Min(tmax, Mathf.Max(1f, F(CfgPower, 90f)) / Mathf.Max(1f, v));
         }
 
@@ -603,7 +612,7 @@ namespace NextDayRevival
             }
             _aoa = aoa;
             float crit = Mathf.Clamp(F(CfgCritAoa, 15f), 6f, 30f);
-            float tmax = Mathf.Max(0.2f, F(CfgThrust, 2.6f));
+            float tmax = Mathf.Max(0.2f, F(CfgThrust, 4.0f));
             float thrust = ThrustAt(Mathf.Max(0f, vb.z)) * _throttle * power;
             float wash = thrust / tmax;
             // Control authority: the elevator and rudder have it all from
@@ -630,6 +639,30 @@ namespace NextDayRevival
                 float aero = Mathf.Clamp01(speed / 20f);
                 float steer = 0f;
                 bool autopilot = Mathf.Abs(_rIn) < 0.05f && An2Bombs.Steer(out steer);
+                // B6 soft map edge: past it a countdown, then the assist banks
+                // the aeroplane back towards the map (A/D still add or take
+                // 15 degrees); too low over the skirt, it climbs.
+                float edgeTarget, edgeTurn, edgeK;
+                float edgeR = speed * speed / (G * Mathf.Tan(AirBoundary.TurnBank * Mathf.Deg2Rad)) * K;
+                _edgeTurn = false;
+                if (AirBoundary.Guide(tr.position, _vel * K, Mathf.Atan2(_vel.x, _vel.z) * Mathf.Rad2Deg,
+                                      edgeR, out edgeTarget, out edgeTurn, out edgeK, out _edgeClimb))
+                {
+                    if (edgeK > 0f)
+                    {
+                        float maxBank = Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+                        float back = Mathf.Clamp(edgeTurn * 1.5f, -AirBoundary.TurnBank, AirBoundary.TurnBank);
+                        steer = Mathf.Lerp(_rIn * maxBank, back, edgeK) + _rIn * 15f * edgeK;
+                        autopilot = true;
+                        _edgeTurn = true;
+                    }
+                    else if (_edgeClimb && !autopilot)
+                    {
+                        steer = _rIn * Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+                        autopilot = true;
+                    }
+                }
+                else _edgeClimb = false;
                 if (Assisted() || autopilot)
                     Assist(speed, aoa, crit, auth, ailAuth, aero, autopilot, steer,
                            out pRate, out rRate, out yRate);
@@ -759,7 +792,8 @@ namespace NextDayRevival
             // Full circle, unlike Bank(): upside down must read as upside down.
             float bank = Mathf.Atan2(-right.y, up.y) * Mathf.Rad2Deg;
             float maxBank = Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
-            float want = autopilot ? Mathf.Clamp(steer, -maxBank, maxBank) : _rIn * maxBank;
+            float cap = _edgeTurn ? Mathf.Max(maxBank, AirBoundary.TurnBank) : maxBank;
+            float want = autopilot ? Mathf.Clamp(steer, -cap, cap) : _rIn * maxBank;
             float rollMax = F(CfgRollRate, 75f);
             rRate = Mathf.Clamp((want - bank) * 2.5f, -rollMax, rollMax) * ailAuth;
 
@@ -769,6 +803,16 @@ namespace NextDayRevival
             yRate = omega * Mathf.Cos(phi) * aero + _yIn * F(CfgYawRate, 20f) * auth;
 
             float gamma = _pIn * (_pIn > 0f ? 15f : 25f);
+            // B6 climb-out: the assist rotated the aeroplane off the runway
+            // (GroundAttitude); with W/S still released and the throttle open
+            // it keeps climbing away from the ground instead of holding a
+            // metre of height.
+            float low;
+            if (Mathf.Abs(_pIn) < 0.05f && _throttle > 0.7f && Time.time - _airborneSince < 10f
+                && Height(_plane, out low) && low < 40f)
+                gamma = Mathf.Max(gamma, 8f);
+            // B6: too low over the skirt beyond the map's edge (no collider).
+            if (_edgeClimb) gamma = Mathf.Max(gamma, 12f);
             float vyWant = speed * Mathf.Sin(gamma * Mathf.Deg2Rad);
             float vs = Vs();
             if (vyWant > 0f) vyWant *= Mathf.Clamp01((speed - 1.2f * vs) / (0.5f * vs));
@@ -791,6 +835,10 @@ namespace NextDayRevival
         // stance. The tail rises with speed and forward stick; the tail wheel
         // steers at taxi speed and the rudder takes over as the air gets hold.
         static float _gHeading, _gTheta;
+        /// <summary>B6: the soft map edge is turning the aeroplane / wants it higher.</summary>
+        static bool _edgeTurn, _edgeClimb;
+        /// <summary>Rotation speed over the stall speed (research/an2_flight_sim.py ROTATE).</summary>
+        const float RotateAt = 1.15f;
 
         static void GroundAttitude(float dt, float speed, float auth)
         {
@@ -802,6 +850,12 @@ namespace NextDayRevival
             float parked = An2Model.Parked;
             float able = Mathf.Clamp01((speed - 8f) / 14f);
             float lift = able * Mathf.Clamp01(0.45f - 0.55f * _pIn);
+            // B6 rotation: with the assist and W/S released the tail comes
+            // down at RotateAt x stall speed and the aeroplane lifts off at
+            // about 80 km/h, like a pilot pulling back - not tail-high at 130
+            // km/h, 800 m down the runway. W held keeps it on the wheels, and
+            // so does a landing roll: only a takeoff has the throttle open.
+            if (Assisted() && _pIn > -0.1f && _throttle > 0.7f && speed > RotateAt * Vs()) lift = 0f;
             float want = parked * (1f - lift);
             // Back stick at flying speed rotates the aeroplane: the tail is
             // already on the ground, so the nose comes up past the stance only
@@ -2186,6 +2240,7 @@ namespace NextDayRevival
 
             if (_plane != null && _pilot)
             {
+                AirBoundary.Draw();
                 An2Visual vis = VisualOf(_plane);
                 float agl;
                 Height(_plane, out agl);
@@ -2752,6 +2807,7 @@ namespace NextDayRevival
                        Hinge(root.transform, "aileron_r", _ailR),
                        Hinge(root.transform, "elevator", _elev),
                        Hinge(root.transform, "rudder", _rud));
+            ModelLod.Apply(root, ModelLod.Kind.Aircraft);    // P2: small parts off far away, never culled
             return true;
         }
     }
@@ -2826,14 +2882,24 @@ namespace NextDayRevival
             for (int i = 0; i < rs.Length; i++)
             {
                 if (rs[i].gameObject.name == "Glass") { rs[i].enabled = false; continue; }
-                Material m = rs[i].material;
-                m.color = new Color(0.20f, 0.18f, 0.16f, 1f);
-                if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.05f);
+                // P2: one scorched copy per material, not a clone per renderer and wreck
+                Material[] ms = rs[i].sharedMaterials;
+                for (int k = 0; k < ms.Length; k++) ms[k] = ModelLod.SharedCopy(ms[k], "An-2 scorched", _scorch);
+                rs[i].sharedMaterials = ms;
             }
         }
 
+        static readonly Action<Material> _scorch = delegate(Material m)
+        {
+            m.color = new Color(0.20f, 0.18f, 0.16f, 1f);
+            if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.05f);
+        };
+
         void Update()
         {
+            FrameProf.S(FrameProf.S_An2Visual_Update);
+            try
+            {
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
             if (!_dead) HideCarrier();
@@ -2865,6 +2931,8 @@ namespace NextDayRevival
                 Sound(rpm);
             }
             catch { }
+            }
+            finally { FrameProf.E(FrameProf.S_An2Visual_Update); }
         }
 
         void Sound(float rpm)
@@ -2948,6 +3016,9 @@ namespace NextDayRevival
 
         void Update()
         {
+            FrameProf.S(FrameProf.S_An2Glide_Update);
+            try
+            {
             float dt = Mathf.Min(Time.deltaTime, 0.05f);
             if (dt <= 0f) return;
             _t += dt;
@@ -2973,6 +3044,8 @@ namespace NextDayRevival
             }
             transform.position = pos;
             if (_t > 120f) { enabled = false; PlayerAn2.FinishGlide(gameObject, pos); }
+            }
+            finally { FrameProf.E(FrameProf.S_An2Glide_Update); }
         }
     }
 }

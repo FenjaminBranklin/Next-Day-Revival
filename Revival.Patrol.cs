@@ -254,6 +254,12 @@ namespace NextDayRevival
             internal int MapLineN = -1;
             internal bool MapLineLoop;
 
+            // B4: is the whole route inside a settlement ring? Cached against
+            // the waypoint count and Patrol.SettleVersion (see InSettlement).
+            internal int SettleN = -1;
+            internal int SettleV;
+            internal bool InSettle;
+
             // What the map overlay's last BUILD worked out for this route (see
             // Patrol.DrawMap). MapProj is the projected line kept relative to
             // the map picture's own screen origin, which makes it independent
@@ -2545,7 +2551,7 @@ namespace NextDayRevival
             if (vgs == null) return false;
             try
             {
-                FieldInfo f = AccessTools.Field(vgs.GetType(), "Passengers");
+                FieldInfo f = FastField.Find(vgs.GetType(), "Passengers");
                 Array seats = f == null ? null : f.GetValue(vgs) as Array;
                 if (seats == null) return false;
                 for (int i = 0; i < seats.Length; i++)
@@ -6108,7 +6114,7 @@ namespace NextDayRevival
                 }
                 _instance = _ngs.GetProperty("Instance",
                     BindingFlags.Public | BindingFlags.Static);
-                _networkPlayers = AccessTools.Field(_ngs, "NetworkPlayers");
+                _networkPlayers = FastField.Find(_ngs, "NetworkPlayers");
                 if (_instance == null || _networkPlayers == null)
                 {
                     RevivalPlugin.L.LogWarning("Patrol gun: NetworkGameServer.Instance or "
@@ -6123,7 +6129,7 @@ namespace NextDayRevival
                 _statesType = RevivalPlugin.TypeByName("PlayerStatesController");
                 if (_statesType != null)
                 {
-                    _stateField = AccessTools.Field(_statesType, "_characterState");
+                    _stateField = FastField.Find(_statesType, "_characterState");
                     if (_stateField != null && _stateField.FieldType.IsEnum)
                     {
                         try { _death = Enum.Parse(_stateField.FieldType, "Death"); }
@@ -7083,7 +7089,7 @@ namespace NextDayRevival
         /// is close enough for a road.</summary>
         static Vector3 Where()
         {
-            Camera cam = Camera.main;
+            Camera cam = CameraOwner.MainCamera();
             if (cam == null) return Vector3.zero;
             return cam.transform.position;
         }
@@ -7464,6 +7470,92 @@ namespace NextDayRevival
             get { return RevivalPlugin.CfgAdmin != null && RevivalPlugin.CfgAdmin.Value && Admin.HasAccess; }
         }
 
+        /// <summary>B4: is this route drawn on the map? A convoy route always
+        /// (while its convoy is out, tested by the callers); any other route
+        /// only for admins, and never when it lies inside a settlement ring -
+        /// a town's own vehicle patrol or AA site scribbles over the place.</summary>
+        static bool OnMap(Route r)
+        {
+            return r.IsConvoy || (ShowPatrolMap && !InSettlement(r));
+        }
+
+        // Settlement rings a route may hide in: world x, z and radius. The
+        // military town and the traitor camp come from their own classes;
+        // Point N12 (NPC_Settlement[Neutrals]) is fixed; every other vanilla
+        // NPC_Settlement of the loaded scene is found once per scene and gets
+        // the same ring as N12 (its map ring is ~340 u, see docs/ai/tasks/b4-map-markers.md).
+        const float VanillaRing = 340f;
+        const float SettleSlack = 40f;   // the MT patrol reaches 386 u from the 380 u centre ring
+        static readonly List<Vector3> _settleScan = new List<Vector3>();
+        static string _settleScene;
+        static float _settleRetry;
+        static int _settleVersion = 1;
+        static float _settleExtra = -1f;
+
+        static void SettlementScan()
+        {
+            string scene = MapScene.Current;
+            if (scene == _settleScene && (_settleScan.Count > 0 || Time.realtimeSinceStartup < _settleRetry)) return;
+            _settleScene = scene;
+            _settleRetry = Time.realtimeSinceStartup + 30f;
+            _settleScan.Clear();
+            _settleVersion++;
+            try
+            {
+                Type type = RevivalPlugin.TypeByName("NPC_Settlement");
+                if (type == null) return;
+                UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(type);
+                for (int i = 0; i < all.Length; i++)
+                {
+                    Component c = all[i] as Component;
+                    // Crew's inactive replica contexts are not places.
+                    if (c == null || c.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal)) continue;
+                    Vector3 at = c.transform.position;
+                    _settleScan.Add(new Vector3(at.x, VanillaRing, at.z));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null) RevivalPlugin.L.LogWarning("Patrol settlements: " + ex.Message);
+            }
+        }
+
+        static bool InRing(Route r, float x, float z, float radius)
+        {
+            float lim = (radius + SettleSlack) * (radius + SettleSlack);
+            for (int i = 0; i < r.P.Count; i++)
+            {
+                Vector3 p = r.P[i].Pos;
+                if ((p.x - x) * (p.x - x) + (p.z - z) * (p.z - z) > lim) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Every waypoint lies within a settlement ring (plus a
+        /// little slack). Worked out once per route and settlement set.</summary>
+        static bool InSettlement(Route r)
+        {
+            if (r.P.Count == 0) return false;
+            SettlementScan();
+            float extra = NewSettlement.MapRingRadius();
+            if (extra != _settleExtra) { _settleExtra = extra; _settleVersion++; }
+            if (r.SettleN == r.P.Count && r.SettleV == _settleVersion) return r.InSettle;
+            // The fixed rings are home-map places (the town is in the east
+            // world beside it); a route of another region is never in them.
+            bool home = MapScene.AtHome;
+            bool inside = home && (InRing(r, MilitaryTown.Centre.x, MilitaryTown.Centre.z, MilitaryTown.MapRingRadius)
+                || InRing(r, 1446.6f, 1703.2f, VanillaRing));
+            if (!inside && NewSettlement.Here())
+            {
+                Vector3 c = NewSettlement.Centre();
+                inside = InRing(r, c.x, c.z, extra);
+            }
+            for (int i = 0; !inside && i < _settleScan.Count; i++)
+                inside = InRing(r, _settleScan[i].x, _settleScan[i].z, _settleScan[i].y);
+            r.SettleN = r.P.Count; r.SettleV = _settleVersion; r.InSettle = inside;
+            return inside;
+        }
+
         /// <summary>
         /// Admins see recorded patrol routes as faction-coloured dashed lines ALONG
         /// the road it drives, running down the middle of that road. A convoy
@@ -7642,7 +7734,7 @@ namespace NextDayRevival
                     // or the toxic swamp is what this stops - those patrols
                     // are not there, and FitsScene below cannot tell, because
                     // two surface maps are of a similar size. See MapScene.
-                    if (!route.Here || (!route.IsConvoy && !ShowPatrolMap)) continue;
+                    if (!route.Here || !OnMap(route)) continue;
 
                     // A convoy route is an EVENT, not a standing road on
                     // the map: it is drawn only while a convoy is actually
@@ -7747,7 +7839,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || !route.MapInked || route.MapProj == null) continue;
-                if (!route.IsConvoy && !ShowPatrolMap) continue;
+                if (!OnMap(route)) continue;
                 if (route.IsConvoy != (pass == 0)) continue;
                 if (!route.MapBounds.Contains(mouseRel)) continue;
                 if (!NearPolyline(route.MapProj, mouseRel, RouteHoverPx)) continue;
@@ -7793,7 +7885,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || route.P.Count < 1) continue;
-                if (!route.Here || (!route.IsConvoy && !ShowPatrolMap)) continue;          // same region gate as the ring loop
+                if (!route.Here || !OnMap(route)) continue;          // same region gate as the ring loop
                 if (route.IsConvoy && !ConvoyRouteActive(route.Name)) continue;
                 int wantedPass = labels != null && labels.Pinned(route.Name)
                     ? 0 : (route.IsConvoy ? 1 : 2);
@@ -7839,7 +7931,7 @@ namespace NextDayRevival
                 Route route;
                 if (!_routes.TryGetValue(_order[routeIndex], out route)
                     || route == null || !route.MapNamed) continue;
-                if (!route.IsConvoy && !ShowPatrolMap) continue;
+                if (!OnMap(route)) continue;
                 bool overName = labels != null && labels.Keep(route.Name, mouseAbs);
                 if (overMap && (overName
                         || (mouseRel - route.MapAnchor).sqrMagnitude < 196f))
@@ -8925,7 +9017,7 @@ namespace NextDayRevival
             }
             FieldInfo fi;
             if (byName.TryGetValue(name, out fi)) return fi;
-            fi = AccessTools.Field(t, name);
+            fi = FastField.Find(t, name);
             byName[name] = fi;
             if (fi == null)
                 RevivalPlugin.L.LogWarning("Patrol: field " + name + " not on " + t.Name + ".");
@@ -9267,7 +9359,7 @@ namespace NextDayRevival
 
         static void Feld(object o, string name, object value)
         {
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null)
             {
                 RevivalPlugin.L.LogWarning("Fraktion: NPCMainOptions has no "

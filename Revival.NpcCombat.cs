@@ -187,7 +187,7 @@ namespace NextDayRevival
     //   is computed; a remote client sees the synchronised state, body yaw and
     //   the weapon's own muzzle flash.
     //
-    public static class NpcWar
+    public static partial class NpcWar
     {
         // -------------------------------------------------------------- config
 
@@ -457,6 +457,7 @@ namespace NextDayRevival
             public bool Sees;
             public float AimHeight = ChestHeight;  // the part of the target he can see
             public float Skill = 1f;      // marksmanship multiplier, drawn once
+            public float RangeFalloff = 1f; // share of the range falloff he suffers (M3: a merc's grade; 1 for every NPC)
 
             // His place in the assault line.
             public float LaneOffset, RankOffset;
@@ -590,6 +591,13 @@ namespace NextDayRevival
             public Component Vehicle;
             public float NextVehicleScan;
             public int Drones, Rockets;
+            // B3: a hired mercenary's one-man squad (Revival.MercsWar.cs):
+            // the owner's orders replace the ground duty, the owner client
+            // runs it whether or not it is the master. Null for everyone else.
+            public MercUnit Merc;
+            // B3, master only: another player's mercenary, listed so squads and
+            // defenders here can fight him. Never driven (not IsMine).
+            public bool Watch;
         }
 
         /// <summary>The dead of an ended operation, left for their loot.</summary>
@@ -1252,12 +1260,15 @@ namespace NextDayRevival
             if (_squads.Count == 0 && _defenders.Count == 0 && _graves.Count == 0)
             { _status = ""; return; }
             if (!LookUp()) return;
-            if (!IsMaster()) { _status = "NpcWar: not master client"; return; }
-
             float now = Time.time;
+            // B3: a player's mercenaries are his own Photon objects and his
+            // client runs them, master or not (Revival.MercsWar.cs).
+            if (!IsMaster()) { TickMercSquads(now); _status = "NpcWar: not master client"; return; }
+
             if (_graves.Count > 0) TickGraves(now);
             _searchBudget = 1;
             PatrolTargets();
+            WatchRemoteMercs(now);
 
             for (int q = _squads.Count - 1; q >= 0; q--)
             {
@@ -1502,7 +1513,12 @@ namespace NextDayRevival
         // and corpse cleanup with troop squads, but never issue assault orders.
         static void RunGround(Squad s, float now)
         {
-            if (s.Settlement == null) { Remove(s, "settlement gone"); return; }
+            if (s.Settlement == null)
+            {
+                if (s.Merc != null || s.Watch) DropMercSquad(s);
+                else Remove(s, "settlement gone");
+                return;
+            }
             if (now >= s.NextVehicleScan)
             {
                 s.NextVehicleScan = now + 0.5f;
@@ -1516,8 +1532,19 @@ namespace NextDayRevival
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
                 alive++;
                 if (!IsMine(f.Ai)) continue;
+                // B3c: a merc on a seat belongs to the ride (Revival.MercsRide.cs).
+                if (s.Merc != null && MercSeated(f, s.Merc, now)) continue;
                 if (Regenerating(f, now)) continue;
-                EnsureArmed(f, now); Acquire(f, now); Planted(f, now);
+                EnsureArmed(f, now);
+                if (s.Merc == null || MercMayEngage(s.Merc, now)) Acquire(f, now);
+                else { f.Target = null; f.Sees = false; f.TargetIsPlayer = false; }
+                // M1: a merc's cover perception (Revival.MercCover.cs).
+                if (s.Merc != null) MercSenseTick(f, s.Merc, now);
+                Planted(f, now);
+                // M2: a merc fights like a player - to cover, peek, a short
+                // burst, back down, relocate (Revival.MercFight.cs); when the
+                // fight is over his order runs again.
+                if (s.Merc != null) { if (!MercFight(f, s.Merc, now)) MercStep(f, s, now); continue; }
                 if (Reloading(f)) { Quiet(f, true); continue; }
                 if (f.Target != null && f.Sees && f.Armed
                     && Flat(f.Target.position - f.Tr.position) <= RangeOf(f))
@@ -1557,7 +1584,13 @@ namespace NextDayRevival
                 Go(f, dest, MainWalk, PoseStand, now, Stance.Advance);
                 f.MoveDeadline = now + 15f + Flat(dest - f.Tr.position) / 0.8f;
             }
-            if (alive == 0) Remove(s, "ground group defeated");
+            if (alive == 0)
+            {
+                // A mercenary's body is his owner's object and his loot; it is
+                // never queued for NpcWar's corpse cleanup.
+                if (s.Merc != null || s.Watch) DropMercSquad(s);
+                else Remove(s, "ground group defeated");
+            }
         }
 
         static bool GroundDestination(Fighter f, Squad s, out Vector3 dest)
@@ -2553,7 +2586,8 @@ namespace NextDayRevival
         {
             if (now >= f.NextScan)
             {
-                f.NextScan = now + 0.3f + UnityEngine.Random.value * 0.15f;
+                f.NextScan = now + (f.Squad != null && f.Squad.Merc != null
+                    ? MercScanGap(f) : 0.3f + UnityEngine.Random.value * 0.15f);
                 Transform had = f.Target;
                 bool checkedLos;
                 if (f.Squad != null) checkedLos = PickTargetForMan(f, now);
@@ -2564,7 +2598,8 @@ namespace NextDayRevival
                     // to find out what hit him.
                     f.ReactUntil = now + (f.Squad != null
                         ? UnityEngine.Random.Range(0.05f, 0.25f)
-                        : UnityEngine.Random.Range(0.3f, 0.9f)) * (1.4f - 0.4f * f.Skill);
+                        : UnityEngine.Random.Range(0.3f, 0.9f)) * (1.4f - 0.4f * f.Skill)
+                        * (f.Squad != null && f.Squad.Merc != null ? MercReactScale(f) : 1f);
                     f.MuzzleBlockedSince = 0f;
                     f.MateBlockedSince = 0f;
                     if (!checkedLos) { f.LastSeen = now; f.NextLos = now; }
@@ -2597,8 +2632,9 @@ namespace NextDayRevival
         /// line of fire was checked here.</summary>
         static bool PickTargetForMan(Fighter f, float now)
         {
-            float range = RangeOf(f);
-            Component player = KillTarget(f);
+            float range = f.Squad != null && f.Squad.Merc != null ? MercSeekRange(f) : RangeOf(f);
+            Component player = f.Squad != null && f.Squad.Merc != null
+                ? MercPlayerTarget(f, range, now) : KillTarget(f);
             if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
             {
                 if (f.TargetIsPlayer)
@@ -2637,8 +2673,12 @@ namespace NextDayRevival
                 if (!Hostile(f.Hated, FactionOf(c))) continue;
                 if ((other == null || other.Squad == null) && !Targetable(c)) continue;
                 if (!Alive(c)) continue;
+                // B3c: a merc inside a closed hull or an aircraft is no target.
+                if (MercRide.HiddenRider(c)) continue;
                 Insert(ref n, c.transform, false, d);
             }
+            // M1: every hostile a merc weighed is one of his threats for a while.
+            if (f.Squad != null && f.Squad.Merc != null) MercNoteThreats(f.Squad.Merc, n, now);
 
             f.Target = null;
             f.TargetIsPlayer = false;
@@ -2693,7 +2733,7 @@ namespace NextDayRevival
             if (f.Sees && !f.TargetIsPlayer)
             {
                 Component ai = f.Target.GetComponent(_npcType);
-                if (ai != null && FighterOf(ai) == null) Enlist(ai);
+                if (ai != null && FighterOf(ai) == null && IsMine(ai)) Enlist(ai);
             }
             return true;
         }
@@ -2878,8 +2918,10 @@ namespace NextDayRevival
                 return false;
             }
             f.MuzzleBlockedSince = 0f;
-            // Never through a comrade of the line.
-            if (f.Squad != null && MateInLine(f, from, aimAt))
+            // Never through a comrade of the line (M3: a merc, never through
+            // his owner or another merc of this client either).
+            if (f.Squad != null && (MateInLine(f, from, aimAt)
+                || (f.Squad.Merc != null && MercFriendInLine(f, from, aimAt))))
             {
                 if (f.MateBlockedSince <= 0f) f.MateBlockedSince = Time.time;
                 f.NextShot = Time.time + 0.15f;
@@ -2945,7 +2987,7 @@ namespace NextDayRevival
                 : Hostile(f.Hated, FactionOf(hitAi))
                   && ((hurt != null && hurt.Squad != null) || Targetable(hitAi)));
             if (!enemy) return true;
-            if (hurt == null && f.Squad != null) Enlist(hitAi);
+            if (hurt == null && f.Squad != null && IsMine(hitAi)) Enlist(hitAi);
 
             float damage = CfgDamage.Value;
             if (f.Squad == null && hurt != null && hurt.Squad != null)
@@ -2955,7 +2997,11 @@ namespace NextDayRevival
             BreakKillStreak(hitAi);
             try
             {
-                if (Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage))
+                // B3: an NPC owned by another client (a mercenary, or a
+                // settlement NPC hit from a mercenary owner's client) takes
+                // the round as the game's own ApplyDamage RPC to its owner.
+                if (IsMine(hitAi) ? Turret.TryDamage(struck, "NPC_AI2", "ApplyDamage", damage)
+                    : RemoteHit(hitAi, damage, impact))
                 {
                     if (f.Squad != null) f.Squad.Hits++;
                     else if (hurt != null && hurt.Squad != null) hurt.Squad.TakenHits++;
@@ -3124,8 +3170,8 @@ namespace NextDayRevival
                     || victim.Stance == Stance.Advance) acc *= Steadied(0.8f, marksman);
             }
             float far = Mathf.Clamp01(dist / Mathf.Max(1f, RangeOf(shooter)));
-            float falloff = shooter.Squad == null ? 0.4f
-                : (marksman ? SniperFalloff : SquadFalloff);
+            float falloff = (shooter.Squad == null ? 0.4f
+                : (marksman ? SniperFalloff : SquadFalloff)) * shooter.RangeFalloff;
             if (UnityEngine.Random.value <= acc * (1f - falloff * far)) return Vector3.zero;
 
             Vector3 axis = (to - from).normalized;
@@ -3280,7 +3326,7 @@ namespace NextDayRevival
                 GameObject go = f.Ik.gameObject;
                 if (!go.activeSelf) go.SetActive(true);
                 f.AimWeight = Mathf.Min(1f, f.AimWeight + Time.deltaTime * 5f);
-                _fIkWeight.SetValue(solver, f.AimWeight);
+                FastField.SetFloat(_fIkWeight, solver, f.AimWeight);    // P1b: no boxed float per aiming man per frame
                 // Snap on the first frame of an engagement, then follow.
                 f.Look.position = f.IkDriven
                     ? Vector3.Lerp(f.Look.position, lookAt, Time.deltaTime * 8f)

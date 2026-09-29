@@ -282,6 +282,8 @@ namespace NextDayRevival
             Registry.Install(h);
             NpcScan.Registry.Install(h);
             InventoryScan.Registry.Install(h);
+            SettlementScan.Registry.Install(h);
+            PlayerScan.Registry.Install(h);
         }
 
         /// <summary>Active VehicleGameSystem components. Never null; shared array.</summary>
@@ -297,6 +299,35 @@ namespace NextDayRevival
         public static readonly SceneRegistry Registry = new SceneRegistry("NPC_AI2");
 
         /// <summary>Active NPC_AI2 components. Never null; shared array.</summary>
+        public static Component[] All() { return Registry.All(); }
+    }
+
+    /// <summary>
+    /// The scene's NPC_Settlement components (P1b script budget): Mortar's
+    /// placement scan (every 1-5 s), Katyusha's and AirEvents' safe-zone
+    /// lists each walked every MonoBehaviour of the world with
+    /// FindObjectsOfType - the Mortar.Tick peaks. NPC_Settlement declares
+    /// OnEnable (IL), so the registry is hook-fed like NpcScan.
+    /// </summary>
+    public static class SettlementScan
+    {
+        public static readonly SceneRegistry Registry = new SceneRegistry("NPC_Settlement");
+
+        /// <summary>Active NPC_Settlement components. Never null; shared array.</summary>
+        public static Component[] All() { return Registry.All(); }
+    }
+
+    /// <summary>
+    /// The scene's PlayerNetworkController components (P1b): every player's,
+    /// local and remote - for GunnerOptics' warm targets instead of a
+    /// FindObjectsOfType every 0.35 s while the optic is up. The type
+    /// declares Awake and OnDestroy (IL).
+    /// </summary>
+    public static class PlayerScan
+    {
+        public static readonly SceneRegistry Registry = new SceneRegistry("PlayerNetworkController");
+
+        /// <summary>Active PlayerNetworkController components. Never null; shared array.</summary>
         public static Component[] All() { return Registry.All(); }
     }
 
