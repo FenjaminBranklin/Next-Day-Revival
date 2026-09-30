@@ -99,7 +99,7 @@ namespace NextDayRevival
         }
 
         static readonly List<Source> _sources = new List<Source>();
-        static readonly Dictionary<int, int> _hits = new Dictionary<int, int>();
+        static readonly Dictionary<int, float> _hits = new Dictionary<int, float>();
         static readonly List<GameObject> _tmp = new List<GameObject>();
         static bool _probed;
 
@@ -166,18 +166,25 @@ namespace NextDayRevival
         {
             if (!Alive(c)) return;
             int id = c.Go.GetInstanceID();
-            int n;
+            float n;
             _hits.TryGetValue(id, out n);
-            n++;
             int need = c.Src.Hits > 0 ? c.Src.Hits : gunHits > 0 ? gunHits
                 : Mathf.Max(1, Gepard.CfgHeliHits == null ? 10 : Gepard.CfgHeliHits.Value);
-            if (n < need) { _hits[id] = n; return; }
+            // W AA4: an NPC aeroplane's hit points live in one ledger on the
+            // master, so rifle rounds, flak and the Gepard add up and persist.
+            if (NpcAircraft.Is(c.Go))
+            {
+                NpcAircraft.Damage(c.Go, point, AirKillCore.GunHitDamage(need), AirKills.Credit());
+                return;
+            }
+            n = ShortRangeCore.AddHit(n, need);
+            if (n < 0.99999f) { _hits[id] = n; return; }
             _hits.Remove(id);
             try
             {
                 c.Src.Kill(c.Go, point);
-                RevivalPlugin.L.LogInfo("GepardAir: " + c.Src.Name + " shot down after "
-                    + n + " hits.");
+                RevivalPlugin.L.LogInfo("GepardAir: " + c.Src.Name + " shot down (airframe damage "
+                    + n + ").");
             }
             catch (Exception ex)
             {
@@ -190,6 +197,21 @@ namespace NextDayRevival
         /// Stinger, an NPC flyover's lethal small-arms count): the owning
         /// source's own kill, whatever its hit count.</summary>
         internal static bool Kill(GameObject go, Vector3 point)
+        {
+            if (go == null) return false;
+            // W AA4: through the NPC aeroplane's ledger (the master decides
+            // and pays the bounty), which ends in KillNow.
+            if (NpcAircraft.Is(go))
+            {
+                if (PlayerAn2.Down(go)) return false;
+                NpcAircraft.Damage(go, point, 1f, AirKills.Credit());
+                return true;
+            }
+            return KillNow(go, point);
+        }
+
+        /// <summary>The owning source's own kill, at once.</summary>
+        internal static bool KillNow(GameObject go, Vector3 point)
         {
             if (go == null) return false;
             Probe();
@@ -1089,7 +1111,7 @@ namespace NextDayRevival
                 {
                     h.ErrFor = h.AirTarget;
                     h.AirErr = FlakFire.Offset(h.AirTarget, mid,
-                        dist * Mathf.Max(0f, F(CfgAirInitialError, 30f)) * 0.001f);
+                        dist * Mathf.Max(0f, F(CfgAirInitialError, 30f)) * (ShortRange.Drone(h.AirTarget) ? 0.35f : 1f) * 0.001f);
                     h.AirLastVel = v;
                 }
                 aim += h.AirErr;
@@ -1119,7 +1141,7 @@ namespace NextDayRevival
                 // The burst is over: correct on what he saw.
                 float dist = Vector3.Distance(mid, p);
                 float walk = Mathf.Clamp01(F(CfgAirWalk, 0.55f));
-                float floor = Mathf.Max(0f, F(CfgAirErrorFloor, 4f)) * 0.001f * dist;
+                float floor = (ShortRange.Drone(h.AirTarget) ? 0.7f : Mathf.Max(0f, F(CfgAirErrorFloor, 4f))) * 0.001f * dist;
                 float dv = (v - h.AirLastVel).magnitude;
                 h.AirLastVel = v;
                 h.AirErr = h.AirErr * walk
@@ -1290,13 +1312,16 @@ namespace NextDayRevival
             _planes.Clear();
             GepardAir.Collect(_planes);
             for (int i = 0; i < _planes.Count; i++) Offer(h, _planes[i].Go, 6, _planes[i].Src, eye, airRange);
+            Drone.Net.AirContacts(h.Air, eye, airRange);
+            SurvNet.AirContacts(h.Air, eye, airRange);
             for (int i = h.Air.Count - 1; i >= 0; i--)
             {
                 GepardGun.Contact c = h.Air[i];
                 bool gone = c.Go == null || !c.Go.activeInHierarchy || now - c.SeenAt > 1.2f
                     || (c.Kind == 0 && PlayerHeli.MissileTarget(c.HeliView) == null)
                     || (c.Kind == 6 && !GepardAir.Alive(c));
-                if (!gone) continue;
+                if (!gone && Feindlich(h, c)
+                    && FlakFire.Airborne(c, ShortRange.Drone(c) ? 0.5f * Flak.K : -1f)) continue;
                 if (h.AirTarget == c) h.AirTarget = null;
                 h.Air.RemoveAt(i);
             }
@@ -1405,21 +1430,12 @@ namespace NextDayRevival
         /// worth a round.</summary>
         static bool Feindlich(Hull h, GepardGun.Contact c)
         {
-            // P6a: an engaged violator of a no-fly zone of this Gepard's
-            // faction, whoever is aboard (Revival.NoFly.cs).
-            if (h.Root != null && NoFly.Engaged(c.Go, h.Side, h.Root.position)) return true;
-            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs).
+            bool hostile, friendly;
+            FlakFire.Allegiance(c, h.Side, out hostile, out friendly);
+            if (friendly) return false;
             if (NpcAircraft.Hostile(c.Go)) return true;
-            float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
-            List<GameObject> players = Spieler();
-            for (int i = 0; i < players.Count; i++)
-            {
-                GameObject go = players[i];
-                if (go == null) continue;
-                if ((go.transform.position - c.Pos).sqrMagnitude > reach * reach) continue;
-                if (Fraktion.Feind(h.Side, Fraktion.Spielerseite(go))) return true;
-            }
-            return false;
+            if (h.Root != null && NoFly.Engaged(c.Go, h.Side, h.Root.position)) return true;
+            return hostile;
         }
 
         static bool Feind(Hull h, Transform tr, Component npc)

@@ -40,8 +40,8 @@
 //      Every client puts them on the layers' seats of the top carriage after
 //      the animator with the game's seated clip, turning with the gun.
 //   4  THE GUNNER (master only). Air targets only - a helicopter or the An-2
-//      with a player of a hostile faction aboard, a drone flown by one, or
-//      the admin's NPC flyover - airborne and within range. BRACKETING: the
+//      with a hostile pilot, a drone flown by one, or an NPC raider - airborne
+//      and within range. Town guns engage only over MT. BRACKETING: the
 //      first shot is far off (InitialError); after every shot the crew
 //      corrects by the puff it saw (the error shrinks by the walk factor)
 //      down to ErrorFloor, so the puffs visibly walk toward the aircraft,
@@ -49,8 +49,8 @@
 //      the correction off again (EvadeFactor). With nothing to shoot at the
 //      crew sweeps the sky ahead (B2, FlakFire.Watch) - the gun never parks.
 //   5  THE RADAR (Revival.TowerRadar.cs). With an operator at the tower's
-//      console the guns are radar-directed (SetRadarDirected + the direction
-//      scales): RadarRange and RadarWalkFactor - long range, fast bracketing.
+//      console its own-side airfield guns are radar-directed (DirectOwned):
+//      RadarRange and RadarWalkFactor - long range, fast bracketing.
 //      With the radar down, dark or unmanned (a dead or WOUNDED operator
 //      counts as gone - Up) the crews lay by eye: VisualRange and
 //      WalkFactor - visual range only, slow bracketing.
@@ -138,6 +138,8 @@ namespace NextDayRevival
         Reloading = 4,
         /// <summary>A player is at the sight.</summary>
         PlayerManned = 5,
+        /// <summary>W AA7: wrecked; tools and time restore this gun.</summary>
+        Destroyed = 6,
     }
 
     /// <summary>A snapshot of one gun for the P5 radar and the P6a zones.</summary>
@@ -148,13 +150,16 @@ namespace NextDayRevival
         public Vector3 Position;          // the mount's pivot, world units
         public float Yaw, Pitch;          // mount bearing (world, degrees from +z) and elevation
         public FlakState State;
+        public float Health;              // W AA7: 0 destroyed, 1 intact
         public FlakMode Mode;
         public GameObject Target;         // what it lays on now; null = none
         public GameObject Assigned;       // the target an API caller assigned; null = none
         public int Rounds;                // in the two boxes
         public int CrewAlive;             // 0..2
-        public bool PlayerManned;
+        public int MercActor = -1, CrewSide = -1;
+        public bool PlayerManned, ShortRange;
         public int ManActor = -1;         // the player at the sight (actor number), -1 none
+        public int OwnerSide = -1;        // persistent faction, independent of crew presence
         public float Range;               // engagement range, world units
         public Vector3 ZoneCentre;        // ZoneDefence: the zone (horizontal circle, ceiling above ground)
         public float ZoneRadius, ZoneCeiling;
@@ -181,7 +186,8 @@ namespace NextDayRevival
         internal static ConfigEntry<float> CfgVelocity, CfgRange, CfgRadarRange, CfgSelfDestruct, CfgCeiling,
             CfgRpm, CfgDispersion, CfgFuze, CfgSplash, CfgTurn, CfgElev, CfgAccel, CfgPitchMin,
             CfgPitchMax, CfgInitialError, CfgWalk, CfgRadarWalk, CfgFloor, CfgEvade, CfgLag, CfgReaction,
-            CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity, CfgMinHeight;
+            CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity, CfgMinHeight,
+            CfgManualRpm, CfgManualReload;
         internal static ConfigEntry<int> CfgHeliHits, CfgRoundsPerLoad, CfgEventCode;
 
         public static void BindConfig(ConfigFile cfg)
@@ -236,9 +242,9 @@ namespace NextDayRevival
             CfgRange = cfg.Bind(G, "VisualRange", 1800f,
                 "Slant range in metres the crews open fire at when they lay by eye (radar "
                 + "down, dark or unmanned).");
-            CfgRadarRange = cfg.Bind(G, "RadarRange", 4000f,
+            CfgRadarRange = cfg.Bind(G, "RadarRange", 7000f,
                 "Slant range in metres with the tower radar manned (radar-directed).");
-            CfgSelfDestruct = cfg.Bind(G, "MaxFuzeRange", 4500f,
+            CfgSelfDestruct = cfg.Bind(G, "MaxFuzeRange", 8000f,
                 "The longest fuze setting: a shell that meets nothing bursts after this many metres at the latest.");
             CfgCeiling = cfg.Bind(G, "Ceiling", 3000f,
                 "Highest target altitude above the gun in metres engaged.");
@@ -280,8 +286,13 @@ namespace NextDayRevival
                 + "second (the Gepard's radar: 5).");
             CfgReaction = cfg.Bind(G, "Reaction", 3f, "Seconds on a new target before the first shot.");
             CfgRoundsPerLoad = cfg.Bind(G, "Rounds", 20, "Ready rounds at the gun before the next rack is brought up.");
+            ShortRange.BindConfig(cfg);
             CfgReload = cfg.Bind(G, "ReloadSeconds", 25f,
                 "Bringing up the next rack, seconds (one man left alone: x 1.5).");
+            CfgManualRpm = cfg.Bind(G, "ManualRateOfFire", 18f,
+                "Player cadence, 15..20 rounds/minute. The ready rack supplies the loader.");
+            CfgManualReload = cfg.Bind(G, "ManualReloadSeconds", 6f,
+                "Player ready-rack refill in seconds. R refills early; an empty rack refills automatically.");
         }
 
         internal static bool On
@@ -303,11 +314,11 @@ namespace NextDayRevival
         internal static float RangeMetres(bool radar)
         {
             float eye = Mathf.Max(100f, F(CfgRange, 1800f));
-            return radar ? Mathf.Max(eye, F(CfgRadarRange, 4000f)) : eye;
+            return radar ? Mathf.Max(eye, F(CfgRadarRange, 7000f)) : eye;
         }
         static float SelfDestructU
         {
-            get { return Mathf.Max(Mathf.Max(F(CfgRange, 1800f), F(CfgRadarRange, 4000f)), F(CfgSelfDestruct, 4500f)) * K; }
+            get { return Mathf.Max(Mathf.Max(F(CfgRange, 1800f), Mathf.Max(MercAACore.RadarMetres, F(CfgRadarRange, 7000f))), F(CfgSelfDestruct, 8000f)) * K; }
         }
         internal static float CeilingU { get { return Mathf.Max(50f, F(CfgCeiling, 3000f)) * K; } }
         static int RoundsFull { get { return Mathf.Max(1, CfgRoundsPerLoad == null ? 20 : CfgRoundsPerLoad.Value); } }
@@ -326,22 +337,34 @@ namespace NextDayRevival
         /// town's battery on the school sports ground (MT-S1f, 50 x 80 u open
         /// pad at (5605, 660), docs/ai/tasks/military-town.md): no holder,
         /// they stand on the ground facing west, toward the airfield.</summary>
-        static readonly string[] Ids = { "AA-N", "AA-S", "MT-AA2a", "MT-AA2b" };
+        static readonly string[] Ids = { "AA-N", "AA-S", "MT-AA2a", "MT-AA2b", "ZU-N", "ZU-S" };
         static readonly string[] Names = { "AA position north", "AA position S2-S3",
-            "Town battery west", "Town battery east" };
+            "Town battery west", "Town battery east", "Airfield ZU north", "Airfield ZU south" };
         static readonly Vector2[] Spots = { new Vector2(4385f, 1320f), new Vector2(4300f, -550f),
-            new Vector2(5598f, 642f), new Vector2(5612f, 686f) };
-        static readonly float[] SpotYaws = { 90f, 90f, 270f, 270f };
-        static readonly bool[] TownSpot = { false, false, true, true };
+            new Vector2(5598f, 642f), new Vector2(5612f, 686f),
+            new Vector2(4440f, 1250f), new Vector2(4355f, -480f) };
+        static readonly float[] SpotYaws = { 90f, 90f, 270f, 270f, 90f, 90f };
+        static readonly bool[] TownSpot = { false, false, true, true, false, false };
         const string EmptyName = "AA position V3 (empty)";
 
         // ------------------------------------------------------------- the gun
 
         internal sealed class Gun
         {
+            public FlakGunInfo Info;            // W Perf1: the reused snapshot (Flak.Guns / Get)
             public int Index;
+            internal int NaturalSide = -2;
             public string Id, Name;
+            public bool ShortRange, Awake;
+            public float NextWake;
+            public ShortBurst ShortBurst;
+            public string CrewGKey, CrewCKey;
+            public Transform BarrelRight, MuzzleRight;
+            public Vector3 BarrelHome, BarrelRightHome;
             public bool Town;                   // the military town's battery (its faction)
+            public bool RadarDirected;
+            public int DirectionTier = 1;
+            public int TownSide = -1;
             public Transform Holder;            // the emplacement; null on the ground
             public Transform Root, Mount, Cradle, Barrel, Muzzle;
             public Transform SeatGunner, SeatLoader, Eye;
@@ -382,7 +405,10 @@ namespace NextDayRevival
             // the wire (what the others see)
             public float RemoteAt = -100f, RemoteFuze, RemoteShotAt = -100f;
             public int RemoteSeq = -1;
+            public bool ExactShots;
+            public int ShotSender = -1, ShotSeq = -1;
             public float ClaimedUntil = -100f;  // a player at this gun on another client
+            public float NextHold;              // W Perf1: next crew hold of a far gun (FlakCrew.Hold)
             public int ClaimActor;
         }
 
@@ -405,45 +431,68 @@ namespace NextDayRevival
         /// gun id and the target.</summary>
         public static event Action<string, GameObject> Engaging;
 
-        /// <summary>Every gun built in this world, as a fresh snapshot.</summary>
+        // W Perf1: one snapshot object per gun, refilled on every call - NoFly
+        // asked Get for each of its guns every frame, and each Get built a new
+        // list with a new snapshot of every gun. Get needs no list at all now;
+        // Guns still hands out its own list (a caller may loop over it while
+        // it calls into code that asks again), holding the per-gun objects.
+        // Every caller reads the values at once.
+
+        /// <summary>Every gun built in this world, as a snapshot (the values
+        /// are refreshed by the next Guns/Get call - read them, do not keep them).</summary>
         public static List<FlakGunInfo> Guns()
         {
-            List<FlakGunInfo> list = new List<FlakGunInfo>();
+            List<FlakGunInfo> list = new List<FlakGunInfo>(_guns.Count);
             for (int i = 0; i < _guns.Count; i++)
             {
                 Gun g = _guns[i];
                 if (g.Root == null) continue;
-                FlakGunInfo f = new FlakGunInfo();
-                f.Id = g.Id;
-                f.Name = g.Name;
-                f.Position = g.Mount != null ? g.Mount.position : g.Root.position;
-                f.Yaw = g.Root.eulerAngles.y + g.Yaw;
-                if (f.Yaw >= 360f) f.Yaw -= 360f;
-                f.Pitch = g.Pitch;
-                f.State = State(g);
-                f.Mode = g.Mode;
-                f.Target = g.Target != null ? g.Target.Go : null;
-                f.Assigned = g.Assigned;
-                f.Rounds = g.Rounds < 0 ? RoundsFull : g.Rounds;
-                f.CrewAlive = (Up(g.Gunner) ? 1 : 0) + (Up(g.Loader) ? 1 : 0);
-                f.PlayerManned = PlayerAt(g);
-                f.ManActor = g == _manned ? Crocodile.LocalActor() : Time.time < g.ClaimedUntil ? g.ClaimActor : -1;
-                f.Range = RangeU;
-                f.ZoneCentre = g.ZoneCentre;
-                f.ZoneRadius = g.ZoneRadius;
-                f.ZoneCeiling = g.ZoneCeiling;
-                f.ZoneStrict = g.ZoneStrict;
-                list.Add(f);
+                list.Add(Snapshot(g));
             }
             return list;
+        }
+
+        static FlakGunInfo Snapshot(Gun g)
+        {
+            FlakGunInfo f = g.Info;
+            if (f == null) { f = new FlakGunInfo(); g.Info = f; }
+            f.Id = g.Id;
+            f.Name = g.Name;
+            f.Position = g.Mount != null ? g.Mount.position : g.Root.position;
+            f.Yaw = g.Root.eulerAngles.y + g.Yaw;
+            if (f.Yaw >= 360f) f.Yaw -= 360f;
+            f.Pitch = g.Pitch;
+            f.State = State(g);
+            f.Health = AirDefenceDamage.Hp(g.Index);
+            f.Mode = g.Mode;
+            f.Target = g.Target != null ? g.Target.Go : null;
+            f.Assigned = g.Assigned;
+            f.Rounds = g.Rounds < 0 ? RoundsFull : g.Rounds;
+            MercAAPost merc = MercAA.Gun(g.Index);
+            f.CrewAlive = merc != null ? 1 : (Up(g.Gunner) ? 1 : 0) + (Up(g.Loader) ? 1 : 0);
+            f.MercActor = merc == null ? -1 : merc.Actor;
+            f.CrewSide = merc == null ? TowerRadar.SideId(Fraktion.Eigene(Side(g))) : merc.Side;
+            f.ShortRange = g.ShortRange;
+            f.OwnerSide = OwnerSide(g);
+            f.PlayerManned = PlayerAt(g);
+            f.ManActor = g == _manned ? Crocodile.LocalActor() : Time.time < g.ClaimedUntil ? g.ClaimActor : -1;
+            f.Range = GunRange(g);
+            f.ZoneCentre = g.ZoneCentre;
+            f.ZoneRadius = g.ZoneRadius;
+            f.ZoneCeiling = g.ZoneCeiling;
+            f.ZoneStrict = g.ZoneStrict;
+            return f;
         }
 
         /// <summary>One gun's snapshot by id; null if there is none.</summary>
         public static FlakGunInfo Get(string id)
         {
-            List<FlakGunInfo> all = Guns();
-            for (int i = 0; i < all.Count; i++)
-                if (string.Equals(all[i].Id, id, StringComparison.OrdinalIgnoreCase)) return all[i];
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                Gun g = _guns[i];
+                if (g.Root == null) continue;
+                if (string.Equals(g.Id, id, StringComparison.OrdinalIgnoreCase)) return Snapshot(g);
+            }
             return null;
         }
 
@@ -485,7 +534,7 @@ namespace NextDayRevival
         /// the crews by eye (the P4 numbers); the radar HQ sets smaller
         /// reaction and error and a faster tracking with an operator at the
         /// console, larger ones when it is destroyed. Acts on the master
-        /// (Authority), for every gun.
+        /// (Authority); DirectOwned filters the affected guns.
         /// </summary>
         public static void SetFireDirection(float reactionScale, float errorScale, float trackingScale)
         {
@@ -518,7 +567,87 @@ namespace NextDayRevival
         /// military town's faction, the airfield guns the airfield's.</summary>
         internal static string Side(Gun g)
         {
-            return g != null && g.Town ? MilitaryTown.Faction() : Airfield.Faction();
+            MercAAPost merc = g == null ? null : MercAA.Gun(g.Index);
+            return merc == null ? (g != null && g.Town ? MilitaryTown.Faction() : AirfieldOwnership.CrewSide) : merc.SideName;
+        }
+
+        internal static int OwnerSide(Gun g)
+        {
+            return g.Town ? g.TownSide : AirfieldOwnership.Holder;
+        }
+
+        internal static string OwnerFaction(Gun g)
+        {
+            return g.Town ? Fraktion.Eigene(MilitaryTown.Faction()) : AirfieldOwnership.FactionName;
+        }
+
+        /// <summary>This gun's engagement range, world units (the ZU-23's own,
+        /// else the W AA3 calibration: radar-directed or by eye).</summary>
+        internal static float GunRange(Gun g)
+        {
+            return (g.ShortRange ? ShortRangeCore.RangeM : MercAA.Calibration(g).Range) * K;
+        }
+
+        // Called on the existing 2 Hz HQ tick. Town crews always work by eye.
+        internal static void DirectOwned(int side, int tier)
+        {
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                Gun g = _guns[i];
+                bool radar = AirDefencePolicy.Radar(g.Town, OwnerSide(g), side, tier);
+                int direction = !g.Town && OwnerSide(g) == side ? tier : 1;
+                if (g.RadarDirected == radar && g.DirectionTier == direction) continue;
+                g.RadarDirected = radar;
+                g.DirectionTier = direction;
+                g.NextLook = 0f;
+            }
+        }
+
+        internal static bool AirfieldClear()
+        {
+            int count = 0;
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                Gun g = _guns[i];
+                if (g.Town || g.Root == null) continue;
+                count++;
+                if (Up(g.Gunner) || Up(g.Loader) || PlayerAt(g)) return false;
+            }
+            return count == 2; // Missing/unresolved emplacements cannot grant capture.
+        }
+
+        internal static bool AirfieldManned()
+        {
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                Gun g = _guns[i];
+                if (!g.Town && g.Root != null && (Up(g.Gunner) || Up(g.Loader) || PlayerAt(g))) return true;
+            }
+            return false;
+        }
+
+        internal static bool TownManned()
+        {
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                Gun g = _guns[i];
+                if (g.Town && g.Root != null && (Up(g.Gunner) || Up(g.Loader) || PlayerAt(g))) return true;
+            }
+            return false;
+        }
+
+        internal static void ClearAirfieldOrders()
+        {
+            for (int i = 0; i < _guns.Count; i++)
+                if (!_guns[i].Town)
+                {
+                    Gun g = _guns[i];
+                    g.Assigned = null;
+                    g.Target = null;
+                    g.Hostile.Clear();
+                    g.Mode = FlakMode.WeaponsFree;
+                    g.NextLook = 0f;
+                }
         }
 
         /// <summary>P5: the radar HQ's order for a gun (by id) shown in the
@@ -533,9 +662,8 @@ namespace NextDayRevival
         /// Zone defence (P6a): engage only aircraft inside the horizontal circle
         /// round <paramref name="centre"/> of <paramref name="radius"/> world
         /// units, up to <paramref name="ceiling"/> units above the ground (0 = the
-        /// gun's own ceiling). <paramref name="strict"/>: any aircraft in the zone
-        /// that has nobody of the crew's own faction aboard is a target, hostile
-        /// or not (a no-fly zone); otherwise only hostile ones.
+        /// gun's own ceiling). <paramref name="strict"/> is retained for API
+        /// compatibility; assignments and strict zones never bypass pilot IFF.
         /// </summary>
         public static bool ZoneDefence(string id, Vector3 centre, float radius, float ceiling, bool strict)
         {
@@ -578,8 +706,9 @@ namespace NextDayRevival
 
         static FlakState State(Gun g)
         {
+            if (!AirDefenceDamage.Alive(g.Index)) return FlakState.Destroyed;
             if (PlayerAt(g)) return FlakState.PlayerManned;
-            if (!Up(g.Gunner) && !Up(g.Loader)) return FlakState.NoCrew;
+            if (MercAA.Gun(g.Index) == null && !Up(g.Gunner) && !Up(g.Loader)) return FlakState.NoCrew;
             bool firing = Time.time - Mathf.Max(g.LastShot, g.RemoteShotAt) < 1.5f;
             if (g.Reloading) return FlakState.Reloading;
             if (firing) return FlakState.Firing;
@@ -587,8 +716,9 @@ namespace NextDayRevival
             return FlakState.Idle;
         }
 
-        static bool PlayerAt(Gun g)
+        internal static bool PlayerAt(Gun g)
         {
+            if (!AirDefenceDamage.Alive(g.Index)) return false;
             return g == _manned || Time.time < g.ClaimedUntil;
         }
 
@@ -613,6 +743,7 @@ namespace NextDayRevival
 
         public static void Install(Harmony harmony)
         {
+            AirDefenceDamage.Install(harmony);
             if (CfgEnabled != null && !CfgEnabled.Value) return;
             int n = 0;
             HarmonyMethod post = new HarmonyMethod(typeof(Flak).GetMethod("LockPostfix"));
@@ -637,7 +768,7 @@ namespace NextDayRevival
 
         public static void LockPostfix(ref bool __result)
         {
-            if (_manned != null) __result = true;
+            if (_manned != null || AirDefenceDamage.Repairing) __result = true;
         }
 
         // ---------------------------------------------------------- the frame
@@ -665,9 +796,25 @@ namespace NextDayRevival
                     Gun g = _guns[i];
                     try
                     {
+                        if (!AirDefenceDamage.Alive(g.Index))
+                        {
+                            if (g == _manned) FlakPlayer.Leave("the gun is destroyed");
+                            FlakFire.Release(g); continue;
+                        }
+                        if (g.ShortRange && !ShortRange.Awake(g, master))
+                        { FlakFire.Release(g); continue; }
                         if (master) FlakCrew.Spawn(g);
                         if (g == _manned) FlakPlayer.Lay(g, dt);
-                        else if (master && B(CfgNpcCrew) && Time.time >= g.ClaimedUntil) FlakFire.Control(g, dt);
+                        else if (master && (B(CfgNpcCrew) || MercAA.Gun(g.Index) != null) && Time.time >= g.ClaimedUntil)
+                        {
+                            if (g.ShortRange)
+                            {
+                                FrameProf.S(FrameProf.S_ShortRangeT);
+                                ShortRange.Control(g, dt);
+                                FrameProf.E(FrameProf.S_ShortRangeT);
+                            }
+                            else FlakFire.Control(g, dt);
+                        }
                         else FlakFire.Release(g);
                         if (!g.Laying && g != _manned) Remote(g, dt);
                         Slew(g, dt);
@@ -698,7 +845,7 @@ namespace NextDayRevival
                 for (int i = 0; i < _guns.Count; i++)
                 {
                     Gun g = _guns[i];
-                    if (g.Root == null) continue;
+                    if (g.Root == null || (g.ShortRange && !g.Awake && g != _manned)) continue;
                     Pose(g);
                     FlakCrew.Hold(g);
                 }
@@ -758,13 +905,20 @@ namespace NextDayRevival
             for (int k = 0; k < Ids.Length; k++)
             {
                 if (Has(Ids[k])) continue;
+                if (k >= 4)
+                {
+                    if (!fallback || !ShortRange.On) continue;
+                    Gun z = Zu23Model.Build(k + 1, Ids[k], Spots[k], SpotYaws[k], airfield.isLoaded ? airfield : tile);
+                    if (z != null) _guns.Add(z);
+                    continue;
+                }
                 if (TownSpot[k])
                 {
                     // The town battery stands on the ground: once the tile's
                     // content had the same 40 s to load as the fallback.
                     if (!fallback || !B(CfgTown) || !MilitaryTown.On) continue;
                     Gun t = FlakModel.Build(k, Ids[k], Names[k], null, null, Spots[k], SpotYaws[k], tile);
-                    if (t != null) { t.Town = true; _guns.Add(t); }
+                    if (t != null) { t.Town = true; t.TownSide = TowerRadar.SideId(Fraktion.Eigene(MilitaryTown.Faction())); _guns.Add(t); }
                     continue;
                 }
                 if (holders[k] == null && !fallback) continue;
@@ -786,7 +940,7 @@ namespace NextDayRevival
         {
             int n = 0;
             bool town = B(CfgTown) && MilitaryTown.On;
-            for (int k = 0; k < Ids.Length; k++) if (!TownSpot[k] || town) n++;
+            for (int k = 0; k < Ids.Length; k++) if (k >= 4 ? ShortRange.On : (!TownSpot[k] || town)) n++;
             return n;
         }
 
@@ -813,6 +967,7 @@ namespace NextDayRevival
             for (int i = 0; i < _guns.Count; i++)
                 if (_guns[i].Root != null) UnityEngine.Object.Destroy(_guns[i].Root.gameObject);
             _guns.Clear();
+            AirDefenceDamage.Reset(0, 6);
             Log("guns cleared (" + why + ").");
         }
 
@@ -834,10 +989,13 @@ namespace NextDayRevival
         static void Slew(Gun g, float dt)
         {
             if (dt <= 0f) return;
-            float turn = Mathf.Max(1f, F(CfgTurn, 20f));
-            float elev = Mathf.Max(1f, F(CfgElev, 12f));
-            float acc = Mathf.Max(1f, F(CfgAccel, 40f));
-            float min = F(CfgPitchMin, -3f), max = F(CfgPitchMax, 82f);
+            float turn = g.ShortRange ? 70f : Mathf.Max(1f, F(CfgTurn, 20f));
+            float elev = g.ShortRange ? 55f : Mathf.Max(1f, F(CfgElev, 12f));
+            float acc = g.ShortRange ? 180f : Mathf.Max(1f, F(CfgAccel, 40f));
+            // W AA2: assisted handwheels while a player uses a 52-K (remote players
+            // too); the NPC bracketing/traverse tuning stays.
+            if (!g.ShortRange && PlayerAt(g)) { turn = Mathf.Max(turn, 30f); elev = Mathf.Max(elev, 24f); acc = Mathf.Max(acc, 90f); }
+            float min = g.ShortRange ? -10f : F(CfgPitchMin, -3f), max = g.ShortRange ? 90f : F(CfgPitchMax, 82f);
 
             // Q2: the gunner cranks WITH the target, not after it. The rate at
             // which the laying point moves (smoothed over ~0.3 s, so the ten
@@ -878,7 +1036,7 @@ namespace NextDayRevival
             // (the recuperator), the case thrown out halfway home.
             if (g.Recoil > 0f)
             {
-                g.Recoil = Mathf.MoveTowards(g.Recoil, 0f, dt / RunOut);
+                g.Recoil = Mathf.MoveTowards(g.Recoil, 0f, dt / (g.ShortRange ? 0.08f : RunOut));
                 if (g.CaseDue && g.Recoil < 0.55f)
                 {
                     g.CaseDue = false;
@@ -908,16 +1066,21 @@ namespace NextDayRevival
 
         static void Pose(Gun g)
         {
-            float r = B(CfgRecoil) ? g.Recoil : 0f;
+            bool dead = !AirDefenceDamage.Alive(g.Index);
+            float r = !dead && B(CfgRecoil) ? g.Recoil : 0f;
             if (g.Mount != null) g.Mount.localRotation = Quaternion.Euler(0f, g.Yaw, 0f);
             // B2: the shot jerks the cradle up a little on its trunnions
             // (gone within a quarter of the run-out).
-            if (g.Cradle != null) g.Cradle.localRotation = Quaternion.Euler(-g.Pitch - Kick * r * r * r * r, 0f, 0f);
+            if (g.Cradle != null) g.Cradle.localRotation = Quaternion.Euler(dead ? 12f : -g.Pitch - Kick * r * r * r * r, 0f, dead ? 8f : 0f);
             if (g.Barrel != null)
             {
                 // The recoil curve: the shot throws the barrel the whole stroke
                 // back at once, the recuperator eases it home (smoothstep).
-                g.Barrel.localPosition = new Vector3(0f, 0f, -g.Stroke * r * r * (3f - 2f * r));
+                if (g.ShortRange) g.Barrel.localPosition = g.BarrelHome
+                    - Vector3.forward * (g.Stroke * r * r * (3f - 2f * r) * ((g.Seq & 1) == 0 ? 1f : 0f));
+                else g.Barrel.localPosition = new Vector3(0f, 0f, -g.Stroke * r * r * (3f - 2f * r));
+                if (g.BarrelRight != null) g.BarrelRight.localPosition = g.BarrelRightHome
+                    - Vector3.forward * (g.Stroke * r * r * (3f - 2f * r) * ((g.Seq & 1) == 1 ? 1f : 0f));
             }
         }
 
@@ -941,13 +1104,9 @@ namespace NextDayRevival
         internal static Vector3 Intercept(Vector3 from, Vector3 p, Vector3 v, out float tof)
         {
             float speed = Speed;
-            tof = Vector3.Distance(from, p) / speed;
-            Vector3 aim = p;
-            for (int i = 0; i < 4; i++)
-            {
-                aim = p + v * tof;
-                tof = Vector3.Distance(from, aim) / speed;
-            }
+            Vector3 d = p - from;
+            tof = MercAACore.FlightTime(d.x, d.y, d.z, v.x, v.y, v.z, speed, Gravity);
+            Vector3 aim = p + v * tof;
             return aim + Vector3.up * (0.5f * Gravity * tof * tof);
         }
 
@@ -964,6 +1123,7 @@ namespace NextDayRevival
             _spec.HeliHits = Mathf.Max(1, CfgHeliHits == null ? 2 : CfgHeliHits.Value);
             _spec.Tracer = B(CfgTracers);
             _spec.Flak = true;
+            _spec.Exact = true; // dispersion is chosen once in Shoot and sent on the wire
             _spec.PuffFx = B(CfgPuffs);
             _spec.PuffScale = PuffScale;
             _spec.BurstSound = B(CfgBurstSound) ? (Action<Vector3>)FlakSound.Burst : null;
@@ -981,6 +1141,7 @@ namespace NextDayRevival
         internal static void Shoot(Gun g, Vector3 aim, bool aimValid, float fuze, bool live,
                                    List<GepardGun.Contact> contacts)
         {
+            if (g.ShortRange) { ShortRange.Shoot(g, aim, aimValid, fuze, live, contacts); return; }
             Transform m = g.Muzzle;
             if (m == null) return;
             Vector3 muzzle = m.position;
@@ -991,9 +1152,24 @@ namespace NextDayRevival
                 if (Vector3.Angle(dir, want) < 1f) dir = want;
             }
             float range = Mathf.Clamp(fuze, 30f, SelfDestructU);
-            // The fuze is set by hand, not exact: a few per cent either way.
-            float life = range / Speed * UnityEngine.Random.Range(0.97f, 1.03f);
-            GepardShots.Fire(Spec(), g.Owner, muzzle, dir, life, live, contacts);
+            // A range-set time fuze. The player's is exact (W AA2: a random error
+            // moved the burst tens of metres past a correctly led aircraft); an
+            // NPC or merc crew keeps its W AA3 calibrated error.
+            float fuzeError = live && g != _manned ? MercAA.Calibration(g).FuzeError : 0f;
+            float life = range / Speed * (fuzeError > 0f ? UnityEngine.Random.Range(1f - fuzeError, 1f + fuzeError) : 1f);
+            Vector2 spread = UnityEngine.Random.insideUnitCircle * (Spec().Dispersion * 0.001f);
+            Vector3 right = Vector3.Cross(Vector3.up, dir);
+            if (right.sqrMagnitude < 1e-6f) right = Vector3.right;
+            right.Normalize();
+            dir = (dir + right * spread.x + Vector3.Cross(dir, right) * spread.y).normalized;
+            // W AA4: a kill pays the player at the gun, or the merc crew's
+            // owner; a garrison crew's kill pays nobody.
+            MercAAPost merc = MercAA.Gun(g.Index);
+            AirKills.NextShotCredit = g == _manned ? Mathf.Max(0, Mercs.LocalActor)
+                : merc != null ? Mathf.Max(0, merc.Actor) : 0;
+            try { GepardShots.Fire(Spec(), g.Owner, muzzle, dir, life, live, contacts); }
+            finally { AirKills.NextShotCredit = -1; }
+            if (live) FlakNet.SendShot(g, muzzle, dir, life);
             g.Recoil = 1f;
             g.CaseDue = true;
             g.LastShot = Time.time;
@@ -1020,17 +1196,26 @@ namespace NextDayRevival
             return 60f / Mathf.Clamp(F(CfgRpm, 15f), 1f, 60f);
         }
 
+        internal static float ManualInterval()
+        {
+            return 60f / Mathf.Clamp(F(CfgManualRpm, 18f), 15f, 20f);
+        }
+
+        internal static float ManualReloadSeconds() { return Mathf.Max(0.5f, F(CfgManualReload, 6f)); }
+
         internal static float MaxFuze { get { return SelfDestructU; } }
 
         /// <summary>Another client lays this gun: follow its pose and fire the
         /// shells it fired (not live), one per step of its shot counter.</summary>
         static void Remote(Gun g, float dt)
         {
+            if (!AirDefenceDamage.Alive(g.Index)) { g.Seq = Mathf.Max(g.Seq, g.RemoteSeq); return; }
+            if (g.ExactShots) return; // reliable shot packets carry the actual launch, not the desired pose
             if (g.RemoteSeq < 0 || g.Seq == g.RemoteSeq) return;
             int behind = g.RemoteSeq - g.Seq;
             // A first sample, a new layer or a counter that went back: take it
             // as it is, fire nothing.
-            if (g.Seq < 0 || behind < 0 || behind > 3) { g.Seq = g.RemoteSeq; return; }
+            if (g.Seq < 0 || behind < 0 || behind > (g.ShortRange ? 8 : 3)) { g.Seq = g.RemoteSeq; return; }
             g.Seq++;
             g.RemoteShotAt = Time.time;
             Shoot(g, Vector3.zero, false, g.RemoteFuze, false, null);
@@ -1039,7 +1224,8 @@ namespace NextDayRevival
         internal static void OnPose(int index, float yaw, float pitch, int seq, float fuze, bool player, int sender)
         {
             Gun g = ByIndex(index);
-            if (g == null) return;
+            if (g == null || !AirDefenceDamage.Alive(index)) return;
+            if (g.ShortRange && !player && sender != MercAA.MasterActor()) return;
             // B1: a claim from a dead gunner is no claim (his lease runs out).
             if (player && Crocodile.ActorDown(sender)) player = false;
             if (player)
@@ -1058,6 +1244,21 @@ namespace NextDayRevival
             g.RemoteAt = Time.time;
         }
 
+        internal static void OnShot(Gun g, int seq, int sender, Vector3 muzzle, Vector3 velocity,
+                                    float life, float stamp, float gravity)
+        {
+            if (g == null || g == _manned) return;
+            if (g.ShotSender == sender && seq <= g.ShotSeq) return;
+            g.ShotSender = sender; g.ShotSeq = seq;
+            g.Seq = seq;
+            float age = Mathf.Repeat(RadarClock.Now - stamp + 100000f, 100000f);
+            if (age > 10f) age = 0f; // clock fallback before the radar's first tick
+            GepardShots.FireExact(Spec(), g.Owner, muzzle, velocity, life, false, null, age, gravity);
+            g.Recoil = 1f; g.CaseDue = true; g.RemoteShotAt = g.LastShot = Time.time;
+            if (B(CfgMuzzleFlash)) GepardFx.Muzzle(muzzle, velocity.normalized);
+            if (B(CfgGunSound)) FlakSound.Report(muzzle);
+        }
+
         /// <summary>The layer's pose ten times a second, and at once after a
         /// shot (<paramref name="now"/>).</summary>
         internal static void Publish(Gun g, bool player, bool now)
@@ -1072,13 +1273,14 @@ namespace NextDayRevival
         internal static void Fire(Gun g, Vector3 aim, bool aimValid, float fuze, List<GepardGun.Contact> contacts,
                                   bool player)
         {
+            if (!AirDefenceDamage.Alive(g.Index)) return;
             if (g.Seq < 0) g.Seq = 0;
             g.Seq++;
             g.FuzeRange = fuze;
             Shoot(g, aim, aimValid, fuze, true, contacts);
             g.Rounds--;
             g.Fired++;
-            Publish(g, player, true);
+            Publish(g, player, !g.ShortRange);
         }
 
         // ------------------------------------------------------------- reload
@@ -1095,7 +1297,7 @@ namespace NextDayRevival
         {
             if (!g.Reloading || Time.time < g.ReloadUntil) return;
             g.Reloading = false;
-            g.Rounds = RoundsFull;
+            g.Rounds = g.ShortRange ? ShortRangeCore.Magazine : RoundsFull;
         }
 
         internal static float ReloadSeconds() { return Mathf.Max(0.5f, F(CfgReload, 12f)); }
@@ -1154,6 +1356,8 @@ namespace NextDayRevival
                 g.Index = index;
                 g.Id = id;
                 g.Name = name;
+                g.CrewGKey = "flak/" + id.ToLowerInvariant() + "/g";
+                g.CrewCKey = "flak/" + id.ToLowerInvariant() + "/c";
                 g.Holder = holder;
 
                 GameObject root = new GameObject("NDR Flak 52-K " + id);
@@ -1162,7 +1366,8 @@ namespace NextDayRevival
                     root.transform.SetParent(holder, false);
                     root.transform.localPosition = Vector3.zero;
                     root.transform.localRotation = Quaternion.identity;
-                    string swapped = Swap(holder, empty);
+                    AirKills.AddPit(holder);   // W AA4: the ring shelters the crew
+                string swapped = Swap(holder, empty);
                     int unblocked = Unblock(holder);
                     Flak.Log(id + ": built on \"" + name + "\" at " + holder.position + ", derelict " + swapped
                         + ", " + unblocked + " derelict collider(s) off.");
@@ -1545,7 +1750,7 @@ namespace NextDayRevival
             _nextResolve = Time.time + 0.5f;
             Type npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (npcType == null) return;
-            _byKey.Clear();
+            foreach (List<Component> cached in _byKey.Values) cached.Clear();
             UnityEngine.Object[] actors = NpcScan.All();
             for (int i = 0; i < actors.Length; i++)
             {
@@ -1560,8 +1765,8 @@ namespace NextDayRevival
             for (int i = 0; i < guns.Count; i++)
             {
                 Flak.Gun g = guns[i];
-                g.Gunner = Pick(Key(g) + KeyGunner, g.Gunner);
-                g.Loader = Pick(Key(g) + KeyLoader, g.Loader);
+                g.Gunner = Pick(g.CrewGKey, g.Gunner);
+                g.Loader = Pick(g.CrewCKey, g.Loader);
             }
         }
 
@@ -1578,7 +1783,9 @@ namespace NextDayRevival
         /// no player is within 150 u and nobody is at the sight.</summary>
         internal static void Spawn(Flak.Gun g)
         {
+            if (MercAA.Gun(g.Index) != null) return;
             if (!Flak.B2(Flak.CfgNpcCrew) || g.Root == null) return;
+            if (Flak.Side(g) == null) return;
             bool alive = Flak.Up(g.Gunner) || Flak.Up(g.Loader);
             if (alive) { g.DeadSince = -1f; return; }
             if (Time.time < g.NextTry) return;
@@ -1647,16 +1854,47 @@ namespace NextDayRevival
         /// <summary>Every client, late: each living man on his seat, turned
         /// with the mount, his own navigation and idle logic held off, and -
         /// SeatedCrew - the game's seated clip sampled onto him.</summary>
-        internal static void Hold(Flak.Gun g)
+        // W Perf1: a gun this far from the camera holds its crew five times a
+        // second, not every frame (Flak.LateFrame was ~1 ms for the whole
+        // battery). Nothing can move them in between: the agent is parked
+        // (Parken) and the AI's pause (GepardCrew.Ruhig) lasts 1.4 s. The
+        // seated pose is still sampled every frame - Sitzen skips a man no
+        // camera sees, and a visible one must not stand up between holds.
+        const float HoldNearU = 300f * Flak.K;
+        static int _camFrame = -1;
+        static Vector3 _camPos;
+        static bool _camOk;
+
+        static bool NearCamera(Vector3 p)
         {
-            Seat(g, g.Gunner, g.SeatGunner, 0);
-            Seat(g, g.Loader, g.SeatLoader, 1);
+            if (_camFrame != Time.frameCount)
+            {
+                _camFrame = Time.frameCount;
+                Camera cam = CameraOwner.ViewCamera();
+                _camOk = cam != null;
+                if (_camOk) _camPos = cam.transform.position;
+            }
+            return !_camOk || (p - _camPos).sqrMagnitude < HoldNearU * HoldNearU;
         }
 
-        static void Seat(Flak.Gun g, Component ai, Transform seat, int clip)
+        internal static void Hold(Flak.Gun g)
+        {
+            bool full = g == null || g.Root == null || NearCamera(g.Root.position)
+                || Time.time >= g.NextHold || Flak.PlayerAt(g);
+            if (full && g != null) g.NextHold = Time.time + 0.2f;
+            Seat(g, g.Gunner, g.SeatGunner, 0, full);
+            Seat(g, g.Loader, g.SeatLoader, 1, full);
+        }
+
+        static void Seat(Flak.Gun g, Component ai, Transform seat, int clip, bool full)
         {
             if (seat == null || !Flak.Up(ai)) return;
             bool sit = Flak.B2(Flak.CfgSeated);
+            if (!full)
+            {
+                if (sit) TechnicalCrew.Sitzen(ai, clip);
+                return;
+            }
             Vector3 at = seat.position;
             if (sit) at -= Vector3.up * Mathf.Max(0f, Flak.CfgSeatDrop == null ? 2.3f : Flak.CfgSeatDrop.Value);
             else at.y = g.Root.position.y + 0.12f * Flak.K;
@@ -1701,12 +1939,14 @@ namespace NextDayRevival
 
         internal static void Control(Flak.Gun g, float dt)
         {
-            bool gunner = Flak.Up(g.Gunner), loader = Flak.Up(g.Loader);
+            bool merc = MercAA.Gun(g.Index) != null;
+            bool gunner = merc || Flak.Up(g.Gunner), loader = merc || Flak.Up(g.Loader);
             if (!gunner && !loader) { Release(g); return; }
             if (!g.Laying)
             {
                 g.Laying = true;
                 g.Rounds = g.Rounds < 0 ? Flak.RoundsPerLoad : g.Rounds;
+                g.NextLook = Time.time + (g.Index & 3) * 0.125f;
             }
             if (Time.time >= g.NextLook)
             {
@@ -1740,8 +1980,7 @@ namespace NextDayRevival
                 g.Fired = 0;
                 g.Held = 0f;
                 // The first shot is laid on a rough range and lead: far off.
-                g.Err = Offset(t, mid, dist * Mathf.Max(0f, Flak.CfgInitialError == null ? 60f : Flak.CfgInitialError.Value)
-                    * Flak.DirError * 0.001f);
+                g.Err = Offset(t, mid, dist * MercAA.Calibration(g).InitialMil * 0.001f);
                 g.LastVel = t.Vel;
                 Flak.Log(g.Id + ": engages " + Describe(t) + " at "
                     + dist.ToString("0", CultureInfo.InvariantCulture) + " u (" + g.Mode + ", "
@@ -1753,8 +1992,8 @@ namespace NextDayRevival
             Vector3 aim = Flak.Intercept(mid, t.Pos, t.Vel, out tof) + g.Err;
             float wantYaw, wantPitch;
             Flak.Angles(g, aim - mid, out wantYaw, out wantPitch);
-            float min = Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
-            float max = Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
+            float min = g.ShortRange ? -10f : Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
+            float max = g.ShortRange ? 90f : Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
             bool reach = wantPitch >= min - 0.5f && wantPitch <= max + 0.5f;
             g.WantYaw = wantYaw;
             g.WantPitch = Mathf.Clamp(wantPitch, min, max);
@@ -1764,7 +2003,7 @@ namespace NextDayRevival
             Vector3 bore = g.Cradle != null ? g.Cradle.forward : g.Root.forward;
             float error = Vector3.Angle(bore, aim - mid);
             g.Held += dt;
-            float reaction = Mathf.Max(0f, Flak.CfgReaction == null ? 3f : Flak.CfgReaction.Value) * Flak.DirReaction;
+            float reaction = MercAA.Calibration(g).Reaction;
             bool ready = reach && g.Held >= reaction && error < 1.5f && g.Mode != FlakMode.HoldFire
                 && !g.Reloading;
             Trigger(g, ready, aim, t, mid, tof, gunner && loader);
@@ -1824,8 +2063,9 @@ namespace NextDayRevival
             g.NextShot = now + Flak.Interval() * (both ? 1f : 2f) * UnityEngine.Random.Range(0.9f, 1.15f);
             // The correction for the next shot, from where this one bursts.
             float dist = Vector3.Distance(mid, t.Pos);
-            float floor = Mathf.Max(0f, Flak.CfgFloor == null ? 5f : Flak.CfgFloor.Value) * 0.001f * dist;
-            g.Err = g.Err * Flak.Walk + Scatter(t, mid, floor);
+            AACalibration calibration = MercAA.Calibration(g);
+            float floor = calibration.FloorMil * 0.001f * dist;
+            g.Err = g.Err * calibration.Walk + Scatter(t, mid, floor);
             if (g.Rounds <= 0)
             {
                 g.Firing = false;
@@ -1874,13 +2114,15 @@ namespace NextDayRevival
 
         /// <summary>Every air target in reach, and of those the ones this crew
         /// may fire on; the closest valid one (the assigned one first).</summary>
-        static void Search(Flak.Gun g)
+        internal static void Search(Flak.Gun g)
         {
             Vector3 eye = Flak.Mid(g);
-            float range = Flak.RangeU;
+            bool direction = MercAA.DirectionAvailable(g);
+            MercAAPost man = MercAA.Gun(g.Index);
+            float range = (g.ShortRange ? ShortRangeCore.RangeM : MercAACore.Calibrate(man != null, direction, man == null ? 0 : man.Trait).Range) * Flak.K;
             Collect(g.Air, eye, range);
 
-            string side = Flak.Side(g);
+            string side = Flak.OwnerFaction(g);
             g.Hostile.Clear();
             GepardGun.Contact best = null, assigned = null;
             float bestD = float.MaxValue;
@@ -1890,25 +2132,32 @@ namespace NextDayRevival
                 if (c.Go == null) continue;
                 bool hostile, friendly;
                 Allegiance(c, side, out hostile, out friendly);
-                if (friendly) continue;
+                if (friendly || !hostile) continue;
+                if (g.Town && !NoFly.TownContains(c.Pos)) continue;
                 bool zone = g.Mode == FlakMode.ZoneDefence;
                 bool inZone = zone && InZone(g, c.Pos);
-                bool candidate = hostile || (zone && g.ZoneStrict && inZone) || (c.Go == g.Assigned && !friendly);
-                if (!candidate) continue;
-                if (zone && !inZone && c.Go != g.Assigned) continue;
+                if (zone && !inZone) continue;
                 if (g.Mode == FlakMode.AssignedOnly && c.Go != g.Assigned) continue;
-                if (!Airborne(c)) continue;
+                if (g.ShortRange && ShortRange.Drone(c))
+                { if (!Airborne(c, 0.5f * Flak.K)) continue; }
+                else if (!Airborne(c)) continue;
                 g.Hostile.Add(c);
                 float d = Vector3.Distance(eye, c.Pos);
-                if (d > range || c.Pos.y - eye.y > Flak_Ceiling()) continue;
+                float targetRange = g.ShortRange ? range : MercAACore.Calibrate(man != null,
+                    direction && RadarShadow.Visible(c.Go), man == null ? 0 : man.Trait).Range * Flak.K;
+                if (d > targetRange || c.Pos.y - eye.y > (g.ShortRange ? ShortRangeCore.CeilingM * Flak.K : Flak_Ceiling())) continue;
+                // The contact list still holds every valid target for shell hits.
+                // Only a target that can beat the current choice needs a LOS ray.
+                if (c.Go != g.Assigned && d >= bestD) continue;
                 if (!Sight(g, eye, c)) continue;
                 if (c.Go == g.Assigned) assigned = c;
                 if (d < bestD) { best = c; bestD = d; }
             }
             if (assigned != null) best = assigned;
             // Stay on the target being walked in unless the assigned one appears.
-            if (g.Target != null && g.Target.Go != null && best != null && best != g.Target && assigned == null
-                && g.Hostile.Contains(g.Target) && Vector3.Distance(eye, g.Target.Pos) <= range)
+            if (!g.ShortRange && g.Target != null && g.Target.Go != null && best != null && best != g.Target && assigned == null
+                && g.Hostile.Contains(g.Target) && Vector3.Distance(eye, g.Target.Pos) <= MercAA.Calibration(g).Range * Flak.K
+                && Sight(g, eye, g.Target))
                 best = g.Target;
             if (best != g.Target)
             {
@@ -1929,8 +2178,8 @@ namespace NextDayRevival
             _planes.Clear();
             GepardAir.Collect(_planes);
             for (int i = 0; i < _planes.Count; i++) Offer(air, _planes[i].Go, 6, 0, _planes[i].Src, eye, range);
-            Drones(air, typeof(Drone.Net), "_fremde", 2, eye, range);
-            Drones(air, typeof(SurvNet), "_ghosts", 3, eye, range);
+            Drone.Net.AirContacts(air, eye, range);
+            SurvNet.AirContacts(air, eye, range);
             for (int i = air.Count - 1; i >= 0; i--)
             {
                 GepardGun.Contact c = air[i];
@@ -1941,22 +2190,7 @@ namespace NextDayRevival
             }
         }
 
-        static void Drones(List<GepardGun.Contact> air, Type type, string field, int kind, Vector3 eye, float range)
-        {
-            FieldInfo f = type == null ? null : AccessTools.Field(type, field);
-            System.Collections.IDictionary dict = f == null ? null : f.GetValue(null) as System.Collections.IDictionary;
-            if (dict == null) return;
-            foreach (System.Collections.DictionaryEntry pair in dict)
-            {
-                object item = pair.Value;
-                if (item == null) continue;
-                FieldInfo gf = AccessTools.Field(item.GetType(), "Go");
-                GameObject go = gf == null ? null : gf.GetValue(item) as GameObject;
-                Offer(air, go, kind, pair.Key is int ? (int)pair.Key : 0, null, eye, range);
-            }
-        }
-
-        static void Offer(List<GepardGun.Contact> air, GameObject go, int kind, int actor, GepardAir.Source src,
+        internal static void Offer(List<GepardGun.Contact> air, GameObject go, int kind, int actor, GepardAir.Source src,
                           Vector3 eye, float range)
         {
             if (go == null || !go.activeInHierarchy) return;
@@ -1973,6 +2207,11 @@ namespace NextDayRevival
                 c.Src = src;
                 if (kind == 0) c.HeliView = PlayerHeli.MissileView(go);
                 GepardGun.Measure(c);
+                if (kind == 2 || kind == 3)
+                {
+                    c.LocalCentre = Vector3.zero;
+                    c.Radius = kind == 2 ? Mathf.Max(0.30f, 0.18f * RevivalPlugin.CfgDroneModelScale.Value) : SurvDrone.HitRadius;
+                }
                 c.Pos = go.transform.TransformPoint(c.LocalCentre);
                 air.Add(c);
             }
@@ -1984,6 +2223,7 @@ namespace NextDayRevival
         static void Follow(Flak.Gun g, float dt)
         {
             float lag = Mathf.Max(0.2f, Flak.CfgLag == null ? 1.5f : Flak.CfgLag.Value) * Flak.DirTracking;
+            if (Flak.RadarDirected && !MercAA.Directed(g)) lag /= Mathf.Max(1f, Flak.DirTracking);
             FollowAll(g.Air, dt, lag);
         }
 
@@ -2004,36 +2244,13 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>Who is aboard. <paramref name="friendly"/>: a player of the
-        /// crew's own faction - never fired on, whoever else is aboard.
-        /// <paramref name="hostile"/>: a player of a hostile faction (for a
-        /// drone: its pilot).</summary>
-        static void Allegiance(GepardGun.Contact c, string side, out bool hostile, out bool friendly)
+        /// <summary>Pilot IFF: passengers and nearby players do not change it.
+        /// Unknown pilots are never permission to fire.</summary>
+        internal static void Allegiance(GepardGun.Contact c, string side, out bool hostile, out bool friendly)
         {
-            hostile = false;
-            friendly = false;
-            if (c.Kind == 2 || c.Kind == 3)
-            {
-                GameObject pilot = Crocodile.PlayerByActor(c.Actor);
-                string f = pilot == null ? null : Fraktion.Spielerseite(pilot);
-                if (f == null) return;
-                if (f == Fraktion.Eigene(side)) friendly = true;
-                else hostile = Fraktion.Feind(side, f);
-                return;
-            }
-            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs).
-            if (NpcAircraft.Hostile(c.Go)) { hostile = true; return; }
-            float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
-            List<GameObject> players = GepardCrew.Spieler();
-            for (int i = 0; i < players.Count; i++)
-            {
-                GameObject go = players[i];
-                if (go == null || (go.transform.position - c.Pos).sqrMagnitude > reach * reach) continue;
-                string f = Fraktion.Spielerseite(go);
-                if (f == null) continue;
-                if (f == Fraktion.Eigene(side)) friendly = true;
-                else if (Fraktion.Feind(side, f)) hostile = true;
-            }
+            string pilot = AirPilot.Faction(c);
+            friendly = side != null && pilot == side;
+            hostile = AirDefencePolicy.Hostile(side, pilot);
         }
 
         static bool InZone(Flak.Gun g, Vector3 p)
@@ -2049,9 +2266,11 @@ namespace NextDayRevival
 
         /// <summary>In the air: more than MinTargetHeight over whatever is
         /// under it. A landed helicopter is not an air target.</summary>
-        internal static bool Airborne(GepardGun.Contact c)
+        internal static bool Airborne(GepardGun.Contact c) { return Airborne(c, -1f); }
+
+        internal static bool Airborne(GepardGun.Contact c, float overrideMin)
         {
-            float min = Mathf.Max(0f, Flak.CfgMinHeight == null ? 3f : Flak.CfgMinHeight.Value) * Flak.K;
+            float min = overrideMin >= 0f ? overrideMin : Mathf.Max(0f, Flak.CfgMinHeight == null ? 3f : Flak.CfgMinHeight.Value) * Flak.K;
             if (min <= 0f) return true;
             Vector3 origin = c.Pos;
             float rest = min + c.Radius + 2f;
@@ -2074,7 +2293,7 @@ namespace NextDayRevival
 
         /// <summary>A clear line from the gun to the target: terrain and
         /// buildings hide it; the emplacement and the target itself do not.</summary>
-        static bool Sight(Flak.Gun g, Vector3 from, GepardGun.Contact c)
+        internal static bool Sight(Flak.Gun g, Vector3 from, GepardGun.Contact c)
         {
             Vector3 d = c.Pos - from;
             float dist = d.magnitude;
@@ -2102,6 +2321,8 @@ namespace NextDayRevival
 
         internal static bool Crewman(Flak.Gun g, Transform t)
         {
+            MercAAPost merc = MercAA.Gun(g.Index);
+            if (merc != null && t.IsChildOf(merc.Ai.transform)) return true;
             return (g.Gunner != null && t.IsChildOf(g.Gunner.transform))
                 || (g.Loader != null && t.IsChildOf(g.Loader.transform));
         }
@@ -2123,8 +2344,13 @@ namespace NextDayRevival
         static bool _zoom;
         static Vector3 _stoodAt;
         static readonly List<GepardGun.Contact> _air = new List<GepardGun.Contact>();
-        static float _nextLook, _nextShot, _fuzeM;
+        static float _nextLook, _fuzeM;
         static bool _autoLocked;
+        static GepardGun.Contact _leadTarget;
+        static float _leadTof, _leadRange, _nextLead, _nextClear, _clearDistance;
+        static string _order;
+        static int _orderMode = -1, _orderSide = -2, _orderOwner = -2, _orderHolder = -2;
+        static bool _orderWorking;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
         static string _hint;
@@ -2175,7 +2401,8 @@ namespace NextDayRevival
                 d.y *= 0.5f;
                 if (d.sqrMagnitude > reach * reach) continue;
                 _near = g;
-                if (Flak.Up(g.Gunner) || Flak.Up(g.Loader)) _nearWhy = "The crew is at this gun.";
+                if (!AirDefenceDamage.Alive(g.Index)) _nearWhy = AirDefenceDamage.DestroyedPrompt;
+                else if (Flak.Up(g.Gunner) || Flak.Up(g.Loader) || MercAA.Gun(g.Index) != null) _nearWhy = "The crew is at this gun.";
                 else if (Time.time < g.ClaimedUntil) _nearWhy = "Another player is at this gun.";
                 break;
             }
@@ -2185,15 +2412,19 @@ namespace NextDayRevival
 
         static void Enter(Flak.Gun g, GameObject me)
         {
-            if (!CameraOwner.Request(CameraOwner.Flak, true, "52-K")) { Hint("The camera is busy.", 2f); return; }
+            if (!CameraOwner.Request(CameraOwner.Flak, true, g.ShortRange ? "ZU-23-2" : "52-K")) { Hint("The camera is busy.", 2f); return; }
             Flak._manned = g;
             _stoodAt = me.transform.position;
             _cmdYaw = g.Yaw;
             _cmdPitch = g.Pitch;
             _zoom = false;
             _fuzeM = 0f;
+            _leadTarget = null;
+            _autoLocked = false;
+            _nextLead = _nextLook = _nextClear = 0f;
+            _orderOwner = -2;
             _air.Clear();
-            if (g.Rounds < 0) g.Rounds = Flak.RoundsPerLoad;
+            if (g.Rounds < 0) g.Rounds = g.ShortRange ? ShortRangeCore.Magazine : Flak.RoundsPerLoad;
             g.WantYaw = g.Yaw;
             g.WantPitch = g.Pitch;
             Flak.Log("the local player mans " + g.Id + " (" + g.Rounds + " rounds).");
@@ -2204,6 +2435,8 @@ namespace NextDayRevival
             Flak.Gun g = Flak._manned;
             if (g == null) return;
             Flak._manned = null;
+            _leadTarget = null;
+            _autoLocked = false;
             g.Firing = false;
             Flak.Publish(g, true, true);
             CameraOwner.Release(CameraOwner.Flak);
@@ -2216,8 +2449,8 @@ namespace NextDayRevival
             float sens = Mathf.Max(0.1f, Flak.CfgSensitivity == null ? 2f : Flak.CfgSensitivity.Value) * (_zoom ? 0.35f : 1f);
             _cmdYaw += GameUi.Axis("Mouse X") * sens;
             _cmdPitch += GameUi.Axis("Mouse Y") * sens;
-            float min = Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
-            float max = Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
+            float min = g.ShortRange ? -10f : Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
+            float max = g.ShortRange ? 90f : Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
             _cmdPitch = Mathf.Clamp(_cmdPitch, min, max);
             if (_cmdYaw > 180f) _cmdYaw -= 360f;
             if (_cmdYaw < -180f) _cmdYaw += 360f;
@@ -2232,58 +2465,117 @@ namespace NextDayRevival
             if (Time.time >= _nextLook)
             {
                 _nextLook = Time.time + 0.4f;
-                FlakFire.Collect(_air, Flak.Mid(g), Flak.RangeU * 1.2f);
+                FlakFire.Collect(_air, Flak.Mid(g), Flak.GunRange(g));
+                string owner = Flak.OwnerFaction(g);
+                for (int i = _air.Count - 1; i >= 0; i--)
+                {
+                    GepardGun.Contact c = _air[i];
+                    if (!AirDefencePolicy.Hostile(owner, AirPilot.Faction(c))
+                        || (g.Town && !NoFly.TownContains(c.Pos)) || !FlakFire.Airborne(c)
+                        || !FlakFire.Sight(g, Flak.Mid(g), c))
+                        _air.RemoveAt(i);
+                }
             }
             FlakFire.FollowAll(_air, dt, 5f);
+            UpdateLead(g);
+            UpdateOrder(g);
 
-            if (GameUi.KeyDown(KeyCode.R) && !g.Reloading && g.Rounds < Flak.RoundsPerLoad)
-                Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f);
+            if (GameUi.KeyDown(KeyCode.R) && !g.Reloading && g.Rounds < (g.ShortRange ? ShortRangeCore.Magazine : Flak.RoundsPerLoad))
+                Flak.StartReload(g, ManualReload(g));
 
-            // The fuze setter. Automatic: the range of the aircraft nearest
-            // the bore (within 4 degrees), else the longest setting. The
+            // The fuze setter. Automatic: the selected lead solution, else
+            // the longest setting. Selection follows the player's sight. The
             // mouse wheel sets it by hand in 100 m steps; F goes back to auto.
             float wheel = GameUi.Axis("Mouse ScrollWheel");
             if (wheel > 0.01f || wheel < -0.01f)
             {
-                if (_fuzeM <= 0f) _fuzeM = Mathf.Round(Mathf.Min(AutoFuze(g), Flak.MaxFuze) / Flak.K / 100f) * 100f;
-                _fuzeM = Mathf.Clamp(_fuzeM + (wheel > 0f ? 100f : -100f), 200f, Flak.MaxFuze / Flak.K);
+                if (_fuzeM <= 0f) _fuzeM = Mathf.Round(Mathf.Min(AutoFuze(g), (g.ShortRange ? ShortRangeCore.RangeM * Flak.K : Flak.MaxFuze)) / Flak.K / 100f) * 100f;
+                _fuzeM = Mathf.Clamp(_fuzeM + (wheel > 0f ? 100f : -100f), 200f, g.ShortRange ? ShortRangeCore.RangeM : Flak.MaxFuze / Flak.K);
             }
             if (GameUi.KeyDown(KeyCode.F)) _fuzeM = 0f;
             g.FuzeRange = _fuzeM > 0f ? _fuzeM * Flak.K : AutoFuze(g);
 
             bool held = GameUi.Button(0) && !g.Reloading;
-            if (held && g.Rounds <= 0) { Flak.StartReload(g, Flak.ReloadSeconds() * 1.5f); held = false; }
+            if (held && g.Rounds <= 0) { Flak.StartReload(g, ManualReload(g)); held = false; }
             g.Firing = held;
-            if (held && Time.time >= _nextShot)
+            if (held && Time.time >= g.NextShot)
             {
-                // The player is gunner and loader in one: half the crew's rate.
+                // Solve again at launch, using the muzzle rather than the
+                // cradle: the cached cue is advisory, never an aim snap.
+                if (_fuzeM <= 0f && _autoLocked && _leadTarget != null)
+                {
+                    float tof, fuze;
+                    Lead(g, g.Muzzle != null ? g.Muzzle.position : Flak.Mid(g), _leadTarget, out tof, out fuze);
+                    g.FuzeRange = Mathf.Clamp(fuze, 30f, MaxFuze(g));
+                }
                 Flak.Fire(g, Vector3.zero, false, g.FuzeRange, _air, true);
-                _nextShot = Time.time + Flak.Interval() * 2f;
+                g.NextShot = Time.time + (g.ShortRange ? ShortRangeCore.ShotSeconds : Flak.ManualInterval());
+                if (g.Rounds <= 0) Flak.StartReload(g, ManualReload(g));
             }
             else Flak.Publish(g, true, false);
         }
 
-        /// <summary>The automatic fuze: slant range to the aircraft nearest
-        /// the bore within 4 degrees, else the longest setting.</summary>
+        /// <summary>The automatic fuze uses the same flight time as the cue.</summary>
         static float AutoFuze(Flak.Gun g)
         {
-            Vector3 mid = Flak.Mid(g);
-            Vector3 bore = g.Cradle != null ? g.Cradle.forward : g.Root.forward;
-            float best = 4f, range = Flak.MaxFuze;
-            _autoLocked = false;
+            return _autoLocked ? Mathf.Clamp(_leadRange, 30f, MaxFuze(g)) : MaxFuze(g);
+        }
+
+        // W AA5: the ZU-23's own range, reload and ballistics on the manual path.
+        static float MaxFuze(Flak.Gun g) { return g.ShortRange ? ShortRangeCore.RangeM * Flak.K : Flak.MaxFuze; }
+
+        static float ManualReload(Flak.Gun g)
+        {
+            return g.ShortRange ? ShortRangeCore.ReloadSeconds * 1.5f : Flak.ManualReloadSeconds();
+        }
+
+        /// <summary>Lead point and the fuze range for it (the 52-K: flight time x
+        /// shell speed; the ZU-23: the distance to the lead point).</summary>
+        static Vector3 Lead(Flak.Gun g, Vector3 from, GepardGun.Contact c, out float tof, out float fuze)
+        {
+            Vector3 aim = g.ShortRange ? ShortRange.Intercept(from, c.Pos, c.Vel, out tof) : Flak.Intercept(from, c.Pos, c.Vel, out tof);
+            fuze = g.ShortRange ? Vector3.Distance(from, aim) : tof * Flak.Speed;
+            return aim;
+        }
+
+        // Only the manned gun, 10 Hz. Retain the selected contact while it
+        // stays near the sight so crossing a wingman does not switch the fuze.
+        static void UpdateLead(Flak.Gun g)
+        {
+            if (Time.time < _nextLead) return;
+            _nextLead = Time.time + 0.1f;
+            Vector3 mid = g.Muzzle != null ? g.Muzzle.position : Flak.Mid(g);
+            Vector3 bore = Flak.Direction(g, _cmdYaw, _cmdPitch);
+            float best = 12f;
+            GepardGun.Contact chosen = null;
             for (int i = 0; i < _air.Count; i++)
             {
                 GepardGun.Contact c = _air[i];
                 if (c.Go == null) continue;
                 float tof;
-                Vector3 aim = Flak.Intercept(mid, c.Pos, c.Vel, out tof);
-                float a = Vector3.Angle(bore, aim - mid);
+                float fuze;
+                Vector3 aim = Lead(g, mid, c, out tof, out fuze);
+                if (fuze > MaxFuze(g) || float.IsNaN(tof) || float.IsInfinity(tof)) continue;
+                float a = Mathf.Min(Vector3.Angle(bore, aim - mid), Vector3.Angle(bore, c.Pos - mid));
+                if (c == _leadTarget && a < 14f) { chosen = c; break; }
                 if (a >= best) continue;
                 best = a;
-                range = Vector3.Distance(mid, aim);
-                _autoLocked = true;
+                chosen = c;
             }
-            return range;
+            _leadTarget = chosen;
+            _autoLocked = chosen != null;
+            if (_autoLocked) Lead(g, mid, chosen, out _leadTof, out _leadRange);
+        }
+
+        static void UpdateOrder(Flak.Gun g)
+        {
+            int owner = Flak.OwnerSide(g), holder = AirfieldOwnership.Holder;
+            bool working = TowerRadar.Built && TowerRadar.Working;
+            if (owner == _orderOwner && holder == _orderHolder && TowerRadar.Mode == _orderMode
+                && TowerRadar.ControlSide == _orderSide && working == _orderWorking) return;
+            _orderOwner = owner; _orderHolder = holder; _orderWorking = working;
+            _orderMode = TowerRadar.Mode; _orderSide = TowerRadar.ControlSide;
+            _order = Flak.SightOrder == null ? null : Flak.SightOrder(g.Id);
         }
 
         /// <summary>
@@ -2295,7 +2587,7 @@ namespace NextDayRevival
         /// Both look along the COMMANDED lay to the fuze range, like the
         /// Gepard's sight: the centre cross is where the gun is told to point
         /// and the burst range, the small ring is where the bore is (it
-        /// catches up at the mount's slew rate). One ray a frame, and only
+        /// catches up at the mount's slew rate). A cached ray at 10 Hz, only
         /// while a player mans the gun, keeps the shoulder camera out of
         /// walls, trees and sandbags.
         /// </summary>
@@ -2350,6 +2642,8 @@ namespace NextDayRevival
             if (dist < 0.01f) return want;
             d /= dist;
             float margin = 0.3f * Flak.K;
+            if (Time.time < _nextClear) return from + d * Mathf.Min(dist, _clearDistance);
+            _nextClear = Time.time + 0.1f;
             int n = Physics.RaycastNonAlloc(from, d, _hits, dist + margin, Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore);
             GameObject me = MapTools.LocalPlayer();
@@ -2362,15 +2656,31 @@ namespace NextDayRevival
                 if (me != null && t.IsChildOf(me.transform)) continue;
                 best = _hits[i].distance;
             }
-            if (best >= dist + margin) return want;
-            return from + d * Mathf.Max(0.2f * Flak.K, best - margin);
+            _clearDistance = best >= dist + margin ? dist : Mathf.Max(0.2f * Flak.K, best - margin);
+            return from + d * _clearDistance;
         }
 
         // ---------------------------------------------------------------- HUD
 
         static Texture2D _white;
         static GUIStyle _text;
+        static readonly GUIContent _label = new GUIContent();
+        static readonly string[] Digits = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+        static string _prompt, _promptZu;
+        static string _controls;
+        static readonly Vector2[] RingPoints = MakeRing();
         static readonly Color Amber = new Color(1f, 0.78f, 0.3f, 0.95f);
+
+        static Vector2[] MakeRing()
+        {
+            Vector2[] points = new Vector2[16];
+            for (int i = 0; i < points.Length; i++)
+            {
+                float a = i * Mathf.PI * 2f / points.Length;
+                points[i] = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+            }
+            return points;
+        }
 
         internal static void Draw(List<Flak.Gun> guns)
         {
@@ -2387,6 +2697,9 @@ namespace NextDayRevival
                 {
                     _text = new GUIStyle(GUI.skin.label);
                     _text.fontSize = 15;
+                    _prompt = "[" + Key() + "] Man the 52-K 85 mm gun";
+                    _promptZu = "[" + Key() + "] Man the ZU-23-2 23 mm gun";
+                    _controls = "LMB fire   RMB sight   wheel fuze   F auto   R rack   " + Key() + " / Esc leave";
                 }
                 float w = Screen.width, h = Screen.height;
                 Flak.Gun g = Flak._manned;
@@ -2406,22 +2719,47 @@ namespace NextDayRevival
                             Ring(p.x, h - p.y, 7f);
                             GUI.color = Color.white;
                         }
+                        if (_autoLocked && _leadTarget != null && _leadTarget.Go != null)
+                        {
+                            // Extrapolate the cached flight time with the current
+                            // contact position; no solver or query in OnGUI.
+                            Vector3 aim = _leadTarget.Pos + _leadTarget.Vel * _leadTof
+                                + Vector3.up * (0.5f * Flak.Gravity * _leadTof * _leadTof);
+                            Vector3 cue = cam.WorldToScreenPoint(aim);
+                            if (cue.z > 0f)
+                            {
+                                bool inside = cue.x > 18f && cue.x < w - 18f && h - cue.y > 18f && h - cue.y < h - 110f;
+                                float x = Mathf.Clamp(cue.x, 18f, w - 18f), y = Mathf.Clamp(h - cue.y, 18f, h - 110f);
+                                GUI.color = inside ? Color.cyan : Amber;
+                                // Four corners distinguish the lead cue from
+                                // the bore ring. Put the green bore in this box.
+                                GUI.DrawTexture(new Rect(x - 10f, y - 10f, 6f, 2f), _white);
+                                GUI.DrawTexture(new Rect(x + 4f, y - 10f, 6f, 2f), _white);
+                                GUI.DrawTexture(new Rect(x - 10f, y + 8f, 6f, 2f), _white);
+                                GUI.DrawTexture(new Rect(x + 4f, y + 8f, 6f, 2f), _white);
+                                Label(new Rect(x - 30f, y + 12f, 60f, 22f), "LEAD", GUI.color);
+                                GUI.color = Color.white;
+                            }
+                        }
                     }
-                    string fuze = "fuze " + (g.FuzeRange / Flak.K).ToString("0", CultureInfo.InvariantCulture) + " m "
-                        + (_fuzeM > 0f ? "(set)" : _autoLocked ? "(auto: on target)" : "(auto: max)");
-                    string line = "52-K 85 mm   " + (g.Reloading
-                        ? "NEXT RACK " + Mathf.Max(0f, g.ReloadUntil - Time.time).ToString("0", CultureInfo.InvariantCulture) + " s"
-                        : g.Rounds + " rds") + "   elev " + g.Pitch.ToString("0", CultureInfo.InvariantCulture)
-                        + "   " + fuze + "   LMB fire  RMB sight  wheel fuze  F auto fuze  R rack  " + Key() + " leave";
-                    Label(new Rect(0f, h - 70f, w, 26f), line, Amber);
-                    string order = null;
-                    try { if (Flak.SightOrder != null) order = Flak.SightOrder(g.Id); }
-                    catch { }
-                    if (!string.IsNullOrEmpty(order)) Label(new Rect(0f, h - 100f, w, 26f), order, Color.white);
+                    float left = w * 0.5f - 260f;
+                    Label(new Rect(left, h - 70f, 95f, 24f), g.ShortRange ? "ZU-23-2 23 mm" : "52-K 85 mm", Amber);
+                    Label(new Rect(left + 100f, h - 70f, 95f, 24f), g.Reloading ? "NEXT RACK" : "ROUNDS", Amber);
+                    Number(left + 200f, h - 70f, g.Reloading ? Mathf.CeilToInt(Mathf.Max(0f, g.ReloadUntil - Time.time)) : g.Rounds);
+                    Label(new Rect(left + 240f, h - 70f, 110f, 24f), _fuzeM > 0f ? "FUZE SET" : _autoLocked ? "FUZE AUTO" : "FUZE MAX", Amber);
+                    Number(left + 355f, h - 70f, Mathf.RoundToInt(g.FuzeRange / Flak.K));
+                    Label(new Rect(left + 410f, h - 70f, 22f, 24f), "m", Amber);
+                    Label(new Rect(0f, h - 40f, w, 24f), _controls, Amber);
+                    float wait = g.Reloading ? g.ReloadUntil - Time.time : g.NextShot - Time.time;
+                    GUI.color = wait > 0f ? Amber : Color.green;
+                    GUI.DrawTexture(new Rect(w * 0.5f - 60f, h - 82f, 120f * (1f - Mathf.Clamp01(wait /
+                        (g.Reloading ? ManualReload(g) : g.ShortRange ? ShortRangeCore.ShotSeconds : Flak.ManualInterval()))), 3f), _white);
+                    GUI.color = Color.white;
+                    if (!string.IsNullOrEmpty(_order)) Label(new Rect(0f, h - 108f, w, 26f), _order, Color.white);
                 }
                 else if (_near != null)
                 {
-                    string s = _nearWhy ?? ("[" + Key() + "] Man the 52-K 85 mm gun");
+                    string s = _nearWhy ?? (_near.ShortRange ? _promptZu : _prompt);
                     Label(new Rect(0f, h * 0.62f, w, 26f), s, Color.white);
                 }
                 if (_hint != null && Time.time <= _hintUntil)
@@ -2434,13 +2772,27 @@ namespace NextDayRevival
         {
             // Centred by hand: the alignment enum lives in a module the build
             // does not reference.
-            float tw = _text.CalcSize(new GUIContent(s)).x;
+            _label.text = s;
+            float tw = _text.CalcSize(_label).x;
             r = new Rect(r.x + (r.width - tw) * 0.5f, r.y, tw + 4f, r.height);
             GUI.color = new Color(0f, 0f, 0f, 0.8f);
-            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), s, _text);
+            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), _label, _text);
             GUI.color = c;
-            GUI.Label(r, s, _text);
+            GUI.Label(r, _label, _text);
             GUI.color = Color.white;
+        }
+
+        // Reuse digit strings and GUIContent, including moving ranges/countdowns.
+        static void Number(float x, float y, int value)
+        {
+            value = Mathf.Clamp(value, 0, 99999);
+            int divisor = 1;
+            while (value / divisor >= 10) divisor *= 10;
+            do
+            {
+                Label(new Rect(x, y, 10f, 24f), Digits[value / divisor], Amber);
+                value %= divisor; divisor /= 10; x += 10f;
+            } while (divisor > 0);
         }
 
         /// <summary>The collimator sight: a centre cross and two lead rings.</summary>
@@ -2456,11 +2808,10 @@ namespace NextDayRevival
 
         static void Ring(float cx, float cy, float r)
         {
-            int n = 48;
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < RingPoints.Length; i++)
             {
-                float a = i * Mathf.PI * 2f / n;
-                GUI.DrawTexture(new Rect(cx + Mathf.Cos(a) * r - 1f, cy + Mathf.Sin(a) * r - 1f, 2f, 2f), _white);
+                Vector2 p = RingPoints[i];
+                GUI.DrawTexture(new Rect(cx + p.x * r - 1f, cy + p.y * r - 1f, 2f, 2f), _white);
             }
         }
     }
@@ -2618,6 +2969,20 @@ namespace NextDayRevival
         static bool _hooked, _failed;
         static MethodInfo _raise;
         static Type _optType;
+        static readonly float[] _poseData = new float[8];
+        static object[] _poseArgs;
+
+        delegate void PoseSend(byte code, object data, bool reliable, object options);
+        static PoseSend _send;
+        static object _options;
+        static readonly float[][] _packets = MakePackets();
+        static readonly float[] _shot = new float[17];
+        static float[][] MakePackets()
+        {
+            float[][] p = new float[7][];
+            for (int i = 0; i < p.Length; i++) p[i] = new float[8];
+            return p;
+        }
 
         static int Code() { return Flak.CfgEventCode == null ? 198 : Flak.CfgEventCode.Value; }
 
@@ -2660,6 +3025,8 @@ namespace NextDayRevival
                 MethodInfo mine = typeof(FlakNet).GetMethod("OnPhotonEvent", BindingFlags.Public | BindingFlags.Static);
                 Delegate handler = Delegate.CreateDelegate(onEvent.FieldType, mine);
                 onEvent.SetValue(null, Delegate.Combine(onEvent.GetValue(null) as Delegate, handler));
+                object poseOpts = _optType == null ? null : Activator.CreateInstance(_optType);
+                _poseArgs = new object[] { (byte)code, _poseData, false, poseOpts };
                 _hooked = true;
                 Flak.Log("event code " + code + " hooked.");
             }
@@ -2676,11 +3043,71 @@ namespace NextDayRevival
             if (!_hooked) return;
             try
             {
-                object opts = _optType == null ? null : Activator.CreateInstance(_optType);
-                float[] data = new float[] { Pose, gun, yaw, pitch, seq, fuze, player ? 1f : 0f };
-                _raise.Invoke(null, new object[] { (byte)Code(), data, false, opts });
+                if (gun < 0 || gun >= _packets.Length) return;
+                float[] data = _packets[gun];
+                data[0] = Pose; data[1] = gun; data[2] = yaw; data[3] = pitch;
+                data[4] = seq; data[5] = fuze; data[6] = player ? 1f : 0f;
+                // W AA2: a 52-K's shots go out exact (SendShot); a peer does not replay
+                // them from poses. The ZU-23 has no shot packet and keeps the replay.
+                Flak.Gun gun_ = Flak.ByIndex(gun);
+                data[7] = gun_ != null && !gun_.ShortRange ? 1f : 0f;
+                PrepareSender();
+                _send((byte)Code(), data, false, _options);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak network send: " + ex.Message); }
+        }
+
+        static void PrepareSender()
+        {
+                if (_send == null)
+                {
+                    _options = Activator.CreateInstance(_optType);
+                    System.Reflection.Emit.DynamicMethod dm = new System.Reflection.Emit.DynamicMethod(
+                        "FlakPublish", typeof(void), new Type[] { typeof(byte), typeof(object), typeof(bool), typeof(object) },
+                        typeof(FlakNet), true);
+                    System.Reflection.Emit.ILGenerator il = dm.GetILGenerator();
+                    il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                    il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+                    il.Emit(System.Reflection.Emit.OpCodes.Ldarg_2);
+                    il.Emit(System.Reflection.Emit.OpCodes.Ldarg_3);
+                    il.Emit(System.Reflection.Emit.OpCodes.Castclass, _optType);
+                    il.Emit(System.Reflection.Emit.OpCodes.Call, _raise);
+                    if (_raise.ReturnType != typeof(void)) il.Emit(System.Reflection.Emit.OpCodes.Pop);
+                    il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                    _send = (PoseSend)dm.CreateDelegate(typeof(PoseSend));
+                }
+        }
+
+        // W AA2: reliable, once per shot. The first seven fields retain the legacy
+        // pose format; upgraded peers use the exact launch instead of replay.
+        internal static void SendShot(Flak.Gun g, Vector3 muzzle, Vector3 dir, float life)
+        {
+            if (!_hooked) return;
+            try
+            {
+                Vector3 v = dir * Flak.Speed;
+                // Reused buffer: RaiseEvent serializes before it returns.
+                float[] data = _shot;
+                data[0] = Pose; data[1] = g.Index; data[2] = g.Yaw; data[3] = g.Pitch; data[4] = g.Seq;
+                data[5] = g.FuzeRange; data[6] = g == Flak._manned ? 1f : 0f; data[7] = 1f;
+                data[8] = muzzle.x; data[9] = muzzle.y; data[10] = muzzle.z;
+                data[11] = v.x; data[12] = v.y; data[13] = v.z;
+                data[14] = life; data[15] = RadarClock.Now; data[16] = -Flak.Gravity;
+                PrepareSender();
+                _send((byte)Code(), data, true, _options);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak shot send: " + ex.Message); }
+        }
+
+        internal static void SendPacket(float[] data, bool reliable)
+        {
+            if (!_hooked) return;
+            try
+            {
+                PrepareSender();
+                _send((byte)Code(), data, reliable, _options);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("AA network send: " + ex.Message); }
         }
 
         public static void OnPhotonEvent(byte code, object content, int sender)
@@ -2692,10 +3119,28 @@ namespace NextDayRevival
                 if (f == null || f.Length < 7) return;
                 for (int i = 0; i < f.Length; i++)
                     if (float.IsNaN(f[i]) || float.IsInfinity(f[i])) return;
-                if (Mathf.RoundToInt(f[0]) != Pose) return;
+                int kind = Mathf.RoundToInt(f[0]);
+                if (kind >= AirDefenceDamage.BlastMsg && kind <= AirDefenceDamage.RepairMsg)
+                { AirDefenceDamage.OnPacket(f, sender); return; }
+                if (kind != Pose) return;
+                Flak.Gun g = Flak.ByIndex(Mathf.RoundToInt(f[1]));
+                if (g == null) return;
+                // A player still needs the uncrewed post. NPC launches come
+                // only from the master; ownership remains W AA1's authority.
+                bool player = f[6] > 0.5f;
+                if (player && (Crocodile.ActorDown(sender) || Flak.Up(g.Gunner) || Flak.Up(g.Loader))) return;
+                if (!player && !AirfieldOwnership.MasterSender(sender)) return;
+                g.ExactShots = f.Length >= 8 && f[7] > 0.5f;
                 Flak.OnPose(Mathf.RoundToInt(f[1]), Mathf.Repeat(f[2] + 180f, 360f) - 180f,
                     Mathf.Clamp(f[3], -15f, 90f), Mathf.Max(0, Mathf.RoundToInt(f[4])),
                     Mathf.Clamp(f[5], 30f, 20000f), f[6] > 0.5f, sender);
+                if (f.Length == 17 && f[14] > 0f && f[14] <= 60f && f[16] <= 0f && f[16] >= -100f)
+                {
+                    Vector3 muzzle = new Vector3(f[8], f[9], f[10]);
+                    Vector3 velocity = new Vector3(f[11], f[12], f[13]);
+                    if ((muzzle - Flak.Mid(g)).sqrMagnitude > 40f * 40f || velocity.sqrMagnitude < 10000f) return;
+                    Flak.OnShot(g, Mathf.RoundToInt(f[4]), sender, muzzle, velocity, f[14], f[15], f[16]);
+                }
             }
             catch (Exception ex)
             {

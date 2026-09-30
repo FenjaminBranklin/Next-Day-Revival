@@ -4,4 +4,7 @@
 # waves = type:count:delay:load;... (b = Tu-95 bomber, load bombs; t = An-2, load paratroopers).
 # interval hours 0/0 = admin panel only; scene empty = the default map.
 # altitude = Tu-95 metres above the ground.
+# #retake = the garrison's retake raids (W Tower 4): enabled frequency strength bombers bombs
+#   targets(t g f) transports paratroopers helis heliTroops escort escorts faction.
+#retake	1	1.00	1.00	1	36	tgf	2	8	1	8	1	2	auto
 Airfield-raid	1	4632.00	0.00	180.0	900.0	150.0	auto	4380.00	-500.00	4250.00	1250.00	traitor	60	2.500	3.500	b:1:0:48;t:2:90:10		550

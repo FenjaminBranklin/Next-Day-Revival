@@ -14,9 +14,13 @@ namespace NextDayRevival
 {
     // Online editor groups. All clients retain the definition; only the Photon
     // master spawns or controls NPCs. No writes to installed, verified assets.
-    // A group holds its post (waiting), wanders inside its radius (walking),
+    // A group guards its point with roam (roam, the default: spread on posts,
+    // slow rounds inside the radius), wanders inside its radius (walking),
     // walks the route the editor drew (patrol) or spreads onto a perimeter
-    // around its point and holds that (guard).
+    // around its point and holds that (guard, "hold position"). Editor groups
+    // get the alive layer on top (Revival.GroundAlive.cs): cover, flank, call,
+    // search, return. "waiting" is the old default; an editor group that still
+    // says so roams. The airfield / military town pockets keep their behavior.
     internal static class RevivalGroundEnemies
     {
         internal const int MaxGroups = 64, MaxGroupSize = 12, MaxTotal = 128;
@@ -83,8 +87,11 @@ namespace NextDayRevival
                     g.Count = Integer(c[5], 1, MaxGroupSize);
                     g.Behavior = c[6];
                     if (g.Behavior != "waiting" && g.Behavior != "walking"
-                        && g.Behavior != "patrol" && g.Behavior != "guard")
+                        && g.Behavior != "patrol" && g.Behavior != "guard"
+                        && g.Behavior != "roam")
                         throw new IOException("Invalid ground behavior");
+                    // Old data: the old default stood on the spot; it roams now.
+                    if (g.Behavior == "waiting") g.Behavior = "roam";
                     g.Radius = Number(c[7], 25f, 500f);
                     g.Respawn = Number(c[8], 5f, 240f) * 60f;
                     Route(c[9], g.Route);
@@ -236,11 +243,20 @@ namespace NextDayRevival
             }
         }
 
+        // W Perf1: the reconcile's working sets are reused second to second
+        // (emptied, not replaced), the per-group man lists too.
+        static readonly Dictionary<string, Group> _desired = new Dictionary<string, Group>();
+        static readonly List<string> _remove = new List<string>();
+        static readonly Dictionary<string, List<Component>> _existing = new Dictionary<string, List<Component>>();
+        static readonly List<List<Component>> _menPool = new List<List<Component>>();
+
         static void Reconcile()
         {
-            Dictionary<string, Group> desired = new Dictionary<string, Group>();
+            Dictionary<string, Group> desired = _desired;
+            desired.Clear();
             foreach (Group g in _groups) if (g.Enabled) desired.Add(g.Key, g);
-            List<string> remove = new List<string>();
+            List<string> remove = _remove;
+            remove.Clear();
             foreach (KeyValuePair<string, string> running in _running)
                 if (!desired.ContainsKey(running.Value))
                 { NpcWar.StopGround(running.Key); remove.Add(running.Key); }
@@ -248,7 +264,13 @@ namespace NextDayRevival
 
             if (_npcType == null) _npcType = RevivalPlugin.TypeByName("NPC_AI2");
             if (_npcType == null) return;
-            Dictionary<string, List<Component>> existing = new Dictionary<string, List<Component>>();
+            Dictionary<string, List<Component>> existing = _existing;
+            foreach (KeyValuePair<string, List<Component>> e in existing)
+            {
+                e.Value.Clear();
+                _menPool.Add(e.Value);
+            }
+            existing.Clear();
             UnityEngine.Object[] actors = NpcScan.All();
             foreach (UnityEngine.Object actor in actors)
             {
@@ -272,7 +294,11 @@ namespace NextDayRevival
                 }
                 List<Component> men;
                 if (!existing.TryGetValue(key, out men))
-                { men = new List<Component>(); existing.Add(key, men); }
+                {
+                    if (_menPool.Count > 0) { men = _menPool[_menPool.Count - 1]; _menPool.RemoveAt(_menPool.Count - 1); }
+                    else men = new List<Component>();
+                    existing.Add(key, men);
+                }
                 men.Add(ai);
             }
 
@@ -304,7 +330,10 @@ namespace NextDayRevival
                         root.transform.position = home;
                         if (NpcWar.StartGround(g.Tag, root, men.ToArray(), home,
                             g.Behavior, g.Radius, g.Loadout, g.Route, g.Loop, g.Hold))
-                        { g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key; }
+                        {
+                            g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key;
+                            if (!g.Builtin) NpcWar.GroundAliveOn(g.Tag, g.Faction);
+                        }
                         else UnityEngine.Object.Destroy(root);
                         continue;
                     }
@@ -341,7 +370,11 @@ namespace NextDayRevival
             GameObject settlement = Crew.DropGroundSquad(home, positions, g.Faction, g.Loadout, g.Key);
             Array npcs = Crew.Men(settlement);
             if (settlement != null && NpcWar.StartGround(g.Tag, settlement, npcs,
-                home, g.Behavior, g.Radius, g.Loadout, g.Route, g.Loop, g.Hold)) return true;
+                home, g.Behavior, g.Radius, g.Loadout, g.Route, g.Loop, g.Hold))
+            {
+                if (!g.Builtin) NpcWar.GroundAliveOn(g.Tag, g.Faction);
+                return true;
+            }
             if (npcs != null)
                 foreach (object npc in npcs) NpcWar.RemoveGroundActor(npc as Component);
             if (settlement != null) { Crew.Forget(settlement); UnityEngine.Object.Destroy(settlement); }

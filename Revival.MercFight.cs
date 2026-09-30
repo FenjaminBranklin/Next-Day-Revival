@@ -236,6 +236,7 @@ namespace NextDayRevival
         /// False: no fight - his order runs (MercStep).</summary>
         static bool MercFight(Fighter f, MercUnit u, float now)
         {
+            if (f.Manpads != null) return MercStingerFight(f, u, now);
             MercFight ft = u.Fight;
             if (ft.Brain == null || ft.Brain.Id != u.Id) ft.Brain = new MercBrain(u.Id);
             MercBrain b = ft.Brain;
@@ -262,7 +263,18 @@ namespace NextDayRevival
                 }
                 if (o.Kick) StartReload(f);
                 if (o.HealNow) Mercs.Dress(u, MercBrain.HealAmount);
+                // Once rallied safely beside the living owner, the chosen
+                // FOLLOW/VEHICLE order resumes (including boarding at a stop).
+                if (u.Rally && b.Down && b.Cover.Found && !b.SurvivalFire &&
+                    ft.In.HasOwner && Flat(ft.In.Me - ft.In.Owner) <= 22f)
+                {
+                    u.Rally = false;
+                    b.Leave(MercCoverService.Field);
+                    o = new FightOut();
+                    u.NextOrder = 0f;
+                }
                 ft.Out = o;
+                MercNotice(f, u, ft, now);           // W: the owner's toasts (Revival.MercNotify.cs)
             }
             FightOut act = ft.Out;
             if (act.Act == FightAct.None)
@@ -291,9 +303,9 @@ namespace NextDayRevival
                     bool target = f.Target != null && f.Target;
                     // M3: never through the owner or a mate - the brain's
                     // view (NoShot) and the live bodies, every frame.
-                    bool hold = act.NoShot || (target && MercFriendInLine(f, me, f.Target.position));
+                    bool hold = act.NoShot || (ft.In.Survive && !b.SurvivalFire) || (target && MercFriendInLine(f, me, f.Target.position));
                     if (target && f.Sees && !hold) Fire(f, now);
-                    else if (act.Suppress && !hold && MercSuppress(f, act.Face, now)) { }
+                    else if (!ft.In.Survive && act.Suppress && !hold && MercSuppress(f, act.Face, now)) { }
                     else
                     {
                         f.Stance = Stance.Hold;
@@ -338,19 +350,24 @@ namespace NextDayRevival
             ft.In.Hits = ft.Hits;
             ft.In.Suppression = f.Suppression;
             ft.In.Danger = MercDanger.Near(ft.In.Me, MercBrain.DangerRadius, now, out ft.In.DangerAt);
+            ft.In.Survive = !u.Deserting && (u.Order.Survive || u.Rally);
+            ft.In.Rally = u.Rally;
+            ft.In.Watch = u.Approach;
             ft.In.MayFight = MercMayEngage(u, now) && MercMayStand(f, u);
+            if (ft.In.Survive) ft.In.MayFight = true;
             // A perimeter guard gives up the cover sooner: his B3b pursuit
             // takes over a target that went out of sight.
             ft.In.Disengage = u.Order.Mode == MercOrder.Perimeter ? 6f : 8f;
             ft.In.Pick = s.Pick;
             ft.In.PickFresh = s.Pick.Found && s.Count > 0 && s.PickFor == s.Who[0] && now - s.PickAt < 5f;
+            if (ft.In.Survive) ft.In.PickFresh = s.Pick.Found && now - s.PickAt < 5f;
             ft.In.PickFrom = s.PickFrom;
             // M3: the owner - never fired through; fallen back on under a
             // FOLLOW / VEHICLE order only (the others keep their post).
             Transform owner = u.Owner;
             ft.In.HasOwner = owner != null && owner;
             ft.In.Owner = ft.In.HasOwner ? owner.position : Vector3.zero;
-            ft.In.Regroup = ft.In.HasOwner && (u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle)
+            ft.In.Regroup = !ft.In.Survive && ft.In.HasOwner && (u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle)
                 && Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits;
             // What he fights, for his mates.
             ft.Target = target ? f.Target : null;

@@ -124,6 +124,7 @@ namespace NextDayRevival
         static MethodInfo _networkTimeGetter;
         static MethodInfo _localPlayerGetter;
         static PropertyInfo _actorIdProperty;
+        static MethodInfo _actorIdGetter;
 
         static readonly Dictionary<MethodBase, int> DamageArguments =
             new Dictionary<MethodBase, int>();
@@ -352,6 +353,13 @@ namespace NextDayRevival
                 return state != 3 && state != 4;
             }
             catch { return true; }
+        }
+
+        /// <summary>W Perf2: an Animal_AI that is the crocodile (EnginePerf
+        /// leaves its animation alone). One set lookup, no allocation.</summary>
+        internal static bool IsCrocAnimal(Component animal)
+        {
+            return animal != null && CrocAnimals.Contains(animal.GetInstanceID());
         }
 
         static bool IsCrocodile(object instance)
@@ -1048,7 +1056,7 @@ namespace NextDayRevival
                 {
                     Component states = player.GetComponent(_statesType);
                     if (states != null
-                        && Convert.ToInt32(_characterState.GetValue(states)) == 8) return false;
+                        && FastField.GetInt(_characterState, states) == 8) return false;   // W Perf1: no boxed enum
                 }
                 if (_vehicleManagerType != null && _inVehiclePose != null)
                 {
@@ -1074,7 +1082,7 @@ namespace NextDayRevival
                 {
                     Component states = player.GetComponent(_statesType);
                     if (states != null
-                        && Convert.ToInt32(_characterState.GetValue(states)) == 8) return false;
+                        && FastField.GetInt(_characterState, states) == 8) return false;   // W Perf1: no boxed enum
                 }
             }
             catch { }
@@ -1107,7 +1115,7 @@ namespace NextDayRevival
                 LookUpView();
                 if (player == null || _photonViewType == null || _ownerId == null) return -1;
                 Component view = player.GetComponent(_photonViewType);
-                return view == null ? -1 : Convert.ToInt32(_ownerId.GetValue(view));
+                return view == null ? -1 : FastField.GetInt(_ownerId, view);   // W Perf1: no box
             }
             catch { return -1; }
         }
@@ -1137,8 +1145,11 @@ namespace NextDayRevival
                 if (_actorIdProperty == null)
                     _actorIdProperty = player.GetType().GetProperty("ID",
                         BindingFlags.Public | BindingFlags.Instance);
-                return _actorIdProperty == null ? -1
-                    : Convert.ToInt32(_actorIdProperty.GetValue(player, null));
+                // W Perf1: the compiled getter, no boxed int (the radar asks
+                // for the local actor every frame).
+                if (_actorIdGetter == null && _actorIdProperty != null)
+                    _actorIdGetter = _actorIdProperty.GetGetMethod();
+                return _actorIdGetter == null ? -1 : FastCall.Int(_actorIdGetter, player);
             }
             catch { return -1; }
         }
@@ -1270,7 +1281,7 @@ namespace NextDayRevival
                         _masterGetter = AccessTools.PropertyGetter(photon, "IsMasterClient");
                 }
                 return _masterGetter == null
-                    || Convert.ToBoolean(_masterGetter.Invoke(null, null));
+                    || FastCall.Bool(_masterGetter, null);
             }
             catch { return false; }
         }
@@ -1283,7 +1294,7 @@ namespace NextDayRevival
                 if (photon == null) return true;
                 MethodInfo getter = AccessTools.PropertyGetter(photon, "offlineMode");
                 if (getter == null) getter = AccessTools.PropertyGetter(photon, "OfflineMode");
-                return getter != null && Convert.ToBoolean(getter.Invoke(null, null));
+                return getter != null && FastCall.Bool(getter, null);
             }
             catch { return false; }
         }

@@ -332,7 +332,7 @@ namespace NextDayRevival
         {
             try
             {
-                FieldInfo f = AccessTools.Field(obj.GetType(), field);
+                FieldInfo f = FastField.Find(obj.GetType(), field);
                 if (f == null) return fallback;
                 object v = f.GetValue(obj);
                 return v is float ? (float)v : fallback;

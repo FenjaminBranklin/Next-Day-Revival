@@ -319,6 +319,11 @@ def check_ground_enemies():
     limits have to agree between grounddef.py and the plugin, otherwise the
     editor happily publishes a snapshot the game then refuses in full.
 
+    The alive layer (Revival.GroundAlive.cs, Revival.GroundAliveCore.cs) made
+    'roam' - guard with roam - the default and turned the old default
+    'waiting' into it; its behaviour, cover, call, search and cost are proven
+    by research/ground_alive_check.py, which must be in the repository.
+
     Movement on real terrain, the walking animation itself and the respawn
     timer stay in-game acceptance items.
     """
@@ -448,9 +453,14 @@ def check_ground_enemies():
          "die Zeilenzahl des Bodenstands ist begrenzt",
          "ein Bodenstand darf beliebig viele Zeilen haben")
     need('if (g.Behavior != "waiting" && g.Behavior != "walking"' in g
-         and '&& g.Behavior != "patrol" && g.Behavior != "guard")' in g,
-         "vier gepruefte Verhalten: warten, gehen, streifen, Stellung halten",
+         and '&& g.Behavior != "patrol" && g.Behavior != "guard"' in g
+         and '&& g.Behavior != "roam")' in g,
+         "gepruefte Verhalten: Bewachen mit Rundgang, Streife, Stellung halten, Wandern",
          "das Verhalten einer Bodengruppe wird nicht mehr vollstaendig geprueft")
+    need('if (g.Behavior == "waiting") g.Behavior = "roam";' in g
+         and "if (!g.Builtin) NpcWar.GroundAliveOn(g.Tag, g.Faction);" in g,
+         "alte Daten (warten) bewachen mit Rundgang; Editorgruppen werden lebendig",
+         "alte wartende Editorgruppen stehen wieder nur herum")
     need('throw new IOException("Ground patrol without a route")' in g,
          "eine Streife ohne Route wird abgelehnt",
          "eine Streife ohne Route wird angenommen und steht dann herum")
@@ -501,8 +511,10 @@ def check_ground_enemies():
          and len(re.findall(r'"[A-Za-z]+"', columns.group(1))) == int(cs_columns.group(1)),
          "Editor und Plugin zaehlen dieselben Spalten",
          "die Spaltenzahl von grounddef.py passt nicht zum Parser des Plugins")
-    need('BEHAVIORS = ["waiting", "walking", "patrol", "guard"]' in gdef,
-         "der Editor bietet genau die vier Verhalten des Plugins an",
+    need('BEHAVIORS = ["roam", "patrol", "guard", "walking"]' in gdef
+         and 'LEGACY_BEHAVIORS = {"waiting": "roam"}' in gdef
+         and '("behavior", "roam")' in gdef,
+         "der Editor bietet genau die vier Verhalten des Plugins an, Rundgang als Vorgabe",
          "der Editor bietet ein Verhalten an, das das Plugin nicht kennt")
     cs_route = re.search(r"MaxRoutePoints = (\d+)", g)
     need(cs_route is not None and value("MAX_ROUTE_POINTS") == cs_route.group(1),
@@ -558,7 +570,7 @@ def check_ground_enemies():
     # --- die beiden Regressionen zu diesem Feature muessen im Repository
     # liegen. verify.py fuehrt sie nicht aus (es startet keine Unterprozesse).
     if os.path.isdir(os.path.join(ROOT, "research")):
-        for check in ("ground_enemy_check.py", "ground_editor_check.js"):
+        for check in ("ground_enemy_check.py", "ground_editor_check.js", "ground_alive_check.py"):
             need(os.path.exists(os.path.join(ROOT, "research", check)),
                  "research/" + check + " liegt vor",
                  "research/" + check + " fehlt - die Bodengegner sind unbelegt")
@@ -1163,11 +1175,12 @@ def check_flak():
          and "Crew.DropGroundSquad(" in s,
          "crew keys flak/<id>/g and /c (the slash keeps GroundEnemies off them)",
          "crew keys missing or without the slash")
-    need("Airfield.Faction()" in s and "TechnicalCrew.Sitzen(ai, clip)" in s,
-         "the crew is of the airfield's faction and sits with the game's clip",
+    need("AirfieldOwnership.CrewSide" in s and "MilitaryTown.Faction()" in s and "TechnicalCrew.Sitzen(ai, clip)" in s,
+         "the crew follows the persistent holder or town faction and sits with the game's clip",
          "crew faction or seated clip missing")
-    need("friendly = true" in s and "if (friendly) continue;" in s and "Airborne(c)" in s,
-         "never an aircraft with the crew's own faction aboard, air targets only",
+    need("friendly = side != null && pilot == side;" in s and "if (friendly || !hostile) continue;" in s
+         and "Airborne(c)" in s and "AirPilot.Faction(c)" in s,
+         "pilot faction IFF excludes friendly/unknown aircraft, air targets only",
          "the own-faction or airborne filter is missing")
     need("_manned" in s and "CameraOwner.Request(CameraOwner.Flak" in s
          and "Flak.Up(g.Gunner) || Flak.Up(g.Loader)" in s,
@@ -1211,7 +1224,7 @@ def check_flak():
          "bursts walk in (initial error > floor), faster radar-directed (%s) than by eye (%s), evading throws them off"
          % (rw, w),
          "the bracketing error model is missing, inert, or not faster with the radar")
-    need("g.Err = g.Err * Flak.Walk + Scatter(" in s and "Flak.SetRadarDirected(tier == 2);" in read("Revival.TowerRadar.cs"),
+    need(("g.Err = g.Err * Flak.Walk + Scatter(" in s or ("g.Err = g.Err * calibration.Walk + Scatter(" in s and "MercAA.Calibration(g)" in s)) and "Flak.SetRadarDirected(tier == 2);" in read("Revival.TowerRadar.cs"),
          "every shot is a bracketing step; the radar tier sets range and walk (SetRadarDirected)",
          "the bracketing step or the radar coupling is missing")
     tr, el = num("TraverseSpeed"), num("ElevationSpeed")
@@ -1309,6 +1322,22 @@ def check_flak():
         need(api in s, "API: " + api.split("(")[0].replace("public static ", ""),
              "API member missing: " + api)
 
+    # W-AA1: execute production ownership/IFF code, including master migration.
+    import subprocess
+    aa = read("Revival.AirDefence.cs")
+    need('"Revival.AirDefence.cs"' in read("sync_public.py") and bool(aa)
+         and all(ord(c) < 128 for c in aa),
+         "AA ownership module is ASCII and ships in the public source package",
+         "AA ownership module missing, non-ASCII, or absent from public sources")
+    try:
+        result = subprocess.run([sys.executable, os.path.join(ROOT, "research", "aa_ownership_check.py")],
+                                capture_output=True, text=True, errors="replace", timeout=30)
+        need(result.returncode == 0,
+             "production AA ownership/IFF matrix, pilot leases and master authority PASS",
+             "offline ownership check failed: " + (result.stderr or result.stdout)[-1600:])
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        bad("Flak: offline ownership check could not run: " + str(ex))
+
 
 def check_tower_radar():
     """[35] East airfield P5: the tower C1 as air defence HQ (Revival.TowerRadar.cs).
@@ -1327,7 +1356,7 @@ def check_tower_radar():
     import json as _json
     import shutil
     import subprocess
-    import tempfile
+    from research.sandbox_temp import mkdtemp
     print("[35] East airfield tower radar HQ (P5)")
 
     def read(name):
@@ -1378,7 +1407,7 @@ def check_tower_radar():
     need(rpm is not None and 2 <= rpm <= 6 and "M = bk.M" in t, "turns at %s rpm, metres x 2.8 through bldg_kit" % rpm,
          "the radar's rpm or the kit's metre scale is off")
     if os.path.exists(tool):
-        out = tempfile.mkdtemp(prefix="c1r_")
+        out = mkdtemp(prefix="c1r_")
         try:
             r = subprocess.run([sys.executable, tool, "--out", out], capture_output=True, text=True, timeout=300)
             scene = os.path.join(out, "c1r_scene.json")
@@ -1417,17 +1446,20 @@ def check_tower_radar():
     for api in ("public static bool AssignedOnly(", "public static void SetFireDirection(", "AssignedOnly = 3,"):
         need(api in flak, "flak API: " + api.split("(")[0].replace("public static ", ""),
              "the P4 flak lacks " + api)
-    need("g.Mode == FlakMode.AssignedOnly && c.Go != g.Assigned" in flak and "* Flak.DirReaction" in flak
-         and "* Flak.DirError" in flak and "* Flak.DirTracking" in flak,
+    need("g.Mode == FlakMode.AssignedOnly && c.Go != g.Assigned" in flak
+         and (("* Flak.DirReaction" in flak and "* Flak.DirError" in flak) or ("c.InitialMil *= Flak.DirError" in read("Revival.MercAA.cs") and "c.Reaction *= Flak.DirReaction" in read("Revival.MercAA.cs")))
+         and "* Flak.DirTracking" in flak,
          "the crews hold all but the assigned target and take the direction scales",
          "AssignedOnly or the direction scales do not reach the flak's fire control")
     # Q3: orders go gun by gun to those that follow the commanding side
     for call in ("Flak.AssignTarget(ids[i], c.Go)", "Flak.WeaponsFree(ids[i])", "Flak.HoldFire(ids[i])",
                  "Flak.AssignedOnly(ids[i])"):
         need(call in s, "console command " + call, "the console does not command the guns: " + call + " missing")
-    need("return side == HomeSide() || !NpcOperatorUp;" in s and "if (g.CrewAlive > 0) return side == HomeSide();" in s
-         and "TowerRadar.ControlSide });" in s and "Flak.SightOrder = SightLine;" in s,
-         "radar takeover: faction lock only while the HQ operator lives, guns with a hostile crew ignore, synced",
+    need(("return side == HomeSide() || !NpcOperatorUp;" in s or "return merc != null ? side == merc.Side : side == HomeSide() || !NpcOperatorUp;" in s)
+         and "if (!g.PlayerManned && g.MercActor >= 0) return side == g.CrewSide;" in s
+         and "AirDefencePolicy.Follows(g.OwnerSide, side" in s
+         and "TowerRadar.ControlSide, AirfieldOwnership.Holder" in s and "Flak.SightOrder = SightLine;" in s,
+         "radar takeover: living HQ locks it; merc crews obey their side, other guns their owner (W AA1); holder synced",
          "the radar takeover (Q3) is incomplete: lock, per-gun follow, ControlSide sync or sight line missing")
 
     def num(key):
@@ -1438,8 +1470,8 @@ def check_tower_radar():
     need(None not in (dr, de, dt, xr, xe, xt) and dr < 1 < xr and de < 1 < xe and dt > 1 > xt,
          "with an operator faster and closer (%s/%s/%s), destroyed slower and wider (%s/%s/%s)" % (dr, de, dt, xr, xe, xt),
          "the operator must make the guns better and a destroyed HQ worse than by eye")
-    need("Obeyed(" in s and "Fraktion.Eigene(Airfield.Faction())" in s,
-         "the crews take orders only from the airfield's own faction", "command authority is missing")
+    need("Obeyed(" in s and "return AirfieldOwnership.Holder;" in s and "AirfieldOwnership.MasterSender(sender)" in s,
+         "commands use holder authority and clients accept state only from the master", "command authority is missing")
     need('Key = "radar/c1/op"' in s and "Crew.DropGroundSquad(" in s,
          "NPC operator key radar/c1/op (the slash keeps GroundEnemies off him)",
          "operator key missing or without the slash")
@@ -1493,6 +1525,58 @@ def check_tower_radar():
                                                               else "no loop (played whole)"),
          "assets/ndr_siren.wav missing, not a PCM/float WAV, or its smpl loop lies outside the data "
          "(python research/siren_synth.py)")
+
+    # W-Tower1: the held radar's air picture on the map and its early warning
+    # (docs/ai/tasks/w-tower1-airpicture.md) - production rules, simulation,
+    # allocation benchmark and the draw path's seams (research/air_picture_check.py).
+    import subprocess
+    try:
+        result = subprocess.run([sys.executable, os.path.join(ROOT, "research", "air_picture_check.py")],
+                                capture_output=True, text=True, errors="replace", timeout=60)
+        need(result.returncode == 0,
+             "air picture: holder/manned rule, IFF, intercept and raid ETA, F6 slots, allocation-free draw PASS",
+             "offline air picture check failed: " + (result.stderr or result.stdout)[-1600:])
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        bad("TowerRadar: offline air picture check could not run: " + str(ex))
+
+
+def check_retake_raids():
+    """[W4] Retake raids (W Tower 4, Revival.RetakeRaids.cs + the pure core
+    Revival.RetakeRaidsCore.cs, airdef.py "retakeRaids", editor/air.js,
+    docs/ai/tasks/w-tower4-retake-raids.md).
+
+    research/retake_raids_check.py compiles the production core unchanged
+    with csc 3.5 and simulates the hold clock, the composition and a six-hour
+    hold (rhythm rises, troops bounded, no allocation), round-trips the
+    editor row into the plugin parser and pins the seams.
+    """
+    print("[W4] Retake raids (the garrison strikes back at a held airfield)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "retake_raids_check.py")
+    if not os.path.exists(check):
+        bad("research/retake_raids_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip().endswith("RESULT: PASS"):
+        ok("retake raids pass research/retake_raids_check.py")
+    else:
+        bad("research/retake_raids_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_bomb_damage():
+    """W bomb damage: run the production queue/RPC and falloff offline."""
+    import subprocess
+    path = os.path.join(ROOT, "research", "bomb_damage_check.py")
+    if not os.path.exists(path):
+        bad("OrdnanceBlast: research/bomb_damage_check.py missing")
+        return
+    proc = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode == 0 and "BOMB DAMAGE CHECK PASS" in proc.stdout:
+        ok("OrdnanceBlast: production NPC/player RPC routing, falloff, units, authority and bounded tick PASS")
+    else:
+        bad("OrdnanceBlast offline check: " + (proc.stdout + proc.stderr)[-1800:])
 
 
 def check_air_events():
@@ -1557,8 +1641,13 @@ def check_air_events():
     # Numbers: a real Tu-95 stick, the warning, damage once, pooled bursts.
     need("WarnSeconds = 60f" in src, "the siren sounds ~60 s before the first aircraft",
          "the air raid warning is not 60 s")
-    need("if (!master) return;" in src and "Mortar.AnyFaction = true;" in src
-         and "!AnyFaction && FactionShield.SameFactionAsLocal(go)" in read("RevivalMortar.cs"),
+    ordnance = read("Revival.OrdnanceBlast.cs")
+    master_blast = ("if (!master) return;" in src and "OrdnanceBlast.Enqueue(at, radius," in src
+                    and "if (!_ready || !_master()) return;" in ordnance
+                    and '"PlayerApplyDamage", victim,' in ordnance
+                    and "FactionShield.SameFactionAsLocal" not in ordnance)
+    need(master_blast or ("if (!master) return;" in src and "Mortar.AnyFaction = true;" in src
+         and "!AnyFaction && FactionShield.SameFactionAsLocal(go)" in read("RevivalMortar.cs")),
          "one damage sweep per impact, on the master, every player's faction",
          "bomb damage is not swept once on the master")
     need("_flash.Emit(p, 1);" in src and "_dust.Emit(p, 1);" in src and "BombPool.Take()" in src
@@ -1689,8 +1778,8 @@ def check_npc_aircraft():
          and "NpcAircraft.Velocity(go, out vel)" in an2 and "internal static GameObject BuildNpc(" in an2,
          "PlayerAn2 prepares, excludes and shoots down NPC aeroplanes",
          "a PlayerAn2 seam for NPC aeroplanes is missing (BuildNpc / Prepared / Is / Velocity)")
-    need("NpcAircraft.Hostile(c.Go)" in gep and "NpcAircraft.Hostile(c.Go)" in flak
-         and "NpcAircraft.Hostile(c.Go)" in nofly,
+    need("NpcAircraft.Hostile(c.Go)" in gep and "AirPilot.Faction(c)" in flak
+         and "AirPilot.Faction(c)" in nofly and "NpcAircraft.Hostile(c.Go)" in read("Revival.AirDefence.cs"),
          "NPC aeroplanes are hostile to the Gepard crew, the ZU-23 and the no-fly zones",
          "a hostility seam (GepardCrew / Flak / NoFly) for NPC aeroplanes is missing")
     need("GepardAir.Collect(_planes)" in sting and "GepardAir.Kill(f.Target.Go, f.Position)" in sting,
@@ -5791,7 +5880,7 @@ def check_vehicle_condition():
          "PlayerHeli EngineState no longer forwards the condition message")
     for n in ("VehicleCondition.Install(_harmony);", "VehicleCondition.Tick();", "VehicleCondition.Draw();"):
         need(n in plug, "RevivalPlugin calls " + n, "RevivalPlugin.cs lost " + n)
-    need("VehicleCondition.SpawnFound = GUILayout.Toggle(" in adm and "NearestCondition(" in adm,
+    need("VehicleCondition.SpawnFound = UiKit.Toggle(" in adm and "NearestCondition(" in adm,
          "admin panel: as-found switch and nearest-vehicle tools",
          "the admin panel lost the N8 condition controls")
     need('"Revival.VehicleCondition.cs"' in sync, "sync_public.py ships Revival.VehicleCondition.cs",
@@ -8316,6 +8405,7 @@ if __name__ == "__main__":
     check_gepard()
     check_gepard_npc()
     check_katyusha()
+    check_bomb_damage()
     check_east_world()
     check_east_crossings()
     check_east_roads()
@@ -8329,6 +8419,7 @@ if __name__ == "__main__":
     check_nofly()
     check_npc_aircraft()
     check_air_events()
+    check_retake_raids()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

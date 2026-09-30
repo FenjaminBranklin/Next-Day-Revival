@@ -251,6 +251,15 @@ namespace NextDayRevival
             catch { }
         }
 
+        // Static edge scenery must bind after P3 has appended/painted its layer.
+        internal static bool GroundReady
+        {
+            get { return !Wanted || (_build == null && _builtVersion == NpcDistance.MaskVersion
+                && NpcDistance.Masks.Count > 0); }
+        }
+        internal static int GroundRevision { get { return _groundRevision; } }
+        static int _groundRevision;
+
         /// <summary>Layers this file added to `d` (EastCrossings' layer-count
         /// guard).</summary>
         internal static int AddedLayers(TerrainData d)
@@ -324,6 +333,7 @@ namespace NextDayRevival
         static void SetLook(bool on)
         {
             _look = on;
+            _groundRevision++;
             foreach (Ground g in _grounds.Values)
             {
                 if (g.T == null || g.D == null || g.T.terrainData != g.D || g.Canopy == null) continue;
@@ -371,13 +381,16 @@ namespace NextDayRevival
         /// <summary>LOD0 (empty) while the chunk's reference point is closer
         /// than its tree distance minus half a chunk, LOD1 (cards) beyond.
         /// Unity: relative height = size/2 * lodBias / (distance * tan(fov/2)).</summary>
+        static readonly LOD[] _lods2 = new LOD[2];
+
         static void ApplyLod(Chunk ch, float tanHalf, float bias)
         {
             if (ch.G == null) return;
             float td = ch.T != null ? ch.T.treeDistance : 1000f;
             float d = Mathf.Max(20f * K, td - ch.Half);
             float h = Mathf.Clamp(ch.Size * 0.5f * Mathf.Max(0.01f, bias) / (d * tanHalf), 0.0005f, 0.99f);
-            LOD[] lods = new LOD[2];
+            // W Perf1: one array for every chunk - SetLODs copies it.
+            LOD[] lods = _lods2;
             lods[0] = new LOD(h, ch.Near);
             lods[1] = new LOD(0.00001f, ch.Far);
             ch.G.SetLODs(lods);
@@ -436,6 +449,7 @@ namespace NextDayRevival
             _lodFov = -1f;                      // Step's CheckLods re-thresholds every chunk
             _look = false;                      // Step turns the look on (and the root active)
 
+            _groundRevision++;
             _sCards = _sTris = 0;
             for (int i = 0; i < made.Count; i++) { _sCards += made[i].Cards; _sTris += made[i].Tris; }
             _lastBuild = Names[level] + ": " + (gl.Length > 0 ? gl.ToString() : "no ground terrain painted") + "; "

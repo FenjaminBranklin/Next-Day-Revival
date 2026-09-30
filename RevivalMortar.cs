@@ -2562,6 +2562,8 @@ namespace NextDayRevival
             vehicleHits = 0;
             playerHits = 0;
             radius = Mathf.Max(0.5f, radius);
+            // W AA7: mod bombs, rockets and AT sweeps also damage fixed AA.
+            if (shooter) AirDefenceDamage.ReportBlast(point, radius, Mathf.Clamp(vehiclePeak / 700f, 0f, 2f));
 
             // ---- NPCs. Turret.TryDamage fills every argument but the damage
             //      with its type default, so damageOwnerId goes in as 0 - the
@@ -2576,6 +2578,9 @@ namespace NextDayRevival
                     if (ai == null || ai.gameObject == null) continue;
                     float d = Vector3.Distance(ai.transform.position, point);
                     if (d > radius) continue;
+                    // W AA4: a gun crew in its sandbag ring dies only from a
+                    // bomb in the pit, not from a carpet beside it.
+                    if (AirKills.Sheltered(ai.transform.position, point)) continue;
                     if (!Alive(ai) || !Hurtable(ai)) continue;
                     float dmg = peak * Falloff(d, radius);
                     if (dmg < 1f) continue;
@@ -2640,6 +2645,7 @@ namespace NextDayRevival
                     if (go == null) continue;
                     float d = Vector3.Distance(go.transform.position, point);
                     if (d > radius) continue;
+                    if (AirKills.Sheltered(go.transform.position, point)) continue;   // W AA4: gun pit
                     // THE FACTION RULE for players. A man of our own faction is
                     // not hit at all - the only way to be certain his death can
                     // never be booked against us. Where a faction cannot be read
@@ -2792,7 +2798,7 @@ namespace NextDayRevival
         /// NpcWar solves it the same way for the same reason. It is repeated
         /// here rather than shared because that method is private to another
         /// feature's file, and every source file has one writer.</summary>
-        static void BreakKillStreak(Component ai)
+        internal static void BreakKillStreak(Component ai)
         {
             if (ai == null) return;
             try
@@ -2838,7 +2844,7 @@ namespace NextDayRevival
         /// an NPC in a safe settlement or one in a conversation swallows every
         /// round, so shelling them is a waste and a settlement full of angry
         /// shopkeepers nobody asked for.</summary>
-        static bool Hurtable(Component ai)
+        internal static bool Hurtable(Component ai)
         {
             try
             {
@@ -3727,7 +3733,10 @@ namespace NextDayRevival
                 if (info == null) return -1;
                 try
                 {
-                    if (_fraction != null) return Convert.ToInt32(_fraction.GetValue(info));
+                    // W Perf1: FastField.GetInt reads an int/enum field of a
+                    // class without the box GetValue made (the patrol gun asks
+                    // this per player target); anything else falls back to it.
+                    if (_fraction != null) return FastField.GetInt(_fraction, info);
                     if (_fractionProp != null) return Convert.ToInt32(_fractionProp.GetValue(info, null));
                 }
                 catch { }
@@ -3754,6 +3763,8 @@ namespace NextDayRevival
                 catch { return false; }
             }
 
+            static readonly object[] _infoArg = new object[1];
+
             static object Info(GameObject player)
             {
                 if (!Look()) return null;
@@ -3768,9 +3779,14 @@ namespace NextDayRevival
                         if (stats == null) stats = player.GetComponentInChildren(_statsType);
                         return stats == null ? null : _getInfo.Invoke(stats, null);
                     }
-                    return _infoStatic
-                        ? _getInfo.Invoke(null, new object[] { player })
-                        : _getInfo.Invoke(_manager, new object[] { player });
+                    // W Perf1: one argument array, reused (not re-entrant:
+                    // GetPlayerInfo does not call back into this).
+                    _infoArg[0] = player;
+                    object info = _infoStatic
+                        ? _getInfo.Invoke(null, _infoArg)
+                        : _getInfo.Invoke(_manager, _infoArg);
+                    _infoArg[0] = null;
+                    return info;
                 }
                 catch { return null; }
             }

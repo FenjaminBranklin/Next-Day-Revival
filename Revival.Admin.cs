@@ -956,20 +956,68 @@ namespace NextDayRevival
     /// without adding anything when no backpack slot is free, so both facts
     /// have to be checked here instead of reporting success unconditionally.
     /// </summary>
+    /// <summary>W-UI4: the row cursor of the admin panel's tabs - and of
+    /// the Options() blocks Flyover and AirEvents add to them. Content
+    /// coordinates of the current scroll area, one kit row per call.</summary>
+    internal static class AdminLayout
+    {
+        internal static float Y;
+        internal static float Width;
+
+        internal static void Begin(float width) { Y = 0f; Width = width; }
+
+        /// <summary>The next full-width row (UiKit.RowH high).</summary>
+        internal static Rect Row()
+        {
+            float h = UiKit.S(UiKit.RowH);
+            Rect r = new Rect(0f, Y, Width, h);
+            Y += h + UiKit.S(UiKit.Gap);
+            return r;
+        }
+
+        /// <summary>A section title (small, upper case, hairline) with the
+        /// section gap above it.</summary>
+        internal static void Section(string title)
+        {
+            if (Y > 0f) Y += UiKit.S(UiKit.Gap);
+            float h = UiKit.S(24f);
+            UiKit.Section(new Rect(0f, Y, Width, h), title);
+            Y += h + UiKit.S(UiKit.Gap);
+        }
+
+        /// <summary>A dim caption under the last row; nothing for null/empty.</summary>
+        internal static void Note(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            float h = UiKit.S(18f);
+            UiKit.Label(new Rect(UiKit.S(4f), Y - UiKit.S(4f), Width - UiKit.S(8f), h), text,
+                        UiFont.Small, UiFont.Left, UiKit.TextDim);
+            Y += h;
+        }
+
+        /// <summary>One line of body text in r.</summary>
+        internal static void Text(Rect r, string text, Color c)
+        {
+            UiKit.Label(r, text, UiFont.Body, UiFont.Left, c);
+        }
+
+        /// <summary>The part of a row from fraction <paramref name="from"/>,
+        /// <paramref name="width"/> wide; a kit gap is left before the next part.</summary>
+        internal static Rect Part(Rect row, float from, float width)
+        {
+            float g = from + width < 0.999f ? UiKit.S(UiKit.Gap) : 0f;
+            return new Rect(row.x + row.width * from, row.y, row.width * width - g, row.height);
+        }
+    }
+
     public static class Admin
     {
-        const int FensterId = 0x4E445241;
-
-        static bool _offen;
-        static bool _fokusLoesen;
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
-        static Rect _fenster = new Rect(40f, 40f, 560f, 0f);
-        static Vector2 _rollen;
         static string _menge = "";
         static string _moneyAmount = "100000";
         static string _moneyStatus = "";
-        static string _status = "Bereit.";
+        static string _status;               // the last message; null = "Ready."
         static bool _sessionGranted;
         static bool _godMode;
         static bool _teleportArmed;
@@ -990,11 +1038,14 @@ namespace NextDayRevival
             public int Actor;
             public string Name;
             public bool Mine;
+            public string Label, LabelName;  // the button text and the name it was built from
+            public bool LabelMine;
         }
 
         static readonly List<PlayerRow> _players = new List<PlayerRow>();
+        static readonly List<PlayerRow> _rowPool = new List<PlayerRow>();
 
-        public static bool IsOpen { get { return _offen; } }
+        public static bool IsOpen { get { return Win.Open; } }
 
         // -1 noch nicht geprueft, 0 nein, 1 ja. Einmal entschieden bleibt es
         // so: die Steam-Id aendert sich waehrend einer Sitzung nicht.
@@ -1155,27 +1206,31 @@ namespace NextDayRevival
         {
             Net.EnsureHooked();
             // The roster serves the menu and an armed map teleport only.
-            if ((_offen || _teleportArmed) && Time.time >= _nextPlayers)
+            if ((Win.Open || _teleportArmed) && Time.time >= _nextPlayers)
             {
                 _nextPlayers = Time.time + 1f;
                 RefreshPlayers();
             }
-            if (!RevivalPlugin.CfgAdmin.Value || !Zutritt()) return;
+            if (!RevivalPlugin.CfgAdmin.Value || !Zutritt())
+            {
+                if (Win.Open) UiKit.Close(Win);
+                return;
+            }
             try
             {
+                if (Win.Open && Time.realtimeSinceStartup >= _nextLive) RefreshLive();
                 if (!Input.GetKeyDown(Key())) return;
-                _offen = !_offen;
-                if (_offen)
+                // A focused text field in the panel owns the keyboard.
+                if (Win.Open && GUIUtility.keyboardControl != 0) return;
+                UiKit.Toggle(Win);
+                if (Win.Open)
                 {
                     RefreshPlayers();
                     _nextPlayers = Time.time + 1f;
+                    RefreshLabels();
+                    _nextLive = 0f;
                 }
-                if (!_offen)
-                {
-                    _fokusLoesen = true;
-                    CursorZurueck();
-                }
-                RevivalPlugin.L.LogInfo("Adminmenue " + (_offen ? "auf" : "zu") + ".");
+                RevivalPlugin.L.LogInfo("Adminmenue " + (Win.Open ? "auf" : "zu") + ".");
             }
             catch (Exception ex)
             {
@@ -1183,429 +1238,543 @@ namespace NextDayRevival
             }
         }
 
-        static void CursorZurueck()
-        {
-            if (!CursorTracker.SawCall) return;
-            CursorTracker.Restoring = true;
-            try
-            {
-                Cursor.lockState = CursorTracker.DesiredLock;
-                Cursor.visible = CursorTracker.DesiredVisible;
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Adminmenue Cursor zurueck: " + ex.Message);
-            }
-            finally { CursorTracker.Restoring = false; }
-        }
+        // ================================================= W-UI4: the kit window
+        //
+        // The admin panel in the UI kit (docs/UI_KIT.md): one window, six
+        // tabs, every row a kit control on the AdminLayout cursor. The kit
+        // frees and restores the cursor and closes on Esc. Nothing here
+        // builds a string per frame: labels that carry a key or a count are
+        // built on open (RefreshLabels), the other modules' status lines at
+        // 1 Hz for the visible tab only (RefreshLive).
+
+        static readonly UiWindow Win = new UiWindow("Revival - Админ", "Revival - Admin", 680f, 720f);
+        const int TabPlayers = 0, TabVehicles = 1, TabWorld = 2, TabMercs = 3, TabItems = 4, TabTools = 5, TabCount = 6;
+        static readonly string[] TabsRu = { "Игроки", "Техника", "Мир", "Наёмники", "Предметы", "Сервис" };
+        static readonly string[] TabsEn = { "Players", "Vehicles", "World", "Mercs", "Items", "Tools" };
+        static int _tab;
+        static readonly UiScroll[] _scroll = { new UiScroll(), new UiScroll(), new UiScroll(),
+                                               new UiScroll(), new UiScroll(), new UiScroll() };
+        static readonly float[] _tabH = new float[TabCount];
+        static float _viewH;
+        static float _nextLive;
+
+        // Built on open (keys, capacities, config switches).
+        static string _lblKatyRockets, _lblKatyNote, _lblBombs, _lblBombsNote, _lblHeliNote, _lblAn2Note;
+        static string _lblTurret, _lblArena, _lblSpawnCar, _lblTank, _lblJump;
+        static int _labelsLang = -1;
+        // Refreshed at 1 Hz while the tab shows them.
+        static string _liveNpc, _liveForest, _liveBench, _liveMercs, _liveCover, _liveFights, _liveNotify, _liveMerc, _liveMines;
+        static readonly List<string> _liveFlak = new List<string>();
+        // The item list's row labels, rebuilt when the list changes.
+        static string[] _itemLabels = new string[0];
+        static int _itemCount = -1;
+        static string[] _extraLabels;
 
         public static void Draw()
         {
-            // Vermutung: Das Mengenfeld haelt sonst den IMGUI-Tastaturfokus.
-            if (_fokusLoesen)
-            {
-                _fokusLoesen = false;
-                GUIUtility.keyboardControl = 0;
-                GUIUtility.hotControl = 0;
-            }
-            if (!_offen || !RevivalPlugin.CfgAdmin.Value || !Zutritt()) return;
-            // Der Cursor gehoert waehrenddessen dem Menue. CursorGuard wird in
-            // RevivalPlugin.Update ausgesetzt, solange offen ist. Restoring
-            // verhindert, dass diese Zugriffe als Spielwunsch gespeichert werden.
-            CursorTracker.Restoring = true;
-            try
-            {
-                Cursor.visible = true;
-                Cursor.lockState = CursorLockMode.None;
-            }
-            finally { CursorTracker.Restoring = false; }
-            _fenster = GUILayout.Window(FensterId, _fenster, Inhalt,
-                                        Loc.T("Revival - Админ",
-                                              "Revival - Admin"));
+            if (!UiKit.BeginWindow(Win)) return;
+            try { Content(Win.Content); }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Adminmenue draw: " + ex.Message); }
+            UiKit.EndWindow(Win);
         }
 
-        static void Inhalt(int id)
+        static void Content(Rect c)
         {
-            GUILayout.Label(Loc.T("Деньги (только себе)", "Money (yourself only)"));
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("+100k")) GiveMoney("100000");
-            if (GUILayout.Button("+1M")) GiveMoney("1000000");
-            if (GUILayout.Button("+10M")) GiveMoney("10000000");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(Loc.T("Сумма:", "Amount:"), GUILayout.Width(70f));
-            _moneyAmount = GUILayout.TextField(_moneyAmount, 32, GUILayout.Width(150f));
-            if (GUILayout.Button(Loc.T("выдать себе", "give to myself"))) GiveMoney(_moneyAmount);
-            GUILayout.EndHorizontal();
-            if (_moneyStatus.Length > 0) GUILayout.Label(_moneyStatus);
-            GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Игрок-цель", "Target player"));
-            GUILayout.BeginHorizontal();
-            if (_players.Count == 0)
-                GUILayout.Label(Loc.T("В мире пока нет игроков.", "No player in the world yet."));
-            for (int i = 0; i < _players.Count; i++)
+            float row = UiKit.S(UiKit.RowH), gap = UiKit.S(UiKit.Gap);
+            if (_labelsLang != Loc.Lang()) RefreshLabels();
+            int tab = UiKit.Tabs(new Rect(0f, 0f, c.width, row + UiKit.S(4f)), _tab, Loc.Lang() == 0 ? TabsRu : TabsEn);
+            if (tab != _tab) { _tab = tab; _nextLive = 0f; }
+            float top = row + UiKit.S(4f) + UiKit.S(UiKit.Pad);
+            float foot = row + gap;
+            Rect view = new Rect(0f, top, c.width, c.height - top - foot);
+            _viewH = view.height;
+            Rect inner = UiKit.BeginScroll(view, _scroll[_tab], _tabH[_tab]);
+            AdminLayout.Begin(inner.width);
+            switch (_tab)
             {
-                PlayerRow p = _players[i];
-                string text = (p.Mine ? Loc.T("я: ", "me: ") : "") + p.Name;
-                if (GUILayout.Toggle(_targetActor == p.Actor, text, GUI.skin.button,
-                                     GUILayout.Width(125f)))
-                    _targetActor = p.Actor;
+                case TabPlayers: TabPlayerTools(); break;
+                case TabVehicles: TabVehicleTools(); break;
+                case TabWorld: TabWorldTools(); break;
+                case TabMercs: TabMercTools(); break;
+                case TabItems: TabItemList(); break;
+                default: TabDevTools(); break;
             }
-            GUILayout.EndHorizontal();
+            _tabH[_tab] = AdminLayout.Y;
+            UiKit.EndScroll();
+            Rect status = new Rect(0f, c.height - row, c.width, row);
+            UiKit.Status(status, UiTone.Info, _status ?? Loc.T("Готово.", "Ready."));
+            UiKit.Tip(status, Loc.T("Всё это также попадает в лог BepInEx. Разбор: python playlog.py",
+                                    "Everything here also goes to the BepInEx log. Read it with: python playlog.py"));
+        }
 
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("выдать админа", "grant admin"), GUILayout.Width(120f)))
+        static bool Btn(Rect r, string text) { return UiKit.Button(r, text, UiButton.Secondary, true, null); }
+
+        static bool Btn(Rect r, string text, string tip) { return UiKit.Button(r, text, UiButton.Secondary, true, tip); }
+
+        // ------------------------------------------------------------ Players
+
+        static void TabPlayerTools()
+        {
+            AdminLayout.Section(Loc.T("ДЕНЬГИ (ТОЛЬКО СЕБЕ)", "MONEY (YOURSELF ONLY)"));
+            Rect r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), "+100k")) GiveMoney("100000");
+            if (Btn(UiKit.Col(r, 1, 3), "+1M")) GiveMoney("1000000");
+            if (Btn(UiKit.Col(r, 2, 3), "+10M")) GiveMoney("10000000");
+            r = AdminLayout.Row();
+            AdminLayout.Text(AdminLayout.Part(r, 0f, 0.2f), Loc.T("Сумма:", "Amount:"), UiKit.TextDim);
+            _moneyAmount = UiKit.TextField(AdminLayout.Part(r, 0.2f, 0.4f), _moneyAmount, 32);
+            if (UiKit.Button(AdminLayout.Part(r, 0.6f, 0.4f), Loc.T("выдать себе", "give to myself"), UiButton.Primary, true, null))
+                GiveMoney(_moneyAmount);
+            AdminLayout.Note(_moneyStatus);
+
+            AdminLayout.Section(Loc.T("ИГРОК-ЦЕЛЬ", "TARGET PLAYER"));
+            if (_players.Count == 0)
+            {
+                AdminLayout.Text(AdminLayout.Row(), Loc.T("В мире пока нет игроков.", "No player in the world yet."), UiKit.TextDim);
+            }
+            for (int i = 0; i < _players.Count; i += 3)
+            {
+                r = AdminLayout.Row();
+                for (int k = 0; k < 3 && i + k < _players.Count; k++)
+                {
+                    PlayerRow p = _players[i + k];
+                    bool on = _targetActor == p.Actor;
+                    if (UiKit.Button(UiKit.Col(r, k, 3), p.Label, on ? UiButton.Primary : UiButton.Secondary, true, null))
+                        _targetActor = p.Actor;
+                }
+            }
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), Loc.T("выдать админа", "grant admin"),
+                    Loc.T("админ-меню для выбранного игрока на эту сессию", "the admin panel for the selected player, this session")))
             {
                 string message;
                 Net.Grant(_targetActor, out message);
                 Melde(message);
             }
-            if (GUILayout.Button(Loc.T("телепорт по карте", "teleport on map"), GUILayout.Width(145f)))
+            if (Btn(UiKit.Col(r, 1, 3), Loc.T("телепорт по карте", "teleport on map")))
             {
                 if (_targetActor < 0) Melde(Loc.T("сначала выберите игрока", "select a player first"));
                 else
                 {
                     _teleportArmed = true;
-                    _offen = false;
-                    CursorZurueck();
+                    UiKit.Close(Win);
                     Melde(Loc.T("откройте карту и щёлкните по месту назначения",
                                 "open the map and click the destination"));
                 }
             }
-            if (_teleportArmed && GUILayout.Button(Loc.T("отменить телепорт", "cancel teleport"), GUILayout.Width(125f)))
+            if (_teleportArmed && Btn(UiKit.Col(r, 2, 3), Loc.T("отменить телепорт", "cancel teleport")))
             {
                 _teleportArmed = false;
                 Melde(Loc.T("телепорт по карте отменён", "map teleport cancelled"));
             }
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("бессмертие ВКЛ", "god mode ON"), GUILayout.Width(120f)))
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), Loc.T("бессмертие ВКЛ", "god mode ON")))
             {
                 string message;
                 Net.GodMode(_targetActor, true, out message);
                 Melde(message);
             }
-            if (GUILayout.Button(Loc.T("бессмертие ВЫКЛ", "god mode OFF"), GUILayout.Width(120f)))
+            if (Btn(UiKit.Col(r, 1, 3), Loc.T("бессмертие ВЫКЛ", "god mode OFF")))
             {
                 string message;
                 Net.GodMode(_targetActor, false, out message);
                 Melde(message);
             }
-            GUILayout.Label(_targetActor == Net.OwnActor()
-                ? (_godMode ? Loc.T("локально: защищён", "local: protected")
-                            : Loc.T("локально: уязвим", "local: vulnerable"))
-                : Loc.T("применяется к выбранному игроку", "applies to selected player"));
-            GUILayout.EndHorizontal();
+            bool self = _targetActor == Net.OwnActor();
+            UiKit.Chip(UiKit.Col(r, 2, 3), self
+                ? (_godMode ? Loc.T("локально: защищён", "local: protected") : Loc.T("локально: уязвим", "local: vulnerable"))
+                : Loc.T("для выбранного игрока", "applies to selected player"),
+                self && _godMode ? UiTone.Success : UiTone.Info);
 
-            GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Полное снаряжение", "Complete loadout"));
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("полный набор", "full loadout"), GUILayout.Width(150f)))
+            AdminLayout.Section(Loc.T("ПОЛНОЕ СНАРЯЖЕНИЕ", "COMPLETE LOADOUT"));
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 2), Loc.T("полный набор", "full loadout")))
             {
                 string message;
                 Net.Loadout(_targetActor, false, out message);
                 Melde(message);
             }
-            if (GUILayout.Button(Loc.T("полный набор + броня УКБ", "full loadout UKB armor"), GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 1, 2), Loc.T("полный набор + броня УКБ", "full loadout UKB armor")))
             {
                 string message;
                 Net.Loadout(_targetActor, true, out message);
                 Melde(message);
             }
-            GUILayout.EndHorizontal();
+        }
 
-            GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Конвой", "Convoy"));
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("отправить конвой сейчас", "spawn convoy now"),
-                                 GUILayout.Width(190f)))
-                Melde(RevivalConvoy.SpawnNow());
-            GUILayout.Label(Loc.T("тест: нужен маршрут с меткой \"конвой\" (F4)",
-                                  "test: needs a route marked \"convoy\" (F4)"));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(Loc.T("вертолёт с десантом сейчас", "troop helicopter now"),
-                                 GUILayout.Width(190f)))
-                Melde(RevivalTroopInsertion.SpawnNow());
-            GUILayout.Label(Loc.T("случайная точка из редактора (Troop landings)",
-                                  "random landing from the editor (Troop landings)"));
-            GUILayout.EndHorizontal();
-            if (GUILayout.Button("Vehicle find status")) Melde(VehicleFinds.Report());
+        // ----------------------------------------------------------- Vehicles
+
+        static void TabVehicleTools()
+        {
+            AdminLayout.Section(Loc.T("СПАВН ПЕРЕД ВАМИ", "SPAWN IN FRONT OF YOU"));
             // N8: the vanilla condition. With the switch on, every spawn button
             // below puts its vehicle down the way the world's own spawn points
             // do (battery, spark plugs, key each 50 percent, a low tank);
             // off, it comes ready as before. Convoys and F7/F9 never change.
-            GUILayout.BeginHorizontal();
-            VehicleCondition.SpawnFound = GUILayout.Toggle(VehicleCondition.SpawnFound,
-                Loc.T("спавн как найденный (ванильное состояние: АКБ/свечи/ключ 50%, мало топлива)",
-                      "spawn as found (vanilla condition: battery/plugs/key 50%, low fuel)"));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Spawn Ural", GUILayout.Width(123f)))
+            VehicleCondition.SpawnFound = UiKit.Toggle(AdminLayout.Row(), VehicleCondition.SpawnFound,
+                Loc.T("спавн как найденный (ванильное состояние)", "spawn as found (vanilla condition)"),
+                Loc.T("АКБ/свечи/ключ 50%, мало топлива", "battery/plugs/key 50%, low fuel"));
+            Rect r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), "Spawn Ural"))
                 Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("ural")));
-            if (GUILayout.Button("Spawn T-72", GUILayout.Width(123f)))
+            if (Btn(UiKit.Col(r, 1, 3), "Spawn T-72"))
                 Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("tank")));
-            if (GUILayout.Button("Spawn MTW (BTR)", GUILayout.Width(123f)))
+            if (Btn(UiKit.Col(r, 2, 3), "Spawn MTW (BTR)"))
                 Melde(VehicleCondition.AsAdmin(() => VehicleCondition.SpawnKindInFront("btr")));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // The vehicle within 15 m (a Mi-8 within 20 m first): what it has,
-            // and the two conditions put on it by hand for a test.
-            if (GUILayout.Button(Loc.T("ближайшая: состояние", "nearest: condition"), GUILayout.Width(150f)))
-                Melde(NearestCondition(0));
-            if (GUILayout.Button(Loc.T("ближайшая: как найденная", "nearest: as found"), GUILayout.Width(150f)))
-                Melde(NearestCondition(1));
-            if (GUILayout.Button(Loc.T("ближайшая: готова", "nearest: ready"), GUILayout.Width(150f)))
-                Melde(NearestCondition(2));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Spawn technical", GUILayout.Width(190f)))
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), "Spawn technical", "In front of you (MG gun truck)"))
                 Melde(VehicleCondition.AsAdmin(() => Technical.SpawnInFront()));
-            GUILayout.Label("In front of you (MG gun truck)");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
             // The drivable howitzer has no key of its own: F4..F12 are all
             // taken. This button is its spawn, exactly as ArtyVehicle/Key says.
-            if (GUILayout.Button("Spawn howitzer", GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 1, 3), "Spawn howitzer", "In front of you (drivable 122 mm howitzer)"))
                 Melde(VehicleCondition.AsAdmin(() => ArtyVehicle.SpawnInFront()));
-            GUILayout.Label("In front of you (drivable 122 mm howitzer)");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
+            // Same both-ways press as the [PlayerHeli] spawn key: with an empty
+            // machine of yours in reach it takes that one away again.
+            if (Btn(UiKit.Col(r, 2, 3), "Spawn helicopter", _lblHeliNote))
+                Melde(VehicleCondition.AsAdmin(() => PlayerHeli.SpawnInFront()));
+
+            AdminLayout.Section(Loc.T("ПВО И АРТИЛЛЕРИЯ", "AIR DEFENCE AND ARTILLERY"));
+            r = AdminLayout.Row();
             // Same as the howitzer: no free F-key, Gepard/Key is None by default.
-            if (GUILayout.Button("Spawn Gepard", GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 0, 2), "Spawn Gepard", "In front of you (35 mm anti-aircraft gun with radar)"))
                 Melde(VehicleCondition.AsAdmin(() => Gepard.SpawnInFront()));
-            GUILayout.Label(Gepard.OffNote() ?? "In front of you (35 mm anti-aircraft gun with radar)");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
             // Four belts of Gepard/AmmoItemId: each one reloads RoundsPerBelt.
-            if (GUILayout.Button("Gepard ammo x4", GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 1, 2), "Gepard ammo x4", "Ammunition belts for the Gepard into your inventory"))
             {
                 string one;
                 GibItem(Gepard.CfgAmmoId.Value, 4, out one);
                 Melde(one);
             }
-            GUILayout.Label("Ammunition belts for the Gepard into your inventory");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
+            AdminLayout.Note(Gepard.OffNote());
+            r = AdminLayout.Row();
             // The Katyusha comes with full rails, so its salvo can be tried at
-            // once; the rockets button below tests the reload.
-            if (GUILayout.Button("Spawn Katyusha", GUILayout.Width(190f)))
+            // once; the rockets button tests the reload.
+            if (Btn(UiKit.Col(r, 0, 2), "Spawn Katyusha"))
                 Melde(Katyusha.SpawnInFront());
-            GUILayout.Label(Katyusha.Enabled ? "In front of you (BM-13 rocket launcher, rails loaded - "
-                            + Katyusha.CfgFireKey.Value + " in the cab: map fire control)"
-                            : "[Katyusha] Enabled = false in the config");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Katyusha rockets x" + Katyusha.Capacity, GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 1, 2), _lblKatyRockets))
             {
                 string one;
                 GibItem(Katyusha.ItemId, Katyusha.Capacity, out one);
                 Melde(one);
             }
-            GUILayout.Label("M-13 rockets into your inventory (" + Katyusha.CfgLoadKey.Value
-                            + " at a standing Katyusha loads them, one by one)");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // Every PMN-2 this client knows, off the map on every client.
-            if (GUILayout.Button("Clear AP mines", GUILayout.Width(190f)))
-                Melde(ApMine.ClearAll());
-            GUILayout.Label("PMN-2 anti-personnel mines laid: " + ApMine.Count);
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // Same both-ways press as the [PlayerHeli] spawn key: with an empty
-            // machine of yours in reach it takes that one away again.
-            if (GUILayout.Button("Spawn helicopter", GUILayout.Width(190f)))
-                Melde(VehicleCondition.AsAdmin(() => PlayerHeli.SpawnInFront()));
-            GUILayout.Label("In front of you (Mi-8 you can fly - "
-                            + PlayerHeli.CfgBoardKey.Value + " to get in)");
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
+            AdminLayout.Note(_lblKatyNote);
+
+            AdminLayout.Section(Loc.T("АН-2", "AN-2"));
+            r = AdminLayout.Row();
             // The flyable An-2 ready to go: full tanks, every repair part,
             // full bomb racks. The host builds it, anyone else asks the host
             // over the An-2's own spawn request - the helicopter's pattern.
-            if (GUILayout.Button("Spawn An-2 (ready)", GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 0, 2), "Spawn An-2 (ready)", _lblAn2Note))
                 Melde(PlayerAn2.SpawnReadyInFront());
-            GUILayout.Label(PlayerAn2.OffNote() ?? An2Bombs.OffNote()
-                            ?? ("In front of you (repaired, fuelled, bombs aboard - "
-                                + PlayerAn2.CfgBoardKey.Value + " to get in)"));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
             // FAB-50s for the An-2's racks, as the Gepard's belts above.
-            if (GUILayout.Button("An-2 bombs x" + An2Bombs.Capacity, GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 1, 2), _lblBombs, _lblBombsNote))
             {
                 string one;
                 GibItem(An2Bombs.ItemId, An2Bombs.Capacity, out one);
                 Melde(one);
             }
-            GUILayout.Label("FAB-50 bombs into your inventory ("
-                            + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)"
-                            + (An2Bombs.Enabled ? "" : " - loading needs [PlayerAn2] Enabled and "
-                               + "[Gameplay] An2Bombs; the ready An-2 switches both on"));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // N2: frame cost of the NPC distance tiers at this spot (~28 s,
-            // hold still); the label is the live tier count until a result.
-            if (GUILayout.Button("NPC tier bench", GUILayout.Width(190f)))
-                Melde(NpcDistance.Bench());
-            GUILayout.Label(NpcDistance.Status());
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // P3: frame cost of the far forest at this spot (~14 s, on then
-            // off); the label is the live state until a result.
-            if (GUILayout.Button("Far forest bench", GUILayout.Width(190f)))
-                Melde(FarForest.Bench());
-            GUILayout.Label(FarForest.Status());
-            GUILayout.EndHorizontal();
-            // B3: mercenaries for testing (Revival.Mercs.cs). With the server
-            // roster the grant is a real saved contract; without it a
-            // session-only test merc. The status line says which.
-            GUILayout.Label("Mercenaries: " + Mercs.Status());
-            // M1: the merc cover field (Revival.MercCover.cs) and its overlay.
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(MercCoverService.Show ? "Hide merc cover" : "Show merc cover", GUILayout.Width(125f)))
-                MercCoverService.Show = !MercCoverService.Show;
-            GUILayout.Label("Merc cover: " + MercCoverService.Status());
-            GUILayout.EndHorizontal();
-            // M2: what their fight loops do (Revival.MercFight.cs); the
-            // overlay above shows each merc's state over his head.
-            GUILayout.Label("Merc fights: " + MercFightStats.Status());
-            GUILayout.BeginHorizontal();
-            List<Mercs.Profile> mercProfiles = Mercs.AllProfiles;
-            if (mercProfiles.Count > 0)
-            {
-                _mercPick = Mathf.Clamp(_mercPick, 0, mercProfiles.Count - 1);
-                Mercs.Profile mp = mercProfiles[_mercPick];
-                if (GUILayout.Button("<", GUILayout.Width(28f)))
-                    _mercPick = (_mercPick + mercProfiles.Count - 1) % mercProfiles.Count;
-                GUILayout.Label(mp.Name + " (" + mp.Settlement + ", " + mp.Price + ")", GUILayout.Width(210f));
-                if (GUILayout.Button(">", GUILayout.Width(28f)))
-                    _mercPick = (_mercPick + 1) % mercProfiles.Count;
-                if (GUILayout.Button("Give me this merc", GUILayout.Width(150f)))
-                    Melde(Mercs.AdminGive(mp.Id));
-            }
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Bill upkeep now", GUILayout.Width(125f))) Melde(Mercs.AdminBillNow());
-            if (GUILayout.Button("+24 in-game h", GUILayout.Width(110f))) Melde(Mercs.AdminAddHours(24.0));
-            if (GUILayout.Button("Kill selected merc", GUILayout.Width(130f))) Melde(Mercs.AdminKillSelected());
-            if (GUILayout.Button("Clear my roster", GUILayout.Width(115f))) Melde(Mercs.AdminClear());
-            if (GUILayout.Button("Roster to log", GUILayout.Width(100f))) Melde(Mercs.AdminDump());
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // P3: before/after screenshots from this spot into <game>/NDR_Shots.
-            if (GUILayout.Button("Far forest shots", GUILayout.Width(190f)))
-                Melde(FarForest.Shots());
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // P2: frame time and draw load at the ten render viewpoints
-            // (vanilla towns, airfield, military town, tile; ~150 s, teleports
-            // and returns you); pressed again, aborts. "Count here": the same
-            // numbers at this spot, now.
-            if (GUILayout.Button(FrameBench.Running ? "Render bench (abort)" : "Render bench", GUILayout.Width(190f)))
-                Melde(FrameBench.StartRender());
-            if (GUILayout.Button("Count here", GUILayout.Width(90f)))
-                Melde(FrameBench.CountHere());
-            GUILayout.Label(FrameBench.Status());
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
+            AdminLayout.Note(PlayerAn2.OffNote() ?? An2Bombs.OffNote());
+
+            AdminLayout.Section(Loc.T("БЛИЖАЙШАЯ ТЕХНИКА", "NEAREST VEHICLE"));
+            // The vehicle within 15 m (a Mi-8 within 20 m first): what it has,
+            // and the two conditions put on it by hand for a test.
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), Loc.T("состояние", "condition")))
+                Melde(NearestCondition(0));
+            if (Btn(UiKit.Col(r, 1, 3), Loc.T("как найденная", "as found")))
+                Melde(NearestCondition(1));
+            if (Btn(UiKit.Col(r, 2, 3), Loc.T("готова", "ready")))
+                Melde(NearestCondition(2));
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), "Vehicle find status")) Melde(VehicleFinds.Report());
+        }
+
+        // -------------------------------------------------------------- World
+
+        static void TabWorldTools()
+        {
+            AdminLayout.Section(Loc.T("СОБЫТИЯ", "EVENTS"));
+            Rect r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 2), Loc.T("отправить конвой сейчас", "spawn convoy now"),
+                    Loc.T("тест: нужен маршрут с меткой \"конвой\" (F4)", "test: needs a route marked \"convoy\" (F4)")))
+                Melde(RevivalConvoy.SpawnNow());
+            if (Btn(UiKit.Col(r, 1, 2), Loc.T("вертолёт с десантом сейчас", "troop helicopter now"),
+                    Loc.T("случайная точка из редактора (Troop landings)", "random landing from the editor (Troop landings)")))
+                Melde(RevivalTroopInsertion.SpawnNow());
+
+            AdminLayout.Section(Loc.T("ВОЗДУХ", "AIR"));
+            r = AdminLayout.Row();
             // N3: an NPC An-2 edge to edge over you, a target for every AA
             // system (Revival.NpcAircraft.cs). A map point: right-click the map.
-            if (GUILayout.Button("Test flyover", GUILayout.Width(190f)))
+            if (Btn(AdminLayout.Part(r, 0f, 0.7f), "Test flyover",
+                    "NPC An-2 from the map edge straight over you (hostile to all AA; map right-click: Flyover here)"))
                 Melde(Flyover.OverMe());
-            if (GUILayout.Button("Clear", GUILayout.Width(60f)))
+            if (Btn(AdminLayout.Part(r, 0.7f, 0.3f), "Clear"))
                 Melde(Flyover.Clear());
-            GUILayout.Label("NPC An-2 from the map edge straight over you (hostile to all AA; "
-                            + "map right-click: Flyover here)");
-            GUILayout.EndHorizontal();
             Flyover.Options();
+            r = AdminLayout.Row();
+            // N11: an editor air event (Tu-95 carpet, An-2 paradrop) with its
+            // target moved onto you (Revival.AirEvents.cs). A map point: right-click the map.
+            if (Btn(AdminLayout.Part(r, 0f, 0.7f), "Trigger air event now",
+                    "the chosen event at your position: siren + radar, then bombers / paratroopers (map right-click: Air strike here)"))
+                Melde(AirEvents.NowAtMe());
+            if (Btn(AdminLayout.Part(r, 0.7f, 0.3f), "Call off"))
+                Melde(AirEvents.Clear());
+            AirEvents.Options();
             // N6: what the 52-Ks make of it - fire direction, range, each
             // gun's state (read-only; the flyover above is the target).
             if (Flak.On)
             {
-                List<FlakGunInfo> guns = Flak.Guns();
-                string line = "  52-K: " + (TowerRadar.On ? TowerRadar.TierName(TowerRadar.Tier) : "no radar")
-                    + ", range " + Flak.RangeMetres(TowerRadar.On && TowerRadar.Tier == 2).ToString("0") + " m" + (guns.Count == 0 ? ", no gun built yet" : "");
-                for (int i = 0; i < guns.Count; i++)
-                    line += "  |  " + guns[i].Id + " " + guns[i].State + " " + guns[i].CrewAlive + "/2";
-                GUILayout.Label(line);
+                AdminLayout.Section(Loc.T("ЗЕНИТКИ 52-К", "52-K FLAK"));
+                for (int i = 0; i < _liveFlak.Count; i++)
+                    AdminLayout.Text(AdminLayout.Row(), _liveFlak[i], i == 0 ? UiKit.TextDim : UiKit.Text);
             }
-            GUILayout.BeginHorizontal();
+
+            AdminLayout.Section(Loc.T("ВОСТОК", "EAST"));
+            r = AdminLayout.Row();
             // N9a: are the airfield and town loot points up, and what is the
             // nearest one (docs/ai/tasks/n09a-east-loot-spots.md).
-            if (GUILayout.Button(Loc.T("лут востока: статус", "east loot: status"), GUILayout.Width(190f)))
+            if (Btn(UiKit.Col(r, 0, 2), Loc.T("лут востока: статус", "east loot: status"),
+                    Loc.T("точки лута аэродрома и городка, ближайшая к вам",
+                          "Airfield and military town loot points, the nearest to you")))
                 Melde(Airfield.LootReport());
-            GUILayout.Label(Loc.T("точки лута аэродрома и городка, ближайшая к вам",
-                                  "Airfield and military town loot points, the nearest to you"));
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            // N11: an editor air event (Tu-95 carpet, An-2 paradrop) with its
-            // target moved onto you (Revival.AirEvents.cs). A map point: right-click the map.
-            if (GUILayout.Button("Trigger air event now", GUILayout.Width(190f)))
-                Melde(AirEvents.NowAtMe());
-            if (GUILayout.Button("Call off", GUILayout.Width(60f)))
-                Melde(AirEvents.Clear());
-            GUILayout.Label("the chosen event at your position: siren + radar, then bombers / paratroopers "
-                            + "(map right-click: Air strike here)");
-            GUILayout.EndHorizontal();
-            AirEvents.Options();
+            // Every PMN-2 this client knows, off the map on every client.
+            if (UiKit.Button(UiKit.Col(r, 1, 2), "Clear AP mines", UiButton.Danger, true, _liveMines))
+                Melde(ApMine.ClearAll());
+        }
 
-            GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Выдать предметы в рюкзак", "Put items in the backpack"));
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(Loc.T("Кол-во (пусто = станд.):", "Amount (empty = default):"), GUILayout.Width(170f));
-            _menge = GUILayout.TextField(_menge, 6, GUILayout.Width(60f));
-            GUILayout.EndHorizontal();
+        // -------------------------------------------------------------- Mercs
 
-            _rollen = GUILayout.BeginScrollView(_rollen, GUILayout.Height(175f));
+        static void TabMercTools()
+        {
+            // B3: mercenaries for testing (Revival.Mercs.cs). With the server
+            // roster the grant is a real saved contract; without it a
+            // session-only test merc. The status line says which.
+            AdminLayout.Section(Loc.T("НАЁМНИКИ", "MERCENARIES"));
+            AdminLayout.Text(AdminLayout.Row(), _liveMercs, UiKit.Text);
+            // M2: what their fight loops do (Revival.MercFight.cs); the cover
+            // overlay shows each merc's state over his head.
+            AdminLayout.Note(_liveFights);
+            AdminLayout.Note(_liveNotify);
+            List<Mercs.Profile> mercProfiles = Mercs.AllProfiles;
+            Rect r;
+            if (mercProfiles.Count > 0)
+            {
+                r = AdminLayout.Row();
+                float arrow = r.height;
+                Rect prev = new Rect(r.x, r.y, arrow, r.height);
+                Rect next = new Rect(r.x + r.width * 0.62f - arrow, r.y, arrow, r.height);
+                if (Btn(prev, "<"))
+                {
+                    _mercPick = (_mercPick + mercProfiles.Count - 1) % mercProfiles.Count;
+                    _nextLive = 0f;
+                }
+                AdminLayout.Text(new Rect(prev.xMax + UiKit.S(8f), r.y, next.x - prev.xMax - UiKit.S(16f), r.height), _liveMerc, UiKit.Text);
+                if (Btn(next, ">"))
+                {
+                    _mercPick = (_mercPick + 1) % mercProfiles.Count;
+                    _nextLive = 0f;
+                }
+                _mercPick = Mathf.Clamp(_mercPick, 0, mercProfiles.Count - 1);
+                if (UiKit.Button(AdminLayout.Part(r, 0.62f, 0.38f), "Give me this merc", UiButton.Primary, true, null))
+                    Melde(Mercs.AdminGive(mercProfiles[_mercPick].Id));
+            }
+            // W: every merc of mine beside me on FOLLOW; unspawned ones now.
+            if (Btn(AdminLayout.Row(), "Bring my mercs to me")) Melde(Mercs.AdminBring());
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 3), "Bill upkeep now")) Melde(Mercs.AdminBillNow());
+            if (Btn(UiKit.Col(r, 1, 3), "+24 in-game h")) Melde(Mercs.AdminAddHours(24.0));
+            if (Btn(UiKit.Col(r, 2, 3), "Roster to log")) Melde(Mercs.AdminDump());
+            r = AdminLayout.Row();
+            if (UiKit.Button(UiKit.Col(r, 0, 2), "Kill selected merc", UiButton.Danger, true, null)) Melde(Mercs.AdminKillSelected());
+            if (UiKit.Button(UiKit.Col(r, 1, 2), "Clear my roster", UiButton.Danger, true, null)) Melde(Mercs.AdminClear());
+
+            // M1: the merc cover field (Revival.MercCover.cs) and its overlay.
+            AdminLayout.Section(Loc.T("УКРЫТИЯ", "COVER"));
+            MercCoverService.Show = UiKit.Toggle(AdminLayout.Row(), MercCoverService.Show,
+                Loc.T("показать укрытия наёмников", "show merc cover"), null);
+            AdminLayout.Note(_liveCover);
+        }
+
+        // -------------------------------------------------------------- Items
+
+        static void TabItemList()
+        {
+            Rect r = AdminLayout.Row();
+            AdminLayout.Text(AdminLayout.Part(r, 0f, 0.55f), Loc.T("Кол-во (пусто = станд.):", "Amount (empty = default):"), UiKit.TextDim);
+            _menge = UiKit.TextField(AdminLayout.Part(r, 0.55f, 0.2f), _menge, 6);
+            AdminLayout.Section(Loc.T("ВЫДАТЬ ПРЕДМЕТЫ В РЮКЗАК", "PUT ITEMS IN THE BACKPACK"));
+            ItemLabels();
             List<ItemDef> items = RevivalPlugin.Items;
-            for (int i = 0; i < items.Count; i++)
+            float rh = UiKit.S(UiKit.RowH), step = rh + UiKit.S(4f);
+            float from = _scroll[TabItems].Offset - step, to = _scroll[TabItems].Offset + _viewH;
+            for (int i = 0; i < items.Count + ExtraItemIds.Length; i++)
             {
-                ItemDef d = items[i];
-                GUILayout.BeginHorizontal();
-                GUILayout.Label(d.Id + "  " + d.Name, GUILayout.Width(250f));
-                if (GUILayout.Button(Loc.T("выдать", "give"), GUILayout.Width(90f)))
-                    Geben(d);
-                GUILayout.EndHorizontal();
+                bool extra = i >= items.Count;
+                int e = i - items.Count;
+                if (extra && RevivalPlugin.FindItem(ExtraItemIds[e]) != null) continue;
+                float y = AdminLayout.Y;
+                AdminLayout.Y += step;
+                if (y < from || y > to)
+                {
+                    // Off screen: take the button's control id and focus slot
+                    // anyway, so ids stay the same whatever the scroll offset.
+                    GUIUtility.GetControlID(FocusType.Passive);
+                    Win.Nav.Next();
+                    continue;
+                }
+                Rect row = new Rect(0f, y, AdminLayout.Width, rh);
+                UiKit.Card(row);
+                AdminLayout.Text(new Rect(row.x + UiKit.S(10f), y, row.width * 0.75f, rh),
+                    extra ? _extraLabels[e] : (i < _itemLabels.Length ? _itemLabels[i] : null), UiKit.Text);
+                if (Btn(AdminLayout.Part(row, 0.78f, 0.22f), Loc.T("выдать", "give")))
+                {
+                    if (extra) GebenExtra(ExtraItemIds[e]);
+                    else Geben(items[i]);
+                }
             }
-            for (int i = 0; i < ExtraItemIds.Length; i++)
+        }
+
+        static void ItemLabels()
+        {
+            List<ItemDef> items = RevivalPlugin.Items;
+            if (_itemCount == items.Count && _extraLabels != null) return;
+            _itemCount = items.Count;
+            _itemLabels = new string[items.Count];
+            for (int i = 0; i < items.Count; i++) _itemLabels[i] = items[i].Id + "  " + items[i].Name;
+            _extraLabels = new string[ExtraItemIds.Length];
+            for (int i = 0; i < ExtraItemIds.Length; i++) _extraLabels[i] = ExtraItemIds[i] + "  " + ExtraItemNames[i];
+        }
+
+        // -------------------------------------------------------------- Tools
+
+        static void TabDevTools()
+        {
+            AdminLayout.Section(Loc.T("ИНСТРУМЕНТЫ", "TOOLS"));
+            RevivalPlugin.CfgTurret.Value = UiKit.Toggle(AdminLayout.Row(), RevivalPlugin.CfgTurret.Value, _lblTurret, null);
+            RevivalPlugin.CfgArena.Value = UiKit.Toggle(AdminLayout.Row(), RevivalPlugin.CfgArena.Value, _lblArena, null);
+            RevivalPlugin.CfgSpawnCar.Value = UiKit.Toggle(AdminLayout.Row(), RevivalPlugin.CfgSpawnCar.Value, _lblSpawnCar, null);
+            RevivalPlugin.CfgTank.Value = UiKit.Toggle(AdminLayout.Row(), RevivalPlugin.CfgTank.Value, _lblTank, null);
+            RevivalPlugin.CfgSceneJump.Value = UiKit.Toggle(AdminLayout.Row(), RevivalPlugin.CfgSceneJump.Value, _lblJump, null);
+
+            AdminLayout.Section(Loc.T("ЗАМЕРЫ", "BENCHMARKS"));
+            Rect r = AdminLayout.Row();
+            // N2: frame cost of the NPC distance tiers at this spot (~28 s,
+            // hold still); the line is the live tier count until a result.
+            if (Btn(AdminLayout.Part(r, 0f, 0.34f), "NPC tier bench"))
+                Melde(NpcDistance.Bench());
+            AdminLayout.Text(AdminLayout.Part(r, 0.34f, 0.66f), _liveNpc, UiKit.TextDim);
+            r = AdminLayout.Row();
+            // P3: frame cost of the far forest at this spot (~14 s, on then
+            // off); the line is the live state until a result.
+            if (Btn(AdminLayout.Part(r, 0f, 0.34f), "Far forest bench"))
+                Melde(FarForest.Bench());
+            AdminLayout.Text(AdminLayout.Part(r, 0.34f, 0.66f), _liveForest, UiKit.TextDim);
+            r = AdminLayout.Row();
+            // P3: before/after screenshots from this spot into <game>/NDR_Shots.
+            if (Btn(AdminLayout.Part(r, 0f, 0.34f), "Far forest shots"))
+                Melde(FarForest.Shots());
+            r = AdminLayout.Row();
+            // P2: frame time and draw load at the ten render viewpoints
+            // (vanilla towns, airfield, military town, tile; ~150 s, teleports
+            // and returns you); pressed again, aborts. "Count here": the same
+            // numbers at this spot, now.
+            if (Btn(AdminLayout.Part(r, 0f, 0.34f), FrameBench.Running ? "Render bench (abort)" : "Render bench"))
+                Melde(FrameBench.StartRender());
+            if (Btn(AdminLayout.Part(r, 0.34f, 0.2f), "Count here"))
+                Melde(FrameBench.CountHere());
+            AdminLayout.Text(AdminLayout.Part(r, 0.54f, 0.46f), _liveBench, UiKit.TextDim);
+
+            AdminLayout.Section(Loc.T("ИНТЕРФЕЙС", "INTERFACE"));
+            r = AdminLayout.Row();
+            // W-UI1: the shared UI kit's demo window (Revival.UiKit.cs). The
+            // admin panel closes so the kit window is not under this one.
+            if (Btn(AdminLayout.Part(r, 0f, 0.34f), Loc.T("Демо UI-кита", "UI kit demo")))
             {
-                int itemId = ExtraItemIds[i];
-                if (RevivalPlugin.FindItem(itemId) != null) continue;
-                GUILayout.BeginHorizontal();
-                GUILayout.Label(itemId + "  " + ExtraItemNames[i],
-                                GUILayout.Width(250f));
-                if (GUILayout.Button(Loc.T("выдать", "give"), GUILayout.Width(90f)))
-                    GebenExtra(itemId);
-                GUILayout.EndHorizontal();
+                UiKit.Close(Win);
+                UiDemo.Toggle();
             }
-            GUILayout.EndScrollView();
+        }
 
-            GUILayout.Space(6f);
-            GUILayout.Label(Loc.T("Инструменты", "Tools"));
-            RevivalPlugin.CfgTurret.Value =
-                GUILayout.Toggle(RevivalPlugin.CfgTurret.Value,
-                                 Loc.T("Пушка (клавиша ", "Gun (key ") + RevivalPlugin.CfgTurretKey.Value + ")");
-            RevivalPlugin.CfgArena.Value =
-                GUILayout.Toggle(RevivalPlugin.CfgArena.Value,
-                                 Loc.T("Полигон (клавиша ", "Test area (key ") + RevivalPlugin.CfgArenaKey.Value + ")");
-            RevivalPlugin.CfgSpawnCar.Value =
-                GUILayout.Toggle(RevivalPlugin.CfgSpawnCar.Value,
-                                 Loc.T("Спавн техники (клавиша ", "Vehicle spawn (key ") + RevivalPlugin.CfgSpawnCarKey.Value + ")");
-            RevivalPlugin.CfgTank.Value =
-                GUILayout.Toggle(RevivalPlugin.CfgTank.Value,
-                                 Loc.T("Танк Т-72 (клавиша ", "T-72 tank (key ") + RevivalPlugin.CfgTankKey.Value + ")");
-            RevivalPlugin.CfgSceneJump.Value =
-                GUILayout.Toggle(RevivalPlugin.CfgSceneJump.Value,
-                                 Loc.T("Переход сцены (клавиша ", "Scene jump (key ") + RevivalPlugin.CfgJumpKey.Value + ")");
+        // ------------------------------------------------------------ texts
 
-            GUILayout.Space(6f);
-            GUILayout.Label(_status);
-            GUILayout.Label(Loc.T("Всё это также попадает в лог BepInEx. Разбор: python playlog.py",
-                                  "Everything here also goes to the BepInEx log. Read it with: python playlog.py"));
+        /// <summary>On open and on a language change: the labels that carry a
+        /// key, a capacity or a config switch.</summary>
+        static void RefreshLabels()
+        {
+            _labelsLang = Loc.Lang();
+            _lblKatyRockets = "Katyusha rockets x" + Katyusha.Capacity;
+            _lblKatyNote = Katyusha.Enabled
+                ? "BM-13 rocket launcher, rails loaded - " + Katyusha.CfgFireKey.Value + " in the cab: map fire control; M-13 rockets: "
+                  + Katyusha.CfgLoadKey.Value + " at a standing Katyusha loads them, one by one"
+                : "[Katyusha] Enabled = false in the config";
+            _lblBombs = "An-2 bombs x" + An2Bombs.Capacity;
+            _lblBombsNote = "FAB-50 bombs into your inventory (" + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)"
+                + (An2Bombs.Enabled ? "" : " - loading needs [PlayerAn2] Enabled and [Gameplay] An2Bombs; the ready An-2 switches both on");
+            _lblHeliNote = "In front of you (Mi-8 you can fly - " + PlayerHeli.CfgBoardKey.Value + " to get in)";
+            _lblAn2Note = "In front of you (repaired, fuelled, bombs aboard - " + PlayerAn2.CfgBoardKey.Value + " to get in)";
+            _lblTurret = Loc.T("Пушка (клавиша ", "Gun (key ") + RevivalPlugin.CfgTurretKey.Value + ")";
+            _lblArena = Loc.T("Полигон (клавиша ", "Test area (key ") + RevivalPlugin.CfgArenaKey.Value + ")";
+            _lblSpawnCar = Loc.T("Спавн техники (клавиша ", "Vehicle spawn (key ") + RevivalPlugin.CfgSpawnCarKey.Value + ")";
+            _lblTank = Loc.T("Танк Т-72 (клавиша ", "T-72 tank (key ") + RevivalPlugin.CfgTankKey.Value + ")";
+            _lblJump = Loc.T("Переход сцены (клавиша ", "Scene jump (key ") + RevivalPlugin.CfgJumpKey.Value + ")";
+            for (int i = 0; i < _players.Count; i++) _players[i].Label = null;
+            LabelPlayers();
+        }
 
-            if (GUILayout.Button(Loc.T("закрыть", "close"))) _offen = false;
-            GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+        /// <summary>1 Hz while open: the status lines of the visible tab (the
+        /// modules build them; nothing is asked for a hidden tab).</summary>
+        static void RefreshLive()
+        {
+            _nextLive = Time.realtimeSinceStartup + 1f;
+            switch (_tab)
+            {
+                case TabWorld:
+                    _liveMines = "PMN-2 anti-personnel mines laid: " + ApMine.Count;
+                    _liveFlak.Clear();
+                    if (Flak.On)
+                    {
+                        List<FlakGunInfo> guns = Flak.Guns();
+                        _liveFlak.Add((TowerRadar.On ? TowerRadar.TierName(TowerRadar.Tier) : "no radar")
+                            + ", range " + Flak.RangeMetres(TowerRadar.On && TowerRadar.Tier == 2).ToString("0") + " m"
+                            + (guns.Count == 0 ? ", no gun built yet" : ""));
+                        for (int i = 0; i < guns.Count; i++)
+                            _liveFlak.Add(guns[i].Id + "   " + guns[i].State + "   crew " + guns[i].CrewAlive + "/2   "
+                                + guns[i].Rounds + " rds");
+                    }
+                    break;
+                case TabMercs:
+                    _liveMercs = Mercs.Status();
+                    _liveCover = "Merc cover: " + MercCoverService.Status();
+                    _liveFights = "Merc fights: " + MercFightStats.Status();
+                    _liveNotify = MercNotify.Status();
+                    List<Mercs.Profile> mercProfiles = Mercs.AllProfiles;
+                    if (mercProfiles.Count > 0)
+                    {
+                        _mercPick = Mathf.Clamp(_mercPick, 0, mercProfiles.Count - 1);
+                        Mercs.Profile mp = mercProfiles[_mercPick];
+                        _liveMerc = mp.Name + " (" + mp.Settlement + ", " + mp.Price + ")";
+                    }
+                    break;
+                case TabTools:
+                    _liveNpc = NpcDistance.Status();
+                    _liveForest = FarForest.Status();
+                    _liveBench = FrameBench.Status();
+                    break;
+            }
+        }
+
+        /// <summary>The target buttons' texts, built when a row's name changes.</summary>
+        static void LabelPlayers()
+        {
+            for (int i = 0; i < _players.Count; i++)
+            {
+                PlayerRow p = _players[i];
+                if (p.Label != null && p.LabelName == p.Name && p.LabelMine == p.Mine) continue;
+                p.LabelName = p.Name;
+                p.LabelMine = p.Mine;
+                p.Label = (p.Mine ? Loc.T("я: ", "me: ") : "") + p.Name;
+            }
         }
 
         /// <summary>N8 admin tools on the nearest vehicle: 0 report, 1 as
@@ -1890,7 +2059,7 @@ namespace NextDayRevival
         static object Field(object instance, string name)
         {
             if (instance == null) return null;
-            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            FieldInfo f = FastField.Find(instance.GetType(), name);
             return f == null ? null : f.GetValue(instance);
         }
 
@@ -1949,7 +2118,8 @@ namespace NextDayRevival
                     object photonPlayer;
                     int actor = ActorFor(go, out photonPlayer);
                     if (actor <= 0) continue;
-                    PlayerRow row = new PlayerRow();
+                    PlayerRow row = _players.Count < _rowPool.Count ? _rowPool[_players.Count] : null;
+                    if (row == null) { row = new PlayerRow(); _rowPool.Add(row); }
                     row.Actor = actor;
                     row.Mine = actor == own;
                     row.Name = PlayerName(go, photonPlayer, actor);
@@ -1961,6 +2131,7 @@ namespace NextDayRevival
                 if (!targetExists)
                     _targetActor = own > 0 ? own
                         : (_players.Count == 0 ? -1 : _players[0].Actor);
+                LabelPlayers();
             }
             catch (Exception ex)
             {
@@ -2474,6 +2645,9 @@ namespace NextDayRevival
         {
             _status = s;
             RevivalPlugin.L.LogInfo("Adminmenue: " + s);
+            // With the panel shut (map teleport, map right-click) the answer
+            // would go unseen in the status strip: a toast shows it.
+            if (!Win.Open && !string.IsNullOrEmpty(s)) UiKit.Toast(s, UiTone.Info);
         }
 
         static KeyCode Key()

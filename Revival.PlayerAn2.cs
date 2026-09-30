@@ -1194,6 +1194,7 @@ namespace NextDayRevival
                     : Time.time;
             }
             if (Time.time < _respawnAt) return;
+            if (!AirfieldHold.SpawnAllowed()) return;        // W Tower 3: not while the airfield is being taken
             float y;
             if (!EastWorld.On || !MapScene.AtHome || !RevivalTroopInsertion.TerrainHeight(Apron, out y))
             {
@@ -1465,6 +1466,8 @@ namespace NextDayRevival
             int view = ViewId(go);
             bool taken = Busy(view);
             if (taken && (CfgPassengers == null || !CfgPassengers.Value)) { Hint(Text.Occupied(), 3f); return; }
+            // W Tower 3: only the airfield's holder takes the controls of an An-2 standing there.
+            if (!taken && !AirfieldHold.LocalMayUse(go)) { Hint(AirfieldHold.LockedText(), 4f); return; }
 
             _plane = go;
             _body = LocalPlayerRoot();
@@ -2426,6 +2429,7 @@ namespace NextDayRevival
 
             internal static void Send(int kind, float[] content, bool reliable)
             {
+                if (kind == Aboard) AirPilot.Board(_plane, Crocodile.LocalActor(), content);
                 if (!_hooked) return;
                 try
                 {
@@ -2480,6 +2484,7 @@ namespace NextDayRevival
                         int view = (int)f[0];
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
+                        AirPilot.Board(ByView(view), sender, f);
                         return;
                     }
                     if (kind == EngineState)

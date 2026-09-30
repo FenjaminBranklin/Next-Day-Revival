@@ -64,6 +64,13 @@ namespace NextDayRevival
         static bool _actorLookedUp;
 
         static readonly Dictionary<int, Ghost> _ghosts = new Dictionary<int, Ghost>();
+
+        internal static void AirContacts(List<GepardGun.Contact> air, Vector3 eye, float range)
+        {
+            if (SurvDrone.Flying) FlakFire.Offer(air, SurvDrone.AirTarget, 3, Mercs.LocalActor, null, eye, range);
+            foreach (KeyValuePair<int, Ghost> pair in _ghosts)
+                FlakFire.Offer(air, pair.Value.Go, 3, pair.Key, null, eye, range);
+        }
         static readonly List<int> _gone = new List<int>();
 
         /// <summary>A foreign surveillance drone as this client sees it.</summary>

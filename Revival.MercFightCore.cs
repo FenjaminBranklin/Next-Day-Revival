@@ -71,6 +71,8 @@ namespace NextDayRevival
     /// adapter or the offline simulation; nothing here is kept).</summary>
     internal struct FightIn
     {
+        public bool Survive, Rally;
+        public Vector3 Watch;           // approach for quiet shelter selection
         public float Now;
         public Vector3 Me;              // his feet
         public int Count;               // threats sensed, primary first (MercSense)
@@ -272,7 +274,8 @@ namespace NextDayRevival
         {
             o = new FightOut();
             _call = false;
-            Decide(ref i, field, ref o);
+            if (i.Survive) DecideSurvival(ref i, field, ref o);
+            else Decide(ref i, field, ref o);
             // The anchor the sense searches cover from (a new one: search now).
             o.AnchorOn = _anchorOn && State != Off;
             o.Anchor = _anchor;
@@ -290,6 +293,126 @@ namespace NextDayRevival
                     Cover.Point.Pos, Up, moving, _call, i.Sees, i.Count > 0,
                     i.Count > 0 ? i.Threats[0] : _lastThreat, i.Health, Mode);
             }
+        }
+
+        internal const float SurvivalContact = 112f; // 40 m
+        internal bool SurvivalFire;
+        float _defendUntil = -100f, _nextBound, _retreatUntil;
+        bool _survivalStarted;
+
+        /// <summary>Shelter persists through respawn. M2 steps supply the poses,
+        /// peeks and quiet maintenance; M1 supplies every bound's destination.</summary>
+        void DecideSurvival(ref FightIn i, CoverField field, ref FightOut o)
+        {
+            _dt = _lastThink > 0f ? Mathf.Min(i.Now - _lastThink, 0.5f) : 0f;
+            _lastThink = i.Now;
+            _moved = Flat(i.Me - _prevMe); _prevMe = i.Me;
+            bool hit = i.Hits != _hits; _hits = i.Hits;
+            bool fresh = i.Now - i.SensedAt < 0.8f;
+            _lastThreat = i.Count > 0 ? i.Threats[0] : i.Watch;
+            // Exposure without a real threat is only a quiet shelter probe.
+            if (hit || (i.Count > 0 && i.Exposed && fresh) || i.Suppression > 0.15f)
+                _defendUntil = i.Now + 3f;
+            SurvivalFire = i.Target && i.Count > 0 &&
+                (Flat(i.Threats[0] - i.Me) <= SurvivalContact || i.Now < _defendUntil);
+            _suppress = false;
+            _plan = PlanNone;
+            Mode = i.Health < RetreatBelow ? Retreating : Normal;
+            if (!_survivalStarted || State == Off)
+            {
+                _survivalStarted = true; _healsLeft = HealsPerFight;
+                _coverSince = i.Now; State = Evade;
+                o.Repick = true;
+            }
+            // A position is overrun by a close threat, a hit or a failed face.
+            bool overrun = Cover.Found && Down &&
+                (hit || (fresh && i.Exposed) ||
+                 (i.Count > 0 && Flat(i.Threats[0] - i.Me) < 28f));
+            if (overrun || (Cover.Found && i.Health < RetreatBelow && i.Now >= _retreatUntil))
+            {
+                _retreatUntil = i.Now + 12f;
+                SurvivalBack(ref i, field, ref o); return;
+            }
+            if (i.Danger && Flat(i.DangerAt - i.Me) < DangerRadius && State != Flee)
+            {
+                StartFlee(ref i, field, ref o); return;
+            }
+            if (State == Flee)
+            {
+                if (i.Danger && i.Now < _until) { o.Act = FightAct.Run; o.Dest = Dest; return; }
+                State = Evade; Cover = new CoverPick(); o.Repick = true;
+            }
+            // Quiet rally: ask M1 for the next shelter a short bound toward owner.
+            // No usable cover ahead means wait at this cover; never warp or cross
+            // an unbounded open field just because the owner is far away.
+            if (i.Rally && i.HasOwner && i.Now >= _nextBound && State == Hide && !SurvivalFire)
+            {
+                float d = Flat(i.Owner - i.Me);
+                if (d > 22f)
+                {
+                    _anchorOn = true;
+                    _anchor = i.Me + (i.Owner - i.Me) * (Mathf.Min(30f, d) / d);
+                    if (Usable(ref i) && Flat(i.Pick.Point.Pos - i.Owner) + 4f < d &&
+                        Flat(i.Pick.Point.Pos - i.Me) <= 45f)
+                    {
+                        StartDash(ref i, ref o); _nextBound = i.Now + 1f; return;
+                    }
+                    o.Repick = true;
+                }
+            }
+            if (!Cover.Found)
+            {
+                if (Usable(ref i) && Flat(i.Pick.Point.Pos - i.Me) <= 45f) { StartDash(ref i, ref o); return; }
+                o.Repick = i.Now >= _nextBound;
+                if (o.Repick) _nextBound = i.Now + 1.5f;
+                // Mapping delay / no cover: keep moving away from a visible
+                // threat. Never stop upright, shoot, reload or heal in the open.
+                if ((i.Count > 0 && (i.Exposed || hit)) || (_anchorOn && Flat(Dest - i.Me) > 2f && i.Now < _until))
+                {
+                    if (Flat(Dest - i.Me) < 2f || i.Now >= _until)
+                    {
+                        Dest = i.Me + Away(i.Me, _lastThreat) * 20f;
+                        _until = i.Now + 2f;
+                    }
+                    o.Act = FightAct.Run; o.Dest = Dest;
+                }
+                else HoldLow(ref i, ref o);
+                return;
+            }
+            if (i.Now >= _nextClaim)
+            {
+                _nextClaim = i.Now + 1f;
+                field.Claim(_id, Cover.Point.Pos, i.Now + 5f, i.Now);
+            }
+            if (!SurvivalFire && (State == PeekOut || State == Burst))
+            { StartBack(ref i, ref o); return; }
+            switch (State)
+            {
+                case Dash: StepDash(ref i, field, ref o); break;
+                case Hide: StepHide(ref i, field, ref o, hit); break;
+                case PeekOut: StepPeekOut(ref i, ref o, hit); break;
+                case Burst: StepBurst(ref i, ref o, hit); break;
+                case PeekBack: StepPeekBack(ref i, field, ref o); break;
+                case Reloading: StepReload(ref i, field, ref o, hit); break;
+                case Healing: StepHeal(ref i, field, ref o, hit); break;
+                default: StartHide(ref i, ref o, true); break;
+            }
+            o.Suppress = false;
+            if (o.Act == FightAct.Fire) o.NoShot |= !SurvivalFire;
+        }
+
+        void SurvivalBack(ref FightIn i, CoverField field, ref FightOut o)
+        {
+            MarkBad(field, i.Now, BadSeconds);
+            field.Release(_id); Cover = new CoverPick();
+            Relocations++;
+            _anchorOn = true;
+            _anchor = i.Me + Away(i.Me, Primary(ref i)) * 20f;
+            // Discard the stale, compromised pick before M1 supplies a new one.
+            State = Evade; i.PickFresh = false;
+            Dest = _anchor; _until = i.Now + 2f;
+            o.Repick = true; o.AnchorOn = true; o.Anchor = _anchor;
+            o.Act = FightAct.Run; o.Dest = Dest;
         }
 
         void Decide(ref FightIn i, CoverField field, ref FightOut o)
@@ -377,6 +500,7 @@ namespace NextDayRevival
         {
             if (field != null) field.Release(_id);
             State = Off;
+            _survivalStarted = false; SurvivalFire = false; _defendUntil = -100f;
             Cover = new CoverPick();
             _evadeUp = false;
             Order = new FightOut();
@@ -672,6 +796,8 @@ namespace NextDayRevival
             if (!i.Pick.Found || !i.Pick.Confirmed || !i.PickFresh) return false;
             Vector3 p = i.Pick.Point.Pos;
             if (Bad(p, i.Now)) return false;
+            if (i.Survive && _anchorOn && !i.Rally && i.Count > 0 &&
+                Flat(p - i.Threats[0]) < Flat(i.Me - i.Threats[0]) + 4f) return false;
             // M3: a pick searched from his anchor (flank, fall-back, retreat)
             // is his only while the anchor holds; else one from where he is.
             if (_anchorOn)
@@ -719,6 +845,7 @@ namespace NextDayRevival
         void Arrived(ref FightIn i)
         {
             _coverSince = i.Now;
+            if (i.Survive) _anchorOn = false;
             if (Mode == Flanking) EndMode(i.Now);
             if (Mode == Falling && i.Regroup && Flat(i.Me - i.Owner) < FallNear + 12f) _regrouped = true;
         }
@@ -747,6 +874,7 @@ namespace NextDayRevival
         /// there): marked bad for everyone, a new pick asked for, and off.</summary>
         void Relocate(ref FightIn i, CoverField field, ref FightOut o)
         {
+            if (i.Survive) { SurvivalBack(ref i, field, ref o); return; }
             MarkBad(field, i.Now, BadSeconds);
             Relocations++;
             Cover = new CoverPick();
@@ -816,7 +944,8 @@ namespace NextDayRevival
                 o.Face = Primary(ref i);
                 return;
             }
-            if (i.Reloading || NeedReload(ref i))
+            bool quiet = !i.Survive || (!SurvivalFire && !i.Exposed && i.Now >= _defendUntil);
+            if (quiet && (i.Reloading || NeedReload(ref i)))
             {
                 Enter(Reloading, i.Now);
                 _until = i.Now + ReloadCap;
@@ -826,7 +955,7 @@ namespace NextDayRevival
                 o.Kick = !i.Reloading;
                 return;
             }
-            if (_healsLeft > 0 && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal)
+            if (quiet && _healsLeft > 0 && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal)
             {
                 Enter(Healing, i.Now);
                 _until = i.Now + HealSeconds;
@@ -835,6 +964,12 @@ namespace NextDayRevival
                 return;
             }
             HoldLow(ref i, ref o);
+            if (i.Survive)
+            {
+                if (SurvivalFire && i.Count > 0 && i.Now >= _nextPeek)
+                    TryPeek(ref i, field, ref o, false);
+                return;
+            }
             // M3: covering fire for a mate who moves (nobody else is up).
             if (Squad != null && Mode != Retreating && _plan == PlanNone && i.Count > 0 && i.Now >= _nextCover
                 && Squad.MateNeedsCover(_id, i.Now) && !Squad.MateUp(_id, i.Now))

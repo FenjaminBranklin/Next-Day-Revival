@@ -1281,6 +1281,7 @@ namespace NextDayRevival
         static float _armed;
         static Transform _pilotRoot;
         static GameObject _model;
+        internal static GameObject AirTarget { get { return _flying ? _model : null; } }
         static Renderer[] _modelRenderers;  // cached so visibility toggles allocate nothing
         static GameObject _wreck;
         static Vector3 _wreckAt;

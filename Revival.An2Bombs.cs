@@ -2,7 +2,8 @@
 //
 // THE AN-2 AS A BOMBER. The player-flown An-2 (Revival.PlayerAn2.cs) carries
 // up to six small FAB-50 bombs (item 2072) on its racks. docs/ai/tasks/
-// an2-bombs.md has the numbers and the in-game checklist.
+// an2-bombs.md has the original numbers; w-bomb2-bombsight.md documents the
+// CCIP controls, offline trajectory proof and current in-game checklist.
 //
 // WHAT A PLAYER DOES
 //   1. Loading. On foot beside a parked An-2 with FAB-50s in the backpack,
@@ -10,36 +11,26 @@
 //      bombs come from the airfield loot (the "military" pool, D2a and the
 //      other bunkers) or from the admin panel. An An-2 the admin spawns
 //      "ready" comes with a full load.
-//   2. The sight. The pilot presses the sight key (G, in the air - on the
-//      ground G is the engine): the view drops under the belly, WW2 style -
-//      a downward camera laid on a crosshair on the ground. The mouse moves
-//      the crosshair; with the pilot's hands off A/D the aeroplane banks
-//      itself until its track runs through it (Steer, PlayerAn2.Assist) and
-//      flies the run-in wings level. The amber pipper is the point where a
-//      bomb released NOW bursts; it slides up the track line onto the
-//      crosshair, and "DROP!" flashes when they meet. The nadir mark is the
-//      point straight below - the gap to the pipper is the lead. Readouts:
-//      height over the ground, ground speed, fall time, lead and drift.
-//   3. The release key (left mouse button) drops one bomb. It is a REAL falling projectile:
-//      it leaves with the aeroplane's velocity, falls under gravity with a
-//      little drag, and the sight's prediction runs the same equations, so
-//      a steady, level, low run puts it on a vehicle-sized target. The
-//      scatter grows with the height of the drop and with the bank at
-//      release, so a sloppy run misses.
+//   2. CCIP is visible whenever the local pilot is airborne. G opens the
+//      belly camera and marks the ground under the current view (unless a
+//      map target was selected). G again closes it. Right-click the map or
+//      right-click inside the sight to mark a new fixed target; Backspace
+//      clears it. The amber ground ring is the predicted impact + dispersion;
+//      the cyan line and cue bar guide the run to a marked target. No auto aim.
+//   3. LMB drops one bomb; holding it drops a stick at ReleaseInterval. The
+//      amber dotted line previews the remaining stick during steady flight.
+//      Bombs retain the existing quadratic drag, scatter and network damage.
 //
 // HOW IT GOES OFF (the mortar's rules, reused, not copied)
 //   The dropping client flies the bomb. At impact:
 //     the picture  RocketHook.Detonate - the game's own networked grenade
 //                  explosion, one blast and one bang on every client, with 0
 //                  damage of its own (RevivalMortar.cs says why);
-//     the damage   Mortar.Sweep with the bomb's radius and peaks: NPCs with
-//                  owner 0 (credited to nobody), vehicles on the master only
-//                  (part 14, the explosion part, so VehicleArmor applies),
-//                  players from the dropper only and never his own faction;
-//                  Mortar.FactionShield is armed at release;
+//     the damage   OrdnanceBlast: anonymous NPC owner RPCs and vehicle damage
+//                  from master, victim player RPCs from shooter (attribution).
+//                  Physical blasts include the dropper and his faction;
 //     the master   a dropper who is not the master sends the burst on this
-//                  file's event, and the master sweeps the NPCs and vehicles
-//                  it owns - the mortar's SendImpact pattern;
+//                  file's event, and the master queues the one damage pass;
 //     the depot    a burst at the D1 fuel depot (An2Repair.Depot) sets its
 //                  fuel off: the reserve is gone and a second blast follows.
 //   Every other client flies a visual copy of the bomb from the drop event
@@ -72,7 +63,7 @@
 //                       calls FullLoad; Plane / Velocity accessors
 //   Revival.Admin.cs    "Spawn An-2 (ready)" and "An-2 bombs x6"
 //   Revival.Airfield.cs the loot pool (Pool)
-//   RevivalMortar.cs    Sweep overload, Sound, FactionShield
+//   RevivalMortar.cs    Sound; Revival.OrdnanceBlast.cs shared damage
 //   Revival.An2Repair.cs DepotHit
 
 using System;
@@ -128,10 +119,10 @@ namespace NextDayRevival
                 "FAB-50s on the racks of one An-2 (the real one carried 4-6 small "
                 + "bombs under the lower wing).");
             CfgSightKey = cfg.Bind(S, "SightKey", "G",
-                "Pilot, in the air: open or close the bombsight. The same key as "
+                "Pilot, in the air: mark the viewed ground and open or close CCIP. The same key as "
                 + "[PlayerAn2] EngineKey is fine: on the ground it is the engine.");
             CfgReleaseKey = cfg.Bind(S, "ReleaseKey", "Mouse0",
-                "Pilot: drop one bomb (Mouse0 = left mouse button).");
+                "Pilot: tap for one bomb, hold for a stick (Mouse0 = left mouse button).");
             CfgLoadKey = cfg.Bind(S, "LoadKey", "R",
                 "On foot beside a parked An-2: move FAB-50s from the backpack onto its racks.");
             CfgRadius = cfg.Bind(S, "BlastRadius", 25f,
@@ -142,7 +133,7 @@ namespace NextDayRevival
                 "Damage to a vehicle at the burst point (explosion part, so the "
                 + "vehicle armour rules apply).");
             CfgPlayerDamage = cfg.Bind(S, "PlayerDamage", 300f,
-                "Damage to a player at the burst point. Never to the dropper's own faction.");
+                "Body explosion damage to a player at the burst point, including the dropper's faction.");
             CfgDrag = cfg.Bind(S, "Drag", 0.0006f,
                 "Air drag of the bomb, 1/m (deceleration = Drag x speed^2). The "
                 + "sight uses the same number, so it only changes how far a bomb trails.");
@@ -157,8 +148,8 @@ namespace NextDayRevival
             CfgInterval = cfg.Bind(S, "ReleaseInterval", 0.4f, "Seconds between two releases.");
             CfgSightFov = cfg.Bind(S, "SightFov", 40f, "Field of view of the bombsight camera, degrees.");
             CfgAimSensitivity = cfg.Bind(S, "AimSensitivity", 0.5f,
-                "Degrees the bombsight crosshair moves per unit of mouse travel. "
-                + "The aeroplane steers itself onto the crosshair.");
+                "Legacy mouse-aim tuning, retained for config compatibility. "
+                + "CCIP uses fixed map/G/RMB targets and manual flight controls.");
             CfgDepotReach = cfg.Bind(S, "DepotReach", 25f,
                 "Metres from the D1 pump house within which a burst sets the depot off.");
             CfgEventCode = cfg.Bind(S, "NetworkEventCode", 158,
@@ -279,15 +270,19 @@ namespace NextDayRevival
         static string _hint = "";
         static float _hintUntil;
 
-        // The crosshair: a point on the ground the pilot lays with the mouse.
-        // The camera looks at it, the aeroplane steers onto it (Steer).
+        // Optional user-selected target. Never replaced when passed or on closing.
+        // The camera follows the impact; targets do not move the impact marker.
         static bool _aimSet;
         static Vector3 _aim;
 
-        // Sight solution, refreshed every frame while the pilot flies.
-        static bool _solved;
-        static Vector3 _impact, _nadir;
-        static float _fall, _agl, _lead, _drift, _gs;
+        // Local-pilot solution, at most 10 Hz, including releases.
+        static bool _solved, _mapAim;
+        static Vector3 _impact, _sampleRack, _stickStep;
+        static float _fall, _agl, _gs, _sigma, _nextSolve;
+        static int _displayCount, _sightView;
+        static GameObject _sightPlane;
+        static Terrain[] _sightTerrains;
+        static int _terrainScenes = -1;
 
         internal static bool SightOn { get { return _sight && CfgSightView != null && CfgSightView.Value; } }
 
@@ -330,38 +325,65 @@ namespace NextDayRevival
                 if (plane == null)
                 {
                     if (_sight) CloseSight();
-                    _solved = false;
+                    _solved = _aimSet = _mapAim = false;
+                    _sightPlane = null;
                     if (!PlayerAn2.Aboard && !PlayerHeli.Aboard) OnFoot();
                     return;
                 }
                 if (!PlayerAn2.Flying || PlayerAn2.Burning(plane))
                 {
                     if (_sight) CloseSight();
-                    _solved = false;
+                    _solved = _aimSet = _mapAim = false;
+                    _sightPlane = null;
                     return;
                 }
-                // The prediction runs ahead up to 60 s of fall on the terrain
-                // height data: only while the sight is open (Release solves
-                // for itself).
-                if (_sight) { Solve(plane); Aim(plane.transform); }
-                else _solved = false;
-                // Down on the wheels the sight has nothing to do, and the
-                // same key starts the engine there (PlayerAn2.Tick).
-                if (_sight && PlayerAn2.OnGround) CloseSight();
-                if (!PlayerAn2.OnGround && GameUi.KeyDown(SightKey))
+                if (!ReferenceEquals(_sightPlane, plane))
+                {
+                    CloseSight();
+                    _aimSet = _mapAim = false;
+                    _sightPlane = plane;
+                    _sightView = PlayerAn2.View(plane);
+                    _nextSolve = 0f;
+                }
+                if (PlayerAn2.OnGround)
+                {
+                    if (_sight) CloseSight();
+                    _solved = _aimSet = _mapAim = false;
+                    return;
+                }
+                Solve(plane);
+                if (Input.GetMouseButtonDown(1))
+                {
+                    Vector3 point;
+                    if (GameUi.WindowOpen && MapTools.MouseWorld(out point))
+                    {
+                        _aim = point;
+                        _aimSet = _mapAim = true;
+                    }
+                    else if (_sight && !GameUi.WindowOpen)
+                    {
+                        Camera cam = CameraOwner.ViewCamera();
+                        if (cam != null) Mark(cam.ScreenPointToRay(Input.mousePosition));
+                    }
+                }
+                if (GameUi.KeyDown(KeyCode.Backspace)) _aimSet = _mapAim = false;
+                if (GameUi.KeyDown(SightKey))
                 {
                     if (_sight) CloseSight();
                     else
                     {
+                        if (!_mapAim)
+                        {
+                            Camera cam = CameraOwner.ViewCamera();
+                            if (cam != null) Mark(cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f)));
+                        }
                         _sight = true;
-                        _aimSet = false;
-                        Hint(Loc.T("Бомбовый прицел - мышь наводит, самолёт доворачивает сам",
-                                   "Bombsight - the mouse lays the crosshair, the aeroplane steers onto it")
-                            + ". " + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " "
-                            + Loc.T("сброс", "release"), 4f);
+                        Hint(Loc.T("ЛКМ: сброс / удерживать: серия. ПКМ: цель. G: закрыть. Backspace: убрать цель.",
+                                   "LMB: drop / hold: stick. RMB: target. G: close. Backspace: clear target."), 5f);
                     }
                 }
-                if (GameUi.KeyDown(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0))) Release(plane);
+                KeyCode releaseKey = PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0);
+                if (!GameUi.WindowOpen && Input.GetKey(releaseKey)) Release(plane);
                 _errors = 0f;
             }
             catch (Exception ex)
@@ -374,7 +396,6 @@ namespace NextDayRevival
         static void CloseSight()
         {
             _sight = false;
-            _aimSet = false;
             if (_savedFov > 0f)
             {
                 try
@@ -435,55 +456,145 @@ namespace NextDayRevival
             pos += vel * (K * dt);
         }
 
-        /// <summary>The same equations as the bomb, run ahead: where a bomb
-        /// released now bursts, and after how long. Terrain only (the bomb
-        /// itself also stops on objects).</summary>
-        internal static bool Predict(Vector3 from, Vector3 vel, out Vector3 impact, out float seconds)
+        // Terrain.activeTerrains allocates an array. Refresh only on scene changes
+        // or the first flight, not per solve. Native SampleHeight avoids reflection
+        // boxing/argument arrays, and preserves Unity's terrain indexing.
+        static bool Ground(Vector3 at, out float y)
         {
-            impact = from;
-            seconds = 0f;
-            float drag = Mathf.Max(0f, F(CfgDrag, 0.0006f));
-            Vector3 pos = from;
-            const float dt = 0.04f;
-            for (int i = 0; i < 1500; i++)
+            y = 0f;
+            int scenes = UnityEngine.SceneManagement.SceneManager.sceneCount;
+            if (_sightTerrains == null || scenes != _terrainScenes)
             {
-                Vector3 was = pos;
-                Advance(ref pos, ref vel, dt, drag);
-                seconds += dt;
-                float y;
-                if (!RevivalTroopInsertion.TerrainHeight(pos, out y)) return false;
-                if (pos.y <= y)
-                {
-                    float above = was.y - y;
-                    float drop = was.y - pos.y;
-                    float t = drop > 0.0001f ? Mathf.Clamp01(above / drop) : 1f;
-                    impact = Vector3.Lerp(was, pos, t);
-                    impact.y = y;
-                    seconds -= dt * (1f - t);
-                    return true;
-                }
+                _terrainScenes = scenes;
+                _sightTerrains = Terrain.activeTerrains;
+            }
+            Terrain active = Terrain.activeTerrain;
+            for (int i = -1; i < _sightTerrains.Length; i++)
+            {
+                Terrain t = i < 0 ? active : _sightTerrains[i];
+                if (t == null || t.terrainData == null || (i >= 0 && !t.drawHeightmap)) continue;
+                Vector3 origin = t.GetPosition(), size = t.terrainData.size;
+                if (at.x < origin.x || at.z < origin.z || at.x > origin.x + size.x || at.z > origin.z + size.z) continue;
+                y = origin.y + t.SampleHeight(at);
+                return true;
             }
             return false;
         }
 
+        static bool OnPlane(Vector3 from, Vector3 vel, float floor, out Vector3 impact, out float seconds)
+        {
+            double x, z, time;
+            bool ok = An2BombCurve.Fall((from.y - floor) / K, vel.x, vel.y, vel.z,
+                Mathf.Max(0f, F(CfgDrag, 0.0006f)), out x, out z, out time);
+            impact = new Vector3(from.x + (float)x * K, floor, from.z + (float)z * K);
+            seconds = (float)time;
+            return ok;
+        }
+
+        /// <summary>Analytic fall panels + bounded terrain-plane refinement.
+        /// No raycasts; Solve owns the one ground ray per 10 Hz sample.</summary>
+        internal static bool Predict(Vector3 from, Vector3 vel, out Vector3 impact, out float seconds)
+        {
+            impact = from;
+            seconds = 0f;
+            float floor;
+            if (!Ground(from, out floor)) return false;
+            // A secant correction converges on low uphill runs where simple
+            // floor replacement oscillates. A cliff without convergence hides CCIP.
+            float previousFloor = floor, previousError = 0f;
+            for (int i = 0; i < 8; i++)
+            {
+                if (!OnPlane(from, vel, floor, out impact, out seconds))
+                {
+                    if (i == 0) return false;
+                    // The trial floor can exceed the bomb's climb apex on an
+                    // uphill run. Retreat toward the last reachable plane.
+                    floor = (floor + previousFloor) * 0.5f;
+                    continue;
+                }
+                float next;
+                if (!Ground(impact, out next)) return false;
+                if (Mathf.Abs(next - floor) < 0.25f * K) { impact.y = next; return true; }
+                float error = next - floor;
+                float corrected = next;
+                if (i > 0 && Mathf.Abs(error - previousError) > 0.0001f)
+                    corrected = floor - error * (floor - previousFloor) / (error - previousError);
+                previousFloor = floor;
+                previousError = error;
+                floor = corrected;
+            }
+            return false;
+        }
+
+        static float Dispersion(Transform tr, float altitude)
+        {
+            float bank = Mathf.Abs(Vector3.Angle(tr.right, Vector3.ProjectOnPlane(tr.right, Vector3.up)));
+            return Mathf.Max(0f, F(CfgScatter, 1f))
+                + Mathf.Max(0f, F(CfgScatterPerHeight, 0.015f)) * altitude
+                + Mathf.Max(0f, F(CfgScatterPerBank, 0.12f)) * bank;
+        }
+
         static void Solve(GameObject plane)
         {
+            if (Time.time < _nextSolve) return;
+            _nextSolve = Time.time + 0.1f;
             Transform tr = plane.transform;
             Vector3 vel = PlayerAn2.Velocity;
-            Vector3 rack = RackOf(tr);
-            _solved = Predict(rack, vel, out _impact, out _fall);
+            _sampleRack = RackOf(tr);
+            _solved = Predict(_sampleRack, vel, out _impact, out _fall);
             float floor;
-            _agl = RevivalTroopInsertion.TerrainHeight(tr.position, out floor) ? Mathf.Max(0f, (tr.position.y - floor) / K) : 0f;
-            _nadir = new Vector3(tr.position.x, floor, tr.position.z);
-            Vector3 flat = new Vector3(vel.x, 0f, vel.z);
-            _gs = flat.magnitude;
-            Vector3 lead = _impact - _nadir;
-            lead.y = 0f;
-            _lead = lead.magnitude / K;
-            Vector3 nose = tr.forward;
-            nose.y = 0f;
-            _drift = (_gs > 1f && nose.sqrMagnitude > 0.0001f)
-                ? Vector3.Angle(nose, flat) * Mathf.Sign(Vector3.Cross(nose, flat).y) : 0f;
+            _agl = Ground(tr.position, out floor) ? Mathf.Max(0f, (tr.position.y - floor) / K) : 0f;
+            _gs = new Vector3(vel.x, 0f, vel.z).magnitude;
+            _sigma = Dispersion(tr, _agl);
+            if (!_count.TryGetValue(_sightView, out _displayCount)) _displayCount = 0;
+            _stickStep = new Vector3(vel.x, 0f, vel.z) * (K * Mathf.Max(0.1f, F(CfgInterval, 0.4f)));
+            if (!_solved) return;
+            // Exactly one non-allocating cast per solution, never on release.
+            // Includes roofs; ignore the aircraft/crew if a near-vertical drop
+            // catches the carrier, rather than casting repeatedly through it.
+            RaycastHit hit;
+            Vector3 above = new Vector3(_impact.x, Mathf.Max(_sampleRack.y + K, _impact.y + 50f * K), _impact.z);
+            if (Physics.Raycast(above, Vector3.down, out hit, above.y - _impact.y + 10f * K,
+                                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
+                && hit.transform != null && !hit.transform.IsChildOf(tr)
+                && !(hit.collider is CharacterController))
+            {
+                // A roof changes the fall time and therefore the horizontal lead.
+                // Only accept it when the shorter fall still ends within the same
+                // collider footprint; do not advertise a roof the bomb misses.
+                Vector3 roof;
+                float time;
+                if (OnPlane(_sampleRack, vel, hit.point.y, out roof, out time)
+                    && hit.collider.bounds.Contains(new Vector3(roof.x, hit.point.y, roof.z)))
+                { _impact = roof; _fall = time; }
+            }
+        }
+
+        // Use a bounded analytic ray/terrain intersection only on a target action.
+        // An upward view cannot silently mark the predicted impact as a target.
+        static void Mark(Ray ray)
+        {
+            if (ray.direction.y >= -0.05f) { _aimSet = _mapAim = false; return; }
+            float floor;
+            if (!Ground(ray.origin, out floor)) return;
+            Vector3 at = ray.origin;
+            for (int i = 0; i < 5; i++)
+            {
+                float distance = (floor - ray.origin.y) / ray.direction.y;
+                if (distance < 0f || distance > 6000f * K) return;
+                at = ray.GetPoint(distance);
+                float next;
+                if (!Ground(at, out next)) return;
+                if (Mathf.Abs(next - floor) < 0.25f * K)
+                {
+                    at.y = next;
+                    _aim = at;
+                    _aimSet = true;
+                    _mapAim = false;
+                    return;
+                }
+                floor = next;
+            }
         }
 
         /// <summary>Where the sight looks from: UNDER the belly, ahead of the
@@ -494,9 +605,8 @@ namespace NextDayRevival
         static Vector3 SightEye(Transform tr)
         {
             Vector3 eye = tr.position + tr.rotation * (new Vector3(0f, -1.2f, 2.5f) * K);
-            float ground;
-            if (RevivalTroopInsertion.TerrainHeight(eye, out ground) && eye.y < ground + 0.8f * K)
-                eye.y = ground + 0.8f * K;
+            float ground = tr.position.y - _agl * K;
+            if (eye.y < ground + 0.8f * K) eye.y = ground + 0.8f * K;
             return eye;
         }
 
@@ -509,93 +619,15 @@ namespace NextDayRevival
             return track.normalized;
         }
 
-        /// <summary>
-        /// The crosshair on the ground. Laid on the predicted burst when the
-        /// sight opens (a little ahead of it, so there is time to correct);
-        /// the mouse turns the line of sight from the eye and the crosshair is
-        /// where that line meets the ground again. It stays on the ground
-        /// while the aeroplane flies - a target under it stays under it. Once
-        /// it has fallen behind the aeroplane it is laid ahead again.
-        /// </summary>
-        static void Aim(Transform tr)
-        {
-            if (!SightOn) { _aimSet = false; return; }
-            Vector3 eye = SightEye(tr);
-            Vector3 track = Track(tr);
-            Vector3 nadir = new Vector3(tr.position.x, _nadir.y, tr.position.z);
-            if (_aimSet && Vector3.Dot(_aim - nadir, track) < 0f) _aimSet = false;
-            if (!_aimSet)
-            {
-                if (!_solved) return;
-                _aim = _impact + track * (Mathf.Max(40f, _lead * 0.5f) * K);
-                float gy;
-                if (RevivalTroopInsertion.TerrainHeight(_aim, out gy)) _aim.y = gy;
-                _aimSet = true;
-            }
-            float mx = GameUi.Axis("Mouse X"), my = GameUi.Axis("Mouse Y");
-            if (Mathf.Abs(mx) < 0.0001f && Mathf.Abs(my) < 0.0001f) return;
-            float sens = Mathf.Clamp(F(CfgAimSensitivity, 0.5f), 0.02f, 5f);
-            Vector3 dir = _aim - eye;
-            if (dir.sqrMagnitude < 0.01f) return;
-            dir = Quaternion.AngleAxis(mx * sens, Vector3.up) * dir;
-            Vector3 side = Vector3.Cross(Vector3.up, dir);
-            if (side.sqrMagnitude > 0.0001f)
-                dir = Quaternion.AngleAxis(-my * sens, side.normalized) * dir;
-            dir.Normalize();
-            // Between 8 degrees under the horizon and straight down.
-            float below = -Mathf.Asin(Mathf.Clamp(dir.y, -1f, 1f)) * Mathf.Rad2Deg;
-            if (below < 8f)
-            {
-                Vector3 flat = new Vector3(dir.x, 0f, dir.z).normalized;
-                dir = flat * Mathf.Cos(8f * Mathf.Deg2Rad) + Vector3.down * Mathf.Sin(8f * Mathf.Deg2Rad);
-            }
-            // Meet the ground: the plane at the crosshair's height, then the
-            // terrain there.
-            float drop = eye.y - _aim.y;
-            if (drop < 1f) drop = 1f;
-            Vector3 at = eye + dir * (drop / Mathf.Max(0.05f, -dir.y));
-            Vector3 off = at - nadir;
-            off.y = 0f;
-            float reach = 1500f * K;
-            if (off.magnitude > reach) at = nadir + off.normalized * reach;
-            if (Vector3.Dot(at - nadir, track) < 5f * K) return;   // not behind the aeroplane
-            float y;
-            if (RevivalTroopInsertion.TerrainHeight(at, out y)) at.y = y;
-            _aim = at;
-        }
-
-        /// <summary>
-        /// PlayerAn2.Fly asks here while the pilot's hands are off A/D: the
-        /// bank that turns the ground track onto the crosshair. The burst
-        /// point lies on the track ahead of the nadir, so a track through the
-        /// crosshair puts the bombs on it. For the run-in - the crosshair
-        /// within the lead plus a margin - the wings are held level: bank at
-        /// release widens the scatter (ScatterPerBank). The same law is flown
-        /// in research/an2_assist_sim.py (steer_for).
-        /// </summary>
+        // Keep the existing flight seam but leave steering in the pilot's hands.
         internal static bool Steer(out float bank)
         {
             bank = 0f;
-            if (!_sight || !_aimSet || !SightOn) return false;
-            GameObject plane = PlayerAn2.Plane;
-            if (plane == null || PlayerAn2.OnGround) return false;
-            Transform tr = plane.transform;
-            Vector3 track = Track(tr);
-            Vector3 to = _aim - tr.position;
-            to.y = 0f;
-            float dist = to.magnitude / K;
-            if (dist < _lead * 1.1f + 30f) return true;         // run-in: level
-            float err = Vector3.Angle(track, to) * Mathf.Sign(Vector3.Cross(track, to).y);
-            bank = Mathf.Clamp(err * 1.5f, -25f, 25f);
-            return true;
+            return false;
         }
 
-        /// <summary>PlayerAn2.LateTick while the sight is open: the camera
-        /// under the belly, laid on the crosshair (on the predicted burst
-        /// until there is one), the ground track up the screen so a target
-        /// slides straight down the track line. No smoothing: the crosshair is
-        /// on the ground and the eye follows the aeroplane exactly, so the
-        /// picture is as steady as the flight.</summary>
+        /// <summary>Look at the current predicted impact, independently of
+        /// a marked target. Ground track is screen up.</summary>
         internal static void SightCamera(Camera cam, Transform tr)
         {
             if (cam == null || tr == null) return;
@@ -603,7 +635,7 @@ namespace NextDayRevival
             cam.fieldOfView = Mathf.Clamp(F(CfgSightFov, 40f), 10f, 90f);
             Vector3 eye = SightEye(tr);
             Vector3 track = Track(tr);
-            Vector3 look = _aimSet ? (_aim - eye) : _solved ? (_impact - eye) : (track * 2f + Vector3.down);
+            Vector3 look = _solved ? (DisplayImpact(tr) - eye) : (track * 2f + Vector3.down);
             if (look.sqrMagnitude < 0.0001f) look = Vector3.down;
             look.Normalize();
             // Keep 'up' off the look direction: at a vertical look the track
@@ -618,7 +650,8 @@ namespace NextDayRevival
         {
             if (Time.time < _nextRelease) return;
             _nextRelease = Time.time + Mathf.Max(0.1f, F(CfgInterval, 0.4f));
-            int have = CountOf(plane);
+            int have;
+            if (!_count.TryGetValue(_sightView, out have)) have = 0;
             if (have <= 0)
             {
                 Hint(Loc.T("Бомб нет - подвесьте ФАБ-50 на земле", "No bombs aboard - load FAB-50s on the ground"), 3f);
@@ -636,12 +669,9 @@ namespace NextDayRevival
 
             // The scatter: a small random velocity that moves the burst by
             // about sigma metres over the fall. Height and bank make it grow.
-            Vector3 dummy;
-            float fall;
-            if (!Predict(start, vel, out dummy, out fall)) fall = 5f;
+            float fall = _solved ? _fall : 5f;
             float bank = Mathf.Abs(Vector3.Angle(tr.right, Vector3.ProjectOnPlane(tr.right, Vector3.up)));
-            float sigma = Mathf.Max(0f, F(CfgScatter, 1f)) + Mathf.Max(0f, F(CfgScatterPerHeight, 0.015f)) * _agl
-                + Mathf.Max(0f, F(CfgScatterPerBank, 0.12f)) * bank;
+            float sigma = Dispersion(tr, _agl);
             float r = sigma * Gauss();
             float a = UnityEngine.Random.value * Mathf.PI * 2f;
             vel += new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a)) * (r / Mathf.Max(0.5f, fall));
@@ -654,8 +684,8 @@ namespace NextDayRevival
             b.Go = Visual(start, vel);
             _bombs.Add(b);
             SetCount(plane, have - 1, true);
+            _displayCount = have - 1;
             Net.Send(new float[] { 0f, b.Id, start.x, start.y, start.z, vel.x, vel.y, vel.z }, true);
-            try { Mortar.FactionShield.Arm(); } catch (Exception) { }
             RevivalPlugin.L.LogInfo("An2Bombs: bomb " + b.Id + " away at " + start.ToString("0")
                 + ", " + Mathf.RoundToInt(_agl) + " m over the ground, " + Mathf.RoundToInt(_gs * 3.6f)
                 + " km/h, bank " + bank.ToString("0") + ", sigma " + sigma.ToString("0.0") + " m; "
@@ -758,32 +788,34 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("An2Bombs: bomb " + id + " was a dud at " + point.ToString("0") + ".");
                 return;
             }
-            float radius = Mathf.Max(1f, F(CfgRadius, 12f)) * K;
+            float radius = Mathf.Max(1f, F(CfgRadius, 25f)) * K;
             try { RocketHook.Detonate(point + Vector3.up * 0.2f, 0f, radius, 3f); }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("An2Bombs: no visible explosion at " + point.ToString("0") + " - " + ex.Message);
             }
-            int npc, veh, plr;
-            Mortar.Sweep(point, true, radius, Mathf.Max(0f, F(CfgNpcDamage, 500f)),
-                Mathf.Max(0f, F(CfgVehicleDamage, 1200f)), Mathf.Max(0f, F(CfgPlayerDamage, 300f)),
-                out npc, out veh, out plr);
+            QueueBlast(point, radius);
+            OrdnanceBlast.EnqueuePlayers(point, radius, Mathf.Max(0f, F(CfgPlayerDamage, 300f)));
             Depot(point);
             RevivalPlugin.L.LogInfo("An2Bombs: bomb " + id + " burst at " + point.ToString("0")
-                + " - " + npc + " NPC, " + veh + " vehicle, " + plr + " player hit.");
+                + " - damage queued on master.");
         }
 
-        /// <summary>The master's side of somebody else's bomb: its own NPCs
-        /// and every vehicle, as the mortar's SendImpact does.</summary>
+        /// <summary>The master's side of somebody else's bomb: one NPC/vehicle
+        /// pass at the transmitted collision point. Shooter handles players.</summary>
         static void RemoteBurst(Vector3 point)
         {
-            float radius = Mathf.Max(1f, F(CfgRadius, 12f)) * K;
-            int npc, veh, plr;
-            Mortar.Sweep(point, false, radius, Mathf.Max(0f, F(CfgNpcDamage, 500f)),
-                Mathf.Max(0f, F(CfgVehicleDamage, 1200f)), 0f, out npc, out veh, out plr);
+            float radius = Mathf.Max(1f, F(CfgRadius, 25f)) * K;
+            QueueBlast(point, radius);
             Depot(point);
             RevivalPlugin.L.LogInfo("An2Bombs: a player's bomb at " + point.ToString("0")
-                + " - master sweep " + npc + " NPC, " + veh + " vehicle.");
+                + " - damage queued on master.");
+        }
+
+        static void QueueBlast(Vector3 point, float radius)
+        {
+            OrdnanceBlast.Enqueue(point, radius, Mathf.Max(0f, F(CfgNpcDamage, 500f)),
+                Mathf.Max(0f, F(CfgVehicleDamage, 1200f)), 0f);
         }
 
         static void Depot(Vector3 point)
@@ -794,7 +826,7 @@ namespace NextDayRevival
             {
                 if (RevivalTroopInsertion.MasterClient())
                     FuelDepot.Blast(point, Mathf.Max(0f, F(CfgVehicleDamage, 1200f)),
-                        Mathf.Max(1f, F(CfgRadius, 12f)) * K);
+                        Mathf.Max(1f, F(CfgRadius, 25f)) * K);
                 return;
             }
             if (CfgDepotHit != null && !CfgDepotHit.Value) return;
@@ -802,7 +834,7 @@ namespace NextDayRevival
             Vector3 at = An2Repair.Depot;
             float y;
             if (RevivalTroopInsertion.GroundY(at, out y)) at.y = y;
-            float radius = Mathf.Max(1f, F(CfgRadius, 12f)) * K * 1.6f;
+            float radius = Mathf.Max(1f, F(CfgRadius, 25f)) * K * 1.6f;
             try
             {
                 RocketHook.Detonate(at + Vector3.up * (1.5f * K), 0f, radius, 4f);
@@ -1010,179 +1042,255 @@ namespace NextDayRevival
             _hintUntil = Time.time + seconds;
         }
 
+        static GUIStyle _labelStyle;
+        static readonly GUIContent _labelContent = new GUIContent();
+        static readonly GUIContent _bombCaption = new GUIContent();
+        static readonly GUIContent _altCaption = new GUIContent();
+        static readonly GUIContent[] _digits = {
+            new GUIContent("0"), new GUIContent("1"), new GUIContent("2"), new GUIContent("3"),
+            new GUIContent("4"), new GUIContent("5"), new GUIContent("6"), new GUIContent("7"),
+            new GUIContent("8"), new GUIContent("9") };
+        static readonly Vector3[] _circle = MakeCircle();
+        static Material _sightLines;
+        static bool _sightDrawingTried;
+        static string _loadHud;
+        static int _loadCount = -1;
+        static GameObject _loadPlane;
+
+        static Vector3[] MakeCircle()
+        {
+            Vector3[] points = new Vector3[32];
+            for (int i = 0; i < points.Length; i++)
+            {
+                float a = i * Mathf.PI * 2f / points.Length;
+                points[i] = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
+            }
+            return points;
+        }
+
+        static void PrepareSightDrawing()
+        {
+            if (_labelStyle == null)
+            {
+                _labelStyle = new GUIStyle(GUI.skin.label);
+                _labelStyle.fontSize = 14;
+                _bombCaption.text = Loc.T("БОМБ", "BOMBS");
+                _altCaption.text = Loc.T("ВЫС м", "ALT m");
+            }
+            if (!_sightDrawingTried)
+            {
+                _sightDrawingTried = true;
+                Shader shader = Shader.Find("Hidden/Internal-Colored");
+                if (shader == null) return;
+                _sightLines = new Material(shader);
+                _sightLines.hideFlags = HideFlags.HideAndDontSave;
+                _sightLines.SetInt("_SrcBlend", 5);
+                _sightLines.SetInt("_DstBlend", 10);
+                _sightLines.SetInt("_Cull", 0);
+                _sightLines.SetInt("_ZWrite", 0);
+                _sightLines.SetInt("_ZTest", 8);
+            }
+        }
+
+        // Translate the cached solution with the rack between 10 Hz samples.
+        // This removes up to 7 m of sample lag at cruise without another query.
+        static Vector3 DisplayImpact(Transform tr)
+        {
+            Vector3 move = RackOf(tr) - _sampleRack;
+            move.y = 0f;
+            return _impact + move;
+        }
+
         internal static void Draw()
         {
             if (!Enabled) return;
             if (Event.current != null && Event.current.type != EventType.Repaint) return;
-            float cx = Screen.width * 0.5f;
-            float cy = Screen.height * 0.5f;
             bool hint = !string.IsNullOrEmpty(_hint) && Time.time < _hintUntil;
+            bool flying = PlayerAn2.Flying && !PlayerAn2.OnGround;
+            bool loading = PlayerAn2.Plane == null && _near != null && !PlayerAn2.Aboard;
+            if ((!flying && !loading && !hint) || GameUi.WindowOpen) return;
+            PrepareSightDrawing();
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
             GameObject plane = PlayerAn2.Plane;
-
-            if (plane != null && PlayerAn2.Flying)
-            {
-                if (_sight) Sight(cx, cy);
-                else
-                    Label(Loc.T("Бомбы", "Bombs") + " " + CountOf(plane) + "/" + Capacity + "   "
-                          + KeyName(SightKey) + " " + Loc.T("прицел", "sight") + ", "
-                          + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " " + Loc.T("сброс", "release"),
-                          cx, cy + 246f, new Color(0.85f, 0.82f, 0.62f, 1f), 13);
-            }
+            if (plane != null && flying)
+                Sight(cx, cy);
             else if (plane == null && _near != null && !PlayerAn2.Aboard)
             {
-                int n = CountOf(_near);
-                Label("[" + PlayerAn2.KeyOf(CfgLoadKey, KeyCode.R) + "] "
-                      + Loc.T("Подвесить бомбы ФАБ-50", "Load FAB-50 bombs") + " (" + n + "/" + Capacity + ")",
-                      cx, cy + 84f, new Color(0.95f, 0.90f, 0.70f, 1f), 14);
+                // Build only when loading / changing planes, not every repaint.
+                if (_loadHud == null || _loadPlane != _near || Time.time >= _nextLoadHud)
+                {
+                    _nextLoadHud = Time.time + 0.5f;
+                    int n = CountOf(_near);
+                    if (_loadHud == null || _loadPlane != _near || _loadCount != n)
+                    {
+                        _loadPlane = _near; _loadCount = n;
+                        _loadHud = "[" + KeyName(PlayerAn2.KeyOf(CfgLoadKey, KeyCode.R)) + "] "
+                            + Loc.T("Подвесить ФАБ-50", "Load FAB-50") + " (" + n + "/" + Capacity + ")";
+                    }
+                }
+                Label(_loadHud, cx, cy + 84f, new Color(0.95f, 0.90f, 0.70f, 1f), 14);
             }
-            if (hint) Label(_hint, cx, cy + 60f, new Color(1f, 0.92f, 0.70f, 1f), 16);
+            if (hint)
+                Label(_hint, cx, cy + 60f, new Color(1f, 0.92f, 0.70f, 1f), 14);
         }
+        static float _nextLoadHud;
 
-        /// <summary>The bombsight: reticle, pipper, track and heading lines,
-        /// nadir mark, readouts. Drawn over the sight camera, or over the
-        /// normal view when [Graphics] An2Bombsight is off.</summary>
+        // A single GL batch instead of dozens of IMGUI textures/matrix rotations.
+        // Only bomb count and height need text; digits use prebuilt GUIContent.
         static void Sight(float cx, float cy)
         {
             Camera cam = CameraOwner.ViewCamera();
-            Color green = new Color(0.55f, 1f, 0.55f, 0.9f);
-            Color amber = new Color(1f, 0.75f, 0.25f, 0.95f);
-            Transform tr = PlayerAn2.Plane.transform;
-
-            // The fixed reticle: the crosshair the pilot lays with the mouse
-            // (the camera looks at it). The amber pipper below is the burst.
-            if (SightOn)
+            Color amber = new Color(1f, 0.75f, 0.25f, 1f);
+            Color cyan = new Color(0.35f, 0.95f, 1f, 1f);
+            if (cam != null && _solved && _sightLines != null && _sightLines.SetPass(0))
             {
-                Ring(cx, cy, 34f, green);
-                Bar(cx - 90f, cy - 0.5f, 56f, 1.5f, green);
-                Bar(cx + 34f, cy - 0.5f, 56f, 1.5f, green);
-                Bar(cx - 0.5f, cy + 34f, 1.5f, 60f, green);
-                for (int i = 1; i <= 3; i++) Bar(cx - 6f, cy - 34f - i * 18f, 12f, 1.2f, green);
-            }
-            if (cam != null)
-            {
-                // Track line: from the nadir forward along the ground track.
-                Vector3 track = PlayerAn2.Velocity;
-                track.y = 0f;
-                if (track.sqrMagnitude > 1f)
+                Transform tr = PlayerAn2.Plane.transform;
+                Vector3 impact = DisplayImpact(tr);
+                Vector3 centre = impact + Vector3.up * (0.15f * K);
+                GL.PushMatrix();
+                GL.LoadPixelMatrix(0f, Screen.width, Screen.height, 0f);
+                GL.Begin(GL.LINES);
+                GL.Color(amber);
+                // 95% radial dispersion for the release's signed Gaussian scatter.
+                float radius = Mathf.Max(0.5f, 1.96f * _sigma) * K;
+                for (int i = 0; i < _circle.Length; i++)
+                    WorldLine(cam, centre + _circle[i] * radius,
+                        centre + _circle[(i + 1) % _circle.Length] * radius);
+                Vector2 p;
+                if (ToGui(cam, centre, out p) && p.x >= 0f && p.x <= Screen.width
+                    && p.y >= 0f && p.y <= Screen.height)
                 {
-                    Vector3 far = _nadir + track.normalized * (Mathf.Max(60f, _lead * 2.5f) * K);
-                    Segment(cam, _nadir, far, green, 1.5f);
+                    Line(p.x - 5f, p.y, p.x + 5f, p.y);
+                    Line(p.x, p.y - 5f, p.x, p.y + 5f);
                 }
-                // Heading tick: the nose over the ground, short.
-                Vector3 nose = tr.forward;
-                nose.y = 0f;
-                if (nose.sqrMagnitude > 0.0001f && _solved)
-                    Segment(cam, _impact, _impact + nose.normalized * (15f * K), amber, 1.2f);
-                Vector2 s;
-                if (ToGui(cam, _nadir, out s))
+                else TargetMarker(cam, centre, cx, cy);
+                // Each dot represents one remaining bomb at the configured
+                // interval. Assumes current velocity, height and level ground.
+                if (_displayCount > 1)
                 {
-                    Ring(s.x, s.y, 8f, amber);
-                    Label(Loc.T("надир", "nadir"), s.x, s.y + 8f, amber, 11);
+                    WorldLine(cam, centre, centre + _stickStep * (_displayCount - 1));
+                    for (int i = 1; i < _displayCount; i++)
+                        if (ToGui(cam, centre + _stickStep * i, out p))
+                        {
+                            Line(p.x - 3f, p.y, p.x + 3f, p.y);
+                            Line(p.x, p.y - 3f, p.x, p.y + 3f);
+                        }
                 }
-                if (_solved && ToGui(cam, _impact, out s))
+                if (_aimSet)
                 {
-                    Bar(s.x - 7f, s.y - 1f, 14f, 2f, amber);
-                    Bar(s.x - 1f, s.y - 7f, 2f, 14f, amber);
-                    Ring(s.x, s.y, 12f, amber);
-                }
-                // The pipper reaching the crosshair: the moment to release.
-                if (SightOn && _solved && _aimSet)
-                {
-                    Vector3 along = PlayerAn2.Velocity;
-                    along.y = 0f;
-                    Vector3 miss = _aim - _impact;
+                    GL.Color(cyan);
+                    WorldLine(cam, centre, _aim + Vector3.up * K * 0.15f);
+                    TargetMarker(cam, _aim, cx, cy);
+                    Vector3 track = Track(tr), miss = _aim - impact;
                     miss.y = 0f;
-                    float ahead = along.sqrMagnitude > 1f ? Vector3.Dot(miss, along.normalized) / K : 0f;
-                    float wide = along.sqrMagnitude > 1f
-                        ? Mathf.Abs(Vector3.Cross(along.normalized, miss).y) / K : miss.magnitude / K;
-                    float r = Mathf.Max(4f, F(CfgRadius, 25f) * 0.35f);
-                    bool now = ahead < r && ahead > -r && wide < r;
-                    string cue = now ? Loc.T("СБРОС!", "DROP!")
-                        : ahead > 0f && _gs > 1f ? Loc.T("до сброса", "to release") + " "
-                          + (ahead / _gs).ToString("0.0") + " s" : "";
-                    if (cue.Length > 0 && (!now || Mathf.Repeat(Time.time, 0.4f) < 0.28f))
-                        Label(cue, cx, cy + 44f, now ? new Color(1f, 0.3f, 0.25f, 1f) : green, now ? 22 : 13);
+                    float ahead = Vector3.Dot(miss, track) / K;
+                    float cross = Mathf.Abs(Vector3.Cross(track, miss).y) / K;
+                    float tolerance = Mathf.Max(2f, _sigma);
+                    bool now = Mathf.Abs(ahead) <= tolerance && cross <= tolerance && _displayCount > 0;
+                    GL.Color(now ? new Color(0.3f, 1f, 0.35f, 1f) : cyan);
+                    float y = cy + 120f;
+                    Line(cx - 80f, y, cx + 80f, y);
+                    Line(cx, y - 9f, cx, y + 9f);
+                    // Centre means release now; cue moves through centre even
+                    // after a missed target (no automatic target replacement).
+                    float cue = Mathf.Clamp(ahead / Mathf.Max(1f, _gs * 5f), -1f, 1f) * 80f;
+                    Line(cx + cue, y - 15f, cx + cue, y + 15f);
+                    float steer = Mathf.Clamp(Vector3.Cross(track, miss).y / (K * 60f), -1f, 1f) * 80f;
+                    Line(cx + steer - 4f, y + 21f, cx + steer, y + 17f);
+                    Line(cx + steer, y + 17f, cx + steer + 4f, y + 21f);
                 }
+                GL.End();
+                GL.PopMatrix();
             }
+            _labelStyle.fontSize = 14;
+            _labelStyle.normal.textColor = amber;
+            GUI.Label(new Rect(cx - 88f, cy + 158f, 70f, 24f), _bombCaption, _labelStyle);
+            Number(_displayCount, cx - 10f, cy + 158f);
+            GUI.Label(new Rect(cx + 24f, cy + 158f, 65f, 24f), _altCaption, _labelStyle);
+            Number(Mathf.RoundToInt(_agl), cx + 94f, cy + 158f);
+        }
 
-            // Readouts.
-            GameObject plane = PlayerAn2.Plane;
-            float left = SightOn ? cx - 290f : cx - 200f;
-            float top = SightOn ? cy - 170f : cy - 240f;
-            string fall = _solved ? _fall.ToString("0.0") + " s" : "--";
-            Text(Loc.T("ВЫС", "ALT") + " " + Mathf.RoundToInt(_agl) + " m", left, top, green);
-            Text(Loc.T("ПС", "GS") + " " + Mathf.RoundToInt(_gs * 3.6f) + " km/h", left, top + 18f, green);
-            Text(Loc.T("ПАД", "FALL") + " " + fall, left, top + 36f, green);
-            Text(Loc.T("УПР", "LEAD") + " " + Mathf.RoundToInt(_lead) + " m", left, top + 54f, green);
-            Text(Loc.T("СНОС", "DRIFT") + " " + _drift.ToString("0") + " deg", left, top + 72f, green);
-            Text(Loc.T("БОМБ", "BOMBS") + " " + CountOf(plane) + "/" + Capacity, left, top + 90f,
-                 CountOf(plane) > 0 ? amber : new Color(1f, 0.35f, 0.3f, 0.95f));
-            Label(Loc.T("мышь - прицел", "mouse aims") + "   "
-                  + KeyName(PlayerAn2.KeyOf(CfgReleaseKey, KeyCode.Mouse0)) + " " + Loc.T("сброс", "release") + "   "
-                  + KeyName(SightKey) + " " + Loc.T("закрыть прицел", "close sight"),
-                  cx, cy + 246f, new Color(0.80f, 0.85f, 0.90f, 1f), 13);
+        static void Number(int value, float x, float y)
+        {
+            value = Mathf.Clamp(value, 0, 99999);
+            int divisor = 1;
+            while (value / divisor >= 10) divisor *= 10;
+            do
+            {
+                GUI.Label(new Rect(x, y, 12f, 24f), _digits[(value / divisor) % 10], _labelStyle);
+                x += 10f;
+                divisor /= 10;
+            } while (divisor > 0);
         }
 
         static bool ToGui(Camera cam, Vector3 world, out Vector2 gui)
         {
             Vector3 p = cam.WorldToScreenPoint(world);
-            gui = new Vector2(p.x, UnityEngine.Screen.height - p.y);
-            return p.z > 0f && gui.x > -50f && gui.x < UnityEngine.Screen.width + 50f
-                && gui.y > -50f && gui.y < UnityEngine.Screen.height + 50f;
+            gui = new Vector2(p.x, Screen.height - p.y);
+            return p.z > 0f && gui.x > -50f && gui.x < Screen.width + 50f
+                && gui.y > -50f && gui.y < Screen.height + 50f;
         }
 
-        static void Segment(Camera cam, Vector3 a, Vector3 b, Color c, float width)
+        static void WorldLine(Camera cam, Vector3 a, Vector3 b)
         {
-            Vector3 pa = cam.WorldToScreenPoint(a);
-            Vector3 pb = cam.WorldToScreenPoint(b);
+            Vector3 pa = cam.WorldToScreenPoint(a), pb = cam.WorldToScreenPoint(b);
             if (pa.z <= 0f || pb.z <= 0f) return;
-            Vector2 ga = new Vector2(pa.x, UnityEngine.Screen.height - pa.y);
-            Vector2 gb = new Vector2(pb.x, UnityEngine.Screen.height - pb.y);
-            Vector2 d = gb - ga;
-            float len = d.magnitude;
-            if (len < 1f || len > 5000f) return;
-            float angle = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
-            Matrix4x4 keep = GUI.matrix;
-            GUIUtility.RotateAroundPivot(angle, ga);
-            Bar(ga.x, ga.y - width * 0.5f, len, width, c);
-            GUI.matrix = keep;
+            // Clip to the viewport so a distant marker cannot draw an enormous
+            // line across the GUI. Near-plane crossings are deliberately hidden.
+            float ax = pa.x, ay = Screen.height - pa.y;
+            float dx = pb.x - ax, dy = Screen.height - pb.y - ay;
+            float lo = 0f, hi = 1f;
+            if (!Clip(-dx, ax, ref lo, ref hi) || !Clip(dx, Screen.width - ax, ref lo, ref hi)
+                || !Clip(-dy, ay, ref lo, ref hi) || !Clip(dy, Screen.height - ay, ref lo, ref hi)) return;
+            Line(ax + dx * lo, ay + dy * lo, ax + dx * hi, ay + dy * hi);
         }
 
-        static void Ring(float x, float y, float r, Color c)
+        static bool Clip(float p, float q, ref float lo, ref float hi)
         {
-            const int n = 28;
-            for (int i = 0; i < n; i++)
+            if (Mathf.Abs(p) < 0.00001f) return q >= 0f;
+            float r = q / p;
+            if (p < 0f) { if (r > hi) return false; if (r > lo) lo = r; }
+            else { if (r < lo) return false; if (r < hi) hi = r; }
+            return true;
+        }
+
+        static void TargetMarker(Camera cam, Vector3 target, float cx, float cy)
+        {
+            Vector2 p;
+            if (ToGui(cam, target, out p) && p.x >= 12f && p.x <= Screen.width - 12f
+                && p.y >= 12f && p.y <= Screen.height - 12f)
             {
-                float a = i * Mathf.PI * 2f / n;
-                Bar(x + Mathf.Cos(a) * r - 1f, y + Mathf.Sin(a) * r - 1f, 2f, 2f, c);
+                Line(p.x - 8f, p.y, p.x, p.y - 8f); Line(p.x, p.y - 8f, p.x + 8f, p.y);
+                Line(p.x + 8f, p.y, p.x, p.y + 8f); Line(p.x, p.y + 8f, p.x - 8f, p.y);
+                return;
             }
+            Vector3 at = cam.WorldToScreenPoint(target);
+            Vector2 d = new Vector2(at.x - cx, Screen.height - at.y - cy);
+            if (at.z <= 0f) d = -d;
+            if (d.sqrMagnitude < 1f) d = Vector2.down;
+            d.Normalize();
+            float tx = Mathf.Abs(d.x) > 0.001f ? (cx - 20f) / Mathf.Abs(d.x) : 100000f;
+            float ty = Mathf.Abs(d.y) > 0.001f ? (cy - 20f) / Mathf.Abs(d.y) : 100000f;
+            Vector2 tip = new Vector2(cx, cy) + d * Mathf.Min(tx, ty);
+            Vector2 side = new Vector2(-d.y, d.x) * 5f;
+            Vector2 tail = tip - d * 10f;
+            Line(tip.x, tip.y, tail.x + side.x, tail.y + side.y);
+            Line(tip.x, tip.y, tail.x - side.x, tail.y - side.y);
         }
 
-        static void Bar(float x, float y, float w, float h, Color c)
+        static void Line(float ax, float ay, float bx, float by)
         {
-            Color keep = GUI.color;
-            GUI.color = c;
-            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
-            GUI.color = keep;
-        }
-
-        static void Text(string text, float x, float y, Color c)
-        {
-            GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = 13;
-            style.normal.textColor = c;
-            GUI.Label(new Rect(x, y, 200f, 20f), text, style);
+            GL.Vertex3(ax, ay, 0f); GL.Vertex3(bx, by, 0f);
         }
 
         static void Label(string text, float cx, float y, Color colour, int size)
         {
             if (string.IsNullOrEmpty(text)) return;
-            GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = size;
-            style.normal.textColor = colour;
-            GUIContent content = new GUIContent(text);
-            Vector2 measured = style.CalcSize(content);
-            GUI.Label(new Rect(cx - measured.x * 0.5f, y, measured.x, measured.y), content, style);
+            _labelStyle.fontSize = size;
+            _labelStyle.normal.textColor = colour;
+            _labelContent.text = text;
+            Vector2 measured = _labelStyle.CalcSize(_labelContent);
+            GUI.Label(new Rect(cx - measured.x * 0.5f, y, measured.x, measured.y), _labelContent, _labelStyle);
         }
     }
 }

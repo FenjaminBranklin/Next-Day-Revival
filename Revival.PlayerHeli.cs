@@ -467,6 +467,7 @@ namespace NextDayRevival
                 bool falling = Falling(_heli);
 
                 if (Input.GetKeyDown(ViewKey())) _cockpit = !_cockpit;
+                if (_pilot && !falling && Input.GetKeyDown(KeyCode.C)) Mi8Flares.Request(_heli);
                 if (Input.GetKeyDown(JumpKey())) { Why("key " + JumpKey()); Jump(); return; }
                 if (Input.GetKeyDown(BoardKey())) { Why("key " + BoardKey()); Leave(true); return; }
                 if (_pilot && !falling && Input.GetKeyDown(EngineKey()))
@@ -2749,6 +2750,7 @@ namespace NextDayRevival
                      new Color(0.92f, 0.92f, 0.86f, 1f), 15);
 
                 HeliEngine e = EngineOf(_heli);
+                Line(Mi8Flares.Hud(_heli), cx, cy + 215f, new Color(1f, 0.8f, 0.35f, 1f), 13);
                 float power = e == null ? (_engine ? 1f : 0f) : e.Power;
                 Line(Text.Power(Mathf.RoundToInt(power * 100f),
                                 Mathf.RoundToInt(_vel.y / k)),
@@ -2942,6 +2944,7 @@ namespace NextDayRevival
 
             internal static void Send(int kind, float[] content, bool reliable)
             {
+                if (kind == Aboard) AirPilot.Board(_heli, Crocodile.LocalActor(), content);
                 if (!_hooked) return;
                 try
                 {
@@ -2998,8 +3001,10 @@ namespace NextDayRevival
                     {
                         if (f.Length < 2) return;
                         int view = (int)f[0];
+                        Mi8Flares.Pilot(view, sender, f[1] > 0.5f, f.Length >= 3 && f[2] > 0.5f);
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
+                        AirPilot.Board(ByView(view), sender, f);
                         return;
                     }
 

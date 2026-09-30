@@ -201,7 +201,42 @@ namespace NextDayRevival
         public const int S_MercsT = 137;
         public const int S_MercsD = 138;
         public const int S_MercsL = 139;
-        public const int Count = 140;
+        public const int S_UiKitT = 140;
+        public const int S_UiKitD = 141;
+        public const int S_MercNotifyT = 142;
+        public const int S_TraderT = 143;
+        public const int S_TraderD = 144;
+        public const int S_MercPageT = 145;
+        public const int S_MercPageD = 146;
+        public const int S_MercAAT = 147;
+        public const int S_MercAAL = 148;
+        public const int S_AirKillsT = 149;
+        public const int S_ShortRangeT = 150;
+        public const int S_Mi8FlaresT = 151;
+        public const int S_RadarShadowT = 152;
+        public const int S_MercStingerT = 153;
+        public const int S_AaDamageT = 154;
+        public const int S_AaDamageD = 155;
+        public const int S_RetakeRaidsT = 156;
+        public const int S_OrdnanceBlastT = 157;
+        public const int S_AirEventsT = 158;
+        public const int S_NpcAircraftT = 159;
+        public const int S_AirBoundaryT = 160;
+        public const int Sub_PatrolGun = 161;
+        public const int Sub_PatrolAuto = 162;
+        public const int Sub_PatrolKeys = 163;
+        public const int S_EnginePerfT = 164;
+        public const int S_AirPictureT = 165;
+        public const int S_AirPictureD = 166;
+        public const int S_TowerSupportT = 167;
+        public const int S_TowerSupportD = 168;
+        public const int S_AirfieldHoldT = 169;
+        public const int S_AirfieldHoldD = 170;
+        // W edge terrain: the skirt's height query, called inside other slots.
+        public const int S_AirBoundaryH = 171;
+        public const int S_GroundAliveT = 172;
+        public const int S_ParatroopersT = 173;
+        public const int Count = 174;
 
         static readonly string[] Names = new string[]
         {
@@ -323,9 +358,44 @@ namespace NextDayRevival
             "Mercs.Tick",
             "Mercs.Draw",
             "Mercs.LateFrame",
+            "UiKit.Tick",
+            "UiKit.Draw",
+            "MercNotify.Tick",
+            "TraderUi.Tick",
+            "TraderUi.Draw",
+            "MercPage.Tick",
+            "MercPage.Draw",
+            "MercAA.Tick",
+            "MercAA.LateFrame",
+            "AirKills.Tick",
+            "ShortRange.Control",
+            "Mi8Flares.Tick",
+            "RadarShadow.Scan",
+            "MercStinger.Control",
+            "AirDefenceDamage.Tick",
+            "AirDefenceDamage.Draw",
+            "RetakeRaids.Tick",
+            "OrdnanceBlast.Tick",
+            "AirEvents.Tick",
+            "NpcAircraft.Tick",
+            "AirBoundary.Tick",
+            "  Patrol.Gun.Sub",
+            "  Patrol.Auto.Sub",
+            "  Patrol.Keys.Sub",
+            "EnginePerf.Tick",
+            "AirPicture.Tick",
+            "AirPicture.Draw",
+            "TowerSupport.Tick",
+            "TowerSupport.Draw",
+            "AirfieldHold.Tick",
+            "AirfieldHold.Draw",
+            "  AirBoundary.Height.Sub",
+            "GroundAlive.Tick",
+            "Paratroopers.Tick",
         };
 
-        // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI.
+        // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested
+        // sub-slot (inside another slot; shown, never summed).
         static readonly byte[] Kind = new byte[Count];
 
         static FrameProf()
@@ -333,7 +403,8 @@ namespace NextDayRevival
             for (int i = 0; i < Count; i++)
             {
                 string n = Names[i];
-                if ((i >= TurretScope && i <= DroneAlrtD) || i == OtherDraw
+                if (n.EndsWith(".Sub")) Kind[i] = 4;
+                else if ((i >= TurretScope && i <= DroneAlrtD) || i == OtherDraw
                     || n.EndsWith(".Draw") || n.EndsWith(".DrawScope") || n.EndsWith(".DrawMap"))
                     Kind[i] = 3;
                 else if (i == PatrolFixed || n.EndsWith(".FixedUpdate")) Kind[i] = 1;
@@ -508,7 +579,7 @@ namespace NextDayRevival
                     double ours = 0; int top = 0;
                     for (int i = 0; i < Count; i++)
                     {
-                        ours += _acc[i] * TickMs;
+                        if (Kind[i] != 4) ours += _acc[i] * TickMs;
                         if (_acc[i] > _acc[top]) top = i;
                     }
                     _lastSpike = string.Format(
@@ -554,7 +625,7 @@ namespace NextDayRevival
                     int top = 0, topPeak = 0, topKb = 0;
                     for (int i = 0; i < Count; i++)
                     {
-                        measured += _ms[i];
+                        if (Kind[i] != 4) measured += _ms[i];
                         if (_ms[i] > _ms[top]) top = i;
                         if (WinPeak(i) > WinPeak(topPeak)) topPeak = i;
                         if (_kb[i] > _kb[topKb]) topKb = i;
@@ -564,11 +635,11 @@ namespace NextDayRevival
                         + "over50ms={3}/{4} measuredMs={5:0.000} "
                         + "top={6}:{7:0.000} peak4s={8}:{9:0.0} "
                         + "allocKB/frame={10:0.0} topAlloc={11}:{12:0.0} heapMB={13:0} "
-                        + "gc0={14} fixed/frame={15:0.0} | {16}",
+                        + "gc0={14} fixed/frame={15:0.0} | {16} | {17}",
                         _fpsAvg, _low1, _worstMs, _slowFrames, _dtCount,
                         measured, Names[top], _ms[top], Names[topPeak], WinPeak(topPeak),
                         _allocKb, Names[topKb], _kb[topKb], _heapMb,
-                        GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine()));
+                        GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine(), EnginePerf.StatusLine()));
                 }
             }
             catch { /* diagnostics must never throw into the frame loop */ }
@@ -618,8 +689,8 @@ namespace NextDayRevival
 
         static Texture2D _bg;
         const int Shown = 12;
-        static readonly string[] _text = new string[Shown + 12];
-        static readonly Color[] _tint = new Color[Shown + 12];
+        static readonly string[] _text = new string[Shown + 13];
+        static readonly Color[] _tint = new Color[Shown + 13];
         static int _lines;
         static float _textAt;
 
@@ -653,6 +724,7 @@ namespace NextDayRevival
                     case 1: fix += _ms[i]; break;
                     case 2: late += _ms[i]; break;
                     case 3: gui += _ms[i]; break;
+                    case 4: break;
                     default: upd += _ms[i]; break;
                 }
             }
@@ -684,6 +756,7 @@ namespace NextDayRevival
                 _allocKb, _allocKb * _fpsAvg, _heapMb),
                 _allocKb > 8.0 ? new Color(1f, 0.6f, 0.45f, 1f) : plain);
             Add(RenderLine(), soft);
+            Add(EnginePerf.StatusLine(), soft);
             Add("Spike: " + (_lastSpike.Length > 0 ? _lastSpike : "none since F6"),
                 _lastSpike.Length > 0 ? new Color(1f, 0.8f, 0.5f, 1f) : soft);
             Add("Engine/GPU are the rest of the frame. Peak = last 4 s.", soft);

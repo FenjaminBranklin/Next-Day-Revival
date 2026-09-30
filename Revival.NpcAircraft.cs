@@ -76,6 +76,22 @@ namespace NextDayRevival
         public Vector2 Dir;
         float[] _y;
 
+        /// <summary>W AA3: extend only the inbound off-map leg. Reuse the
+        /// already sampled edge height; no new terrain or physics calls.
+        /// Whole sample steps keep the old on-map height profile identical.</summary>
+        internal void ExtendApproach(float targetAlong, float minimum)
+        {
+            int extra = Mathf.Max(0, Mathf.CeilToInt((minimum - targetAlong) / Step));
+            if (extra == 0 || _y == null || _y.Length == 0) return;
+            float run = extra * Step;
+            float[] heights = new float[_y.Length + extra];
+            for (int i = 0; i < extra; i++) heights[i] = _y[0];
+            Array.Copy(_y, 0, heights, extra, _y.Length);
+            _y = heights;
+            From -= Dir * run;
+            Length += run;
+        }
+
         internal static FlightPath Straight(Vector2 from, Vector2 to, float agl, float speed)
         {
             FlightPath p = new FlightPath();
@@ -243,6 +259,10 @@ namespace NextDayRevival
             public int Hits;
             /// <summary>Multiplier on SmallArmsHits (N11: a Tu-95 is 3).</summary>
             public int Toughness = 1;
+            /// <summary>W AA4: hit points and who took them (master), and the
+            /// damage level every client shows as smoke (0..2).</summary>
+            public readonly DamageLedger Ledger = new DamageLedger();
+            public int Level;
             /// <summary>Master, every frame of the flight: the aeroplane and the
             /// distance flown (world units). N11: the drop point of a bomber or
             /// a transport.</summary>
@@ -272,6 +292,14 @@ namespace NextDayRevival
         {
             Flight f;
             return go != null && _flights.TryGetValue(go, out f) && f.Hostile;
+        }
+
+        /// <summary>Every client: an N11 bomber (label "tu95:...").</summary>
+        internal static bool IsTu95(GameObject go)
+        {
+            Flight f;
+            return go != null && _flights.TryGetValue(go, out f) && f.Label != null
+                && f.Label.StartsWith("tu95:", StringComparison.Ordinal);
         }
 
         internal static bool Velocity(GameObject go, out Vector3 vel)
@@ -465,22 +493,46 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ damage
 
-        /// <summary>Master: a hit on an NPC aeroplane. Lethal (a blast on the
-        /// airframe) brings it down; a round counts toward SmallArmsHits.</summary>
+        /// <summary>A hit on an NPC aeroplane by the local player's weapon.
+        /// Lethal (a blast on the airframe) brings it down; a round takes
+        /// 1 / (SmallArmsHits x toughness) of its hit points.</summary>
         internal static void Damage(GameObject go, Vector3 point, bool lethal)
+        {
+            Damage(go, point, lethal ? 1f : -1f, AirKills.Credit());
+        }
+
+        /// <summary>W AA4: <paramref name="amount"/> of the aeroplane's hit
+        /// points (1 = all; below 0 = one rifle round), credited to Photon
+        /// actor <paramref name="actor"/> (0 = an NPC crew). The master keeps
+        /// the only ledger; any other client sends the hit there, and the
+        /// master credits the sender.</summary>
+        internal static void Damage(GameObject go, Vector3 point, float amount, int actor)
         {
             Flight f = Find(go);
             if (f == null || PlayerAn2.Down(go)) return;
             if (!RevivalTroopInsertion.MasterClient())
             {
                 int view = PlayerAn2.View(go);
-                if (view != 0) Net.Send(new float[] { Net.Hit, view, point.x, point.y, point.z, lethal ? 1f : 0f }, true);
+                if (view != 0) Net.Send(new float[] { Net.Hit, view, point.x, point.y, point.z,
+                    amount >= 1f ? 1f : 0f, amount }, true);
                 return;
             }
-            if (!lethal && ++f.Hits < SmallArmsHits * Mathf.Max(1, f.Toughness)) return;
+            Apply(f, point, amount, actor);
+        }
+
+        static void Apply(Flight f, Vector3 point, float amount, int actor)
+        {
+            float dmg = amount < 0f ? AirKillCore.RoundDamage(f.Toughness) : amount;
+            f.Hits++;
+            if (!f.Ledger.Add(dmg, actor))
+            {
+                AirKills.Damaged(f);
+                return;
+            }
             RevivalPlugin.L.LogInfo("NpcAircraft: " + (string.IsNullOrEmpty(f.Label) ? "flight" : f.Label)
-                + " brought down (" + (lethal ? "blast" : f.Hits + " rounds") + ").");
-            if (!GepardAir.Kill(go, point)) PlayerAn2.ShotDown(go, point);
+                + " brought down (" + (amount >= 1f ? "blast" : f.Hits + " hits") + ").");
+            AirKills.Downed(f, point);
+            if (!GepardAir.KillNow(f.Go, point)) PlayerAn2.ShotDown(f.Go, point);
         }
 
         static FieldInfo _camera;
@@ -654,8 +706,11 @@ namespace NextDayRevival
                     }
                     else if (kind == Hit && f.Length >= 6)
                     {
+                        // W AA4: index 6 is the share of hit points; an older
+                        // client's hit is a round or a blast. The sender is paid.
                         GameObject go = PlayerAn2.ByViewId((int)f[1]);
-                        if (go != null) Damage(go, new Vector3(f[2], f[3], f[4]), f[5] > 0.5f);
+                        float amount = f.Length >= 7 ? Mathf.Clamp(f[6], -1f, 1f) : f[5] > 0.5f ? 1f : -1f;
+                        if (go != null) Damage(go, new Vector3(f[2], f[3], f[4]), amount, sender);
                     }
                     else if (kind == Clear)
                     {
@@ -760,42 +815,54 @@ namespace NextDayRevival
                 : Mathf.RoundToInt(Mathf.Repeat(bearing, 360f)) + " deg";
         }
 
-        /// <summary>The panel's option rows (Revival.Admin.cs), GUILayout.</summary>
+        // W-UI4: a value's text is built once per value.
+        static readonly UiMemo _altText = new UiMemo(), _speedText = new UiMemo(), _airText = new UiMemo();
+        static readonly string[] Planes = { "An-2", "Tu-95" };
+
+        /// <summary>The admin panel's option rows (Revival.Admin.cs, World
+        /// tab): kit controls on the AdminLayout cursor.</summary>
         internal static void Options()
         {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("  Altitude", GUILayout.Width(70f));
-            if (GUILayout.Button("-", GUILayout.Width(24f)))
-                AltitudeM = Mathf.Max(MinAltitude, AltitudeM - (AltitudeM > 300 ? 100 : 25));
-            GUILayout.Label(AltitudeM + " m", GUILayout.Width(52f));
-            if (GUILayout.Button("+", GUILayout.Width(24f)))
-                AltitudeM = Mathf.Min(MaxAltitude, AltitudeM + (AltitudeM >= 300 ? 100 : 25));
-            GUILayout.Label("  Speed", GUILayout.Width(52f));
-            if (GUILayout.Button("-", GUILayout.Width(24f))) SpeedKmh = Mathf.Max(MinSpeed, SpeedKmh - 20);
-            GUILayout.Label(SpeedKmh + " km/h", GUILayout.Width(66f));
-            if (GUILayout.Button("+", GUILayout.Width(24f))) SpeedKmh = Mathf.Min(MaxSpeed, SpeedKmh + 20);
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("  From", GUILayout.Width(70f));
-            for (int i = 0; i < Edges.Length; i++)
+            Rect r = AdminLayout.Row();
+            float h = r.height, gap = UiKit.S(UiKit.Gap);
+            float half = (r.width - gap) * 0.5f, lab = half * 0.3f, val = half - lab - 2f * h;
+            for (int k = 0; k < 2; k++)
             {
-                bool on = From == i - 1;
-                if (GUILayout.Toggle(on, Edges[i], "Button", GUILayout.Width(i == 0 ? 64f : 30f)) && !on)
-                    From = i - 1;
+                float x = r.x + k * (half + gap);
+                bool alt = k == 0;
+                AdminLayout.Text(new Rect(x, r.y, lab, h), alt ? "Altitude" : "Speed", UiKit.TextDim);
+                if (UiKit.IconButton(new Rect(x + lab, r.y, h, h), UiIcon.Minus, alt ? "lower" : "slower", true))
+                {
+                    if (alt) AltitudeM = Mathf.Max(MinAltitude, AltitudeM - (AltitudeM > 300 ? 100 : 25));
+                    else SpeedKmh = Mathf.Max(MinSpeed, SpeedKmh - 20);
+                }
+                string text = alt
+                    ? (_altText.Stale(AltitudeM) ? _altText.Set(AltitudeM, AltitudeM + " m") : _altText.Text)
+                    : (_speedText.Stale(SpeedKmh) ? _speedText.Set(SpeedKmh, SpeedKmh + " km/h") : _speedText.Text);
+                UiKit.Label(new Rect(x + lab + h, r.y, val, h), text, UiFont.Body, UiFont.Center, UiKit.Text);
+                if (UiKit.IconButton(new Rect(x + lab + h + val, r.y, h, h), UiIcon.Plus, alt ? "higher" : "faster", true))
+                {
+                    if (alt) AltitudeM = Mathf.Min(MaxAltitude, AltitudeM + (AltitudeM >= 300 ? 100 : 25));
+                    else SpeedKmh = Mathf.Min(MaxSpeed, SpeedKmh + 20);
+                }
             }
-            GUILayout.Label("  in the air: " + NpcAircraft.Airborne());
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("  Aircraft", GUILayout.Width(70f));
-            if (GUILayout.Toggle(!Bomber, "An-2", "Button", GUILayout.Width(64f)) && Bomber) Bomber = false;
-            if (GUILayout.Toggle(Bomber, "Tu-95", "Button", GUILayout.Width(64f)) && !Bomber)
+            r = AdminLayout.Row();
+            AdminLayout.Text(AdminLayout.Part(r, 0f, 0.15f), "From", UiKit.TextDim);
+            From = UiKit.Tabs(AdminLayout.Part(r, 0.15f, 0.85f), From + 1, Edges) - 1;
+            r = AdminLayout.Row();
+            AdminLayout.Text(AdminLayout.Part(r, 0f, 0.15f), "Aircraft", UiKit.TextDim);
+            int plane = UiKit.Tabs(AdminLayout.Part(r, 0.15f, 0.45f), Bomber ? 1 : 0, Planes);
+            if (plane == 0 && Bomber) Bomber = false;
+            else if (plane == 1 && !Bomber)
             {
                 Bomber = true;
                 // A bomber's own height and speed: the air events' numbers.
                 AltitudeM = Mathf.RoundToInt(AirEvents.BomberAltitude(null));
                 SpeedKmh = Mathf.Clamp(Mathf.RoundToInt(AirEvents.BomberKmh), MinSpeed, MaxSpeed);
             }
-            GUILayout.EndHorizontal();
+            int up = NpcAircraft.Airborne();
+            UiKit.Chip(AdminLayout.Part(r, 0.62f, 0.38f), _airText.Stale(up) ? _airText.Set(up, "in the air: " + up) : _airText.Text,
+                up > 0 ? UiTone.Warning : UiTone.Info);
         }
     }
 }

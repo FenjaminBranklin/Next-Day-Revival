@@ -667,14 +667,14 @@ namespace NextDayRevival
 
         static string Value(object o, string field)
         {
-            FieldInfo f = AccessTools.Field(o.GetType(), field);
+            FieldInfo f = FastField.Find(o.GetType(), field);
             object v = f == null ? null : f.GetValue(o);
             return v == null ? "?" : Convert.ToInt32(v).ToString(CultureInfo.InvariantCulture);
         }
 
         static string Active(object o, string field)
         {
-            FieldInfo f = AccessTools.Field(o.GetType(), field);
+            FieldInfo f = FastField.Find(o.GetType(), field);
             GameObject go = f == null ? null : f.GetValue(o) as GameObject;
             if (go == null) return "none";
             return go.activeInHierarchy ? "shown" : (go.activeSelf ? "on, parent off" : "off");

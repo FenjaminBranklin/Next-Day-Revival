@@ -26,20 +26,13 @@
 //     has no collider.
 // Guide is the one entry: each aircraft asks it once per flight frame.
 //
-// THE SKIRT: one ring of low-poly terrain around the rectangle, out to 12 km,
-// that continues the edge: its inner rim is the terrain's own edge height
-// (sampled every 50 u, the highest of three samples so no sliver of sky shows
-// under it, and tucked 25 u under the terrain), then the height drifts to a
-// smoothed edge profile, then to the region's mean, with value-noise hills
-// fading in over the first 800 u. One opaque Standard material, a generated
-// forest/field patch texture in the far-forest colours, lit and fogged like
-// the terrain (the ViewDistance fog makes the haze). No colliders, no
-// shadows, no probes, no NPCs, no loot. Four meshes (one per side, so the
-// frustum culls what is behind), about 11k vertices in all.
-//
-// Cost: the skirt is built once per loaded world (about 2400 terrain samples,
-// a few ms, logged) and then only drawn - four draw calls, ~20k triangles.
-// Per frame: a 2 s timer check; Guide is a rectangle test for the pilot.
+// THE SKIRT: static low-resolution meshes with the adjacent terrain's real
+// splat controls, albedo/normal maps and P3 canopy mip chain. The inner row
+// follows every source heightmap grid intersection; outer rows are decimated.
+// Mirrored relief fades gently into regional hills over 6 km. Built in slices
+// once the terrain and P3 paint are ready. No colliders or per-frame sampling;
+// materials use Unity's terrain lighting/fog without changing global haze.
+// F6: AirBoundary.Tick (idle timer, cached pilot height lookup in Guide).
 //
 // Settings: [AirBoundary] Enabled, BufferU, WarnSeconds, Skirt.
 //
@@ -49,6 +42,7 @@
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments.
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using BepInEx.Configuration;
@@ -85,7 +79,7 @@ namespace NextDayRevival
             _cfgSkirt = cfg.Bind(S, "Skirt", true,
                 "Low-poly hills and forest beyond the map's edge, so the land does "
                 + "not end in the void when seen from the air. Scenery only: no "
-                + "collision, nothing to find. Tiny cost (four meshes, built once).");
+                + "collision, nothing to find. Static meshes, built once after the terrain is ready.");
         }
 
         static bool On { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
@@ -254,181 +248,293 @@ namespace NextDayRevival
         }
 
         // ============================================================== skirt
-
-        const float Step = 50f;             // edge sample spacing, units
-        const float Tuck = 25f;             // inner rim under the terrain
-        const float HillU = 90f;            // hill amplitude
-        const int FanSteps = 6;             // columns round a corner
+        const float Tuck = 25f;
+        const float HillU = 90f;
+        const int FanSteps = 6;
+        const double SliceMs = 0.35;
         static readonly float[] Rings = {
             -Tuck, 0f, 40f, 100f, 200f, 350f, 550f, 800f, 1150f, 1600f, 2200f,
             3000f, 4000f, 5300f, 7000f, 9200f, 12000f };
 
-        static GameObject _skirt;
+        sealed class Source
+        {
+            internal Terrain T;
+            internal TerrainData D;
+            internal Vector3 O, Size;
+            internal float[,] H; // Unity GetHeights API is [z,x]; serialized data is x-major.
+            internal Material[] Mats;
+            internal Texture2D FlatNormal;
+            internal int N;
+            internal bool Contains(float x, float z)
+            {
+                return x >= O.x - 0.01f && z >= O.z - 0.01f
+                    && x <= O.x + Size.x + 0.01f && z <= O.z + Size.z + 0.01f;
+            }
+            internal Vector2 UV(float x, float z)
+            {
+                return new Vector2(Mathf.Clamp01((x - O.x) / Size.x), Mathf.Clamp01((z - O.z) / Size.z));
+            }
+            internal float Height(float x, float z)
+            {
+                Vector2 uv = UV(x, z);
+                float fx = uv.x * (N - 1), fz = uv.y * (N - 1);
+                int ix = Mathf.Min((int)fx, N - 2), iz = Mathf.Min((int)fz, N - 2);
+                return O.y + Size.y * Mathf.Lerp(Mathf.Lerp(H[iz, ix], H[iz, ix + 1], fx - ix),
+                    Mathf.Lerp(H[iz + 1, ix], H[iz + 1, ix + 1], fx - ix), fz - iz);
+            }
+        }
+
+        sealed class Patch
+        {
+            internal Source Src;
+            internal Vector2 A, B, NA, NB;
+            internal bool Corner;
+            internal Vector3[] V;
+            internal int[] I;
+            internal int[][] Bins;
+            internal int Cells;
+
+            internal float Fraction(float x, float z)
+            {
+                if (Corner) return 0f;
+                Vector2 delta = B - A;
+                return ((x - A.x) * delta.x + (z - A.y) * delta.y) / (delta.x * delta.x + delta.y * delta.y);
+            }
+
+            internal bool Height(float x, float z, float depth, out float y)
+            {
+                y = 0f;
+                float t = Fraction(x, z);
+                if (t < -0.00001f || t > 1.00001f || depth > Rings[Rings.Length - 1]) return false;
+                int row = Band(depth), col = Mathf.Min(Cells - 1, (int)(Mathf.Clamp01(t) * Cells));
+                int[] bin = Bins[row * Cells + col];
+                if (bin == null) return false;
+                for (int k = 0; k < bin.Length; k++)
+                {
+                    int i = bin[k];
+                    Vector3 a = V[I[i]], b = V[I[i + 1]], c = V[I[i + 2]];
+                    float bx = b.x - a.x, bz = b.z - a.z, cx = c.x - a.x, cz = c.z - a.z;
+                    float det = bx * cz - bz * cx;
+                    if (Mathf.Abs(det) < 0.00001f) continue;
+                    float px = x - a.x, pz = z - a.z;
+                    float u = (px * cz - pz * cx) / det, v = (bx * pz - bz * px) / det;
+                    if (u < -0.00001f || v < -0.00001f || u + v > 1.00001f) continue;
+                    y = a.y + u * (b.y - a.y) + v * (c.y - a.y);
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        static GameObject _skirt, _pending;
         static Rect _skirtRect;
-        static float _nextTry;
+        static float _nextTry, _mean;
         static bool _warned;
-        static float[] _edge, _smooth;      // per Step of perimeter, from (xMin, yMin) anticlockwise
-        static float _mean;
-        static Rect _hRect;                 // the rectangle _edge belongs to
-        static Material _mat;
-
-        /// <summary>Builds the skirt once the world (and the tile) is up; again
-        /// after a scene change took it away.</summary>
-        internal static void Tick()
-        {
-            bool want = _cfgSkirt == null || _cfgSkirt.Value;
-            if (!want)
-            {
-                if (_skirt != null) { UnityEngine.Object.Destroy(_skirt); _skirt = null; }
-                return;
-            }
-            if (Time.unscaledTime < _nextTry) return;
-            _nextTry = Time.unscaledTime + 2f;
-            Rect r = Play;
-            if (_skirt != null && _skirtRect == r) return;
-            try { Build(r); }
-            catch (Exception ex)
-            {
-                if (!_warned) { _warned = true; RevivalPlugin.L.LogWarning("AirBoundary skirt: " + ex); }
-                _nextTry = Time.unscaledTime + 30f;
-            }
-        }
-
-        /// <summary>The world's edge point at perimeter distance s (anticlockwise
-        /// from the south-west corner) and the side it is on (0 south, 1 east,
-        /// 2 north, 3 west).</summary>
-        static Vector2 Perimeter(Rect r, float s, out int side)
-        {
-            float w = r.width, h = r.height, p = 2f * (w + h);
-            s = Mathf.Repeat(s, p);
-            if (s < w) { side = 0; return new Vector2(r.xMin + s, r.yMin); }
-            s -= w;
-            if (s < h) { side = 1; return new Vector2(r.xMax, r.yMin + s); }
-            s -= h;
-            if (s < w) { side = 2; return new Vector2(r.xMax - s, r.yMax); }
-            s -= w;
-            side = 3;
-            return new Vector2(r.xMin, r.yMax - s);
-        }
-
+        static IEnumerator _build;
+        static Source[] _sources;
+        static Patch[] _patches;
+        static int _revision = -1;
+        static readonly Stopwatch _slice = new Stopwatch();
         static readonly Vector2[] Normals = {
             new Vector2(0f, -1f), new Vector2(1f, 0f), new Vector2(0f, 1f), new Vector2(-1f, 0f) };
 
-        /// <summary>Perimeter distance of the rectangle point nearest to x/z.</summary>
-        static float ArcOf(Rect r, float x, float z)
+        internal static void Tick()
         {
-            float qx = Mathf.Clamp(x, r.xMin, r.xMax), qz = Mathf.Clamp(z, r.yMin, r.yMax);
-            float w = r.width, h = r.height;
-            if (z <= r.yMin) return qx - r.xMin;
-            if (x >= r.xMax) return w + (qz - r.yMin);
-            if (z >= r.yMax) return w + h + (r.xMax - qx);
-            return 2f * w + h + (r.yMax - qz);
+            FrameProf.S(FrameProf.S_AirBoundaryT);
+            try { Step(); }
+            catch (Exception ex)
+            {
+                if (_pending != null) UnityEngine.Object.Destroy(_pending);
+                _pending = null; _build = null;
+                if (!_warned) { _warned = true; RevivalPlugin.L.LogWarning("AirBoundary skirt: " + ex); }
+                _nextTry = Time.unscaledTime + 30f;
+            }
+            finally { FrameProf.E(FrameProf.S_AirBoundaryT); }
         }
 
-        /// <summary>Terrain height: the east world's own lookup (the tile's
-        /// drawing terrain), else whichever active terrain contains the point.</summary>
-        static bool Ground(Vector3 at, out float y)
+        static void Step()
         {
-            if (EastWorld.On) return RevivalTroopInsertion.TerrainHeight(at, out y);
-            y = 0f;
-            Terrain[] all = Terrain.activeTerrains;
+            if (_cfgSkirt != null && !_cfgSkirt.Value)
+            {
+                if (_skirt != null) UnityEngine.Object.Destroy(_skirt);
+                if (_pending != null) UnityEngine.Object.Destroy(_pending);
+                _skirt = _pending = null; _build = null; _sources = null; _patches = null;
+                return;
+            }
+            if (_build != null)
+            {
+                if (_pending == null || Play != _skirtRect)
+                {
+                    if (_pending != null) UnityEngine.Object.Destroy(_pending);
+                    _pending = null; _build = null; return;
+                }
+                _slice.Reset(); _slice.Start();
+                if (!_build.MoveNext()) { _build = null; _nextTry = Time.unscaledTime + 2f; }
+                return;
+            }
+            if (_skirt == null) { _sources = null; _patches = null; }
+            if (Time.unscaledTime < _nextTry) return;
+            _nextTry = Time.unscaledTime + 2f;
+            Rect r = Play;
+            if (_skirt != null && _skirtRect == r)
+            {
+                // P3 quality/bench changes only rebind shared textures, never rebuild geometry.
+                if (FarForest.GroundReady && _revision != FarForest.GroundRevision)
+                {
+                    for (int i = 0; i < _sources.Length; i++) BindMaterials(_sources[i]);
+                    _revision = FarForest.GroundRevision;
+                }
+                return;
+            }
+            if (!FarForest.GroundReady) return;
+            Terrain[] all = Terrain.activeTerrains; // only while waiting for a world
+            List<Source> sources = new List<Source>();
             for (int i = 0; i < all.Length; i++)
             {
                 Terrain t = all[i];
-                // A terrain that only draws trees (GW_Scene_1's billboard
-                // twins) has a flat stand-in heightmap: not the ground.
-                if (t == null || t.terrainData == null || !t.drawHeightmap) continue;
-                Vector3 o = t.GetPosition(), size = t.terrainData.size;
-                if (at.x < o.x || at.z < o.z || at.x > o.x + size.x || at.z > o.z + size.z) continue;
-                y = o.y + t.SampleHeight(at);
-                return true;
+                if (t == null || !t.drawHeightmap || !t.isActiveAndEnabled || t.terrainData == null) continue;
+                TerrainData d = t.terrainData;
+                Vector3 o = t.GetPosition(), sz = d.size;
+                if (d.alphamapLayers == 0 || o.x >= r.xMax || o.z >= r.yMax
+                    || o.x + sz.x <= r.xMin || o.z + sz.z <= r.yMin) continue;
+                Source src = new Source();
+                src.T = t; src.D = d; src.O = o; src.Size = sz; src.N = d.heightmapResolution;
+                sources.Add(src);
             }
-            return false;
-        }
-
-        /// <summary>Terrain edge height sampled along the perimeter: the highest
-        /// of three samples 2 u inside. False when the world is not up.</summary>
-        static bool SampleEdge(Rect r)
-        {
-            int n = Mathf.RoundToInt(2f * (r.width + r.height) / Step);
-            float[] e = new float[n];
-            int missing = 0;
-            for (int i = 0; i < n; i++)
-            {
-                float best = float.NaN;
-                for (int k = -1; k <= 1; k++)
+            if (sources.Count == 0) { _sources = null; return; }
+            Source[] found = sources.ToArray();
+            // Require all four corners and the two long-side tile joins before building.
+            for (int side = 0; side < 4; side++)
+                for (int k = 0; k <= 2; k++)
                 {
-                    int side;
-                    Vector2 p = Perimeter(r, i * Step + k * 17f, out side);
-                    Vector3 at = new Vector3(Mathf.Clamp(p.x, r.xMin + 2f, r.xMax - 2f), 0f,
-                                             Mathf.Clamp(p.y, r.yMin + 2f, r.yMax - 2f));
-                    float y;
-                    if (!Ground(at, out y)) continue;
-                    if (float.IsNaN(best) || y > best) best = y;
+                    Vector2 p = Point(r, side, k * 0.5f);
+                    if (Find(found, p.x, p.y) == null) return;
                 }
-                e[i] = best;
-                if (float.IsNaN(best)) missing++;
-            }
-            if (missing > n / 10) return false;
-            // A hole in the samples takes the last good height.
-            float last = float.NaN;
-            for (int pass = 0; pass < 2; pass++)
-                for (int i = 0; i < n; i++)
-                {
-                    if (!float.IsNaN(e[i])) last = e[i];
-                    else if (!float.IsNaN(last) && pass == 1) e[i] = last;
-                }
-            double sum = 0;
-            for (int i = 0; i < n; i++) sum += e[i];
-            _mean = (float)(sum / n);
-            // The smoothed profile: +-600 u box filter round the ring.
-            const int half = 12;
-            float[] m = new float[n];
-            for (int i = 0; i < n; i++)
-            {
-                float t = 0f;
-                for (int k = -half; k <= half; k++) t += e[((i + k) % n + n) % n];
-                m[i] = t / (2 * half + 1);
-            }
-            _edge = e;
-            _smooth = m;
-            _hRect = r;
-            return true;
+            if (_skirt != null) UnityEngine.Object.Destroy(_skirt);
+            _skirt = null; _sources = null;
+            _skirtRect = r;
+            _pending = new GameObject("NDR_AirSkirt");
+            _pending.AddComponent<AirSkirtAssets>(); // active once so OnDestroy also runs on an aborted build
+            _pending.SetActive(false);
+            _build = Build(r, found, _pending);
         }
 
-        static float Along(float[] a, float s)
+        static Source Find(Source[] sources, float x, float z)
         {
-            int n = a.Length;
-            float f = Mathf.Repeat(s / Step, n);
-            int i = (int)f;
-            return Mathf.Lerp(a[i % n], a[(i + 1) % n], f - i);
+            for (int i = 0; i < sources.Length; i++)
+                if (sources[i].Contains(x, z)) return sources[i];
+            return null;
         }
 
-        /// <summary>The skirt's height at a point outside the rectangle.</summary>
-        static float Skirt(Rect r, float x, float z)
+        static Vector2 Point(Rect r, int side, float t)
         {
+            if (side == 0) return new Vector2(Mathf.Lerp(r.xMin, r.xMax, t), r.yMin);
+            if (side == 1) return new Vector2(r.xMax, Mathf.Lerp(r.yMin, r.yMax, t));
+            if (side == 2) return new Vector2(Mathf.Lerp(r.xMax, r.xMin, t), r.yMax);
+            return new Vector2(r.xMin, Mathf.Lerp(r.yMax, r.yMin, t));
+        }
+
+        // A finite mirrored band: after 40 u of extrusion, the derivative
+        // starts at one and tends smoothly to zero with a 900 u scale. Texture coordinates and heights use the same point.
+        static float Inset(float d) { return 900f * (1f - Mathf.Exp(-Mathf.Max(0f, d - 40f) / 900f)); }
+
+        static Vector2 Mirror(Rect r, float x, float z)
+        {
+            if (x < r.xMin) x = r.xMin + Inset(r.xMin - x);
+            else if (x > r.xMax) x = r.xMax - Inset(x - r.xMax);
+            if (z < r.yMin) z = r.yMin + Inset(r.yMin - z);
+            else if (z > r.yMax) z = r.yMax - Inset(z - r.yMax);
+            return new Vector2(x, z);
+        }
+
+        static float Skirt(Rect r, Source[] sources, float mean, float x, float z)
+        {
+            Vector2 p = Mirror(r, x, z);
+            Source src = Find(sources, p.x, p.y);
+            float y = src == null ? mean : src.Height(p.x, p.y);
             float d = Depth(r, x, z);
-            float s = ArcOf(r, x, z);
-            float e = Along(_edge, s), m = Along(_smooth, s);
-            float t1 = Smooth((d - 40f) / 900f);
-            float t2 = Smooth((d - 600f) / 5000f);
-            float y = Mathf.Lerp(e, m, t1);
-            y = Mathf.Lerp(y, _mean - 30f, t2);
-            y += Fbm(x, z) * HillU * Smooth(d / 800f);
-            // Past the far clip of any profile the rim sinks below the horizon.
+            y = Mathf.Lerp(y, mean - 30f, Smooth((d - 600f) / 6000f));
+            y += Fbm(x, z) * HillU * Smooth((d - 100f) / 1200f);
             if (d > 9000f) y -= (d - 9000f) * 0.06f;
             return y;
         }
 
-        /// <summary>Skirt height under a point beyond the edge, for the
-        /// aircraft's clearance. False inside the map or with no skirt data.</summary>
         internal static bool Height(float x, float z, out float y)
         {
-            y = 0f;
-            if (_edge == null || _hRect != Play) return false;
-            if (Depth(_hRect, x, z) <= 0f) return false;
-            y = Skirt(_hRect, x, z);
-            return true;
+            FrameProf.S(FrameProf.S_AirBoundaryH);
+            try
+            {
+                y = 0f;
+                if (_skirt == null || _sources == null || _skirtRect != Play) return false;
+                float depth = Depth(_skirtRect, x, z);
+                if (depth <= 0f) return false;
+                bool corner = (x < _skirtRect.xMin || x > _skirtRect.xMax)
+                    && (z < _skirtRect.yMin || z > _skirtRect.yMax);
+                Vector2 nearest = new Vector2(Mathf.Clamp(x, _skirtRect.xMin, _skirtRect.xMax),
+                    Mathf.Clamp(z, _skirtRect.yMin, _skirtRect.yMax));
+                for (int i = 0; i < _patches.Length; i++)
+                {
+                    Patch p = _patches[i];
+                    if (p.Corner != corner) continue;
+                    if (corner) { if ((p.A - nearest).sqrMagnitude > 0.01f) continue; }
+                    else if ((x - p.A.x) * p.NA.x + (z - p.A.y) * p.NA.y <= 0f) continue;
+                    if (p.Height(x, z, depth, out y)) return true;
+                }
+                // Only past the mesh's 12000 u rim (4.3 km) (far beyond the soft boundary).
+                y = Skirt(_skirtRect, _sources, _mean, x, z);
+                return true;
+            }
+            finally { FrameProf.E(FrameProf.S_AirBoundaryH); }
+        }
+
+        static int Band(float depth)
+        {
+            int row = 0;
+            while (row + 1 < Rings.Length - 1 && depth > Rings[row + 1]) row++;
+            return row;
+        }
+
+        static float EdgeDistance(Rect r, Vector3 a, Vector3 b, Vector2 corner)
+        {
+            // For corner arcs the chord gets closer to the corner than its
+            // endpoints. Include that minimum when assigning lookup bins.
+            float dx = b.x - a.x, dz = b.z - a.z, den = dx * dx + dz * dz;
+            float t = den <= 0f ? 0f : Mathf.Clamp01(((corner.x - a.x) * dx + (corner.y - a.z) * dz) / den);
+            return Depth(r, a.x + t * dx, a.z + t * dz);
+        }
+
+        static IEnumerator IndexPatch(Rect r, Patch p)
+        {
+            p.Cells = p.Corner ? 1 : Mathf.Max(1, Mathf.CeilToInt((p.B - p.A).magnitude / 50f));
+            List<int>[] bins = new List<int>[(Rings.Length - 1) * p.Cells];
+            for (int i = 0; i < p.I.Length; i += 3)
+            {
+                Vector3 a = p.V[p.I[i]], b = p.V[p.I[i + 1]], c = p.V[p.I[i + 2]];
+                float da = Depth(r, a.x, a.z), db = Depth(r, b.x, b.z), dc = Depth(r, c.x, c.z);
+                float lo = Mathf.Min(da, Mathf.Min(db, dc)), hi = Mathf.Max(da, Mathf.Max(db, dc));
+                if (hi <= 0f) continue;
+                if (p.Corner) lo = Mathf.Min(lo, Mathf.Min(EdgeDistance(r, a, b, p.A),
+                    Mathf.Min(EdgeDistance(r, b, c, p.A), EdgeDistance(r, c, a, p.A))));
+                float ta = p.Fraction(a.x, a.z), tb = p.Fraction(b.x, b.z), tc = p.Fraction(c.x, c.z);
+                int c0 = Mathf.Min(p.Cells - 1, (int)(Mathf.Clamp01(Mathf.Min(ta, Mathf.Min(tb, tc))) * p.Cells));
+                int c1 = Mathf.Min(p.Cells - 1, (int)(Mathf.Clamp01(Mathf.Max(ta, Mathf.Max(tb, tc))) * p.Cells));
+                // Include the previous band at an exact radial boundary.
+                int r0 = Band(Mathf.Max(0f, lo - 0.01f)), r1 = Band(hi);
+                for (int row = r0; row <= r1; row++)
+                    for (int col = c0; col <= c1; col++)
+                    {
+                        int bin = row * p.Cells + col;
+                        if (bins[bin] == null) bins[bin] = new List<int>();
+                        bins[bin].Add(i);
+                    }
+                if ((i & 63) == 0 && OverBudget()) yield return null;
+            }
+            p.Bins = new int[bins.Length][];
+            for (int i = 0; i < bins.Length; i++)
+            {
+                if (bins[i] != null) p.Bins[i] = bins[i].ToArray();
+                if ((i & 31) == 0 && OverBudget()) yield return null;
+            }
         }
 
         static float Smooth(float t)
@@ -450,207 +556,261 @@ namespace NextDayRevival
         static float Value(float x, float z)
         {
             int x0 = Mathf.FloorToInt(x), z0 = Mathf.FloorToInt(z);
-            float tx = x - x0, tz = z - z0;
-            tx = tx * tx * (3f - 2f * tx);
-            tz = tz * tz * (3f - 2f * tz);
+            float tx = Smooth(x - x0), tz = Smooth(z - z0);
             float a = Mathf.Lerp(Hash(x0, z0), Hash(x0 + 1, z0), tx);
             float b = Mathf.Lerp(Hash(x0, z0 + 1), Hash(x0 + 1, z0 + 1), tx);
             return Mathf.Lerp(a, b, tz);
         }
 
-        /// <summary>Hills, -1..1: a 1.7 km swell and 600 u knolls.</summary>
         static float Fbm(float x, float z)
         {
             return (0.7f * Value(x / 1700f, z / 1700f)
                     + 0.3f * Value(x / 600f + 17.3f, z / 600f - 9.1f)) * 2f - 1f;
         }
 
-        struct Column
+        static bool OverBudget() { return _slice.Elapsed.TotalMilliseconds >= SliceMs; }
+
+        static IEnumerator Build(Rect r, Source[] sources, GameObject root)
         {
-            internal Vector2 P, N;
-            internal float S;
+            Stopwatch total = Stopwatch.StartNew();
+            AirSkirtAssets owned = root.GetComponent<AirSkirtAssets>();
+            for (int i = 0; i < sources.Length; i++)
+            {
+                Source src = sources[i];
+                src.H = src.D.GetHeights(0, 0, src.N, src.N); // once; never in Guide/Tick steady state
+                src.Mats = Materials(src, owned);
+                yield return null;
+            }
+            double sum = 0; int count = 0;
+            for (int side = 0; side < 4; side++)
+                for (int k = 0; k < 100; k++)
+                {
+                    Vector2 p = Point(r, side, k / 100f);
+                    sum += Find(sources, p.x, p.y).Height(p.x, p.y); count++;
+                }
+            float mean = (float)(sum / count);
+            List<Patch> patches = new List<Patch>();
+            for (int side = 0; side < 4; side++)
+            {
+                Vector2 a = Point(r, side, 0f), b = Point(r, side, 1f);
+                // Split only at source terrain joins; six sides with the east tile.
+                List<float> cuts = new List<float>(); cuts.Add(0f); cuts.Add(1f);
+                for (int i = 0; i < sources.Length; i++)
+                {
+                    Source src = sources[i];
+                    float lo = side % 2 == 0 ? src.O.x : src.O.z;
+                    float hi = lo + (side % 2 == 0 ? src.Size.x : src.Size.z);
+                    float start = side % 2 == 0 ? a.x : a.y, end = side % 2 == 0 ? b.x : b.y;
+                    float t0 = (lo - start) / (end - start), t1 = (hi - start) / (end - start);
+                    if (t0 > 0f && t0 < 1f && !cuts.Contains(t0)) cuts.Add(t0);
+                    if (t1 > 0f && t1 < 1f && !cuts.Contains(t1)) cuts.Add(t1);
+                }
+                cuts.Sort();
+                for (int k = 0; k + 1 < cuts.Count; k++)
+                {
+                    Patch patch = new Patch();
+                    patch.A = Vector2.Lerp(a, b, cuts[k]); patch.B = Vector2.Lerp(a, b, cuts[k + 1]);
+                    patch.NA = patch.NB = Normals[side];
+                    Vector2 mid = (patch.A + patch.B) * 0.5f;
+                    patch.Src = Find(sources, mid.x, mid.y);
+                    if (patch.Src == null) throw new InvalidOperationException("Missing edge ground");
+                    patches.Add(patch);
+                }
+                Patch corner = new Patch();
+                corner.A = corner.B = a; corner.NA = Normals[(side + 3) % 4]; corner.NB = Normals[side];
+                corner.Corner = true; corner.Src = Find(sources, a.x, a.y); patches.Add(corner);
+            }
+            int vertices = 0, triangles = 0, draws = 0, submitted = 0;
+            float seamHeight = 0f, seamUV = 0f;
+            for (int part = 0; part < patches.Count; part++)
+            {
+                Patch patch = patches[part];
+                List<Vector3> v = new List<Vector3>(); List<Vector3> normals = new List<Vector3>();
+                List<Vector2> uv = new List<Vector2>(); List<int> tris = new List<int>();
+                List<float> prev = null; int prevStart = 0;
+                for (int row = 0; row < Rings.Length; row++)
+                {
+                    List<float> at = Row(patch, row);
+                    int rowStart = v.Count;
+                    for (int c = 0; c < at.Count; c++)
+                    {
+                        float t = at[c];
+                        Vector2 p = Vector2.Lerp(patch.A, patch.B, t);
+                        Vector2 n = Vector2.Lerp(patch.NA, patch.NB, t).normalized;
+                        p += n * (patch.Corner ? Mathf.Max(0f, Rings[row]) : Rings[row]);
+                        float y = Skirt(r, sources, mean, p.x, p.y);
+                        if (row == 0) y -= 5f; // covered overlap under real terrain
+                        v.Add(new Vector3(p.x, y, p.y));
+                        Vector2 mirrored = Mirror(r, p.x, p.y);
+                        Vector2 texUV = patch.Src.UV(mirrored.x, mirrored.y);
+                        uv.Add(texUV);
+                        if (row == 1)
+                        {
+                            seamHeight = Mathf.Max(seamHeight, Mathf.Abs(y - patch.Src.Height(p.x, p.y)));
+                            seamUV = Mathf.Max(seamUV, (texUV - patch.Src.UV(p.x, p.y)).magnitude);
+                        }
+                        // Exact terrain lighting normal at the seam; outer normals from cached heights.
+                        Vector3 normal;
+                        if (row <= 2)
+                        {
+                            Vector2 q = patch.Src.UV(mirrored.x, mirrored.y);
+                            normal = patch.Src.D.GetInterpolatedNormal(q.x, q.y);
+                        }
+                        else
+                        {
+                            const float dx = 5f;
+                            normal = new Vector3(Skirt(r, sources, mean, p.x - dx, p.y)
+                                - Skirt(r, sources, mean, p.x + dx, p.y), 2f * dx,
+                                Skirt(r, sources, mean, p.x, p.y - dx) - Skirt(r, sources, mean, p.x, p.y + dx)).normalized;
+                        }
+                        normals.Add(normal);
+                        if ((c & 31) == 0 && OverBudget()) yield return null;
+                    }
+                    if (prev != null) Stitch(prev, at, prevStart, rowStart, tris);
+                    prev = at; prevStart = rowStart;
+                    if (OverBudget()) yield return null;
+                }
+                Mesh mesh = new Mesh(); mesh.name = "NDR_AirSkirt";
+                owned.Assets.Add(mesh);
+                patch.V = v.ToArray(); patch.I = tris.ToArray();
+                IEnumerator index = IndexPatch(r, patch);
+                while (index.MoveNext()) yield return null;
+                mesh.vertices = patch.V; mesh.normals = normals.ToArray(); mesh.uv = uv.ToArray();
+                int[] indices = patch.I;
+                mesh.subMeshCount = patch.Src.Mats.Length;
+                for (int pass = 0; pass < mesh.subMeshCount; pass++) mesh.SetTriangles(indices, pass);
+                mesh.RecalculateBounds(); mesh.UploadMeshData(true);
+                GameObject go = new GameObject("edge" + part); go.transform.SetParent(root.transform, false);
+                go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                MeshRenderer mr = go.AddComponent<MeshRenderer>(); mr.sharedMaterials = patch.Src.Mats;
+                mr.shadowCastingMode = ShadowCastingMode.Off; mr.receiveShadows = true;
+                mr.lightProbeUsage = LightProbeUsage.Off; mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+                vertices += v.Count; triangles += tris.Count / 3; draws += mesh.subMeshCount;
+                submitted += tris.Count / 3 * mesh.subMeshCount;
+                yield return null; // native upload boundary
+            }
+            _sources = sources; _patches = patches.ToArray(); _mean = mean; _skirt = root; _pending = null;
+            _revision = FarForest.GroundRevision;
+            root.SetActive(true); ViewDistance.KeepVisible(root);
+            RevivalPlugin.L.LogInfo("AirBoundary: terrain skirt built - " + patches.Count + " meshes, "
+                + vertices + " vertices, " + triangles + " triangles (" + submitted + " with " + draws + " splat passes), "
+                + "seam max height step " + seamHeight.ToString("0.0000") + " u, UV step "
+                + seamUV.ToString("0.000000") + " (shared splat colours); "
+                + total.Elapsed.TotalMilliseconds.ToString("0.0") + " ms elapsed (sliced).");
         }
 
-        static void Build(Rect r)
+        // The first two rows include every source cell boundary, not a 50 u
+        // approximation. Farther out, 50..400 u rows reduce geometry sharply.
+        static List<float> Row(Patch patch, int row)
         {
-            // The tile carries the east side: wait for it.
-            float probe;
-            if (EastWorld.On && !Ground(
-                    new Vector3(r.xMax - 100f, 0f, r.center.y), out probe)) return;
-            // Not in a world (menu, loading): five cheap probes, no ring of samples.
-            if (!Ground(new Vector3(r.center.x, 0f, r.center.y), out probe)
-                || !Ground(new Vector3(r.xMin + 20f, 0f, r.center.y), out probe)
-                || !Ground(new Vector3(r.xMax - 20f, 0f, r.center.y), out probe)
-                || !Ground(new Vector3(r.center.x, 0f, r.yMin + 20f), out probe)
-                || !Ground(new Vector3(r.center.x, 0f, r.yMax - 20f), out probe))
-                return;
-            Stopwatch sw = Stopwatch.StartNew();
-            if (!SampleEdge(r)) return;
-            if (_skirt != null) UnityEngine.Object.Destroy(_skirt);
-
-            // Columns anticlockwise; a fan of normals at each corner.
-            List<Column> cols = new List<Column>();
-            List<int> starts = new List<int>();
-            int n = _edge.Length;
-            for (int i = 0; i < n; i++)
+            List<float> points = new List<float>(); points.Add(0f);
+            if (patch.Corner)
             {
-                int side;
-                float s = i * Step;
-                Vector2 p = Perimeter(r, s, out side);
-                bool corner = Mathf.Abs(s) < 0.01f || Mathf.Abs(s - r.width) < 0.01f
-                    || Mathf.Abs(s - r.width - r.height) < 0.01f
-                    || Mathf.Abs(s - 2f * r.width - r.height) < 0.01f;
-                if (corner)
+                for (int i = 1; i < FanSteps; i++) points.Add((float)i / FanSteps);
+            }
+            else
+            {
+                bool x = Mathf.Abs(patch.B.x - patch.A.x) > 0.01f;
+                float start = x ? patch.A.x : patch.A.y, end = x ? patch.B.x : patch.B.y;
+                float origin = x ? patch.Src.O.x : patch.Src.O.z;
+                float spacing = row <= 1 ? (x ? patch.Src.Size.x : patch.Src.Size.z) / (patch.Src.N - 1)
+                    : Mathf.Min(400f, 50f * Mathf.Pow(2f, (row - 2) / 3));
+                int lo = Mathf.FloorToInt((Mathf.Min(start, end) - origin) / spacing) + 1;
+                int hi = Mathf.CeilToInt((Mathf.Max(start, end) - origin) / spacing);
+                for (int i = lo; i < hi; i++) points.Add((origin + i * spacing - start) / (end - start));
+                points.Sort();
+            }
+            points.Add(1f); return points;
+        }
+
+        static void Stitch(List<float> a, List<float> b, int sa, int sb, List<int> tris)
+        {
+            int i = 0, j = 0;
+            while (i + 1 < a.Count || j + 1 < b.Count)
+            {
+                if (j + 1 == b.Count || (i + 1 < a.Count && a[i + 1] <= b[j + 1]))
                 {
-                    starts.Add(cols.Count);
-                    Vector2 a = Normals[(side + 3) % 4], b = Normals[side];
-                    for (int k = 0; k <= FanSteps; k++)
-                    {
-                        Column c;
-                        c.P = p; c.S = s;
-                        c.N = Vector2.Lerp(a, b, (float)k / FanSteps).normalized;
-                        cols.Add(c);
-                    }
+                    tris.Add(sa + i); tris.Add(sa + i + 1); tris.Add(sb + j); i++;
                 }
                 else
                 {
-                    Column c;
-                    c.P = p; c.S = s; c.N = Normals[side];
-                    cols.Add(c);
+                    tris.Add(sa + i); tris.Add(sb + j + 1); tris.Add(sb + j); j++;
                 }
             }
-            cols.Add(cols[0]);              // close the ring
-            starts.Add(cols.Count - 1);
+        }
 
-            _skirt = new GameObject("NDR_AirSkirt");
-            Material mat = Mat();
-            int verts = 0, tris = 0;
-            for (int part = 0; part + 1 < starts.Count; part++)
+        static Material[] Materials(Source src, AirSkirtAssets owned)
+        {
+            if (owned.FlatNormal == null)
             {
-                int c0 = starts[part], c1 = starts[part + 1];
-                Mesh mesh = Strip(r, cols, c0, c1);
-                GameObject go = new GameObject("side" + part);
-                go.transform.SetParent(_skirt.transform, false);
-                go.AddComponent<MeshFilter>().sharedMesh = mesh;
-                MeshRenderer mr = go.AddComponent<MeshRenderer>();
-                mr.sharedMaterial = mat;
-                mr.shadowCastingMode = ShadowCastingMode.Off;
-                mr.receiveShadows = false;
-                mr.lightProbeUsage = LightProbeUsage.Off;
-                mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
-                verts += mesh.vertexCount;
-                tris += mesh.triangles.Length / 3;
+                // Desktop terrain normal decoding accepts DXT5nm (AG) and RG.
+                // Both decode this packed pixel to (0,0,1). Null is white,
+                // which would tilt layers lacking a normal map at the seam.
+                Texture2D flat = new Texture2D(1, 1, TextureFormat.RGBA32, false, true);
+                flat.name = "NDR_EdgeFlatNormal";
+                flat.SetPixel(0, 0, new Color(1f, 0.5f, 1f, 0.5f));
+                flat.Apply(false, true);
+                owned.FlatNormal = flat; owned.Assets.Add(flat);
             }
-            _skirtRect = r;
-            RevivalPlugin.L.LogInfo("AirBoundary: terrain skirt built round "
-                + r.xMin.ToString("0") + ".." + r.xMax.ToString("0") + " x "
-                + r.yMin.ToString("0") + ".." + r.yMax.ToString("0") + " - "
-                + (starts.Count - 1) + " meshes, " + verts + " vertices, " + tris
-                + " triangles, edge mean height " + _mean.ToString("0") + ", "
-                + sw.Elapsed.TotalMilliseconds.ToString("0.0") + " ms.");
-        }
-
-        static Mesh Strip(Rect r, List<Column> cols, int c0, int c1)
-        {
-            int nc = c1 - c0 + 1, nr = Rings.Length;
-            Vector3[] v = new Vector3[nc * nr];
-            Vector2[] uv = new Vector2[v.Length];
-            for (int c = 0; c < nc; c++)
+            src.FlatNormal = owned.FlatNormal;
+            int passes = (src.D.alphamapLayers + 3) / 4;
+            Material[] mats = new Material[passes];
+            bool diffuse = src.T.materialType == Terrain.MaterialType.BuiltInLegacyDiffuse;
+            string kind = diffuse ? "Diffuse" : "Standard";
+            for (int pass = 0; pass < passes; pass++)
             {
-                Column col = cols[c0 + c];
-                float e = Along(_edge, col.S);
-                for (int k = 0; k < nr; k++)
-                {
-                    Vector2 p = col.P + col.N * Rings[k];
-                    float y;
-                    if (Rings[k] < 0f) y = e - 5f;
-                    else if (Rings[k] == 0f) y = e;
-                    else y = Skirt(r, p.x, p.y);
-                    v[c * nr + k] = new Vector3(p.x, y, p.y);
-                    uv[c * nr + k] = new Vector2(p.x / 4000f, p.y / 4000f);
-                }
+                Shader shader = Shader.Find(pass == 0 ? "Nature/Terrain/" + kind
+                    : "Hidden/TerrainEngine/Splatmap/" + kind + "-AddPass");
+                if (shader == null || !shader.isSupported) throw new InvalidOperationException("Terrain splat shader missing: " + kind);
+                Material mat = new Material(shader); mat.name = "NDR_EdgeSplat";
+                mat.enableInstancing = false; // vertices are already real mesh positions
+                mat.renderQueue = pass == 0 ? 1900 : 1901;
+                mats[pass] = mat; owned.Assets.Add(mat);
             }
-            int[] t = new int[(nc - 1) * (nr - 1) * 6];
-            int q = 0;
-            for (int c = 0; c + 1 < nc; c++)
-                for (int k = 0; k + 1 < nr; k++)
+            src.Mats = mats; BindMaterials(src); return mats;
+        }
+
+        static void BindMaterials(Source src)
+        {
+            SplatPrototype[] sp = src.D.splatPrototypes;
+            Texture2D[] control = src.D.alphamapTextures;
+            for (int pass = 0; pass < src.Mats.Length; pass++)
+            {
+                Material mat = src.Mats[pass];
+                mat.SetTexture("_Control", pass < control.Length ? control[pass] : Texture2D.blackTexture);
+                bool normal = false;
+                for (int k = 0; k < 4; k++)
                 {
-                    int a = c * nr + k, b = (c + 1) * nr + k;
-                    // Columns anticlockwise seen from above, rings outward:
-                    // this order is clockwise from above, Unity's front face.
-                    t[q++] = a; t[q++] = b; t[q++] = a + 1;
-                    t[q++] = b; t[q++] = b + 1; t[q++] = a + 1;
+                    int l = pass * 4 + k;
+                    SplatPrototype p = l < sp.Length ? sp[l] : null;
+                    string suffix = k.ToString();
+                    mat.SetTexture("_Splat" + suffix, p == null || p.texture == null ? Texture2D.whiteTexture : p.texture);
+                    Vector2 tile = p == null ? Vector2.one : p.tileSize;
+                    mat.SetTextureScale("_Splat" + suffix, new Vector2(src.Size.x / Mathf.Max(0.01f, tile.x),
+                        src.Size.z / Mathf.Max(0.01f, tile.y)));
+                    mat.SetTextureOffset("_Splat" + suffix, p == null ? Vector2.zero :
+                        new Vector2(p.tileOffset.x / Mathf.Max(0.01f, tile.x), p.tileOffset.y / Mathf.Max(0.01f, tile.y)));
+                    mat.SetTexture("_Normal" + suffix, p == null || p.normalMap == null ? src.FlatNormal : p.normalMap);
+                    mat.SetFloat("_NormalScale" + suffix, 1f);
+                    mat.SetFloat("_Metallic" + suffix, p == null ? 0f : p.metallic);
+                    mat.SetFloat("_Smoothness" + suffix, p == null ? 0f : p.smoothness);
+                    if (p != null && p.normalMap != null) normal = true;
                 }
-            Mesh m = new Mesh();
-            m.name = "NDR_AirSkirt";
-            m.vertices = v;
-            m.uv = uv;
-            m.triangles = t;
-            m.RecalculateNormals();
-            m.RecalculateBounds();
-            m.UploadMeshData(true);
-            return m;
+                if (normal) { mat.EnableKeyword("_NORMALMAP"); mat.EnableKeyword("_TERRAIN_NORMAL_MAP"); }
+                else { mat.DisableKeyword("_NORMALMAP"); mat.DisableKeyword("_TERRAIN_NORMAL_MAP"); }
+            }
         }
+    }
 
-        static Material Mat()
+    // Own only generated assets. Shared terrain textures belong to their scene/P3.
+    internal sealed class AirSkirtAssets : MonoBehaviour
+    {
+        internal readonly List<UnityEngine.Object> Assets = new List<UnityEngine.Object>();
+        internal Texture2D FlatNormal;
+        void OnDestroy()
         {
-            if (_mat != null) return _mat;
-            Shader shader = Shader.Find("Standard");
-            if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
-            if (shader == null) shader = Shader.Find("Diffuse");
-            _mat = new Material(shader);
-            _mat.name = "NDR_AirSkirt";
-            _mat.mainTexture = Land();
-            _mat.color = Color.white;
-            if (_mat.HasProperty("_Glossiness")) _mat.SetFloat("_Glossiness", 0f);
-            if (_mat.HasProperty("_Metallic")) _mat.SetFloat("_Metallic", 0f);
-            return _mat;
-        }
-
-        /// <summary>Forest and field patches over 4 km, tileable: mostly forest
-        /// in the far-forest green, meadows and a few darker stands.</summary>
-        static Texture2D Land()
-        {
-            const int n = 256;
-            Texture2D tex = new Texture2D(n, n, TextureFormat.RGBA32, true);
-            tex.name = "NDR_AirSkirtLand";
-            tex.wrapMode = TextureWrapMode.Repeat;
-            tex.filterMode = FilterMode.Trilinear;
-            tex.anisoLevel = 4;
-            Color forest = new Color(0.20f, 0.27f, 0.13f), dark = new Color(0.15f, 0.21f, 0.10f);
-            Color field = new Color(0.36f, 0.38f, 0.21f), dry = new Color(0.42f, 0.40f, 0.26f);
-            Color32[] px = new Color32[n * n];
-            for (int y = 0; y < n; y++)
-                for (int x = 0; x < n; x++)
-                {
-                    float patch = Tile(x, y, n, 8, 0) * 0.7f + Tile(x, y, n, 32, 5) * 0.3f;
-                    float stand = Tile(x, y, n, 16, 11);
-                    float fine = Tile(x, y, n, 64, 23);
-                    Color open = Color.Lerp(field, dry, Smooth((stand - 0.4f) / 0.4f));
-                    Color wood = Color.Lerp(forest, dark, Smooth((stand - 0.5f) / 0.3f));
-                    Color c = Color.Lerp(open, wood, Smooth((patch - 0.36f) / 0.1f));
-                    c *= 0.85f + 0.3f * fine;
-                    px[y * n + x] = new Color32((byte)(255f * Mathf.Clamp01(c.r)),
-                        (byte)(255f * Mathf.Clamp01(c.g)), (byte)(255f * Mathf.Clamp01(c.b)), 255);
-                }
-            tex.SetPixels32(px);
-            tex.Apply(true, true);
-            return tex;
-        }
-
-        /// <summary>Tileable value noise on a g x g lattice, 0..1.</summary>
-        static float Tile(int x, int y, int n, int g, int seed)
-        {
-            float fx = (float)x * g / n, fy = (float)y * g / n;
-            int x0 = (int)fx, y0 = (int)fy;
-            float tx = fx - x0, ty = fy - y0;
-            tx = tx * tx * (3f - 2f * tx);
-            ty = ty * ty * (3f - 2f * ty);
-            int x1 = (x0 + 1) % g, y1 = (y0 + 1) % g;
-            x0 %= g; y0 %= g;
-            float a = Mathf.Lerp(Hash(x0 + seed * 101, y0), Hash(x1 + seed * 101, y0), tx);
-            float b = Mathf.Lerp(Hash(x0 + seed * 101, y1), Hash(x1 + seed * 101, y1), tx);
-            return Mathf.Lerp(a, b, ty);
+            for (int i = 0; i < Assets.Count; i++) if (Assets[i] != null) UnityEngine.Object.Destroy(Assets[i]);
+            Assets.Clear();
         }
     }
 }

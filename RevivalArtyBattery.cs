@@ -469,6 +469,11 @@ namespace NextDayRevival
         // _posts has a vehicle standing in the world, and the crew, the posting,
         // the spotting and the fire missions all read it.
         static readonly List<Post> _ghosts = new List<Post>();
+        internal static void StingerTargets()
+        {
+            for (int i = 0; i < _posts.Count; i++) Stinger.OfferTarget(_posts[i].DroneModel, 5, 0);
+            for (int i = 0; i < _ghosts.Count; i++) Stinger.OfferTarget(_ghosts[i].DroneModel, 5, 0);
+        }
         static readonly Dictionary<int, Post> _ghostById = new Dictionary<int, Post>();
 
         /// <summary>Seconds a ghost post survives without Mortar naming it

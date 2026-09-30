@@ -338,6 +338,26 @@ namespace NextDayRevival
             return false;
         }
 
+        /// <summary>W Tower 4 (Revival.RetakeRaids.cs): the master flies a
+        /// landing built in code - the garrison's Mi-8 retaking the airfield -
+        /// the editor landing's own way. Not in the editor list, so neither the
+        /// schedule nor the admin's F8 ever picks it.</summary>
+        internal static bool LaunchExternal(Landing d)
+        {
+            if (d == null || !MasterClient()) return false;
+            if (CfgEnabled != null && !CfgEnabled.Value) return false;   // nothing would fly it
+            try { return Begin(d); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Troops external landing: " + ex); return false; }
+        }
+
+        /// <summary>Is a helicopter of this landing name still in the air?</summary>
+        internal static bool Flying(string name)
+        {
+            for (int i = 0; i < _flights.Count; i++)
+                if (_flights[i].Landing != null && _flights[i].Landing.Name == name) return true;
+            return false;
+        }
+
         // ============================================================ the drop
 
         static bool Begin(Landing d)
@@ -729,6 +749,8 @@ namespace NextDayRevival
             Type dummy = RevivalPlugin.TypeByName("HelicopterDummy");
             Component heli = dummy == null ? null : go.GetComponent(dummy);
             object[] data = heli == null ? null : InstantiationData(heli);
+            if (data != null && data.Length >= 3 && data[0] as string == HeliMarker)
+                AirPilot.Npc(go, data[2] as string);
             if (data != null && data.Length >= 2 && data[1] is float)
                 s = Mathf.Clamp((float)data[1], 0.5f, 2f);
             go.transform.localScale = Vector3.one * s;
@@ -752,6 +774,37 @@ namespace NextDayRevival
                 AccessTools.Property(boxType, "center").SetValue(box, new Vector3(2.5f, 5.5f, 3f), null);
                 AccessTools.Property(boxType, "size").SetValue(box, new Vector3(7f, 11f, 38f), null);
             }
+        }
+
+        // W AA4: the troop Mi-8 is an air target (Revival.AirKills.cs).
+
+        /// <summary>Every client: the troop helicopters in this world.</summary>
+        internal static void TroopHelis(List<GameObject> into)
+        {
+            for (int i = 0; i < _ourHelis.Count; i++)
+                if (_ourHelis[i] != null) into.Add(_ourHelis[i]);
+        }
+
+        internal static bool IsTroopHeli(GameObject go)
+        {
+            return go != null && _ourHelis.Contains(go);
+        }
+
+        /// <summary>Master: the flight flying <paramref name="go"/>, or null.</summary>
+        internal static HeliFlight FlightOf(GameObject go)
+        {
+            if (go == null) return null;
+            for (int i = 0; i < _flights.Count; i++)
+                if (_flights[i].Go == go) return _flights[i];
+            return null;
+        }
+
+        /// <summary>Master: the side of the squad a troop helicopter carries
+        /// (null when not known here).</summary>
+        internal static string FactionOf(GameObject go)
+        {
+            HeliFlight f = FlightOf(go);
+            return f == null || f.Landing == null ? null : f.Landing.Faction;
         }
 
         /// <summary>A troop helicopter no flight drives any more - the master
@@ -1158,6 +1211,14 @@ namespace NextDayRevival
         bool _dropped;
         Vector3 _lastPos;
 
+        // W AA4: shot down - the squad never gets out; it falls, spinning,
+        // and lies burning as a wreck with a hold to loot.
+        internal bool Down;
+        bool _wrecked;
+        Vector3 _vel, _fallVel;
+        float _fallSpin, _floor, _floorAt, _wreckUntil;
+        const float WreckSeconds = 900f;
+
         // Vertical distances scale with the helicopter (RevivalTroopInsertion.K),
         // so a bigger machine hovers, sinks and lifts in the same proportions
         // and in the same time as the landing 6.16.0 showed.
@@ -1187,7 +1248,7 @@ namespace NextDayRevival
             try
             {
                 float scale = RevivalTroopInsertion.Scale();
-                object[] data = new object[] { RevivalTroopInsertion.HeliMarker, scale };
+                object[] data = new object[] { RevivalTroopInsertion.HeliMarker, scale, d.Faction };
                 ParameterInfo[] ps = _instantiate.GetParameters();
                 object group = Convert.ChangeType(0, ps[3].ParameterType);
                 Vector3 at = new Vector3(start.x, f._cruiseY, start.z);
@@ -1196,6 +1257,7 @@ namespace NextDayRevival
                     as GameObject;
                 if (f.Go == null) return null;
                 RevivalTroopInsertion.PrepareHeli(f.Go);
+                AirPilot.Npc(f.Go, d.Faction); // Master fallback if instantiationData arrived late.
                 // The vanilla mover must never take over: it idles while
                 // startPosition is zero (HelicopterDummy.HelicopterToTargetMovement).
                 Type dummy = RevivalPlugin.TypeByName("HelicopterDummy");
@@ -1237,16 +1299,34 @@ namespace NextDayRevival
             return _instantiate != null;
         }
 
+        /// <summary>Master: brought down (Revival.AirKills.cs). True the
+        /// first time.</summary>
+        internal bool ShotDown()
+        {
+            if (Down || Go == null) return false;
+            Down = true;
+            _fallVel = _vel;
+            _fallSpin = 0f;
+            _floor = _lz.y;
+            _floorAt = 0f;
+            RevivalPlugin.L.LogInfo("Troops: the helicopter of " + Landing.Name + " was shot down"
+                + (_dropped ? " after the squad got out." : " - the squad dies with it."));
+            return true;
+        }
+
         /// <summary>False when the run is over and the helicopter is gone.</summary>
         internal bool Tick()
         {
             if (Go == null)
             {
-                if (!_dropped) DropNow();
+                // W AA4: only a machine that was landing and was not shot down
+                // sets its men down; one that vanished on the way brings nobody.
+                if (!_dropped && !Down && _stage >= Stage.Descend) DropNow();
                 return false;
             }
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float now = Time.time;
+            if (Down) return Fall(dt, now);
             float k = RevivalTroopInsertion.K;
             Transform tr = Go.transform;
             Vector3 pos = tr.position;
@@ -1332,7 +1412,51 @@ namespace NextDayRevival
             if (_stage == Stage.Ground) { _pitch = 0f; _roll = 0f; }
             tr.position = pos;
             tr.rotation = Quaternion.Euler(_pitch, yaw, _roll);
+            if (dt > 0f) _vel = (pos - _lastPos) / dt;
             _lastPos = pos;
+            return true;
+        }
+
+        /// <summary>W AA4: the fall of a shot-down machine (the tail rotor
+        /// is gone: it spins up as it drops), then the wreck's lifetime.
+        /// The ground is read four times a second, terrain only.</summary>
+        bool Fall(float dt, float now)
+        {
+            if (_wrecked)
+            {
+                if (now < _wreckUntil) return true;
+                NetDestroy(Go);
+                return false;
+            }
+            Transform tr = Go.transform;
+            float k = RevivalTroopInsertion.K;
+            _fallVel += Vector3.down * (9.81f * k * dt);
+            float drag = Mathf.Clamp01(0.4f * dt);
+            _fallVel.x -= _fallVel.x * drag;
+            _fallVel.z -= _fallVel.z * drag;
+            _fallSpin = Mathf.MoveTowards(_fallSpin, 140f, 70f * dt);
+            _yaw += _fallSpin * dt;
+            Vector3 pos = tr.position + _fallVel * dt;
+            if (now >= _floorAt)
+            {
+                _floorAt = now + 0.25f;
+                float y;
+                if (RevivalTroopInsertion.TerrainHeight(pos, out y)) _floor = y;
+            }
+            _pitch = Mathf.MoveTowards(_pitch, 14f, 10f * dt);
+            _roll = Mathf.MoveTowards(_roll, 22f, 14f * dt);
+            if (pos.y <= _floor)
+            {
+                pos.y = _floor;
+                _wrecked = true;
+                _wreckUntil = now + WreckSeconds;
+                tr.position = pos;
+                tr.rotation = Quaternion.Euler(0f, _yaw, 8f);
+                AirKills.TroopHeliCrashed(Go, pos);
+                return true;
+            }
+            tr.position = pos;
+            tr.rotation = Quaternion.Euler(_pitch, _yaw, _roll);
             return true;
         }
 

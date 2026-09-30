@@ -476,7 +476,7 @@ namespace NextDayRevival
                 if (p != null) v = p.GetValue(o, null);
                 else
                 {
-                    FieldInfo f = AccessTools.Field(o.GetType(), name);
+                    FieldInfo f = FastField.Find(o.GetType(), name);
                     if (f != null) v = f.GetValue(o);
                 }
                 return v == null ? 0d : Convert.ToDouble(v);
@@ -1075,7 +1075,7 @@ namespace NextDayRevival
 
         static int IntField(object o, string name)
         {
-            FieldInfo f = AccessTools.Field(o.GetType(), name);
+            FieldInfo f = FastField.Find(o.GetType(), name);
             if (f == null) return int.MinValue;
             try { return Convert.ToInt32(f.GetValue(o)); }
             catch { return int.MinValue; }

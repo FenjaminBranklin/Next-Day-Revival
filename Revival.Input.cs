@@ -139,7 +139,7 @@ namespace NextDayRevival
             get
             {
                 if (!_ready || !CursorGuard.Focused || Time.timeScale == 0f ||
-                    Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen) return false;
+                    Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen || UiKit.AnyOpen) return false;
                 Behaviour ui = _ui(null) as Behaviour;
                 Behaviour global = _global(null) as Behaviour;
                 if (ui == null || !ui.isActiveAndEnabled || global == null) return false;

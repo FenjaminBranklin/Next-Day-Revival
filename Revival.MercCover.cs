@@ -445,6 +445,25 @@ namespace NextDayRevival
                 }
                 s.Add(t, 0.6f);
             }
+            if (s.Count > 0) u.Approach = s.At[0];
+            if (s.Count == 0 && (u.Order.Survive || u.Rally))
+            {
+                // A virtual approach ranks shelter, but is never a combat contact.
+                s.At[0] = u.Approach; s.Weight[0] = 1f;
+                s.Exposed = MercCoverService.Exposed(me, true, u.Approach);
+                s.ExposedAt = now;
+                if (now >= s.NextPick && MercCoverService.MayQuery())
+                {
+                    s.NextPick = now + 1.5f;
+                    Vector3 quietFrom = u.Fight.Out.AnchorOn ? u.Fight.Out.Anchor : me;
+                    CoverPick quiet;
+                    bool bound = u.Rally && u.Fight.Out.AnchorOn;
+                    MercCoverService.Best(quietFrom, s.At, s.Weight, 1, MercCoverService.Radius,
+                        bound ? quietFrom : me, bound ? 24f : 60f, u.Id, out quiet);
+                    s.Pick = quiet; s.PickAt = now; s.PickFrom = quietFrom; s.PickFor = null;
+                }
+                return;
+            }
             if (s.Count == 0)
             {
                 s.Exposed = false;
@@ -494,6 +513,12 @@ namespace NextDayRevival
         /// the stay point, near the owner he follows; a patrol anywhere.</summary>
         static void MercLeash(Fighter f, MercUnit u, out Vector3 centre, out float radius)
         {
+            if (u.Order.Survive || u.Rally)
+            {
+                bool bound = u.Rally && u.Fight.Out.AnchorOn;
+                centre = bound ? u.Fight.Out.Anchor : f.Tr.position;
+                radius = bound ? 24f : 60f; return;
+            }
             MercOrder o = u.Order;
             switch (o.Mode)
             {

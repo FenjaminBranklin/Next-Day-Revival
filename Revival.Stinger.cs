@@ -30,6 +30,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Reflection.Emit;
 using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
@@ -59,6 +60,7 @@ namespace NextDayRevival
         static readonly List<string> _expired = new List<string>();
         static readonly Dictionary<int, int> _lastLaunch = new Dictionary<int, int>();
         static Component _controller;
+        static Component _candidate;
         static Camera _camera;
         static Target _locked;
         static float _held, _scan, _controllerScan;
@@ -72,6 +74,22 @@ namespace NextDayRevival
         static object _room;
         static MethodInfo _roomGetter, _masterGetter, _sense, _weaponState, _ammoUi;
         static FieldInfo _shootState;
+        static FieldInfo _aimField;
+        static Type _controllerType;
+        static PropertyInfo _controllerView;
+        static MethodInfo _viewMine;
+        static readonly RaycastHit[] CastHits = new RaycastHit[64];
+        static bool _castSaturated;
+        static float _visibilityAt;
+        static int _visibilityCursor;
+        static int _epoch, _loaded = -1;
+        static bool _scope;
+        static readonly Dictionary<Type, Func<object, int>> ItemReaders = new Dictionary<Type, Func<object, int>>();
+        static readonly Dictionary<FieldInfo, Func<object, int>> IntReaders = new Dictionary<FieldInfo, Func<object, int>>();
+        static Func<Array, int, int> _roundReader;
+        static Type _roundArrayType;
+        static readonly List<GepardGun.Contact> SeekerAir = new List<GepardGun.Contact>(32);
+        static readonly List<GepardAir.Found> _planes = new List<GepardAir.Found>();
 
         sealed class Target
         {
@@ -79,6 +97,10 @@ namespace NextDayRevival
             public Component Vehicle;
             public Vector3 LocalCentre;
             public int Kind, Actor;
+            public int HeliView;
+            public int Epoch;
+            public bool Seen;
+            public float CheckedAt = -10f;
             public Vector3 Point { get { return Go.transform.TransformPoint(LocalCentre); } }
         }
         sealed class Flight
@@ -88,6 +110,9 @@ namespace NextDayRevival
             public GameObject Model;
             public Vector3 Position, Direction;
             public float Age, NextSend, Born;
+            public bool Diverted;
+            public Vector3 DecoyPoint, CastFrom;
+            public float NextCollision, NextSeeker;
         }
         sealed class Ghost
         {
@@ -117,6 +142,9 @@ namespace NextDayRevival
             try
             {
                 Type ctrl = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
+                _controllerType = ctrl;
+                _controllerView = AccessTools.Property(ctrl, "photonView");
+                _aimField = AccessTools.Field(ctrl, "currentAimingState");
                 MethodInfo fire = AccessTools.Method(ctrl, "Fire", null, null);
                 MethodInfo shot = AccessTools.Method(ctrl, "FireOneShot", null, null);
                 if (fire == null || shot == null) throw new MissingMethodException("Stinger fire hooks");
@@ -139,7 +167,7 @@ namespace NextDayRevival
         static object Field(object obj, string name)
         {
             if (obj == null) return null;
-            FieldInfo f = AccessTools.Field(obj is Type ? (Type)obj : obj.GetType(), name);
+            FieldInfo f = FastField.Find(obj is Type ? (Type)obj : obj.GetType(), name);
             return f == null ? null : f.GetValue(obj is Type ? null : obj);
         }
         static int Int(object value)
@@ -161,20 +189,38 @@ namespace NextDayRevival
             throw new MissingMethodException(type.FullName, "op_Implicit(int)");
         }
         public static bool IsStinger(object ctrl)
-        { return Int(Field(Field(ctrl, "_weaponFirearmData"), "ItemID")) == ItemId; }
+        {
+            object data = Field(ctrl, "_weaponFirearmData");
+            if (data == null) return false;
+            Type type = data.GetType(); Func<object, int> read;
+            if (!ItemReaders.TryGetValue(type, out read))
+            {
+                FieldInfo item = AccessTools.Field(type, "ItemID");
+                if (item == null || type.IsValueType) return false;
+                MethodInfo convert = item.FieldType == typeof(int) ? null : item.FieldType.GetMethod("op_Implicit",
+                    BindingFlags.Public | BindingFlags.Static, null, new Type[] { item.FieldType }, null);
+                if (item.FieldType != typeof(int) && (convert == null || convert.ReturnType != typeof(int))) return false;
+                DynamicMethod method = new DynamicMethod("StingerItem", typeof(int), new Type[] { typeof(object) }, typeof(Stinger), true);
+                ILGenerator il = method.GetILGenerator();
+                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, type); il.Emit(OpCodes.Ldfld, item);
+                if (convert != null) il.Emit(OpCodes.Call, convert);
+                il.Emit(OpCodes.Ret);
+                read = (Func<object, int>)method.CreateDelegate(typeof(Func<object, int>)); ItemReaders[type] = read;
+            }
+            return read(data) == ItemId;
+        }
         static bool Local(object ctrl)
         {
-            PropertyInfo p = AccessTools.Property(ctrl.GetType(), "photonView");
-            object view = p == null ? null : p.GetValue(ctrl, null);
-            PropertyInfo mine = view == null ? null : AccessTools.Property(view.GetType(), "isMine");
-            return mine != null && (bool)mine.GetValue(view, null);
+            object view = _controllerView == null ? null : _controllerView.GetValue(ctrl, null);
+            if (view == null) return false;
+            if (_viewMine == null) _viewMine = AccessTools.PropertyGetter(view.GetType(), "isMine");
+            return _viewMine != null && FastCall.Bool(_viewMine, view);
         }
         static bool Aiming(object ctrl)
         {
             Behaviour b = ctrl as Behaviour;
             if (b == null || !b.isActiveAndEnabled || PlayerHeli.Aboard || Drone.Flying || SurvDrone.Viewing) return false;
-            object aim = Field(ctrl, "currentAimingState");
-            return aim is bool && (bool)aim && !Cursor.visible;
+            return _aimField != null && FastField.GetBool(_aimField, ctrl) && !Cursor.visible;
         }
         public static bool FirePrefix(object __instance)
         {
@@ -209,12 +255,14 @@ namespace NextDayRevival
                 f.Heli = _locked.Kind == 0 ? PlayerHeli.MissileView(_locked.Go) : 0;
                 f.Position = cam.position + cam.forward * 1.2f - cam.up * 0.25f;
                 f.Direction = cam.forward; f.Model = Model();
+                f.CastFrom = f.Position;
                 f.Model.transform.position = f.Position;
                 f.Model.transform.rotation = Quaternion.LookRotation(f.Direction);
                 bullets.SetValue(remaining, slot);
                 _shotFrame = Time.frameCount;
                 _flights.Add(f);
                 Send(f, 0);
+                MissileThreat(f.Target.Go, f.Id);
                 _held = 0; _locked = null;
                 // Fire() retains rate limiting and the normal firing animation.
                 Array show = Field(weapons, "ShowInUI") as Array;
@@ -229,6 +277,7 @@ namespace NextDayRevival
         }
 
         static float LockTime() { return Mathf.Clamp(_lockSeconds.Value, 0.2f, 10f); }
+        internal static float LockSeconds { get { return LockTime(); } }
         static float Range() { return Mathf.Clamp(_range.Value, 20f, 1200f); }
         static float Warhead() { return Mathf.Clamp(_warhead == null ? 1400f : _warhead.Value, 1f, 100000f); }
 
@@ -280,48 +329,78 @@ namespace NextDayRevival
             {
                 Network();
                 object room = _roomGetter == null ? null : _roomGetter.Invoke(null, null);
-                if (!ReferenceEquals(room, _room)) { ClearFlights(); _room = room; }
+                if (!ReferenceEquals(room, _room)) { ClearFlights(); Mi8Flares.Clear(); _room = room; }
                 TickFlights();
+                Mi8Flares.Tick();
                 if (MapTools.LocalPlayer() == null)
-                { _controller = null; _camera = null; ResetLock(); return; }
+                { _controller = null; _candidate = null; _camera = null; ResetLock(); return; }
                 if (Time.time >= _controllerScan)
                 {
                     _controllerScan = Time.time + 0.3f;
-                    _controller = null;
-                    Type type = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
-                    if (type != null)
-                        foreach (Component obj in MapTools.LocalPlayer().GetComponentsInChildren(type, true))
-                        {
-                            Component c = obj as Component;
-                            if (c != null && IsStinger(c) && Local(c)) { _controller = c; break; }
-                        }
+                    Behaviour candidate = _candidate as Behaviour;
+                    if (candidate == null || !candidate.isActiveAndEnabled)
+                        _candidate = FindController(MapTools.LocalPlayer().transform);
+                    Component previous = _controller;
+                    _controller = _candidate != null && IsStinger(_candidate) && Local(_candidate) ? _candidate : null;
+                    if (_controller != previous) _camera = null;
+                    if (_controller != null) { _loaded = Loaded(); _scope = ScopeUp(_controller); }
                 }
-                if (_controller == null || !IsStinger(_controller) || !Aiming(_controller))
+                if (_controller == null || !Aiming(_controller))
                 { _camera = null; ResetLock(); return; }
-                Transform aimCam = Field(_controller, "MainCamera") as Transform;
-                _camera = aimCam == null ? null : aimCam.GetComponent<Camera>();
-                if (_camera == null && aimCam != null) _camera = aimCam.GetComponentInChildren<Camera>();
+                if (_camera == null)
+                {
+                    Transform aimCam = Field(_controller, "MainCamera") as Transform;
+                    _camera = aimCam == null ? null : aimCam.GetComponent<Camera>();
+                    if (_camera == null && aimCam != null) _camera = aimCam.GetComponentInChildren<Camera>();
+                }
                 if (_camera == null) { ResetLock(); return; }
                 if (Time.time >= _scan) { _scan = Time.time + 0.3f; Scan(); }
-                Target best = _locked != null && Inside(_locked) && Visible(_locked) ? _locked : null;
+                if (Time.time >= _visibilityAt)
+                {
+                    _visibilityAt = Time.time + 0.2f;
+                    int budget = 8;
+                    // Reticle candidates get fresh eye-directed LOS first.
+                    for (int i = 0; i < _targets.Count && budget > 0; i++)
+                        if (Inside(_targets[i])) { CheckVisible(_targets[i]); budget--; }
+                    for (int n = 0; n < _targets.Count && budget > 0; n++)
+                    {
+                        int i = _visibilityCursor++ % _targets.Count;
+                        if (_visibilityCursor >= _targets.Count) _visibilityCursor = 0;
+                        if (_targets[i].CheckedAt == Time.time) continue;
+                        CheckVisible(_targets[i]); budget--;
+                    }
+                }
+                Target best = _locked != null && Inside(_locked) && Seen(_locked) ? _locked : null;
                 bool keepTarget = best != null;
                 float distance = float.MaxValue;
                 for (int i = 0; !keepTarget && i < _targets.Count; i++)
                 {
                     Target t = _targets[i];
-                    if (t.Go == null || !Inside(t) || !Visible(t)) continue;
+                    if (t.Go == null || !Inside(t) || !Seen(t)) continue;
                     Vector3 screen = _camera.WorldToScreenPoint(t.Point);
                     float d = (new Vector2(screen.x - Screen.width * 0.5f, screen.y - Screen.height * 0.5f)).sqrMagnitude;
                     if (d < distance) { best = t; distance = d; }
                 }
                 if (best == null) { ResetLock(); return; }
-                if (_locked == null || _locked.Go != best.Go) { _held = 0f; _locked = best; }
-                else _locked = best;
-                _held = Mathf.Min(LockTime(), _held + Mathf.Min(Time.deltaTime, 0.1f));
+                _held = AirDefenceCore.Lock(_held, Time.deltaTime,
+                    _locked != null && _locked.Go == best.Go, Seen(best), LockTime());
+                _locked = best;
             }
             catch (Exception ex) { ResetLock(); Warn(ex); }
         }
         static void ResetLock() { _locked = null; _held = 0f; }
+        static bool Seen(Target t) { return t.Seen && Time.time - t.CheckedAt <= 0.5f; }
+        static void CheckVisible(Target t) { t.Seen = Visible(t); t.CheckedAt = Time.time; }
+        static Component FindController(Transform tr)
+        {
+            if (_controllerType == null) return null;
+            Component c = tr.GetComponent(_controllerType);
+            Behaviour b = c as Behaviour;
+            if (b != null && b.isActiveAndEnabled) return c;
+            for (int i = 0; i < tr.childCount; i++)
+            { c = FindController(tr.GetChild(i)); if (c != null) return c; }
+            return null;
+        }
         static float HalfBox() { return Mathf.Clamp(Screen.height * 0.035f, 18f, 42f); }
         static bool Inside(Target t)
         {
@@ -333,21 +412,29 @@ namespace NextDayRevival
         static bool Visible(Target t)
         {
             if (_camera == null || t.Go == null || !t.Go.activeInHierarchy) return false;
-            if (t.Kind == 0 && PlayerHeli.MissileTarget(PlayerHeli.MissileView(t.Go)) == null) return false;
-            object health = t.Vehicle == null ? null : Field(t.Vehicle, "Durability");
-            if (health is float && (float)health <= 0f) return false;
+            if (t.Kind == 0 && PlayerHeli.MissileTarget(t.HeliView) == null) return false;
+            if (t.Vehicle != null)
+            {
+                FieldInfo health = FastField.Find(t.Vehicle.GetType(), "Durability");
+                if (health != null && health.FieldType == typeof(float) && FastField.GetFloat(health, t.Vehicle) <= 0f) return false;
+            }
             Vector3 origin = _camera.transform.position;
             Vector3 delta = t.Point - origin;
             if (delta.magnitude < 5f || delta.magnitude > Range()) return false;
             RaycastHit hit;
             if (!Cast(origin, delta.normalized, delta.magnitude, out hit)) return true;
-            return hit.transform == t.Go.transform || hit.transform.IsChildOf(t.Go.transform);
+            return !_castSaturated && (hit.transform == t.Go.transform || hit.transform.IsChildOf(t.Go.transform));
         }
         static void Add(GameObject go, int kind, int actor)
         {
             if (go == null || !go.activeInHierarchy) return;
-            for (int i = 0; i < _targets.Count; i++) if (_targets[i].Go == go) return;
+            if (_camera != null && (go.transform.position - _camera.transform.position).sqrMagnitude > Range() * Range() * 1.3f) return;
+            for (int i = 0; i < _targets.Count; i++)
+                if (_targets[i].Go == go) { _targets[i].Epoch = _epoch; return; }
+            if (_targets.Count >= 64) return;
             Target t = new Target(); t.Go = go; t.Kind = kind; t.Actor = actor;
+            if (kind == 0) t.HeliView = PlayerHeli.MissileView(go);
+            t.Epoch = _epoch;
             if (kind == 1) t.Vehicle = go.GetComponent(RevivalPlugin.TypeByName("VehicleGameSystem"));
             if (kind < 2 || kind == 6)
             {
@@ -365,37 +452,25 @@ namespace NextDayRevival
             }
             _targets.Add(t);
         }
-        static void Collection(Type type, string name, string goField, int kind)
-        {
-            object collection = Field(type, name);
-            IDictionary dict = collection as IDictionary;
-            if (dict != null)
-            {
-                foreach (DictionaryEntry pair in dict)
-                    Add(Field(pair.Value, goField) as GameObject, kind, pair.Key is int ? (int)pair.Key : 0);
-                return;
-            }
-            IEnumerable list = collection as IEnumerable;
-            if (list == null) return;
-            foreach (object item in list) Add(item as GameObject ?? Field(item, goField) as GameObject, kind, 0);
-        }
+        internal static void OfferTarget(GameObject go, int kind, int actor) { Add(go, kind, actor); }
         static void Scan()
         {
-            _targets.Clear();
-            _helis.Clear(); PlayerHeli.MissileTargets(_helis);
-            for (int i = 0; i < _helis.Count; i++) Add(_helis[i], 0, 0);
-            foreach (Component c in VehicleScan.All()) if (c != null) Add(c.gameObject, 1, 0);
-            Collection(typeof(Drone.Net), "_fremde", "Go", 2);
-            Collection(typeof(SurvNet), "_ghosts", "Go", 3);
-            Collection(typeof(CrewDrone), "_local", "Go", 4);
-            Collection(typeof(CrewDrone), "_remote", "Go", 4);
-            Collection(typeof(ArtyBattery), "_posts", "DroneModel", 5);
-            Collection(typeof(ArtyBattery), "_ghosts", "DroneModel", 5);
-            // Registered aircraft (GepardAir: the An-2, NPC flyovers), kind 6.
+            _epoch++;
+            for (int i = SeekerAir.Count - 1; i >= 0; i--)
+                if (SeekerAir[i].Go == null || (SeekerAir[i].Go.transform.position - _camera.transform.position).sqrMagnitude > Range() * Range() * 1.3f)
+                    SeekerAir.RemoveAt(i);
+            FlakFire.Collect(SeekerAir, _camera.transform.position, Range());
+            for (int i = 0; i < SeekerAir.Count; i++)
+                if (SeekerAir[i].Kind != 6) Add(SeekerAir[i].Go, SeekerAir[i].Kind, SeekerAir[i].Actor);
             _planes.Clear(); GepardAir.Collect(_planes);
             for (int i = 0; i < _planes.Count; i++) Add(_planes[i].Go, 6, 0);
+            foreach (Component c in VehicleScan.All()) if (c != null) Add(c.gameObject, 1, 0);
+            CrewDrone.StingerTargets();
+            ArtyBattery.StingerTargets();
+            for (int i = _targets.Count - 1; i >= 0; i--)
+                if (_targets[i].Go == null || _targets[i].Epoch != _epoch) _targets.RemoveAt(i);
+            if (_locked != null && _locked.Epoch != _epoch) ResetLock();
         }
-        static readonly List<GepardAir.Found> _planes = new List<GepardAir.Found>();
 
         /// <summary>
         /// The live half of the sight picture. The fixed half - lens, mount,
@@ -410,7 +485,7 @@ namespace NextDayRevival
         {
             if (Event.current != null && Event.current.type != EventType.Repaint) return;
             if (_camera == null || _controller == null || !Aiming(_controller)) return;
-            bool sight = ScopeUp(_controller);
+            bool sight = _scope;
             float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f;
             // Keep the whole box inside the glass, not just its centre.
             float lens = sight ? LensRadius() - HalfBox() - 6f : float.MaxValue;
@@ -418,7 +493,7 @@ namespace NextDayRevival
             for (int i = 0; i < _targets.Count; i++)
             {
                 Target t = _targets[i];
-                if (t.Go == null || !Visible(t)) continue;
+                if (t.Go == null || !Seen(t)) continue;
                 Vector3 p = _camera.WorldToScreenPoint(t.Point);
                 if (p.z <= 0 || p.x < 0 || p.x > Screen.width || p.y < 0 || p.y > Screen.height) continue;
                 if (new Vector2(p.x - cx, p.y - cy).magnitude > lens) continue;
@@ -434,7 +509,7 @@ namespace NextDayRevival
             if (!sight) { Line(cx-7,cy,14,1); Line(cx,cy-7,1,14); }
             // == 0, not <= 0: Loaded returns -1 when the count could not be
             // read, and an unreadable count is not an empty tube.
-            string text = Loaded() == 0
+            string text = _loaded == 0
                 ? Loc.T("ТРУБА ПУСТА - ПЕРЕЗАРЯДИТЕ", "TUBE EMPTY - RELOAD")
                 : _held >= LockTime() ? Loc.T("ЦЕЛЬ ЗАХВАЧЕНА", "TARGET LOCKED")
                 : _held > 0 ? Loc.T("ЗАХВАТ ЦЕЛИ", "ACQUIRING")
@@ -456,13 +531,41 @@ namespace NextDayRevival
             {
                 object weapons = Field(Field(_controller, "_plrInventoryManager"), "_weaponsData");
                 Array bullets = Field(weapons, "Bullets") as Array;
-                object slotValue = Field(weapons, "CurrentSlotID");
-                if (bullets == null || slotValue == null) return -1;
-                int slot = Int(slotValue);
+                if (bullets == null || weapons == null) return -1;
+                FieldInfo slotField = FastField.Find(weapons.GetType(), "CurrentSlotID");
+                if (slotField == null) return -1;
+                Func<object, int> readSlot;
+                if (!IntReaders.TryGetValue(slotField, out readSlot))
+                {
+                    DynamicMethod method = new DynamicMethod("StingerSlot", typeof(int), new Type[] { typeof(object) }, typeof(Stinger), true);
+                    ILGenerator il = method.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, slotField.DeclaringType); il.Emit(OpCodes.Ldfld, slotField);
+                    EmitInt(il, slotField.FieldType); il.Emit(OpCodes.Ret);
+                    readSlot = (Func<object, int>)method.CreateDelegate(typeof(Func<object, int>)); IntReaders[slotField] = readSlot;
+                }
+                int slot = readSlot(weapons);
                 if (slot < 0 || slot >= bullets.Length) return -1;
-                return Int(bullets.GetValue(slot));
+                if (_roundArrayType != bullets.GetType())
+                {
+                    _roundArrayType = bullets.GetType();
+                    Type element = _roundArrayType.GetElementType();
+                    DynamicMethod method = new DynamicMethod("StingerRound", typeof(int), new Type[] { typeof(Array), typeof(int) }, typeof(Stinger), true);
+                    ILGenerator il = method.GetILGenerator();
+                    il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, _roundArrayType); il.Emit(OpCodes.Ldarg_1);
+                    il.Emit(OpCodes.Ldelem, element); EmitInt(il, element); il.Emit(OpCodes.Ret);
+                    _roundReader = (Func<Array, int, int>)method.CreateDelegate(typeof(Func<Array, int, int>));
+                }
+                return _roundReader(bullets, slot);
             }
             catch { return -1; }
+        }
+        static void EmitInt(ILGenerator il, Type type)
+        {
+            if (type == typeof(int)) return;
+            MethodInfo convert = type.GetMethod("op_Implicit", BindingFlags.Public | BindingFlags.Static,
+                null, new Type[] { type }, null);
+            if (convert == null || convert.ReturnType != typeof(int)) throw new MissingMethodException(type.FullName, "op_Implicit(int)");
+            il.Emit(OpCodes.Call, convert);
         }
         static void Line(float x,float y,float w,float h)
         { GUI.DrawTexture(new Rect(x,y,w,h), Texture2D.whiteTexture); }
@@ -509,19 +612,48 @@ namespace NextDayRevival
         }
         // The local body must not block a ray launched from its own camera.
         static bool Cast(Vector3 origin, Vector3 direction, float distance, out RaycastHit nearest)
+        { return CastIgnoring(origin, direction, distance, null, out nearest); }
+
+        static bool CastIgnoring(Vector3 origin, Vector3 direction, float distance, Transform ignore, out RaycastHit nearest)
         {
             nearest = new RaycastHit();
             float best = float.MaxValue;
             GameObject body = MapTools.LocalPlayer();
-            RaycastHit[] hits = Physics.RaycastAll(origin, direction, distance, ~0, QueryTriggerInteraction.Ignore);
-            for (int i = 0; i < hits.Length; i++)
+            int count = Physics.RaycastNonAlloc(origin, direction, CastHits, distance, ~0, QueryTriggerInteraction.Ignore);
+            _castSaturated = count == CastHits.Length;
+            for (int i = 0; i < count; i++)
             {
-                Transform tr = hits[i].transform;
+                Transform tr = CastHits[i].transform;
+                if (ignore != null && (tr == ignore || tr.IsChildOf(ignore))) continue;
                 if (tr == null || (body != null && (tr == body.transform || tr.IsChildOf(body.transform)))) continue;
-                if (hits[i].distance >= best) continue;
-                nearest = hits[i]; best = hits[i].distance;
+                if (CastHits[i].distance >= best) continue;
+                nearest = CastHits[i]; best = CastHits[i].distance;
             }
+            if (_castSaturated && best == float.MaxValue) { nearest = CastHits[0]; return true; }
             return best < float.MaxValue;
+        }
+
+        internal static bool MercVisible(Component merc, GepardGun.Contact c, Vector3 origin)
+        {
+            if (merc == null || c.Go == null || _flights.Count >= 32) return false;
+            Vector3 d = c.Pos - origin;
+            if (d.sqrMagnitude < 25f || d.sqrMagnitude > Range() * Range()) return false;
+            RaycastHit hit;
+            bool blocked = CastIgnoring(origin, d.normalized, d.magnitude, merc.transform, out hit);
+            return !_castSaturated && (!blocked || hit.transform == c.Go.transform || hit.transform.IsChildOf(c.Go.transform));
+        }
+
+        internal static bool LaunchMerc(GepardGun.Contact c, Vector3 origin)
+        {
+            if (!_ready || !_netReady || c.Go == null || _flights.Count >= 32) return false;
+            Target t = new Target(); t.Go = c.Go; t.Kind = c.Kind; t.Actor = c.Actor;
+            t.LocalCentre = c.Go.transform.InverseTransformPoint(c.Pos);
+            Flight f = new Flight(); f.Id = ++_serial; f.Target = t; f.Born = Time.time;
+            f.Heli = c.Kind == 0 ? PlayerHeli.MissileView(c.Go) : 0;
+            f.Direction = (c.Pos - origin).normalized;
+            f.Position = origin + f.Direction * 2f; f.CastFrom = f.Position; f.Model = Model();
+            f.Model.transform.position = f.Position; f.Model.transform.rotation = Quaternion.LookRotation(f.Direction);
+            _flights.Add(f); Send(f, 0); MissileThreat(c.Go, f.Id); return true;
         }
 
         static void ClearFlights()
@@ -532,6 +664,8 @@ namespace NextDayRevival
                 if (g.Model != null) UnityEngine.Object.Destroy(g.Model);
             _flights.Clear(); _ghosts.Clear(); _lastLaunch.Clear();
             _targets.Clear(); _controller = null; _camera = null; ResetLock();
+            _candidate = null;
+            SeekerAir.Clear();
         }
 
         static void TickFlights()
@@ -541,16 +675,21 @@ namespace NextDayRevival
             {
                 Flight f = _flights[i];
                 f.Age = Time.time - f.Born;
-                if (f.Target.Go == null || !f.Target.Go.activeInHierarchy || f.Age > 12f
-                    || (f.Heli != 0 && PlayerHeli.MissileTarget(f.Heli) == null))
+                if (f.Age > 12f || (!f.Diverted && (f.Target.Go == null || !f.Target.Go.activeInHierarchy
+                    || (f.Heli != 0 && PlayerHeli.MissileTarget(f.Heli) == null))))
                 { _flights.RemoveAt(i); Finish(f, false, false); continue; }
+                if (!f.Diverted && Time.time >= f.NextSeeker)
+                {
+                    f.NextSeeker = Time.time + 0.1f;
+                    f.Diverted = Mi8Flares.Decoy(f.Target.Go, f.Position, f.Direction, out f.DecoyPoint);
+                }
                 bool ended = false;
                 float remaining = Mathf.Min(Time.deltaTime, 0.25f);
                 // Short substeps give the same turn rate at ordinary frame rates.
                 while (remaining > 0f)
                 {
                     float dt = Mathf.Min(remaining, 0.025f); remaining -= dt;
-                    Vector3 toward = f.Target.Point - f.Position;
+                    Vector3 toward = (f.Diverted ? f.DecoyPoint : f.Target.Point) - f.Position;
                     f.Direction = Vector3.RotateTowards(f.Direction, toward.normalized, 1.8f * dt, 0f).normalized;
                     float step = 160f * dt;
                     Vector3 previous = f.Position;
@@ -559,16 +698,21 @@ namespace NextDayRevival
                     RaycastHit hit;
                     // Test only up to the target when it lies within this segment:
                     // a wall BEHIND a drone must not swallow the drone impact.
-                    if (Cast(previous, f.Direction, nearTarget ? along : step, out hit))
+                    Vector3 proposed = previous + f.Direction * (nearTarget ? along : step);
+                    Vector3 swept = proposed - f.CastFrom;
+                    if ((nearTarget || Time.time >= f.NextCollision)
+                        && Cast(f.CastFrom, swept.normalized, swept.magnitude, out hit))
                     {
                         f.Position = hit.point;
-                        bool targetHit = hit.transform == f.Target.Go.transform || hit.transform.IsChildOf(f.Target.Go.transform);
-                        _flights.RemoveAt(i); Finish(f, targetHit, true); ended = true; break;
+                        bool targetHit = !f.Diverted && !_castSaturated && (hit.transform == f.Target.Go.transform || hit.transform.IsChildOf(f.Target.Go.transform));
+                        _flights.RemoveAt(i); Finish(f, targetHit, !f.Diverted); ended = true; break;
                     }
+                    if (nearTarget || Time.time >= f.NextCollision)
+                    { f.NextCollision = Time.time + 0.1f; f.CastFrom = proposed; }
                     if (nearTarget)
                     {
                         f.Position = previous + f.Direction * along;
-                        _flights.RemoveAt(i); Finish(f, true, true); ended = true; break;
+                        _flights.RemoveAt(i); Finish(f, !f.Diverted, !f.Diverted); ended = true; break;
                     }
                     f.Position += f.Direction * step;
                 }
@@ -590,6 +734,7 @@ namespace NextDayRevival
 
         static void Finish(Flight f, bool targetHit, bool impact)
         {
+            if (targetHit && Mi8Flares.Protects(f.Target.Go)) { targetHit = false; impact = false; }
             // Remove from the live list BEFORE any external damage/effect call.
             // A failed effect can never turn into another detonation next frame.
             try
@@ -645,7 +790,10 @@ namespace NextDayRevival
             else if (f.Target.Kind == 4)
                 CrewDrone.Beschuss(f.Target.Point - f.Direction * 4f, f.Direction, 8f, Lethal);
             else if (f.Target.Kind == 6)
-                GepardAir.Kill(f.Target.Go, f.Position);
+            {
+                if (AirKills.TroopSide(f.Target.Go) != null) AirKills.StingerHit(f.Target.Go, f.Position);
+                else GepardAir.Kill(f.Target.Go, f.Position);
+            }
             else if (f.Target.Kind == 5)
             {
                 // ArtyBattery.Shoot removes ONE of Post.DroneHits (3) and
@@ -663,7 +811,7 @@ namespace NextDayRevival
         {
             if (!RevivalTroopInsertion.MasterClient()) return;
             GameObject go = PlayerHeli.MissileTarget(view);
-            if (go == null) return;
+            if (go == null || Mi8Flares.Protects(go)) return;
             // The target was already bound to this shot at launch. Verify an
             // impact at the current fuselage (with a small network allowance).
             Collider[] hull = go.GetComponentsInChildren<Collider>();
@@ -727,6 +875,16 @@ namespace NextDayRevival
                 new float[]{point.x,point.y,point.z,direction.x,direction.y,direction.z},sequence},phase!=1,Activator.CreateInstance(_options)});
         }
 
+        internal static void CountermeasurePacket(int phase, int view, int serial, Vector3 point, Vector3 state)
+        { SendPacket(serial, phase, view, point, state, 0); }
+
+        static void MissileThreat(GameObject go, int serial)
+        {
+            int view = PlayerAn2.View(go);
+            if (MercAA.Authority) Mi8Flares.Threat(view);
+            else CountermeasurePacket(8, view, serial, go.transform.position, Vector3.zero);
+        }
+
         public static void OnEvent(byte code,object content,int sender)
         {
             if (code != EventCode || !_netReady) return;
@@ -740,6 +898,21 @@ namespace NextDayRevival
                 for (int i=0;i<v.Length;i++) if(float.IsNaN(v[i])||float.IsInfinity(v[i])) return;
                 Vector3 point = new Vector3(v[0],v[1],v[2]);
                 int phase=(int)p[2], heli=(int)p[3], serial=(int)p[1], sequence=(int)p[5];
+                if (phase == 5) { Mi8Flares.RequestFrom(heli, sender); return; }
+                if (phase == 6)
+                {
+                    if (FromMaster(sender)) Mi8Flares.Apply(heli, serial, point, new Vector3(v[3], v[4], v[5]));
+                    return;
+                }
+                if (phase == 7) { Mi8Flares.Snapshot(); return; }
+                if (phase == 8)
+                {
+                    Ghost shot;
+                    if (serial > 0 && _ghosts.TryGetValue(sender + ":" + serial, out shot)
+                        && Time.time - shot.Born < 1f && (shot.Position - point).sqrMagnitude <= Range() * Range())
+                        Mi8Flares.Threat(heli);
+                    return;
+                }
                 if (phase == 4)
                 {
                     if (FromMaster(sender)) PlayerHeli.MissileImpact(heli, point);

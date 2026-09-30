@@ -97,6 +97,9 @@ namespace NextDayRevival
         // z -1690 / 1690, in world units.
         const float MinX = 3990f, MaxX = 4820f, MinZ = -1690f, MaxZ = 1690f;
 
+        /// <summary>The fence as a world rectangle (x, z) - W Tower 3's map tint.</summary>
+        internal static Rect Fence { get { return Rect.MinMaxRect(MinX, MinZ, MaxX, MaxZ); } }
+
         /// <summary>Is the point inside the fence, widened by margin?</summary>
         internal static bool Inside(Vector3 p, float margin)
         {
@@ -215,10 +218,18 @@ namespace NextDayRevival
             new Pocket("airfield-N4-ammo", "guard", 4, 60f, P(4130f, -1110f))
         };
 
+        // W Perf1: remembered per config text - the tower radar asks this
+        // every frame, and Trim + ToLowerInvariant made two strings each time.
+        static string _factionRaw, _factionIs;
+
         internal static string Faction()
         {
-            string f = CfgFaction == null ? "looter" : CfgFaction.Value.Trim().ToLowerInvariant();
-            return f == "civilian" || f == "traitor" || f == "neutral" ? f : "looter";
+            string raw = CfgFaction == null ? null : CfgFaction.Value;
+            if (_factionIs != null && ReferenceEquals(raw, _factionRaw)) return _factionIs;
+            string f = raw == null ? "looter" : raw.Trim().ToLowerInvariant();
+            _factionRaw = raw;
+            _factionIs = f == "civilian" || f == "traitor" || f == "neutral" ? f : "looter";
+            return _factionIs;
         }
 
         static float RespawnSeconds()
@@ -283,6 +294,8 @@ namespace NextDayRevival
         internal static bool HoldSpawn(RevivalGroundEnemies.Group g)
         {
             if (g == null || !g.Builtin || !g.Name.StartsWith("airfield-", StringComparison.Ordinal)) return false;
+            AirfieldOwnership.Ensure(false);
+            if (AirfieldOwnership.Captured) return true;
             if (g.Seen) return PlayerInside(60f);
             if (PlayerNear(new Vector3(g.X, 0f, g.Z), 150f)) return true;
             for (int i = 0; i < g.Route.Count; i++)
@@ -536,11 +549,13 @@ namespace NextDayRevival
                     // A new room: nothing we spawned is ours any more. Whoever
                     // is master within its first seconds opened the round.
                     _room = room; _started = false; _masterSince = -1f;
-                    _fresh = room != null && (bool)_masterGetter.Invoke(null, null);
+                    AirfieldOwnership.Reset();
+                    if (room != null) AirfieldOwnership.Ensure(false);
+                    _fresh = room != null && FastCall.Bool(_masterGetter, null);
                     for (int i = 0; i < Slots.Length; i++)
                     { Slots[i].Item = null; Slots[i].Placed = false; Slots[i].NextAt = 0f; }
                 }
-                bool master = room != null && (bool)_masterGetter.Invoke(null, null);
+                bool master = room != null && FastCall.Bool(_masterGetter, null);
                 if (!master) { _started = false; _masterSince = -1f; _fresh = false; return; }
                 if (_masterSince < 0f) _masterSince = now;
                 // Ownership and the cached scene objects arrive first.

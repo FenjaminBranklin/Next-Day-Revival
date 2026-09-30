@@ -54,9 +54,9 @@
 //      window panes do not) and the game's explosions (a postfix on
 //      ExplosionObject.NetworkVisualizeExplode, falling off with distance).
 //      The master keeps the hit points (RadarHits, ConsoleHits). Destroyed:
-//      the antenna stops and loses its elements, the scope goes dark, the
-//      screen dies, the guns lose their direction. After RepairMinutes with
-//      no player within 150 u the HQ is back.
+//      the antenna stops and tilts, the scope goes dark, the
+//      screen dies, the guns lose their direction. W AA7 replaces automatic
+//      repair with a toolkit and 60 seconds beside the damaged part.
 //   5  EXTRAS. The air raid siren on the tower roof: on the master's word
 //      when a hostile aircraft is within SirenRange of a working radar; when
 //      it starts, the NPCs round the airfield are alarmed (the game's own
@@ -150,8 +150,7 @@ namespace NextDayRevival
             CfgExplosionHits = cfg.Bind(S, "ExplosionHits", 40,
                 "Hits an explosion is worth at its centre (falling off to 0 at its radius + 1.5 u).");
             CfgRepair = cfg.Bind(S, "RepairMinutes", 30f,
-                "A destroyed radar or console is working again after this many minutes, never with a "
-                + "player within 150 u.");
+                "Legacy setting (unused): repair now requires a toolkit and 60 seconds at the damaged part.");
             CfgOpRespawn = cfg.Bind(S, "OperatorRespawnMinutes", 35f, "A dead NPC operator is replaced after this many minutes.");
             CfgDirReaction = cfg.Bind(S, "DirectedReaction", 0.45f,
                 "With an operator: the guns' Reaction x this (radar-cued: they are laid before the target is seen).");
@@ -166,6 +165,7 @@ namespace NextDayRevival
             CfgEventCode = cfg.Bind(S, "NetworkEventCode", 197,
                 "Photon event code for the HQ's state, hits and commands. Must not overlap any other "
                 + "channel (0..199).");
+            AirPicture.BindConfig(cfg, S);
         }
 
         internal static bool On
@@ -220,11 +220,9 @@ namespace NextDayRevival
         internal static int ControlSide = -1;                  // Fraction value whose orders stand on the guns, -1 none
 
         // master only
-        static float _radarHits, _consoleHits, _radarDeadAt = -1f, _consoleDeadAt = -1f;
         static float _opUntil;
         static float _nextMaster, _nextBroadcast, _sirenSince = -100f, _lastThreat = -100f;
         static bool _dirty, _wasMaster, _directionSet;
-        static readonly List<Vector4> _booms = new List<Vector4>();   // xyz + time of reported explosions
         static readonly List<string> _foreignOrders = new List<string>();   // guns holding another side's orders
 
         internal static bool RadarAlive { get { return RadarHp > 0f; } }
@@ -287,24 +285,14 @@ namespace NextDayRevival
                 }
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerRadar: shot hook: " + ex.Message); }
-            try
-            {
-                Type t = RevivalPlugin.TypeByName("ExplosionObject");
-                MethodInfo m = t == null ? null : AccessTools.Method(t, "NetworkVisualizeExplode", null, null);
-                if (m != null)
-                {
-                    harmony.Patch(m, null, new HarmonyMethod(typeof(TowerRadar).GetMethod("ExplodePostfix")), null, null, null);
-                    boom = "yes";
-                }
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerRadar: explosion hook: " + ex.Message); }
+            boom = "shared AA damage hook";
             Log("input lock on " + n + " of " + Locks.Length + " game predicates, shot hook " + shot
                 + ", explosion hook " + boom + ".");
         }
 
         public static void LockPostfix(ref bool __result)
         {
-            if (RadarScope.InView) __result = true;
+            if (RadarScope.InView || AirDefenceDamage.Repairing) __result = true;
         }
 
         public static void ShotPostfix(object __instance)
@@ -324,7 +312,7 @@ namespace NextDayRevival
                 if (!Built || !On) return;
                 Component c = __instance as Component;
                 if (c == null) return;
-                RadarDamage.Explosion(c);
+                AirDefenceDamage.ExplodePostfix(c);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerRadar explosion: " + ex.Message); }
         }
@@ -347,12 +335,13 @@ namespace NextDayRevival
                 if (!Built) return;
                 if (RadarRoot == null || ConsoleRoot == null) { Clear("the tower's scene went away"); return; }
                 bool master = Crocodile.IsMaster();
+                AirfieldOwnership.Ensure(master && !_wasMaster);
                 if (master && !_wasMaster)
                 {
                     // A new master: the flak crews start weapons free.
                     Mode = 0;
                     AssignedKind = -1;
-                    ControlSide = HomeSide();
+                    if (ControlSide < 0) ControlSide = HomeSide();
                     _foreignOrders.Clear();
                     _dirty = true;
                 }
@@ -388,6 +377,8 @@ namespace NextDayRevival
 
         static void Clear(string why)
         {
+            TowerSupport.WorldEnded();
+            AirfieldHold.WorldEnded();           // W Tower 3: the hold state starts over
             RadarScope.Leave(why);
             RadarSiren.Stop();
             RunwayLights.Clear();
@@ -397,7 +388,11 @@ namespace NextDayRevival
             Screen = null;
             Elements.Clear();
             Built = KitRadar = false;
-            if (_directionSet) { Flak.SetFireDirection(1f, 1f, 1f); Flak.SetRadarDirected(false); _directionSet = false; }
+            AirDefenceDamage.Reset(7, 8);
+            RadarHp = ConsoleHp = 1f;
+            _wasMaster = false;
+            if (_directionSet) { Flak.SetFireDirection(1f, 1f, 1f); Flak.SetRadarDirected(false); Flak.DirectOwned(-1, 1); _directionSet = false; }
+            AirfieldOwnership.Reset();
             Log("cleared (" + why + ").");
         }
 
@@ -545,21 +540,26 @@ namespace NextDayRevival
                 _frozenAt = -1f;
                 Head.localRotation = Quaternion.Euler(0f, AntennaAngle, 0f);
             }
-            else if (_frozenAt < 0f) _frozenAt = AntennaAngle;
-            bool show = RadarAlive || !B(CfgDamageLook);
+            else
+            {
+                if (_frozenAt < 0f) _frozenAt = AntennaAngle;
+                Head.localRotation = Quaternion.Euler(0f, _frozenAt, 0f);
+            }
+            if (!RadarAlive && B(CfgDamageLook)) Head.localRotation = Quaternion.Euler(18f, 0f, 20f);
+            bool show = true; // leave a tilted, charred wreck rather than disappearing
             for (int i = 0; i < Elements.Count; i++)
                 if (Elements[i] != null && Elements[i].enabled != show) Elements[i].enabled = show;
         }
 
-        static bool _screenLit = true;
+        static bool _screenLit = true, _screenDead;
 
         static void ConsoleLook()
         {
             if (Screen == null) return;
             bool lit = Working && B(CfgGlow);
             bool dead = !ConsoleAlive && B(CfgDamageLook);
-            if (lit == _screenLit && !dead) return;
-            _screenLit = lit;
+            if (lit == _screenLit && dead == _screenDead) return;
+            _screenLit = lit; _screenDead = dead;
             Screen.sharedMaterial = dead ? RadarModel.Black : lit ? RadarModel.Phosphor : RadarModel.DarkGlass;
         }
 
@@ -600,33 +600,13 @@ namespace NextDayRevival
                 Log(npc ? "the HQ operator holds the tower." : "the HQ operator is down: the console takes any side's orders.");
                 if (npc && ControlSide != home) GiveBack(home);
             }
+            if (MercAA.Operator != null) ControlSide = MercAA.Operator.Side;
             DropForeignOrders(home);
-
-            // repair
-            float repair = Mathf.Clamp(F(CfgRepair, 30f), 1f, 600f) * 60f;
-            if (!RadarAlive && _radarDeadAt >= 0f && Time.time - _radarDeadAt > repair && !PlayerNear(RadarPos, 150f))
-            {
-                _radarHits = 0f;
-                RadarHp = 1f;
-                _radarDeadAt = -1f;
-                _dirty = true;
-                RadarScope.Note("RADAR back in service.");
-                Log("the radar is repaired.");
-            }
-            if (!ConsoleAlive && _consoleDeadAt >= 0f && Time.time - _consoleDeadAt > repair && !PlayerNear(ConsoleRoot.position, 150f))
-            {
-                _consoleHits = 0f;
-                ConsoleHp = 1f;
-                _consoleDeadAt = -1f;
-                _dirty = true;
-                RadarScope.Note("CONSOLE back in service.");
-                Log("the console is repaired.");
-            }
 
             // the guns' direction
             int tier;
             if (!Working) tier = 0;
-            else if (npc || (OperatorActor >= 0 && Obeyed(OperatorActor) && PlayerSide(OperatorActor) == home)) tier = 2;
+            else if (MercAA.Operator != null || npc || (OperatorActor >= 0 && Obeyed(OperatorActor))) tier = 2;
             else tier = 1;
             if (tier != Tier || !_directionSet)
             {
@@ -641,6 +621,7 @@ namespace NextDayRevival
                 // bracketing; anything else = visual range, slow bracketing.
                 Flak.SetRadarDirected(tier == 2);
             }
+            Flak.DirectOwned(npc ? home : OperatorActor >= 0 ? PlayerSide(OperatorActor) : home, tier);
 
             // the assigned blip follows its aircraft
             if (AssignedKind >= 0)
@@ -687,7 +668,8 @@ namespace NextDayRevival
         {
             int side = PlayerSide(actor);
             if (side < 0) return false;
-            return side == HomeSide() || !NpcOperatorUp;
+            MercAAPost merc = MercAA.Operator;
+            return merc != null ? side == merc.Side : side == HomeSide() || !NpcOperatorUp;
         }
 
         /// <summary>B1: a player whose faction cannot be read. He is still a
@@ -706,18 +688,28 @@ namespace NextDayRevival
         }
 
         /// <summary>The airfield's own side (its crews, its HQ operator).</summary>
-        internal static int HomeSide() { return SideId(Fraktion.Eigene(Airfield.Faction())); }
+        internal static int HomeSide() { return AirfieldOwnership.Holder; }
+
+        // W Perf1: a faction name's value, parsed once per name (HomeSide is
+        // asked every frame; Enum.Parse allocated each time).
+        static readonly Dictionary<string, int> _sideIds = new Dictionary<string, int>();
 
         internal static int SideId(string name)
         {
             if (string.IsNullOrEmpty(name)) return -1;
+            int known;
+            if (_sideIds.TryGetValue(name, out known)) return known;
+            int id;
             try
             {
                 Type t = RevivalPlugin.TypeByName("Fraction");
-                if (t == null || !t.IsEnum) return -1;
-                return Convert.ToInt32(Enum.Parse(t, name), CultureInfo.InvariantCulture);
+                if (t == null || !t.IsEnum) return -1;   // not cached: the type may not be loaded yet
+                id = Convert.ToInt32(Enum.Parse(t, name), CultureInfo.InvariantCulture);
             }
-            catch { return -1; }
+            catch { id = -1; }
+            if (_sideIds.Count > 64) _sideIds.Clear();
+            _sideIds[name] = id;
+            return id;
         }
 
         internal static string SideLabel(int id)
@@ -735,22 +727,23 @@ namespace NextDayRevival
         }
 
         /// <summary>Does this gun take the orders of <paramref name="side"/>?
-        /// Empty: yes. A player at the sight: if he is of that side. The
-        /// airfield's crew: only its own side's.</summary>
+        /// Ownership applies even when empty. A player at the sight must also
+        /// belong to the commanding side.</summary>
         internal static bool Follows(FlakGunInfo g, int side)
         {
             if (g == null || side < 0) return false;
-            if (g.PlayerManned) return g.ManActor >= 0 && PlayerSide(g.ManActor) == side;
-            if (g.CrewAlive > 0) return side == HomeSide();
-            return true;
+            // W AA3: a merc crew obeys its own side's radar; otherwise W AA1: the
+            // gun's owner, and a player at it must be of that side too.
+            if (!g.PlayerManned && g.MercActor >= 0) return side == g.CrewSide;
+            return AirDefencePolicy.Follows(g.OwnerSide, side, g.PlayerManned,
+                g.PlayerManned && g.ManActor >= 0 ? PlayerSide(g.ManActor) : -1);
         }
 
         /// <summary>Why a gun does not follow <paramref name="side"/> (scope text).</summary>
         internal static string Ignores(FlakGunInfo g, int side)
         {
             if (g.PlayerManned) return "IGNORES - " + SideLabel(g.ManActor >= 0 ? PlayerSide(g.ManActor) : -1) + " player at the sight";
-            if (g.CrewAlive > 0) return "IGNORES - " + SideLabel(HomeSide()) + " crew";
-            return side < 0 ? "no orders" : "IGNORES";
+            return "IGNORES - owned by " + SideLabel(g.OwnerSide);
         }
 
         static List<string> Following(int side)
@@ -766,8 +759,7 @@ namespace NextDayRevival
         /// the radar again, every other side's orders are gone.</summary>
         static void GiveBack(int home)
         {
-            Flak.ClearTarget(null);
-            Flak.WeaponsFree(null);
+            Flak.ClearAirfieldOrders();
             _foreignOrders.Clear();
             ControlSide = home;
             Mode = 0;
@@ -785,7 +777,7 @@ namespace NextDayRevival
             for (int i = 0; i < guns.Count; i++)
             {
                 FlakGunInfo g = guns[i];
-                if (!_foreignOrders.Contains(g.Id) || g.PlayerManned || g.CrewAlive <= 0) continue;
+                if (!_foreignOrders.Contains(g.Id) || Follows(g, ControlSide)) continue;
                 _foreignOrders.Remove(g.Id);
                 Flak.ClearTarget(g.Id);
                 Flak.WeaponsFree(g.Id);
@@ -819,45 +811,16 @@ namespace NextDayRevival
         internal static void ApplyHit(int part, float amount, Vector3 boom, bool explosion)
         {
             if (!Crocodile.IsMaster()) { RadarNet.SendHit(part, amount, boom, explosion); return; }
-            if (explosion)
-            {
-                for (int i = _booms.Count - 1; i >= 0; i--)
-                    if (Time.time - _booms[i].w > 3f) _booms.RemoveAt(i);
-                for (int i = 0; i < _booms.Count; i++)
-                {
-                    Vector4 b = _booms[i];
-                    if (Mathf.RoundToInt(b.y) == part && (new Vector3(b.x, boom.y, b.z) - boom).sqrMagnitude < 9f) return;
-                }
-                _booms.Add(new Vector4(boom.x, part, boom.z, Time.time));
-            }
-            amount = Mathf.Clamp(amount, 0f, 200f);
-            if (part == 0)
-            {
-                if (!RadarAlive) return;
-                _radarHits += amount;
-                float max = Mathf.Max(1, I(CfgRadarHits, 30));
-                RadarHp = Mathf.Clamp01(1f - _radarHits / max);
-                if (RadarHp <= 0f)
-                {
-                    _radarDeadAt = Time.time;
-                    RadarScope.Note("RADAR DESTROYED - scope dark.");
-                    Log("the radar is destroyed.");
-                }
-            }
-            else
-            {
-                if (!ConsoleAlive) return;
-                _consoleHits += amount;
-                float max = Mathf.Max(1, I(CfgConsoleHits, 12));
-                ConsoleHp = Mathf.Clamp01(1f - _consoleHits / max);
-                if (ConsoleHp <= 0f)
-                {
-                    _consoleDeadAt = Time.time;
-                    RadarScope.Note("CONSOLE DESTROYED.");
-                    Log("the console is destroyed.");
-                }
-            }
-            _dirty = true;
+            AirDefenceDamage.RadarHit(part, Mathf.Clamp(amount, 0f, 200f));
+        }
+
+        internal static void SetDamageHealth(float radar, float console)
+        {
+            if (radar == RadarHp && console == ConsoleHp) return;
+            if (radar <= 0f && RadarHp > 0f) RadarScope.Note("RADAR DESTROYED - scope dark.");
+            if (console <= 0f && ConsoleHp > 0f) RadarScope.Note("CONSOLE DESTROYED.");
+            RadarHp = radar; ConsoleHp = console;
+            _dirty = true; _directionSet = false;
         }
 
         /// <summary>A player's claim of the console (master).</summary>
@@ -870,9 +833,17 @@ namespace NextDayRevival
                 // B1: a recorded operator who is dead is no operator.
                 if (OperatorActor >= 0 && OperatorActor != actor && Time.time < _opUntil
                     && !Crocodile.ActorDown(OperatorActor)) return;
-                if (OperatorActor != actor) { _dirty = true; Log("actor " + actor + " is at the console."); }
+                bool entering = OperatorActor != actor;
+                if (entering) { _dirty = true; Log("actor " + actor + " is at the console."); }
                 OperatorActor = actor;
                 _opUntil = Time.time + 3f;
+                if (entering && AirfieldOwnership.Take(actor))
+                {
+                    ControlSide = HomeSide();
+                    Mode = 0;
+                    AssignedKind = -1;
+                    _dirty = true;
+                }
             }
             else if (OperatorActor == actor)
             {
@@ -882,10 +853,17 @@ namespace NextDayRevival
             }
         }
 
+        // W Tower 2: claims alone do not grant a paid command; check its lease
+        // and physical holder again at the instant of purchase.
+        internal static bool SupportLease(int actor)
+        {
+            return On && Built && ConsoleAlive && OperatorActor == actor && Time.time < _opUntil;
+        }
+
         internal const int CmdEngage = 1, CmdFree = 2, CmdHold = 3, CmdClear = 4;
 
         /// <summary>A console command (master): only from the claimed operator
-        /// and only obeyed from the airfield's own faction.</summary>
+        /// and filtered by each gun's persistent faction.</summary>
         internal static void OnCommand(int actor, int cmd, int kind, Vector3 pos)
         {
             if (!Crocodile.IsMaster()) { RadarNet.SendCommand(cmd, kind, pos); return; }
@@ -898,6 +876,12 @@ namespace NextDayRevival
                 return;
             }
             int side = PlayerSide(actor), home = HomeSide();
+            if (AirfieldOwnership.Take(actor))
+            {
+                home = HomeSide();
+                Mode = 0;
+                AssignedKind = -1;
+            }
             List<string> ids = Following(side);
             if (side != ControlSide)
             {
@@ -1005,10 +989,10 @@ namespace NextDayRevival
                 }
                 if (_getter != null)
                 {
-                    object v = _getter.Invoke(null, null);
-                    if (v is double)
+                    // W Perf1: compiled call, no boxed double per frame.
+                    double d = FastCall.Double(_getter, null);
+                    if (!double.IsNaN(d))
                     {
-                        double d = (double)v;
                         if (d > 0.0) return (float)(d % 100000.0);
                     }
                 }
@@ -1463,12 +1447,10 @@ namespace NextDayRevival
             return false;
         }
 
-        internal static void Explosion(Component c)
+        internal static void Blast(Vector3 at, float radius, float peak)
         {
-            Vector3 at = c.transform.position;
-            float radius = Radius(c);
             Parts();
-            float[] worst = new float[2];
+            float radar = 0f, console = 0f;
             for (int i = 0; i < _parts.Count; i++)
             {
                 Part p = _parts[i];
@@ -1479,16 +1461,16 @@ namespace NextDayRevival
                 float dist = (l - q).magnitude;
                 float reach = radius + 1.5f;
                 if (dist >= reach) continue;
-                float amount = Mathf.Max(1f, TowerRadar.I(TowerRadar.CfgExplosionHits, 40) * (1f - dist / reach));
-                if (amount > worst[p.Id]) worst[p.Id] = amount;
+                float amount = TowerRadar.I(TowerRadar.CfgExplosionHits, 40) * peak * (1f - dist / reach);
+                if (p.Id == 0) radar = Mathf.Max(radar, amount); else console = Mathf.Max(console, amount);
             }
-            for (int id = 0; id < 2; id++)
-                if (worst[id] > 0f) TowerRadar.ApplyHit(id, worst[id], at, true);
+            if (radar > 0f) TowerRadar.ApplyHit(0, radar, at, true);
+            if (console > 0f) TowerRadar.ApplyHit(1, console, at, true);
         }
 
         /// <summary>The explosion's radius (FireHook.Radius: the field may be
         /// an Obscured type).</summary>
-        static float Radius(Component c)
+        internal static float Radius(Component c)
         {
             try
             {
@@ -1556,7 +1538,9 @@ namespace NextDayRevival
 
         static void Spawn()
         {
+            if (MercAA.Operator != null) return;
             if (!TowerRadar.B(TowerRadar.CfgNpcOperator) || TowerRadar.ConsoleRoot == null) return;
+            if (AirfieldOwnership.CrewSide == null) return;
             if (Alive) { _deadSince = -1f; return; }
             if (Time.time < _nextTry || !TowerRadar.ConsoleAlive) return;
             Vector3 seat = Seat();
@@ -1576,7 +1560,7 @@ namespace NextDayRevival
             _tries++;
             try
             {
-                string side = Airfield.Faction();
+                string side = AirfieldOwnership.CrewSide;
                 _squad = Crew.DropGroundSquad(seat, new Vector3[] { seat }, side, null, Key);
                 _asked = _squad != null || _tries >= 5;
                 _deadSince = -1f;
@@ -1663,6 +1647,9 @@ namespace NextDayRevival
         }
 
         static readonly List<GepardGun.Contact> _air = new List<GepardGun.Contact>();
+        /// <summary>The radar's contacts (every client, 4 Hz, followed every
+        /// frame): W-Tower1's air picture reads them.</summary>
+        internal static List<GepardGun.Contact> Air { get { return _air; } }
         static readonly List<Blip> _blips = new List<Blip>();
         static readonly List<string> _log = new List<string>();
         static readonly Dictionary<string, FlakState> _gunState = new Dictionary<string, FlakState>();
@@ -1706,7 +1693,9 @@ namespace NextDayRevival
             {
                 _nextCollect = now + 0.25f;
                 FlakFire.Collect(_air, eye, TowerRadar.ScopeRangeU);
+                RadarShadow.Scan(_air, eye);
                 Guns();
+                if (InView) Rows();   // W-UI4: the console's gun and track lines, only at the console
             }
             FlakFire.FollowAll(_air, Time.deltaTime, 5f);
             Sweep(eye);
@@ -1729,13 +1718,13 @@ namespace NextDayRevival
                 GepardGun.Contact c = _air[i];
                 if (c.Go == null) continue;
                 Blip b = Find(c.Go);
-                if (!working) continue;
+                if (!working || !RadarShadow.Visible(c.Go)) continue;
                 Vector3 d = c.Pos - eye;
                 d.y = 0f;
                 if (d.magnitude > range) continue;
                 float brg = Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
                 if (Mathf.Repeat(brg - a0, 360f) > span && span < 359f) continue;
-                float h = Height(c.Pos);
+                float h = RadarShadow.Height(c.Go);
                 if (h < Mathf.Max(0f, TowerRadar.F(TowerRadar.CfgMinHeight, 3f)) * K) continue;
                 if (b == null)
                 {
@@ -1782,7 +1771,7 @@ namespace NextDayRevival
             return null;
         }
 
-        static float Height(Vector3 p)
+        internal static float Height(Vector3 p)
         {
             float g;
             return EastWorld.TerrainHeight(p, out g) ? p.y - g : 999f;
@@ -1792,6 +1781,8 @@ namespace NextDayRevival
         static void Guns()
         {
             List<FlakGunInfo> guns = Flak.Guns();
+            _guns.Clear();
+            _guns.AddRange(guns);   // W-UI4: the scope and the console panel draw this 4 Hz snapshot
             for (int i = 0; i < guns.Count; i++)
             {
                 FlakGunInfo g = guns[i];
@@ -1801,6 +1792,7 @@ namespace NextDayRevival
                 {
                     if (g.State == FlakState.Firing) Note(g.Id + " ENGAGING");
                     else if (g.State == FlakState.NoCrew) Note(g.Id + " NO CREW");
+                    else if (g.State == FlakState.Destroyed) Note(g.Id + " DESTROYED - toolkit repair needed");
                     else if (g.State == FlakState.Reloading) Note(g.Id + " reloading");
                 }
                 _gunState[g.Id] = g.State;
@@ -1820,26 +1812,8 @@ namespace NextDayRevival
         /// pilot.</summary>
         static int Iff(GepardGun.Contact c, string mine)
         {
-            if (c.Kind == 2 || c.Kind == 3)
-            {
-                GameObject pilot = Crocodile.PlayerByActor(c.Actor);
-                string f = pilot == null ? null : Fraktion.Spielerseite(pilot);
-                if (f == null) return 0;
-                return mine != null && f == mine ? 1 : -1;
-            }
-            bool friend = false, foe = false;
-            float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
-            List<GameObject> players = GepardCrew.Spieler();
-            for (int i = 0; i < players.Count; i++)
-            {
-                GameObject go = players[i];
-                if (go == null || (go.transform.position - c.Pos).sqrMagnitude > reach * reach) continue;
-                string f = Fraktion.Spielerseite(go);
-                if (f == null) continue;
-                if (mine != null && f == mine) friend = true;
-                else foe = true;
-            }
-            return friend ? 1 : foe ? -1 : 0;
+            string pilot = AirPilot.Faction(c);
+            return pilot == null ? 0 : mine != null && pilot == mine ? 1 : AirDefencePolicy.Hostile(mine, pilot) ? -1 : 0;
         }
 
         /// <summary>Master: a hostile aircraft (a player of a faction hostile
@@ -1848,33 +1822,13 @@ namespace NextDayRevival
         internal static bool HostileWithin(float r)
         {
             Vector3 eye = TowerRadar.RadarPos;
-            string side = Airfield.Faction();
-            string own = Fraktion.Eigene(side);
+            string own = AirfieldOwnership.FactionName;
             float min = Mathf.Max(0f, TowerRadar.F(TowerRadar.CfgMinHeight, 3f)) * K;
             for (int i = 0; i < _air.Count; i++)
             {
                 GepardGun.Contact c = _air[i];
-                if (c.Go == null || (c.Pos - eye).sqrMagnitude > r * r || Height(c.Pos) < min) continue;
-                if (c.Kind == 2 || c.Kind == 3)
-                {
-                    GameObject pilot = Crocodile.PlayerByActor(c.Actor);
-                    string f = pilot == null ? null : Fraktion.Spielerseite(pilot);
-                    if (f != null && f != own && Fraktion.Feind(side, f)) return true;
-                    continue;
-                }
-                float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
-                List<GameObject> players = GepardCrew.Spieler();
-                bool friendly = false, hostile = false;
-                for (int k = 0; k < players.Count; k++)
-                {
-                    GameObject go = players[k];
-                    if (go == null || (go.transform.position - c.Pos).sqrMagnitude > reach * reach) continue;
-                    string f = Fraktion.Spielerseite(go);
-                    if (f == null) continue;
-                    if (f == own) friendly = true;
-                    else if (Fraktion.Feind(side, f)) hostile = true;
-                }
-                if (hostile && !friendly) return true;
+                if (c.Go == null || !RadarShadow.Visible(c.Go) || (c.Pos - eye).sqrMagnitude > r * r || RadarShadow.Height(c.Go) < min) continue;
+                if (AirDefencePolicy.Hostile(own, AirPilot.Faction(c))) return true;
             }
             return false;
         }
@@ -1887,7 +1841,7 @@ namespace NextDayRevival
             for (int i = 0; i < _air.Count; i++)
             {
                 GepardGun.Contact c = _air[i];
-                if (c.Go == null || (kind >= 0 && c.Kind != kind)) continue;
+                if (c.Go == null || !RadarShadow.Visible(c.Go) || (kind >= 0 && c.Kind != kind)) continue;
                 float d = (c.Pos - pos).sqrMagnitude;
                 if (d < bestD) { best = c; bestD = d; }
             }
@@ -1938,6 +1892,7 @@ namespace NextDayRevival
                     if (!Crocodile.PlayerUp(me)) { Leave("the local player is down"); return; }
                     Claim(true);
                 }
+                if (TowerSupport.Selecting) return;
                 float sens = Mathf.Max(1f, TowerRadar.F(TowerRadar.CfgCursor, 14f));
                 _cursor.x = Mathf.Clamp(_cursor.x + Input.GetAxis("Mouse X") * sens, 0f, UnityEngine.Screen.width);
                 _cursor.y = Mathf.Clamp(_cursor.y - Input.GetAxis("Mouse Y") * sens, 0f, UnityEngine.Screen.height);
@@ -1969,6 +1924,7 @@ namespace NextDayRevival
             _enteredFrame = Time.frameCount;
             _cursor = new Vector2(UnityEngine.Screen.width * 0.35f, UnityEngine.Screen.height * 0.5f);
             _nextClaim = 0f;
+            _nextCollect = 0f;   // the console's lines at once
             TowerRadar.Log("the local player is at the console.");
         }
 
@@ -2022,16 +1978,83 @@ namespace NextDayRevival
         }
 
         // --------------------------------------------------------- drawing
+        //
+        // W-UI4: the console in the UI kit's look (docs/UI_KIT.md) - kit
+        // panel, cards, chips, buttons and fonts beside the green PPI scope.
+        // The console keeps its virtual cursor (the game holds the mouse), so
+        // hover and clicks test _cursor instead of IMGUI events. Every text
+        // comes from a cached table or a memo rebuilt at the 4 Hz collect
+        // (Rows); the draw pass itself builds no string and asks no system.
 
         static Texture2D _white, _disc;
-        static GUIStyle _text, _small;
+        static GUIStyle _small;
         static readonly Color Green = new Color(0.35f, 1f, 0.5f, 1f);
         static readonly Color DimGreen = new Color(0.2f, 0.7f, 0.3f, 0.6f);
         static readonly Color Foe = new Color(1f, 0.3f, 0.25f, 1f);
         static readonly Color Unknown = new Color(1f, 0.85f, 0.3f, 1f);
-        static readonly Color Amber = new Color(1f, 0.78f, 0.3f, 0.95f);
         static float _cx, _cy, _r;
-        static Rect[] _buttons = new Rect[4];
+        static readonly Rect[] _buttons = new Rect[4];
+        static readonly Vector3[] TileOutline = { new Vector3(2500f, 0f, -2500f), new Vector3(7500f, 0f, -2500f),
+                                                  new Vector3(7500f, 0f, 2500f), new Vector3(2500f, 0f, 2500f),
+                                                  new Vector3(2500f, 0f, -2500f) };
+        static readonly string[] ButtonNames = { "ENGAGE SELECTED", "WEAPONS FREE ALL", "HOLD FIRE ALL", "CLEAR" };
+        static readonly string[] StateNames = { "NO CREW", "IDLE", "TRACKING", "FIRING", "RELOADING", "PLAYER", "DESTROYED" };
+        static readonly string[] CrewNames = { "crew 0/2", "crew 1/2", "crew 2/2" };
+        static readonly string[] ModeNames = { "WEAPONS FREE", "HOLD FIRE", "WEAPONS TIGHT" };
+
+        /// <summary>A gun line of the console, rebuilt at 4 Hz, texts only on change.</summary>
+        sealed class GunRow
+        {
+            public string Id, Owner, Rounds;
+            public int State, Crew, OwnerKey = int.MinValue;
+            public bool Follows;
+        }
+
+        /// <summary>A track line of the air picture: the blip and its numbers.</summary>
+        sealed class AirRow
+        {
+            public Blip B;
+            public int RangeTenths, Brg, Hdg, Kmh, AltM;
+        }
+
+        static readonly List<FlakGunInfo> _guns = new List<FlakGunInfo>();   // the 4 Hz snapshot
+        static readonly List<GunRow> _gunRows = new List<GunRow>();
+        static readonly List<AirRow> _airRows = new List<AirRow>();
+        static readonly List<AirRow> _airPool = new List<AirRow>();
+        static readonly Rect[] _airRects = new Rect[16];
+        static readonly Blip[] _airHit = new Blip[16];
+        static int _airShown;
+        static readonly UiMemo _controlText = new UiMemo(), _operatorText = new UiMemo(), _promptText = new UiMemo();
+        static bool _obeyed;
+        static int _who = -1;
+
+        // Cached number texts: one string per value for the session.
+        static readonly string[] _id2 = new string[100], _deg3 = new string[360], _tenths = new string[1000];
+        static readonly string[] _radarChip = new string[102], _consoleChip = new string[102];
+
+        static string Id2(int v) { v = Mathf.Clamp(v, 0, 99); return _id2[v] ?? (_id2[v] = v.ToString("00", CultureInfo.InvariantCulture)); }
+
+        static string Deg3(int v)
+        {
+            v = ((v % 360) + 360) % 360;
+            return _deg3[v] ?? (_deg3[v] = v.ToString("000", CultureInfo.InvariantCulture));
+        }
+
+        static string Km(int tenths)
+        {
+            if (tenths < 0) tenths = 0;
+            if (tenths > 999) tenths = 999;
+            return _tenths[tenths] ?? (_tenths[tenths] = (tenths / 10f).ToString("0.0", CultureInfo.InvariantCulture) + " km");
+        }
+
+        /// <summary>"RADAR 85%" from a per-prefix table; "RADAR DESTROYED" at 0.</summary>
+        static string Pct(string[] cache, string prefix, float f)
+        {
+            int v = f <= 0f ? 101 : Mathf.Clamp(Mathf.RoundToInt(f * 100f), 1, 100);
+            return cache[v] ?? (cache[v] = prefix + (v == 101 ? "DESTROYED" : v.ToString(CultureInfo.InvariantCulture) + "%"));
+        }
+
+        static int HpTone(float f) { return f >= 0.5f ? UiTone.Success : f > 0f ? UiTone.Warning : UiTone.Error; }
 
         static void Ensure()
         {
@@ -2056,43 +2079,156 @@ namespace NextDayRevival
                     }
                 _disc.Apply();
             }
-            if (_text == null)
+            if (_small == null)
             {
-                _text = new GUIStyle(GUI.skin.label);
-                _text.fontSize = 15;
                 _small = new GUIStyle(GUI.skin.label);
                 _small.fontSize = 12;
             }
         }
 
+        /// <summary>The kit's textures and fonts are built by its first use;
+        /// ParagraphHeight is the public call that builds them (true = ready).</summary>
+        static bool KitReady() { return UiKit.ParagraphHeight(" ", 64f) > 0f; }
+
+        /// <summary>At the 4 Hz collect, only while the local player is at the
+        /// console: the gun and track lines. Texts only when a value changed.</summary>
+        static void Rows()
+        {
+            int me = Crocodile.LocalActor();
+            _obeyed = TowerRadar.Obeyed(me);
+            _who = _obeyed ? TowerRadar.PlayerSide(me) : TowerRadar.ControlSide;
+            int home = TowerRadar.HomeSide();
+
+            int ck = (TowerRadar.NpcOperatorUp ? 1 : 0) + (_obeyed ? 2 : 0) + 4 * (home + 1) + 4096 * (TowerRadar.ControlSide + 1);
+            if (_controlText.Stale(ck))
+                _controlText.Set(ck, TowerRadar.NpcOperatorUp
+                    ? "RADAR HELD BY " + TowerRadar.SideLabel(home) + " - HQ operator at the console"
+                        + (_obeyed ? "" : "   (watch only: your orders are refused)")
+                    : "HQ OPERATOR DOWN - console free   orders standing: " + TowerRadar.SideLabel(TowerRadar.ControlSide)
+                        + (_obeyed ? "   (you may give orders)" : ""));
+            int op = TowerRadar.OperatorActor;
+            int opSide = op >= 0 ? TowerRadar.PlayerSide(op) : -1;
+            int ok = op >= 0 ? 8 * (opSide + 2) : TowerRadar.NpcOperatorUp ? 1 : 2;
+            if (_operatorText.Stale(ok))
+                _operatorText.Set(ok, "Operator: " + (op >= 0 ? "player at the console (" + TowerRadar.SideLabel(opSide) + ")"
+                    : TowerRadar.NpcOperatorUp ? "HQ operator" : "none"));
+
+            // the guns
+            while (_gunRows.Count < _guns.Count) _gunRows.Add(new GunRow());
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                FlakGunInfo g = _guns[i];
+                GunRow row = _gunRows[i];
+                row.Id = g.Id;
+                row.State = Mathf.Clamp((int)g.State, 0, StateNames.Length - 1);
+                row.Crew = Mathf.Clamp(g.CrewAlive, 0, 2);
+                row.Rounds = UiNum.Of(g.Rounds);
+                row.Follows = TowerRadar.Follows(g, _who);
+                int manSide = g.PlayerManned && g.ManActor >= 0 ? TowerRadar.PlayerSide(g.ManActor) : -1;
+                int key = (g.PlayerManned ? 1 : 0) + (g.CrewAlive > 0 ? 2 : 0) + (row.Follows ? 4 : 0)
+                    + 8 * (manSide + 2) + 8192 * (_who + 2) + 1048576 * (home + 1);
+                if (key != row.OwnerKey || row.Owner == null)
+                {
+                    row.OwnerKey = key;
+                    row.Owner = GunOwner(g, manSide, home) + "  -  "
+                        + (row.Follows ? "FOLLOWS " + TowerRadar.SideLabel(_who) : TowerRadar.Ignores(g, _who));
+                }
+            }
+
+            // the air picture: tracks painted this sweep and the last, foes first, then by range
+            for (int i = 0; i < _airRows.Count; i++) _airPool.Add(_airRows[i]);
+            _airRows.Clear();
+            float sweep = TowerRadar.SweepSeconds;
+            Vector3 eye = TowerRadar.RadarPos;
+            for (int i = 0; i < _blips.Count; i++)
+            {
+                Blip b = _blips[i];
+                if (b.Go == null || Time.time - b.PaintedAt > sweep * 2.2f) continue;
+                AirRow row;
+                if (_airPool.Count > 0) { row = _airPool[_airPool.Count - 1]; _airPool.RemoveAt(_airPool.Count - 1); }
+                else row = new AirRow();
+                Vector3 d = b.Pos - eye;
+                d.y = 0f;
+                Vector3 v = b.Vel;
+                v.y = 0f;
+                row.B = b;
+                row.RangeTenths = Mathf.RoundToInt(d.magnitude / K / 100f);
+                row.Brg = Mathf.RoundToInt(Mathf.Repeat(Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg, 360f));
+                row.Kmh = Mathf.RoundToInt(v.magnitude / K * 3.6f);
+                row.Hdg = row.Kmh < 5 ? -1 : Mathf.RoundToInt(Mathf.Repeat(Mathf.Atan2(v.x, v.z) * Mathf.Rad2Deg, 360f));
+                row.AltM = Mathf.RoundToInt(b.Height / K);
+                // insertion: foe (-1) before unknown (0) before friend (1), then nearer first
+                int at = _airRows.Count;
+                while (at > 0 && Before(row, _airRows[at - 1])) at--;
+                _airRows.Insert(at, row);
+            }
+        }
+
+        static bool Before(AirRow a, AirRow b)
+        {
+            if (a.B.Iff != b.B.Iff) return a.B.Iff < b.B.Iff;
+            return a.RangeTenths < b.RangeTenths;
+        }
+
+        /// <summary>Who holds a gun: a player at the sight, the HQ's crew, nobody.</summary>
+        static string GunOwner(FlakGunInfo g, int manSide, int home)
+        {
+            if (g.PlayerManned) return "PLAYER (" + TowerRadar.SideLabel(manSide) + ")";
+            if (g.CrewAlive > 0) return TowerRadar.SideLabel(home) + " CREW";
+            return "UNMANNED";
+        }
+
         internal static void Draw()
         {
+            if (TowerSupport.Selecting) return;
             try
             {
                 if (!InView && !_near && (_hint == null || Time.time > _hintUntil)) return;
                 Ensure();
+                // Without the kit (its font failed to build) the scope still
+                // draws, so the console never goes blind; G / Esc leave it.
+                bool kit = KitReady();
                 float w = UnityEngine.Screen.width, h = UnityEngine.Screen.height;
                 if (!InView)
                 {
-                    if (_near) Label(new Rect(0f, h * 0.62f, w, 26f), _nearWhy ?? ("[" + Key() + "] Radar console"), Color.white, true);
-                    if (_hint != null && Time.time <= _hintUntil) Label(new Rect(0f, h * 0.66f, w, 26f), _hint, Amber, true);
+                    if (!kit) return;
+                    if (_near)
+                    {
+                        int kk = (int)Key();
+                        Prompt(h * 0.62f, _nearWhy ?? (_promptText.Stale(kk) ? _promptText.Set(kk, "[" + Key() + "] Radar console") : _promptText.Text),
+                               _nearWhy != null ? UiKit.Warn : UiKit.Text);
+                    }
+                    if (_hint != null && Time.time <= _hintUntil) Prompt(h * 0.66f, _hint, UiKit.Warn);
                     return;
                 }
-                GUI.color = new Color(0f, 0f, 0f, 0.92f);
+                GUI.color = new Color(0.02f, 0.025f, 0.03f, 0.94f);
                 GUI.DrawTexture(new Rect(0f, 0f, w, h), _white);
-                _r = Mathf.Min(h * 0.44f, w * 0.3f);
+                // The scope gives way on narrow screens: the side panel keeps 640 design px.
+                _r = Mathf.Min(h * 0.44f, Mathf.Min(w * 0.3f, (w - UiKit.S(640f) - h * 0.09f - UiKit.S(UiKit.Pad)) * 0.5f));
+                _r = Mathf.Max(_r, h * 0.2f);
                 _cx = _r + h * 0.05f;
                 _cy = h * 0.5f;
                 Scope();
-                Panel(w, h);
+                if (kit) Panel(w, h);
                 // the cursor
                 GUI.color = Color.white;
                 GUI.DrawTexture(new Rect(_cursor.x - 9f, _cursor.y - 1f, 18f, 2f), _white);
                 GUI.DrawTexture(new Rect(_cursor.x - 1f, _cursor.y - 9f, 2f, 18f), _white);
-                if (_hint != null && Time.time <= _hintUntil) Label(new Rect(0f, h - 60f, w, 26f), _hint, Amber, true);
+                if (kit && _hint != null && Time.time <= _hintUntil) Prompt(h - UiKit.S(72f), _hint, UiKit.Warn);
                 GUI.color = Color.white;
             }
             catch { GUI.matrix = Matrix4x4.identity; GUI.color = Color.white; }
+        }
+
+        /// <summary>A kit pill across the screen's middle: the console prompt and hints.</summary>
+        static void Prompt(float y, string text, Color c)
+        {
+            float pw = UiKit.S(560f), ph = UiKit.S(34f);
+            Rect r = new Rect((UnityEngine.Screen.width - pw) * 0.5f, y, pw, ph);
+            UiKit.Fill(new Rect(r.x, r.y + UiKit.S(3f), r.width, r.height), UiKit.Shadow, 1);
+            UiKit.Fill(r, UiKit.Header, 1);
+            UiKit.Fill(new Rect(r.x, r.y + UiKit.S(8f), UiKit.S(3f), ph - UiKit.S(16f)), c, 0);
+            UiKit.Label(r, text, UiFont.Body, UiFont.Center, UiKit.Text);
         }
 
         static Vector2 ToScreen(Vector3 world)
@@ -2110,8 +2246,8 @@ namespace NextDayRevival
             {
                 GUI.color = new Color(0f, 0f, 0f, 1f);
                 GUI.DrawTexture(new Rect(_cx - _r * 0.72f, _cy - _r * 0.72f, _r * 1.44f, _r * 1.44f), _white);
-                Label(new Rect(_cx - _r, _cy - 12f, _r * 2f, 26f),
-                    !TowerRadar.RadarAlive ? "NO VIDEO - ANTENNA DESTROYED" : "NO VIDEO - CONSOLE DAMAGED", Foe, true);
+                UiKit.Label(new Rect(_cx - _r, _cy - 13f, _r * 2f, 26f),
+                    !TowerRadar.RadarAlive ? "NO VIDEO - ANTENNA DESTROYED" : "NO VIDEO - CONSOLE DAMAGED", UiFont.Heading, UiFont.Center, UiKit.Bad);
                 return;
             }
             float range = TowerRadar.ScopeRangeU;
@@ -2129,23 +2265,19 @@ namespace NextDayRevival
             SmallLabel(_cx - 6f, _cy - _r - 18f, "N", Green);
             // the east tile's outline and the runway
             GUI.color = new Color(0.25f, 0.6f, 0.35f, 0.5f);
-            Rect tile = new Rect(2500f, -2500f, 5000f, 5000f);
-            Poly(new Vector3[] { new Vector3(tile.xMin, 0f, tile.yMin), new Vector3(tile.xMax, 0f, tile.yMin),
-                                 new Vector3(tile.xMax, 0f, tile.yMax), new Vector3(tile.xMin, 0f, tile.yMax),
-                                 new Vector3(tile.xMin, 0f, tile.yMin) });
+            Poly(TileOutline);
             GUI.color = new Color(0.4f, 0.9f, 0.5f, 0.7f);
             Vector2 r0 = ToScreen(new Vector3(4632f, 0f, -1600f)), r1 = ToScreen(new Vector3(4632f, 0f, 1600f));
             Line(r0.x, r0.y, r1.x, r1.y, 3f);
-            // the guns and their reach
-            List<FlakGunInfo> guns = Flak.Guns();
-            for (int i = 0; i < guns.Count; i++)
+            // the guns and their reach (the 4 Hz snapshot)
+            for (int i = 0; i < _guns.Count; i++)
             {
-                Vector2 g = ToScreen(guns[i].Position);
+                Vector2 g = ToScreen(_guns[i].Position);
                 GUI.color = new Color(0.3f, 0.8f, 1f, 0.35f);
-                Ring(g.x, g.y, _r * guns[i].Range / range, 48);
+                Ring(g.x, g.y, _r * _guns[i].Range / range, 48);
                 GUI.color = new Color(0.3f, 0.8f, 1f, 0.95f);
                 GUI.DrawTexture(new Rect(g.x - 3f, g.y - 3f, 6f, 6f), _white);
-                SmallLabel(g.x + 5f, g.y - 7f, guns[i].Id, GUI.color);
+                SmallLabel(g.x + 5f, g.y - 7f, _guns[i].Id, GUI.color);
             }
             // the sweep and its afterglow
             float ang = TowerRadar.AntennaAngle;
@@ -2181,7 +2313,7 @@ namespace NextDayRevival
                     Vector2 q = ToScreen(b.Pos + v * 20f);
                     Line(p.x, p.y, q.x, q.y, 1.2f);
                 }
-                SmallLabel(p.x + 6f, p.y + 2f, b.Id.ToString("00", CultureInfo.InvariantCulture), c);
+                SmallLabel(p.x + 6f, p.y + 2f, Id2(b.Id), c);
                 if (b == _selected) Bracket(p.x, p.y, 11f, new Color(1f, 1f, 1f, 0.95f));
                 if (TowerRadar.AssignedKind >= 0 && b.Kind == TowerRadar.AssignedKind
                     && (b.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
@@ -2193,105 +2325,238 @@ namespace NextDayRevival
             GUI.color = Color.white;
         }
 
+        static int IffTone(int iff) { return iff > 0 ? UiTone.Success : iff < 0 ? UiTone.Error : UiTone.Warning; }
+
+        static Color IffColor(int iff) { return iff > 0 ? UiKit.Good : iff < 0 ? UiKit.Bad : UiKit.Warn; }
+
+        /// <summary>The side panel: status card, orders, the selected track,
+        /// the guns (owner, crew, state), the air picture, the contact log.</summary>
         static void Panel(float w, float h)
         {
-            float x = _cx + _r + h * 0.05f;
-            float pw = w - x - 20f;
-            float y = h * 0.06f;
-            Label(new Rect(x, y, pw, 24f), "P-18 AIR DEFENCE HQ - C1 TOWER", Green, false);
-            y += 24f;
-            string status = "RADAR " + Pct(TowerRadar.RadarHp) + "   CONSOLE " + Pct(TowerRadar.ConsoleHp) + "   ANTENNA "
-                + TowerRadar.AntennaAngle.ToString("000", CultureInfo.InvariantCulture) + "   RANGE "
-                + (TowerRadar.ScopeRangeU / K / 1000f).ToString("0.0", CultureInfo.InvariantCulture) + " km";
-            SmallLabel(x, y, status, Green);
-            y += 18f;
-            SmallLabel(x, y, "FIRE CONTROL: " + (TowerRadar.Mode == 0 ? "WEAPONS FREE" : TowerRadar.Mode == 1 ? "HOLD FIRE"
-                : "WEAPONS TIGHT - assigned track only") + "   direction: " + TowerRadar.TierName(TowerRadar.Tier)
-                + (TowerRadar.SirenOn ? "   SIREN" : ""), TowerRadar.Mode == 1 ? Amber : Green);
-            y += 18f;
-            bool obeyed = TowerRadar.Obeyed(Crocodile.LocalActor());
-            string control = TowerRadar.NpcOperatorUp
-                ? "RADAR HELD BY " + TowerRadar.SideLabel(TowerRadar.HomeSide()) + " - HQ operator at the console"
-                    + (obeyed ? "" : "   (watch only: your orders are refused)")
-                : "HQ OPERATOR DOWN - console free   orders standing: " + TowerRadar.SideLabel(TowerRadar.ControlSide)
-                    + (obeyed ? "   (you may give orders)" : "");
-            SmallLabel(x, y, control, obeyed ? Green : Foe);
-            y += 24f;
+            float gap = UiKit.S(UiKit.Gap), pad = UiKit.S(UiKit.Pad);
+            float rowH = UiKit.S(UiKit.RowH), line = UiKit.S(22f);
+            float x = _cx + _r + h * 0.04f;
+            float pw = w - x - pad;
+            float y = h * 0.04f;
+            float bottom = h - pad - line;
+            UiKit.Fill(new Rect(x - pad, 0f, w - x + pad, h), UiKit.Panel, 0);
+            UiKit.Fill(new Rect(x - pad, 0f, Mathf.Max(1f, UiKit.S(1f)), h), UiKit.Line, 0);
+
+            // the title and the status chips
+            UiKit.Fill(new Rect(x, y + UiKit.S(6f), UiKit.S(3f), UiKit.S(22f)), UiKit.Accent, 0);
+            UiKit.Label(new Rect(x + UiKit.S(12f), y, pw, UiKit.S(34f)), "P-18 AIR DEFENCE HQ - C1 TOWER", UiFont.Title, UiFont.Left, UiKit.Text);
+            y += UiKit.S(38f);
+            float chipH = UiKit.S(22f);
+            Rect cr = new Rect(x, y, pw, chipH);
+            UiKit.Chip(UiKit.Col(cr, 0, 5), Pct(_radarChip, "RADAR ", TowerRadar.RadarHp), HpTone(TowerRadar.RadarHp));
+            UiKit.Chip(UiKit.Col(cr, 1, 5), Pct(_consoleChip, "CONSOLE ", TowerRadar.ConsoleHp), HpTone(TowerRadar.ConsoleHp));
+            UiKit.Chip(UiKit.Col(cr, 2, 5), Km(Mathf.RoundToInt(TowerRadar.ScopeRangeU / K / 100f)), UiTone.Info);
+            int mode = Mathf.Clamp(TowerRadar.Mode, 0, 2);
+            UiKit.Chip(UiKit.Col(cr, 3, 5), ModeNames[mode], mode == 0 ? UiTone.Success : mode == 1 ? UiTone.Warning : UiTone.Info);
+            if (TowerRadar.SirenOn) UiKit.Chip(UiKit.Col(cr, 4, 5), "SIREN", UiTone.Error);
+            y += chipH + gap;
+            float lw = UiKit.S(96f);
+            UiKit.Label(new Rect(x, y, lw, line), "fire direction", UiFont.Small, UiFont.Left, UiKit.TextDim);
+            UiKit.Label(new Rect(x + lw, y, UiKit.S(170f), line), TowerRadar.TierName(TowerRadar.Tier), UiFont.Small, UiFont.Left, UiKit.Text);
+            UiKit.Label(new Rect(x + lw + UiKit.S(176f), y, UiKit.S(56f), line), "antenna", UiFont.Small, UiFont.Left, UiKit.TextDim);
+            UiKit.Label(new Rect(x + lw + UiKit.S(232f), y, UiKit.S(40f), line), Deg3(Mathf.RoundToInt(TowerRadar.AntennaAngle)),
+                UiFont.Small, UiFont.Left, UiKit.Text);
+            y += line;
+            UiKit.Status(new Rect(x, y, pw, rowH), _obeyed ? UiTone.Success : UiTone.Error, _controlText.Text);
+            y += rowH + gap * 1.5f;
+
+            // the orders
+            bool canEngage = _selected != null && _selected.Go != null && _selected.Iff <= 0;
+            Rect br = new Rect(x, y, pw, rowH + UiKit.S(4f));
+            for (int i = 0; i < 4; i++)
+            {
+                Rect r = UiKit.Col(br, i, 4);
+                _buttons[i] = r;
+                bool active = (i == 1 && mode == 0) || (i == 2 && mode == 1) || (i == 0 && mode == 2);
+                ConsoleButton(r, ButtonNames[i], i == 0 ? UiButton.Primary : i == 3 ? UiButton.Ghost : UiButton.Secondary,
+                              i != 0 || canEngage, active);
+            }
+            y += br.height + gap * 1.5f;
 
             // the selected track
+            float cardH = UiKit.S(78f);
+            Rect card = new Rect(x, y, pw, cardH);
+            UiKit.Fill(card, UiKit.CardFill, 1);
             if (_selected != null && _selected.Go != null)
             {
                 Blip b = _selected;
-                Vector3 d = b.Pos - TowerRadar.RadarPos;
-                float brg = Mathf.Repeat(Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg, 360f);
-                Vector3 v = b.Vel;
-                v.y = 0f;
-                float hdg = Mathf.Repeat(Mathf.Atan2(v.x, v.z) * Mathf.Rad2Deg, 360f);
-                float kmh = v.magnitude / K * 3.6f;
-                Color c = b.Iff > 0 ? Green : b.Iff < 0 ? Foe : Unknown;
-                Label(new Rect(x, y, pw, 22f), "TRACK " + b.Id.ToString("00", CultureInfo.InvariantCulture) + "  " + IffName(b.Iff), c, false);
-                y += 22f;
-                SmallLabel(x, y, "type: " + Guess(b), c); y += 16f;
-                SmallLabel(x, y, "bearing " + brg.ToString("000", CultureInfo.InvariantCulture) + "   range "
-                    + (new Vector3(d.x, 0f, d.z).magnitude / K / 1000f).ToString("0.00", CultureInfo.InvariantCulture) + " km", c); y += 16f;
-                SmallLabel(x, y, "heading " + (kmh < 5f ? "---" : hdg.ToString("000", CultureInfo.InvariantCulture)) + "   speed "
-                    + kmh.ToString("0", CultureInfo.InvariantCulture) + " km/h   height "
-                    + (b.Height / K).ToString("0", CultureInfo.InvariantCulture) + " m", c); y += 22f;
+                AirRow a = RowOf(b);
+                float ix = x + UiKit.S(12f), iw = pw - UiKit.S(24f);
+                UiKit.Label(new Rect(ix, y + UiKit.S(6f), iw * 0.3f, UiKit.S(24f)), "TRACK", UiFont.Heading, UiFont.Left, UiKit.TextDim);
+                UiKit.Label(new Rect(ix + UiKit.S(64f), y + UiKit.S(6f), UiKit.S(40f), UiKit.S(24f)), Id2(b.Id), UiFont.Heading, UiFont.Left, UiKit.Text);
+                UiKit.Chip(new Rect(ix + UiKit.S(104f), y + UiKit.S(8f), UiKit.S(86f), UiKit.S(20f)), IffName(b.Iff), IffTone(b.Iff));
+                UiKit.Label(new Rect(ix + UiKit.S(200f), y + UiKit.S(6f), iw - UiKit.S(200f), UiKit.S(24f)), Guess(b), UiFont.Body, UiFont.Left, IffColor(b.Iff));
+                if (a != null) Numbers(new Rect(ix, y + UiKit.S(40f), iw, UiKit.S(26f)), a, UiFont.Body);
             }
             else
-            {
-                SmallLabel(x, y, "No track selected - click a blip.", DimGreen);
-                y += 22f;
-            }
-
-            // the buttons
-            string[] names = { "ENGAGE SELECTED", "WEAPONS FREE ALL", "HOLD FIRE ALL", "CLEAR" };
-            float bw = Mathf.Min(170f, (pw - 30f) / 4f);
-            for (int i = 0; i < 4; i++)
-            {
-                Rect r = new Rect(x + i * (bw + 8f), y, bw, 30f);
-                _buttons[i] = r;
-                bool hot = r.Contains(_cursor);
-                GUI.color = hot ? new Color(0.3f, 0.8f, 0.4f, 0.9f) : new Color(0.1f, 0.35f, 0.15f, 0.9f);
-                GUI.DrawTexture(r, _white);
-                SmallLabel(r.x + 6f, r.y + 7f, names[i], Color.white);
-            }
-            y += 42f;
+                UiKit.Label(new Rect(x + UiKit.S(12f), y, pw - UiKit.S(24f), cardH), "No track selected - click a blip on the scope or a line of the air picture.",
+                    UiFont.Body, UiFont.Left, UiKit.TextDim);
+            y += cardH + gap * 1.5f;
 
             // the guns
-            List<FlakGunInfo> guns = Flak.Guns();
-            int me = Crocodile.LocalActor();
-            int who = TowerRadar.Obeyed(me) ? TowerRadar.PlayerSide(me) : TowerRadar.ControlSide;
-            if (guns.Count == 0) { SmallLabel(x, y, "No AA guns on the air defence net.", Amber); y += 18f; }
-            for (int i = 0; i < guns.Count; i++)
+            float small = UiKit.S(26f);
+            UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "GUNS - OWNER / CREW / STATE");
+            y += UiKit.S(22f) + gap * 0.5f;
+            if (_gunRows.Count == 0 || _guns.Count == 0)
             {
-                FlakGunInfo g = guns[i];
-                bool follows = TowerRadar.Follows(g, who);
-                SmallLabel(x, y, g.Id + "  52-K   " + g.State + "   crew " + g.CrewAlive + "/2   "
-                    + g.Rounds + " rds   " + (follows ? "FOLLOWS " + TowerRadar.SideLabel(who) : TowerRadar.Ignores(g, who)),
-                    !follows ? Foe : g.State == FlakState.Firing ? Foe : g.State == FlakState.NoCrew ? Amber : Green);
-                y += 16f;
+                UiKit.Label(new Rect(x, y, pw, small), "No AA guns on the air defence net.", UiFont.Body, UiFont.Left, UiKit.Warn);
+                y += small;
             }
-            y += 8f;
-            SmallLabel(x, y, "Operator: " + (TowerRadar.OperatorActor >= 0 ? "player at the console ("
-                + TowerRadar.SideLabel(TowerRadar.PlayerSide(TowerRadar.OperatorActor)) + ")" : TowerRadar.NpcOperatorUp ? "HQ operator" : "none"), DimGreen);
-            y += 22f;
+            for (int i = 0; i < _guns.Count && i < _gunRows.Count; i++)
+            {
+                GunRow g = _gunRows[i];
+                Rect r = new Rect(x, y, pw, small);
+                if (i % 2 == 0) UiKit.Fill(r, UiKit.Fade(Color.white, 0.03f), 2);
+                UiKit.Label(new Rect(r.x + UiKit.S(8f), r.y, UiKit.S(60f), small), g.Id, UiFont.Body, UiFont.Left, UiKit.Text);
+                UiKit.Label(new Rect(r.x + UiKit.S(70f), r.y, UiKit.S(44f), small), GunType(i), UiFont.Small, UiFont.Left, UiKit.TextDim);
+                float cx = r.x + UiKit.S(118f);
+                UiKit.Chip(new Rect(cx, r.y + UiKit.S(3f), UiKit.S(86f), small - UiKit.S(6f)), StateNames[g.State], StateTone(g.State));
+                UiKit.Chip(new Rect(cx + UiKit.S(92f), r.y + UiKit.S(3f), UiKit.S(66f), small - UiKit.S(6f)), CrewNames[g.Crew],
+                    g.Crew == 2 ? UiTone.Success : g.Crew == 1 ? UiTone.Warning : UiTone.Error);
+                UiKit.Label(new Rect(cx + UiKit.S(164f), r.y, UiKit.S(36f), small), g.Rounds, UiFont.Small, UiFont.Right, UiKit.TextDim);
+                UiKit.Label(new Rect(cx + UiKit.S(204f), r.y, UiKit.S(26f), small), "rds", UiFont.Small, UiFont.Left, UiKit.TextDim);
+                UiKit.Label(new Rect(cx + UiKit.S(234f), r.y, r.xMax - cx - UiKit.S(240f), small), g.Owner, UiFont.Small, UiFont.Left,
+                    g.Follows ? UiKit.Good : UiKit.Bad);
+                y += small;
+            }
+            UiKit.Label(new Rect(x, y, pw, UiKit.S(20f)), _operatorText.Text, UiFont.Small, UiFont.Left, UiKit.TextDim);
+            y += UiKit.S(20f) + gap;
+
+            // the air picture
+            UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "AIR PICTURE");
+            y += UiKit.S(22f) + gap * 0.5f;
+            bool log = TowerRadar.B(TowerRadar.CfgLog);
+            float logMin = log ? UiKit.S(22f) + 4f * UiKit.S(17f) : 0f;
+            _airShown = 0;
+            if (_airRows.Count == 0)
+            {
+                UiKit.Label(new Rect(x, y, pw, small), TowerRadar.Working ? "No air contact." : "No picture - the radar is dark.",
+                    UiFont.Body, UiFont.Left, UiKit.TextDim);
+                y += small;
+            }
+            for (int i = 0; i < _airRows.Count && _airShown < _airRects.Length; i++)
+            {
+                if (y + small > bottom - logMin)
+                {
+                    UiKit.Label(new Rect(x, y, pw, UiKit.S(18f)), "+ more tracks on the scope", UiFont.Small, UiFont.Left, UiKit.TextDim);
+                    y += UiKit.S(18f);
+                    break;
+                }
+                AirRow a = _airRows[i];
+                Rect r = new Rect(x, y, pw, small);
+                _airRects[_airShown] = r;
+                _airHit[_airShown] = a.B;
+                _airShown++;
+                bool sel = a.B == _selected;
+                bool hot = r.Contains(_cursor);
+                if (sel || hot || i % 2 == 0)
+                    UiKit.Fill(r, sel ? UiKit.Fade(UiKit.Accent, 0.25f) : hot ? UiKit.CardHover : UiKit.Fade(Color.white, 0.03f), 2);
+                UiKit.Label(new Rect(r.x + UiKit.S(8f), r.y, UiKit.S(30f), small), Id2(a.B.Id), UiFont.Body, UiFont.Left, UiKit.Text);
+                UiKit.Chip(new Rect(r.x + UiKit.S(40f), r.y + UiKit.S(3f), UiKit.S(74f), small - UiKit.S(6f)), IffName(a.B.Iff), IffTone(a.B.Iff));
+                UiKit.Label(new Rect(r.x + UiKit.S(122f), r.y, UiKit.S(170f), small), Guess(a.B), UiFont.Small, UiFont.Left, IffColor(a.B.Iff));
+                Numbers(new Rect(r.x + UiKit.S(296f), r.y, r.width - UiKit.S(300f), small), a, UiFont.Small);
+                if (TowerRadar.AssignedKind >= 0 && a.B.Kind == TowerRadar.AssignedKind
+                    && (a.B.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
+                    UiKit.Fill(new Rect(r.x, r.y, UiKit.S(3f), r.height), UiKit.Bad, 0);
+                y += small;
+            }
+            y += gap;
 
             // the log
-            if (TowerRadar.B(TowerRadar.CfgLog))
+            if (log && y + UiKit.S(22f) < bottom)
             {
-                Label(new Rect(x, y, pw, 22f), "RADIO / CONTACT LOG", Green, false);
-                y += 20f;
-                for (int i = _log.Count - 1; i >= 0 && y < h - 70f; i--)
+                UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "RADIO / CONTACT LOG");
+                y += UiKit.S(22f) + gap * 0.5f;
+                float lh = UiKit.S(17f);
+                for (int i = _log.Count - 1; i >= 0 && y + lh <= bottom; i--)
                 {
-                    SmallLabel(x, y, _log[i], new Color(0.6f, 1f, 0.7f, 0.9f));
-                    y += 15f;
+                    UiKit.Label(new Rect(x, y, pw, lh), _log[i], UiFont.Small, UiFont.Left, UiKit.Fade(UiKit.Text, 0.8f));
+                    y += lh;
                 }
             }
-            SmallLabel(x, h - 40f, "Mouse: cursor   LMB: select / button   " + Key() + " / Esc: leave", DimGreen);
+            UiKit.Label(new Rect(x, h - pad - line, pw, line), FooterText(), UiFont.Small, UiFont.Left, UiKit.TextDim);
         }
 
-        static string Pct(float f) { return f <= 0f ? "DESTROYED" : (f * 100f).ToString("0", CultureInfo.InvariantCulture) + "%"; }
+        static string _footer;
+        static KeyCode _footerKey = KeyCode.None;
+
+        static string FooterText()
+        {
+            KeyCode k = Key();
+            if (_footer == null || k != _footerKey)
+            {
+                _footerKey = k;
+                _footer = "H: support map   Mouse: cursor   LMB: select / order   " + k + " / Esc: leave";
+            }
+            return _footer;
+        }
+
+        /// <summary>The gun's type label (the 52-K is the net's only gun type here).</summary>
+        static string GunType(int index) { return index < _guns.Count && _guns[index].ShortRange ? "ZU-23" : "52-K"; }   // W-AA5
+
+        static int StateTone(int state)
+        {
+            switch (state)
+            {
+                case 0: return UiTone.Error;      // no crew
+                case 3: return UiTone.Warning;    // firing
+                case 4: return UiTone.Info;       // reloading
+                case 5: return UiTone.Info;       // player
+                case 6: return UiTone.Error;      // W-AA7: destroyed
+                default: return UiTone.Success;   // idle, tracking
+            }
+        }
+
+        /// <summary>Range, bearing, heading, speed, height of a track in columns.</summary>
+        static void Numbers(Rect r, AirRow a, int font)
+        {
+            float c = r.width / 5f;
+            Color dim = UiKit.TextDim, txt = UiKit.Text;
+            Col(new Rect(r.x, r.y, c, r.height), "RNG", Km(a.RangeTenths), font, dim, txt);
+            Col(new Rect(r.x + c, r.y, c, r.height), "BRG", Deg3(a.Brg), font, dim, txt);
+            Col(new Rect(r.x + 2f * c, r.y, c, r.height), "HDG", a.Hdg < 0 ? "---" : Deg3(a.Hdg), font, dim, txt);
+            Col(new Rect(r.x + 3f * c, r.y, c, r.height), "KM/H", UiNum.Of(a.Kmh), font, dim, txt);
+            Col(new Rect(r.x + 4f * c, r.y, c, r.height), "ALT M", a.AltM < 1000 ? UiNum.Of(Mathf.Max(0, a.AltM)) : ">999", font, dim, txt);
+        }
+
+        static void Col(Rect r, string label, string value, int font, Color dim, Color txt)
+        {
+            float lw = UiKit.S(font == UiFont.Small ? 36f : 44f);
+            UiKit.Label(new Rect(r.x, r.y, lw, r.height), label, UiFont.Small, UiFont.Left, dim);
+            UiKit.Label(new Rect(r.x + lw, r.y, r.width - lw, r.height), value, font, UiFont.Left, txt);
+        }
+
+        static AirRow RowOf(Blip b)
+        {
+            for (int i = 0; i < _airRows.Count; i++) if (_airRows[i].B == b) return _airRows[i];
+            return null;
+        }
+
+        /// <summary>A kit button under the virtual cursor (the console has no IMGUI mouse).</summary>
+        static void ConsoleButton(Rect r, string text, int look, bool enabled, bool active)
+        {
+            bool hot = enabled && r.Contains(_cursor);
+            bool down = hot && Input.GetMouseButton(0);
+            Color bg, fg = UiKit.Text;
+            if (look == UiButton.Primary)
+            {
+                bg = down ? UiKit.AccentPress : hot ? UiKit.AccentHover : UiKit.Accent;
+                fg = UiKit.TextOnAccent;
+            }
+            else if (look == UiButton.Ghost)
+                bg = UiKit.Fade(Color.white, down ? 0.10f : hot ? 0.06f : 0f);
+            else
+                bg = active ? UiKit.Fade(UiKit.Accent, hot ? 0.45f : 0.32f) : down ? UiKit.Header : hot ? UiKit.CardHover : UiKit.CardFill;
+            if (!enabled) { bg = UiKit.Fade(bg, 0.35f); fg = UiKit.Fade(fg, 0.45f); }
+            UiKit.Fill(r, bg, 1);
+            if (look == UiButton.Secondary || look == UiButton.Ghost) UiKit.Outline(r, active ? UiKit.Accent : UiKit.Line);
+            UiKit.Label(r, text, UiFont.Body, UiFont.Center, fg);
+        }
 
         static void Click()
         {
@@ -2299,6 +2564,12 @@ namespace NextDayRevival
                 if (_buttons[i].Contains(_cursor))
                 {
                     Command(i == 0 ? TowerRadar.CmdEngage : i == 1 ? TowerRadar.CmdFree : i == 2 ? TowerRadar.CmdHold : TowerRadar.CmdClear);
+                    return;
+                }
+            for (int i = 0; i < _airShown; i++)
+                if (_airRects[i].Contains(_cursor))
+                {
+                    if (_airHit[i] != null && _blips.Contains(_airHit[i])) _selected = _airHit[i];
                     return;
                 }
             if (_r <= 0f) return;
@@ -2314,21 +2585,6 @@ namespace NextDayRevival
         }
 
         // ------------------------------------------------------- primitives
-
-        static void Label(Rect r, string s, Color c, bool centre)
-        {
-            GUIStyle st = _text;
-            if (centre)
-            {
-                float tw = st.CalcSize(new GUIContent(s)).x;
-                r = new Rect(r.x + (r.width - tw) * 0.5f, r.y, tw + 4f, r.height);
-            }
-            GUI.color = new Color(0f, 0f, 0f, 0.8f);
-            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), s, st);
-            GUI.color = c;
-            GUI.Label(r, s, st);
-            GUI.color = Color.white;
-        }
 
         static void SmallLabel(float x, float y, string s, Color c)
         {
@@ -2898,6 +3154,8 @@ namespace NextDayRevival
         static MethodInfo _raise;
         static Type _optType;
 
+        internal static bool Ready { get { return _hooked; } }
+
         static int Code() { return TowerRadar.CfgEventCode == null ? 197 : TowerRadar.CfgEventCode.Value; }
 
         static bool Overlaps(int code)
@@ -2949,7 +3207,7 @@ namespace NextDayRevival
             }
         }
 
-        static void Send(float[] data)
+        internal static void Send(float[] data)
         {
             if (!_hooked) return;
             try
@@ -2965,7 +3223,7 @@ namespace NextDayRevival
             Send(new float[] { State, TowerRadar.RadarHp, TowerRadar.ConsoleHp, TowerRadar.OperatorActor,
                 TowerRadar.NpcOperatorUp ? 1f : 0f, TowerRadar.Mode, TowerRadar.SirenOn ? 1f : 0f, TowerRadar.Tier,
                 TowerRadar.AssignedKind, TowerRadar.AssignedPos.x, TowerRadar.AssignedPos.y, TowerRadar.AssignedPos.z,
-                TowerRadar.ControlSide });
+                TowerRadar.ControlSide, AirfieldOwnership.Holder, AirfieldOwnership.Captured ? 1f : 0f });
         }
 
         internal static void SendClaim(bool on) { Send(new float[] { ClaimMsg, on ? 1f : 0f }); }
@@ -2990,14 +3248,22 @@ namespace NextDayRevival
                 for (int i = 0; i < f.Length; i++)
                     if (float.IsNaN(f[i]) || float.IsInfinity(f[i])) return;
                 int kind = Mathf.RoundToInt(f[0]);
-                if (kind == State && f.Length >= 12)
+                if (kind >= 5 && kind <= 8) { TowerSupport.Receive(f, sender); return; }
+                if (kind == AirfieldHold.StateMsg || kind == AirfieldHold.GrantMsg) { AirfieldHold.Receive(f, sender); return; }
+                if (kind == State && f.Length >= 12 && AirfieldOwnership.MasterSender(sender))
+                {
+                    if (f.Length >= 15 && !Crocodile.IsMaster())
+                        AirfieldOwnership.Apply(Mathf.RoundToInt(f[13]), f[14] > 0.5f);
                     TowerRadar.OnState(f[1], f[2], Mathf.RoundToInt(f[3]), f[4] > 0.5f, Mathf.Clamp(Mathf.RoundToInt(f[5]), 0, 2),
                         f[6] > 0.5f, Mathf.Clamp(Mathf.RoundToInt(f[7]), 0, 2), Mathf.RoundToInt(f[8]), new Vector3(f[9], f[10], f[11]),
                         f.Length >= 13 ? Mathf.RoundToInt(f[12]) : -1);
+                    Flak.DirectOwned(TowerRadar.ControlSide, TowerRadar.Tier);
+                }
                 else if (kind == ClaimMsg)
                     TowerRadar.OnClaim(sender, f[1] > 0.5f);
-                else if (kind == Hit && f.Length >= 7 && Crocodile.IsMaster())
-                    TowerRadar.ApplyHit(Mathf.Clamp(Mathf.RoundToInt(f[1]), 0, 1), Mathf.Clamp(f[2], 0f, 100f),
+                else if (kind == Hit && f.Length >= 7 && Crocodile.IsMaster() && f[6] < 0.5f
+                    && Crocodile.PlayerByActor(sender) != null)
+                    TowerRadar.ApplyHit(Mathf.Clamp(Mathf.RoundToInt(f[1]), 0, 1), Mathf.Clamp(f[2], 0f, 1f),
                         new Vector3(f[3], f[4], f[5]), f[6] > 0.5f);
                 else if (kind == Cmd && f.Length >= 6 && Crocodile.IsMaster())
                     TowerRadar.OnCommand(sender, Mathf.RoundToInt(f[1]), Mathf.RoundToInt(f[2]), new Vector3(f[3], f[4], f[5]));

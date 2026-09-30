@@ -632,7 +632,15 @@ namespace NextDayRevival
 
         public static void Tick()
         {
+            // W Perf1: the vehicle shot reports are synthesised a slice per
+            // frame here (every client, patrols on or off) instead of inside
+            // the first shot - see VehicleShotSound.Prewarm. Free once done.
+            VehicleShotSound.Prewarm();
             if (!RevivalPlugin.CfgPatrol.Value) return;
+            // W Perf1: three nested F6 sub-slots, so the overlay says which
+            // half of Patrol.Tick a cost belongs to (keys/editor, the automatic
+            // refill, the guns). Not added to the totals (FrameProf kind 4).
+            FrameProf.S(FrameProf.Sub_PatrolKeys);
             try
             {
                 ParseKeys();
@@ -649,16 +657,21 @@ namespace NextDayRevival
                 Editor.Tick();
             }
             catch (Exception ex) { RevivalPlugin.L.LogError("Patrol tick: " + ex); }
+            FrameProf.E(FrameProf.Sub_PatrolKeys);
 
+            FrameProf.S(FrameProf.Sub_PatrolAuto);
             try { Nachschub(); }
             catch (Exception ex) { RevivalPlugin.L.LogError("Patrol auto: " + ex); }
+            FrameProf.E(FrameProf.Sub_PatrolAuto);
 
             // The gun runs at frame rate, not in the physics step: the turret
             // is turned by RotateTowards and a turret that steps 50 times a
             // second while the picture is drawn 120 times stutters visibly.
             // The driving stays in FixedTick, where it belongs.
+            FrameProf.S(FrameProf.Sub_PatrolGun);
             try { Gun.Tick(_units); }
             catch (Exception ex) { RevivalPlugin.L.LogError("Patrol gun: " + ex); }
+            FrameProf.E(FrameProf.Sub_PatrolGun);
         }
 
         /// <summary>The driving itself. Belongs in FixedUpdate: it writes the
@@ -2921,8 +2934,7 @@ namespace NextDayRevival
             int seg;
             Vector3 line = PointOnRoute(r, arc, out seg);
             Vector3 dir = HeadingOnRoute(r, arc);
-            Carry(u, line, dir, speed,
-                  "Convoy " + u.ConvoyId + ": ground slot " + u.ColumnIndex);
+            Carry(u, line, dir, speed, false);
             u.Stuck = 0f;
             u.Next = seg;
         }
@@ -2937,7 +2949,9 @@ namespace NextDayRevival
         /// proved it cannot drive this stretch itself. <paramref name="who"/>
         /// names the caller in the ground report, which is the only line that
         /// tells the two apart.</summary>
-        static void Carry(Unit u, Vector3 line, Vector3 dir, float speed, string who)
+        // W Perf1: the log label is made inside the (10 s gated) log branch;
+        // both callers built it as a string every physics step per vehicle.
+        static void Carry(Unit u, Vector3 line, Vector3 dir, float speed, bool rail)
         {
             if (u.ColumnLift <= 0f) ColumnFootprint(u);
 
@@ -3001,6 +3015,8 @@ namespace NextDayRevival
                     || (u.Placed && Mathf.Abs(t.position.y - targetY) > 2f)))
             {
                 u.ColumnGroundLog = Time.time + 10f;
+                string who = rail ? "Patrol rail on " + u.Route.Name + ":"
+                    : "Convoy " + u.ConvoyId + ": ground slot " + u.ColumnIndex;
                 RevivalPlugin.L.LogInfo(who + " routeY=" + line.y.ToString("0.0")
                     + " surfaceY=" + y.ToString("0.0") + " hullY="
                     + targetY.ToString("0.0") + " found=" + found);
@@ -4741,12 +4757,16 @@ namespace NextDayRevival
         /// no mesh is a thing we cannot size up, and a thing we cannot size up
         /// is a thing we do not crush.
         /// </summary>
+        static readonly List<Renderer> _passt = new List<Renderer>();
+
         static bool Passt(Transform t, float hoch, float breit)
         {
-            Renderer[] rs = t.GetComponentsInChildren<Renderer>(true);
+            // W Perf1: one reused list, not a new array per obstacle test.
+            List<Renderer> rs = _passt;
+            t.GetComponentsInChildren<Renderer>(true, rs);
             bool any = false;
             Bounds b = new Bounds();
-            for (int i = 0; i < rs.Length; i++)
+            for (int i = 0; i < rs.Count; i++)
             {
                 if (rs[i] == null || !rs[i].enabled) continue;
                 if (!any) { b = rs[i].bounds; any = true; }
@@ -4988,6 +5008,23 @@ namespace NextDayRevival
             if (go == null) return false;
             if (IsTerrain(go) || normal.y >= 0.45f) return true;
 
+            // W Perf1: the answer below depends only on the names of the hit
+            // object and five of its parents, which do not change - remembered
+            // per object instead of six name strings (and six lower-cased
+            // copies) per steep ray hit per physics step.
+            int id = go.GetInstanceID();
+            bool known;
+            if (_surfaceByName.TryGetValue(id, out known)) return known;
+            if (_surfaceByName.Count > 4096) _surfaceByName.Clear();
+            known = NamedDriveSurface(go);
+            _surfaceByName[id] = known;
+            return known;
+        }
+
+        static readonly Dictionary<int, bool> _surfaceByName = new Dictionary<int, bool>();
+
+        static bool NamedDriveSurface(GameObject go)
+        {
             Transform t = go.transform;
             for (int depth = 0; t != null && depth < 6; depth++, t = t.parent)
             {
@@ -5859,8 +5896,7 @@ namespace NextDayRevival
             }
 
             Vector3 line = RailPoint(r, u.RailArc, u.OneWay, out seg);
-            Carry(u, line, RailHeading(r, u.RailArc, u.OneWay), u.RailSpeed,
-                  "Patrol rail on " + r.Name + ":");
+            Carry(u, line, RailHeading(r, u.RailArc, u.OneWay), u.RailSpeed, true);
 
             u.Next = seg;
             u.Stuck = 0f;
@@ -6009,7 +6045,15 @@ namespace NextDayRevival
                 if (c.Npc != null) return NpcWar.PatrolTarget(c.Npc);
                 if (c.Vehicle != null) return NpcWar.PatrolVehicleAlive(c.Vehicle);
                 return c.States == null || _stateField == null || _death == null
-                    || !_death.Equals(_stateField.GetValue(c.States));
+                    || !IsDeath(c.States);
+            }
+
+            /// <summary>W Perf1: the player's state compared as an int
+            /// (FastField.GetInt) - GetValue boxed the enum on every ask, per
+            /// engaged vehicle per frame.</summary>
+            static bool IsDeath(Component states)
+            {
+                return FastField.GetInt(_stateField, states) == _deathValue;
             }
 
             static bool Feind(Unit u, CombatTarget c)
@@ -6064,6 +6108,7 @@ namespace NextDayRevival
             static PropertyInfo _instance;
             static FieldInfo _networkPlayers, _stateField;
             static object _death;
+            static int _deathValue;
             static bool _lookedUp;
 
             /// <summary>
@@ -6132,7 +6177,11 @@ namespace NextDayRevival
                     _stateField = FastField.Find(_statesType, "_characterState");
                     if (_stateField != null && _stateField.FieldType.IsEnum)
                     {
-                        try { _death = Enum.Parse(_stateField.FieldType, "Death"); }
+                        try
+                        {
+                            _death = Enum.Parse(_stateField.FieldType, "Death");
+                            _deathValue = Convert.ToInt32(_death);
+                        }
                         catch { _death = null; }
                     }
                 }
@@ -6157,7 +6206,7 @@ namespace NextDayRevival
             static bool Lebt(Spieler s)
             {
                 if (s.States == null || _stateField == null || _death == null) return true;
-                return !_death.Equals(_stateField.GetValue(s.States));
+                return !IsDeath(s.States);
             }
 
             // --------------------------------------------------------- frame
@@ -6558,8 +6607,11 @@ namespace NextDayRevival
                 float dist = Vector3.Distance(from, ziel);
                 float spread = Streuweite(u, dist, suppress);
                 Vector3 aim = ziel + GunnerAI.Offset(ziel - from, spread);
-                string gun = (u.Tank ? "tank " : "BTR ") + u.Route.Name;
-                string wer = Name(u.GunTarget);
+                // W Perf1: the two log names are only built when shot logging
+                // is on - they were made for every round and then dropped.
+                bool log = GunnerAI.LogShots;
+                string gun = log ? (u.Tank ? "tank " : "BTR ") + u.Route.Name : null;
+                string wer = log ? Name(u.GunTarget) : null;
 
                 Vector3 dir = aim - from;
                 if (dir.sqrMagnitude < 0.0001f) return false;
@@ -6617,8 +6669,9 @@ namespace NextDayRevival
                         RocketHook.Detonate(blast, 0f, rad, 3f);
                         int vorher = u.Hits;
                         Sprengschaden(u, hit, blast, scha, rad, from);
-                        GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
-                            "shell on " + struck.name + ", " + (u.Hits - vorher) + " hostile(s) hurt");
+                        if (log)
+                            GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
+                                "shell on " + struck.name + ", " + (u.Hits - vorher) + " hostile(s) hurt");
                     }
                     catch (Exception ex)
                     {
@@ -6630,9 +6683,10 @@ namespace NextDayRevival
 
                 bool traf = Schaden(u, struck, Schadenswert(u), impact, from);
                 if (traf) u.Hits++;
-                GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
-                    (traf ? "hit " : "miss on ") + struck.name
-                    + " (" + u.Hits + " of " + u.Shots + ")");
+                if (log)
+                    GunnerAI.LogShot(gun, wer, dist, !suppress, u.Vis, spread, suppress,
+                        (traf ? "hit " : "miss on ") + struck.name
+                        + " (" + u.Hits + " of " + u.Shots + ")");
                 return true;
             }
 
@@ -6658,12 +6712,17 @@ namespace NextDayRevival
                 for (int i = 0; i < _targets.Count; i++)
                 {
                     CombatTarget c = _targets[i];
-                    if (!Feind(u, c)) continue;
+                    // W Perf1: the cheap range test first - Feind is reflection
+                    // and was asked for every target on the map per shell. Both
+                    // are pure filters, so the set of victims is unchanged.
+                    if (c == null || c.Tr == null) continue;
                     Vector3 to = Zielpunkt(c.Tr);
                     if (c != direct && Vector3.Distance(point, to) > reach + 20f) continue;
-                    Collider[] hull = c.Tr.GetComponentsInChildren<Collider>();
+                    if (!Feind(u, c)) continue;
+                    List<Collider> hull = _hull;
+                    c.Tr.GetComponentsInChildren<Collider>(false, hull);
                     float dist = Vector3.Distance(point, to);
-                    for (int k = 0; k < hull.Length; k++)
+                    for (int k = 0; k < hull.Count; k++)
                     {
                         if (!hull[k].enabled || hull[k].isTrigger) continue;
                         Vector3 near = hull[k].ClosestPointOnBounds(point);
@@ -6700,14 +6759,15 @@ namespace NextDayRevival
             /// that is not the target does the cover count. One ray alone
             /// grazed the ground the shell had just hit and saved men standing
             /// in the open.</summary>
+            static readonly List<Collider> _hull = new List<Collider>();
+
             static bool Gedeckt(Unit u, CombatTarget c, Vector3 point, Vector3 near)
             {
                 Vector3 from = point + Vector3.up * 0.6f;
                 Vector3 chest = c.Tr.position + Vector3.up * 3.3f;
-                Vector3[] aims = new Vector3[] { near + Vector3.up * 0.3f, chest };
-                for (int k = 0; k < aims.Length; k++)
+                for (int k = 0; k < 2; k++)
                 {
-                    Vector3 to = aims[k] - from;
+                    Vector3 to = (k == 0 ? near + Vector3.up * 0.3f : chest) - from;
                     float len = to.magnitude;
                     if (len < 0.2f) return false;
                     Vector3 ignored;
@@ -6736,10 +6796,19 @@ namespace NextDayRevival
                 return n;
             }
 
+            static readonly Dictionary<Type, MethodInfo> _applyDamage = new Dictionary<Type, MethodInfo>();
+
             static bool FahrzeugSchaden(Component vehicle, float damage, int part)
             {
-                MethodInfo apply = AccessTools.Method(vehicle.GetType(), "ApplyDamage",
-                    new Type[] { typeof(float), typeof(int) }, null);
+                // W Perf1: looked up once per vehicle type, not per hit.
+                Type vt = vehicle.GetType();
+                MethodInfo apply;
+                if (!_applyDamage.TryGetValue(vt, out apply))
+                {
+                    apply = AccessTools.Method(vt, "ApplyDamage",
+                        new Type[] { typeof(float), typeof(int) }, null);
+                    _applyDamage[vt] = apply;
+                }
                 if (apply == null) return false;
                 apply.Invoke(vehicle, new object[] { damage, part });
                 return true;
@@ -9238,9 +9307,20 @@ namespace NextDayRevival
         public static string Sauber(string name)
         {
             if (name == null) return "neutral";
-            string n = name.Trim().ToLowerInvariant();
+            // W Perf1: Feind asks this for every unit every frame. Trim and
+            // ToLowerInvariant made two strings per call; the match below is
+            // the same test (surrounding white space ignored, case ignored)
+            // and returns the table's own string.
+            int a = 0, b = name.Length;
+            while (a < b && char.IsWhiteSpace(name[a])) a++;
+            while (b > a && char.IsWhiteSpace(name[b - 1])) b--;
             for (int i = 0; i < Namen.Length; i++)
-                if (Namen[i] == n) return n;
+            {
+                string n = Namen[i];
+                if (n.Length == b - a
+                    && string.Compare(name, a, n, 0, n.Length, StringComparison.OrdinalIgnoreCase) == 0)
+                    return n;
+            }
             return "";
         }
 
@@ -9292,8 +9372,9 @@ namespace NextDayRevival
         {
             int faction = Mortar.FactionShield.FactionOf(player);
             Type type = RevivalPlugin.TypeByName("Fraction");
+            // W Perf1: a name table, not Enum.GetName (a box per call).
             return faction < 0 || type == null || !type.IsEnum
-                ? null : Enum.GetName(type, faction);
+                ? null : EnumNames.Get(type, faction);
         }
 
         /// <summary>

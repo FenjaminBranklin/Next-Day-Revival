@@ -129,6 +129,7 @@ namespace NextDayRevival
         internal Vector3 LastKnown, SpeedFrom;
         internal float NextScan, Held, NextShot, LastSeen, LastContact, Vis, SpeedAt, TargetSpeed, NextPose;
         internal int Burst, BurstLen, Rounds, Hits;
+        internal int TargetHits;             // W: hits on this target (a kill toast needs one)
 
         internal bool Seated { get { return Carrier != null; } }
     }
@@ -622,7 +623,7 @@ namespace NextDayRevival
 
         static void StepUnit(MercUnit u, MercSeat st, MercCarrier oc, float now, int k)
         {
-            bool want = u.Order.Mode == MercOrder.Vehicle && !u.Deserting;
+            bool want = u.Order.Mode == MercOrder.Vehicle && !u.Deserting && !u.Rally;
             MercCarrier c = st.Carrier;
             if (c != null)
             {
@@ -965,7 +966,7 @@ namespace NextDayRevival
         static void ClearGun(MercSeat st)
         {
             st.Target = null; st.TargetNpc = null; st.TargetCarrier = null;
-            st.TargetPlayer = false; st.Suppress = false; st.Firing = false;
+            st.TargetPlayer = false; st.Suppress = false; st.Firing = false; st.TargetHits = 0;
             st.Held = 0f; st.Burst = 0; st.BurstLen = 0; st.NextScan = 0f;
         }
 
@@ -1071,7 +1072,11 @@ namespace NextDayRevival
             if (st.Target == null || !st.Target.gameObject.activeInHierarchy
                 || (st.TargetNpc != null && !NpcWar.MercAlive(st.TargetNpc)))
             {
-                if (st.Target != null) { st.Target = null; st.Held = 0f; }
+                if (st.Target != null)
+                {
+                    GunKilled(u, st, st.Target, st.TargetNpc, st.TargetPlayer);
+                    st.Target = null; st.Held = 0f;
+                }
                 st.Firing = false;
                 Rest(c, st, dt, now);
                 PublishPose(c, st, now, false);
@@ -1150,6 +1155,8 @@ namespace NextDayRevival
                 && (st.Target.position - muzzle).sqrMagnitude < range * range * 1.2f) return;
             int n = NpcWar.MercGunCandidates(u, muzzle, range, _cand, _candNpc, _candPlayer);
             Transform had = st.Target;
+            Component hadNpc = st.TargetNpc;
+            bool hadPlayer = st.TargetPlayer;
             st.Target = null;
             for (int i = 0; i < n && i < 3; i++)
             {
@@ -1163,7 +1170,9 @@ namespace NextDayRevival
             }
             if (st.Target != had)
             {
-                st.Held = 0f; st.Burst = 0;
+                if (had != null) GunKilled(u, st, had, hadNpc, hadPlayer);
+                st.Held = 0f; st.Burst = 0; st.TargetHits = 0;
+                if (st.Target != null) MercNotify.GunTarget(u, st.Target.position);
                 if (st.Target != null)
                     RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " on the " + c.En + "'s gun engages "
                         + (st.TargetPlayer ? "a player" : "an NPC") + " at "
@@ -1459,7 +1468,21 @@ namespace NextDayRevival
             }
             bool heavy = c.GunKind == MercCarrier.GunBtr || c.GunKind == MercCarrier.GunTank;
             if (NpcWar.MercGunHit(u, struck, damage, impact, muzzle, st.Target, st.TargetCarrier, heavy,
-                c.GunKind == MercCarrier.GunTank)) st.Hits++;
+                c.GunKind == MercCarrier.GunTank)) { st.Hits++; st.TargetHits++; }
+        }
+
+        /// <summary>W: the target he left was hit by this gun and is dead -
+        /// the owner's kill toast (Revival.MercNotify.cs). Event time only.</summary>
+        static void GunKilled(MercUnit u, MercSeat st, Transform t, Component npc, bool player)
+        {
+            int hits = st.TargetHits;
+            st.TargetHits = 0;
+            if (hits <= 0) return;
+            // An NPC (MercAlive is false for a destroyed one too), else a player.
+            bool dead = !ReferenceEquals(npc, null) ? !NpcWar.MercAlive(npc)
+                : player && t != null && Mercs.PlayerDead(t.gameObject);
+            if (!dead) return;
+            MercNotify.GunKill(u, t != null ? t.position : Muzzle(st.Carrier));
         }
 
         // ============================================================ network
@@ -1584,6 +1607,40 @@ namespace NextDayRevival
             _dirty = false;
         }
 
+        static object _aaOpts;
+        delegate void AASend(byte code, object data, bool reliable, object options);
+        static AASend _aaSend;
+        static bool _aaFailed;
+        internal static void SendAAPacket(float[] data)
+        {
+            if (_aaFailed) return;
+            try
+            {
+            EnsureHooked();
+            if (!_hooked) return;
+            if (_aaSend == null)
+            {
+                _aaOpts = Activator.CreateInstance(_optType);
+                // Bind once: a reflection return would box RaiseEvent's bool each heartbeat.
+                System.Reflection.Emit.DynamicMethod dm = new System.Reflection.Emit.DynamicMethod(
+                    "MercAAPublish", typeof(void), new Type[] { typeof(byte), typeof(object), typeof(bool), typeof(object) },
+                    typeof(MercRide), true);
+                System.Reflection.Emit.ILGenerator il = dm.GetILGenerator();
+                il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+                il.Emit(System.Reflection.Emit.OpCodes.Ldarg_2);
+                il.Emit(System.Reflection.Emit.OpCodes.Ldarg_3);
+                il.Emit(System.Reflection.Emit.OpCodes.Castclass, _optType);
+                il.Emit(System.Reflection.Emit.OpCodes.Call, _raise);
+                if (_raise.ReturnType != typeof(void)) il.Emit(System.Reflection.Emit.OpCodes.Pop);
+                il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                _aaSend = (AASend)dm.CreateDelegate(typeof(AASend));
+            }
+            _aaSend((byte)Code(), data, true, _aaOpts);
+            }
+            catch (Exception ex) { _aaFailed = true; Warn("AA publish", ex); }
+        }
+
         static void Raise(float[] data, bool reliable)
         {
             try
@@ -1601,6 +1658,7 @@ namespace NextDayRevival
             try
             {
                 float[] d = content as float[];
+                if (d != null && d.Length > 0 && (d[0] == 2f || d[0] == 3f)) { MercAA.OnPacket(d, sender); return; }
                 if (d == null || d.Length < 2 || Mathf.RoundToInt(d[0]) != 1) return;
                 int n = Mathf.RoundToInt(d[1]);
                 if (n < 0 || n > 16 || d.Length < 2 + n * 7) return;

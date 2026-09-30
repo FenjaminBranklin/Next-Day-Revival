@@ -147,11 +147,30 @@ namespace NextDayRevival
             }
         }
 
+        // W Perf1: Scene.name is a new string on every read; the answer below
+        // depends only on the active scene, so it is kept until that changes
+        // (a scene handle is not reused within a session).
+        static int _readScene = int.MinValue;
+        static string _readResult;
+
         static string Read()
         {
             try
             {
                 Scene scene = SceneManager.GetActiveScene();
+                int handle = scene.GetHashCode();
+                if (handle == _readScene && _readResult != null) return _readResult;
+                _readResult = ReadName(scene);
+                _readScene = handle;
+                return _readResult;
+            }
+            catch { return _name; }
+        }
+
+        static string ReadName(Scene scene)
+        {
+            try
+            {
                 string name = scene.name == null ? "" : scene.name.Trim();
                 if (name.Length == 0) return _name;
 

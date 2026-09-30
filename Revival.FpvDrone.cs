@@ -67,6 +67,7 @@ namespace NextDayRevival
     public static class Drone
     {
         static bool _flying;
+        static GameObject _aaTarget;
         static Vector3 _pos;
         static Vector3 _vel;
         static float _yaw;                   // Grad, 0 = Welt-Z
@@ -153,6 +154,7 @@ namespace NextDayRevival
                 {
                     Steer();
                     Move();
+                    if (_flying && _aaTarget != null) _aaTarget.transform.position = _pos;
                     DroneNpcFire.Tick();
                 }
                 // Last, and after Move: the jammer may end the flight, and it
@@ -260,6 +262,9 @@ namespace NextDayRevival
             }
 
             _flying = true;
+            if (_aaTarget == null) _aaTarget = new GameObject("NDR FPV AA target");
+            _aaTarget.SetActive(true);
+            _aaTarget.transform.position = _pos;
             _start = Time.time;
             _armed = Time.time + ArmDelay();
             _hp = Mathf.Max(1, RevivalPlugin.CfgDroneHitpoints.Value);
@@ -284,6 +289,7 @@ namespace NextDayRevival
         {
             if (!_flying) return;
             _flying = false;
+            if (_aaTarget != null) _aaTarget.SetActive(false);
             try
             {
                 if (grund != Grund.Detonation)
@@ -823,6 +829,14 @@ namespace NextDayRevival
             static Type _optType;
             static FieldInfo _onEventCall;
             static readonly Dictionary<int, Fremd> _fremde = new Dictionary<int, Fremd>();
+
+            // Typed dictionary iteration: no reflection, boxing or enumerator allocation.
+            internal static void AirContacts(List<GepardGun.Contact> air, Vector3 eye, float range)
+            {
+                if (Drone.Flying) FlakFire.Offer(air, _aaTarget, 2, Mercs.LocalActor, null, eye, range);
+                foreach (KeyValuePair<int, Fremd> pair in _fremde)
+                    FlakFire.Offer(air, pair.Value.Go, 2, pair.Key, null, eye, range);
+            }
             static readonly List<int> _weg = new List<int>();
 
             /// <summary>Eine fremde Drohne, wie dieser Client sie sieht.</summary>
@@ -1394,6 +1408,29 @@ namespace NextDayRevival
             /// jeden, der auf sie schiesst. Ein Kind, um die eigenen Bounds
             /// verschoben, legt die Mitte der Drohne auf den Transform.
             /// </summary>
+            /// <summary>
+            /// W Perf1: the drone's one-time assets (hum clip, mesh file,
+            /// material with its Shader.Find) built one piece per call instead
+            /// of all inside the first launch's frame - that frame was the
+            /// 33 ms CrewDrone.Tick peak. True once everything exists. Bauen
+            /// still builds whatever is missing, so nothing depends on this
+            /// having run.
+            /// </summary>
+            public static bool Prewarm()
+            {
+                if (RevivalPlugin.CfgDroneSound.Value && !Sound.HumReady) { Sound.HumStep(1024); return false; }
+                if (!_meshReady)
+                {
+                    _meshReady = true;
+                    if (Assets.Load("drone.ndmesh") == null) Notnagel();
+                    return false;
+                }
+                if (_mat == null) { Werkstoff(); return true; }
+                return true;
+            }
+
+            static bool _meshReady;
+
             public static GameObject Bauen()
             {
                 GameObject go = new GameObject("NDR_Drone");
@@ -1789,31 +1826,52 @@ namespace NextDayRevival
         {
             static AudioClip _hum;
 
-            public static AudioClip Hum()
+            // W Perf1: the hum is synthesised in slices (HumStep, from
+            // Modell.Prewarm while a crew drone is being prepared) - one second
+            // of 4-rotor audio in one frame was most of the first launch's
+            // 33 ms. Same samples, same order, same noise sequence.
+            const int HumRate = 22050;
+            static readonly int[] Rotor = new int[] { 187, 193, 199, 211 };
+            static float[] _humData;
+            static int _humAt;
+            static int _humSeed = 1163;
+
+            public static bool HumReady { get { return _hum != null; } }
+
+            /// <summary>Synthesises up to <paramref name="samples"/> more
+            /// samples; makes the clip when the second is complete.</summary>
+            public static void HumStep(int samples)
             {
-                if (_hum != null) return _hum;
-                const int rate = 22050;
-                float[] d = new float[rate];
-                int[] rotor = new int[] { 187, 193, 199, 211 };
-                int seed = 1163;
-                for (int i = 0; i < d.Length; i++)
+                if (_hum != null) return;
+                if (_humData == null) { _humData = new float[HumRate]; _humAt = 0; _humSeed = 1163; }
+                int end = Mathf.Min(_humData.Length, _humAt + Mathf.Max(1, samples));
+                for (int i = _humAt; i < end; i++)
                 {
-                    float t = (float)i / rate;
+                    float t = (float)i / HumRate;
                     float s = 0f;
-                    for (int k = 0; k < rotor.Length; k++)
+                    for (int k = 0; k < Rotor.Length; k++)
                     {
-                        float w = 2f * Mathf.PI * rotor[k] * t;
+                        float w = 2f * Mathf.PI * Rotor[k] * t;
                         s += Mathf.Sin(w) * 0.22f + Mathf.Sin(w * 2f) * 0.07f;
                     }
                     // Billiges, deterministisches Rauschen - kein System.Random,
                     // damit jeder Client denselben Klang bekommt.
-                    seed = seed * 1103515245 + 12345;
-                    float r = (((seed >> 16) & 0x7fff) / 16383.5f) - 1f;
+                    _humSeed = _humSeed * 1103515245 + 12345;
+                    float r = (((_humSeed >> 16) & 0x7fff) / 16383.5f) - 1f;
                     s += r * 0.05f;
-                    d[i] = Mathf.Clamp(s * 0.5f, -1f, 1f);
+                    _humData[i] = Mathf.Clamp(s * 0.5f, -1f, 1f);
                 }
-                _hum = AudioClip.Create("NDR_DroneHum", d.Length, 1, rate, false);
-                _hum.SetData(d, 0);
+                _humAt = end;
+                if (_humAt < _humData.Length) return;
+                _hum = AudioClip.Create("NDR_DroneHum", _humData.Length, 1, HumRate, false);
+                _hum.SetData(_humData, 0);
+                _humData = null;
+            }
+
+            public static AudioClip Hum()
+            {
+                if (_hum != null) return _hum;
+                HumStep(HumRate);   // whatever the slices have not done yet
                 return _hum;
             }
 

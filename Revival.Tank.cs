@@ -26,6 +26,59 @@ namespace NextDayRevival
         static AudioClip _technical;
         static bool _technicalLookedUp;
 
+        // W Perf1: a pool of shot sources. Every round used to make a new
+        // GameObject with an AudioSource and destroy it a second or two later
+        // - at a Gepard's or a BTR's rate of fire that is dozens of objects a
+        // second. A pooled source is set up exactly like the old one before
+        // each shot and is free again when its clip has played out; when all
+        // are busy a temporary one is made as before.
+        const int PoolMax = 32;
+        static readonly List<AudioSource> _pool = new List<AudioSource>();
+        static readonly List<float> _freeAt = new List<float>();
+
+        static AudioSource Source(Vector3 point, AudioClip clip, string name)
+        {
+            float now = Time.time;
+            for (int i = _pool.Count - 1; i >= 0; i--)
+            {
+                AudioSource p = _pool[i];
+                if (p == null) { _pool.RemoveAt(i); _freeAt.RemoveAt(i); continue; }   // scene change
+                if (now < _freeAt[i]) continue;
+                _freeAt[i] = now + clip.length + 0.1f;
+                p.transform.position = point;
+                p.clip = clip;
+                return p;
+            }
+            GameObject go = new GameObject(name);
+            go.transform.position = point;
+            AudioSource source = go.AddComponent<AudioSource>();
+            source.clip = clip;
+            if (_pool.Count < PoolMax)
+            {
+                _pool.Add(source);
+                _freeAt.Add(now + clip.length + 0.1f);
+            }
+            else UnityEngine.Object.Destroy(go, clip.length + 1f);
+            return source;
+        }
+
+        static void Setup(AudioSource source, float minDistance)
+        {
+            source.loop = false;
+            source.playOnAwake = false;
+            source.spatialBlend = 1f;
+            source.rolloffMode = AudioRolloffMode.Logarithmic;
+            source.dopplerLevel = 0f;
+            source.minDistance = minDistance;
+            source.maxDistance = RevivalPlugin.CfgTurretSoundRange == null
+                ? 650f : Mathf.Max(50f,
+                    RevivalPlugin.CfgTurretSoundRange.Value);
+            source.volume = RevivalPlugin.CfgTurretSoundVolume == null
+                ? 1f : Mathf.Clamp01(
+                    RevivalPlugin.CfgTurretSoundVolume.Value);
+            source.Play();
+        }
+
         /// <summary>
         /// The technical is a machine gun, but each report must have the sharp
         /// TAC-50/L96 character requested for it. Cadence remains the caller's
@@ -51,24 +104,7 @@ namespace NextDayRevival
                     return;
                 }
 
-                GameObject go = new GameObject("NDR Technical TAC Shot Sound");
-                go.transform.position = point;
-                AudioSource source = go.AddComponent<AudioSource>();
-                source.clip = _technical;
-                source.loop = false;
-                source.playOnAwake = false;
-                source.spatialBlend = 1f;
-                source.rolloffMode = AudioRolloffMode.Logarithmic;
-                source.dopplerLevel = 0f;
-                source.minDistance = 10f;
-                source.maxDistance = RevivalPlugin.CfgTurretSoundRange == null
-                    ? 650f : Mathf.Max(50f,
-                        RevivalPlugin.CfgTurretSoundRange.Value);
-                source.volume = RevivalPlugin.CfgTurretSoundVolume == null
-                    ? 1f : Mathf.Clamp01(
-                        RevivalPlugin.CfgTurretSoundVolume.Value);
-                source.Play();
-                UnityEngine.Object.Destroy(go, source.clip.length + 1f);
+                Setup(Source(point, _technical, "NDR Technical TAC Shot Sound"), 10f);
             }
             catch (Exception ex)
             {
@@ -83,25 +119,8 @@ namespace NextDayRevival
                 || !RevivalPlugin.CfgTurretSound.Value) return;
             try
             {
-                GameObject go = new GameObject(tank
-                    ? "NDR Tank Shot Sound" : "NDR BTR Shot Sound");
-                go.transform.position = point;
-                AudioSource source = go.AddComponent<AudioSource>();
-                source.clip = Clip(tank);
-                source.loop = false;
-                source.playOnAwake = false;
-                source.spatialBlend = 1f;
-                source.rolloffMode = AudioRolloffMode.Logarithmic;
-                source.dopplerLevel = 0f;
-                source.minDistance = tank ? 30f : 10f;
-                source.maxDistance = RevivalPlugin.CfgTurretSoundRange == null
-                    ? 650f : Mathf.Max(50f,
-                        RevivalPlugin.CfgTurretSoundRange.Value);
-                source.volume = RevivalPlugin.CfgTurretSoundVolume == null
-                    ? 1f : Mathf.Clamp01(
-                        RevivalPlugin.CfgTurretSoundVolume.Value);
-                source.Play();
-                UnityEngine.Object.Destroy(go, source.clip.length + 1f);
+                Setup(Source(point, Clip(tank), tank
+                    ? "NDR Tank Shot Sound" : "NDR BTR Shot Sound"), tank ? 30f : 10f);
             }
             catch (Exception ex)
             {
@@ -110,17 +129,71 @@ namespace NextDayRevival
             }
         }
 
+        // W Perf1: the two reports are synthesised a slice per frame by
+        // Prewarm (Patrol.Tick, every client) instead of inside the first
+        // shot. The tank's 3.4 s report alone is 150,000 samples of sines and
+        // exponentials - the 15 ms Patrol.Tick peak of a patrol tank's first
+        // round. Same samples, same order, same noise sequence as before;
+        // Clip still finishes whatever is left if a shot comes first.
+        sealed class Synth
+        {
+            public bool Tank;
+            public float[] Data;
+            public int At;
+            public int Seed;
+            public float Filtered;
+        }
+
+        static Synth _btrSynth, _tankSynth;
+        static bool _warm;
+
+        /// <summary>A bounded slice of the report synthesis, once per frame
+        /// until both clips exist. Free after that (one bool).</summary>
+        public static void Prewarm()
+        {
+            if (_warm) return;
+            if (RevivalPlugin.CfgTurretSound == null || !RevivalPlugin.CfgTurretSound.Value) return;
+            try
+            {
+                if (_btr == null) { Step(false, 3072); return; }
+                if (_tank == null) { Step(true, 3072); return; }
+                _warm = true;
+            }
+            catch (Exception ex)
+            {
+                _warm = true;
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Vehicle shot sound prewarm: " + ex.Message);
+            }
+        }
+
         static AudioClip Clip(bool tank)
         {
             if (tank && _tank != null) return _tank;
             if (!tank && _btr != null) return _btr;
+            Step(tank, int.MaxValue);
+            return tank ? _tank : _btr;
+        }
 
+        static void Step(bool tank, int samples)
+        {
             const int rate = 44100;
-            float seconds = tank ? 3.4f : 0.48f;
-            float[] data = new float[Mathf.RoundToInt(rate * seconds)];
-            int seed = tank ? 125 : 30;
-            float filteredNoise = 0f;
-            for (int i = 0; i < data.Length; i++)
+            Synth s = tank ? _tankSynth : _btrSynth;
+            if (s == null)
+            {
+                s = new Synth();
+                s.Tank = tank;
+                float seconds = tank ? 3.4f : 0.48f;
+                s.Data = new float[Mathf.RoundToInt(rate * seconds)];
+                s.Seed = tank ? 125 : 30;
+                s.Filtered = 0f;
+                if (tank) _tankSynth = s; else _btrSynth = s;
+            }
+            float[] data = s.Data;
+            int seed = s.Seed;
+            float filteredNoise = s.Filtered;
+            int end = samples >= data.Length - s.At ? data.Length : s.At + samples;
+            for (int i = s.At; i < end; i++)
             {
                 float t = (float)i / rate;
                 seed = seed * 1103515245 + 12345;
@@ -158,11 +231,15 @@ namespace NextDayRevival
                         + crack * 0.85f + echo * 0.18f, -1f, 1f);
                 }
             }
+            s.At = end;
+            s.Seed = seed;
+            s.Filtered = filteredNoise;
+            if (end < data.Length) return;
             AudioClip clip = AudioClip.Create(tank ? "NDR_TankShot"
                 : "NDR_BTRShot", data.Length, 1, rate, false);
             clip.SetData(data, 0);
-            if (tank) _tank = clip; else _btr = clip;
-            return clip;
+            if (tank) { _tank = clip; _tankSynth = null; }
+            else { _btr = clip; _btrSynth = null; }
         }
     }
 
@@ -1345,7 +1422,7 @@ namespace NextDayRevival
         {
             try
             {
-                FieldInfo fi = AccessTools.Field(instance.GetType(), name);
+                FieldInfo fi = FastField.Find(instance.GetType(), name);
                 if (fi == null) return;
                 if (fi.FieldType == typeof(float)) fi.SetValue(instance, value);
             }

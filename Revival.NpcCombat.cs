@@ -526,14 +526,17 @@ namespace NextDayRevival
             public float NextEquip, SlotStuckSince;
             public int EquipTries;
             public int WeaponId;
+            internal MercStingerState Manpads;
             public float MuzzleBlockedSince, MateBlockedSince;
         }
 
         /// <summary>What an editor ground group does when nobody shoots at it
         /// (grounddef.BEHAVIORS): stand on the spot it was placed on, wander
         /// inside its radius, walk the drawn route, or hold a perimeter around
-        /// the point. Every one of them walks; none of them ever runs.</summary>
-        enum GroundMode { Waiting, Wander, Patrol, Guard }
+        /// the point. Roam (guard with roam, the editor default) is the alive
+        /// layer's own (Revival.GroundAlive.cs). Calm, every one of them walks;
+        /// only the alive layer's runs to cover in a fight are runs.</summary>
+        enum GroundMode { Waiting, Wander, Patrol, Guard, Roam }
 
         class Squad
         {
@@ -548,6 +551,10 @@ namespace NextDayRevival
             public bool GroundLoop, GroundForward = true;
             public int GroundLeg;
             public float GroundHold, GroundHoldUntil, GroundLegUntil, GroundContact;
+            // The alive layer of an editor group (Revival.GroundAlive.cs): its
+            // brain, null for every other squad, and the next sleeping upkeep.
+            public GroundBrain Alive;
+            public float NextFar;
             public string Tag;
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
@@ -979,6 +986,16 @@ namespace NextDayRevival
 
         internal static int ActiveCount { get { return _squads.Count; } }
 
+        /// <summary>Squads whose tag starts with <paramref name="prefix"/>
+        /// (W Tower 4: the retake raids' paratroopers and heli troops).</summary>
+        internal static int ActiveWithPrefix(string prefix)
+        {
+            int n = 0;
+            for (int i = 0; i < _squads.Count; i++)
+                if (_squads[i].Tag != null && _squads[i].Tag.StartsWith(prefix, StringComparison.Ordinal)) n++;
+            return n;
+        }
+
         internal static bool GroundOwned(Component ai)
         {
             return LookUp() && IsMine(ai);
@@ -1027,7 +1044,12 @@ namespace NextDayRevival
         internal static string PatrolFaction(Component ai)
         {
             object faction = LookUp() ? FactionOf(ai) : null;
-            return faction == null ? null : faction.ToString();
+            if (faction == null) return null;
+            // W Perf1: the enum's name from a table, not faction.ToString()
+            // (a new string per call, for every target the patrol gun weighs).
+            int v;
+            string name = FacValue(faction, out v) ? EnumNames.Get(faction.GetType(), v) : null;
+            return name ?? faction.ToString();
         }
 
         internal static bool PatrolVehicleAlive(Component vehicle)
@@ -1067,7 +1089,8 @@ namespace NextDayRevival
             s.GroundGroup = true; s.GroundRadius = radius;
             s.GroundDuty = behavior == "walking" ? GroundMode.Wander
                 : behavior == "patrol" ? GroundMode.Patrol
-                : behavior == "guard" ? GroundMode.Guard : GroundMode.Waiting;
+                : behavior == "guard" ? GroundMode.Guard
+                : behavior == "roam" ? GroundMode.Roam : GroundMode.Waiting;
             // The wander flag stays the one thing RunGround asks about: it is
             // what tells a waiting man from a wandering one.
             s.GroundWalking = s.GroundDuty == GroundMode.Wander;
@@ -1119,7 +1142,8 @@ namespace NextDayRevival
             EnsurePointsRoot(); _squads.Add(s);
             string duty = s.GroundDuty == GroundMode.Wander ? "walking"
                 : s.GroundDuty == GroundMode.Patrol ? "patrol"
-                : s.GroundDuty == GroundMode.Guard ? "guard" : "waiting";
+                : s.GroundDuty == GroundMode.Guard ? "guard"
+                : s.GroundDuty == GroundMode.Roam ? "roam" : "waiting";
             RevivalPlugin.L.LogInfo("Ground enemies: " + tag + " controls " + s.Men.Count
                 + " men, " + duty
                 + (s.GroundDuty == GroundMode.Patrol
@@ -1269,16 +1293,24 @@ namespace NextDayRevival
             _searchBudget = 1;
             PatrolTargets();
             WatchRemoteMercs(now);
+            // The editor groups' alive layer: board and awake groups under their
+            // own F6 slot (Revival.GroundAlive.cs); sleeping groups cost nearly 0.
+            FrameProf.S(FrameProf.S_GroundAliveT);
+            GroundAliveFrame(now);
+            FrameProf.E(FrameProf.S_GroundAliveT);
 
             for (int q = _squads.Count - 1; q >= 0; q--)
             {
                 Squad s = _squads[q];
+                bool alive = s.Alive != null;
+                if (alive) FrameProf.S(FrameProf.S_GroundAliveT);
                 try { RunSquad(s, now); }
                 catch (Exception ex)
                 {
                     RevivalPlugin.L.LogError("NpcWar: operation " + s.Tag + " - " + ex);
                     Remove(s, "error");
                 }
+                if (alive) FrameProf.E(FrameProf.S_GroundAliveT);
             }
 
             for (int i = _defenders.Count - 1; i >= 0; i--)
@@ -1519,6 +1551,8 @@ namespace NextDayRevival
                 else Remove(s, "settlement gone");
                 return;
             }
+            // An editor group with no player near sleeps (Revival.GroundAlive.cs).
+            if (s.Alive != null && !GroundAliveGate(s, now)) return;
             if (now >= s.NextVehicleScan)
             {
                 s.NextVehicleScan = now + 0.5f;
@@ -1526,12 +1560,24 @@ namespace NextDayRevival
             }
             if (s.GroundDuty == GroundMode.Patrol) PatrolCursor(s, now);
             int alive = 0;
+            // A calm alive group steps each man every other frame: its men only
+            // walk, stand and look, and Acquire keeps its own clock.
+            int slice = s.Alive != null && s.Alive.Phase == GroundPhase.Calm ? (Time.frameCount & 1) : -1;
             for (int i = 0; i < s.Men.Count; i++)
             {
                 Fighter f = s.Men[i];
-                if (f.Ai == null || f.Tr == null || !Alive(f.Ai)) continue;
+                if (f.Ai == null || f.Tr == null || !Alive(f.Ai))
+                {
+                    if (s.Alive != null && i < s.Alive.Count) s.Alive.Men[i].Alive = false;
+                    continue;
+                }
                 alive++;
                 if (!IsMine(f.Ai)) continue;
+                if (s.Alive != null && i < s.Alive.Count)
+                {
+                    if (slice >= 0 && (i & 1) != slice && f.Target == null) continue;
+                    GroundAliveInputs(f, s.Alive.Men[i], now);
+                }
                 // B3c: a merc on a seat belongs to the ride (Revival.MercsRide.cs).
                 if (s.Merc != null && MercSeated(f, s.Merc, now)) continue;
                 if (Regenerating(f, now)) continue;
@@ -1544,8 +1590,15 @@ namespace NextDayRevival
                 // M2: a merc fights like a player - to cover, peek, a short
                 // burst, back down, relocate (Revival.MercFight.cs); when the
                 // fight is over his order runs again.
-                if (s.Merc != null) { if (!MercFight(f, s.Merc, now)) MercStep(f, s, now); continue; }
+                if (s.Merc != null)
+                {
+                    if (MercFight(f, s.Merc, now)) MercAA.Release(s.Merc);
+                    else MercStep(f, s, now);
+                    continue;
+                }
                 if (Reloading(f)) { Quiet(f, true); continue; }
+                // Alive layer: no stop to shoot on the run to cover or a flank.
+                if (s.Alive != null && GroundAliveBusy(f, s, i, now)) continue;
                 if (f.Target != null && f.Sees && f.Armed
                     && Flat(f.Target.position - f.Tr.position) <= RangeOf(f))
                 {
@@ -1556,6 +1609,8 @@ namespace NextDayRevival
                     s.GroundContact = now + 5f;
                     continue;
                 }
+                // Alive layer: roam, and every duty in a fight or a search.
+                if (s.Alive != null && GroundAliveStep(f, s, i, now)) continue;
                 // The two behaviors that were given a place to be: the route
                 // the editor drew, and the perimeter around the point.
                 if (s.GroundDuty == GroundMode.Patrol) { PatrolStep(f, s, now); continue; }
@@ -1593,6 +1648,9 @@ namespace NextDayRevival
             }
         }
 
+        static NavMeshPath _groundPath;
+        static readonly Vector3[] _groundCorners = new Vector3[64];
+
         static bool GroundDestination(Fighter f, Squad s, out Vector3 dest)
         {
             dest = s.Lz;
@@ -1604,12 +1662,15 @@ namespace NextDayRevival
                 Vector3 candidate = s.Lz + new Vector3(offset.x, 0f, offset.y);
                 if (!RevivalGroundEnemies.TryGround(candidate, 6f, out dest)
                     || Flat(dest - s.Lz) > s.GroundRadius || Flat(dest - f.Tr.position) < 5f) continue;
-                NavMeshPath path = new NavMeshPath();
+                // One path and one corner buffer for every wanderer: no
+                // allocation per destination (alive layer task).
+                NavMeshPath path = _groundPath ?? (_groundPath = new NavMeshPath());
                 if (!NavMesh.CalculatePath(f.Tr.position, dest, agent.areaMask, path)
                     || path.status != NavMeshPathStatus.PathComplete) continue;
                 bool inside = true;
-                Vector3[] corners = path.corners;
-                for (int c = 0; c < corners.Length; c++)
+                Vector3[] corners = _groundCorners;
+                int cornerCount = path.GetCornersNonAlloc(corners);
+                for (int c = 0; c < cornerCount; c++)
                     if (Flat(corners[c] - s.Lz) > s.GroundRadius) { inside = false; break; }
                 if (inside) return true;
             }
@@ -3072,6 +3133,7 @@ namespace NextDayRevival
         /// native weapon. Failure never produces effects or damage.</summary>
         static int VanillaShot(Fighter f, Component weapon, Vector3 aim)
         {
+            if (f.Manpads != null) return 0; // Guided launches consume ammo in MercStingerFight.
             if (weapon == null || _mFireTo == null || _mHasBullets == null || _fRofDelay == null)
                 return -1;
             try
@@ -3255,7 +3317,7 @@ namespace NextDayRevival
             DriveAim(f, look, now);
             if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
             {
-                try { _fAimingPoint.SetValue(f.Ai, look); }
+                try { FastField.SetVector3(_fAimingPoint, f.Ai, look); }   // W Perf1: no boxed Vector3 per aiming man per frame
                 catch { }
             }
         }
@@ -3368,7 +3430,7 @@ namespace NextDayRevival
             {
                 if (f.Ik == null || _fSolver == null || _fIkWeight == null) return;
                 object solver = _fSolver.GetValue(f.Ik);
-                if (solver != null) _fIkWeight.SetValue(solver, 0f);
+                if (solver != null) FastField.SetFloat(_fIkWeight, solver, 0f);   // W Perf1: no boxed float
             }
             catch { }
         }
@@ -3923,22 +3985,9 @@ namespace NextDayRevival
         /// -1 when it is none of them.</summary>
         static float ToFloat(object raw)
         {
-            if (raw == null) return -1f;
-            if (raw is float) return (float)raw;
-            if (raw is double) return (float)(double)raw;
-            if (raw is int) return (int)raw;
-            MethodInfo[] ms = raw.GetType().GetMethods(BindingFlags.Public | BindingFlags.Static);
-            for (int i = 0; i < ms.Length; i++)
-            {
-                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(float)) continue;
-                ParameterInfo[] ps = ms[i].GetParameters();
-                if (ps.Length == 1 && ps[0].ParameterType == raw.GetType())
-                {
-                    try { return (float)ms[i].Invoke(null, new object[] { raw }); }
-                    catch { return -1f; }
-                }
-            }
-            return -1f;
+            // W Perf1: GetMethods + Invoke(new object[]) ran on every call; the
+            // conversion is looked up once per type now (FastField.ToFloat).
+            return FastField.ToFloat(raw);
         }
 
         // ------------------------------------------------------------ install
@@ -4495,7 +4544,9 @@ namespace NextDayRevival
             if (_fDurability == null) return true;
             try
             {
-                float left = ToFloat(_fDurability.GetValue(v));
+                // W Perf1: no box, no GetMethods - the patrol gun asks this
+                // for every vehicle target every frame (FastField.GetNumber).
+                float left = FastField.GetNumber(_fDurability, v);
                 return left < 0f ? true : left > 0f;
             }
             catch { return true; }
@@ -4600,6 +4651,7 @@ namespace NextDayRevival
                 if (pair.Value == null || pair.Value.Squad == s) stale.Add(pair.Key);
             for (int i = 0; i < stale.Count; i++) _armoured.Remove(stale[i]);
             _squads.Remove(s);
+            GroundAliveDrop(s);
 
             float minutes = Mathf.Clamp(CfgCorpseMinutes == null ? 20f : CfgCorpseMinutes.Value, 1f, 120f);
             if (grave.Bodies.Count > 0)
@@ -4713,15 +4765,54 @@ namespace NextDayRevival
 
         static bool OtherFaction(object own, object other)
         {
-            return own != null && other != null && !own.Equals(other);
+            if (own == null || other == null) return false;
+            if (ReferenceEquals(own, other)) return false;
+            // W Perf1: compared as values - Enum.Equals boxes internally.
+            int a, b;
+            if (own.GetType() == other.GetType() && FacValue(own, out a) && FacValue(other, out b))
+                return a != b;
+            return !own.Equals(other);
         }
+
+        // W Perf1: FactionOf used to box the enum on every call - hundreds of
+        // calls a frame between the squads' target scans and the patrol gun.
+        // One box per value is kept and handed out; a boxed enum is immutable,
+        // and Equals/ToString on it answer exactly as a fresh box does.
+        static readonly object[] _facBox = new object[64];
+        static bool _unboxFails;
 
         static object FactionOf(Component ai)
         {
             object opt = MainOptions(ai);
             if (opt == null) return null;
-            try { return _fMyFraction.GetValue(opt); }
+            try
+            {
+                int v = FastField.GetInt(_fMyFraction, opt);
+                if (v < 0 || v >= _facBox.Length) return _fMyFraction.GetValue(opt);
+                object box = _facBox[v];
+                if (box == null)
+                {
+                    box = _fMyFraction.GetValue(opt);
+                    _facBox[v] = box;
+                }
+                return box;
+            }
             catch { return null; }
+        }
+
+        /// <summary>The int value of a boxed int-backed enum (or int). An enum
+        /// box unboxes to its underlying type (ECMA-335 unbox), no allocation.</summary>
+        static bool FacValue(object f, out int v)
+        {
+            v = 0;
+            if (f == null) return false;
+            if (!_unboxFails)
+            {
+                try { v = (int)f; return true; }
+                catch (InvalidCastException) { _unboxFails = true; }
+            }
+            try { v = Convert.ToInt32(f); return true; }
+            catch { return false; }
         }
 
         static Array GetHated(Component ai)
@@ -4744,6 +4835,17 @@ namespace NextDayRevival
         static bool Hostile(Array aHated, object bFrac)
         {
             if (aHated == null || bFrac == null) return false;
+            // W Perf1: an int-backed enum array IS an int[] to the runtime
+            // (array cast rule of ECMA-335, Mono's cast_class): read without a
+            // box per element. Anything else takes the old element-wise path.
+            int[] ids = aHated as int[];
+            int b;
+            if (ids != null && aHated.GetType().GetElementType() == bFrac.GetType() && FacValue(bFrac, out b))
+            {
+                for (int i = 0; i < ids.Length; i++)
+                    if (ids[i] == b) return true;
+                return false;
+            }
             for (int i = 0; i < aHated.Length; i++)
             {
                 object h = aHated.GetValue(i);

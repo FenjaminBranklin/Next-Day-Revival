@@ -249,7 +249,7 @@ namespace NextDayRevival
         static object GetField(object instance, string name)
         {
             if (instance == null) return null;
-            FieldInfo f = AccessTools.Field(instance.GetType(), name);
+            FieldInfo f = FastField.Find(instance.GetType(), name);
             if (f == null) throw new MissingFieldException(instance.GetType().FullName, name);
             return f.GetValue(instance);
         }

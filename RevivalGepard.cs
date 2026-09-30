@@ -1048,7 +1048,7 @@ namespace NextDayRevival
         static readonly List<GameObject> _tmp = new List<GameObject>();
         static readonly List<GepardAir.Found> _air = new List<GepardAir.Found>();
         static readonly Dictionary<int, int> _rounds = new Dictionary<int, int>();
-        static readonly Dictionary<int, int> _heliHits = new Dictionary<int, int>();
+        static readonly Dictionary<int, float> _heliHits = new Dictionary<int, float>();
         static readonly Dictionary<int, float> _vehicleNext = new Dictionary<int, float>();
         static bool _reloading;
         static float _reloadUntil, _noAmmoSaid;
@@ -1772,14 +1772,20 @@ namespace NextDayRevival
         internal static void Struck(List<Contact> contacts, Transform own, bool npc,
                                     GameObject go, Vector3 point, Vector3 dir)
         {
-            if (go == null) return;
+            Struck(contacts, own, npc, go, point, dir, 0);
+        }
+
+        internal static void Struck(List<Contact> contacts, Transform own, bool npc,
+                                    GameObject go, Vector3 point, Vector3 dir, int heliHits)
+        {
+            if (go == null || contacts == null) return;
             for (int i = 0; i < contacts.Count; i++)
             {
                 Contact c = contacts[i];
                 if (c.Go == null || c.Kind == 1) continue;
                 if (go.transform == c.Go.transform || go.transform.IsChildOf(c.Go.transform))
                 {
-                    Hit(c, point, dir, npc);
+                    Hit(c, point, dir, npc, heliHits);
                     return;
                 }
             }
@@ -1828,6 +1834,25 @@ namespace NextDayRevival
             return best;
         }
 
+        /// <summary>One fragment hit per live air contact in a flak cloud.
+        /// The contacts have already passed the firing gun's IFF policy.
+        /// A direct hit is excluded because Step has already applied it.</summary>
+        internal static int BurstAll(List<Contact> contacts, Vector3 at, Vector3 dir, float reach, int heliHits, Contact direct)
+        {
+            if (contacts == null || reach <= 0f) return 0;
+            int hits = 0;
+            for (int i = 0; i < contacts.Count; i++)
+            {
+                Contact c = contacts[i];
+                if (c == null || c == direct || !c.Air || c.Go == null || !c.Go.activeInHierarchy) continue;
+                float radius = Mathf.Max(0f, c.Radius) + reach;
+                if ((c.Pos - at).sqrMagnitude > radius * radius) continue;
+                Hit(c, at, dir, true, heliHits);
+                hits++;
+            }
+            return hits;
+        }
+
         /// <summary><paramref name="heliHits"/> &gt; 0: the hits a helicopter
         /// or registered aircraft takes from THIS gun (a lighter calibre than
         /// the Gepard's); 0 = [Gepard] HeliHits.</summary>
@@ -1843,12 +1868,14 @@ namespace NextDayRevival
                 case 2:
                     if (Time.time < c.NextHit) return;
                     c.NextHit = Time.time + 0.15f;
-                    Drone.Net.Send(Drone.Net.Treffer, point, new Vector3(c.Actor, 0f, 0f), dmg, true);
+                    if (c.Actor == Mercs.LocalActor) Drone.Beschossen(0, point, c.Actor, dmg);
+                    else Drone.Net.Send(Drone.Net.Treffer, point, new Vector3(c.Actor, 0f, 0f), dmg, true);
                     break;
                 case 3:
                     if (Time.time < c.NextHit) return;
                     c.NextHit = Time.time + 0.15f;
-                    SurvNet.Send(SurvNet.Treffer, point, new Vector3(c.Actor, 0f, 0f), dmg, true);
+                    if (c.Actor == Mercs.LocalActor) SurvDrone.RemoteHit(0, point, c.Actor, dmg);
+                    else SurvNet.Send(SurvNet.Treffer, point, new Vector3(c.Actor, 0f, 0f), dmg, true);
                     break;
                 case 4:
                     CrewDrone.Beschuss(point - dir * 4f, dir, 8f, dmg);
@@ -1867,14 +1894,14 @@ namespace NextDayRevival
         {
             int view = c.HeliView;
             if (view <= 0 || PlayerHeli.MissileTarget(view) == null) return;
-            int n;
+            float n;
             _heliHits.TryGetValue(view, out n);
-            n++;
             int need = Mathf.Max(1, heliHits > 0 ? heliHits : Gepard.CfgHeliHits.Value);
-            if (n < need) { _heliHits[view] = n; return; }
+            n = ShortRangeCore.AddHit(n, need);
+            if (n < 0.99999f) { _heliHits[view] = n; return; }
             _heliHits.Remove(view);
-            RevivalPlugin.L.LogInfo("Gepard: helicopter " + view + " shot down after " + n
-                + " hits" + (npc ? " by an NPC gunner." : "."));
+            RevivalPlugin.L.LogInfo("Gepard: helicopter " + view + " shot down (airframe damage " + n
+                + ")" + (npc ? " by an NPC gunner." : "."));
             GepardNet.SendHeliKill(view, point);
             PlayerHeli.MissileImpact(view, point);
             if (!npc) Hint(GepardText.HeliDown(), 3f);
@@ -2222,11 +2249,13 @@ namespace NextDayRevival
         sealed class Round
         {
             public Vector3 Pos, Vel;
-            public float Age, Life, Flown;
+            public Vector3 ProbePos, CastPos;
+            public float Age, Life, Flown, NextProbe, NextCast, Gravity;
             public bool Live;
             public Transform Owner;
             public LineRenderer Line;
             public List<GepardGun.Contact> Npc;   // an NPC gunner's contacts; null = the local gunner's
+            public int Credit = -1;               // W AA4: the actor paid for a kill; -1 = by Npc (0 or local)
             // Another gun's ballistics (Revival.Flak.cs); the Gepard's own
             // rounds keep Spec null and read the [Gepard] config as before.
             public Spec Spec;
@@ -2244,10 +2273,12 @@ namespace NextDayRevival
             public float Gravity = -9.81f;       // u/s^2, negative is down
             public float Dispersion = 1.5f;      // one round, milliradians
             public float Fuze = 1.5f;            // passing distance that counts as a hit, u
+            public float CollisionSeconds;      // > 0: swept collision checks throttled to this cadence
             public float Splash;                 // a timed burst this close to an aircraft hits it, u (0 = none)
             public int HeliHits;                 // 0 = [Gepard] HeliHits
             public bool Tracer = true;
             public bool Flak;                    // self-destruct as a black flak puff with its own sound
+            public bool Exact;                   // launch dispersion has already been applied by the sender
             public bool PuffFx = true;           // Flak: draw the puff (the burst still happens)
             public float PuffScale = 1f;         // Flak: the puff's size (1 = 23 mm, the 52-K's 85 mm: larger)
             public Action<Vector3> BurstSound;   // the far bang of a puff; null = silent
@@ -2266,21 +2297,39 @@ namespace NextDayRevival
         {
             if (spec == null) return;
             float mil = Mathf.Max(0f, spec.Dispersion) * 0.001f;
-            Vector2 spread = UnityEngine.Random.insideUnitCircle * mil;
+            Vector2 spread = spec.Exact ? Vector2.zero : UnityEngine.Random.insideUnitCircle * mil;
             Vector3 right = Vector3.Cross(Vector3.up, dir);
             if (right.sqrMagnitude < 1e-6f) right = Vector3.right;
             right.Normalize();
             Vector3 up = Vector3.Cross(dir, right);
             dir = (dir + right * spread.x + up * spread.y).normalized;
 
-            Round r = new Round();
-            r.Pos = muzzle;
-            r.Vel = dir * Mathf.Max(100f, spec.Speed);
+            FireExact(spec, owner, muzzle, dir * Mathf.Max(100f, spec.Speed), life, live, contacts, 0f, spec.Gravity);
+        }
+
+        /// <summary>A fully specified launch, used by the 52-K shot packet.
+        /// Network age advances the same parabola rather than changing its fuze.</summary>
+        internal static void FireExact(Spec spec, Transform owner, Vector3 muzzle, Vector3 velocity, float life,
+                                      bool live, List<GepardGun.Contact> contacts, float age, float gravity)
+        {
+            // W AA5: rounds come from the pre-warmed pool, never an allocation per shot.
+            Round r = RentRound();
+            if (r == null) return;
+            age = Mathf.Clamp(age, 0f, life);
+            r.Pos = muzzle + velocity * age + Vector3.up * (0.5f * gravity * age * age);
+            r.CastPos = r.Pos;
+            r.ProbePos = r.Pos; r.NextProbe = age;
+            r.Vel = velocity + Vector3.up * (gravity * age);
+            r.Gravity = gravity;
+            r.Age = age;
+            r.NextCast = age;
+            r.Flown = 0f;
             r.Life = Mathf.Max(0.05f, life);
             r.Live = live;
             r.Owner = owner;
             r.Npc = contacts;
             r.Spec = spec;
+            r.Credit = AirKills.NextShotCredit;
             r.Line = spec.Tracer ? Take() : null;
             if (r.Line != null)
             {
@@ -2290,8 +2339,28 @@ namespace NextDayRevival
             _rounds.Add(r);
         }
 
-        static readonly List<Round> _rounds = new List<Round>();
-        static readonly Stack<LineRenderer> _pool = new Stack<LineRenderer>();
+        static readonly List<Round> _rounds = new List<Round>(1024);
+        static readonly Stack<Round> _roundPool = new Stack<Round>(1024);
+        static bool _warm;
+        internal static void WarmShortRange()
+        {
+            if (_warm) return;
+            _warm = true;
+            for (int i = 0; i < 1024; i++) _roundPool.Push(new Round());
+            LineRenderer[] lines = new LineRenderer[64];
+            for (int i = 0; i < lines.Length; i++) lines[i] = Take();
+            for (int i = 0; i < lines.Length; i++) Give(lines[i]);
+        }
+        static Round RentRound()
+        {
+            // Warm-up is once at the first gun, never an allocation per shot.
+            WarmShortRange();
+            if (_roundPool.Count == 0) return null;
+            Round r = _roundPool.Pop();
+            r.Age = r.Flown = 0f; r.Spec = null; r.Credit = -1;
+            return r;
+        }
+        static readonly Stack<LineRenderer> _pool = new Stack<LineRenderer>(128);
         const float TracerLength = 14f;
         static readonly Color TracerHead = new Color(1f, 0.55f, 0.25f, 1f);
         static readonly Color TracerTail = new Color(1f, 0.25f, 0.08f, 0f);
@@ -2355,8 +2424,10 @@ namespace NextDayRevival
             dir = (dir + right * spread.x + up * spread.y).normalized;
             float speed = Mathf.Max(100f, Gepard.CfgVelocity == null ? 1175f : Gepard.CfgVelocity.Value);
 
-            Round r = new Round();
+            Round r = RentRound();
+            if (r == null) return;
             r.Pos = muzzle;
+            r.ProbePos = muzzle; r.NextProbe = 0f;
             r.Vel = dir * speed;
             r.Life = Mathf.Max(200f, Gepard.CfgMaxRange == null ? 2600f : Gepard.CfgMaxRange.Value) / speed;
             r.Live = live;
@@ -2398,39 +2469,72 @@ namespace NextDayRevival
                 if (!done) continue;
                 Give(r.Line);
                 _rounds.RemoveAt(i);
+                r.Owner = null; r.Npc = null; r.Spec = null; r.Line = null;
+                _roundPool.Push(r);
             }
         }
 
         static bool Step(Round r, float dt, float g)
         {
             Spec spec = r.Spec;
-            if (spec != null) g = spec.Gravity;
+            if (spec != null) g = r.Gravity;
+            if (spec != null && spec.Flak && spec.Exact) dt = Time.deltaTime;
+            // Stop at the fuze time, even on a long frame. At 550 m/s a
+            // one-frame overshoot used to miss a target by up to 27.5 m.
+            if (spec != null && spec.Flak && spec.Exact) dt = Mathf.Min(dt, Mathf.Max(0f, r.Life - r.Age));
             r.Age += dt;
             Vector3 next = r.Pos + r.Vel * dt + Vector3.up * (0.5f * g * dt * dt);
             r.Vel += Vector3.up * (g * dt);
-            Vector3 seg = next - r.Pos;
+            bool batched = spec != null && spec.CollisionSeconds > 0f;
+            bool probe = !batched || r.Age >= r.NextProbe || r.Age >= r.Life;
+            Vector3 collisionFrom = batched ? r.ProbePos : r.Pos;
+            Vector3 seg = next - collisionFrom;
             float len = seg.magnitude;
-            if (len > 1e-4f)
+            if (probe && len > 1e-4f)
             {
                 Vector3 dir = seg / len;
                 RaycastHit hit;
-                bool struck = Cast(r.Pos, dir, len, r.Owner, out hit);
+                bool struck;
+                if (spec != null && spec.Flak && spec.Exact)
+                {
+                    // Swept collision every 0.1 s, and at expiry. Contacts
+                    // still use the cheap per-step segment test below.
+                    hit = new RaycastHit();
+                    struck = false;
+                    if (r.Age >= r.NextCast || r.Age >= r.Life)
+                    {
+                        Vector3 sweep = next - r.CastPos;
+                        float distance = sweep.magnitude;
+                        if (distance > 1e-4f) struck = Cast(r.CastPos, sweep / distance, distance, r.Owner, out hit);
+                        r.CastPos = next;
+                        r.NextCast = r.Age + 0.1f;
+                    }
+                }
+                else struck = Cast(collisionFrom, dir, len, r.Owner, out hit);
                 Vector3 end = struck ? hit.point : next;
                 if (r.Live)
                 {
                     GepardGun.Contact c;
                     Vector3 at;
                     bool near = spec != null
-                        ? GepardGun.Proximity(r.Npc, r.Pos, end, spec.Fuze, out c, out at)
+                        ? GepardGun.Proximity(r.Npc, collisionFrom, end, spec.Fuze, out c, out at)
                         : r.Npc != null
-                        ? GepardGun.Proximity(r.Npc, r.Pos, end, out c, out at)
-                        : GepardGun.Proximity(r.Pos, end, out c, out at);
+                        ? GepardGun.Proximity(r.Npc, collisionFrom, end, out c, out at)
+                        : GepardGun.Proximity(collisionFrom, end, out c, out at);
                     if (near)
                     {
                         if (spec != null && spec.Flak) Puff(spec, at);
                         else GepardFx.Burst(at, 1f);
-                        if (spec != null) GepardGun.Hit(c, at, dir, true, spec.HeliHits);
-                        else GepardGun.Hit(c, at, dir, r.Npc != null);
+                        AirKills.HitCredit = RoundCredit(r);
+                        try
+                        {
+                            if (spec != null) GepardGun.Hit(c, at, dir, true, spec.HeliHits);
+                            else GepardGun.Hit(c, at, dir, r.Npc != null);
+                            // W AA2: a 52-K cloud reaches every contact in its radius.
+                            if (spec != null && spec.Flak && spec.Exact)
+                                GepardGun.BurstAll(r.Npc, at, dir, spec.Splash, spec.HeliHits, c);
+                        }
+                        finally { AirKills.HitCredit = -1; }
                         return true;
                     }
                 }
@@ -2438,11 +2542,16 @@ namespace NextDayRevival
                 {
                     GepardFx.Impact(hit.point, hit.normal);
                     if (r.Live && r.Npc != null)
-                        GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir);
+                        GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir, spec != null ? spec.HeliHits : 0);
                     else if (r.Live && spec == null) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
                     return true;
                 }
                 r.Flown += len;
+            }
+            if (probe)
+            {
+                r.ProbePos = next;
+                r.NextProbe = r.Age + (batched ? spec.CollisionSeconds : 0f);
             }
             r.Pos = next;
             if (r.Age >= r.Life)
@@ -2454,8 +2563,20 @@ namespace NextDayRevival
                     Puff(spec, r.Pos);
                     if (r.Live && spec.Splash > 0f && r.Npc != null)
                     {
-                        GepardGun.Contact c = GepardGun.Nearest(r.Npc, r.Pos, spec.Splash);
-                        if (c != null) GepardGun.Hit(c, r.Pos, r.Vel.normalized, true, spec.HeliHits);
+                        AirKills.HitCredit = RoundCredit(r);
+                        try
+                        {
+                            if (spec.Exact)
+                                GepardGun.BurstAll(r.Npc, r.Pos, r.Vel.normalized, spec.Splash, spec.HeliHits, null);
+                            else
+                            {
+                                // The NPC Gepard's 35 mm timed round retains its
+                                // single-contact damage policy; 52-K clouds use all.
+                                GepardGun.Contact c = GepardGun.Nearest(r.Npc, r.Pos, spec.Splash);
+                                if (c != null) GepardGun.Hit(c, r.Pos, r.Vel.normalized, true, spec.HeliHits);
+                            }
+                        }
+                        finally { AirKills.HitCredit = -1; }
                     }
                     return true;
                 }
@@ -2471,6 +2592,14 @@ namespace NextDayRevival
                 r.Line.SetPosition(1, r.Pos);
             }
             return false;
+        }
+
+        /// <summary>W AA4: who a hit by this round is credited to - the
+        /// gun's own choice (a merc crew's owner, the player at a flak gun),
+        /// else an NPC gunner (0) or the local gunner (-1: the local actor).</summary>
+        static int RoundCredit(Round r)
+        {
+            return r.Credit >= 0 ? r.Credit : r.Npc != null ? 0 : -1;
         }
 
         static void Puff(Spec spec, Vector3 at)

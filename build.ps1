@@ -73,6 +73,9 @@ $refs = @(
     (Join-Path $managed "UnityEngine.AIModule.dll"),
     (Join-Path $managed "UnityEngine.ImageConversionModule.dll"),
     (Join-Path $managed "UnityEngine.IMGUIModule.dll"),
+    # TextRenderingModule: Font - the UI kit (Revival.UiKit.cs) sets its own
+    # OS font (Segoe UI) on its GUIStyles.
+    (Join-Path $managed "UnityEngine.TextRenderingModule.dll"),
     # AudioModule: die Drohne rechnet ihr Surren zur Laufzeit aus (AudioClip.Create)
     # und haengt es an eine AudioSource. Ohne das hoert man sie nicht kommen.
     (Join-Path $managed "UnityEngine.AudioModule.dll"),
@@ -228,6 +231,13 @@ $assets = @(
     "k52_cradle_lod0.ndmesh", "k52_cradle_lod1.ndmesh", "k52_cradle_lod2.ndmesh", "k52_cradle_lod3.ndmesh",
     "k52_barrel_lod0.ndmesh", "k52_barrel_lod1.ndmesh", "k52_barrel_lod2.ndmesh", "k52_barrel_lod3.ndmesh",
     "k52_diffuse.png", "k52_normal.png", "k52_rig.txt",
+    # W AA5: the shipped Blender ZU-23-2, two independently recoiling barrels.
+    "zu23_base_lod0.ndmesh", "zu23_base_lod1.ndmesh", "zu23_base_lod2.ndmesh", "zu23_base_lod3.ndmesh",
+    "zu23_mount_lod0.ndmesh", "zu23_mount_lod1.ndmesh", "zu23_mount_lod2.ndmesh", "zu23_mount_lod3.ndmesh",
+    "zu23_cradle_lod0.ndmesh", "zu23_cradle_lod1.ndmesh", "zu23_cradle_lod2.ndmesh", "zu23_cradle_lod3.ndmesh",
+    "zu23_barrel_l_lod0.ndmesh", "zu23_barrel_l_lod1.ndmesh", "zu23_barrel_l_lod2.ndmesh", "zu23_barrel_l_lod3.ndmesh",
+    "zu23_barrel_r_lod0.ndmesh", "zu23_barrel_r_lod1.ndmesh", "zu23_barrel_r_lod2.ndmesh", "zu23_barrel_r_lod3.ndmesh",
+    "zu23_diffuse.png", "zu23_normal.png", "zu23_rig.txt",
     # Helipad decks: one painted texture per built surface, mapped
     # radius-relative over the whole pad (helipad_texture.py). Without them the
     # pad falls back to flat colours, so they are assets and not a hard

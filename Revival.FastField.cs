@@ -82,6 +82,18 @@ namespace NextDayRevival
             return d != null ? d(o) : (bool)fi.GetValue(o);
         }
 
+        delegate void SetV(object o, UnityEngine.Vector3 v);
+        static readonly Dictionary<FieldInfo, SetV> _setV = new Dictionary<FieldInfo, SetV>();
+
+        /// <summary>W Perf1: a Vector3 field written without boxing (NpcWar's
+        /// per-frame aiming point of every aiming man).</summary>
+        public static void SetVector3(FieldInfo fi, object o, UnityEngine.Vector3 v)
+        {
+            SetV d;
+            if (!_setV.TryGetValue(fi, out d)) { d = (SetV)Setter(fi, typeof(UnityEngine.Vector3), typeof(SetV)); _setV[fi] = d; }
+            if (d != null) d(o, v); else fi.SetValue(o, v);
+        }
+
         public static void SetBool(FieldInfo fi, object o, bool v)
         {
             SetB d;
@@ -103,6 +115,97 @@ namespace NextDayRevival
                 _getI[fi] = d;
             }
             return d != null ? d(o) : Convert.ToInt32(fi.GetValue(o));
+        }
+
+        static readonly Dictionary<FieldInfo, GetF> _getN = new Dictionary<FieldInfo, GetF>();
+        static readonly Dictionary<Type, MethodInfo> _toFloat = new Dictionary<Type, MethodInfo>();
+        static readonly object[] _numArg = new object[1];
+
+        /// <summary>
+        /// W Perf1: a numeric field read as a float without boxing - float,
+        /// int, double, or a struct with an implicit conversion to float (the
+        /// game's ObscuredFloat: VehicleGameSystem.Durability). The old readers
+        /// boxed the value with GetValue and, for the struct, called
+        /// GetMethods + Invoke(new object[]) on every read - the patrol gun
+        /// asked that for every vehicle target, every frame. -1 when the field
+        /// is none of these, as NpcWar.ToFloat answered.
+        /// </summary>
+        public static float GetNumber(FieldInfo fi, object o)
+        {
+            GetF d;
+            if (!_getN.TryGetValue(fi, out d))
+            {
+                d = NumberGetter(fi);
+                _getN[fi] = d;
+            }
+            if (d != null) return d(o);
+            return ToFloat(fi.GetValue(o));
+        }
+
+        /// <summary>The boxed fallback of <see cref="GetNumber"/>: a float, a
+        /// double, an int or a struct with op_Implicit to float; -1 otherwise.
+        /// The conversion is looked up once per type, its argument array is
+        /// reused.</summary>
+        public static float ToFloat(object raw)
+        {
+            if (raw == null) return -1f;
+            if (raw is float) return (float)raw;
+            if (raw is double) return (float)(double)raw;
+            if (raw is int) return (int)raw;
+            MethodInfo op = Implicit(raw.GetType());
+            if (op == null) return -1f;
+            try
+            {
+                _numArg[0] = raw;
+                object r = op.Invoke(null, _numArg);
+                _numArg[0] = null;
+                return r is float ? (float)r : -1f;
+            }
+            catch { _numArg[0] = null; return -1f; }
+        }
+
+        static MethodInfo Implicit(Type t)
+        {
+            MethodInfo op;
+            if (_toFloat.TryGetValue(t, out op)) return op;
+            op = null;
+            MethodInfo[] ms = t.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length && op == null; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(float)) continue;
+                ParameterInfo[] ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == t) op = ms[i];
+            }
+            _toFloat[t] = op;
+            return op;
+        }
+
+        static GetF NumberGetter(FieldInfo fi)
+        {
+            if (_emitBroken || fi == null || fi.IsStatic || fi.DeclaringType == null
+                || fi.DeclaringType.IsValueType) return null;
+            Type ft = fi.FieldType;
+            MethodInfo op = null;
+            if (ft != typeof(float) && ft != typeof(int) && ft != typeof(double))
+            {
+                if (!ft.IsValueType) return null;
+                op = Implicit(ft);
+                if (op == null) return null;
+            }
+            try
+            {
+                DynamicMethod dm = new DynamicMethod("ndr_getn_" + fi.Name, typeof(float),
+                    new Type[] { typeof(object) }, fi.DeclaringType, true);
+                ILGenerator il = dm.GetILGenerator();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Castclass, fi.DeclaringType);
+                il.Emit(OpCodes.Ldfld, fi);
+                if (op != null) il.Emit(OpCodes.Call, op);
+                else if (ft != typeof(float)) il.Emit(OpCodes.Conv_R4);
+                il.Emit(OpCodes.Ret);
+                return (GetF)dm.CreateDelegate(typeof(GetF));
+            }
+            catch (Exception ex) { Broken(ex); return null; }
         }
 
         static GetI IntGetter(FieldInfo fi)
@@ -188,6 +291,8 @@ namespace NextDayRevival
     public static class FastCall
     {
         delegate bool CallB(object o);
+        delegate int CallI(object o);
+        delegate double CallD(object o);
         delegate float CallF(object o);
         delegate UnityEngine.Vector3 CallV(object o);
         delegate void CallOF(object o, object a, float b);
@@ -195,6 +300,8 @@ namespace NextDayRevival
         delegate void CallF1(object o, float a);
 
         static readonly Dictionary<MethodInfo, CallB> _b = new Dictionary<MethodInfo, CallB>();
+        static readonly Dictionary<MethodInfo, CallI> _i = new Dictionary<MethodInfo, CallI>();
+        static readonly Dictionary<MethodInfo, CallD> _d = new Dictionary<MethodInfo, CallD>();
         static readonly Dictionary<MethodInfo, CallF> _f = new Dictionary<MethodInfo, CallF>();
         static readonly Dictionary<MethodInfo, CallV> _v = new Dictionary<MethodInfo, CallV>();
         static readonly Dictionary<MethodInfo, CallOF> _of = new Dictionary<MethodInfo, CallOF>();
@@ -215,6 +322,35 @@ namespace NextDayRevival
             }
             object r = m.Invoke(o, null);
             return r is bool && (bool)r;
+        }
+
+        /// <summary>W Perf1: an int method (or property getter) without
+        /// arguments; the same as <c>Convert.ToInt32(m.Invoke(o, null))</c>.</summary>
+        public static int Int(MethodInfo m, object o)
+        {
+            CallI d;
+            if (!_i.TryGetValue(m, out d)) { d = (CallI)Emit(m, typeof(int), null, typeof(CallI)); _i[m] = d; }
+            if (d != null)
+            {
+                try { return d(o); }
+                catch (Exception ex) { if (!Unusable(ex)) throw; _i[m] = null; }
+            }
+            return Convert.ToInt32(m.Invoke(o, null));
+        }
+
+        /// <summary>W Perf1: a double method (or property getter) without
+        /// arguments (PhotonNetwork.time); NaN when the result is no double.</summary>
+        public static double Double(MethodInfo m, object o)
+        {
+            CallD d;
+            if (!_d.TryGetValue(m, out d)) { d = (CallD)Emit(m, typeof(double), null, typeof(CallD)); _d[m] = d; }
+            if (d != null)
+            {
+                try { return d(o); }
+                catch (Exception ex) { if (!Unusable(ex)) throw; _d[m] = null; }
+            }
+            object r = m.Invoke(o, null);
+            return r is double ? (double)r : double.NaN;
         }
 
         /// <summary>A float method (or property getter) without arguments.</summary>
@@ -360,6 +496,51 @@ namespace NextDayRevival
                 return dm.CreateDelegate(del);
             }
             catch (Exception ex) { FastField.Broken(ex); return null; }
+        }
+    }
+
+    /// <summary>
+    /// W Perf1: enum value names without a box per call. Enum.GetName and a
+    /// boxed enum's ToString allocate every time they are asked; the patrol
+    /// gun asked "which faction is this man" for every target it weighed.
+    /// The names are read once per enum type into a table indexed by value.
+    /// </summary>
+    public static class EnumNames
+    {
+        static readonly Dictionary<Type, string[]> _byType = new Dictionary<Type, string[]>();
+
+        /// <summary>The name of <paramref name="value"/> in <paramref name="enumType"/>,
+        /// or null for a value the enum does not define (Enum.GetName's answer).</summary>
+        public static string Get(Type enumType, int value)
+        {
+            if (enumType == null || !enumType.IsEnum) return null;
+            string[] table;
+            if (!_byType.TryGetValue(enumType, out table))
+            {
+                table = Build(enumType);
+                _byType[enumType] = table;
+            }
+            if (table != null && value >= 0 && value < table.Length) return table[value];
+            return Enum.GetName(enumType, value);
+        }
+
+        static string[] Build(Type t)
+        {
+            try
+            {
+                Array values = Enum.GetValues(t);
+                int max = -1;
+                for (int i = 0; i < values.Length; i++)
+                {
+                    int v = Convert.ToInt32(values.GetValue(i));
+                    if (v > max) max = v;
+                }
+                if (max < 0 || max > 255) return null;
+                string[] table = new string[max + 1];
+                for (int v = 0; v <= max; v++) table[v] = Enum.GetName(t, v);
+                return table;
+            }
+            catch { return null; }
         }
     }
 }

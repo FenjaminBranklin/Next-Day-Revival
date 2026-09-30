@@ -1119,7 +1119,7 @@ namespace NextDayRevival
                 if (h.Renderers[i] != null && h.Renderers[i].enabled) h.Renderers[i].enabled = false;
         }
 
-        static Transform WeaponHand(Component ai)
+        internal static Transform WeaponHand(Component ai)
         {
             try
             {

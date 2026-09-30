@@ -701,20 +701,42 @@ namespace NextDayRevival
             return ai == null || !SpawnData(ai, out data, out isMine);
         }
 
+        // W Perf1: the three lookups are made once per type. They ran for
+        // every NPC of the scene on every call - GroundEnemies' once-a-second
+        // reconcile, the flak, the radar and the crews all walk the NPC list
+        // through GroundKey: 13 KB a frame and a 2 ms peak in Kevin's F6.
+        static readonly Dictionary<Type, MethodInfo> _sdPhotonView = new Dictionary<Type, MethodInfo>();
+        static readonly Dictionary<Type, MethodInfo> _sdIsMine = new Dictionary<Type, MethodInfo>();
+        static readonly Dictionary<Type, MethodInfo> _sdInstData = new Dictionary<Type, MethodInfo>();
+
         static bool SpawnData(Component ai, out object[] data, out bool isMine)
         {
             data = null;
             isMine = true;
             try
             {
-                MethodInfo pv = AccessTools.Method(ai.GetType(), "get_photonView",
-                                                   null, null);
+                Type at = ai.GetType();
+                MethodInfo pv;
+                if (!_sdPhotonView.TryGetValue(at, out pv))
+                {
+                    pv = AccessTools.Method(at, "get_photonView", null, null);
+                    _sdPhotonView[at] = pv;
+                }
                 object view = pv == null ? null : pv.Invoke(ai, null);
                 if (view == null) return false;
-                MethodInfo mine = AccessTools.PropertyGetter(view.GetType(), "isMine");
-                if (mine != null) isMine = (bool)mine.Invoke(view, null);
-                MethodInfo inst = AccessTools.PropertyGetter(view.GetType(),
-                                                              "instantiationData");
+                Type vt = view.GetType();
+                MethodInfo mine, inst;
+                if (!_sdIsMine.TryGetValue(vt, out mine))
+                {
+                    mine = AccessTools.PropertyGetter(vt, "isMine");
+                    _sdIsMine[vt] = mine;
+                }
+                if (!_sdInstData.TryGetValue(vt, out inst))
+                {
+                    inst = AccessTools.PropertyGetter(vt, "instantiationData");
+                    _sdInstData[vt] = inst;
+                }
+                if (mine != null) isMine = FastCall.Bool(mine, view);   // no boxed bool
                 data = inst == null ? null : inst.Invoke(view, null) as object[];
                 return data != null && data.Length >= 5 && data[0] != null
                     && Convert.ToInt32(data[0]) == 0 && data[1] is int[];
@@ -1197,13 +1219,29 @@ namespace NextDayRevival
 
         // The optional cached Photon field lets a new master adopt these men
         // instead of spawning a second copy of the same editor group.
+        // W Perf1: a man's key never changes (Photon instantiation data is
+        // fixed at spawn), so it is read once per man - the Substring below
+        // was a new string per ground-group man per scan.
+        static readonly Dictionary<int, string> _groundKeys = new Dictionary<int, string>();
+
         internal static string GroundKey(Component ai)
         {
+            if (ai == null) return null;
+            int id = ai.GetInstanceID();
+            string known;
+            if (_groundKeys.TryGetValue(id, out known)) return known;
             object[] data; bool mine;
-            if (!SpawnData(ai, out data, out mine) || data.Length != 11) return null;
-            string key = data[10] as string;
-            return key != null && key.StartsWith("ndr-ground-1:", StringComparison.Ordinal)
-                ? key.Substring(13) : null;
+            if (!SpawnData(ai, out data, out mine)) return null;   // not readable yet: ask again later
+            string result = null;
+            if (data.Length == 11)
+            {
+                string key = data[10] as string;
+                if (key != null && key.StartsWith("ndr-ground-1:", StringComparison.Ordinal))
+                    result = key.Substring(13);
+            }
+            if (_groundKeys.Count > 4096) _groundKeys.Clear();
+            _groundKeys[id] = result;
+            return result;
         }
 
         /// <summary>
@@ -1316,7 +1354,7 @@ namespace NextDayRevival
         static void OwnerInit(Component sied)
         {
             PhotonLook();
-            bool master = _photonMaster != null && (bool)_photonMaster.Invoke(null, null);
+            bool master = _photonMaster != null && FastCall.Bool(_photonMaster, null);
             if (master) { Invoke(sied, "StartMainInit"); return; }
             float type = GetNumber(sied, "SettlementType");
             SetNumber(sied, "SettlementType", 2f);
@@ -1888,7 +1926,7 @@ namespace NextDayRevival
         static bool Bool(object o, string name)
         {
             if (o == null) return false;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null || fi.FieldType != typeof(bool)) return false;
             try { return (bool)fi.GetValue(o); }
             catch { return false; }
@@ -1897,7 +1935,7 @@ namespace NextDayRevival
         static int Count(object o, string name)
         {
             if (o == null) return -1;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null) return -1;
             try
             {
@@ -2405,7 +2443,7 @@ namespace NextDayRevival
         static void Set(object o, string name, object value)
         {
             if (o == null) return;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null)
             {
                 RevivalPlugin.L.LogWarning("Crew: field " + name + " not on "
@@ -2425,7 +2463,7 @@ namespace NextDayRevival
         static float GetNumber(object o, string name)
         {
             if (o == null) return 0f;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null) return 0f;
             try
             {
@@ -2442,7 +2480,7 @@ namespace NextDayRevival
         static void SetNumber(object o, string name, float value)
         {
             if (o == null) return;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null)
             {
                 RevivalPlugin.L.LogWarning("Crew: field " + name + " not on "
@@ -2471,7 +2509,7 @@ namespace NextDayRevival
         static void SetEnum(object o, string name, string value)
         {
             if (o == null) return;
-            FieldInfo fi = AccessTools.Field(o.GetType(), name);
+            FieldInfo fi = FastField.Find(o.GetType(), name);
             if (fi == null || !fi.FieldType.IsEnum)
             {
                 RevivalPlugin.L.LogWarning("Crew: enum field " + name + " not on "
@@ -2903,7 +2941,7 @@ namespace NextDayRevival
                 }
             }
             if (_masterGetter == null) return false;
-            return (bool)_masterGetter.Invoke(null, null);
+            return FastCall.Bool(_masterGetter, null);
         }
 
         /// <summary>The weapon `ItemID` is an ObscuredInt; unwrap it through its
@@ -3197,6 +3235,11 @@ namespace NextDayRevival
         static readonly List<Local> _local = new List<Local>();
         static readonly Dictionary<string, Remote> _remote =
             new Dictionary<string, Remote>();
+        internal static void StingerTargets()
+        {
+            for (int i = 0; i < _local.Count; i++) Stinger.OfferTarget(_local[i].Go, 4, 0);
+            foreach (Remote r in _remote.Values) Stinger.OfferTarget(r.Go, 4, 0);
+        }
         static readonly List<string> _remove = new List<string>();
         static int _nextId = 1;
 
@@ -3331,7 +3374,9 @@ namespace NextDayRevival
                 if (p.Root == null) { _pending.RemoveAt(i); continue; }
                 if (Time.time < p.At) continue;
                 GameObject target = FindTarget(p.Npcs);
-                if (target == null) continue;
+                // W Perf1: a crew with nobody to fight is asked again four
+                // times a second, not every frame (0.25 s later launch at most).
+                if (target == null) { p.At = Time.time + 0.25f; continue; }
                 string why;
                 if (!AreaFree(p.Root.position, out why))
                 {
@@ -3343,9 +3388,18 @@ namespace NextDayRevival
                 _pending.RemoveAt(i);
             }
 
+            // W Perf1: the drone's assets are built a slice per frame once
+            // crew drones are on (about 25 frames at ~0.2 ms, once a session),
+            // not all in the first launch frame - and on every client, because
+            // a remote drone's first appearance built them too
+            // (Drone.Modell.Prewarm).
+            if (!_prewarmed) _prewarmed = Drone.Modell.Prewarm();
+
             for (int i = _local.Count - 1; i >= 0; i--)
                 Move(_local[i]);
         }
+
+        static bool _prewarmed;
 
         static GameObject FindTarget(Array npcs)
         {
@@ -3353,7 +3407,9 @@ namespace NextDayRevival
             {
                 object ai = npcs.GetValue(i);
                 if (ai == null) continue;
-                FieldInfo targetField = AccessTools.Field(ai.GetType(), "_killTarget");
+                // W Perf1: remembered per type (FastField.Find) - AccessTools.Field
+                // ran for every man of every waiting crew, every frame.
+                FieldInfo targetField = FastField.Find(ai.GetType(), "_killTarget");
                 object raw = targetField == null ? null : targetField.GetValue(ai);
                 GameObject go = raw as GameObject;
                 Component component = raw as Component;

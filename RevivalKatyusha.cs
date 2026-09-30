@@ -45,11 +45,11 @@
 // HOW A ROCKET GOES OFF
 //   The shooter draws the impact points and sends them in ONE reliable event
 //   (KatyushaNet kind 1). Every client flies the same rockets on the same
-//   schedule and paints the same bursts with the pooled effects below - no
-//   network object per explosion. The damage goes through the mortar's rules
-//   (Mortar.Sweep, the An-2 bombs' path): the shooter sweeps with shooter =
-//   true (players, never his own faction - FactionShield is armed), the master
-//   sweeps NPCs and vehicles for a shooter who is not the master, and only the
+//   schedule; the shooter sends the final xyz impact (kind 3), used by both
+//   the pooled burst and master damage on every client - no
+//   network object per explosion. OrdnanceBlast queues one master damage pass
+//   through NPC Photon owners with body/explosion parameters. The shooter
+//   alone sends player victim RPCs, preserving sender attribution. The
 //   master touches the airfield fuel depots (FuelDepot.Blast; with the old
 //   depot the An-2 repair's DepotHit), so one depot burns once.
 //
@@ -73,8 +73,7 @@
 //   RevivalUralTruck.cs   VehicleRegistry entry "katyusha"
 //   Revival.Admin.cs      "Spawn Katyusha" and "Katyusha rockets x16"
 //   Revival.Airfield.cs   the loot pool (Pool)
-//   RevivalMortar.cs      ShowMap / MapPoint made internal; Sweep,
-//                         FactionShield used unchanged
+//   RevivalMortar.cs      ShowMap / MapPoint; OrdnanceBlast shared damage
 //   RevivalFrameProfiler.cs two slots
 
 using System;
@@ -149,13 +148,18 @@ namespace NextDayRevival
             CfgMaxPitch = cfg.Bind(S, "MaxElevation", 45f, "Rail elevation at MaxRange, degrees.");
             CfgStowPitch = cfg.Bind(S, "StowElevation", 4f,
                 "Rail elevation in the travel position (the rails clear the cab roof).");
-            CfgRadius = cfg.Bind(S, "BlastRadius", 32f, "Burst radius of one rocket, world units.");
+            ConfigEntry<float> legacyRadius = cfg.Bind(S, "BlastRadius", 32f,
+                "Legacy burst radius in world units; custom values seed BlastRadiusMetres once.");
+            float radiusM = Mathf.Abs(legacyRadius.Value - 32f) < 0.01f ? 18f
+                : legacyRadius.Value / OrdnanceBlast.UnitsPerMetre;
+            CfgRadius = cfg.Bind(S, "BlastRadiusMetres", radiusM,
+                "Burst radius of one M-13 rocket in metres, linear falloff to zero.");
             CfgNpcDamage = cfg.Bind(S, "NpcDamage", 700f, "Damage to an NPC at the burst point.");
             CfgVehicleDamage = cfg.Bind(S, "VehicleDamage", 1600f,
                 "Damage to a vehicle at the burst point (explosion part, armour rules apply); "
                 + "also what a fuel depot tank takes.");
             CfgPlayerDamage = cfg.Bind(S, "PlayerDamage", 350f,
-                "Damage to a player at the burst point. Never to the shooter's own faction.");
+                "Body explosion damage to a player at the burst point, including the shooter's faction.");
             CfgFlightBase = cfg.Bind(S, "FlightSeconds", 2.5f, "Flight time at zero range, seconds.");
             CfgFlightSpeed = cfg.Bind(S, "FlightSpeed", 260f, "Map metres a second added to the flight.");
             CfgHearRange = cfg.Bind(S, "HearRange", 3000f,
@@ -178,7 +182,7 @@ namespace NextDayRevival
         static float MinPitch { get { return Mathf.Clamp(F(CfgMinPitch, 12f), 5f, 60f); } }
         static float MaxPitch { get { return Mathf.Clamp(F(CfgMaxPitch, 45f), MinPitch + 1f, 70f); } }
         static float StowPitch { get { return Mathf.Clamp(F(CfgStowPitch, 4f), 0f, 10f); } }
-        internal static float Radius { get { return Mathf.Max(2f, F(CfgRadius, 32f)); } }
+        internal static float Radius { get { return Mathf.Max(1f, F(CfgRadius, 18f)) * OrdnanceBlast.UnitsPerMetre; } }
 
         internal static bool IstKatyusha(Transform root)
         {
@@ -711,7 +715,6 @@ namespace NextDayRevival
                 msg[5 + i * 2] = p.x;
                 msg[6 + i * 2] = p.z;
             }
-            try { Mortar.FactionShield.Arm(); } catch (Exception) { }
             KatyushaNet.Send(msg, true);
             StartSalvo(l, points, interval, l.Pitch, true);
             _pinned = false;
@@ -801,24 +804,26 @@ namespace NextDayRevival
         // ============================================================ impacts
 
         /// <summary>A rocket's burst. The picture on every client (pooled);
-        /// the damage by the shooter (players, NPCs) and the master (NPCs and
-        /// vehicles of a shooter who is not the master; the fuel depots).</summary>
+        /// master NPC/vehicle damage and shooter player victim RPCs.</summary>
         internal static void Burst(Vector3 point, bool mine)
+        {
+            if (!mine) return; // Visual flight copies wait for the shooter's actual impact.
+            KatyushaNet.Send(new float[] { 3f, 0f, point.x, point.y, point.z }, true);
+            ReceiveImpact(point);
+            OrdnanceBlast.EnqueuePlayers(point, Radius, Mathf.Max(0f, F(CfgPlayerDamage, 350f)));
+        }
+
+        internal static void ReceiveImpact(Vector3 point)
         {
             KatyushaFx.Explosion(point);
             KatyushaSound.Boom(point);
             bool master = RevivalTroopInsertion.MasterClient();
-            if (!mine && !master) return;
+            if (!master) return;
             float radius = Radius;
-            int npc, veh, plr;
-            Mortar.Sweep(point, mine, radius, Mathf.Max(0f, F(CfgNpcDamage, 700f)),
+            OrdnanceBlast.Enqueue(point, radius, Mathf.Max(0f, F(CfgNpcDamage, 700f)),
                 Mathf.Max(0f, F(CfgVehicleDamage, 1600f)),
-                mine ? Mathf.Max(0f, F(CfgPlayerDamage, 350f)) : 0f,
-                out npc, out veh, out plr);
+                0f);
             if (master) Depot(point);
-            if (npc + veh + plr > 0)
-                RevivalPlugin.L.LogInfo("Katyusha: burst at " + point.ToString("0") + " - " + npc
-                    + " NPC, " + veh + " vehicle, " + plr + " player hit.");
         }
 
         /// <summary>The airfield fuel: the POL depot's tanks take the blast
@@ -1337,7 +1342,8 @@ namespace NextDayRevival
             public GameObject Go;
             public Vector3 Slot, Tip, To;
             public float Age, Time, Apex, NextTrail;
-            public bool Mine;
+            public bool Mine, SupportMission;
+            public int SupportGeneration;
         }
 
         const float Slide = 0.15f;
@@ -1363,6 +1369,30 @@ namespace NextDayRevival
             _flights.Add(f);
             Vector3 dir = (f.Tip - f.Slot).normalized;
             KatyushaFx.Launch(f.Slot, dir, l.Car == null ? f.Slot : l.Car.transform.position, l.Scale);
+            KatyushaSound.Launch(f.Slot);
+        }
+
+        // W Tower 2: an off-map battery, with the same pooled M-13 flight,
+        // motor, sound and impact. Only the master applies support damage.
+        internal static void Support(Vector3 origin, Vector3 target, bool master)
+        {
+            Flight f = new Flight();
+            f.Slot = origin;
+            f.Tip = origin + Vector3.up * 2f;
+            float y;
+            if (!RevivalTroopInsertion.TerrainHeight(target, out y)) return;
+            target.y = y;
+            f.To = target;
+            Vector3 flat = target - origin;
+            flat.y = 0f;
+            f.Time = Katyusha.FlightTime(flat.magnitude);
+            f.Apex = Mathf.Clamp(flat.magnitude * 0.25f, 5f, 2000f);
+            f.Mine = master;
+            f.SupportMission = true;
+            f.SupportGeneration = TowerSupport.WorldGeneration;
+            f.Go = Take(1f);
+            _flights.Add(f);
+            KatyushaFx.Launch(f.Slot, (f.To - f.Slot).normalized, f.Slot, 1f);
             KatyushaSound.Launch(f.Slot);
         }
 
@@ -1407,6 +1437,8 @@ namespace NextDayRevival
             for (int i = _flights.Count - 1; i >= 0; i--)
             {
                 Flight f = _flights[i];
+                if (f.SupportMission && f.SupportGeneration != TowerSupport.WorldGeneration)
+                { Give(f.Go); _flights.RemoveAt(i); continue; }
                 f.Age += dt;
                 Vector3 p = At(f, f.Age);
                 Vector3 ahead = At(f, f.Age + 0.05f) - p;
@@ -1424,7 +1456,14 @@ namespace NextDayRevival
                 if (f.Age < Slide + f.Time) continue;
                 _flights.RemoveAt(i);
                 Give(f.Go);
-                Katyusha.Burst(f.To, f.Mine);
+                if (!f.SupportMission) Katyusha.Burst(f.To, f.Mine);
+                else if (!AirEvents.Safe(f.To))
+                {
+                    bool previous = Mortar.AnyFaction;
+                    Mortar.AnyFaction = true;
+                    try { Katyusha.Burst(f.To, Crocodile.IsMaster()); }
+                    finally { Mortar.AnyFaction = previous; }
+                }
             }
         }
     }
@@ -2180,6 +2219,7 @@ namespace NextDayRevival
                 if (kind == 0 && f.Length >= 5) Katyusha.ReceivePose(view, f[2], f[3], f[4] > 0.5f);
                 else if (kind == 1 && f.Length >= 5) Katyusha.ReceiveSalvo(f);
                 else if (kind == 2 && f.Length >= 3) Katyusha.ReceiveCount(view, Mathf.RoundToInt(f[2]));
+                else if (kind == 3 && f.Length >= 5) Katyusha.ReceiveImpact(new Vector3(f[2], f[3], f[4]));
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Katyusha net receive: " + ex.Message); }
         }

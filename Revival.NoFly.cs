@@ -12,14 +12,13 @@ using UnityEngine;
 // A zone is a circle or a polygon on one map (scene), a ceiling above the
 // ground, an owning editor faction and its defenders. An aircraft (player
 // Mi-8, An-2, a player's FPV or recon drone) that is airborne inside it with
-// a player aboard and nobody of the owning faction aboard is a VIOLATOR:
+// a hostile pilot is a VIOLATOR; passengers never override pilot IFF:
 //
 //   1. warning - WarningSeconds: every client whose player is aboard shows the
 //      HUD banner "NO FLY ZONE ... leave now" and beeps;
 //   2. engaged - the master hands it to the zone's defenders:
-//        - the zone's ZU-23 guns (Revival.Flak.cs, P4 API): ZoneDefence over the
-//          zone once, then AssignTarget(violator) - the crew fires on it even
-//          when it is not of a hostile faction;
+//        - the zone's 52-K guns (Revival.Flak.cs, P4 API); AF/MT guns keep
+//          their radar orders and acquire hostile pilots independently;
 //        - else a manned Gepard of the owning faction near the zone
 //          (GepardCrew.Defends / the Feindlich hook: NoFly.Engaged);
 //        - else NOBODY. There is no scripted fire any more (Q2, after the
@@ -121,6 +120,13 @@ namespace NextDayRevival
         /// <summary>The zones. The same list as assets/editor/nofly.json -
         /// python verify.py [35] compares them.</summary>
         internal static readonly List<Zone> Zones = new List<Zone>();
+        static Zone _town;
+
+        // Horizontal town boundary; the 52-K's own ceiling still applies.
+        internal static bool TownContains(Vector3 p)
+        {
+            return _town != null && AirDefencePolicy.TownArea(p.x, p.z, _town.Centre.x, _town.Centre.y, _town.Radius);
+        }
 
         static NoFly()
         {
@@ -141,12 +147,22 @@ namespace NextDayRevival
             // town (the AA1 site) and nobody else - with it dead the sky over
             // the town is open.
             Zone mt = Circle("MT", "Military town", "GW_Scene_1", "traitor", 5650f, 900f, 530f, 700f,
-                             new string[0]);
+                             new string[] { "MT-AA2a", "MT-AA2b" });
             mt.Reach = 0f;
             mt.Exists = MilitaryTown.NoFlyShown;
             mt.Armed = MilitaryTown.NoFlyArmed;
             mt.Side = MilitaryTown.Faction;
+            _town = mt;
             Zones.Add(mt);
+            Zone af = Polygon("AF", "Airfield", "GW_Scene_1", "looter", new Vector2[] {
+                new Vector2(3990f, -1690f), new Vector2(4820f, -1690f),
+                new Vector2(4820f, 1690f), new Vector2(3990f, 1690f) }, 8400f, // 3000 m x 2.8
+                new string[] { "AA-N", "AA-S" });
+            af.Exists = AirfieldOwnership.Shown;
+            af.Armed = AirfieldOwnership.Armed;
+            af.Side = AirfieldOwnership.ZoneSide;
+            af.Reach = 0f;
+            Zones.Add(af);
         }
 
         static Zone Circle(string id, string name, string scene, string faction,
@@ -181,7 +197,7 @@ namespace NextDayRevival
 
         /// <summary>Warned and engaged: here, and its defence (if it has a
         /// condition) is up.</summary>
-        static bool Live(Zone zn) { return Here(zn) && (zn.Armed == null || zn.Armed()); }
+        static bool Live(Zone zn) { return Here(zn) && (zn.Armed == null || zn.Armed() || (zn.Id == "MT" && Flak.TownManned())); }
 
         /// <summary>Inside the outline and under the ceiling.</summary>
         internal static bool Contains(Zone zn, Vector3 p)
@@ -220,29 +236,10 @@ namespace NextDayRevival
         /// own faction.</summary>
         static void Aboard(GepardGun.Contact c, string faction, out bool anyone, out bool owner)
         {
-            anyone = false;
-            owner = false;
-            string own = Fraktion.Eigene(faction);
-            if (c.Kind == 2 || c.Kind == 3)
-            {
-                GameObject pilot = Crocodile.PlayerByActor(c.Actor);
-                if (pilot == null) return;
-                anyone = true;
-                owner = Fraktion.Spielerseite(pilot) == own;
-                return;
-            }
-            // An NPC intruder (the admin's test flyover, Revival.NpcAircraft.cs)
-            // violates every zone: flown, and of no faction that owns one.
-            if (NpcAircraft.Hostile(c.Go)) { anyone = true; return; }
-            float reach = Mathf.Max(4f, c.Radius * 1.5f) + 2f;
-            List<GameObject> players = GepardCrew.Spieler();
-            for (int i = 0; i < players.Count; i++)
-            {
-                GameObject go = players[i];
-                if (go == null || (go.transform.position - c.Pos).sqrMagnitude > reach * reach) continue;
-                anyone = true;
-                if (Fraktion.Spielerseite(go) == own) owner = true;
-            }
+            string pilot = AirPilot.Faction(c);
+            string own = faction == "players" ? AirfieldOwnership.FactionName : Fraktion.Eigene(faction);
+            anyone = AirDefencePolicy.Hostile(own, pilot);
+            owner = pilot != null && pilot == own;
         }
 
         // ------------------------------------------------------------ API
@@ -306,6 +303,7 @@ namespace NextDayRevival
             for (int z = 0; z < Zones.Count; z++)
             {
                 Zone zn = Zones[z];
+                if (zn.Id == "AF") continue; // Owned flak scans already engage; HUD uses LocalTick.
                 if (!Live(zn)) { zn.In.Clear(); continue; }
                 FlakFire.FollowAll(zn.Air, Time.deltaTime, 2f);
                 if (now >= zn.NextScan)
@@ -385,6 +383,7 @@ namespace NextDayRevival
                 if (first == null) first = v;
             }
             // The guns lay on one violator at a time: the first engaged one.
+            if (zn.Id == "AF" || zn.Id == "MT") return; // Keep explicit radar HOLD/ENGAGE orders.
             GameObject want = guns && first != null ? first.C.Go : null;
             if (want != zn.AssignedGo)
             {
@@ -411,7 +410,7 @@ namespace NextDayRevival
                 FlakGunInfo info = Flak.Get(zn.Guns[g]);
                 if (info == null) continue;
                 if (info.CrewAlive > 0 || info.PlayerManned) ready = true;
-                if (check && info.Mode != FlakMode.ZoneDefence)
+                if (check && zn.Id != "AF" && zn.Id != "MT" && info.Mode != FlakMode.ZoneDefence)
                 {
                     Vector3 c = Ground(zn);
                     Flak.ZoneDefence(zn.Guns[g], c, zn.Radius, zn.Ceiling, false);
@@ -465,13 +464,14 @@ namespace NextDayRevival
             {
                 Zone zn = Zones[z];
                 bool inside = false;
-                if (Live(zn) && me != null && Fraktion.Spielerseite(me) != Fraktion.Eigene(zn.Faction))
+                if (Live(zn) && me != null)
                     for (int i = 0; i < at.Count && !inside; i++)
                     {
                         if (!Contains(zn, at[i])) continue;
                         bool anyone = true, owner = false;
                         if (by[i] != null) Aboard(by[i], zn.Faction, out anyone, out owner);
-                        inside = !owner;
+                        if (by[i] == null) anyone = AirDefencePolicy.Hostile(zn.Id == "AF" ? AirfieldOwnership.FactionName : Fraktion.Eigene(zn.Faction), Fraktion.Spielerseite(me));
+                        inside = anyone && !owner;
                     }
                 Local l = null;
                 for (int i = 0; i < _local.Count; i++) if (_local[i].Zone == zn) l = _local[i];
@@ -515,7 +515,7 @@ namespace NextDayRevival
             for (int g = 0; zn.Guns != null && g < zn.Guns.Length; g++)
             {
                 FlakGunInfo info = Flak.Get(zn.Guns[g]);
-                if (info != null && (info.CrewAlive > 0 || info.PlayerManned)) return true;
+                if (info != null && info.Health > 0f && (info.CrewAlive > 0 || info.PlayerManned)) return true;
             }
             return GepardCrew.Defends(zn.Faction, Ground(zn), zn.Radius + zn.Reach);
         }
@@ -617,7 +617,7 @@ namespace NextDayRevival
                 for (int z = 0; z < Zones.Count; z++)
                 {
                     Zone zn = Zones[z];
-                    if (!Here(zn)) continue;
+                    if (!Here(zn) || (zn.Id == "AF" && !Live(zn))) continue;
                     Vector2 size = new Vector2(full.width, full.height);
                     if (size.x <= 0f || size.y <= 0f) continue;
                     if (zn.Dashes == null || zn.DashesEast != EastWorld.Extends

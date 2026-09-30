@@ -73,6 +73,8 @@ namespace NextDayRevival
             Fighter f = NewFighter(ai, s);
             f.GroundDest = f.Tr.position;
             Equip(f, spec);
+            if (spec.Weapons != null && spec.Weapons.Length > 0 && spec.Weapons[0] == Stinger.ItemId)
+                f.Manpads = new MercStingerState();
             // Traits (docs/ai/tasks/mercenaries.md 4.6): precise sharpens his
             // NPC-versus-NPC shot, tanky takes a further share off every hit.
             f.Skill = Mathf.Clamp(f.Skill * (1f + unit.Precise / 100f), 0.5f, 2f);
@@ -153,6 +155,7 @@ namespace NextDayRevival
         static bool MercMayStand(Fighter f, MercUnit u)
         {
             if (u.Deserting) return false;
+            if (u.Order.Survive || u.Rally) return true;
             MercOrder o = u.Order;
             switch (o.Mode)
             {
@@ -226,6 +229,8 @@ namespace NextDayRevival
                 case MercOrder.Vehicle: MercBoard(f, u, now); return;
                 case MercOrder.Patrol: MercPatrol(f, u, now); return;
                 case MercOrder.Perimeter: MercPerimeter(f, u, now); return;
+                case MercOrder.ManGun:
+                case MercOrder.ManRadar: MercPostStep(f, u, now); return;
                 default: MercStay(f, u, now); return;
             }
         }
@@ -491,6 +496,24 @@ namespace NextDayRevival
             return (ap - ab * t).magnitude;
         }
 
+        /// <summary>W, F8 "Bring my mercs to me": one merc put down at a spot;
+        /// his cover claim and fight state start afresh there.</summary>
+        internal static bool MercTeleport(MercUnit u, Vector3 spot)
+        {
+            for (int i = 0; i < _squads.Count; i++)
+            {
+                Squad s = _squads[i];
+                if (s.Merc != u || s.Men.Count == 0) continue;
+                Fighter f = s.Men[0];
+                if (f.Tr == null) return false;
+                MercCoverService.Forget(u);
+                MercWarp(f, spot);
+                u.NextWarp = Time.time + 10f;
+                return true;
+            }
+            return false;
+        }
+
         /// <summary>A lost merc is put down beside his owner.</summary>
         static void MercWarp(Fighter f, Vector3 spot)
         {
@@ -559,6 +582,14 @@ namespace NextDayRevival
         static bool HatedValue(Array hated, int value)
         {
             if (hated == null) return false;
+            // W Perf1: no box per element for an int-backed enum array (NpcWar.Hostile).
+            int[] ids = hated as int[];
+            if (ids != null)
+            {
+                for (int i = 0; i < ids.Length; i++)
+                    if (ids[i] == value) return true;
+                return false;
+            }
             for (int i = 0; i < hated.Length; i++)
             {
                 object h = hated.GetValue(i);

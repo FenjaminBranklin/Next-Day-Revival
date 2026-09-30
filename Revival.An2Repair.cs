@@ -363,6 +363,8 @@ namespace NextDayRevival
             }
             else if (what == FuelCan || what == FuelDepot)
             {
+                // W Tower 3: the master refuses fuel at the airfield for anyone but its holder.
+                if (!AirfieldHold.ActorMayUse(go, sender)) return;
                 float fuel = PlayerAn2.FuelOf(go);
                 float add = Mathf.Clamp(litres, 0f, Capacity - fuel);
                 if (what == FuelDepot) add = Mathf.Min(add, Reserve());
@@ -523,6 +525,9 @@ namespace NextDayRevival
 
             float fuel = PlayerAn2.FuelOf(go);
             bool room = fuel < Capacity - 1f;
+            // W Tower 3: at the airfield only its holder refuels.
+            if (room && !AirfieldHold.LocalMayUse(go) && (Turret.HasItem(CanisterId) || AtDepot(go)))
+            { _prompt = AirfieldHold.LockedText(); return; }
             if (room && Turret.HasItem(CanisterId))
             {
                 if (PlayerAn2.Occupied(go)) { _prompt = Loc.T("Кто-то в кабине", "Somebody is in the cockpit"); return; }
@@ -604,6 +609,8 @@ namespace NextDayRevival
                 Request(go, part, 0f);
                 Turret.Hinweis(Loc.T("Установлено: ", "Fitted: ") + PartName(part), 3f);
             }
+            else if (!AirfieldHold.LocalMayUse(go))
+                Turret.Hinweis(AirfieldHold.LockedText(), 3f);   // W Tower 3: lost the airfield meanwhile
             else if (job == Job.Canister)
             {
                 if (!Turret.TakeItem(CanisterId, "An2Repair")) { Turret.Hinweis(Loc.T("Канистры нет", "The canister is gone"), 2f); return; }
