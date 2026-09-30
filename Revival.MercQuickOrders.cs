@@ -16,16 +16,16 @@ namespace NextDayRevival
         internal static KeyCode CommandKey = KeyCode.Mouse2;
         static KeyCode _cameraKey = KeyCode.BackQuote, _cameraConfigured = KeyCode.BackQuote;
         static int _deployedFrame = -1;
-        static bool _deployed, _cameraPatched;
+        static bool _deployed, _owned, _cameraPatched;
 
         internal static void BindConfig(ConfigFile cfg)
         {
             _commandCfg = cfg.Bind("Mercs", "QuickOrderKey", "Mouse2",
-                "With your deployed mercs: tap = attack the aimed enemy or ground point, double tap = rally, "
+                "With your owned merc roster: tap = immediate attack at release, double tap = rally, "
                 + "hold = all nine orders. None disables this binding; OrderKey remains available.");
             _cameraCfg = cfg.Bind("Mercs", "CameraAimKey", "BackQuote",
-                "Camera aim alignment toggle moved from middle mouse while your deployed mercs use Mouse2. "
-                + "Without deployed mercs, middle mouse keeps its native camera function. Use a different key from QuickOrderKey.");
+                "Camera aim alignment toggle moved from middle mouse while your owned merc roster uses Mouse2. "
+                + "Without owned mercs, middle mouse keeps its native camera function. Use a different key from QuickOrderKey.");
         }
 
         static KeyCode Parse(string text, KeyCode fallback)
@@ -54,22 +54,28 @@ namespace NextDayRevival
             get
             {
                 if (_deployedFrame == Time.frameCount) return _deployed;
-                _deployedFrame = Time.frameCount; _deployed = false;
+                _deployedFrame = Time.frameCount; _deployed = false; _owned = false;
                 List<Mercs.Record> roster = Mercs.Roster;
                 for (int i = 0; i < roster.Count; i++)
                 {
                     Mercs.Record r = roster[i];
-                    if (!r.Dead && r.Unit != null && r.Unit.Ai != null && !r.Unit.Deserting)
-                    { _deployed = true; break; }
+                    if (r.Dead || r.Deserted) continue;
+                    _owned = true;
+                    if (r.Unit != null && r.Unit.Ai != null && !r.Unit.Deserting) _deployed = true;
                 }
                 return _deployed;
             }
         }
 
+        internal static bool HasRoster
+        {
+            get { if (Deployed) return true; return _owned; }
+        }
+
         internal static bool Available
         {
-            get { return CommandKey != KeyCode.None && (CommandKey != KeyCode.Mouse2 || _cameraPatched)
-                && Deployed && GameplayCursor.CanRestore && !MercUi.ListOpen; }
+            get { return CommandKey != KeyCode.None && HasRoster
+                && GameplayCursor.CanCommand && !MercUi.ListOpen; }
         }
 
         internal static void Install(Harmony harmony)
@@ -79,23 +85,25 @@ namespace NextDayRevival
                 MethodInfo native = AccessTools.Method(RevivalPlugin.TypeByName("CameraSwitch"), "CameraZPOSManager", null, null);
                 if (native == null) throw new MissingMethodException("CameraSwitch.CameraZPOSManager");
                 harmony.Patch(native, null, null, new HarmonyMethod(typeof(MercQuick).GetMethod("CameraTranspile")), null, null);
-                Type demo = RevivalPlugin.TypeByName("RootMotion.CameraController");
-                if (demo != null)
-                    harmony.Patch(AccessTools.Method(demo, "UpdateInput", null, null), null, null,
-                        new HarmonyMethod(typeof(MercQuick).GetMethod("CameraTranspile")), null, null);
-                HookLook(harmony, "PlayerMovementController", "PlayerRotationControl");
-                HookLook(harmony, "CameraFPSController", "Input_Rotate");
-                HookLook(harmony, "MouseOrbitController", "LateUpdate");
-                RevivalPlugin.L.LogInfo("Merc quick orders: Mouse2 reserved only with deployed mercs; camera aim on BackQuote.");
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Merc quick orders camera binding: " + ex.Message); }
+            // Optional camera methods must never disable the command poller.
+            HookLook(harmony, "RootMotion.CameraController", "UpdateInput");
+            HookLook(harmony, "PlayerMovementController", "PlayerRotationControl");
+            HookLook(harmony, "CameraFPSController", "Input_Rotate");
+            HookLook(harmony, "MouseOrbitController", "LateUpdate");
+            RevivalPlugin.L.LogInfo("Merc quick orders: command input enabled; native Mouse2 remap " + _cameraPatched + ".");
         }
 
         static void HookLook(Harmony harmony, string type, string method)
         {
-            MethodInfo target = AccessTools.Method(RevivalPlugin.TypeByName(type), method, null, null);
-            if (target != null) harmony.Patch(target, null, null,
-                new HarmonyMethod(typeof(MercQuick).GetMethod("CameraTranspile")), null, null);
+            try
+            {
+                MethodInfo target = AccessTools.Method(RevivalPlugin.TypeByName(type), method, null, null);
+                if (target != null) harmony.Patch(target, null, null,
+                    new HarmonyMethod(typeof(MercQuick).GetMethod("CameraTranspile")), null, null);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Merc command camera " + type + "." + method + ": " + ex.Message); }
         }
 
         // Replace only literal button 2 at these two camera call sites. Scroll,
@@ -129,16 +137,16 @@ namespace NextDayRevival
         public static bool CameraDown(int button)
         {
             Keys();
-            if (button == 2 && CommandKey == KeyCode.Mouse2 && Deployed)
-                return _cameraKey != KeyCode.None && GameplayCursor.CanRestore && Input.GetKeyDown(_cameraKey);
+            if (button == 2 && CommandKey == KeyCode.Mouse2 && HasRoster)
+                return _cameraKey != KeyCode.None && GameplayCursor.CanCommand && Input.GetKeyDown(_cameraKey);
             return Input.GetMouseButtonDown(button);
         }
 
         public static bool CameraHeld(int button)
         {
             Keys();
-            if (button == 2 && CommandKey == KeyCode.Mouse2 && Deployed)
-                return _cameraKey != KeyCode.None && GameplayCursor.CanRestore && Input.GetKey(_cameraKey);
+            if (button == 2 && CommandKey == KeyCode.Mouse2 && HasRoster)
+                return _cameraKey != KeyCode.None && GameplayCursor.CanCommand && Input.GetKey(_cameraKey);
             return Input.GetMouseButton(button);
         }
     }
@@ -147,6 +155,7 @@ namespace NextDayRevival
     {
         static MercQuickGesture _quickGesture;
         static bool _quickWheel, _quickNeedsUp;
+        static bool _wheelScrollPick;
         static Vector3 _quickPoint;
         static Component _quickNpc;
         static GameObject _quickPlayer;
@@ -155,9 +164,30 @@ namespace NextDayRevival
         static float _commandPingUntil;
         static Camera _pingCamera;
         static float _pingCameraAt;
+        static int _inputFrame = -1;
+        static float _inputWarnAt;
+
+        internal static void PollCommands()
+        {
+            if (_inputFrame == Time.frameCount) return;
+            _inputFrame = Time.frameCount;
+            FrameProf.S(FrameProf.S_MercQuickT);
+            try { TickInput(); }
+            catch (Exception ex)
+            {
+                CancelQuick();
+                if (Time.unscaledTime >= _inputWarnAt)
+                {
+                    _inputWarnAt = Time.unscaledTime + 5f;
+                    RevivalPlugin.L.LogWarning("Merc command input: " + ex.Message);
+                }
+            }
+            finally { FrameProf.E(FrameProf.S_MercQuickT); }
+        }
 
         internal static bool QuickLookBlocked
-        { get { return _quickWheel && !MercRide.OwnerInVehicle && MercQuick.Available; } }
+        { get { return _wheelOpen && !MercRide.OwnerInVehicle && MercQuick.HasRoster
+            && GameplayCursor.CanCommand && !ListOpen; } }
 
         static bool PlaceDown()
         { return (_wheelKey != KeyCode.None && Input.GetKeyDown(_wheelKey))
@@ -177,9 +207,17 @@ namespace NextDayRevival
         {
             if (!MercRide.OwnerInVehicle)
             {
-                _wheelVec += new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
+                float x = Input.GetAxis("Mouse X"), y = Input.GetAxis("Mouse Y");
+                if (x != 0f || y != 0f) _wheelScrollPick = false;
+                _wheelVec += new Vector2(x, y);
                 if (_wheelVec.magnitude > 6f) _wheelVec = _wheelVec.normalized * 6f;
-                _wheelPick = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
+                if (!_wheelScrollPick) _wheelPick = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
+                float scroll = Input.GetAxis("Mouse ScrollWheel");
+                if (scroll != 0f)
+                {
+                    _wheelScrollPick = true;
+                    _wheelPick = (_wheelPick + (scroll > 0f ? 1 : -1) + SectorEn.Length) % SectorEn.Length;
+                }
             }
             else { _wheelVec = Vector2.zero; _wheelPick = -1; }
             for (int n = 1; n <= SectorEn.Length; n++)
@@ -195,13 +233,10 @@ namespace NextDayRevival
             _quickNpc = null; _quickPlayer = null; _quickHit = false; _quickActor = false;
         }
 
-        // Nested F6 slot: independent from the roster's 4 Hz step.
+        // PollCommands measures both quick input and the legacy K/list keys.
         static bool QuickInput()
         {
-            FrameProf.S(FrameProf.S_MercQuickT);
-            bool owns = QuickStep();
-            FrameProf.E(FrameProf.S_MercQuickT);
-            return owns;
+            return QuickStep();
         }
 
         static bool QuickStep()
@@ -218,8 +253,8 @@ namespace NextDayRevival
             }
             bool busy = _quickGesture.Busy;
             int action = _quickGesture.Step(Time.unscaledTime, Input.GetKeyDown(key), held, Input.GetKeyUp(key));
-            if ((action & MercQuickGesture.Attack) != 0) QuickAttack();
             if ((action & MercQuickGesture.Capture) != 0) CaptureQuickAim();
+            if ((action & MercQuickGesture.Attack) != 0) QuickAttack();
             if ((action & MercQuickGesture.Rally) != 0)
             {
                 Reply();
@@ -229,7 +264,7 @@ namespace NextDayRevival
             if ((action & MercQuickGesture.Open) != 0)
             {
                 _quickWheel = true; _wheelOpen = true; _wheelArmed = false;
-                _wheelVec = Vector2.zero; _wheelPick = -1;
+                _wheelVec = Vector2.zero; _wheelPick = -1; _wheelScrollPick = false;
             }
             if (_quickWheel)
             {
@@ -244,7 +279,7 @@ namespace NextDayRevival
             return busy || _quickGesture.Busy || action != 0;
         }
 
-        // Save aim at release, before the double-click window. One ray per tap;
+        // Save aim at release before executing in the same frame. One ray per tap;
         // holding the menu needs only its existing throttled 5 Hz point preview.
         static void CaptureQuickAim()
         {
@@ -307,11 +342,10 @@ namespace NextDayRevival
                 r.Unit.QuickNpc = _quickNpc; r.Unit.QuickPlayer = _quickPlayer;
                 r.Unit.QuickSteam = _quickPlayer == null ? null : Mercs.SteamOf(_quickPlayer);
                 r.Unit.QuickFor = r.Order; r.Unit.QuickUntil = Time.time + 120f;
+                if (close) Mercs.OrderFocused(r, _quickPoint);
+                else NpcWar.MercOrderWake(r.Unit);
                 focused++;
             }
-            if (focused > 0)
-                Toast(Loc.T("ЦЕЛЬ: враг под прицелом. Укрытие и отход важнее атаки.",
-                    "TARGET: aimed enemy. Cover and retreat take priority."), false);
             if (given || focused > 0) CommandPing(_quickPoint);
             _quickNpc = null; _quickPlayer = null;
         }

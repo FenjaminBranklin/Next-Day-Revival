@@ -125,7 +125,9 @@ namespace NextDayRevival
     //               the players' window.
     //     antitank  keeps AntiTankBack behind the line, fires his rifle only
     //               inside AntiTankSelfDefense and flies the FPV drone
-    //               (CrewDrone.LaunchAt) at the enemy the squad is fighting.
+    //               (CrewDrone.LaunchAt) at the enemy the squad is fighting -
+    //               only in a destroyed patrol vehicle's crew (Y B2,
+    //               CrewDrone.Flies); everywhere else he has the LAW alone.
     //               Against a vehicle he sends the drone first, then draws the
     //               M72 LAW (AntiTankRockets rounds in all), runs into
     //               AntiTankLawRange and fires the player LAW's blast.
@@ -301,8 +303,8 @@ namespace NextDayRevival
                 "Gegen ein feindliches Fahrzeug bleibt die Linie in diesem Abstand "
                 + "(Meter) stehen; nur der Panzerabwehrschuetze rueckt vor.");
             CfgFpvDrones = cfg.Bind("NpcWar", "FpvDrones", true,
-                "Panzerabwehrschuetzen des Landetrupps fliegen FPV-Drohnen gegen "
-                + "NPCs und Fahrzeuge.");
+                "Anti-tank gunners in the crew of a destroyed patrol vehicle fly FPV "
+                + "drones at NPCs and vehicles. No other squad ever carries one.");
             CfgArmorMaxReduction = cfg.Bind("NpcWar", "ArmorMaxReduction", 0.7f,
                 "Hoechstens so viel Schaden (0..0,9) nimmt die Ruestung eines "
                 + "Truppsoldaten weg. Gerechnet wird wie beim Spieler: Regenerate-Wert "
@@ -454,6 +456,7 @@ namespace NextDayRevival
             public Transform Target;
             public bool TargetIsPlayer;   // Target is his vanilla _killTarget
             public float NextScan, NextShot, ReactUntil, NextLos, LastSeen;
+            public int MercLookCursor; // bounded tail search past occluded nearest candidates
             public bool Sees;
             public float AimHeight = ChestHeight;  // the part of the target he can see
             public float Skill = 1f;      // marksmanship multiplier, drawn once
@@ -480,7 +483,7 @@ namespace NextDayRevival
             public int RifleId, LawLeft, SwitchTo, SwitchPhase;
             public float SwitchSince, NextSwitchWarn;
             public int DroneId, DronesUsed;
-            public bool NoFpv;
+            public bool NoFpv = true;     // Y B2: closed until Equip finds a patrol wreck crew
             public float NextDrone, DroneHoldUntil;
             public Transform DroneTarget;
             public float LastFullOrder;     // Time.time of the last full (RPC) move order
@@ -555,7 +558,8 @@ namespace NextDayRevival
             // the next sleeping upkeep; null for other squads.
             public GroundBrain Alive;
             public ParaObjective Para;
-            public float NextFar;
+            public float NextFar, NextLoadFar, NextLoadCheck;
+            public bool LoadFar;
             public string Tag;
             public GameObject Settlement;
             public Transform WalkRoot;       // AllWalkPointsTr: follows the body
@@ -629,7 +633,7 @@ namespace NextDayRevival
         static string _status = "";
         // One ground search per frame across all fights: each one costs a
         // handful of raycasts and a NavMesh sample per candidate.
-        static int _searchBudget;
+        static int _searchBudget, _farUpkeepBudget;
 
         // ------------------------------------------------------- reflection cache
 
@@ -1292,6 +1296,7 @@ namespace NextDayRevival
 
             if (_graves.Count > 0) TickGraves(now);
             _searchBudget = 1;
+            _farUpkeepBudget = 2;
             PatrolTargets();
             WatchRemoteMercs(now);
             // The editor groups' alive layer: board and awake groups under their
@@ -1354,9 +1359,61 @@ namespace NextDayRevival
                 + _defenders.Count + " defender(s)" + DebugTail();
         }
 
+        static bool FarUpkeep(Squad s, float now)
+        {
+            if (s.Merc != null || s.Watch || s.Settlement == null) return false;
+            if (now >= s.NextLoadCheck)
+            {
+                s.NextLoadCheck = now + 0.5f;
+                s.LoadFar = true;
+                // The men can be kilometres from their original settlement.
+                // Wake for any player's camera/body beside any squad member.
+                for (int i = 0; i < s.Men.Count; i++)
+                    if (s.Men[i].Tr != null && CombatLoad.AnyNear(s.Men[i].Tr.position, 600f))
+                    { s.LoadFar = false; break; }
+            }
+            if (!s.LoadFar) return false;
+            if (now < s.NextLoadFar || _farUpkeepBudget <= 0) return true;
+            _farUpkeepBudget--;
+            s.NextLoadFar = now + 0.5f;
+            return false;
+        }
+
+        internal static int ParatrooperPopulation()
+        {
+            // Event admission only, includes every retained NPC in a landed
+            // stick (dead bodies still use a slot until authoritative cleanup).
+            int count = 0;
+            for (int i = 0; i < _squads.Count; i++)
+            {
+                Squad s = _squads[i];
+                if (s.Para == null) continue;
+                for (int m = 0; m < s.Men.Count; m++) if (s.Men[m].Ai != null) count++;
+            }
+            return count;
+        }
+
+        internal static int EventPopulation()
+        {
+            // Cold master-side admission. Reserve in-flight sticks as well as
+            // live/dead men of assault and wreck-crew operations. No mercs or
+            // fixed/editor garrisons are denied by this event-only budget.
+            int count = AirEvents.PendingParatroopers();
+            for (int i = 0; i < _squads.Count; i++)
+            {
+                Squad s = _squads[i];
+                if (s.Merc != null || s.Watch) continue;
+                if (s.GroundGroup && s.Para == null
+                    && (s.Tag == null || !s.Tag.StartsWith("patrol-crew-", StringComparison.Ordinal))) continue;
+                for (int m = 0; m < s.Men.Count; m++) if (s.Men[m].Ai != null) count++;
+            }
+            return count;
+        }
+
         static void RunSquad(Squad s, float now)
         {
             if (s.GroundGroup) { RunGround(s, now); return; }
+            if (FarUpkeep(s, now)) return;
             int alive = 0, inLine = 0;
             Vector3 centre = Vector3.zero, lineSum = Vector3.zero, front = Vector3.zero;
             for (int i = 0; i < s.Men.Count; i++)
@@ -1552,6 +1609,7 @@ namespace NextDayRevival
                 else Remove(s, "settlement gone");
                 return;
             }
+            if (FarUpkeep(s, now)) return;
             // An editor group with no player near sleeps (Revival.GroundAlive.cs).
             // Mission lifetimes still expire while asleep, without scene queries.
             if (s.Para != null && (now >= s.HardEnd
@@ -1587,6 +1645,8 @@ namespace NextDayRevival
                 }
                 // B3c: a merc on a seat belongs to the ride (Revival.MercsRide.cs).
                 if (s.Merc != null && MercSeated(f, s.Merc, now)) continue;
+                // Y B1: a merc on the tower ladder belongs to the climb (Revival.TowerRoof.cs).
+                if (s.Merc != null && TowerRoof.Climbing(f.Tr)) continue;
                 if (Regenerating(f, now)) continue;
                 EnsureArmed(f, now);
                 if (s.Merc == null || MercMayEngage(s.Merc, now)) Acquire(f, now);
@@ -1599,7 +1659,8 @@ namespace NextDayRevival
                 // fight is over his order runs again.
                 if (s.Merc != null)
                 {
-                    if (MercFight(f, s.Merc, now)) MercAA.Release(s.Merc);
+                    if (MercStationDuty(f, s.Merc, now)) { }
+                    else if (MercFight(f, s.Merc, now)) MercAA.Release(s.Merc);
                     else MercStep(f, s, now);
                     continue;
                 }
@@ -2653,7 +2714,8 @@ namespace NextDayRevival
         /// scan about three times a second, the line of fire about as often.</summary>
         static void Acquire(Fighter f, float now)
         {
-            if (now >= f.NextScan)
+            bool merc = f.Squad != null && f.Squad.Merc != null;
+            if (now >= f.NextScan && (!merc || MercScanFrame()))
             {
                 f.NextScan = now + (f.Squad != null && f.Squad.Merc != null
                     ? MercScanGap(f) : 0.3f + UnityEngine.Random.value * 0.15f);
@@ -2682,7 +2744,8 @@ namespace NextDayRevival
                 return;
             }
             if (now < f.NextLos) return;
-            f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
+            f.NextLos = now + (merc ? MercAssault.LosGap(UnityEngine.Random.value)
+                : 0.3f + UnityEngine.Random.value * 0.15f);
             float height;
             if (IsSquadVehicle(f, f.Target)) f.Sees = VehicleVisible(f, f.Target, out height);
             else f.Sees = AimPoint(f, f.Target, out height);
@@ -2794,12 +2857,17 @@ namespace NextDayRevival
                 f.LastSeen = now;
                 break;
             }
+            // Y S2: nearer enemies behind walls must not hide a visible foe
+            // farther along the attack. Two more LOS candidates, rotating
+            // through the cached scene list; never an unbounded ray sweep.
+            if (f.Target == null && f.Squad.Merc != null) MercVisibleTail(f, rangeSqr, now);
             if (f.Target == null)
             {
                 f.Target = _cand[0];
                 f.TargetIsPlayer = _candPlayer[0];
             }
-            f.NextLos = now + 0.3f + UnityEngine.Random.value * 0.15f;
+            f.NextLos = now + (f.Squad.Merc != null ? MercAssault.LosGap(UnityEngine.Random.value)
+                : 0.3f + UnityEngine.Random.value * 0.15f);
             if (f.Sees && !f.TargetIsPlayer)
             {
                 Component ai = f.Target.GetComponent(_npcType);
@@ -3860,11 +3928,16 @@ namespace NextDayRevival
 
         static void Equip(Fighter f, RevivalComposition.CrewMan spec)
         {
-            // Garrison loadouts retain their LAW/rifle role but carry no FPV.
-            f.NoFpv = CrewDrone.Garrison(f.Ai) || (f.Squad != null
+            // Y B2: only the dismounted crew of a destroyed patrol vehicle flies
+            // FPV drones (CrewDrone.Flies). Everybody else - paratroopers, heli
+            // landings, garrisons, editor groups, gun crews, mercs - keeps the
+            // LAW/rifle role without one.
+            bool garrison = CrewDrone.Garrison(f.Ai) || (f.Squad != null
                 && ((f.Squad.Settlement != null && f.Squad.Settlement.GetComponent<GarrisonNoFpv>() != null)
                     || (f.Squad.Tag != null && (f.Squad.Tag.StartsWith("ground/mt-", StringComparison.Ordinal)
                         || f.Squad.Tag.StartsWith("ground/airfield-", StringComparison.Ordinal)))));
+            f.NoFpv = !CrewDrone.Flies(f.Squad != null && CrewDrone.Marked(f.Squad.Settlement),
+                garrison, f.Squad != null && f.Squad.Merc != null, spec == null || spec.Fpv);
             f.Class = ClassOf(spec == null ? "" : spec.Class);
             f.ArmorScale = ArmorScale(spec);
             f.RifleId = f.WeaponId;
@@ -4683,11 +4756,17 @@ namespace NextDayRevival
 
         /// <summary>The dead of ended operations go once their time is up and
         /// no player is standing among them.</summary>
+        static float _nextGraves;
         static void TickGraves(float now)
         {
+            if (now < _nextGraves) return;
+            _nextGraves = now + 0.5f;
             for (int i = _graves.Count - 1; i >= 0; i--)
             {
                 Grave g = _graves[i];
+                bool retained = false;
+                for (int b = 0; b < g.Bodies.Count; b++) if (g.Bodies[b] != null) { retained = true; break; }
+                if (!retained) g.Until = now;
                 if (now < g.Until) continue;
                 for (int b = 0; b < g.Bodies.Count; b++)
                 {

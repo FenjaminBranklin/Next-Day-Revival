@@ -16,12 +16,13 @@
 //             the threat. Fire: the NpcWar planted shot (Fire), standing - the
 //             game has no crouched or prone aiming clip. Reload: the game's
 //             own reload (StartReload) while he crouches in cover. Heal: a
-//             field dressing, HealAmount of his full health (Mercs.Dress).
-//   NETWORK   nothing new: moves, poses and shots go through the NPC's own
+//             finite native medkit with the player timer/amount (MercMedicine).
+//   NETWORK   moves, poses and shots go through the NPC's own
 //             SetStateWithAnimAndSync, NavMeshAgent and weapon replication,
 //             like every NpcWar order. Health is the owner's (ApplyDamage is
 //             isMine only); the roster report carries it to the server, which
-//             accepts +0.1 a report (a dressing is 0.10, 20 s apart).
+//             accepts native medkit recovery against its supply ledger.
+//             Event 199 kind 4 supplies the medkit animation on peers.
 //   COST      per merc in a fight: one Think every 0.1 s (arithmetic, at most
 //             two rays when a peek starts), the per-frame part is NpcWar's
 //             own (Drive / Fire / aim). Move orders are re-issued only when
@@ -92,6 +93,7 @@ namespace NextDayRevival
         internal byte Gate;
         internal float UnseenSince;
         internal Transform TraceTarget;
+        internal readonly MercOverwatch Overwatch = new MercOverwatch();
 
         internal byte State { get { return Brain == null ? MercBrain.Off : Brain.State; } }
         internal bool Holding { get { return Brain != null && Brain.Holding; } }
@@ -252,8 +254,15 @@ namespace NextDayRevival
         /// False: no fight - his order runs (MercStep).</summary>
         static bool MercFight(Fighter f, MercUnit u, float now)
         {
-            if (f.Manpads != null) return MercStingerFight(f, u, now);
             MercFight ft = u.Fight;
+            if (f.Manpads != null)
+            {
+                // MANPADS normally bypass the brain. Keep the same cached 2 Hz
+                // health read so a wounded specialist can retreat/heal too.
+                if (now >= ft.NextHealth) { ft.NextHealth = now + 0.5f; ft.Health = HealthFraction(f); }
+                if (ft.Health >= MercBrain.HealBelow && (u.Medicine == null || u.Medicine.Active == 0))
+                    return MercStingerFight(f, u, now);
+            }
             if (ft.Brain == null || ft.Brain.Id != u.Id) ft.Brain = new MercBrain(u.Id);
             MercBrain b = ft.Brain;
             b.Squad = MercTeam.Board;
@@ -266,6 +275,9 @@ namespace NextDayRevival
             // runs; it wears off as it does for a defender.
             f.Suppression = Mathf.Max(0f, f.Suppression - dt * 0.28f);
 
+            if (u.Order.Mode == MercOrder.Attack && f.Sees && f.Target != null
+                && (ft.TraceTarget != f.Target || ft.React.ContactAt < 0f))
+                b.ContactNow(now);
             if (b.Due(now))
             {
                 MercFightIn(f, u, ft, now);
@@ -278,7 +290,6 @@ namespace NextDayRevival
                     ft.FallbackAt = 0f;
                 }
                 if (o.Kick) StartReload(f);
-                if (o.HealNow) Mercs.Dress(u, MercBrain.HealAmount);
                 // Once rallied safely beside the living owner, the chosen
                 // FOLLOW/VEHICLE order resumes (including boarding at a stop).
                 if (u.Rally && b.Down && b.Cover.Found && !b.SurvivalFire &&
@@ -289,6 +300,7 @@ namespace NextDayRevival
                     o = new FightOut();
                     u.NextOrder = 0f;
                 }
+                Mercs.MedicineAct(u, o, now);
                 ft.Out = o;
                 MercNotice(f, u, ft, now);           // W: the owner's toasts (Revival.MercNotify.cs)
             }
@@ -317,7 +329,11 @@ namespace NextDayRevival
                     f.Crouched = false;
                     f.InCover = false;
                     // Up: look for the target at once, not at the next line check.
-                    if (ft.LastAct != FightAct.Fire) f.NextLos = now;
+                    if (ft.LastAct != FightAct.Fire)
+                    {
+                        f.NextLos = now;
+                        if (u.Order.Mode == MercOrder.Attack) f.NextState = 0f;
+                    }
                     bool target = f.Target != null && f.Target;
                     // M3: never through the owner or a mate - the brain's
                     // view (NoShot) and the live bodies, every frame.
@@ -389,15 +405,20 @@ namespace NextDayRevival
             ft.In.Planted = f.PlantedSince > 0f && now - f.PlantedSince >= PlantSeconds;
             if (now >= ft.NextHealth) { ft.NextHealth = now + 0.5f; ft.Health = HealthFraction(f); }
             ft.In.Health = ft.Health;
+            ft.In.HasMedkit = u.Medicine != null && u.Medicine.Known
+                && (u.Medicine.Active != 0 || u.Medicine.Next != 0);
+            ft.In.MedkitSeconds = u.Medicine == null ? 0f : MercMedicine.Seconds(u.Medicine.Next);
             MercRounds(f, ft, now, out ft.In.Rounds, out ft.In.MaxRounds);
             ft.In.Reloading = Reloading(f);
             ft.In.Hits = ft.Hits;
             ft.In.Suppression = f.Suppression;
             ft.In.Danger = MercDanger.Near(ft.In.Me, MercBrain.DangerRadius, now, out ft.In.DangerAt);
-            ft.In.Survive = !u.Deserting && (u.Order.Survive || u.Rally);
+            ft.In.Survive = !u.Deserting && (u.Order.Survive || u.Rally
+                || (s.Count == 0 && Mercs.MedicineWanted(u, now)));
             ft.In.Rally = u.Rally;
             ft.In.Watch = u.Approach;
             ft.In.MayFight = MercMayEngage(u, now) && MercMayStand(f, u);
+            if (MercRoleReposition(f, u, now)) ft.In.MayFight = false;
             if (ft.In.Survive) ft.In.MayFight = true;
             // A perimeter guard gives up the cover sooner: his B3b pursuit
             // takes over a target that went out of sight.
@@ -413,7 +434,8 @@ namespace NextDayRevival
             ft.In.HasOwner = owner != null && owner;
             ft.In.Owner = ft.In.HasOwner ? owner.position : Vector3.zero;
             ft.In.Regroup = !ft.In.Survive && ft.In.HasOwner && (u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle)
-                && Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits;
+                && (u.Fight.Overwatch.Role == MercRole.Marksman
+                    ? MercRole.InBand(ft.In.Me, ft.In.Owner) : Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits);
             // merc-combat-response: lanes - the owner's held aim, and whether
             // he may step out of a line (not a deserter, a boarder, a gun or
             // radar crewman).
@@ -500,6 +522,9 @@ namespace NextDayRevival
         /// a peek). Re-issued only when the goal moved or the order lapsed.</summary>
         static void MercRun(Fighter f, MercUnit u, MercFight ft, Vector3 goal, bool sprint, float now)
         {
+            // Y B1: on the tower roof the fight stays up there, at his post.
+            Vector3 post;
+            if (TowerRoof.KeepUp(f.Tr.position, goal, u.Slot, out post)) goal = post;
             bool reorder = !f.HasOrder || f.WantMain != MainRun || now >= f.MoveDeadline
                 || Flat(ft.MoveTo - goal) > 1f;
             if (reorder && now >= ft.NextMove)

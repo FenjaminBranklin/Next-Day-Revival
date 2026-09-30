@@ -22,8 +22,11 @@
 // A master client switching a master-run feature (patrols, air events, convoy)
 // off pauses it for everyone for those seconds; the tooltips say so.
 //
-// Auto test: per feature 1 s settle + 3 s sample with it ON, then 5 s OFF
-// (1 s settle + 4 s sample), then back on; ~2.4 min for the list. A window's
+// Auto test: a 4 s lead-in first (Y P0: the first feature's ON window caught
+// the click's own transient - edge terrain read 65.66 ms ON, while every
+// later window, the skirt back on, read 26-30), then per feature 1 s settle +
+// 3 s sample with it ON, then 5 s OFF (1 s settle + 4 s sample), then back
+// on; ~2.5 min for the list. A window's
 // value is the mean of its middle 80 % of frames (a GC pause or a streaming
 // hitch would otherwise move a 3 s mean by ~0.4 ms); its worst frame is kept
 // beside it. The user's own switches are put back afterwards. Result: a table in the tab, one log block
@@ -264,6 +267,8 @@ namespace NextDayRevival
         // ============================================================ auto test
 
         internal const float OnSettle = 1f, OnSample = 3f, OffSettle = 1f, OffSample = 4f;
+        /// <summary>Extra settle before the first feature's ON window.</summary>
+        internal const float LeadIn = 4f;
         internal const float Trim = 0.1f;             // share of frames dropped at each end of a window
         const int AutoIdle = 0, AutoOnSettle = 1, AutoOnSample = 2, AutoOffSettle = 3, AutoOffSample = 4;
 
@@ -292,7 +297,7 @@ namespace NextDayRevival
         internal static int ResultTone(int f) { return _resTone[f]; }
 
         /// <summary>Seconds a whole auto test takes.</summary>
-        internal static float AutoSeconds { get { return Count * (OnSettle + OnSample + OffSettle + OffSample); } }
+        internal static float AutoSeconds { get { return LeadIn + Count * (OnSettle + OnSample + OffSettle + OffSample); } }
 
         /// <summary>Admin button: start the auto test, or stop a running one.</summary>
         internal static string AutoToggle()
@@ -310,7 +315,7 @@ namespace NextDayRevival
             AllOn();
             _autoFeature = 0;
             _haveResult = false;
-            Phase(AutoOnSettle, Time.realtimeSinceStartup);
+            Phase(AutoOnSettle, Time.realtimeSinceStartup + LeadIn);   // settle age < 0 through the lead-in
             string m = "Perf auto test started: " + Count + " features, ~"
                 + Mathf.CeilToInt(AutoSeconds).ToString(CultureInfo.InvariantCulture)
                 + " s. Hold still; table here and in the log.";

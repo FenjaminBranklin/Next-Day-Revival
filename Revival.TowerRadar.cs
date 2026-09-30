@@ -533,7 +533,7 @@ namespace NextDayRevival
 
         static void Antenna()
         {
-            if (Head == null) return;
+            if (Head == null || !CombatLoad.LocalNear(RadarPos, 1500f)) return;
             bool turn = B(CfgRotation) && RadarAlive && ConsoleAlive;
             if (turn)
             {
@@ -1583,8 +1583,11 @@ namespace NextDayRevival
         }
 
         /// <summary>Every client, late: the man on the chair facing the screen.</summary>
+        static float _nextHold;
         internal static void Hold()
         {
+            if (Time.time < _nextHold) return;
+            _nextHold = Time.time + 0.5f;
             if (!Alive || TowerRadar.ConsoleRoot == null) return;
             Component ai = _man;
             bool sit = TowerRadar.B(TowerRadar.CfgSeated);
@@ -1699,8 +1702,8 @@ namespace NextDayRevival
                 Guns();
                 if (InView) Rows();   // Rows and advice use the existing 4 Hz snapshot.
             }
-            FlakFire.FollowAll(_air, Time.deltaTime, 5f);
-            Sweep(eye);
+            if (InView)
+            { FlakFire.FollowAll(_air, Time.deltaTime, 5f); Sweep(eye); }
             Operate();
         }
 
@@ -3114,6 +3117,9 @@ namespace NextDayRevival
                 _sweep.Begin("East");
             }
             bool on = _night && TowerRadar.ConsoleAlive;
+            bool lightEngines = on && CombatLoad.LocalNear(TowerRadar.RadarPos, 1500f);
+            for (int i = 0; i < _lights.Count; i++)
+                if (_lights[i] != null && _lights[i].enabled != lightEngines) _lights[i].enabled = lightEngines;
             if (_root != null && on != _lit)
             {
                 _lit = on;

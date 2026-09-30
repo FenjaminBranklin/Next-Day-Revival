@@ -51,7 +51,7 @@ namespace NextDayRevival
         delegate int ReadInt(object owner);
         static ReadRef _ui, _global, _player, _states, _chat, _buttons;
         static ReadInt _general, _additional, _death, _chatState, _window, _menu;
-        static bool _ready, _ownsLock;
+        static bool _ready, _inputReady, _ownsLock;
         static float _nextCheck;
 
         public static void Install(Harmony harmony)
@@ -72,6 +72,8 @@ namespace NextDayRevival
                 _chatState = Int(AccessTools.Field(ui, "HUD_Chat_Script").FieldType, "_chatState");
                 _menu = Int(AccessTools.Field(ui, "_ButtonFormMoveSystem").FieldType, "OneMenuIsOpened");
                 _window = Int(global, "currentUIWindow");
+                // Command eligibility needs the readers, not optional cursor hooks.
+                _inputReady = true;
 
                 Hook(harmony, ui, "ClosePlayerListUI", "Closed");
                 Hook(harmony, ui, "CloseUI", "Closed");
@@ -136,9 +138,25 @@ namespace NextDayRevival
 
         public static bool CanRestore
         {
+            get { return _ready && CanCommand; }
+        }
+
+        // Cached delegate reads the enum as an int; GameUi.State boxes its
+        // reflected enum. Keep command polling free of that per-frame box.
+        public static int CommandUiState
+        {
             get
             {
-                if (!_ready || !CursorGuard.Focused || Time.timeScale == 0f ||
+                Behaviour ui = _inputReady ? _ui(null) as Behaviour : null;
+                return ui == null ? 0 : _general(ui);
+            }
+        }
+
+        public static bool CanCommand
+        {
+            get
+            {
+                if (!_inputReady || !CursorGuard.Focused || Time.timeScale == 0f ||
                     Admin.IsOpen || Patrol.EditorOpen || Settings.IsOpen || UiKit.AnyOpen) return false;
                 Behaviour ui = _ui(null) as Behaviour;
                 Behaviour global = _global(null) as Behaviour;

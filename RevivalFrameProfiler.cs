@@ -240,7 +240,16 @@ namespace NextDayRevival
         public const int S_PerfBisectT = 174;
         public const int S_MercQuickT = 175;
         public const int S_MercQuickD = 176;
-        public const int Count = 177;
+        public const int S_PatrolSaveT = 177;
+        public const int S_CombatLoadT = 178;
+        public const int S_MercReceiptT = 179;
+        public const int S_MercMedicineT = 180;
+        public const int S_MercMedPose_LateUpdate = 181;
+        // Y B1: the tower roof ladder, the mercs' climb.
+        public const int S_TowerRoofT = 182;
+        public const int S_TowerRoofL = 183;
+        public const int S_SeatBindingL = 184;
+        public const int Count = 185;
 
         static readonly string[] Names = new string[]
         {
@@ -399,6 +408,14 @@ namespace NextDayRevival
             "PerfBisect.Tick",
             "  MercQuick.Input.Sub",
             "  MercQuick.Ping.Sub",
+            "Patrol.Save.Tick",
+            "CombatLoad.Tick",
+            "  MercOrders.Receipt.Sub",
+            "  MercMedicine.Think.Sub",
+            "MercMedPose.LateUpdate",
+            "TowerRoof.Tick",
+            "TowerRoof.LateFrame",
+            "SeatBinding.LateFrame",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested
@@ -653,7 +670,7 @@ namespace NextDayRevival
                         _fpsAvg, _low1, _worstMs, _slowFrames, _dtCount,
                         measured, Names[top], _ms[top], Names[topPeak], WinPeak(topPeak),
                         _allocKb, Names[topKb], _kb[topKb], _heapMb,
-                        GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine(), EnginePerf.StatusLine()));
+                        GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine(), EnginePerf.StatusLine() + "; " + CombatLoad.StatusLine()));
                 }
             }
             catch { /* diagnostics must never throw into the frame loop */ }
@@ -771,6 +788,7 @@ namespace NextDayRevival
                 _allocKb > 8.0 ? new Color(1f, 0.6f, 0.45f, 1f) : plain);
             Add(RenderLine(), soft);
             Add(EnginePerf.StatusLine(), soft);
+            Add(CombatLoad.StatusLine(), soft);
             Add("Spike: " + (_lastSpike.Length > 0 ? _lastSpike : "none since F6"),
                 _lastSpike.Length > 0 ? new Color(1f, 0.8f, 0.5f, 1f) : soft);
             Add("Engine/GPU are the rest of the frame. Peak = last 4 s.", soft);

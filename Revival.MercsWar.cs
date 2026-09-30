@@ -6,8 +6,9 @@
 //                 to his MercUnit (Revival.Mercs.cs). NpcWar.Tick runs these
 //                 squads on the owner whether or not he is the master
 //                 (TickMercSquads); every other squad stays master-only.
-//   ORDERS        FOLLOW: a wedge slot behind the owner, run when far, warp
-//                 when lost (> WarpUnits). STAY: a ring slot at the chosen
+//   ORDERS        FOLLOW: marksman rear/flank overwatch, assault near/ahead;
+//                 run to regain the slot, warp when lost (> WarpUnits).
+//                 STAY: a ring slot at the chosen
 //                 point. A merc breaks off a fight when his owner runs off.
 //                 B3b PATROL: the owner's loop, each merc from his own leg.
 //                 B3b PERIMETER: sector posts, longer reach, faster scans,
@@ -77,6 +78,7 @@ namespace NextDayRevival
             Fighter f = NewFighter(ai, s);
             f.GroundDest = f.Tr.position;
             Equip(f, spec);
+            unit.Fight.Overwatch.Role = MercRole.Of(spec.Weapons != null && spec.Weapons.Length > 0 ? spec.Weapons[0] : 0);
             if (spec.Weapons != null && spec.Weapons.Length > 0 && spec.Weapons[0] == Stinger.ItemId)
                 f.Manpads = new MercStingerState();
             // Traits (docs/ai/tasks/mercenaries.md 4.6): precise sharpens his
@@ -172,8 +174,9 @@ namespace NextDayRevival
                     // merc-combat-response: a fight already running holds him
                     // to a longer leash (hysteresis) - a few steps of the owner
                     // no longer cancel the shots to regain the follow slot.
-                    return u.Owner == null || Flat(u.Owner.position - f.Tr.position)
-                        <= (u.Fight.Brain != null && u.Fight.Brain.Fighting ? MercFightLeashUnits : MercBreakOffUnits);
+                    return u.Owner == null || (u.Fight.Overwatch.Role == MercRole.Marksman && MercRoleProtected(u, Time.time))
+                        || MercRole.MayFight(u.Fight.Overwatch.Role, f.Tr.position, u.Owner.position,
+                            u.Fight.Brain != null && u.Fight.Brain.Fighting);
                 case MercOrder.Patrol:
                     return RouteDistance(o, f.Tr.position) <= MercPatrolLeash;
                 case MercOrder.Perimeter:
@@ -196,29 +199,35 @@ namespace NextDayRevival
             float r = RangeOf(f);
             float reach = MercReachUnits(f);
             MercUnit u = f.Squad == null ? null : f.Squad.Merc;
+            if (u != null && u.Order.Mode == MercOrder.Attack) return MercAssault.Reach(reach, r);
             if (u == null || !u.Alert) return reach;
             // From a sector post (0.55 R out) the far edge is 1.55 R away.
             float edge = u.Order.RadiusUnits * (u.Order.N > 1 ? 1.55f : 1f) + 140f;
             return Mathf.Max(reach, Mathf.Min(Mathf.Max(r * 1.6f, edge), 600f));
         }
 
-        /// <summary>The target scan interval: three times the rate on a
-        /// perimeter (about 7 a second instead of 2.7).</summary>
+        /// <summary>Merc contacts: 6.7..8 Hz, with one full scan per frame
+        /// across the owned roster to bound the world-query peak.</summary>
         static float MercScanGap(Fighter f)
         {
-            MercUnit u = f.Squad == null ? null : f.Squad.Merc;
-            float gap = 0.3f + UnityEngine.Random.value * 0.15f;
-            return u != null && u.Alert ? gap / 3f : gap;
+            return MercAssault.ScanGap(UnityEngine.Random.value);
         }
 
-        /// <summary>The moment between seeing a new target and the first
-        /// shot, shortened on a perimeter and (M3) by his grade;
-        /// x-merc-competence: x0.9 at grade 0 down to x0.55 at grade 1.</summary>
+        static int _mercScanFrame = -1;
+        static bool MercScanFrame()
+        {
+            if (_mercScanFrame == Time.frameCount) return false;
+            _mercScanFrame = Time.frameCount;
+            return true;
+        }
+
+        /// <summary>Y S2: react before stock NPCs, x0.32..0.20 by grade.
+        /// Native planting, reload and friendly-fire gates still apply.</summary>
         static float MercReactScale(Fighter f)
         {
             MercUnit u = f.Squad == null ? null : f.Squad.Merc;
             if (u == null) return 1f;
-            return (u.Alert ? 0.35f : 1f) * MercGrade.Lerp(u.Grade, 0.9f, 0.55f);
+            return MercAssault.React(u.Grade);
         }
 
         /// <summary>One merc out of contact: walk or run where his order
@@ -260,8 +269,9 @@ namespace NextDayRevival
             Vector3 fwd = owner.forward; fwd.y = 0f;
             if (fwd.sqrMagnitude < 0.01f) fwd = Vector3.forward;
             fwd.Normalize();
-            // The wedge: two per rank behind the owner, the fifth at the tail.
-            Vector3 goal = MercHalt.Slot(owner.position, fwd, u.Slot);
+            bool marksman = u.Fight.Overwatch.Role == MercRole.Marksman;
+            Vector3 goal = marksman ? MercOverwatchGoal(f, u, fwd, now)
+                : MercRole.Slot(MercRole.Assault, owner.position, fwd, u.Slot, 0);
             // merc-combat-response: never a slot inside the owner's held aim.
             goal = MercSlotOutOfAim(goal, now);
             float dist = Flat(owner.position - f.Tr.position);
@@ -272,14 +282,18 @@ namespace NextDayRevival
                 if (RevivalGroundEnemies.TryGround(goal, 12f, out spot)) MercWarp(f, spot);
                 return;
             }
+            // Y B1: an owner on the tower roof - the roof posts are the cover,
+            // and a man below him is not beside him (Revival.TowerRoof.cs).
+            bool roof = TowerRoof.GoalUp(owner.position) || TowerRoof.Split(f.Tr.position, goal);
             // x-merc-competence: the owner halted - cover near the slot, low.
-            if (dist < 30f && MercHaltCover(f, u, owner.position, fwd, goal, now)) return;
+            if (!marksman && dist < 60f && !roof && MercHaltCover(f, u, owner.position, fwd, goal, now)) return;
             // Close to the owner and near his slot: stand, watch his front.
-            if (Flat(goal - f.Tr.position) < 7f && dist < 30f)
+            if (Flat(goal - f.Tr.position) < (marksman ? 2f : 7f) && !roof)
             {
-                Hold(f, null, now); FaceDir(f, fwd); return;
+                if (marksman) MercCrouch(f, now); else Hold(f, null, now);
+                FaceDir(f, fwd); return;
             }
-            MercMove(f, u, goal, dist > MercRunUnits, now);
+            MercMove(f, u, goal, marksman || dist > MercRunUnits, now);
         }
 
         static readonly Vector3[] _haltWatch = new Vector3[1];
@@ -330,15 +344,18 @@ namespace NextDayRevival
             MercSeat st = u.Ride;
             if (st.Boarding == null) { MercFollow(f, u, now); return; }
             if (Flat(st.BoardAt - f.Tr.position) < 3f) { Hold(f, null, now); return; }
-            MercMove(f, u, st.BoardAt, true, now);
+            if (MercAA.IsVehicle(u.Order)) MercStationApproach(f, u, st.BoardAt, now);
+            else MercMove(f, u, st.BoardAt, true, now);
         }
 
         static void MercStay(Fighter f, MercUnit u, float now)
         {
             MercOrder o = u.Order;
-            if (u.GoalFor != o) { u.GoalFor = o; u.Goal = Beside(o.Centre, o.K); }
+            // Y B1: a STAY on the tower roof keeps its height (Beside would put
+            // it on the ground under the roof); the roof ladder takes it there.
+            if (u.GoalFor != o) { u.GoalFor = o; u.Goal = TowerRoof.GoalUp(o.Centre) ? o.Centre : Beside(o.Centre, o.K); }
             float dist = Flat(u.Goal - f.Tr.position);
-            if (dist < 4f)
+            if (dist < 4f && !TowerRoof.Split(f.Tr.position, u.Goal))
             {
                 Hold(f, null, now);
                 FaceDir(f, o.Facing.sqrMagnitude > 0.01f ? o.Facing : f.Tr.forward);
@@ -522,14 +539,29 @@ namespace NextDayRevival
         /// when it changes, never per frame.</summary>
         static void MercMove(Fighter f, MercUnit u, Vector3 goal, bool run, float now)
         {
+            // Y B1: the tower roof is joined to the ground by its outside
+            // ladder only (Revival.TowerRoof.cs): walk to the foot or the top,
+            // climb, then hold the roof post behind its sandbags.
+            Vector3 leg;
+            int roof = TowerRoof.Leg(f.Tr, goal, u.Slot, out leg);
+            if (roof == TowerRoof.LegClimbUp || roof == TowerRoof.LegClimbDown)
+            {
+                Hold(f, null, now);
+                TowerRoof.StartClimb(f.Tr, Agent(f), roof == TowerRoof.LegClimbUp);
+                return;
+            }
+            if (roof == TowerRoof.LegHold) { MercCrouch(f, now); FaceDir(f, leg); return; }
+            if (roof == TowerRoof.LegWalk) goal = leg;
             int state = run ? MainRun : MainWalk;
-            bool reorder = !f.HasOrder || now >= f.MoveDeadline || Flat(f.Ordered - goal) > 6f
+            float precision = u.Order.Mode == MercOrder.Attack ? 1f : 6f;
+            bool reorder = !f.HasOrder || now >= f.MoveDeadline || Flat(f.Ordered - goal) > precision
                 || f.WantMain != state;
             if (reorder && now >= u.NextOrder)
             {
                 u.NextOrder = now + 0.8f;
                 Vector3 dest;
-                if (!RevivalGroundEnemies.TryGround(goal, 8f, out dest)) dest = goal;
+                if (roof == TowerRoof.LegWalk) dest = goal;    // a NavMesh spot already, maybe on the roof
+                else if (!RevivalGroundEnemies.TryGround(goal, 8f, out dest)) dest = goal;
                 Go(f, dest, state, PoseStand, now, Stance.Advance);
             }
             else if (f.HasOrder) Drive(f, state, AddNone, PoseStand, now, false);
@@ -605,7 +637,7 @@ namespace NextDayRevival
         {
             MercUnit u = f.Squad.Merc;
             if (now < u.NextPlayerScan) return u.PlayerTarget;
-            u.NextPlayerScan = now + (0.5f + UnityEngine.Random.value * 0.2f) * (u.Alert ? 0.4f : 1f);
+            u.NextPlayerScan = now + MercAssault.ScanGap(UnityEngine.Random.value);
             Transform best = null;
             float bestSqr = range * range;
             if (MercMayEngage(u, now))

@@ -1,13 +1,26 @@
 // Next Day: Survival - Revival Toolkit
 //
 // THE AN-2 AS A BOMBER. The player-flown An-2 (Revival.PlayerAn2.cs) carries
-// up to six small FAB-50 bombs (item 2072) on its racks. docs/ai/tasks/
-// an2-bombs.md has the original numbers; w-bomb2-bombsight.md documents the
-// CCIP controls, offline trajectory proof and current in-game checklist.
+// aerial bombs (item 2072) on its racks. docs/ai/tasks/an2-bombs.md has the
+// original numbers; w-bomb2-bombsight.md documents the CCIP controls, offline
+// trajectory proof and current in-game checklist.
+//
+// THE BOMB LOAD (Y B4). [An2Bombs] BombLoad, also in the F2 settings window:
+//   8x100  eight FAB-100 (800 kg) - the default, the realistic load;
+//   12x50  twelve FAB-50 (600 kg) - more, smaller bursts.
+// One bomb item fills one rack station. An empty rack takes the loader's
+// chosen load; a part-full rack is topped up with what already hangs there,
+// so one aeroplane never mixes sizes. The rack's bomb mass travels with its
+// count (load message) and with every drop and burst, so the master sweeps
+// the damage of the bomb that fell, whatever its own setting. BlastRadius and
+// the three *Damage keys are a FAB-50's; a bomb of m kg scales them by
+// (m / 50)^(1/3), the same law as OrdnanceBlast.RadiusForMass: a FAB-100 is
+// x1.26 (radius 31.5 m, NPC 630, vehicle 1512, player 378). A message
+// without the mass (an older client) counts as a FAB-50.
 //
 // WHAT A PLAYER DOES
-//   1. Loading. On foot beside a parked An-2 with FAB-50s in the backpack,
-//      the load key (R) moves them onto the racks, up to BombCapacity. The
+//   1. Loading. On foot beside a parked An-2 with bombs in the backpack,
+//      the load key (R) moves them onto the racks, up to the load's count. The
 //      bombs come from the airfield loot (the "military" pool, D2a and the
 //      other bunkers) or from the admin panel. An An-2 the admin spawns
 //      "ready" comes with a full load.
@@ -41,10 +54,11 @@
 //
 // NETWORK. One Photon event code ([An2Bombs] NetworkEventCode, 158: the
 // An-2's band 150-157 is full), float[] payloads, the first float the kind:
-//   0 drop   id, x, y, z, vx, vy, vz            dropper -> others (visual)
-//   1 burst  id, x, y, z, dud                   dropper -> others (master sweeps)
-//   2 load   view, count                        whoever changed it -> others;
+//   0 drop   id, x, y, z, vx, vy, vz, kg        dropper -> others (visual)
+//   1 burst  id, x, y, z, dud, kg               dropper -> others (master sweeps)
+//   2 load   view, count, kg                    whoever changed it -> others;
 //                                               the master repeats every 5 s
+// (kg: the bomb mass, Y B4; missing = 50 from an older client)
 //
 // SETTINGS SWITCHES (task P9 unifies settings later):
 //   [Gameplay] An2Bombs        the whole feature
@@ -61,7 +75,8 @@
 //   RevivalPlugin.cs    BindConfig / AddItems / Update / OnGUI
 //   Revival.PlayerAn2.cs LateTick hands the camera to SightCamera; Build(ready)
 //                       calls FullLoad; Plane / Velocity accessors
-//   Revival.Admin.cs    "Spawn An-2 (ready)" and "An-2 bombs x6"
+//   Revival.Admin.cs    "Spawn An-2 (ready)" and "An-2 bombs xN" (the load's count)
+//   Revival.Settings.cs the F2 window's bomb load choice (LoadIndex / SetLoad)
 //   Revival.Airfield.cs the loot pool (Pool)
 //   RevivalMortar.cs    Sound; Revival.OrdnanceBlast.cs shared damage
 //   Revival.An2Repair.cs DepotHit
@@ -75,24 +90,80 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
+    /// <summary>Y B4: what hangs on the An-2's racks - the two loads, their
+    /// capacity, the size scaling and the wire value. Pure (no Unity), no
+    /// allocation; research/an2_bomb_load_check.py compiles it offline.</summary>
+    internal static class An2BombLoad
+    {
+        internal const int HeavyKg = 100, HeavyCount = 8;    // 8 x FAB-100, the default
+        internal const int LightKg = 50, LightCount = 12;    // 12 x FAB-50
+        internal const int MaxCount = 12;
+        /// <summary>The config numbers (BlastRadius, *Damage) are a FAB-50's.</summary>
+        internal const float BaseKg = 50f;
+        internal const string Heavy = "8x100", Light = "12x50";
+
+        /// <summary>The bomb mass a [An2Bombs] BombLoad text asks for: a
+        /// number 50 or 12 in it ("12x50", "12 x 50", "FAB-50") is the light
+        /// load, anything else (unknown text too) the default 8 x 100 kg.</summary>
+        internal static int KgOf(string text)
+        {
+            if (text == null) return HeavyKg;
+            int n = -1;
+            for (int i = 0; i <= text.Length; i++)
+            {
+                char c = i < text.Length ? text[i] : ' ';
+                if (c >= '0' && c <= '9')
+                {
+                    n = (n < 0 ? 0 : n) * 10 + (c - '0');
+                    if (n > 100000) n = 100000;
+                    continue;
+                }
+                if (n == LightKg || n == LightCount) return LightKg;
+                n = -1;
+            }
+            return HeavyKg;
+        }
+
+        /// <summary>Only the two known sizes exist; anything else rounds to one.</summary>
+        internal static int Known(float kg) { return kg >= 75f ? HeavyKg : LightKg; }
+
+        /// <summary>Rack stations for bombs of this mass.</summary>
+        internal static int CapacityFor(int kg) { return Known(kg) == LightKg ? LightCount : HeavyCount; }
+
+        /// <summary>Radius and damage factor of a bomb against the FAB-50
+        /// config numbers: (m / 50)^(1/3), OrdnanceBlast.RadiusForMass's law.</summary>
+        internal static float Scale(int kg) { return (float)Math.Pow(Known(kg) / BaseKg, 1.0 / 3.0); }
+
+        /// <summary>The mass in an optional message tail; missing = an older
+        /// client, which only knew the FAB-50.</summary>
+        internal static int KgAt(float[] f, int index)
+        {
+            return f != null && index >= 0 && index < f.Length ? Known(f[index]) : LightKg;
+        }
+
+        internal static string Name(int kg) { return Known(kg) == HeavyKg ? "FAB-100" : "FAB-50"; }
+        internal static string NameRu(int kg) { return Known(kg) == HeavyKg ? "ФАБ-100" : "ФАБ-50"; }
+    }
+
     /// <summary>Bombs for the player-flown An-2: racks, sight, release,
     /// ballistic fall, burst through the mortar's damage rules.</summary>
     internal static class An2Bombs
     {
-        /// <summary>FAB-50, after the An-2 repair parts (2069-2071).</summary>
+        /// <summary>The aerial bomb, after the An-2 repair parts (2069-2071);
+        /// hung as a FAB-100 or a FAB-50 (Y B4, BombLoad).</summary>
         internal const int ItemId = 2072;
         const int DONOR = 2030;              // the generic carryable, like 2069-2071
         const float G = 9.81f;
         const float Step = 0.02f;            // the bomb's integration step, s
-        const float RealLength = 1.07f;      // FAB-50, metres nose to fin box
+        const float RealLength = 1.07f;      // FAB-50, metres nose to fin box (x Scale for a FAB-100)
 
         static float K { get { return PlayerAn2.K; } }
 
         // ============================================================= config
 
         internal static ConfigEntry<bool> CfgGameplay, CfgDepotHit, CfgSightView, CfgModel;
-        internal static ConfigEntry<string> CfgSightKey, CfgReleaseKey, CfgLoadKey;
-        internal static ConfigEntry<int> CfgCapacity, CfgEventCode, CfgControls;
+        internal static ConfigEntry<string> CfgSightKey, CfgReleaseKey, CfgLoadKey, CfgLoad;
+        internal static ConfigEntry<int> CfgEventCode, CfgControls;
         internal static ConfigEntry<float> CfgRadius, CfgNpcDamage, CfgVehicleDamage,
             CfgPlayerDamage, CfgDrag, CfgScatter, CfgScatterPerHeight, CfgScatterPerBank,
             CfgArmSeconds, CfgInterval, CfgSightFov, CfgDepotReach, CfgAimSensitivity;
@@ -100,7 +171,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgGameplay = cfg.Bind("Gameplay", "An2Bombs", true,
-                "The player-flown An-2 carries FAB-50 bombs (item 2072), has a "
+                "The player-flown An-2 carries aerial bombs (item 2072), has a "
                 + "bombsight and drops them. Needs [PlayerAn2] Enabled. Every "
                 + "client must have the same setting.");
             CfgDepotHit = cfg.Bind("Gameplay", "An2BombDepotHit", true,
@@ -112,28 +183,31 @@ namespace NextDayRevival
                 + "bombsight camera. Off: the sight marks are drawn over the "
                 + "normal view instead.");
             CfgModel = cfg.Bind("Graphics", "An2BombModel", true,
-                "The falling bomb is drawn (the FAB-50 model). Off: it falls unseen.");
+                "The falling bomb is drawn (the FAB model, sized to the bomb). Off: it falls unseen.");
 
             const string S = "An2Bombs";
-            CfgCapacity = cfg.Bind(S, "BombCapacity", 6,
-                "FAB-50s on the racks of one An-2 (the real one carried 4-6 small "
-                + "bombs under the lower wing).");
+            CfgLoad = cfg.Bind(S, "BombLoad", An2BombLoad.Heavy,
+                "What an empty An-2's racks take when you load them (also in the F2 settings window): "
+                + "8x100 = eight FAB-100 (default), 12x50 = twelve FAB-50. One bomb item per station. "
+                + "Radius and damage below are a FAB-50's; a FAB-100 hits x1.26 (cube root of the mass). "
+                + "Replaces the old BombCapacity key, which is ignored.");
             CfgSightKey = cfg.Bind(S, "SightKey", "G",
                 "Pilot, in the air: mark the viewed ground and open or close CCIP. The same key as "
                 + "[PlayerAn2] EngineKey is fine: on the ground it is the engine.");
             CfgReleaseKey = cfg.Bind(S, "ReleaseKey", "Mouse0",
                 "Pilot: tap for one bomb, hold for a stick (Mouse0 = left mouse button).");
             CfgLoadKey = cfg.Bind(S, "LoadKey", "R",
-                "On foot beside a parked An-2: move FAB-50s from the backpack onto its racks.");
+                "On foot beside a parked An-2: move bombs from the backpack onto its racks.");
             CfgRadius = cfg.Bind(S, "BlastRadius", 25f,
-                "Metres. Damage falls off linearly to zero here. A vehicle needs "
-                + "a burst within a few metres to be hurt badly.");
-            CfgNpcDamage = cfg.Bind(S, "NpcDamage", 500f, "Damage to an NPC at the burst point.");
+                "Metres, for a FAB-50 (a FAB-100 x1.26). Damage falls off linearly to zero here. "
+                + "A vehicle needs a burst within a few metres to be hurt badly.");
+            CfgNpcDamage = cfg.Bind(S, "NpcDamage", 500f, "Damage to an NPC at the burst point of a FAB-50 (a FAB-100 x1.26).");
             CfgVehicleDamage = cfg.Bind(S, "VehicleDamage", 1200f,
-                "Damage to a vehicle at the burst point (explosion part, so the "
-                + "vehicle armour rules apply).");
+                "Damage to a vehicle at the burst point of a FAB-50, a FAB-100 x1.26 (explosion part, "
+                + "so the vehicle armour rules apply).");
             CfgPlayerDamage = cfg.Bind(S, "PlayerDamage", 300f,
-                "Body explosion damage to a player at the burst point, including the dropper's faction.");
+                "Body explosion damage to a player at the burst point of a FAB-50 (a FAB-100 x1.26), "
+                + "including the dropper's faction.");
             CfgDrag = cfg.Bind(S, "Drag", 0.0006f,
                 "Air drag of the bomb, 1/m (deceleration = Drag x speed^2). The "
                 + "sight uses the same number, so it only changes how far a bomb trails.");
@@ -215,7 +289,37 @@ namespace NextDayRevival
         }
 
         static float F(ConfigEntry<float> e, float fallback) { return e == null ? fallback : e.Value; }
-        internal static int Capacity { get { return Mathf.Clamp(CfgCapacity == null ? 6 : CfgCapacity.Value, 1, 12); } }
+
+        static string _loadText;
+        static int _loadKg = An2BombLoad.HeavyKg;
+
+        /// <summary>The chosen load's bomb mass, parsed once per change of the text.</summary>
+        internal static int LoadKg
+        {
+            get
+            {
+                string t = CfgLoad == null ? null : CfgLoad.Value;
+                if (!ReferenceEquals(t, _loadText)) { _loadText = t; _loadKg = An2BombLoad.KgOf(t); }
+                return _loadKg;
+            }
+        }
+
+        /// <summary>Stations of the chosen load (8, or 12 for FAB-50s).</summary>
+        internal static int Capacity { get { return An2BombLoad.CapacityFor(LoadKg); } }
+
+        /// <summary>F2 settings window: 0 = 8 x FAB-100, 1 = 12 x FAB-50.</summary>
+        internal static int LoadIndex { get { return LoadKg == An2BombLoad.LightKg ? 1 : 0; } }
+
+        internal static void SetLoad(int index)
+        {
+            if (CfgLoad == null) return;
+            CfgLoad.Value = index == 1 ? An2BombLoad.Light : An2BombLoad.Heavy;
+            if (RevivalPlugin.L != null) RevivalPlugin.L.LogInfo("An2Bombs: bomb load " + CfgLoad.Value + ".");
+        }
+
+        /// <summary>Damage / radius of a bomb of this mass from the FAB-50 numbers.</summary>
+        static float RadiusU(int kg) { return Mathf.Max(1f, F(CfgRadius, 25f)) * K * An2BombLoad.Scale(kg); }
+        static float Peak(ConfigEntry<float> e, float fallback, int kg) { return Mathf.Max(0f, F(e, fallback)) * An2BombLoad.Scale(kg); }
 
         // ============================================================== items
 
@@ -223,18 +327,20 @@ namespace NextDayRevival
         {
             items.Add(new ItemDef(
                 ItemId, DONOR, false,
-                "Авиабомба ФАБ-50", "FAB-50 bomb",
-                "Небольшая фугасная авиабомба. Подвешивается на Ан-2 у самолёта "
-                + "(клавиша загрузки), сбрасывается пилотом через бомбовый прицел.",
-                "A small high-explosive aircraft bomb. Load it onto the An-2 at the "
-                + "aeroplane (the load key); the pilot drops it through the bombsight.",
+                "Авиабомба ФАБ", "Aerial bomb (FAB)",
+                "Фугасная авиабомба. Подвешивается на Ан-2 у самолёта (клавиша "
+                + "загрузки) как ФАБ-100 (8 шт.) или ФАБ-50 (12 шт.) - по выбранной "
+                + "загрузке; сбрасывается пилотом через бомбовый прицел.",
+                "A high-explosive aircraft bomb. Load it onto the An-2 at the aeroplane "
+                + "(the load key) as a FAB-100 (8 racks) or a FAB-50 (12 racks), per the "
+                + "chosen bomb load; the pilot drops it through the bombsight.",
                 "fab50.ndmesh", "fab50_diffuse.png", "fab50_normal.png",
                 "fab50_icon.png", null,
                 1, 0, 10.0f));
         }
 
         /// <summary>The airfield's loot with the bombs in it (Airfield.Draw):
-        /// the "military" pool of the bunkers rolls a FAB-50 now and then.</summary>
+        /// the "military" pool of the bunkers rolls a bomb now and then.</summary>
         internal static string[] Pool(string pool, string[] entries)
         {
             if (!Enabled || entries == null || pool != "military") return entries;
@@ -258,12 +364,14 @@ namespace NextDayRevival
             public Vector3 Pos;              // world units
             public Vector3 Vel;              // m/s
             public float Age, Carry;
+            public int Kg;                   // Y B4: 100 or 50
             public bool Mine, Whistled;
             public GameObject Go;
         }
 
         static readonly List<Bomb> _bombs = new List<Bomb>();
         static readonly Dictionary<int, int> _count = new Dictionary<int, int>();   // view -> bombs aboard
+        static readonly Dictionary<int, int> _rackKg = new Dictionary<int, int>();  // view -> their mass (Y B4)
         static bool _sight;
         static float _savedFov = -1f;
         static float _nextRelease, _nextHeartbeat, _errors;
@@ -293,13 +401,26 @@ namespace NextDayRevival
             return view != 0 && _count.TryGetValue(view, out n) ? n : 0;
         }
 
-        static void SetCount(GameObject go, int n, bool send)
+        /// <summary>The mass of what hangs on this aeroplane; an empty rack
+        /// takes the chosen load.</summary>
+        internal static int RackKg(GameObject go) { return RackKgOf(PlayerAn2.View(go)); }
+
+        static int RackKgOf(int view)
+        {
+            int n, kg;
+            if (view != 0 && _count.TryGetValue(view, out n) && n > 0 && _rackKg.TryGetValue(view, out kg)) return kg;
+            return LoadKg;
+        }
+
+        static void SetCount(GameObject go, int n, int kg, bool send)
         {
             int view = PlayerAn2.View(go);
             if (view == 0) return;
-            n = Mathf.Clamp(n, 0, Capacity);
+            kg = An2BombLoad.Known(kg);
+            n = Mathf.Clamp(n, 0, An2BombLoad.CapacityFor(kg));
             _count[view] = n;
-            if (send) Net.Send(new float[] { 2f, view, n }, true);
+            _rackKg[view] = kg;
+            if (send) Net.Send(new float[] { 2f, view, n, kg }, true);
         }
 
         /// <summary>From PlayerAn2.Build for a "ready" An-2 (the admin panel):
@@ -308,7 +429,7 @@ namespace NextDayRevival
         {
             if (!Enabled || go == null) return;
             Net.EnsureHooked();
-            SetCount(go, Capacity, true);
+            SetCount(go, Capacity, LoadKg, true);
         }
 
         // ============================================================== frame
@@ -424,18 +545,21 @@ namespace NextDayRevival
             if (_near == null || An2Repair.Busy) return;
             if (!Input.GetKeyDown(PlayerAn2.KeyOf(CfgLoadKey, KeyCode.R))) return;
             int have = CountOf(_near);
-            if (have >= Capacity) { Hint(Loc.T("Бомбодержатели заполнены", "The racks are full"), 3f); return; }
+            int kg = RackKg(_near);           // a part-full rack keeps its size
+            int cap = An2BombLoad.CapacityFor(kg);
+            if (have >= cap) { Hint(Loc.T("Бомбодержатели заполнены", "The racks are full"), 3f); return; }
             int taken = 0;
-            while (have + taken < Capacity && Turret.TakeItem(ItemId, "An2Bombs")) taken++;
+            while (have + taken < cap && Turret.TakeItem(ItemId, "An2Bombs")) taken++;
             if (taken == 0)
             {
-                Hint(Loc.T("Нет бомб ФАБ-50 в рюкзаке", "No FAB-50 bombs in the backpack"), 3f);
+                Hint(Loc.T("Нет авиабомб в рюкзаке", "No aerial bombs in the backpack"), 3f);
                 return;
             }
-            SetCount(_near, have + taken, true);
+            SetCount(_near, have + taken, kg, true);
             RevivalPlugin.L.LogInfo("An2Bombs: " + taken + " bomb(s) loaded onto An-2 "
-                + PlayerAn2.View(_near) + ", " + (have + taken) + " aboard.");
-            Hint(Loc.T("Бомбы подвешены", "Bombs loaded") + ": " + (have + taken) + "/" + Capacity, 3f);
+                + PlayerAn2.View(_near) + ", " + (have + taken) + " x " + kg + " kg aboard.");
+            Hint(Loc.T("Подвешены " + An2BombLoad.NameRu(kg), An2BombLoad.Name(kg) + " loaded")
+                + ": " + (have + taken) + "/" + cap, 3f);
         }
 
         // --------------------------------------------------------------- sight
@@ -654,7 +778,7 @@ namespace NextDayRevival
             if (!_count.TryGetValue(_sightView, out have)) have = 0;
             if (have <= 0)
             {
-                Hint(Loc.T("Бомб нет - подвесьте ФАБ-50 на земле", "No bombs aboard - load FAB-50s on the ground"), 3f);
+                Hint(Loc.T("Бомб нет - подвесьте бомбы на земле", "No bombs aboard - load bombs on the ground"), 3f);
                 return;
             }
             if (PlayerAn2.OnGround)
@@ -676,21 +800,23 @@ namespace NextDayRevival
             float a = UnityEngine.Random.value * Mathf.PI * 2f;
             vel += new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a)) * (r / Mathf.Max(0.5f, fall));
 
+            int kg = RackKgOf(_sightView);
             Bomb b = new Bomb();
             b.Id = UnityEngine.Random.Range(1, 8000000);
             b.Pos = start;
             b.Vel = vel;
+            b.Kg = kg;
             b.Mine = true;
-            b.Go = Visual(start, vel);
+            b.Go = Visual(start, vel, kg);
             _bombs.Add(b);
-            SetCount(plane, have - 1, true);
+            SetCount(plane, have - 1, kg, true);
             _displayCount = have - 1;
-            Net.Send(new float[] { 0f, b.Id, start.x, start.y, start.z, vel.x, vel.y, vel.z }, true);
-            RevivalPlugin.L.LogInfo("An2Bombs: bomb " + b.Id + " away at " + start.ToString("0")
+            Net.Send(new float[] { 0f, b.Id, start.x, start.y, start.z, vel.x, vel.y, vel.z, kg }, true);
+            RevivalPlugin.L.LogInfo("An2Bombs: " + kg + " kg bomb " + b.Id + " away at " + start.ToString("0")
                 + ", " + Mathf.RoundToInt(_agl) + " m over the ground, " + Mathf.RoundToInt(_gs * 3.6f)
                 + " km/h, bank " + bank.ToString("0") + ", sigma " + sigma.ToString("0.0") + " m; "
                 + (have - 1) + " left.");
-            Hint(Loc.T("Бомба сброшена", "Bomb away") + " - " + (have - 1) + "/" + Capacity, 2f);
+            Hint(Loc.T("Бомба сброшена", "Bomb away") + " - " + (have - 1) + "/" + An2BombLoad.CapacityFor(kg), 2f);
         }
 
         static float Gauss()
@@ -757,8 +883,8 @@ namespace NextDayRevival
                 }
                 if (!down) continue;
                 _bombs.RemoveAt(i);
-                if (b.Go != null) UnityEngine.Object.Destroy(b.Go);
-                if (b.Mine) Burst(b.Id, at, b.Age < arm);
+                GiveVisual(b.Go);
+                if (b.Mine) Burst(b.Id, at, b.Age < arm, b.Kg);
             }
         }
 
@@ -779,54 +905,53 @@ namespace NextDayRevival
         }
 
         /// <summary>The dropper's burst: the picture, the sweep, the master.</summary>
-        static void Burst(int id, Vector3 point, bool dud)
+        static void Burst(int id, Vector3 point, bool dud, int kg)
         {
-            Net.Send(new float[] { 1f, id, point.x, point.y, point.z, dud ? 1f : 0f }, true);
+            Net.Send(new float[] { 1f, id, point.x, point.y, point.z, dud ? 1f : 0f, kg }, true);
             if (dud)
             {
                 Hint(Loc.T("Слишком низко - взрыватель не взвёлся", "Too low - the fuze did not arm"), 3f);
                 RevivalPlugin.L.LogInfo("An2Bombs: bomb " + id + " was a dud at " + point.ToString("0") + ".");
                 return;
             }
-            float radius = Mathf.Max(1f, F(CfgRadius, 25f)) * K;
+            float radius = RadiusU(kg);
             try { RocketHook.Detonate(point + Vector3.up * 0.2f, 0f, radius, 3f); }
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("An2Bombs: no visible explosion at " + point.ToString("0") + " - " + ex.Message);
             }
-            QueueBlast(point, radius);
-            OrdnanceBlast.EnqueuePlayers(point, radius, Mathf.Max(0f, F(CfgPlayerDamage, 300f)));
-            Depot(point);
-            RevivalPlugin.L.LogInfo("An2Bombs: bomb " + id + " burst at " + point.ToString("0")
+            QueueBlast(point, radius, kg);
+            OrdnanceBlast.EnqueuePlayers(point, radius, Peak(CfgPlayerDamage, 300f, kg));
+            Depot(point, kg);
+            RevivalPlugin.L.LogInfo("An2Bombs: " + kg + " kg bomb " + id + " burst at " + point.ToString("0")
                 + " - damage queued on master.");
         }
 
         /// <summary>The master's side of somebody else's bomb: one NPC/vehicle
         /// pass at the transmitted collision point. Shooter handles players.</summary>
-        static void RemoteBurst(Vector3 point)
+        static void RemoteBurst(Vector3 point, int kg)
         {
-            float radius = Mathf.Max(1f, F(CfgRadius, 25f)) * K;
-            QueueBlast(point, radius);
-            Depot(point);
-            RevivalPlugin.L.LogInfo("An2Bombs: a player's bomb at " + point.ToString("0")
+            float radius = RadiusU(kg);
+            QueueBlast(point, radius, kg);
+            Depot(point, kg);
+            RevivalPlugin.L.LogInfo("An2Bombs: a player's " + kg + " kg bomb at " + point.ToString("0")
                 + " - damage queued on master.");
         }
 
-        static void QueueBlast(Vector3 point, float radius)
+        static void QueueBlast(Vector3 point, float radius, int kg)
         {
-            OrdnanceBlast.Enqueue(point, radius, Mathf.Max(0f, F(CfgNpcDamage, 500f)),
-                Mathf.Max(0f, F(CfgVehicleDamage, 1200f)), 0f);
+            OrdnanceBlast.Enqueue(point, radius, Peak(CfgNpcDamage, 500f, kg),
+                Peak(CfgVehicleDamage, 1200f, kg), 0f);
         }
 
-        static void Depot(Vector3 point)
+        static void Depot(Vector3 point, int kg)
         {
             // The visual ExplosionObject has zero damage. Apply the vehicle
             // profile once on the master (local Burst or RemoteBurst).
             if (FuelDepot.Active)
             {
                 if (RevivalTroopInsertion.MasterClient())
-                    FuelDepot.Blast(point, Mathf.Max(0f, F(CfgVehicleDamage, 1200f)),
-                        Mathf.Max(1f, F(CfgRadius, 25f)) * K);
+                    FuelDepot.Blast(point, Peak(CfgVehicleDamage, 1200f, kg), RadiusU(kg));
                 return;
             }
             if (CfgDepotHit != null && !CfgDepotHit.Value) return;
@@ -852,20 +977,40 @@ namespace NextDayRevival
         static float _meshScale = 1f;
         static Vector3 _meshCentre;
 
-        /// <summary>The falling FAB-50: the item mesh scaled to its real
-        /// 1.07 m, nose along the flight path.</summary>
-        static GameObject Visual(Vector3 at, Vector3 vel)
+        /// <summary>The falling bomb: the item mesh scaled to a FAB-50's real
+        /// 1.07 m (x Scale for a FAB-100), nose along the flight path.</summary>
+        static GameObject Visual(Vector3 at, Vector3 vel, int kg)
         {
             if (CfgModel != null && !CfgModel.Value) return null;
             if (!LoadModel()) return null;
-            GameObject go = new GameObject("NDR_An2Bomb");
+            GameObject go = null;
+            for (int i = 0; i < _visualPool.Length; i++)
+            {
+                if (_visualPool[i] != null && _visualPool[i].activeSelf) continue;
+                go = _visualPool[i];
+                if (go == null) { go = BuildVisual(); _visualPool[i] = go; }
+                go.SetActive(true);
+                break;
+            }
+            if (go == null) return null; // the damage/trajectory is independent
+            // Pooled shells are shared by FAB-50 and FAB-100: size per drop.
+            float scale = _meshScale * An2BombLoad.Scale(kg);
+            Transform part = go.transform.GetChild(0);
+            part.localScale = Vector3.one * scale;
+            part.localPosition = -(_meshTurn * (_meshCentre * scale));
             go.transform.position = at;
             if (vel.sqrMagnitude > 0.01f) go.transform.rotation = Quaternion.LookRotation(vel.normalized);
+            return go;
+        }
+
+        static readonly GameObject[] _visualPool = new GameObject[64];
+        static void GiveVisual(GameObject go) { if (go != null) go.SetActive(false); }
+        static GameObject BuildVisual()
+        {
+            GameObject go = new GameObject("NDR pooled An2 bomb");
             GameObject part = new GameObject("mesh");
             part.transform.SetParent(go.transform, false);
             part.transform.localRotation = _meshTurn;
-            part.transform.localScale = Vector3.one * _meshScale;
-            part.transform.localPosition = -(_meshTurn * (_meshCentre * _meshScale));
             part.AddComponent<MeshFilter>().sharedMesh = _mesh;
             part.AddComponent<MeshRenderer>().sharedMaterial = _mat;
             return go;
@@ -926,9 +1071,9 @@ namespace NextDayRevival
                     gone.Add(kv.Key);
                     continue;
                 }
-                Net.Send(new float[] { 2f, kv.Key, kv.Value }, false);
+                Net.Send(new float[] { 2f, kv.Key, kv.Value, RackKgOf(kv.Key) }, false);
             }
-            if (gone != null) for (int i = 0; i < gone.Count; i++) _count.Remove(gone[i]);
+            if (gone != null) for (int i = 0; i < gone.Count; i++) { _count.Remove(gone[i]); _rackKg.Remove(gone[i]); }
         }
 
         internal static class Net
@@ -1003,8 +1148,9 @@ namespace NextDayRevival
                         b.Id = Mathf.RoundToInt(f[1]);
                         b.Pos = new Vector3(f[2], f[3], f[4]);
                         b.Vel = new Vector3(f[5], f[6], f[7]);
+                        b.Kg = An2BombLoad.KgAt(f, 8);
                         b.Mine = false;
-                        b.Go = Visual(b.Pos, b.Vel);
+                        b.Go = Visual(b.Pos, b.Vel, b.Kg);
                         _bombs.Add(b);
                         return;
                     }
@@ -1014,17 +1160,23 @@ namespace NextDayRevival
                         for (int i = _bombs.Count - 1; i >= 0; i--)
                         {
                             if (_bombs[i].Mine || _bombs[i].Id != id) continue;
-                            if (_bombs[i].Go != null) UnityEngine.Object.Destroy(_bombs[i].Go);
+                            GiveVisual(_bombs[i].Go);
                             _bombs.RemoveAt(i);
                         }
                         if (f[5] < 0.5f && RevivalTroopInsertion.MasterClient())
-                            RemoteBurst(new Vector3(f[2], f[3], f[4]));
+                            RemoteBurst(new Vector3(f[2], f[3], f[4]), An2BombLoad.KgAt(f, 6));
                         return;
                     }
                     if (kind == 2 && f.Length >= 3)
                     {
                         int view = Mathf.RoundToInt(f[1]);
-                        if (view != 0) _count[view] = Mathf.Clamp(Mathf.RoundToInt(f[2]), 0, Capacity);
+                        if (view != 0)
+                        {
+                            // The sender's rack, whatever this client's own choice.
+                            int kg = An2BombLoad.KgAt(f, 3);
+                            _count[view] = Mathf.Clamp(Mathf.RoundToInt(f[2]), 0, An2BombLoad.CapacityFor(kg));
+                            _rackKg[view] = kg;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -1054,7 +1206,7 @@ namespace NextDayRevival
         static Material _sightLines;
         static bool _sightDrawingTried;
         static string _loadHud;
-        static int _loadCount = -1;
+        static int _loadCount = -1, _loadKgShown = -1;
         static GameObject _loadPlane;
 
         static Vector3[] MakeCircle()
@@ -1120,12 +1272,13 @@ namespace NextDayRevival
                 if (_loadHud == null || _loadPlane != _near || Time.time >= _nextLoadHud)
                 {
                     _nextLoadHud = Time.time + 0.5f;
-                    int n = CountOf(_near);
-                    if (_loadHud == null || _loadPlane != _near || _loadCount != n)
+                    int n = CountOf(_near), kg = RackKg(_near);
+                    if (_loadHud == null || _loadPlane != _near || _loadCount != n || _loadKgShown != kg)
                     {
-                        _loadPlane = _near; _loadCount = n;
+                        _loadPlane = _near; _loadCount = n; _loadKgShown = kg;
                         _loadHud = "[" + KeyName(PlayerAn2.KeyOf(CfgLoadKey, KeyCode.R)) + "] "
-                            + Loc.T("Подвесить ФАБ-50", "Load FAB-50") + " (" + n + "/" + Capacity + ")";
+                            + Loc.T("Подвесить " + An2BombLoad.NameRu(kg), "Load " + An2BombLoad.Name(kg))
+                            + " (" + n + "/" + An2BombLoad.CapacityFor(kg) + ")";
                     }
                 }
                 Label(_loadHud, cx, cy + 84f, new Color(0.95f, 0.90f, 0.70f, 1f), 14);

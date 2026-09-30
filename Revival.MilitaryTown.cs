@@ -469,6 +469,7 @@ namespace NextDayRevival
 
         sealed class Post
         {
+            internal float NextPark;
             internal string Group, Building;
             internal float Fx, Fz, H;
             internal int Mode;
@@ -594,6 +595,9 @@ namespace NextDayRevival
 
         static float _nextMen;
         static readonly List<Component> _found = new List<Component>();
+        static readonly Dictionary<string, List<Component>> _postGroups = new Dictionary<string, List<Component>>();
+        static readonly Comparison<Component> _viewOrder = ComparePostView;
+        static int ComparePostView(Component a, Component b) { return ViewId(a).CompareTo(ViewId(b)); }
 
         /// <summary>Every client, every 2 s: the men of the posted groups, by
         /// their Photon spawn key, each group's men in Photon view id order so
@@ -617,7 +621,8 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("MilitaryTown: posts " + s + ".");
             }
             List<Component> npcs = NpcWar.PatrolTargets();
-            Dictionary<string, List<Component>> byGroup = new Dictionary<string, List<Component>>();
+            Dictionary<string, List<Component>> byGroup = _postGroups;
+            foreach (List<Component> list in byGroup.Values) list.Clear();
             for (int i = 0; i < npcs.Count; i++)
             {
                 Component ai = npcs[i];
@@ -631,7 +636,7 @@ namespace NextDayRevival
             }
             foreach (KeyValuePair<string, List<Component>> kv in byGroup)
             {
-                kv.Value.Sort(delegate(Component a, Component b) { return ViewId(a).CompareTo(ViewId(b)); });
+                kv.Value.Sort(_viewOrder);
                 int k = 0;
                 for (int i = 0; i < Posts.Length; i++)
                 {
@@ -647,6 +652,7 @@ namespace NextDayRevival
 
         static Type _viewType;
         static PropertyInfo _viewId;
+        static MethodInfo _viewIdGetter;
 
         static int ViewId(Component ai)
         {
@@ -654,10 +660,11 @@ namespace NextDayRevival
             {
                 if (_viewType == null) _viewType = RevivalPlugin.TypeByName("PhotonView");
                 if (_viewType == null) return ai.GetInstanceID();
-                if (_viewId == null) _viewId = _viewType.GetProperty("viewID");
+                if (_viewId == null)
+                { _viewId = _viewType.GetProperty("viewID"); _viewIdGetter = AccessTools.PropertyGetter(_viewType, "viewID"); }
                 Component v = ai.GetComponent(_viewType);
                 if (v == null || _viewId == null) return ai.GetInstanceID();
-                return (int)_viewId.GetValue(v, null);
+                return FastCall.Int(_viewIdGetter, v);
             }
             catch { return ai.GetInstanceID(); }
         }
@@ -676,7 +683,8 @@ namespace NextDayRevival
                     if (!p.Placed || p.Man == null) continue;
                     Transform tr = p.Man.transform;
                     if (tr == null) { p.Man = null; continue; }
-                    Park(p.Man);
+                    if (Time.time >= p.NextPark)
+                    { p.NextPark = Time.time + 0.5f; Park(p.Man); }
                     if (!p.Held)
                     {
                         p.Held = true;
@@ -701,8 +709,7 @@ namespace NextDayRevival
 
         static void Park(Component ai)
         {
-            NavMeshAgent agent = ai.GetComponent<NavMeshAgent>();
-            if (agent == null) agent = ai.GetComponentInChildren<NavMeshAgent>();
+            NavMeshAgent agent = CombatLoad.Agent(ai);
             if (agent == null) return;
             try
             {

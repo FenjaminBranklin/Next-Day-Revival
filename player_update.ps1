@@ -12,6 +12,41 @@ function Get-NdrJson([string]$Url) {
     }
 }
 
+# Launcher.bat runs this hidden. Without a window the first start after a
+# release looked dead for minutes (268 MB download + unpack, 2026-09-30).
+$script:NdrSplash = $null
+function Show-NdrSplash {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $f = New-Object Windows.Forms.Form
+    $f.Text = 'Next Day Revival'
+    $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $true
+    $f.StartPosition = 'CenterScreen'; $f.ClientSize = New-Object Drawing.Size(420, 90)
+    $f.TopMost = $true
+    $l = New-Object Windows.Forms.Label
+    $l.Location = New-Object Drawing.Point(14, 14); $l.Size = New-Object Drawing.Size(392, 24)
+    $l.Text = 'Checking for the current client ...'
+    $p = New-Object Windows.Forms.ProgressBar
+    $p.Location = New-Object Drawing.Point(14, 48); $p.Size = New-Object Drawing.Size(392, 22)
+    $p.Style = 'Marquee'
+    $f.Controls.Add($l); $f.Controls.Add($p)
+    $f.Show(); $f.Activate(); $f.TopMost = $false
+    [Windows.Forms.Application]::DoEvents()
+    $script:NdrSplash = @{ form = $f; label = $l; bar = $p }
+}
+function Set-NdrSplash([string]$Text, [int]$Percent = -1) {
+    if (-not $script:NdrSplash) { return }
+    $script:NdrSplash.label.Text = $Text
+    if ($Percent -ge 0) {
+        $script:NdrSplash.bar.Style = 'Continuous'
+        $script:NdrSplash.bar.Value = [math]::Min(100, [math]::Max(0, $Percent))
+    }
+    [Windows.Forms.Application]::DoEvents()
+}
+function Close-NdrSplash {
+    if ($script:NdrSplash) { $script:NdrSplash.form.Close(); $script:NdrSplash.form.Dispose(); $script:NdrSplash = $null }
+}
+
 function Assert-NdrChild([string]$Parent, [string]$Path) {
     $base = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     $full = [IO.Path]::GetFullPath($Path)
@@ -93,7 +128,24 @@ function Expand-NdrRelease($Release, [string]$Cache) {
         $part = Assert-NdrChild $Cache (Join-Path $Cache ([guid]::NewGuid().ToString('N') + '.part'))
         try {
             Write-Host ('Downloading verified client ' + $Release.version + ' ...')
-            Invoke-WebRequest -Uri $Release.url -OutFile $part -UseBasicParsing -TimeoutSec 180
+            if ($script:NdrSplash) {
+                # Async so the splash keeps painting and shows megabytes.
+                $wc = New-Object Net.WebClient
+                $wc.Headers.Add('User-Agent', 'NextDayRevivalVerifiedLauncher')
+                $task = $wc.DownloadFileTaskAsync($Release.url, $part)
+                $total = [math]::Max(1, $Release.size / 1MB)
+                while (-not $task.IsCompleted) {
+                    $done = 0
+                    if (Test-Path -LiteralPath $part) { $done = (Get-Item -LiteralPath $part).Length / 1MB }
+                    Set-NdrSplash ('Downloading client {0}: {1:n0} / {2:n0} MB' -f $Release.version, $done, $total) ([int](100 * $done / $total))
+                    Start-Sleep -Milliseconds 200
+                }
+                $wc.Dispose()
+                if ($task.IsFaulted) { throw $task.Exception.InnerException }
+                Set-NdrSplash 'Verifying download ...' 100
+            } else {
+                Invoke-WebRequest -Uri $Release.url -OutFile $part -UseBasicParsing -TimeoutSec 180
+            }
             if ((Get-Item -LiteralPath $part).Length -ne $Release.size -or
                 (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ine $Release.hash) {
                 throw 'The download is incomplete or its checksum is wrong. Nothing was installed.'
@@ -116,6 +168,7 @@ function Expand-NdrRelease($Release, [string]$Cache) {
     } finally { $archive.Dispose() }
     $complete = $false
     try {
+    Set-NdrSplash 'Unpacking client ...' 100
     Expand-Package $zip $session
     $source = Join-Path $session ('NextDayRevival_Client_' + $Release.version)
     foreach ($name in @('VERSION', 'launcher.ps1', 'player_update.ps1', 'client_patch.ps1',
@@ -268,8 +321,10 @@ function Invoke-NdrPrepare([string]$GamePath, [string]$HostName) {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if ($OpenLauncher) {
+            Show-NdrSplash
             $release = Get-NdrRelease $Server
             $source = Expand-NdrRelease $release (Join-Path $env:LOCALAPPDATA 'NextDayRevival/verified')
+            Close-NdrSplash
             try {
                 $argsForLauncher = @{ ServerHost = $Server }
                 if ($Game) { $argsForLauncher.Game = $Game }
@@ -281,6 +336,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
         } else { Invoke-NdrPrepare $Game $Server }
     } catch {
+        Close-NdrSplash
         Write-Host ('Start blocked: ' + $_.Exception.Message) -ForegroundColor Red
         if ($OpenLauncher) {
             Add-Type -AssemblyName System.Windows.Forms

@@ -19,20 +19,21 @@
 //     inside the airfield fence and only the holder refuels one there (canister
 //     or the D1 pump). The apron respawn waits while a capture is running.
 //     The loser loses it: a new holder owns the parked aeroplane at once.
-//   2 INCOME. Every IncomeMinutes while players hold it, the master grants
-//     IncomeAmount to each player of the holding side in the room; that
-//     player's client books it into its own native wallet through the game's
-//     AddPlayerMoney (the same native path as a trader sale), after any
-//     mercenary or tower payment in flight has settled. Grants carry the
-//     master's epoch + serial, only the master's are accepted, each once.
+//   2 NO INCOME (Y B4). Holding the airfield used to pay 20000 every 10
+//     minutes to each player of the holding side. That passive money is
+//     parked until the airfield economy is designed (the airfield grind:
+//     vault, running costs, fuel sales). The master pays nothing, and a
+//     grant (RadarNet kind 10, reserved) from an older master is dropped
+//     unbooked. The pure clock / clamp / ledger stay in AirfieldHoldPolicy
+//     for that economy; [AirfieldHold] IncomeAmount / IncomeMinutes in an
+//     old config file are ignored.
 //   3 THE ANNOUNCEMENT. "<SIDE> hold the airfield" as a banner on every client
 //     and a line in the radar log; the fence is tinted in the holder's colour
 //     on the map (native map ink, MapInkLayer), the name on hover.
 //
-// AUTHORITY. The master alone decides presence, capture, the holder and who
-// is paid; clients only draw its state (RadarNet kind 9, once a second on
-// change and every 5 s) and book their own grant (kind 10). A master handoff
-// continues from the last state, including the income timer.
+// AUTHORITY. The master alone decides presence, capture and the holder;
+// clients only draw its state (RadarNet kind 9, once a second on
+// change and every 5 s). A master handoff continues from the last state.
 //
 // PERFORMANCE. AirfieldHold.Tick: time compares per frame; the master's step
 // (players, faction reads, terrain heights of players near the tower) runs
@@ -45,9 +46,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using BepInEx.Configuration;
-using HarmonyLib;
 using UnityEngine;
 
 namespace NextDayRevival
@@ -115,7 +114,9 @@ namespace NextDayRevival
         }
 
         /// <summary>The income clock: runs only while players hold the
-        /// airfield, restarts full on every capture, never pays a burst.</summary>
+        /// airfield, restarts full on every capture, never pays a burst.
+        /// Y B4: not called - the passive income is parked until the airfield
+        /// economy; this clock, Grant and GrantLedger are kept for it.</summary>
         internal static bool IncomeDue(ref float left, bool byPlayers, float dt, float period)
         {
             if (period < 60f) period = 60f;
@@ -174,25 +175,22 @@ namespace NextDayRevival
         internal const int StateMsg = 9, GrantMsg = 10;   // RadarNet kinds (TowerSupport uses 5..8)
 
         static ConfigEntry<bool> CfgEnabled, CfgAn2, CfgAnnounce, CfgMap;
-        static ConfigEntry<float> CfgRadius, CfgSeconds, CfgHeight, CfgIncomeMinutes;
-        static ConfigEntry<int> CfgIncome;
+        static ConfigEntry<float> CfgRadius, CfgSeconds, CfgHeight;
 
         internal static void BindConfig(ConfigFile cfg)
         {
             const string S = "AirfieldHold";
             CfgEnabled = cfg.Bind(S, "Enabled", true,
                 "W Tower 3: the airfield is held by a side. With the HQ operator down, players of one side "
-                + "on the ground near the C1 tower take it; the holder alone flies and refuels the An-2 there, "
-                + "earns income, and is announced and coloured on the map. Master-authoritative.");
+                + "on the ground near the C1 tower take it; the holder alone flies and refuels the An-2 there "
+                + "and is announced and coloured on the map. No passive income (parked until the airfield economy). "
+                + "Master-authoritative.");
             CfgRadius = cfg.Bind(S, "CaptureRadius", 150f, "Metres around the C1 tower that count for a capture.");
             CfgSeconds = cfg.Bind(S, "CaptureSeconds", 60f, "Seconds one side must stand there uncontested.");
             CfgHeight = cfg.Bind(S, "MaxGroundHeight", 20f,
                 "Metres above the terrain up to which a player counts (tower cab yes, aircraft overhead no).");
             CfgAn2 = cfg.Bind(S, "An2HolderOnly", true,
                 "Only the holder's side takes the controls of, or refuels, an An-2 inside the airfield fence.");
-            CfgIncomeMinutes = cfg.Bind(S, "IncomeMinutes", 10f, "Minutes between income payments while players hold it (1..240).");
-            CfgIncome = cfg.Bind(S, "IncomeAmount", 20000,
-                "Native money each online player of the holding side receives per payment (0 = none, max 1000000).");
             CfgAnnounce = cfg.Bind(S, "Announce", true, "Banner on every client when the airfield changes hands.");
             CfgMap = cfg.Bind(S, "MapColour", true, "Tint the airfield fence on the map in the holder's colour.");
         }
@@ -201,30 +199,23 @@ namespace NextDayRevival
         static bool B(ConfigEntry<bool> c) { return c == null || c.Value; }
         static float RadiusU { get { return Mathf.Clamp(TowerRadar.F(CfgRadius, 150f), 20f, 600f) * K; } }
         static float Seconds { get { return Mathf.Clamp(TowerRadar.F(CfgSeconds, 60f), 5f, 1800f); } }
-        static float Period { get { return Mathf.Clamp(TowerRadar.F(CfgIncomeMinutes, 10f), 1f, 240f) * 60f; } }
-        static int Amount { get { return Mathf.Clamp(CfgIncome == null ? 20000 : CfgIncome.Value, 0, AirfieldHoldPolicy.MaxGrant); } }
         static void Log(string s) { RevivalPlugin.L.LogInfo("AirfieldHold: " + s); }
 
         internal static readonly HoldState State = new HoldState();
         internal static int LocalSide = -1;
         static bool _known, _dirty, _inZone;
-        static float _incomeLeft = -1f, _nextStep, _lastStep = -1f, _nextBroadcast, _nextLocal, _nextPay;
+        static float _nextStep, _lastStep = -1f, _nextBroadcast;
         static int _sentCapturer = -1, _sentHolder = -2;
         static float _sentProgress;
         static bool _sentBy;
-        static int _epoch, _grantId;
         static readonly int[] _sides = new int[16];
         static int _sideCount;
-        static readonly GrantLedger _ledger = new GrantLedger();
-        static readonly int[] _pending = new int[8];
-        static int _pendingCount;
 
         // ------------------------------------------------------------- frame
 
         internal static void Tick()
         {
             float now = Time.time;
-            if (_pendingCount > 0 && now >= _nextPay) { _nextPay = now + 1f; BookPending(); }
             if (!Enabled || !TowerRadar.Built) return;
             if (now < _nextStep) return;
             _nextStep = now + 1f;
@@ -246,9 +237,7 @@ namespace NextDayRevival
             State.Capturer = -1;
             State.Progress = 0f;
             _known = false;
-            _incomeLeft = -1f;
             _lastStep = -1f;
-            _epoch = 0;
             _sentHolder = -2;
             _bannerUntil = 0f;
             _inZone = false;
@@ -293,7 +282,6 @@ namespace NextDayRevival
             int ev = AirfieldHoldPolicy.Step(State, home, TowerRadar.NpcOperatorUp, _sides, _sideCount, dt, Seconds);
             // W AA1 merged: the AA guns and the radar belong to this holder too.
             AirfieldOwnership.Follow(State.Holder, State.ByPlayers);
-            if (_incomeLeft < 0f) _incomeLeft = Period;
             if (ev != AirfieldHoldPolicy.None)
             {
                 Log((ev == AirfieldHoldPolicy.Captured ? "captured by " : "retaken by the garrison, ")
@@ -301,7 +289,7 @@ namespace NextDayRevival
                 Announce(ev, before, beforeBy);
                 _dirty = true;
             }
-            if (AirfieldHoldPolicy.IncomeDue(ref _incomeLeft, State.ByPlayers, dt, Period)) PayIncome();
+            // Y B4: no passive income here until the airfield economy is designed.
             if (State.Holder != _sentHolder || State.ByPlayers != _sentBy || State.Capturer != _sentCapturer
                 || Mathf.Abs(State.Progress - _sentProgress) >= 0.049f) _dirty = true;
             if (_dirty || now >= _nextBroadcast) SendState(now);
@@ -340,28 +328,7 @@ namespace NextDayRevival
             _known = true;
             ZoneText();
             RadarNet.Send(new float[] { StateMsg, State.Holder, State.ByPlayers ? 1f : 0f, State.Capturer,
-                State.Progress, Mathf.Max(0f, _incomeLeft) });
-        }
-
-        static void PayIncome()
-        {
-            int amount = Amount;
-            if (amount <= 0 || State.Holder < 0) return;
-            if (_epoch <= 0) _epoch = UnityEngine.Random.Range(1, 8000000);
-            int local = Crocodile.LocalActor(), paid = 0;
-            List<GameObject> players = Crocodile.Players();
-            for (int i = 0; i < players.Count; i++)
-            {
-                GameObject p = players[i];
-                if (p == null || SideOf(p) != State.Holder) continue;
-                int actor = Crocodile.ActorOf(p);
-                if (actor < 0) continue;
-                if (++_grantId >= 8000000) { _grantId = 1; _epoch = UnityEngine.Random.Range(1, 8000000); }
-                if (actor == local) Grant(_epoch, _grantId, amount);
-                else RadarNet.Send(new float[] { GrantMsg, _epoch, _grantId, actor, amount });
-                paid++;
-            }
-            Log("income: " + amount + " to " + paid + " player(s) of " + TowerRadar.SideLabel(State.Holder) + ".");
+                State.Progress, 0f });   // f[5]: the parked income timer, kept for the layout
         }
 
         // ------------------------------------------------------------- wire
@@ -383,69 +350,17 @@ namespace NextDayRevival
                 State.ByPlayers = by;
                 State.Capturer = capturer;
                 State.Progress = Mathf.Clamp01(f[4]);
-                _incomeLeft = Mathf.Clamp(f[5], 0f, Period);
                 _known = true;
                 if (changed) Announce(by ? AirfieldHoldPolicy.Captured : AirfieldHoldPolicy.Retaken, before, beforeBy);
                 ZoneText();
             }
-            else if (kind == GrantMsg && f.Length >= 5)
-            {
-                int epoch = Whole(f[1]), id = Whole(f[2]), actor = Whole(f[3]), amount = Whole(f[4]);
-                if (actor < 0 || actor != Crocodile.LocalActor()) return;
-                Grant(epoch, id, amount);
-            }
+            // kind == GrantMsg: an older master's income grant - parked (Y B4), not booked.
         }
 
         static int Whole(float v)
         {
             int i = Mathf.RoundToInt(v);
             return Mathf.Abs(v - i) > 0.001f ? int.MinValue : i;
-        }
-
-        // ------------------------------------------------------------ wallet
-
-        static void Grant(int epoch, int id, int amount)
-        {
-            if (amount <= 0 || !_ledger.Accept(epoch, id)) return;
-            amount = Mathf.Min(amount, AirfieldHoldPolicy.MaxGrant);
-            if (_pendingCount < _pending.Length) _pending[_pendingCount++] = amount;
-            else _pending[_pending.Length - 1] = Mathf.Min(AirfieldHoldPolicy.MaxGrant, _pending[_pending.Length - 1] + amount);
-            _nextPay = 0f;
-        }
-
-        static MethodInfo _get, _add;
-        static Type _statsType;
-
-        /// <summary>Book the oldest grant into the local native wallet once no
-        /// other money operation is in flight (B3d: one at a time).</summary>
-        static void BookPending()
-        {
-            if (Mercs.MoneyBusy || TowerSupportPayments.Busy || TowerSupportPayments.WalletBusy
-                || TowerPaymentWire.Pending) return;
-            Component stats = Admin.LocalStats();
-            if (stats == null) return;
-            if (_statsType != stats.GetType())
-            {
-                _statsType = stats.GetType();
-                _get = AccessTools.Method(_statsType, "GetPlayerMoney", Type.EmptyTypes, null);
-                _add = AccessTools.Method(_statsType, "AddPlayerMoney", new Type[] { typeof(int), typeof(bool), typeof(bool) }, null);
-            }
-            if (_get == null || _add == null) return;
-            try
-            {
-                int balance = Convert.ToInt32(_get.Invoke(stats, null));
-                int amount = AirfieldHoldPolicy.Grant(_pending[0], balance);
-                if (amount > 0) _add.Invoke(stats, new object[] { amount, true, false });
-                for (int i = 1; i < _pendingCount; i++) _pending[i - 1] = _pending[i];
-                _pendingCount--;
-                Log("income booked: +" + amount + ".");
-                if (amount > 0) Income(amount);
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("AirfieldHold: income not booked, retrying - " + ex.Message);
-                _nextPay = Time.time + 10f;
-            }
         }
 
         // ------------------------------------------------------------- An-2
@@ -537,7 +452,7 @@ namespace NextDayRevival
                 _line.text = before >= 0 ? Loc.T("Потеряли: " + Name(before), Name(before) + " lost it") : "";
             }
             if (LocalSide >= 0 && LocalSide == State.Holder)
-                _line.text += Loc.T(" - Ан-2, заправка и доход ваши", " - the An-2, its fuel and the income are yours");
+                _line.text += Loc.T(" - Ан-2 и его заправка ваши", " - the An-2 and its fuel are yours");
             _bannerColour = SideColour(State.Holder);
             _mapLabel.text = MapLabel();
             _mapBuilt = false;
@@ -549,15 +464,6 @@ namespace NextDayRevival
         static string MapLabel()
         {
             return "<b>" + Loc.T("Аэродром - держат " + Name(State.Holder, true), "Airfield - held by " + Name(State.Holder, false)) + "</b>";
-        }
-
-        static void Income(int amount)
-        {
-            _head.text = "<b>" + Loc.T("Доход с аэродрома: +$" + amount, "Airfield income: +$" + amount) + "</b>";
-            _line.text = Loc.T("Аэродром держат " + Name(State.Holder, true), "Your side holds the airfield");
-            _bannerColour = new Color(0.55f, 1f, 0.55f, 1f);
-            _measure = true;
-            _bannerUntil = Time.time + 6f;
         }
 
         /// <summary>The line a player inside the zone sees, rebuilt only when

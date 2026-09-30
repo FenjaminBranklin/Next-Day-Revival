@@ -1471,7 +1471,7 @@ namespace NextDayRevival
             // over the An-2's own spawn request - the helicopter's pattern.
             if (Btn(UiKit.Col(r, 0, 2), "Spawn An-2 (ready)", _lblAn2Note))
                 Melde(PlayerAn2.SpawnReadyInFront());
-            // FAB-50s for the An-2's racks, as the Gepard's belts above.
+            // Bombs for the An-2's racks (the load's count), as the Gepard's belts above.
             if (Btn(UiKit.Col(r, 1, 2), _lblBombs, _lblBombsNote))
             {
                 string one;
@@ -1773,7 +1773,8 @@ namespace NextDayRevival
                   + Katyusha.CfgLoadKey.Value + " at a standing Katyusha loads them, one by one"
                 : "[Katyusha] Enabled = false in the config";
             _lblBombs = "An-2 bombs x" + An2Bombs.Capacity;
-            _lblBombsNote = "FAB-50 bombs into your inventory (" + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them)"
+            _lblBombsNote = "Aerial bombs into your inventory (" + An2Bombs.CfgLoadKey.Value + " at a parked An-2 loads them as "
+                + An2BombLoad.Name(An2Bombs.LoadKg) + ", [An2Bombs] BombLoad / F2)"
                 + (An2Bombs.Enabled ? "" : " - loading needs [PlayerAn2] Enabled and [Gameplay] An2Bombs; the ready An-2 switches both on");
             _lblHeliNote = "In front of you (Mi-8 you can fly - " + PlayerHeli.CfgBoardKey.Value + " to get in)";
             _lblAn2Note = "In front of you (repaired, fuelled, bombs aboard - " + PlayerAn2.CfgBoardKey.Value + " to get in)";

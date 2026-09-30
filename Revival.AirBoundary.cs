@@ -26,15 +26,39 @@
 //     has no collider.
 // Guide is the one entry: each aircraft asks it once per flight frame.
 //
-// THE SKIRT: static low-resolution meshes with the adjacent terrain's real
-// splat controls, albedo/normal maps and P3 canopy mip chain. The inner row
-// follows every source heightmap grid intersection; outer rows are decimated.
-// Mirrored relief fades gently into regional hills over 6 km. Built in slices
-// once the terrain and P3 paint are ready. No colliders or per-frame sampling;
-// materials use Unity's terrain lighting/fog without changing global haze.
+// THE SKIRT (Y rebuild, "lite"): four static meshes, one per side of the
+// map (its corner fan included), ONE shared material (Legacy VertexLit: one
+// pass, lights per vertex, no forward add passes) with ONE baked colour
+// texture, no shadows cast or received, no light/reflection probes. The
+// inner row follows every source heightmap grid intersection; outer rows coarsen 50 -> 400 u (the geometry is its own LOD); mirrored
+// relief fades into regional hills over 6 km. The colour texture (TexelU per
+// texel over the play rectangle) is each terrain's splat weights times the
+// mean colour of each layer (P3 canopy included), baked once on the GPU
+// (Blit + ReadPixels, like FarForest's mip averages) - the terrain's own
+// basemap look. Queue 2490 draws it after all world geometry, so the depth
+// test drops every skirt pixel the real terrain, trees or buildings cover.
+// Built in slices once the terrain and P3 paint are ready; frustum culling
+// per side. Cost model: research/edge_skirt_cost.py - 4 draws + 4 depth
+// draws, ~0.12 ms CPU per frame; GPU ~0 on foot, <= 0.33 ms looking out
+// over the edge from the air (old splat skirt there: ~34 ms modelled).
+//
+// WHY THE OLD SKIRT (W edge terrain) COST ~38 ms: it drew the terrain's own
+// splat shaders on 8-10 meshes - Standard PBR, one first/add pass per four
+// layers (5 per mesh, 40-45 in all), each sampling control + 4 albedo + 4
+// normal maps, plus a forward add pass per pixel light per pass. That ran
+// over 12 km of mesh with no basemap distance, in the terrain's own queue
+// 1900, so skirt pixels behind the real terrain could be shaded too. All
+// of it is GPU/render-thread time per pixel on screen: F6 (managed calls)
+// cannot see it and a draw count (~48 draws, ~1.5 ms) cleared it. On foot
+// the skirt covers <= 0.4 % of the screen (cheap); from the air 18-64 %
+// (modelled ~9-34 ms). The 37.9 ms reading itself is most likely the Perf
+// auto test's FIRST slot, whose ON window caught the click's transient:
+// every later window, skirt back on, read 26-30 ms (PerfBisect now leads
+// in 4 s).
+// The old [AirBoundary] Skirt key is retired (old configs carry true).
 // F6: AirBoundary.Tick (idle timer, cached pilot height lookup in Guide).
 //
-// Settings: [AirBoundary] Enabled, BufferU, WarnSeconds, Skirt.
+// Settings: [AirBoundary] Enabled, BufferU, WarnSeconds, SkirtLite.
 //
 // Seams: RevivalPlugin.Awake (BindConfig), RevivalPlugin.Update (Tick),
 // PlayerAn2.Fly / PlayerHeli.Fly (Guide), PlayerAn2.Draw / PlayerHeli.Draw
@@ -76,10 +100,13 @@ namespace NextDayRevival
             _cfgWarn = cfg.Bind(S, "WarnSeconds", 5f,
                 "Seconds of warning past the edge before the auto-turn (less when "
                 + "the speed would carry the turn past the buffer).");
-            _cfgSkirt = cfg.Bind(S, "Skirt", true,
+            // New key on purpose: every 6.62-6.64 config carries Skirt = true
+            // for the old splat skirt (~38 ms/frame); that key is ignored now.
+            _cfgSkirt = cfg.Bind(S, "SkirtLite", true,
                 "Low-poly hills and forest beyond the map's edge, so the land does "
                 + "not end in the void when seen from the air. Scenery only: no "
-                + "collision, nothing to find. Static meshes, built once after the terrain is ready.");
+                + "collision, nothing to find. Four static meshes, one plain "
+                + "material, built once after the terrain is ready.");
         }
 
         static bool On { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
@@ -252,6 +279,12 @@ namespace NextDayRevival
         const float HillU = 90f;
         const int FanSteps = 6;
         const double SliceMs = 0.35;
+        /// <summary>Colour texture resolution over the play rectangle (u per
+        /// texel; 16 u = 5.7 m, like a far basemap).</summary>
+        const float TexelU = 16f;
+        /// <summary>Last opaque queue: drawn after every world object, so
+        /// covered skirt pixels fail the depth test before shading.</summary>
+        const int SkirtQueue = 2490;
         static readonly float[] Rings = {
             -Tuck, 0f, 40f, 100f, 200f, 350f, 550f, 800f, 1150f, 1600f, 2200f,
             3000f, 4000f, 5300f, 7000f, 9200f, 12000f };
@@ -262,8 +295,6 @@ namespace NextDayRevival
             internal TerrainData D;
             internal Vector3 O, Size;
             internal float[,] H; // Unity GetHeights API is [z,x]; serialized data is x-major.
-            internal Material[] Mats;
-            internal Texture2D FlatNormal;
             internal int N;
             internal bool Contains(float x, float z)
             {
@@ -337,7 +368,6 @@ namespace NextDayRevival
         static IEnumerator _build;
         static Source[] _sources;
         static Patch[] _patches;
-        static int _revision = -1;
         static readonly Stopwatch _slice = new Stopwatch();
         static readonly Vector2[] Normals = {
             new Vector2(0f, -1f), new Vector2(1f, 0f), new Vector2(0f, 1f), new Vector2(-1f, 0f) };
@@ -380,16 +410,9 @@ namespace NextDayRevival
             if (Time.unscaledTime < _nextTry) return;
             _nextTry = Time.unscaledTime + 2f;
             Rect r = Play;
-            if (_skirt != null && _skirtRect == r)
-            {
-                // P3 quality/bench changes only rebind shared textures, never rebuild geometry.
-                if (FarForest.GroundReady && _revision != FarForest.GroundRevision)
-                {
-                    for (int i = 0; i < _sources.Length; i++) BindMaterials(_sources[i]);
-                    _revision = FarForest.GroundRevision;
-                }
-                return;
-            }
+            // Built once: P3 look/bench switches do not rebuild or rebind it
+            // (the baked layer means barely move; the bisect keeps its root).
+            if (_skirt != null && _skirtRect == r) return;
             if (!FarForest.GroundReady) return;
             Terrain[] all = Terrain.activeTerrains; // only while waiting for a world
             List<Source> sources = new List<Source>();
@@ -582,7 +605,6 @@ namespace NextDayRevival
             {
                 Source src = sources[i];
                 src.H = src.D.GetHeights(0, 0, src.N, src.N); // once; never in Guide/Tick steady state
-                src.Mats = Materials(src, owned);
                 yield return null;
             }
             double sum = 0; int count = 0;
@@ -624,83 +646,101 @@ namespace NextDayRevival
                 corner.A = corner.B = a; corner.NA = Normals[(side + 3) % 4]; corner.NB = Normals[side];
                 corner.Corner = true; corner.Src = Find(sources, a.x, a.y); patches.Add(corner);
             }
-            int vertices = 0, triangles = 0, draws = 0, submitted = 0;
+            int vertices = 0, triangles = 0, renderers = 0;
             float seamHeight = 0f, seamUV = 0f;
-            for (int part = 0; part < patches.Count; part++)
+            IEnumerator bake = Bake(r, sources, owned);
+            while (bake.MoveNext()) yield return null;
+            Material mat = LiteMaterial(owned);
+            // One mesh per side: its straight patches plus the corner fan
+            // that opens it (corner.NB is the side's normal). Patch-local
+            // V/I stay behind for the pilot height lookup.
+            for (int side = 0; side < 4; side++)
             {
-                Patch patch = patches[part];
                 List<Vector3> v = new List<Vector3>(); List<Vector3> normals = new List<Vector3>();
                 List<Vector2> uv = new List<Vector2>(); List<int> tris = new List<int>();
-                List<float> prev = null; int prevStart = 0;
-                for (int row = 0; row < Rings.Length; row++)
+                for (int part = 0; part < patches.Count; part++)
                 {
-                    List<float> at = Row(patch, row);
-                    int rowStart = v.Count;
-                    for (int c = 0; c < at.Count; c++)
+                    Patch patch = patches[part];
+                    if ((patch.NB - Normals[side]).sqrMagnitude > 0.0001f) continue;
+                    int first = v.Count;
+                    List<int> local = new List<int>();
+                    List<float> prev = null; int prevStart = 0;
+                    for (int row = 0; row < Rings.Length; row++)
                     {
-                        float t = at[c];
-                        Vector2 p = Vector2.Lerp(patch.A, patch.B, t);
-                        Vector2 n = Vector2.Lerp(patch.NA, patch.NB, t).normalized;
-                        p += n * (patch.Corner ? Mathf.Max(0f, Rings[row]) : Rings[row]);
-                        float y = Skirt(r, sources, mean, p.x, p.y);
-                        if (row == 0) y -= 5f; // covered overlap under real terrain
-                        v.Add(new Vector3(p.x, y, p.y));
-                        Vector2 mirrored = Mirror(r, p.x, p.y);
-                        Vector2 texUV = patch.Src.UV(mirrored.x, mirrored.y);
-                        uv.Add(texUV);
-                        if (row == 1)
+                        List<float> at = Row(patch, row);
+                        int rowStart = v.Count - first;
+                        for (int c = 0; c < at.Count; c++)
                         {
-                            seamHeight = Mathf.Max(seamHeight, Mathf.Abs(y - patch.Src.Height(p.x, p.y)));
-                            seamUV = Mathf.Max(seamUV, (texUV - patch.Src.UV(p.x, p.y)).magnitude);
+                            float t = at[c];
+                            Vector2 p = Vector2.Lerp(patch.A, patch.B, t);
+                            Vector2 n = Vector2.Lerp(patch.NA, patch.NB, t).normalized;
+                            p += n * (patch.Corner ? Mathf.Max(0f, Rings[row]) : Rings[row]);
+                            float y = Skirt(r, sources, mean, p.x, p.y);
+                            if (row == 0) y -= 5f; // covered overlap under real terrain
+                            v.Add(new Vector3(p.x, y, p.y));
+                            Vector2 mirrored = Mirror(r, p.x, p.y);
+                            Vector2 texUV = PlayUV(r, mirrored.x, mirrored.y);
+                            uv.Add(texUV);
+                            if (row == 1)
+                            {
+                                seamHeight = Mathf.Max(seamHeight, Mathf.Abs(y - patch.Src.Height(p.x, p.y)));
+                                seamUV = Mathf.Max(seamUV, (texUV - PlayUV(r, p.x, p.y)).magnitude);
+                            }
+                            // Exact terrain lighting normal at the seam; outer normals from cached heights.
+                            Vector3 normal;
+                            if (row <= 2)
+                            {
+                                Vector2 q = patch.Src.UV(mirrored.x, mirrored.y);
+                                normal = patch.Src.D.GetInterpolatedNormal(q.x, q.y);
+                            }
+                            else
+                            {
+                                const float dx = 5f;
+                                normal = new Vector3(Skirt(r, sources, mean, p.x - dx, p.y)
+                                    - Skirt(r, sources, mean, p.x + dx, p.y), 2f * dx,
+                                    Skirt(r, sources, mean, p.x, p.y - dx) - Skirt(r, sources, mean, p.x, p.y + dx)).normalized;
+                            }
+                            normals.Add(normal);
+                            if ((c & 31) == 0 && OverBudget()) yield return null;
                         }
-                        // Exact terrain lighting normal at the seam; outer normals from cached heights.
-                        Vector3 normal;
-                        if (row <= 2)
-                        {
-                            Vector2 q = patch.Src.UV(mirrored.x, mirrored.y);
-                            normal = patch.Src.D.GetInterpolatedNormal(q.x, q.y);
-                        }
-                        else
-                        {
-                            const float dx = 5f;
-                            normal = new Vector3(Skirt(r, sources, mean, p.x - dx, p.y)
-                                - Skirt(r, sources, mean, p.x + dx, p.y), 2f * dx,
-                                Skirt(r, sources, mean, p.x, p.y - dx) - Skirt(r, sources, mean, p.x, p.y + dx)).normalized;
-                        }
-                        normals.Add(normal);
-                        if ((c & 31) == 0 && OverBudget()) yield return null;
+                        if (prev != null) Stitch(prev, at, prevStart, rowStart, local);
+                        prev = at; prevStart = rowStart;
+                        if (OverBudget()) yield return null;
                     }
-                    if (prev != null) Stitch(prev, at, prevStart, rowStart, tris);
-                    prev = at; prevStart = rowStart;
-                    if (OverBudget()) yield return null;
+                    patch.V = v.GetRange(first, v.Count - first).ToArray(); patch.I = local.ToArray();
+                    for (int i = 0; i < local.Count; i++) tris.Add(first + local[i]);
+                    IEnumerator index = IndexPatch(r, patch);
+                    while (index.MoveNext()) yield return null;
                 }
+                if (v.Count == 0) continue;
                 Mesh mesh = new Mesh(); mesh.name = "NDR_AirSkirt";
                 owned.Assets.Add(mesh);
-                patch.V = v.ToArray(); patch.I = tris.ToArray();
-                IEnumerator index = IndexPatch(r, patch);
-                while (index.MoveNext()) yield return null;
-                mesh.vertices = patch.V; mesh.normals = normals.ToArray(); mesh.uv = uv.ToArray();
-                int[] indices = patch.I;
-                mesh.subMeshCount = patch.Src.Mats.Length;
-                for (int pass = 0; pass < mesh.subMeshCount; pass++) mesh.SetTriangles(indices, pass);
+                mesh.vertices = v.ToArray(); mesh.normals = normals.ToArray(); mesh.uv = uv.ToArray();
+                mesh.triangles = tris.ToArray();
                 mesh.RecalculateBounds(); mesh.UploadMeshData(true);
-                GameObject go = new GameObject("edge" + part); go.transform.SetParent(root.transform, false);
+                GameObject go = new GameObject("edge" + side); go.transform.SetParent(root.transform, false);
                 go.AddComponent<MeshFilter>().sharedMesh = mesh;
-                MeshRenderer mr = go.AddComponent<MeshRenderer>(); mr.sharedMaterials = patch.Src.Mats;
-                mr.shadowCastingMode = ShadowCastingMode.Off; mr.receiveShadows = true;
+                MeshRenderer mr = go.AddComponent<MeshRenderer>(); mr.sharedMaterial = mat;
+                mr.shadowCastingMode = ShadowCastingMode.Off; mr.receiveShadows = false;
                 mr.lightProbeUsage = LightProbeUsage.Off; mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
-                vertices += v.Count; triangles += tris.Count / 3; draws += mesh.subMeshCount;
-                submitted += tris.Count / 3 * mesh.subMeshCount;
+                mr.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
+                vertices += v.Count; triangles += tris.Count / 3; renderers++;
                 yield return null; // native upload boundary
             }
             _sources = sources; _patches = patches.ToArray(); _mean = mean; _skirt = root; _pending = null;
-            _revision = FarForest.GroundRevision;
             root.SetActive(true); ViewDistance.KeepVisible(root);
-            RevivalPlugin.L.LogInfo("AirBoundary: terrain skirt built - " + patches.Count + " meshes, "
-                + vertices + " vertices, " + triangles + " triangles (" + submitted + " with " + draws + " splat passes), "
-                + "seam max height step " + seamHeight.ToString("0.0000") + " u, UV step "
-                + seamUV.ToString("0.000000") + " (shared splat colours); "
+            RevivalPlugin.L.LogInfo("AirBoundary: lite skirt built - " + renderers + " renderers, 1 material ("
+                + mat.shader.name + ", queue " + mat.renderQueue + ", colour " + owned.Colour.width + "x"
+                + owned.Colour.height + "), " + vertices + " vertices, " + triangles + " triangles, "
+                + patches.Count + " lookup patches, no shadows; seam max height step "
+                + seamHeight.ToString("0.0000") + " u, UV step " + seamUV.ToString("0.000000") + "; "
                 + total.Elapsed.TotalMilliseconds.ToString("0.0") + " ms elapsed (sliced).");
+        }
+
+        /// <summary>Colour texture coordinate: the play rectangle, 0..1.</summary>
+        static Vector2 PlayUV(Rect r, float x, float z)
+        {
+            return new Vector2(Mathf.Clamp01((x - r.xMin) / r.width), Mathf.Clamp01((z - r.yMin) / r.height));
         }
 
         // The first two rows include every source cell boundary, not a 50 u
@@ -743,65 +783,132 @@ namespace NextDayRevival
             }
         }
 
-        static Material[] Materials(Source src, AirSkirtAssets owned)
+        /// <summary>The one skirt material: a single-pass shader with one
+        /// texture. Legacy VertexLit first: one pass, all lights per vertex
+        /// (no forward add passes), one texture fetch per pixel; it is
+        /// Legacy Diffuse's fallback, so it ships wherever that one does.
+        /// Then Mobile/Diffuse (sun per pixel, noforwardadd); Legacy Diffuse
+        /// last (adds a pass per pixel light near the edge).</summary>
+        static Material LiteMaterial(AirSkirtAssets owned)
         {
-            if (owned.FlatNormal == null)
-            {
-                // Desktop terrain normal decoding accepts DXT5nm (AG) and RG.
-                // Both decode this packed pixel to (0,0,1). Null is white,
-                // which would tilt layers lacking a normal map at the seam.
-                Texture2D flat = new Texture2D(1, 1, TextureFormat.RGBA32, false, true);
-                flat.name = "NDR_EdgeFlatNormal";
-                flat.SetPixel(0, 0, new Color(1f, 0.5f, 1f, 0.5f));
-                flat.Apply(false, true);
-                owned.FlatNormal = flat; owned.Assets.Add(flat);
-            }
-            src.FlatNormal = owned.FlatNormal;
-            int passes = (src.D.alphamapLayers + 3) / 4;
-            Material[] mats = new Material[passes];
-            bool diffuse = src.T.materialType == Terrain.MaterialType.BuiltInLegacyDiffuse;
-            string kind = diffuse ? "Diffuse" : "Standard";
-            for (int pass = 0; pass < passes; pass++)
-            {
-                Shader shader = Shader.Find(pass == 0 ? "Nature/Terrain/" + kind
-                    : "Hidden/TerrainEngine/Splatmap/" + kind + "-AddPass");
-                if (shader == null || !shader.isSupported) throw new InvalidOperationException("Terrain splat shader missing: " + kind);
-                Material mat = new Material(shader); mat.name = "NDR_EdgeSplat";
-                mat.enableInstancing = false; // vertices are already real mesh positions
-                mat.renderQueue = pass == 0 ? 1900 : 1901;
-                mats[pass] = mat; owned.Assets.Add(mat);
-            }
-            src.Mats = mats; BindMaterials(src); return mats;
+            Shader shader = Shader.Find("Legacy Shaders/VertexLit");
+            if (shader == null || !shader.isSupported) shader = Shader.Find("Mobile/Diffuse");
+            if (shader == null || !shader.isSupported) shader = Shader.Find("Legacy Shaders/Diffuse");
+            if (shader == null) throw new InvalidOperationException("No plain diffuse shader for the skirt");
+            Material mat = new Material(shader); mat.name = "NDR_EdgeLite";
+            mat.mainTexture = owned.Colour;
+            if (mat.HasProperty("_Color")) mat.color = Color.white;
+            if (mat.HasProperty("_SpecColor")) mat.SetColor("_SpecColor", Color.black); // VertexLit: no highlights
+            if (mat.HasProperty("_Emission")) mat.SetColor("_Emission", Color.black);
+            mat.enableInstancing = false;
+            mat.renderQueue = SkirtQueue;
+            owned.Assets.Add(mat);
+            return mat;
         }
 
-        static void BindMaterials(Source src)
+        /// <summary>Bakes owned.Colour over the play rectangle: per texel the
+        /// terrain's splat weights times each layer's mean colour. Control
+        /// maps and layer textures are read on the GPU (Blit + ReadPixels),
+        /// so non-readable textures work. Once per build, sliced.</summary>
+        static IEnumerator Bake(Rect r, Source[] sources, AirSkirtAssets owned)
         {
-            SplatPrototype[] sp = src.D.splatPrototypes;
-            Texture2D[] control = src.D.alphamapTextures;
-            for (int pass = 0; pass < src.Mats.Length; pass++)
+            int w = Mathf.Clamp(Mathf.CeilToInt(r.width / TexelU), 16, 1024);
+            int h = Mathf.Clamp(Mathf.CeilToInt(r.height / TexelU), 16, 1024);
+            Color32[] px = new Color32[w * h];
+            Color32 fallback = new Color32(84, 92, 60, 255);
+            for (int i = 0; i < px.Length; i++) px[i] = fallback;
+            for (int s = 0; s < sources.Length; s++)
             {
-                Material mat = src.Mats[pass];
-                mat.SetTexture("_Control", pass < control.Length ? control[pass] : Texture2D.blackTexture);
-                bool normal = false;
-                for (int k = 0; k < 4; k++)
+                Source src = sources[s];
+                // Play texels whose centre lies on this terrain.
+                int x0 = Mathf.Clamp(Mathf.CeilToInt((src.O.x - r.xMin) / r.width * w - 0.5f), 0, w);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((src.O.x + src.Size.x - r.xMin) / r.width * w - 0.5f), 0, w);
+                int z0 = Mathf.Clamp(Mathf.CeilToInt((src.O.z - r.yMin) / r.height * h - 0.5f), 0, h);
+                int z1 = Mathf.Clamp(Mathf.CeilToInt((src.O.z + src.Size.z - r.yMin) / r.height * h - 0.5f), 0, h);
+                int sw = x1 - x0, sh = z1 - z0;
+                if (sw <= 0 || sh <= 0) continue;
+                SplatPrototype[] sp = src.D.splatPrototypes;
+                Color[] layer = new Color[sp.Length];
+                for (int l = 0; l < sp.Length; l++)
                 {
-                    int l = pass * 4 + k;
-                    SplatPrototype p = l < sp.Length ? sp[l] : null;
-                    string suffix = k.ToString();
-                    mat.SetTexture("_Splat" + suffix, p == null || p.texture == null ? Texture2D.whiteTexture : p.texture);
-                    Vector2 tile = p == null ? Vector2.one : p.tileSize;
-                    mat.SetTextureScale("_Splat" + suffix, new Vector2(src.Size.x / Mathf.Max(0.01f, tile.x),
-                        src.Size.z / Mathf.Max(0.01f, tile.y)));
-                    mat.SetTextureOffset("_Splat" + suffix, p == null ? Vector2.zero :
-                        new Vector2(p.tileOffset.x / Mathf.Max(0.01f, tile.x), p.tileOffset.y / Mathf.Max(0.01f, tile.y)));
-                    mat.SetTexture("_Normal" + suffix, p == null || p.normalMap == null ? src.FlatNormal : p.normalMap);
-                    mat.SetFloat("_NormalScale" + suffix, 1f);
-                    mat.SetFloat("_Metallic" + suffix, p == null ? 0f : p.metallic);
-                    mat.SetFloat("_Smoothness" + suffix, p == null ? 0f : p.smoothness);
-                    if (p != null && p.normalMap != null) normal = true;
+                    layer[l] = Mean(sp[l] == null ? null : sp[l].texture, fallback);
+                    yield return null; // one small GPU readback per frame
                 }
-                if (normal) { mat.EnableKeyword("_NORMALMAP"); mat.EnableKeyword("_TERRAIN_NORMAL_MAP"); }
-                else { mat.DisableKeyword("_NORMALMAP"); mat.DisableKeyword("_TERRAIN_NORMAL_MAP"); }
+                float[] acc = new float[sw * sh * 3];
+                Texture2D[] control = src.D.alphamapTextures;
+                // uv = texel * scale + offset maps an sw x sh target onto the
+                // terrain's control map exactly where those play texels lie.
+                Vector2 scale = new Vector2(sw * r.width / w / src.Size.x, sh * r.height / h / src.Size.z);
+                Vector2 offset = new Vector2((r.xMin + x0 * r.width / w - src.O.x) / src.Size.x,
+                    (r.yMin + z0 * r.height / h - src.O.z) / src.Size.z);
+                for (int c = 0; c < control.Length; c++)
+                {
+                    if (control[c] == null) continue;
+                    Color32[] weights = Read(control[c], sw, sh, scale, offset, true);
+                    for (int i = 0; i < weights.Length; i++)
+                    {
+                        Color32 wt = weights[i];
+                        for (int k = 0; k < 4; k++)
+                        {
+                            int l = c * 4 + k;
+                            if (l >= layer.Length) break;
+                            float f = (k == 0 ? wt.r : k == 1 ? wt.g : k == 2 ? wt.b : wt.a) / 255f;
+                            if (f <= 0f) continue;
+                            acc[i * 3] += f * layer[l].r; acc[i * 3 + 1] += f * layer[l].g; acc[i * 3 + 2] += f * layer[l].b;
+                        }
+                        if ((i & 1023) == 0 && OverBudget()) yield return null;
+                    }
+                    yield return null;
+                }
+                for (int z = 0; z < sh; z++)
+                    for (int x = 0; x < sw; x++)
+                    {
+                        int i = z * sw + x;
+                        px[(z0 + z) * w + x0 + x] = new Color32((byte)(Mathf.Clamp01(acc[i * 3]) * 255f),
+                            (byte)(Mathf.Clamp01(acc[i * 3 + 1]) * 255f), (byte)(Mathf.Clamp01(acc[i * 3 + 2]) * 255f), 255);
+                    }
+                yield return null;
+            }
+            Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, true);
+            tex.name = "NDR_EdgeColour";
+            tex.wrapMode = TextureWrapMode.Clamp; tex.filterMode = FilterMode.Bilinear; tex.anisoLevel = 0;
+            tex.SetPixels32(px); tex.Apply(true, true); // mips on, CPU copy freed
+            owned.Colour = tex; owned.Assets.Add(tex);
+        }
+
+        /// <summary>Mean RGB of a (possibly non-readable) texture: Blit to
+        /// 16 x 16, the GPU samples the matching small mip. Alpha is ignored
+        /// (terrain layers keep smoothness there).</summary>
+        static Color Mean(Texture tex, Color32 fallback)
+        {
+            if (tex == null) return fallback;
+            Color32[] px = Read(tex, 16, 16, Vector2.one, Vector2.zero, false);
+            double r = 0, g = 0, b = 0;
+            for (int i = 0; i < px.Length; i++) { r += px[i].r; g += px[i].g; b += px[i].b; }
+            double n = px.Length * 255.0;
+            return new Color((float)(r / n), (float)(g / n), (float)(b / n), 1f);
+        }
+
+        /// <summary>tex resampled to w x h (uv * scale + offset); linear for
+        /// weight data (control maps), sRGB-default for colours.</summary>
+        static Color32[] Read(Texture tex, int w, int h, Vector2 scale, Vector2 offset, bool linear)
+        {
+            RenderTexture prev = RenderTexture.active;
+            RenderTexture rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32,
+                linear ? RenderTextureReadWrite.Linear : RenderTextureReadWrite.Default);
+            Texture2D img = new Texture2D(w, h, TextureFormat.RGBA32, false, linear);
+            try
+            {
+                Graphics.Blit(tex, rt, scale, offset);
+                RenderTexture.active = rt;
+                img.ReadPixels(new Rect(0f, 0f, w, h), 0, 0);
+                return img.GetPixels32();
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+                UnityEngine.Object.DestroyImmediate(img);
             }
         }
     }
@@ -810,7 +917,7 @@ namespace NextDayRevival
     internal sealed class AirSkirtAssets : MonoBehaviour
     {
         internal readonly List<UnityEngine.Object> Assets = new List<UnityEngine.Object>();
-        internal Texture2D FlatNormal;
+        internal Texture2D Colour;
         void OnDestroy()
         {
             for (int i = 0; i < Assets.Count; i++) if (Assets[i] != null) UnityEngine.Object.Destroy(Assets[i]);

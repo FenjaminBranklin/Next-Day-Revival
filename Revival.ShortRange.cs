@@ -50,8 +50,9 @@ namespace NextDayRevival
 
         internal static void Control(Flak.Gun g, float dt)
         {
-            bool merc = MercAA.Gun(g.Index) != null;
-            bool gunner = merc || Flak.Up(g.Gunner), loader = merc || Flak.Up(g.Loader);
+            MercAAPost operatorMerc = MercAA.Gun(g.Index);
+            if (operatorMerc != null && operatorMerc.Peaceful && !Flak.Up(g.Gunner)) { FlakFire.Release(g); return; }
+            bool gunner = MercAA.Held(g.Index) != null || Flak.Up(g.Gunner), loader = MercAA.Held(g.Index + 7) != null || Flak.Up(g.Loader);
             if (!gunner && !loader) { FlakFire.Release(g); return; }
             if (!g.Laying)
             {

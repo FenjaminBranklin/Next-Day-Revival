@@ -4,7 +4,7 @@
 //   CORRIDOR   origin (where the attackers stood) -> objective. Merc k of n
 //              has his own lane abreast (7 m apart) and his own hold spot and
 //              watch sector at the objective - never one point for all.
-//   ADVANCE    no contact in the group: the line walks its lanes in steps of
+//   ADVANCE    no contact in the group: the line sprints its lanes in steps of
 //              30 m, nobody more than 14 m ahead of the slowest. Contact in
 //              the last 15 s (or a hit): fire and movement - the odd or the
 //              even half runs a bound 30 m past the others while they fight
@@ -14,9 +14,9 @@
 //              on to a position he can fire from. A single merc fights, then
 //              advances.
 //   FIGHT      the M2/M3 brain (with the merc-combat-response opening burst
-//              and lane clearance) takes over whenever Gate lets it: inside
-//              the corridor always, outside it only for an immediate threat
-//              (in sight within 40 m, or a hit). Two fights in a row without a round start an
+//              and lane clearance) takes over for any visible enemy, even
+//              outside the corridor. An unseen, safe new order starts moving
+//              immediately in short M1 cover hops. Two fights without a round start an
 //              8 s push in which only a target in sight (or a hit) stops him:
 //              no advance/cover cycle without shots.
 //   SEARCH     a fight that saw its threat ends in a short local search:
@@ -38,6 +38,25 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
+    /// <summary>Y S2: merc-only contact timing and short, immediate advances.</summary>
+    internal static class MercAssault
+    {
+        internal const float Hop = 24f;           // 8.6 m between cover decisions
+        internal const float Precise = 2f;        // 0.7 m at the assigned hold spot
+        internal const float CoverEvery = 0.5f;   // at most 2 cover queries/s per mover
+        internal static float ScanGap(float jitter) { return 0.125f + jitter * 0.025f; }
+        internal static float LosGap(float jitter) { return 0.15f + jitter * 0.03f; }
+        internal static float Reach(float weapon, float ordinary)
+        { return Math.Max(weapon * 1.2f, ordinary * 1.4f); }
+        internal static float React(float grade) { return 0.32f - Math.Max(0f, Math.Min(1f, grade)) * 0.12f; }
+
+        internal static Vector3 HopTo(Vector3 me, Vector3 goal)
+        {
+            float d = MercAttackGeo.Flat(goal - me);
+            return d <= Hop ? goal : me + (goal - me) * (Hop / d);
+        }
+    }
+
     /// <summary>ATTACK geometry on the ground plane.</summary>
     internal static class MercAttackGeo
     {
@@ -45,7 +64,7 @@ namespace NextDayRevival
         internal const float CorridorMin = 84f;     // at least 30 m either side of the line
         internal const float Immediate = 112f;      // 40 m: answered anywhere
         internal const float Bound = 84f;           // 30 m: one bound / one advance step
-        internal const float Arrive = 8f;           // at his spot (3 m)
+        internal const float Arrive = MercAssault.Precise;
         internal const float Lead = 39.2f;          // 14 m: the line keeps together
         internal const float SectorDeg = 25f;       // watch sectors fan out by this
 
@@ -148,6 +167,7 @@ namespace NextDayRevival
         public bool Target, Sees;       // he has a target / a line of fire to it
         public Vector3 TargetAt;
         public bool Danger;             // a grenade or blast beside him
+        public bool Protected;          // low HP, reload or exposure: M2/M3 keeps control
     }
 
     /// <summary>What he does out of a fight until the next step.</summary>
@@ -181,6 +201,7 @@ namespace NextDayRevival
         readonly bool[] _arrived = new bool[Max];
         readonly float[] _mark = new float[Max];     // along at his last progress
         readonly float[] _progAt = new float[Max];
+        readonly float[] _coverAt = new float[Max]; // real covering fire, not just a sighting
         internal float LastContact = -1000f;
         internal float LastSight = -1000f;          // a member had a target in sight (covering fire is possible)
         internal int Moving;                        // bounding: the half (k & 1) that runs
@@ -192,7 +213,7 @@ namespace NextDayRevival
         internal MercAttackTeam(int size)
         {
             Size = Math.Max(1, Math.Min(Max, size));
-            for (int k = 0; k < Max; k++) _seen[k] = -1000f;
+            for (int k = 0; k < Max; k++) { _seen[k] = -1000f; _coverAt[k] = -1000f; }
         }
 
         internal bool Contact(float now) { return now - LastContact < ContactKeep; }
@@ -202,7 +223,11 @@ namespace NextDayRevival
             if (k < 0 || k >= Max) return;
             if (now - _seen[k] > Active || along > _mark[k] + 4f || along < _mark[k] - 20f) { _mark[k] = along; _progAt[k] = now; }
             _along[k] = along; _seen[k] = now; _phase[k] = phase;
-            if (contact) LastContact = now;
+            if (contact)
+            {
+                if (!Contact(now)) SwitchAt = now + BoundSeconds;
+                LastContact = now;
+            }
             if (sight) LastSight = now;
             // Complete: every active member holds, nobody fought for a while.
             bool all = true;
@@ -247,6 +272,26 @@ namespace NextDayRevival
 
         internal void Arrived(int k) { if (k >= 0 && k < Max) _arrived[k] = true; }
 
+        internal void Covering(int k, float now, bool firing)
+        {
+            if (k < 0 || k >= Size) return;
+            _coverAt[k] = firing ? now : -1000f;
+        }
+
+        internal bool Covered(int k, float now)
+        {
+            for (int i = 0; i < Size; i++)
+                if (i != k && (i & 1) != Moving && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) return true;
+            return false;
+        }
+
+        internal bool HasCover(float now)
+        {
+            for (int i = 0; i < Size; i++)
+                if ((i & 1) != Moving && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) return true;
+            return false;
+        }
+
         /// <summary>Is k in the running half of a bound under contact, not at
         /// his bound yet, with an active mate to cover him while someone has
         /// the enemy in sight?</summary>
@@ -255,7 +300,7 @@ namespace NextDayRevival
             if (Size < 2 || k < 0 || k >= Max || !Contact(now) || now - LastSight > 2f || (k & 1) != Moving || _arrived[k]) return false;
             byte p = _phase[k];
             if (p == MercAttackRun.Holding || p == MercAttackRun.Stalled || p == MercAttackRun.Search) return false;
-            return WatchFront(now) >= 0f;
+            return WatchFront(now) >= 0f && Covered(k, now);
         }
 
         /// <summary>Swap the halves when every active runner is at his bound
@@ -293,6 +338,7 @@ namespace NextDayRevival
         internal const float SearchReach = 56f;     // 20 m
         internal const float LookSeconds = 4f;
         internal const float HitKeep = 3f;
+        internal const float LaunchSeconds = 0.8f; // unseen old fights must not delay a new attack
 
         // News for the owner (the adapter toasts and clears them).
         internal const byte NewsArrived = 1, NewsStalled = 2, NewsComplete = 4;
@@ -301,6 +347,9 @@ namespace NextDayRevival
         internal MercOrder For;
         internal Vector3 HoldAt, HoldFace;
         internal bool Grounded;          // the adapter put HoldAt on the ground (once per order)
+        internal Vector3 MoveAt;         // adapter's cached M1 cover waypoint
+        internal bool HaveMove, MoveCovered;
+        internal float NextCover;
         internal byte News;
         // Counters (F8, the offline check).
         internal int Fights, DryFights, Pushes, Searches, Stalls, Steps, Bounds;
@@ -310,6 +359,7 @@ namespace NextDayRevival
         bool _wasFighting, _haveThreat, _arrivedOnce, _primed, _leftForBound;
         int _shotsAtStart, _hits, _dry;
         float _fightStart, _threatAt, _hitAt = -1000f, _pushUntil, _searchUntil, _lookUntil;
+        float _launchUntil;
         Vector3 _threat, _searchAt;
         byte _resume;
 
@@ -321,6 +371,8 @@ namespace NextDayRevival
             Phase = Idle; For = null; News = 0; _primed = false; _leftForBound = false;
             _stalls = 0; _dry = 0; _wasFighting = false; _haveThreat = false; _arrivedOnce = false;
             _pushUntil = 0f; _searchUntil = 0f; _lookUntil = 0f; _lastStep = 0f; _stepTime = 0f;
+            HaveMove = false; MoveCovered = false; NextCover = 0f;
+            _launchUntil = 0f;
         }
 
         /// <summary>A new order (or the first step of one): his hold spot and
@@ -335,6 +387,7 @@ namespace NextDayRevival
             Phase = Advance;
             _bestAt = 0f;
             _budget = 120f + 0.5f * MercAttackGeo.Length(o);
+            _launchUntil = now + LaunchSeconds;
         }
 
         MercAttackTeam Team(MercOrder o) { return o.Team as MercAttackTeam; }
@@ -363,22 +416,24 @@ namespace NextDayRevival
                 team.Report(o.K, now, MercAttackGeo.Along(o, i.Me), Phase, i.Fighting || now - _hitAt < HitKeep, i.Target && i.Sees);
 
             bool hit = now - _hitAt < HitKeep;
-            // An immediate threat: in sight within 40 m (56 m to stay in a
-            // fight - no flicker at the edge).
-            bool near = i.Target && i.Sees && MercAttackGeo.Flat(i.TargetAt - i.Me)
-                <= (i.Fighting ? MercAttackGeo.Immediate * 1.4f : MercAttackGeo.Immediate);
-            if (near || i.Danger) return true;
+            // A visible hostile always interrupts the advance, even outside
+            // the corridor and beyond the old 40 m gate. Safety shapes the fight.
+            if ((i.Target && i.Sees) || i.Danger || i.Protected || hit) return true;
+            if (now < _launchUntil)
+            {
+                if (i.Fighting) _leftForBound = true; // not a dry fight or a search
+                return false;
+            }
             // Fire and movement: whoever has a target in sight shoots (2.5 s
             // of hysteresis); a runner without a line of fire leaves the
-            // fight to his mates' cover and runs his bound - a hit does not
-            // stop him, he is moving to a position he can fire from.
+            // fight to his mates' actual covering fire and runs his bound.
+            // Hits and protected states keep the safety loop above in control.
             bool sighted = i.Target && (i.Sees || (i.Fighting && now - _threatAt < 2.5f));
             if (!sighted && team != null && team.Runner(o.K, now) && MercAttackGeo.Inside(o, i.Me, 20f))
             {
                 if (i.Fighting && !_leftForBound) { _leftForBound = true; Bounds++; }
                 return false;
             }
-            if (hit) return true;
             // Outside the corridor only the immediate threat is answered: the
             // way back in comes first.
             if (!MercAttackGeo.Inside(o, i.Me, 20f)) return false;
@@ -470,7 +525,7 @@ namespace NextDayRevival
             if (Phase == Holding)
             {
                 // Pulled off his spot by a fight or a search: back to it.
-                if (MercAttackGeo.Flat(HoldAt - me) > MercAttackGeo.Arrive * 2f)
+                if (MercAttackGeo.Flat(HoldAt - me) > MercAttackGeo.Arrive)
                 {
                     a.Act = MercAttackAct.MoveTo; a.Dest = HoldAt; a.Run = false;
                     return;
@@ -493,7 +548,7 @@ namespace NextDayRevival
             float goalAlong;
             bool run;
             bool wait = false;
-            if (team != null && team.Size >= 2 && contact)
+            if (team != null && team.Size >= 2 && contact && team.HasCover(now))
             {
                 // Bounding overwatch.
                 team.MaybeSwap(now);
@@ -523,7 +578,7 @@ namespace NextDayRevival
                 float rear = team != null ? team.Rear(now, along) : along;
                 wait = team != null && along > rear + MercAttackGeo.Lead && along < len - MercAttackGeo.Arrive;
                 goalAlong = Math.Min(len, along + MercAttackGeo.Bound);
-                run = MercAttackGeo.Off(o, me) > 45f;
+                run = true; // execute immediately; cover waypoints shape the route
             }
             Phase = Advance;
             if (wait)

@@ -293,12 +293,13 @@ def main():
         assert 'OrdnanceBlast.Enqueue(' in source
         assert 'Mortar.Sweep(' not in source
         assert 'FactionShield.Arm(' not in source
-    assert 'QueueBlast(point, radius);' in method(an2, 'static void Burst(')
-    assert 'QueueBlast(point, radius);' in method(an2, 'static void RemoteBurst(')
+    assert 'QueueBlast(point, radius, kg);' in method(an2, 'static void Burst(')
+    assert 'QueueBlast(point, radius, kg);' in method(an2, 'static void RemoteBurst(')
     assert 'OrdnanceBlast.EnqueuePlayers(' in method(an2, 'static void Burst(')
     assert 'OrdnanceBlast.EnqueuePlayers(' not in method(an2, 'static void RemoteBurst(')
     assert 'f[5] < 0.5f && RevivalTroopInsertion.MasterClient()' in an2  # dud excluded
-    assert 'Net.Send(new float[] { 1f, id, point.x, point.y, point.z, dud ? 1f : 0f }, true)' in an2
+    assert 'Net.Send(new float[] { 1f, id, point.x, point.y, point.z, dud ? 1f : 0f, kg }, true)' in an2
+    assert 'RemoteBurst(new Vector3(f[2], f[3], f[4]), An2BombLoad.KgAt(f, 6))' in an2  # Y B4: the dropper's mass
     assert 'Burst(b.Impact, master);' in air and 'OrdnanceBlast.RadiusForMass(250f)' in air
     assert 'BurstFx.Play(at);' in method(air, 'static void Burst(')
     assert 'if (!mine) return;' in method(kat, 'internal static void Burst(')

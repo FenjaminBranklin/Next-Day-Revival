@@ -2044,8 +2044,9 @@ namespace NextDayRevival
 
         internal static void Control(Flak.Gun g, float dt)
         {
-            bool merc = MercAA.Gun(g.Index) != null;
-            bool gunner = merc || Flak.Up(g.Gunner), loader = merc || Flak.Up(g.Loader);
+            MercAAPost operatorMerc = MercAA.Gun(g.Index);
+            if (operatorMerc != null && operatorMerc.Peaceful && !Flak.Up(g.Gunner)) { Release(g); return; }
+            bool gunner = MercAA.Held(g.Index) != null || Flak.Up(g.Gunner), loader = MercAA.Held(g.Index + 7) != null || Flak.Up(g.Loader);
             if (!gunner && !loader) { Release(g); return; }
             if (!g.Laying)
             {
@@ -2509,7 +2510,7 @@ namespace NextDayRevival
                 if (d.sqrMagnitude > reach * reach) continue;
                 _near = g;
                 if (!AirDefenceDamage.Alive(g.Index)) _nearWhy = AirDefenceDamage.DestroyedPrompt;
-                else if (Flak.Up(g.Gunner) || Flak.Up(g.Loader) || MercAA.Gun(g.Index) != null) _nearWhy = "The crew is at this gun.";
+                else if (Flak.Up(g.Gunner) || Flak.Up(g.Loader)) _nearWhy = "The crew is at this gun.";
                 else if (Time.time < g.ClaimedUntil) _nearWhy = "Another player is at this gun.";
                 break;
             }

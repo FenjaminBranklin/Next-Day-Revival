@@ -540,11 +540,7 @@ namespace NextDayRevival
                     return;
                 }
                 Transform tr = _heli.transform;
-                _body.position = tr.position + tr.rotation * (Seat(_seat) * K);
-                Vector3 dir = tr.forward;
-                dir.y = 0f;
-                if (dir.sqrMagnitude > 0.000001f)
-                    _body.rotation = Quaternion.LookRotation(dir.normalized, Vector3.up);
+                SeatBinding.BindSeat(_body, SeatBinding.AircraftSeat(tr, false, _seat), tr);
                 // THE CAMERA RIG HANGS UNDER THE BODY (CameraTPSController
                 // finds PlayerStates with GetComponentInParent, IL 2026-09-28).
                 // CameraOwner.LateTick placed the camera before this, so moving
@@ -872,7 +868,7 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("PlayerHeli: seated in the cabin of "
                     + view + ", seat " + _seat + ".");
             }
-            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f }, true);
+            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f, _seat }, true);
         }
 
         /// <summary>
@@ -1267,6 +1263,7 @@ namespace NextDayRevival
             _heli = null;
             _pilot = false;
             _seat = 0;
+            SeatBinding.Detach(_body);
             _body = null;
             _hadBody = false;
             _vel = Vector3.zero;
@@ -1281,6 +1278,7 @@ namespace NextDayRevival
         /// the fuselage he was riding in.</summary>
         static void Ground(GameObject go)
         {
+            SeatBinding.Detach(_body);
             if (_body == null || go == null) return;
             Transform tr = go.transform;
             // The door is on the left, the same side the troop squad uses.
@@ -1654,7 +1652,7 @@ namespace NextDayRevival
             _nextHeartbeat = Time.time + 2f;
             int view = ViewId(_heli);
             if (view == 0) return;
-            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f }, false);
+            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f, _seat }, false);
         }
 
 
@@ -2083,6 +2081,7 @@ namespace NextDayRevival
                 // skids buries half of itself in the ground.
                 FireEffect.SpawnHeliBlast(where + Vector3.up * (1.5f * K), 22f);
                 if (!FireEffect.SpawnHeliFire(go)) FireEffect.SpawnWreck(go, false);
+                CombatLoad.Wreck(go);
                 HeliCrashSound.Play(where);
             }
             catch (Exception ex)
@@ -2626,6 +2625,8 @@ namespace NextDayRevival
         /// is the pilot's; the rest is the cabin, two files down both sides. The
         /// origin is at gear level, x 0.9 is the fuselage centre line and +z is
         /// the nose - all three measured for the troop landings.</summary>
+        internal static Vector3 CabinSeatLocal(int index) { return Seat(index); }
+
         static Vector3 Seat(int index)
         {
             float x = CfgSeatSide == null ? 0.9f : CfgSeatSide.Value;
@@ -3007,6 +3008,7 @@ namespace NextDayRevival
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
                         AirPilot.Board(ByView(view), sender, f);
+                        SeatBinding.AircraftBoard(ByView(view), sender, f, false);
                         return;
                     }
 

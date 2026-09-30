@@ -449,11 +449,7 @@ namespace NextDayRevival
                 if (_body != null) _hadBody = true;
                 if (_body == null) return;
                 Transform tr = _plane.transform;
-                _body.position = tr.position + tr.rotation * (An2Model.Seat(_seat) * K);
-                Vector3 dir = tr.forward;
-                dir.y = 0f;
-                if (dir.sqrMagnitude > 0.000001f)
-                    _body.rotation = Quaternion.LookRotation(dir.normalized, Vector3.up);
+                SeatBinding.BindSeat(_body, SeatBinding.AircraftSeat(tr, true, _seat), tr);
                 // The camera rig is a child of the body (PlayerHeli.LateFrame
                 // has the IL): seating the body dragged the camera that
                 // CameraOwner.LateTick had already placed. Place it again, last.
@@ -1511,7 +1507,7 @@ namespace NextDayRevival
                 Hint(Text.Seated(), 5f);
                 RevivalPlugin.L.LogInfo("PlayerAn2: seated in the cabin of " + view + ".");
             }
-            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f }, true);
+            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f, _seat }, true);
         }
 
         /// <summary>Get out. Always runs to the end: the camera and the body
@@ -1550,6 +1546,7 @@ namespace NextDayRevival
                 _plane = null;
                 _pilot = false;
                 _seat = -1;
+                SeatBinding.Detach(_body);
                 _body = null;
                 _hadBody = false;
                 _vel = Vector3.zero;
@@ -1569,6 +1566,7 @@ namespace NextDayRevival
         /// lower wing, onto the ground.</summary>
         static void Ground(GameObject go)
         {
+            SeatBinding.Detach(_body);
             if (_body == null || go == null) return;
             Vector3 outside = DoorOf(go);
             if (Airborne(go)) { _body.position = outside; return; }
@@ -1761,6 +1759,7 @@ namespace NextDayRevival
                 anchor.transform.SetParent(tr, false);
                 anchor.transform.localPosition = new Vector3(-2.5f, 0.6f, -8.5f);
                 if (!FireEffect.SpawnHeliFire(anchor)) FireEffect.SpawnWreck(go, false);
+                CombatLoad.Wreck(go);
                 HeliCrashSound.Play(where);
                 AirEvents.Burned(go);               // N11: the Tu-95 wreck, its loot
             }
@@ -1906,7 +1905,7 @@ namespace NextDayRevival
             _nextHeartbeat = Time.time + 2f;
             int view = ViewId(_plane);
             if (view == 0) return;
-            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f }, false);
+            Net.Send(Net.Aboard, new float[] { view, 1f, _pilot ? 1f : 0f, _seat }, false);
         }
 
         /// <summary>The host tells everybody, every five seconds, which engines
@@ -2488,6 +2487,7 @@ namespace NextDayRevival
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
                         AirPilot.Board(ByView(view), sender, f);
+                        SeatBinding.AircraftBoard(ByView(view), sender, f, true);
                         return;
                     }
                     if (kind == EngineState)

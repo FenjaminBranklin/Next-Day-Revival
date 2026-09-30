@@ -747,21 +747,23 @@ namespace NextDayRevival
         }
 
         /// <summary>Every client, late in the frame: each man on his seat,
-        /// upright on the hull's heading, his own navigation held off.</summary>
+        /// with the hull's full attitude, his own navigation held off.</summary>
         static void Halten(Hull h)
         {
-            Vector3 dir = h.Root.forward;
-            dir.y = 0f;
-            Quaternion rot = dir.sqrMagnitude < 0.000001f
-                ? Quaternion.Euler(0f, h.Root.eulerAngles.y, 0f)
-                : Quaternion.LookRotation(dir.normalized, Vector3.up);
-            if (Steht(h.Gunner)) Setzen(h, h.Gunner, Platz(h, Gepard.GunnerSeat), rot);
+            Quaternion rot = h.Root.rotation;
+            if (Steht(h.Gunner))
+            {
+                Setzen(h, h.Gunner, Platz(h, Gepard.GunnerSeat), rot);
+                SeatBinding.BindSeat(h.Gunner.transform, h.Seats.GetChild(Gepard.GunnerSeat), h.Root);
+            }
+            else if (h.Gunner != null) SeatBinding.Detach(h.Gunner.transform);
             int k = 0;
             for (int i = 0; i < h.Crew.Count && k < CrewSeats.Length; i++)
             {
                 Component ai = h.Crew[i];
-                if (!Steht(ai)) continue;
+                if (!Steht(ai)) { if (ai != null) SeatBinding.Detach(ai.transform); continue; }
                 Setzen(h, ai, Platz(h, CrewSeats[k]), rot);
+                SeatBinding.BindSeat(ai.transform, h.Seats.GetChild(CrewSeats[k]), h.Root);
                 k++;
             }
         }
@@ -894,6 +896,7 @@ namespace NextDayRevival
             {
                 Component ai = h.Men[i];
                 if (ai == null) continue;
+                SeatBinding.Detach(ai.transform);
                 Vector3 at = ai.transform.position;
                 // Out of the hatch onto the ground: only the machine that
                 // runs the man moves him; everybody else gets the move from

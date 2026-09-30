@@ -291,17 +291,84 @@ namespace NextDayRevival
                 return;
             }
 
-            GameObject root = new GameObject("NDR Feuerball");
-            root.transform.position = point;
+            PooledBlast(point, r, add, blend, flame, smoke);
 
-            Ball(root, r, add, flame);
-            Zungen(root, r, add, flame);
-            Funken(root, r, add, flame);
-            Rauch(root, r, blend, smoke);
-            if (Anim.Lights) Blitz(root, r);   // NDR P9: [Effects] ExplosionLights
-            Fx.ApplyAll(root);                 // NDR P9: [Effects] ParticleDensity
+        }
 
-            UnityEngine.Object.Destroy(root, 8f);
+        sealed class BlastLease
+        {
+            internal GameObject Root;
+            internal ParticleSystem[] Systems;
+            internal float[] Sizes, Speeds, Radii;
+            internal Light Flash;
+            internal float At;
+        }
+
+        // Four normal and four helicopter bursts. Reuse interrupts the oldest
+        // visual, never its independently queued gameplay damage.
+        static readonly BlastLease[] _blastPool = new BlastLease[CombatLoadPolicy.BlastCap];
+        static int _normalBlast, _heliBlast;
+        static void PooledBlast(Vector3 point, float r, Material add, Material blend, float flame, float smoke)
+        {
+            if (!CombatLoad.LocalNear(point, 1400f)) return;
+            bool heli = flame > 1f;
+            int slot = heli ? 4 + (_heliBlast++ & 3) : (_normalBlast++ & 3);
+            BlastLease v = _blastPool[slot];
+            if (v == null || v.Root == null)
+            {
+                v = new BlastLease();
+                v.Root = new GameObject("NDR pooled blast");
+                Ball(v.Root, 1f, add, flame);
+                Zungen(v.Root, 1f, add, flame);
+                Funken(v.Root, 1f, add, flame);
+                Rauch(v.Root, 1f, blend, smoke);
+                Fx.ApplyAll(v.Root);
+                v.Systems = v.Root.GetComponentsInChildren<ParticleSystem>(true);
+                v.Sizes = new float[v.Systems.Length]; v.Speeds = new float[v.Systems.Length]; v.Radii = new float[v.Systems.Length];
+                for (int i = 0; i < v.Systems.Length; i++)
+                {
+                    v.Sizes[i] = v.Systems[i].main.startSizeMultiplier;
+                    v.Speeds[i] = v.Systems[i].main.startSpeedMultiplier;
+                    v.Radii[i] = v.Systems[i].shape.radius;
+                }
+                v.Flash = v.Root.AddComponent<Light>();
+                v.Flash.type = LightType.Point; v.Flash.shadows = LightShadows.None;
+                v.Flash.color = new Color(1f, 0.72f, 0.38f, 1f);
+                _blastPool[slot] = v;
+            }
+            v.Root.SetActive(true); v.Root.transform.position = point; v.At = Time.unscaledTime;
+            for (int i = 0; i < v.Systems.Length; i++)
+            {
+                ParticleSystem ps = v.Systems[i];
+                ps.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                ParticleSystem.MainModule main = ps.main;
+                main.startSizeMultiplier = v.Sizes[i] * r;
+                main.startSpeedMultiplier = v.Speeds[i] * r;
+                ParticleSystem.ShapeModule shape = ps.shape; shape.radius = v.Radii[i] * r;
+                ps.Play(false);
+            }
+            v.Flash.enabled = Anim.Lights;
+            v.Flash.range = Mathf.Clamp(r * 5f, 8f, 90f); v.Flash.intensity = 7f;
+        }
+
+        internal static void TickBlasts()
+        {
+            for (int i = 0; i < _blastPool.Length; i++)
+            {
+                BlastLease v = _blastPool[i];
+                if (v == null || v.Root == null || !v.Root.activeSelf) continue;
+                float age = Time.unscaledTime - v.At;
+                if (v.Flash != null && v.Flash.enabled)
+                {
+                    if (age >= 0.45f) v.Flash.enabled = false;
+                    else v.Flash.intensity = 7f * (1f - age / 0.45f);
+                }
+                if (age >= 8f)
+                {
+                    for (int n = 0; n < v.Systems.Length; n++) v.Systems[n].Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                    v.Root.SetActive(false);
+                }
+            }
         }
 
         /// <summary>

@@ -151,6 +151,29 @@ namespace NextDayRevival
             public Vector3 Pos;
             public float Speed;          // km/h on the leg starting here, 0 = config
             public string Flags;
+            string _savedName, _savedFlags, _savedLine;
+            Vector3 _savedPos;
+            float _savedSpeed;
+            int _savedIndex = -1;
+
+            // Re-saving a large recorded road must not format every unchanged
+            // coordinate again. Cache only text; driving still uses Pos/Speed.
+            public string SaveRow(string name, int k)
+            {
+                if (_savedLine != null && _savedName == name && _savedIndex == k
+                    && _savedFlags == Flags && _savedSpeed == Speed
+                    && _savedPos.x == Pos.x && _savedPos.y == Pos.y && _savedPos.z == Pos.z)
+                    return _savedLine;
+                _savedName = name; _savedIndex = k; _savedFlags = Flags;
+                _savedPos = Pos; _savedSpeed = Speed;
+                _savedLine = name + "\t" + k.ToString(CultureInfo.InvariantCulture)
+                    + "\t" + Pos.x.ToString("0.00", CultureInfo.InvariantCulture)
+                    + "\t" + Pos.y.ToString("0.00", CultureInfo.InvariantCulture)
+                    + "\t" + Pos.z.ToString("0.00", CultureInfo.InvariantCulture)
+                    + "\t" + Speed.ToString("0.#", CultureInfo.InvariantCulture)
+                    + "\t" + (Flags == null ? "" : Flags);
+                return _savedLine;
+            }
         }
 
         /// <summary>
@@ -322,7 +345,7 @@ namespace NextDayRevival
             public float FixedAt = -1f;
             public int Slot = -1;
             public bool Far;
-            public float FarAt;
+            public float FarAt, NextFarGun;
 
             // Refusals to warp in a row (FreeHold), cleared by the first warp
             // that happens (Free). A single refusal is a sensible answer; the
@@ -645,6 +668,10 @@ namespace NextDayRevival
             // frame here (every client, patrols on or off) instead of inside
             // the first shot - see VehicleShotSound.Prewarm. Free once done.
             VehicleShotSound.Prewarm();
+            FrameProf.S(FrameProf.S_PatrolSaveT);
+            try { TickSave(); }
+            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol save tick: " + ex); }
+            FrameProf.E(FrameProf.S_PatrolSaveT);
             if (!RevivalPlugin.CfgPatrol.Value) return;
             // W Perf1: three nested F6 sub-slots, so the overlay says which
             // half of Patrol.Tick a cost belongs to (keys/editor, the automatic
@@ -751,21 +778,7 @@ namespace NextDayRevival
 
         static bool Watched(Vector3 p)
         {
-            if (_eyeKnown)
-            {
-                Vector3 d = _eye - p;
-                d.y = 0f;
-                if (d.sqrMagnitude < FarDriveU * FarDriveU) return true;
-            }
-            List<GameObject> players = Crocodile.Players();
-            for (int i = 0; i < players.Count; i++)
-            {
-                if (players[i] == null) continue;
-                Vector3 d = players[i].transform.position - p;
-                d.y = 0f;
-                if (d.sqrMagnitude < FarDriveU * FarDriveU) return true;
-            }
-            return false;
+            return CombatLoad.AnyNear(p, FarDriveU / 2.8f);
         }
 
         public static void FixedTick()
@@ -2685,9 +2698,35 @@ namespace NextDayRevival
             }
             u.CrewOut = true;
             List<RevivalComposition.CrewMan> crew = u.CrewSnapshot;
+            // Y B2: a truck that set its men down alive (the deploy stop) and
+            // the military town's garrison vehicles hand out no FPV drone.
             Crew.Aussteigen(u.Car, u.Vgs, u.CrewSize, u.Tank, u.Seite, crew,
-                u.Route != null && (u.Route.Name == MilitaryTown.AaRoute
-                    || u.Route.Name == MilitaryTown.PatrolRoute || u.Route.Name == MilitaryTown.ReinforceRoute));
+                u.Died <= 0f || GarrisonRoute(u));
+        }
+
+        /// <summary>The military town's own vehicles (its AA, patrol and
+        /// reinforcement routes) are its garrison: their crews on foot get no
+        /// FPV drone (Y B2, CrewDrone.Flies).</summary>
+        static bool GarrisonRoute(Unit u)
+        {
+            return u != null && u.Route != null && (u.Route.Name == MilitaryTown.AaRoute
+                || u.Route.Name == MilitaryTown.PatrolRoute || u.Route.Name == MilitaryTown.ReinforceRoute);
+        }
+
+        /// <summary>Is this car a destroyed patrol vehicle, and did it drive a
+        /// military town route? Once per released crew (TechnicalCrew.Abgeben);
+        /// an unknown car is no wreck, so no FPV rights go out by mistake.</summary>
+        internal static bool PatrolWreck(Transform car, out bool garrison)
+        {
+            garrison = false;
+            if (car == null) return false;
+            for (int i = 0; i < _units.Count; i++)
+                if (_units[i].Car != null && _units[i].Car.transform == car)
+                {
+                    garrison = GarrisonRoute(_units[i]);
+                    return _units[i].Died > 0f;
+                }
+            return false;
         }
 
         /// <summary>Remove every vehicle of one convoy - living stragglers and
@@ -4174,6 +4213,7 @@ namespace NextDayRevival
                 // wreck. The effect is a child, so Weg(u.Car) removes it too.
                 FireEffect.SpawnWreck(u.Car, u.Tank);
                 Turret.Net.PublishWreck(u.Car.transform, u.Tank);
+                CombatLoad.Wreck(u.Car);
 
                 UnloadCrew(u);
 
@@ -6334,6 +6374,10 @@ namespace NextDayRevival
                     Unit u = units[i];
                     if (!u.Armed || u.Died > 0f || u.Car == null) continue;
                     if (u.Turrets.Length == 0) continue;
+                    // Far targets cannot be seen by any player: aim/fire upkeep
+                    // at 2 Hz; near turrets keep their smooth rendered-frame turn.
+                    if (u.Far && Time.time < u.NextFarGun) continue;
+                    u.NextFarGun = Time.time + 0.5f;
                     Einer(u);
                 }
             }
@@ -7279,6 +7323,9 @@ namespace NextDayRevival
 
         public static void Load(bool force)
         {
+            // A reload after an editor save must see the completed file,
+            // never the previous snapshot while the worker is still writing.
+            if (force && _routeSave.Busy) { _reloadAfterSave = true; return; }
             if (_loaded && !force) return;
             if (force) RevivalComposition.Load(true);
             _loaded = true;
@@ -7432,35 +7479,90 @@ namespace NextDayRevival
             }
         }
 
+        static readonly SlicedTextSave _routeSave = new SlicedTextSave(new RouteSaveSource());
+        static bool _reloadAfterSave;
+
         static void Save()
         {
-            string path = Path.Combine(RevivalPlugin.AssetDir,
-                                       RevivalPlugin.CfgPatrolFile.Value);
-            try
+            _routeSave.Request(Path.Combine(RevivalPlugin.AssetDir,
+                                           RevivalPlugin.CfgPatrolFile.Value));
+        }
+
+        internal static void FinishSave()
+        {
+            _routeSave.Finish();
+            Exception error = _routeSave.TakeError();
+            if (error != null) RevivalPlugin.L.LogError("Patrol: writing routes: " + error);
+        }
+
+        static void TickSave()
+        {
+            _routeSave.Tick();
+            Exception error = _routeSave.TakeError();
+            if (error != null)
             {
-                List<string> lines = new List<string>();
-                lines.Add("# ndr_routes.tsv - written by the in-game recorder.");
-                lines.Add("# route\tindex\tx\ty\tz\tspeed\tflags");
-                lines.Add("# Pull it into the repository with: python routecheck.py --pull");
+                _reloadAfterSave = false;
+                RevivalPlugin.L.LogError("Patrol: writing routes: " + error);
+            }
+            if (_reloadAfterSave && !_routeSave.Busy)
+            {
+                _reloadAfterSave = false;
+                Load(true);
+            }
+        }
+
+        // Only the main thread reads routes. Edits during a snapshot request a
+        // follow-up snapshot; writes are serialized and the final file is complete.
+        sealed class RouteSaveSource : ITextSaveSource
+        {
+            string[] _names;
+            int _header, _route, _point, _count, _nameCount;
+            Route _current;
+
+            public void Reset()
+            {
+                if (_names == null || _names.Length < _order.Count) _names = new string[_order.Count];
+                _nameCount = 0;
                 for (int i = 0; i < _order.Count; i++)
                 {
                     Route r = _routes[_order[i]];
-                    if (r.Builtin) continue;   // NDR military town: the plugin's own, never saved
-                    MetaSchreiben(r);
-                    for (int k = 0; k < r.P.Count; k++)
-                    {
-                        Point p = r.P[k];
-                        lines.Add(r.Name + "\t" + k.ToString(CultureInfo.InvariantCulture)
-                            + "\t" + p.Pos.x.ToString("0.00", CultureInfo.InvariantCulture)
-                            + "\t" + p.Pos.y.ToString("0.00", CultureInfo.InvariantCulture)
-                            + "\t" + p.Pos.z.ToString("0.00", CultureInfo.InvariantCulture)
-                            + "\t" + p.Speed.ToString("0.#", CultureInfo.InvariantCulture)
-                            + "\t" + (p.Flags == null ? "" : p.Flags));
-                    }
+                    if (r.Builtin) continue;   // NDR military town: never saved
+                    _names[_nameCount++] = r.Name;
                 }
-                File.WriteAllLines(path, lines.ToArray());
+                _header = _route = _point = _count = 0;
+                _current = null;
             }
-            catch (Exception ex) { RevivalPlugin.L.LogError("Patrol: writing routes: " + ex); }
+
+            public bool Next(out string line)
+            {
+                line = null;
+                if (_header < 3)
+                {
+                    if (_header == 0) line = "# ndr_routes.tsv - written by the in-game recorder.";
+                    else if (_header == 1) line = "# route\tindex\tx\ty\tz\tspeed\tflags";
+                    else line = "# Pull it into the repository with: python routecheck.py --pull";
+                    _header++;
+                    return true;
+                }
+                if (_current == null || _point >= _count || _point >= _current.P.Count)
+                {
+                    _current = null;
+                    if (_route >= _nameCount) return false;
+                    Route r;
+                    if (_routes.TryGetValue(_names[_route++], out r) && !r.Builtin)
+                    {
+                        MetaSchreiben(r);
+                        _current = r;
+                        _count = r.P.Count;
+                        _point = 0;
+                    }
+                    return true;
+                }
+                int k = _point++;
+                Point p = _current.P[k];
+                line = p.SaveRow(_current.Name, k);
+                return true;
+            }
         }
 
         static Route Active()

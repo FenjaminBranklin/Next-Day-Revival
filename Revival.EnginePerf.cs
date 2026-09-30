@@ -118,14 +118,15 @@ namespace NextDayRevival
         static ConfigEntry<int> _cfgSteps;
         static ConfigEntry<bool> _cfgAnimals;
 
-        internal const int DefaultSteps = 4;
+        internal const int DefaultSteps = 2;
         internal const int MaxSteps = 16;
 
         internal static void BindConfig(ConfigFile cfg)
         {
             _cfgSteps = cfg.Bind("EnginePerf", "MaxPhysicsSteps", DefaultSteps,
                 "Most physics steps one frame may run to catch up after a hitch "
-                + "(Time.maximumDeltaTime = steps x fixed timestep; 4 = 0.08 s). The game's "
+                + "(nonzero values are capped at 2; >=40 ms frames use 1). "
+                + "Time.maximumDeltaTime = steps x fixed timestep (2 = 0.04 s). The game's "
                 + "0.333 s lets a GC pause be followed by 16-17 steps, which makes the next "
                 + "frame the next hitch. A frame longer than the cap loses the rest of its game "
                 + "time instead. 0 = the game's value.");
@@ -143,15 +144,15 @@ namespace NextDayRevival
 
         static float _next;
 
-        /// <summary>Once a second: the step cap and the animal pass.</summary>
+        /// <summary>Step cap each frame; animal work once a second.</summary>
         internal static void Tick()
         {
             float now = Time.unscaledTime;
+            StepCap();
             if (now < _next) return;
             _next = now + 1f;
             try
             {
-                StepCap();
                 if (_cfgAnimals == null || _cfgAnimals.Value) CullAnimals();
                 else RestoreAnimals();
             }
@@ -178,7 +179,7 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ step cap
 
-        static bool _capped;
+        static bool _capped, _saidCap;
         static float _base = -1f;       // the value before ours (the game's 0.333)
         static float _written = -1f;    // what we wrote last
 
@@ -197,6 +198,7 @@ namespace NextDayRevival
         static void StepCap()
         {
             int steps = _cfgSteps != null ? _cfgSteps.Value : DefaultSteps;
+            steps = CombatLoadPolicy.Steps(steps, Time.unscaledDeltaTime);
             float cur = Time.maximumDeltaTime;
             if (steps <= 0)
             {
@@ -216,11 +218,14 @@ namespace NextDayRevival
             bool first = !_capped || Mathf.Abs(want - _written) > 1e-5f;
             _written = want;
             _capped = true;
-            if (first)
+            if (first && !_saidCap)
+            {
+                _saidCap = true;
                 RevivalPlugin.L.LogInfo("EnginePerf: physics step cap " + steps + " (maximumDeltaTime "
                     + want.ToString("0.000", CultureInfo.InvariantCulture) + " s, game "
                     + _base.ToString("0.000", CultureInfo.InvariantCulture) + " s, fixed step "
                     + Time.fixedDeltaTime.ToString("0.000", CultureInfo.InvariantCulture) + " s).");
+            }
         }
 
         // ------------------------------------------------------------ animals
@@ -325,6 +330,7 @@ namespace NextDayRevival
         internal static string StatusLine()
         {
             int steps = _cfgSteps != null ? _cfgSteps.Value : DefaultSteps;
+            steps = CombatLoadPolicy.Steps(steps, Time.unscaledDeltaTime);
             string cap = steps > 0 && _capped
                 ? "step cap " + steps + " (max dt " + Time.maximumDeltaTime.ToString("0.000", CultureInfo.InvariantCulture)
                   + " s, game " + _base.ToString("0.000", CultureInfo.InvariantCulture) + ")"

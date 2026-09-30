@@ -609,22 +609,22 @@ namespace NextDayRevival
             y += S(26f);
             if (dead) return false;
 
-            // Line 4: Locate, Order, Pay, Dismiss.
+            // Line 4: Locate, Order, Pay, Dismiss, native medkit gift.
             Rect btns = new Rect(x, y, w, S(26f));
             bool spawned = m.Unit != null && m.Unit.Ai != null;
-            if (UiKit.Button(UiKit.Col(btns, 0, 4), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
+            if (UiKit.Button(UiKit.Col(btns, 0, 5), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
                 Loc.T("Отметить на карте и на экране на 30 с", "Mark him on the map and on screen for 30 s")))
                 Locate(m, row, lang);
             bool open = _orderFor == m.Id;
-            if (UiKit.Button(UiKit.Col(btns, 1, 4), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
+            if (UiKit.Button(UiKit.Col(btns, 1, 5), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
                 UiButton.Secondary, !deserting, null))
             { _orderFor = open ? NoRow : m.Id; _orderAll = false; MercUi.Reply(); }
             bool canPay = m.Unpaid && !m.PayPending && !m.PayWanted && !deserting;
-            if (UiKit.Button(UiKit.Col(btns, 2, 4), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
+            if (UiKit.Button(UiKit.Col(btns, 2, 5), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
                 canPay ? UiButton.Primary : UiButton.Secondary, canPay, null))
             { MercUi.Reply(); Mercs.Pay(m, true); }
             bool armed = _dismissId == m.Id && now < _dismissUntil;
-            if (UiKit.Button(UiKit.Col(btns, 3, 4), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
+            if (UiKit.Button(UiKit.Col(btns, 3, 5), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
                 UiButton.Danger, true, Loc.T("Без возврата денег; второй щелчок увольняет", "No refund; a second click dismisses")))
             {
                 MercUi.Reply();
@@ -638,6 +638,10 @@ namespace NextDayRevival
                     return true;
                 }
             }
+            if (UiKit.Button(UiKit.Col(btns, 4, 5), Mercs.MedkitLabel(m),
+                UiButton.Secondary, Mercs.CanGiveMedkit(m),
+                Loc.T("Дать аптечку из рюкзака (10 м); оплата пополняет запас",
+                    "Give one native medkit within 10 m; upkeep refills supplies"))) Mercs.GiveMedkit(m);
             if (open)
             {
                 y += S(26f) + S(UiKit.Gap);

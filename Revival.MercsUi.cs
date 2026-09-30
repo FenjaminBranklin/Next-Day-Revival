@@ -63,9 +63,16 @@ namespace NextDayRevival
 
         internal static void Reply() { _replyFrame = Time.frameCount; }
 
+        internal static void OrderReply(string text, bool warn)
+        {
+            Reply();
+            Toast(text, warn);
+        }
+
         static void Note(string text, int kind, bool warn)
         {
             if (!MercPageNote.Pass(MercPage.NoteMode, kind, Time.frameCount == _replyFrame)) return;
+            if (Time.frameCount == _replyFrame) MercNotify.OrderClick(warn);
             float secs = Mathf.Clamp(Mercs.CfgToastSeconds == null ? 4f : Mercs.CfgToastSeconds.Value, 1f, 15f);
             ToastLine t = new ToastLine();
             t.Text = text; t.Until = Time.time + secs * (warn ? 1.5f : 1f); t.Warn = warn;
@@ -184,16 +191,18 @@ namespace NextDayRevival
         internal static void TickInput()
         {
             Keys();
+            CacheStrip();
             bool quickOwns = QuickInput();
             if (Input.anyKeyDown && !Input.GetMouseButtonDown(0)) Reply();
             if (_tabActive && Time.frameCount - _tabFrame > 2) CloseTab();
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
             {
-                if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && !GameUi.WindowOpen
+                if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && GameplayCursor.CommandUiState == 0
                     && !Admin.IsOpen) _listOpen = true;
                 return;
             }
-            bool gameWindow = GameUi.WindowOpen;
+            int uiState = GameplayCursor.CommandUiState;
+            bool gameWindow = uiState != 0;
             if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey))
             {
                 if (Ctrl()) CtrlL();
@@ -210,9 +219,9 @@ namespace NextDayRevival
                     if (Input.GetKeyDown(KeyCode.Alpha0 + n)) Mercs.Select(n);
             }
             // B3b: a patrol route being set takes the order key (on the map too).
-            if (_placing && !_listOpen && (!gameWindow || GameUi.State == 8))
+            if (_placing && !_listOpen && (!gameWindow || uiState == 8))
             { _wheelOpen = false; _wheelArmed = false; RouteInput(gameWindow); return; }
-            if (gameWindow || _listOpen) { _wheelOpen = false; _wheelArmed = false; return; }
+            if (gameWindow || _listOpen || !GameplayCursor.CanCommand) { _wheelOpen = false; _wheelArmed = false; return; }
             if (!quickOwns) Wheel();
         }
 
@@ -229,25 +238,14 @@ namespace NextDayRevival
                     else Mercs.OrderFollow();
                     return;
                 }
-                _kDownAt = now; _wheelArmed = true; _wheelVec = Vector2.zero; _wheelPick = -1;
+                _kDownAt = now; _wheelArmed = true; _wheelVec = Vector2.zero; _wheelPick = -1; _wheelScrollPick = false;
             }
-            if (_wheelArmed && Input.GetKey(_wheelKey))
+            if (_wheelArmed && (Input.GetKey(_wheelKey) || Input.GetKeyUp(_wheelKey)))
             {
                 if (!_wheelOpen && now - _kDownAt > 0.22f) _wheelOpen = true;
                 if (_wheelOpen)
                 {
-                    // B3c: in a seat the mouse aims the seat's view: keys only.
-                    if (!MercRide.OwnerInVehicle)
-                    {
-                        _wheelVec += new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
-                        if (_wheelVec.magnitude > 6f) _wheelVec = _wheelVec.normalized * 6f;
-                        _wheelPick = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
-                    }
-                    else { _wheelVec = Vector2.zero; _wheelPick = -1; }
-                    for (int n = 1; n <= SectorEn.Length; n++)
-                        if (Input.GetKeyDown(KeyCode.Alpha0 + n)) { Issue(n - 1); _wheelOpen = false; _wheelArmed = false; return; }
-                    if (Input.GetKeyDown(KeyCode.Escape) || Input.GetMouseButtonDown(1))
-                    { _wheelOpen = false; _wheelArmed = false; return; }
+                    if (!PickWheel()) { _wheelOpen = false; _wheelArmed = false; return; }
                 }
             }
             if (_wheelArmed && Input.GetKeyUp(_wheelKey))
@@ -261,7 +259,7 @@ namespace NextDayRevival
         // Sector order clockwise from the top: FOLLOW, STAY, PATROL,
         // PERIMETER, VEHICLE, PEACEFUL (the mockup's wheel), the AA posts and
         // (merc-attack-orders) ATTACK on key 9.
-        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN GUN", "MAN RADAR", "ATTACK" };
+        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN NEAREST GUN", "MAN NEAREST RADAR", "ATTACK" };
         static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР", "АТАКА" };
         const int AttackSector = 8;
 
@@ -302,10 +300,8 @@ namespace NextDayRevival
                 case 5: Mercs.TogglePeaceful(); break;
                 case 6:
                 case 7:
-                    Vector3 aaPoint, aaFacing;
-                    if (!CrosshairPoint(out aaPoint, out aaFacing))
-                        Toast(Loc.T("Наведите прицел на пушку или консоль.", "Aim at the gun or console."), true);
-                    else Mercs.OrderAAPost(sector == 7, aaPoint);
+                    if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) OpenStations(sector == 7);
+                    else Mercs.OrderAAPost(sector == 7, Mercs.OwnerPosition);
                     break;
                 case AttackSector: AttackAtCrosshair(); break;
             }
@@ -882,7 +878,7 @@ namespace NextDayRevival
             if (string.IsNullOrEmpty(text) || !MapGui(point, texture, camera, world, map, full, out gui)) return;
             if (_mapLabel == null) { _mapLabel = new GUIStyle(_small); _mapLabel.richText = true; }
             string t = "<b>" + text + "</b>";
-            Vector2 size = _mapLabel.CalcSize(new GUIContent(t));
+            Vector2 size = Measure(_mapLabel, t);
             Rect r = new Rect(gui.x - size.x * 0.5f, gui.y - size.y - 4f, size.x, size.y);
             if (!view.Contains(new Vector2(r.xMin, r.yMin)) || !view.Contains(new Vector2(r.xMax, r.yMax))) return;
             Box(new Rect(r.x - 3f, r.y, r.width + 6f, r.height), new Color(0f, 0f, 0f, 0.6f));
@@ -941,6 +937,7 @@ namespace NextDayRevival
         // ============================================================ drawing
         static Texture2D _white;
         static GUIStyle _label, _small, _bold, _title, _button, _chip, _center;
+        static readonly GUIContent _measure = new GUIContent();
         static readonly Color Panel = new Color(0.07f, 0.08f, 0.07f, 0.94f);
         static readonly Color CardBg = new Color(0.13f, 0.14f, 0.12f, 1f);
         static readonly Color Gold = new Color(0.96f, 0.72f, 0.20f, 1f);
@@ -978,9 +975,15 @@ namespace NextDayRevival
             Box(new Rect(r.x, r.y, r.width * Mathf.Clamp01(v), r.height), c);
         }
 
+        static Vector2 Measure(GUIStyle style, string text)
+        {
+            _measure.text = text;
+            return style.CalcSize(_measure);
+        }
+
         static void Centered(Rect r, string text, GUIStyle style)
         {
-            Vector2 size = style.CalcSize(new GUIContent(text));
+            Vector2 size = Measure(style, text);
             GUI.Label(new Rect(r.x + (r.width - size.x) * 0.5f, r.y + (r.height - size.y) * 0.5f,
                 size.x + 2f, size.y), text, style);
         }
@@ -1005,14 +1008,15 @@ namespace NextDayRevival
             if (window && !TraderUi.Owns) DrawTradeTab();
             else if (_tabActive) CloseTab();
             if (_wheelOpen && !window) DrawWheel();
-            if (_placing && !window && !_listOpen) DrawPlacing();
+            bool repaint = Event.current.type == EventType.Repaint;
+            if (repaint && _placing && !window && !_listOpen) DrawPlacing();
             if (GameUi.State == 8 && MapWanted()) DrawMap();
             else HideMap();
             if (_listOpen) DrawList();
-            if (!window && !_listOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
-            if (!window) DrawLocate();
+            if (repaint && !window && !_listOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
+            if (repaint && !window) DrawLocate();
             DrawCommandPing();
-            DrawToasts();
+            if (repaint) DrawToasts();
         }
 
         static void DrawToasts()
@@ -1024,7 +1028,7 @@ namespace NextDayRevival
             for (int i = 0; i < _toasts.Count; i++)
             {
                 string t = _toasts[i].Text;
-                Vector2 size = _label.CalcSize(new GUIContent(t));
+                Vector2 size = Measure(_label, t);
                 float w = Mathf.Min(size.x + 20f, 620f);
                 Rect r = new Rect(Screen.width - w - 20f, y, w, 26f);
                 Box(r, new Color(0f, 0f, 0f, 0.7f));
@@ -1034,21 +1038,89 @@ namespace NextDayRevival
             }
         }
 
+        sealed class StripRow
+        {
+            internal Mercs.Record Record;
+            internal string FullName;
+            internal readonly GUIContent Name = new GUIContent(), Order = new GUIContent();
+            internal MercOrder For;
+            internal bool Dead, Peaceful, Rally, Survive;
+            internal int Mode, Phase, Metres, Points, Radius, Lang = -1;
+        }
+        static readonly List<StripRow> _strip = new List<StripRow>(12);
+        static readonly GUIContent _stripTitle = new GUIContent();
+        static int _stripCount, _stripLang = -1;
+        static string _stripKey;
+        static float _stripAt;
+
+        // At most 5 Hz, and only for the visible HUD. Labels change only when
+        // their displayed values change. Repaint only consumes cached content.
+        static void CacheStrip()
+        {
+            if (_listOpen || GameUi.WindowOpen || (Mercs.CfgHudStrip != null && !Mercs.CfgHudStrip.Value)) return;
+            if (Time.unscaledTime < _stripAt) return;
+            _stripAt = Time.unscaledTime + 0.2f;
+            int lang = Loc.Lang();
+            if (lang != _stripLang || _stripKey != _listKeyText)
+            {
+                _stripLang = lang; _stripKey = _listKeyText;
+                _stripTitle.text = "<b>" + Loc.T("НАЁМНИКИ", "MERCS") + "</b>  (" + _listKeyText + ")";
+            }
+            List<Mercs.Record> roster = Mercs.Roster;
+            _stripCount = roster.Count;
+            while (_strip.Count < _stripCount) _strip.Add(new StripRow());
+            for (int i = 0; i < _strip.Count; i++)
+            {
+                StripRow row = _strip[i];
+                if (i >= _stripCount) { row.Record = null; continue; }
+                Mercs.Record m = roster[i];
+                bool changed = row.Record != m;
+                row.Record = m;
+                if (changed || row.FullName != m.Name)
+                {
+                    row.FullName = m.Name;
+                    row.Name.text = Short(m.Name, 10);
+                }
+                MercOrder order = m.Order;
+                MercUnit u = m.Unit;
+                bool rally = u != null && u.Rally;
+                int phase = u == null || u.Attack.For != order ? MercAttackRun.Advance : u.Attack.Phase;
+                int metres = -1;
+                if (order.Mode == MercOrder.Attack && phase != MercAttackRun.Holding
+                    && phase != MercAttackRun.Stalled && phase != MercAttackRun.Search)
+                {
+                    float d = u == null || u.Ai == null ? MercAttackGeo.Length(order)
+                        : MercAttackGeo.Flat(order.Centre - u.Ai.transform.position);
+                    metres = (int)Math.Round(d / 2.8f, MidpointRounding.AwayFromZero);
+                }
+                int points = order.Points.Length, radius = (int)Math.Round(order.RadiusM, MidpointRounding.AwayFromZero);
+                if (changed || row.For != order || row.Mode != order.Mode || row.Dead != m.Dead || row.Peaceful != m.Peaceful
+                    || row.Rally != rally || row.Survive != order.Survive || row.Lang != lang
+                    || row.Phase != phase || row.Metres != metres || row.Points != points || row.Radius != radius)
+                {
+                    row.For = order; row.Mode = order.Mode; row.Dead = m.Dead; row.Peaceful = m.Peaceful;
+                    row.Rally = rally; row.Survive = order.Survive; row.Lang = lang;
+                    row.Phase = phase; row.Metres = metres; row.Points = points; row.Radius = radius;
+                    row.Order.text = m.Dead ? "DEAD" : OrderText(m);
+                }
+            }
+        }
+
         static void DrawStrip()
         {
-            List<Mercs.Record> roster = Mercs.Roster;
-            if (roster.Count == 0) return;
-            float h = 20f + 16f * roster.Count;
+            if (_stripCount == 0) return;
+            float h = 20f + 16f * _stripCount;
             Rect r = new Rect(12f, Screen.height - h - 150f, 190f, h);
             Box(r, new Color(0f, 0f, 0f, 0.55f));
-            GUI.Label(new Rect(r.x + 6f, r.y + 2f, 180f, 16f), "<b>" + Loc.T("НАЁМНИКИ", "MERCS") + "</b>  (" + _listKeyText + ")", _chip);
-            for (int i = 0; i < roster.Count; i++)
+            GUI.Label(new Rect(r.x + 6f, r.y + 2f, 180f, 16f), _stripTitle, _chip);
+            for (int i = 0; i < _stripCount; i++)
             {
-                Mercs.Record m = roster[i];
+                StripRow row = _strip[i];
+                Mercs.Record m = row.Record;
                 float y = r.y + 18f + 16f * i;
-                GUI.Label(new Rect(r.x + 6f, y, 70f, 16f), Short(m.Name, 10), _small);
+                GUI.Label(new Rect(r.x + 6f, y, 70f, 16f), row.Name, _small);
                 Bar(new Rect(r.x + 78f, y + 5f, 40f, 6f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
-                GUI.Label(new Rect(r.x + 122f, y, 60f, 16f), m.Dead ? "DEAD" : OrderText(m), _small);
+                GUI.Label(new Rect(r.x + 122f, y, 60f, 16f), row.Order, _small);
                 if (m.Unpaid) GUI.Label(new Rect(r.x + 170f, y, 20f, 16f), "<color=#ff5040><b>$!</b></color>", _small);
             }
         }
@@ -1148,7 +1220,7 @@ namespace NextDayRevival
                 ? _wheelKeysMemo.Set(kk, seat ? Loc.T("клавиши 1-", "keys 1-") + n : Loc.T("отпустить = приказ", "release = issue"))
                 : _wheelKeysMemo.Text;
             UiKit.Label(new Rect(cx - hub, cy + UiKit.S(2f), hub * 2f, UiKit.S(20f)), hint, UiFont.Small, UiFont.Center, UiKit.TextDim);
-            if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector) && _wheelPoint != null)
+            if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector || _wheelPick == 6 || _wheelPick == 7) && _wheelPoint != null)
             {
                 float tw = UiKit.S(520f), th = UiKit.S(30f);
                 Rect t = new Rect(cx - tw * 0.5f, cy + rad + UiKit.S(10f), tw, th);
@@ -1183,6 +1255,12 @@ namespace NextDayRevival
             { _wheelWhoKey = who; _wheelWho = Mercs.Addressed(sel); }
             _wheelPeaceful = sel.Count > 0 && sel[0].Peaceful;
             _wheelPoint = null;
+            if (_wheelPick == 6 || _wheelPick == 7)
+            {
+                _wheelPoint = Loc.T("ближайшее свободное место; Shift + отпустить = список, или L > Пушки/радар",
+                    "nearest free seat; Shift + release = list, or L > Guns/radar");
+                return;
+            }
             if ((_wheelPick < 1 || _wheelPick > 3) && _wheelPick != AttackSector) return;
             Vector3 point;
             bool hit = CrosshairCached(out point);
@@ -1554,16 +1632,32 @@ namespace NextDayRevival
             int money = Mercs.Money;
             GUI.Label(new Rect(r.width - 250f, 10f, 200f, 20f), Loc.T("Деньги ", "Money ") + (money < 0 ? "?" : Mercs.Money0(money)), _label);
             if (ButtonColored(new Rect(r.width - 40f, 8f, 30f, 24f), "X", Red, true)) { _listOpen = false; RestoreCursor(); }
-            if (_listTab == 0) MercRows(r); else WhitelistTab(r);
+            if (ButtonColored(new Rect(472f, 10f, 100f, 24f), Loc.T("?????/?????", "Guns/radar"),
+                _listTab == 2 ? Green : Grey, true) && _listTab != 2) OpenStations(false);
+            if (_listTab == 0) MercRows(r); else if (_listTab == 2) StationRows(r); else WhitelistTab(r);
             GUI.DragWindow(new Rect(0f, 0f, r.width, 36f));
         }
+
+        static readonly string[] _mercHeads = new string[7];
+        static readonly float[] MercCols = { 0f, 26f, 190f, 330f, 450f, 560f, 720f };
+        static int _mercHeadsLang = -1;
 
         static void MercRows(Rect r)
         {
             float x0 = 14f, y0 = 44f;
-            string[] heads = { "", Loc.T("Имя", "Name"), Loc.T("Здоровье", "Health"), Loc.T("Приказ", "Order"),
-                Loc.T("Состояние", "State"), Loc.T("Оплата", "Upkeep due"), Loc.T("Дист.", "Dist") };
-            float[] cols = { 0f, 26f, 190f, 330f, 450f, 560f, 720f };
+            if (_mercHeadsLang != Loc.Lang())
+            {
+                _mercHeadsLang = Loc.Lang();
+                _mercHeads[0] = "";
+                _mercHeads[1] = Loc.T("Имя", "Name");
+                _mercHeads[2] = Loc.T("Здоровье", "Health");
+                _mercHeads[3] = Loc.T("Приказ", "Order");
+                _mercHeads[4] = Loc.T("Состояние", "State");
+                _mercHeads[5] = Loc.T("Оплата", "Upkeep due");
+                _mercHeads[6] = Loc.T("Дист.", "Dist");
+            }
+            string[] heads = _mercHeads;
+            float[] cols = MercCols;
             for (int i = 1; i < heads.Length; i++) GUI.Label(new Rect(x0 + cols[i], y0, 140f, 18f), heads[i], _small);
             List<Mercs.Record> roster = Mercs.Roster;
             Rect view = new Rect(0f, y0 + 20f, r.width, r.height - y0 - 20f - 128f);
@@ -1581,6 +1675,7 @@ namespace NextDayRevival
                 GUI.Label(new Rect(x0 + cols[1], y + 2f, 160f, 18f), "<b>" + m.Name + "</b>", _label);
                 GUI.Label(new Rect(x0 + cols[1], y + 18f, 160f, 16f), (p == null ? m.ProfileId : p.Name) + (m.Session ? " (test)" : ""), _small);
                 Bar(new Rect(x0 + cols[2], y + 12f, 90f, 8f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
+                GUI.Label(new Rect(x0 + cols[2], y + 22f, 90f, 14f), Mercs.MedkitCount(m), _small);
                 GUI.Label(new Rect(x0 + cols[2] + 94f, y + 7f, 50f, 18f), Mathf.RoundToInt(m.Hp * 100f).ToString(), _small);
                 GUI.Label(new Rect(x0 + cols[3], y + 9f, 120f, 18f), m.Dead ? "-" : OrderText(m), _label);
                 string state = m.Dead ? "<color=#ff5040>" + Loc.T("убит", "dead") + "</color>"
@@ -1674,6 +1769,8 @@ namespace NextDayRevival
                 _listOpen = false; RestoreCursor();
                 StartAttackMap();
             }
+            if (ButtonColored(new Rect(x0 + 744f, by3, 80f, 28f), Mercs.MedkitLabel(one),
+                Green, Mercs.CanGiveMedkit(one))) Mercs.GiveMedkit(one);
             GUI.Label(new Rect(x0, by3 + 34f, r.width - 30f, 36f),
                 Loc.T("Галочки = кому приказ (Ctrl+1..5, Ctrl+0 все). ", "Checked rows are who the orders address (Ctrl+1..5, Ctrl+0 = all). ")
                 + _wheelKeyText + Loc.T(" удерж. - меню приказов, двойное нажатие - за мной (в машине - за моей техникой). Увольнение без возврата денег.",

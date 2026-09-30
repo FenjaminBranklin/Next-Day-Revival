@@ -626,6 +626,7 @@ namespace NextDayRevival
                 object[] data;
                 bool isMine;
                 if (ai == null || !SpawnData(ai, out data, out isMine)) return;
+                CombatLoad.RegisterNpc(ai);
                 int[] appearance = data[1] as int[];
                 int weapon = Convert.ToInt32(data[2]);
 
@@ -1187,8 +1188,15 @@ namespace NextDayRevival
         {
             if (!RevivalPlugin.CfgPatrolCrew.Value || count <= 0) return;
             if (car == null) return;
-            GameObject settlement = Absetzen(car, vgs, count, tank ? "tank" : "BTR",
-                                             fraktion, composition, noFpv);
+            // Y B2: the one spawn path whose men may fly an FPV drone.
+            GameObject settlement;
+            _patrolWreck = true;
+            try
+            {
+                settlement = Absetzen(car, vgs, count, tank ? "tank" : "BTR",
+                                      fraktion, composition, noFpv);
+            }
+            finally { _patrolWreck = false; }
             if (settlement != null
                 && !NpcWar.StartGround("patrol-crew-" + settlement.GetInstanceID(), settlement,
                     Men(settlement), settlement.transform.position, false, 0f, composition))
@@ -1327,6 +1335,9 @@ namespace NextDayRevival
         }
 
         static bool _ownerSpawn;
+        // Y B2: set only while Aussteigen builds a destroyed patrol vehicle's
+        // crew - the one settlement kind that gets PatrolCrewFpv.
+        static bool _patrolWreck;
         static MethodInfo _photonInstantiate, _photonMaster;
         static bool _photonLooked;
 
@@ -1395,6 +1406,48 @@ namespace NextDayRevival
         internal static void Forget(GameObject settlement)
         {
             _settlements.Remove(settlement);
+            for (int i = _crewRoots.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(_crewRoots[i].Root, settlement)) _crewRoots.RemoveAt(i);
+        }
+
+        sealed class CrewRoot
+        {
+            internal GameObject Root;
+            internal Array Men;
+            internal Component Settlement;
+            internal FieldInfo MenField;
+            internal float Born, Next;
+        }
+        static readonly List<CrewRoot> _crewRoots = new List<CrewRoot>();
+        static int _rootCursor;
+
+        internal static void PruneRoots()
+        {
+            if (_crewRoots.Count == 0) return;
+            if (_rootCursor >= _crewRoots.Count) _rootCursor = 0;
+            int slot = _rootCursor++;
+            CrewRoot r = _crewRoots[slot];
+            float now = Time.unscaledTime;
+            if (r.Root != null && now < r.Next) return;
+            r.Next = now + 0.5f;
+            if (r.Root != null)
+            {
+                if (now - r.Born < 10f) return; // initialization grace
+                if (r.Settlement != null)
+                {
+                    if (r.MenField == null) return; // never guess an empty population
+                    r.Men = r.MenField.GetValue(r.Settlement) as Array;
+                }
+                if (r.Men != null)
+                    for (int i = 0; i < r.Men.Length; i++)
+                        if ((r.Men.GetValue(i) as Component) != null) return;
+                // The Photon children have already been retired by their owner.
+                // Only the empty, local control/waypoint hierarchy remains.
+                UnityEngine.Object.Destroy(r.Root);
+            }
+            _settlements.Remove(r.Root);
+            _crewRoots.RemoveAt(slot);
+            _rootCursor = slot;
         }
 
         static GameObject Absetzen(GameObject car, Component vgs, int count,
@@ -1404,6 +1457,15 @@ namespace NextDayRevival
             GameObject settlement = null;
             try
             {
+                // Keyed garrisons and player-owned mercs have separate bounded
+                // populations. Wreck survivors / generic landings must not
+                // accumulate permanent operations after repeated events.
+                if (_groundKey == null && !_ownerSpawn
+                    && !CombatLoadPolicy.CanSpawnEvent(NpcWar.EventPopulation(), count))
+                {
+                    RevivalPlugin.L.LogInfo("Crew: event NPC capacity reached; no extra ground crew spawned.");
+                    return null;
+                }
                 Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
                 Type pType = RevivalPlugin.TypeByName("NPC_SpawnPoint");
                 Type wType = RevivalPlugin.TypeByName("NPC_WP");
@@ -1501,6 +1563,12 @@ namespace NextDayRevival
                 if (viewType != null) settlement.AddComponent(viewType);
 
                 if (noFpv || _ownerSpawn || CrewDrone.GarrisonKey(_groundKey)) settlement.AddComponent<GarrisonNoFpv>();
+                // Y B2: FPV drones are a patrol wreck crew's alone. Every other
+                // squad built here (paratroopers, heli landings, editor groups,
+                // garrisons, gun and battery crews, mercs) never gets the marker.
+                if (CrewDrone.Flies(_patrolWreck, noFpv || CrewDrone.GarrisonKey(_groundKey),
+                        _ownerSpawn, CrewDrone.AnyTicked(composition)))
+                    settlement.AddComponent<PatrolCrewFpv>();
                 Component sied = settlement.AddComponent(sType);
                 Listen(sied, 0);
                 Abschreiben(sied, VorlageSiedlung(sType, settlement));
@@ -1528,6 +1596,10 @@ namespace NextDayRevival
                 string wer = Fraktion.Sauber(fraktion);
                 if (wer.Length == 0) wer = "neutral";
                 _settlements.Add(settlement);
+                CrewRoot retained = new CrewRoot();
+                retained.Root = settlement; retained.Men = GetNpcArray(sied); retained.Born = Time.unscaledTime;
+                retained.Settlement = sied; retained.MenField = AccessTools.Field(sType, "NpcAI");
+                _crewRoots.Add(retained);
                 RevivalPlugin.L.LogInfo("Crew: " + count + " " + wer
                     + " out of the "
                     + carrier + " at " + car.transform.position
@@ -1955,6 +2027,7 @@ namespace NextDayRevival
                 if (_settlements[i] != null)
                     UnityEngine.Object.Destroy(_settlements[i]);
             _settlements.Clear();
+            _crewRoots.Clear(); _rootCursor = 0;
             RevivalPlugin.L.LogInfo("Crew: " + n + " crew(s) removed.");
         }
 
@@ -3163,6 +3236,10 @@ namespace NextDayRevival
     // Marks a settlement whose crew loadouts must never carry FPV drones.
     public sealed class GarrisonNoFpv : MonoBehaviour { }
 
+    // Y B2: marks the one settlement kind whose men may fly FPV drones - the
+    // dismounted crew of a destroyed patrol vehicle (CrewDrone.Flies).
+    public sealed class PatrolCrewFpv : MonoBehaviour { }
+
     /// <summary>
     /// One disposable FPV drone per dismounted crew. The master client uses
     /// the crew's real kill target, which preserves the game's faction rules.
@@ -3182,6 +3259,50 @@ namespace NextDayRevival
         {
             return npc != null && (GarrisonKey(Crew.GroundKey(npc))
                 || npc.GetComponentInParent<GarrisonNoFpv>() != null);
+        }
+
+        /// <summary>Y B2: the one FPV rule. FPV drones were meant for the men
+        /// who climb out of a destroyed patrol vehicle, and only for them:
+        /// since every enemy shares the patrol crew combat, a blacklist let AA
+        /// gun crews, paratroopers, garrisons, editor groups and airfield
+        /// patrols launch them too. patrolWreck: the squad is such a crew;
+        /// garrison: it belongs to the military town or the airfield (their
+        /// routes and keys); merc: a player's mercenary; ticked: the editor
+        /// roster line (or, for a whole crew, any of its lines) keeps FPV
+        /// on.</summary>
+        internal static bool Flies(bool patrolWreck, bool garrison, bool merc, bool ticked)
+        {
+            return patrolWreck && !garrison && !merc && ticked;
+        }
+
+        /// <summary>Does any line of this roster keep FPV on? No roster (the
+        /// legacy config crew) counts as yes, like CrewMan.Fpv's default.</summary>
+        internal static bool AnyTicked(List<RevivalComposition.CrewMan> roster)
+        {
+            if (roster == null || roster.Count == 0) return true;
+            for (int i = 0; i < roster.Count; i++)
+                if (roster[i] != null && roster[i].Fpv) return true;
+            return false;
+        }
+
+        /// <summary>Is this settlement a patrol wreck crew with FPV rights?</summary>
+        internal static bool Marked(GameObject settlement)
+        {
+            return settlement != null && settlement.GetComponent<PatrolCrewFpv>() != null;
+        }
+
+        /// <summary>Riders who were already spawned while the vehicle drove (a
+        /// technical's cab crew) become a patrol wreck crew only when it is
+        /// destroyed: mark their settlement then and start its drone wait.
+        /// Call before NpcWar.StartGround, which reads the mark.</summary>
+        internal static void AllowWreckCrew(GameObject settlement, Array men,
+            List<RevivalComposition.CrewMan> roster, bool wreck, bool garrison)
+        {
+            if (settlement == null || Marked(settlement)) return;
+            if (!Flies(wreck, garrison || settlement.GetComponent<GarrisonNoFpv>() != null,
+                    false, AnyTicked(roster))) return;
+            settlement.AddComponent<PatrolCrewFpv>();
+            Begin(settlement.transform, men);
         }
 
         class Pending
@@ -3348,7 +3469,8 @@ namespace NextDayRevival
             if (RevivalPlugin.CfgPatrolCrewDrone == null
                 || !RevivalPlugin.CfgPatrolCrewDrone.Value
                 || root == null || npcs == null || npcs.Length == 0) return;
-            if (root.GetComponent<GarrisonNoFpv>() != null) return;
+            if (root.GetComponent<GarrisonNoFpv>() != null
+                || root.GetComponent<PatrolCrewFpv>() == null) return;
             foreach (object obj in npcs) if (Garrison(obj as Component)) return;
             Pending p = new Pending();
             p.Root = root;

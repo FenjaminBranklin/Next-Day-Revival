@@ -19,8 +19,8 @@
 //             the side he was just hit on), the wait is drawn per peek and
 //             grows under fire. A side is proven with one ray before use.
 //   RELOAD    in cover, crouched: when the magazine is low, never at a peek
-//   HEAL      in cover, crouched: a field dressing below HealBelow health,
-//             HealsPerFight per fight, HealGap seconds apart.
+//   HEAL      in proven cover, crouched: a finite native medkit below
+//             HealBelow health, native duration, HealGap seconds apart.
 //   RELOCATE  when a threat sees him in his cover (flanked, or the cover
 //             drove away), when he is hit while hidden (suppressed through
 //             it), or when a blast or a live grenade is near: the point is
@@ -104,6 +104,8 @@ namespace NextDayRevival
         public float LastSeen;          // when he last had that line
         public bool Planted;            // feet planted in the standing aim clip (ready to fire)
         public float Health;            // 0..1
+        public bool HasMedkit;
+        public float MedkitSeconds;
         public int Rounds, MaxRounds;   // the magazine; MaxRounds <= 0: unknown
         public bool Reloading;          // the game's reload is running
         public int Hits;                // hits taken, a running count
@@ -131,7 +133,8 @@ namespace NextDayRevival
         public bool Low;                // Hold: crouched
         public Vector3 Face;            // Hold / Fire: toward this point
         public bool Kick;               // Reload: start the reload now (once)
-        public bool HealNow;            // a dressing is done: add HealAmount health (once)
+        public bool HealNow;
+        public bool HealStart;          // consume one native medkit when the animation starts
         public bool Repick;             // ask the sense for a new pick at once (once)
         // M3
         public bool NoShot;             // Fire: aim, do not fire - a mate or the owner is in the line
@@ -181,8 +184,7 @@ namespace NextDayRevival
         internal const float ReloadCap = 4.5f;
         internal const float RoundsPerSecond = 4f;                // estimate when the magazine is unknown
         internal const float EstimatedMagazine = 24f;
-        internal const float HealBelow = 0.55f, HealSeconds = 4f, HealAmount = 0.10f, HealGap = 20f;
-        internal const int HealsPerFight = 3;
+        internal const float HealBelow = 0.55f, HealSeconds = 24f, HealAmount = 0.50f, HealGap = 20f;
         internal const float DangerRadius = 20f, FleeDistance = 26f;
         internal const float StrafeMin = 8f, StrafeMax = 14f, StrafeCap = 2.6f;
         internal const float EvadeBurstMin = 0.35f, EvadeBurstMax = 0.7f, EvadeUpCap = 1.5f;
@@ -260,7 +262,7 @@ namespace NextDayRevival
 
         float _nextThink, _lastThink, _dt, _until, _nextPeek, _fired, _burstLen, _upSince;
         float _plantedAt, _seenAt, _lastEngaged, _lastHit = -1000f, _pressure, _estFired, _nextClaim, _nextHeal, _kickAt;
-        int _hits, _sameSide, _healsLeft = HealsPerFight, _blindPeeks, _evadeSign = 1;
+        int _hits, _sameSide, _blindPeeks, _evadeSign = 1;
         byte _hitSide;
         bool _evadeUp;
         Vector3 _bad0, _bad1, _lastThreat, _prevMe;
@@ -295,6 +297,9 @@ namespace NextDayRevival
         {
             get { return State == Hide || State == Reloading || State == Healing; }
         }
+
+        /// <summary>Y S2: a newly visible contact cannot wait behind a move Think.</summary>
+        internal void ContactNow(float now) { _nextThink = now; }
 
         /// <summary>A Think is due; the first one is staggered by the merc id.</summary>
         internal bool Due(float now)
@@ -360,6 +365,7 @@ namespace NextDayRevival
             _lastThink = i.Now;
             _moved = Flat(i.Me - _prevMe); _prevMe = i.Me;
             bool hit = i.Hits != _hits; _hits = i.Hits;
+            if (hit) _lastHit = i.Now;
             bool fresh = i.Now - i.SensedAt < 0.8f;
             _lastThreat = i.Count > 0 ? i.Threats[0] : i.Watch;
             // Exposure without a real threat is only a quiet shelter probe.
@@ -372,7 +378,7 @@ namespace NextDayRevival
             Mode = i.Health < RetreatBelow ? Retreating : Normal;
             if (!_survivalStarted || State == Off)
             {
-                _survivalStarted = true; _healsLeft = HealsPerFight;
+                _survivalStarted = true;
                 _coverSince = i.Now; State = Evade;
                 o.Repick = true;
             }
@@ -380,7 +386,8 @@ namespace NextDayRevival
             bool overrun = Cover.Found && Down &&
                 (hit || (fresh && i.Exposed) ||
                  (i.Count > 0 && Flat(i.Threats[0] - i.Me) < 28f));
-            if (overrun || (Cover.Found && i.Health < RetreatBelow && i.Now >= _retreatUntil))
+            if (overrun || (Cover.Found && State != Dash && State != Healing && i.Health < RetreatBelow
+                && i.Now >= _retreatUntil && !(State == Hide && i.HasMedkit && !SurvivalFire && Quiet(ref i))))
             {
                 _retreatUntil = i.Now + 12f;
                 SurvivalBack(ref i, field, ref o); return;
@@ -494,7 +501,7 @@ namespace NextDayRevival
             bool flank = State != Off && Squad != null && i.Count > 0 && Squad.Flanking(now);
             bool engaged = i.MayFight && (own || called || flank);
             if (engaged) _lastEngaged = now;
-            bool fight = i.MayFight && (State == Off ? engaged : engaged || now - _lastEngaged <= Grace);
+            bool fight = i.MayFight && (State == Off ? engaged : engaged || now - _lastEngaged <= Grace || (State == Healing && i.HasMedkit));
             if (!fight && State != Off) Leave(field);
             // Lanes: out of the owner's held aim or a mate's live line of
             // fire, in a fight or not (a grenade comes first).
@@ -502,7 +509,6 @@ namespace NextDayRevival
             if (!fight) return;
             if (State == Off)
             {
-                _healsLeft = HealsPerFight;
                 _blindPeeks = 0;
                 _fightStart = now;
                 _coverSince = now;
@@ -1045,11 +1051,12 @@ namespace NextDayRevival
                 o.Kick = !i.Reloading;
                 return;
             }
-            if (quiet && _healsLeft > 0 && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal
-                && (i.Survive || Quiet(ref i)))
+            if (quiet && i.HasMedkit && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal
+                && Quiet(ref i))
             {
                 Enter(Healing, i.Now);
-                _until = i.Now + HealSeconds;
+                _until = i.Now + i.MedkitSeconds;
+                o.HealStart = true;
                 HoldLow(ref i, ref o);
                 o.Act = FightAct.Heal;
                 return;
@@ -1256,7 +1263,8 @@ namespace NextDayRevival
         /// within HealClear, no hit for HealAfterHit s.</summary>
         bool Quiet(ref FightIn i)
         {
-            if (i.Now - _lastHit < HealAfterHit) return false;
+            if (i.Exposed || i.Now - i.SensedAt >= 0.8f || i.Suppression > 0.15f
+                || i.Now - _lastHit < HealAfterHit) return false;
             for (int t = 0; t < i.Count; t++) if (Flat(i.Threats[t] - i.Me) < HealClear) return false;
             return true;
         }
@@ -1312,10 +1320,11 @@ namespace NextDayRevival
         void StepHeal(ref FightIn i, CoverField field, ref FightOut o, bool hit)
         {
             if (Compromised(ref i, hit)) { Flanks++; Relocate(ref i, field, ref o); return; }
+            if (!Quiet(ref i) || Flat(Cover.Point.Pos - i.Me) > ArriveCover + 0.5f)
+            { StartHide(ref i, ref o, true); return; }
             if (i.Now >= _until)
             {
                 Heals++;
-                _healsLeft--;
                 _nextHeal = i.Now + HealGap;
                 StartHide(ref i, ref o, true);
                 o.HealNow = true;

@@ -112,7 +112,7 @@ namespace NextDayRevival
         internal const float DescentMs = 5f;
         /// <summary>A paratroop stick lands along this many world units.</summary>
         internal const float JumpSpread = 300f;
-        internal const float WreckSeconds_ = 1200f;
+        internal const float WreckSeconds_ = CombatLoadPolicy.WreckSeconds;
         const float Gravity = 9.81f * PlayerAn2.K;
 
         internal const string BomberTag = "tu95:";
@@ -931,6 +931,12 @@ namespace NextDayRevival
         }
 
         static readonly List<Stick> _drops = new List<Stick>();
+        internal static int PendingParatroopers()
+        {
+            int count = 0;
+            for (int i = 0; i < _drops.Count; i++) if (!_drops[i].Spawned) count += _drops[i].Men.Count;
+            return count;
+        }
         const float ParaRange = 1400f;    // 500 m: expensive visual work only near the local player
         static Transform _paraViewer;
         static float _paraViewerAt;
@@ -945,6 +951,13 @@ namespace NextDayRevival
             Vector3 v = path.Velocity(path.Project(p));
             float descent = DescentMs * K;
             men = Mathf.Clamp(men, 1, 12);
+            int present = NpcWar.ParatrooperPopulation();
+            present += PendingParatroopers();
+            if (!CombatLoadPolicy.CanDrop(present, men))
+            {
+                RevivalPlugin.L.LogInfo("AirEvents: paratrooper capacity reached; this stick stays aboard.");
+                return;
+            }
             float[] msg = new float[13 + men * 4];
             msg[0] = 2f; msg[1] = PlayerAn2.View(plane); msg[2] = men;
             msg[3] = interval; msg[4] = descent;
@@ -974,7 +987,11 @@ namespace NextDayRevival
                 Jumper j = s.Men[i];
                 Component ai = i < s.Npcs.Length ? s.Npcs.GetValue(i) as Component : null;
                 j.Body = ParaPose.Hold(ai);
-                if (j.Body != null) j.Body.Drive(j.From, s.Heading, 0f, false);
+                if (j.Body != null)
+                {
+                    j.Body.Drive(j.From, s.Heading, 0f, false);
+                    j.Body.Aboard(plane, i);
+                }
                 j.NpcView = ai == null ? 0 : PlayerAn2.View(ai.gameObject);
                 j.Done = ai == null;
                 int b = 13 + i * 4;
@@ -1097,6 +1114,7 @@ namespace NextDayRevival
                     if (j.Body != null && j.Body.Gone) { j.Body.Release(false); j.Done = true; continue; }
                     if (now < j.Jump)
                     {
+                        if (j.Body != null && s.Plane != null) j.Body.Aboard(s.Plane, k);
                         // Still aboard: a transport going down takes them with it.
                         if (s.PlaneDown && master)
                         {
@@ -1577,7 +1595,7 @@ namespace NextDayRevival
 
         internal static float WreckSeconds(GameObject go, float normal)
         {
-            return IsBomber(go) || IsTransport(go) ? Mathf.Max(normal, WreckSeconds_) : normal;
+            return IsBomber(go) || IsTransport(go) ? WreckSeconds_ : normal;
         }
 
         /// <summary>Every client, from PlayerAn2.Burn: the Tu-95 lies as its

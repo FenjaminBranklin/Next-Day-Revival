@@ -199,7 +199,7 @@ namespace NextDayRevival
         static float _statusAt;
         static readonly List<MercUnit> _units = new List<MercUnit>(8);
         internal static List<MercUnit> Units { get { return _units; } }   // M2: F8 fight status
-        internal static bool Show;               // F8: draw the cover points near the camera
+        internal static bool Show = false;               // F8: draw the cover points near the camera
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -354,7 +354,7 @@ namespace NextDayRevival
         /// Nothing is drawn or allocated while it is off.</summary>
         internal static void Draw()
         {
-            if (!Show || _field == null || Event.current.type != EventType.Repaint) return;
+            if (!Show || !Admin.IsOpen || _field == null || Event.current.type != EventType.Repaint) return;
             Camera cam = Camera.main;
             if (cam == null) return;
             if (_style == null) { _style = new GUIStyle(GUI.skin.label); _style.fontSize = 12; }
@@ -451,7 +451,7 @@ namespace NextDayRevival
                 s.Add(t, 0.6f);
             }
             if (s.Count > 0) u.Approach = s.At[0];
-            if (s.Count == 0 && (u.Order.Survive || u.Rally))
+            if (s.Count == 0 && (u.Order.Survive || u.Rally || Mercs.MedicineWanted(u, now)))
             {
                 // A virtual approach ranks shelter, but is never a combat contact.
                 s.At[0] = u.Approach; s.Weight[0] = 1f;
@@ -544,7 +544,16 @@ namespace NextDayRevival
                     MercAttackLeash(f, u, out centre, out radius); return;
                 case MercOrder.Follow:
                 case MercOrder.Vehicle:
-                    if (u.Owner != null) { centre = u.Owner.position; radius = MercBreakOffUnits; return; }
+                    if (u.Owner != null)
+                    {
+                        bool marksman = u.Fight.Overwatch.Role == MercRole.Marksman;
+                        bool protectedMove = marksman && MercRoleProtected(u, Time.time);
+                        centre = marksman && !protectedMove
+                            ? MercRole.Slot(MercRole.Marksman, u.Owner.position, u.Owner.forward, u.Slot, u.Fight.Overwatch.Lane)
+                            : u.Owner.position;
+                        radius = marksman ? (protectedMove ? MercRole.Far : MercRole.CoverRadius) : MercBreakOffUnits;
+                        return;
+                    }
                     break;
             }
             centre = f.Tr.position; radius = 0f;

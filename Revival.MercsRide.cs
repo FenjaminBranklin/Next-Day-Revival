@@ -14,7 +14,7 @@
 //              has come free. Waiting at the spot was the other choice; it
 //              leaves a man behind for good after one full truck.
 //   SEATS      a merc is NEVER written into VehicleGameSystem.Passengers
-//              (SetDamageToAllPassengers throws on an NPC) and never parented.
+//              (SetDamageToAllPassengers throws on an NPC). Each peer parents him to his seat.
 //              A seat is free when Passengers[i] is null and no merc - ours or
 //              another owner's - claims it. Players always win (D15): a player
 //              in a merc's seat sends him to the next free seat, else out on
@@ -129,6 +129,9 @@ namespace NextDayRevival
         internal int Actor;
         internal float Heard, NextPass;
         internal int WantKind = -1, WantView, WantSeat = -1;
+        internal MercOrder AssignedOrder;
+        internal MercCarrier AssignedCarrier;
+        internal float NextAssignedSearch;
         internal readonly List<Renderer> Off = new List<Renderer>();
         // owner: the gun
         internal Transform Target;
@@ -149,7 +152,7 @@ namespace NextDayRevival
         internal bool Seated { get { return Carrier != null; } }
     }
 
-    internal static class MercRide
+    internal static partial class MercRide
     {
         const float BoardReach = 168f;        // 60 m: run to the vehicle from this far
         const float BoardSpeed = 7f;          // units/s (2.5 m/s): board while it is slower
@@ -489,6 +492,19 @@ namespace NextDayRevival
             if (c == null || seat < 0 || seat >= c.Seats) return false;
             if (c.Kind == MercCarrier.Ground) { if (seat == 0 || PlayerIn(c, seat)) return false; }
             else if (seat == LocalCabinSeat(c)) return false;
+            if (c.Kind == MercCarrier.Ground)
+            {
+                if (Patrol.CrewedCount(c.Vgs) > 0) return false;
+                if (seat == c.GunSeat && c.GunKind == MercCarrier.GunTechnical && TechnicalCrew.GunnerBody(c.Vgs) != null) return false;
+            }
+            List<Mercs.Record> roster = Mercs.Roster;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                Mercs.Record r = roster[i];
+                if (r.Dead || r.Deserted || (r.Unit != null && r.Unit.Ride == self)) continue;
+                if (MercAA.IsVehicle(r.Order) && -Mathf.RoundToInt(r.Order.Facing.x) == c.View
+                    && Mathf.RoundToInt(r.Order.Facing.z) == seat + 1) return false;
+            }
             MercSeat other = Claimant(c, seat, self);
             if (other == null) return true;
             // Two owners' mercs on one seat (a race over the wire): the one
@@ -507,17 +523,14 @@ namespace NextDayRevival
             return -1;
         }
 
-        /// <summary>A seat in world space, upright on the vehicle's heading
-        /// (a rider is not cargo: the hull's pitch and roll stay off him).</summary>
+        /// <summary>The full seat attitude, including hull pitch and roll.</summary>
         static bool SeatPose(MercSeat st, out Vector3 pos, out Quaternion rot)
         {
             MercCarrier c = st.Carrier;
             pos = Vector3.zero; rot = Quaternion.identity;
             if (c == null || c.Root == null || st.Seat < 0) return false;
             Transform root = c.Root;
-            Vector3 fwd = root.forward; fwd.y = 0f;
-            if (fwd.sqrMagnitude < 0.000001f) fwd = Vector3.forward;
-            rot = Quaternion.LookRotation(fwd.normalized, Vector3.up);
+            rot = root.rotation;
             if (c.Kind == MercCarrier.Heli) { pos = PlayerHeli.CabinSeatWorld(c.Go, st.Seat); return true; }
             if (c.Kind == MercCarrier.Plane)
             {
@@ -527,10 +540,8 @@ namespace NextDayRevival
             if (c.SeatPoints == null || st.Seat >= c.SeatPoints.childCount) return false;
             Transform sp = c.SeatPoints.GetChild(st.Seat);
             pos = sp.position;
-            Vector3 face = sp.forward;
-            if (c.GunKind == MercCarrier.GunTechnical && st.Seat == c.GunSeat && c.Mount != null) face = c.Mount.forward;
-            face.y = 0f;
-            if (face.sqrMagnitude > 0.000001f) rot = Quaternion.LookRotation(face.normalized, Vector3.up);
+            rot = c.GunKind == MercCarrier.GunTechnical && st.Seat == c.GunSeat && c.Mount != null
+                ? c.Mount.rotation : sp.rotation;
             return true;
         }
 
@@ -638,7 +649,12 @@ namespace NextDayRevival
 
         static void StepUnit(MercUnit u, MercSeat st, MercCarrier oc, float now, int k)
         {
-            bool want = u.Order.Mode == MercOrder.Vehicle && !u.Deserting && !u.Rally;
+            bool station = MercAA.IsVehicle(u.Order);
+            if (station) oc = Assigned(u, now);
+            bool want = (u.Order.Mode == MercOrder.Vehicle || station) && !u.Deserting && !u.Rally;
+            if (station && MercStationPlan.Retreat(NpcWar.MercSeatHealth(u.Ai), u.AARetreat, false))
+            { u.AARetreat = true; want = false; }
+            else if (station) u.AARetreat = false;
             MercCarrier c = st.Carrier;
             if (c != null)
             {
@@ -647,6 +663,11 @@ namespace NextDayRevival
                 Maintain(st, now);
                 if (!want || oc != c)
                 {
+                    if (station && u.AARetreat && st.Gunner && c.GunKind == MercCarrier.GunTechnical)
+                    {
+                        int shelter = CabSeat(c, st);
+                        if (shelter >= 0) { MoveSeat(u, st, shelter); st.SeatedAt = now; return; }
+                    }
                     // Out when it stands; an aircraft in the air keeps him as
                     // cargo until it is down.
                     if (Standing(c, LeaveSpeed)) GetOut(u, st, k, now, false);
@@ -693,7 +714,8 @@ namespace NextDayRevival
             Vector3 at = u.Ai.transform.position;
             float d = Flat(at - oc.Root.position);
             if (d > BoardReach + oc.Radius) { st.Boarding = null; return; }
-            int free = PickSeat(oc, st);
+            int desired = Mathf.RoundToInt(u.Order.Facing.z) - 1;
+            int free = station ? (SeatFree(oc, desired, st) ? desired : -1) : PickSeat(oc, st);
             if (free < 0)
             {
                 st.Boarding = null;
@@ -913,6 +935,7 @@ namespace NextDayRevival
             Unholster(st);
             UnityEngine.Object live = st.Ai;
             if (live != null) _hidden.Remove(st.Ai.GetInstanceID());
+            if (live != null) SeatBinding.Detach(st.Ai.transform);
             st.Carrier = null; st.Seat = -1;
             st.Hidden = false; st.Gunner = false; st.Firing = false;
         }
@@ -1132,8 +1155,11 @@ namespace NextDayRevival
                 try { if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh) { agent.ResetPath(); agent.Warp(pos); } }
                 catch { }
             }
-            tr.position = pos;
-            tr.rotation = rot;
+            MercCarrier c = st.Carrier;
+            Transform anchor = c.Air ? SeatBinding.AircraftSeat(c.Root, c.Kind == MercCarrier.Plane, st.Seat)
+                : c.SeatPoints.GetChild(st.Seat);
+            if (AtTechnicalGun(st)) SeatBinding.BindWorld(tr, anchor, c.Root, pos, rot);
+            else SeatBinding.BindSeat(tr, anchor, c.Root);
             if (owner) GepardCrew.Ruhig(ai);
             Holster(st, AtTechnicalGun(st), Time.time);
             if (st.Hidden) return;
@@ -1242,6 +1268,7 @@ namespace NextDayRevival
         {
             MercCarrier c = st.Carrier;
             MercGunDrill drill = st.Drill;
+            if (MercAA.IsVehicle(u.Order) && u.AARetreat) { drill.BreakOff(now); st.Firing = false; return; }
             if (!GunReady(c) || PlayerIn(c, st.Seat)) { drill.BreakOff(now); st.Firing = false; return; }
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float range = GunRange(c);
@@ -1886,7 +1913,8 @@ namespace NextDayRevival
             try
             {
                 float[] d = content as float[];
-                if (d != null && d.Length > 0 && (d[0] == 2f || d[0] == 3f)) { MercAA.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && d[0] == 4f) { MercMedPose.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && (d[0] == 2f || d[0] == 3f || d[0] == 6f)) { MercAA.OnPacket(d, sender); return; }
                 if (d == null || d.Length < 2 || Mathf.RoundToInt(d[0]) != 1) return;
                 int n = Mathf.RoundToInt(d[1]);
                 if (n < 0 || n > 16 || d.Length < 2 + n * 7) return;

@@ -13,16 +13,10 @@
 //      On an NPC that GetComponent returns null and the call throws - in the one
 //      moment that must not fail. So NOTHING here ever writes an NPC into
 //      `Passengers`. The men ride beside the seat system, not inside it.
-//   2  A body PARENTED to a seat is parented on the host alone; the other
-//      clients keep getting the NPC's own position sync and would watch the crew
-//      trail the truck down the road. So nothing here parents anything either.
-//      Instead EVERY client works out where the three men belong from the
-//      TRUCK'S OWN TRANSFORM, once a frame in LateUpdate, and writes them there.
-//      That is the same answer TechnicalGun.Stellung already gives for a player
-//      gunner ("every client computes the same circle from the same mount"), and
-//      it is why the men do not lag: their place is derived from a transform the
-//      vehicle's own replication already carries smoothly, not from a position
-//      that has to travel the wire on its own.
+//   2  Every peer resolves the same spawn keys and parents each body to its
+//      local seat transform. The vehicle's own replication carries that seat.
+//      Late seat corrections undo native animation and position-sync writes.
+//      The rider no longer follows a separately replicated world position.
 //
 // WHICH MAN IS WHICH, ON A MACHINE THAT DID NOT SPAWN THEM. A client that joined
 // never made these NPCs and cannot tell them from any other marauder standing
@@ -802,6 +796,7 @@ namespace NextDayRevival
             {
                 Component ai = t.Men[i];
                 if (ai == null) continue;
+                SeatBinding.Detach(ai.transform);
                 NavMeshAgent agent = Agent(ai);
                 if (agent == null) continue;
                 try
@@ -865,42 +860,26 @@ namespace NextDayRevival
             // intentions all the way down the road and stepped off the bed in
             // the first frame that did not overwrite him.
             if (Lebt(t.Gunner)) Ruhig(t.Gunner);
+            else if (t.Gunner != null) SeatBinding.Detach(t.Gunner.transform);
 
             if (!CabCrew) return;
-            // Upright on the truck's heading, SEATED as well: verify.py rule 12
-            // holds the field report of 2026-09-22 ("the NPCs in it fall over").
-            // On a slope that leaves a seated man a few degrees off his seat,
-            // which is the smaller fault of the two.
+            // Sit in the hull frame, including pitch and roll.
             Quaternion aufrecht = Aufrecht(t);
             int seat = 0;
             for (int i = 0; i < t.Cab.Count && seat < Technical.SeatTotal - 1; i++)
             {
                 Component ai = t.Cab[i];
-                if (ai == null || !Lebt(ai)) continue;
+                if (ai == null) continue;
+                if (!Lebt(ai)) { SeatBinding.Detach(ai.transform); continue; }
                 Setzen(t, ai, Platz(t, seat), aufrecht);
+                SeatBinding.BindSeat(ai.transform, t.Seats.GetChild(seat), t.Root);
                 Sitzen(ai, seat);
                 seat++;
             }
         }
 
-        /// <summary>The rotation a rider is given: the truck's HEADING, and
-        /// nothing else of its attitude.
-        ///
-        /// A man is not cargo. Writing the hull's full rotation onto him lays
-        /// him over with every slope, kerb and bump the truck takes, and the
-        /// whole cab lies down at once the moment the truck tips - which is the
-        /// "the NPCs in it fall over while it drives" of the field report of
-        /// 2026-09-22. The gunner has always been treated this way
-        /// (TechnicalGun.Stellung flattens the mount's forward and turns him
-        /// with LookRotation(dir, Vector3.up)); the cab simply never was.</summary>
-        static Quaternion Aufrecht(Truck t)
-        {
-            Vector3 dir = t.Root.forward;
-            dir.y = 0f;
-            if (dir.sqrMagnitude < 0.000001f)
-                return Quaternion.Euler(0f, t.Root.eulerAngles.y, 0f);
-            return Quaternion.LookRotation(dir.normalized, Vector3.up);
-        }
+        /// <summary>A seated rider shares the full vehicle attitude.</summary>
+        static Quaternion Aufrecht(Truck t) { return t.Root.rotation; }
 
         /// <summary>Is this man still on his feet? NpcWar owns the answer - it
         /// is the same test the ground squads and the patrol gun use, so a man
@@ -2110,6 +2089,10 @@ namespace NextDayRevival
             if (settlement == null) return false;
             Array men = Crew.Men(settlement);
             if (men == null) return false;
+            // Y B2: now, not when they boarded, they are a patrol wreck crew.
+            bool garrison;
+            bool wreck = Patrol.PatrolWreck(t.Root, out garrison);
+            CrewDrone.AllowWreckCrew(settlement, men, loadout, wreck, garrison);
             if (NpcWar.StartGround("technical-" + what + "-" + settlement.GetInstanceID(),
                     settlement, men, t.Root.position, false, 0f, loadout))
                 return true;

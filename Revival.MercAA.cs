@@ -16,7 +16,7 @@ namespace NextDayRevival
         internal NavMeshAgent Agent;
         internal float Until;
         internal string SideName;
-        internal bool Parked;
+        internal bool Parked, Peaceful;
         internal Animation[] Animations;
         internal Animator[] Animators;
         internal bool[] AnimationOn, AnimatorOn;
@@ -29,7 +29,7 @@ namespace NextDayRevival
         internal const int Radar = 4;
         static readonly MercAAPost[] Posts = MakePosts();
         static readonly float[] Request = new float[5];
-        static readonly float[] Snapshot = new float[1 + 7 * 4];
+        static readonly float[] Snapshot = new float[1 + 46 * 5];
         static float _nextTick, _nextSend;
         static int _master = -1;
         static Type _viewType, _npcType;
@@ -85,12 +85,24 @@ namespace NextDayRevival
 
         static MercAAPost[] MakePosts()
         {
-            MercAAPost[] p = new MercAAPost[7];
-            for (int i = 0; i < p.Length; i++) { p[i] = new MercAAPost(); p[i].Index = i; }
+            MercAAPost[] p = new MercAAPost[46];
+            for (int i = 0; i < p.Length; i++) { p[i] = new MercAAPost(); p[i].Index = i < 14 ? i : -1; }
             return p;
         }
 
-        internal static MercAAPost Gun(int index) { return index >= 0 && index < Posts.Length && index != Radar ? Live(index) : null; }
+        internal static MercAAPost Gun(int index) { return index >= 0 && index < 7 && index != Radar ? Held(index) ?? Held(index + 7) : null; }
+        internal static MercAAPost Held(int index)
+        {
+            for (int i = 0; i < Posts.Length; i++) if (Posts[i].Index == index) return Live(i);
+            return null;
+        }
+        static MercAAPost Slot(int index)
+        {
+            for (int i = 0; i < Posts.Length; i++) if (Posts[i].Index == index) return Posts[i];
+            for (int i = 14; i < Posts.Length; i++) if (Posts[i].Actor < 0)
+            { Posts[i].Index = index; return Posts[i]; }
+            return null;
+        }
         internal static MercAAPost Operator { get { return Live(Radar); } }
         static MercAAPost Live(int index)
         {
@@ -98,6 +110,8 @@ namespace NextDayRevival
             return p.Ai != null && p.Until > Time.time ? p : null;
         }
         internal static bool IsOrder(MercOrder o) { return o.Mode == MercOrder.ManGun || o.Mode == MercOrder.ManRadar; }
+        internal static bool IsVehicle(MercOrder o) { return o.Mode == MercOrder.ManGun && o.Facing.x < 0f; }
+        internal static bool AvailableForOrder(int post) { return Available(post, LocalActor()); }
 
         static bool Look()
         {
@@ -121,9 +135,11 @@ namespace NextDayRevival
                 rot = TowerRadar.ConsoleRoot.rotation;
                 return true;
             }
-            Flak.Gun g = Flak.ByIndex(post);
-            if (g == null || g.SeatGunner == null) return false;
-            at = g.SeatGunner.position - Vector3.up * (Flak.CfgSeatDrop == null ? 2.3f : Flak.CfgSeatDrop.Value);
+            if (post >= 100) return Mortar.MercPose(post, out at, out rot);
+            Flak.Gun g = Flak.ByIndex(post >= 7 ? post - 7 : post);
+            Transform seat = g == null ? null : post >= 7 ? g.SeatLoader : g.SeatGunner;
+            if (seat == null) return false;
+            at = seat.position - Vector3.up * (Flak.CfgSeatDrop == null ? 2.3f : Flak.CfgSeatDrop.Value);
             rot = g.Mount.rotation;
             return true;
         }
@@ -133,14 +149,15 @@ namespace NextDayRevival
             if (post == Radar)
                 return TowerRadar.Built && TowerRadar.Working && TowerRadar.OperatorActor < 0
                     && !RadarOperator.Alive;
-            Flak.Gun g = Flak.ByIndex(post);
+            if (post >= 100) return Mortar.MercAvailable(post);
+            Flak.Gun g = Flak.ByIndex(post >= 7 ? post - 7 : post);
             return g != null && AirDefenceDamage.Alive(g.Index) && g != Flak._manned && Time.time >= g.ClaimedUntil
-                && !Flak.Up(g.Gunner) && !Flak.Up(g.Loader);
+                && !(post >= 7 ? Flak.Up(g.Loader) : Flak.Up(g.Gunner));
         }
         internal static bool CanApproach(int post, Component ai)
         {
-            MercAAPost held = post == Radar ? Operator : Gun(post);
-            return post >= 0 && post < Posts.Length && Available(post, LocalActor()) && (held == null || held.Ai == ai);
+            MercAAPost held = Held(post);
+            return post >= 0 && Available(post, LocalActor()) && (held == null || held.Ai == ai);
         }
 
         internal static int Nearest(bool radar, Vector3 point)
@@ -161,7 +178,7 @@ namespace NextDayRevival
         internal static int PostOf(MercUnit u)
         {
             if (!IsOrder(u.Order)) return -1;
-            return Mathf.RoundToInt(u.Order.Facing.x) - 1;
+            return IsVehicle(u.Order) ? -1 : Mathf.RoundToInt(u.Order.Facing.x) - 1;
         }
 
         internal static void RequestPost(MercUnit u, int post)
@@ -231,47 +248,52 @@ namespace NextDayRevival
             if (d[0] == 2f && Authority && d.Length == 5)
             {
                 int index = Mathf.RoundToInt(d[1]), view = Mathf.RoundToInt(d[2]);
+                if (d[1] != index || d[2] != view || d[4] < 0f || d[4] > 1f) return;
                 if (index == -1)
                 {
                     for (int i = 0; i < Posts.Length; i++)
                         if (Posts[i].Actor == sender && Posts[i].View == view) Clear(Posts[i]);
                     return;
                 }
-                if (index < 0 || index >= Posts.Length || d[4] != 0f || !Available(index, sender)) return;
-                MercAAPost p = Posts[index];
+                if (index < 0 || !Available(index, sender)) return;
+                MercAAPost p = Slot(index);
+                if (p == null) return;
                 if (p.Until > Time.time && (p.Actor != sender || p.View != view)) return;
                 Component ai = p.Actor == sender && p.View == view ? p.Ai : Resolve(view, sender);
                 Vector3 at; Quaternion rot;
                 if (!Flak.Up(ai) || !Pose(index, out at, out rot) || (ai.transform.position - at).sqrMagnitude > 36f) return;
                 if (NpcWar.MercHealthForPost(ai) < 0.35f) return;
+                if (index >= 100) Mortar.MercPrepare(index);
                 for (int i = 0; i < Posts.Length; i++)
                     if (i != index && Posts[i].View == view && Posts[i].Actor == sender) Clear(Posts[i]);
                 bool change = p.Ai != ai;
                 p.Ai = ai; p.Actor = sender; p.View = view; p.Until = Time.time + 1.6f;
                 // Owner AI supplies the profile trait, bounded like the existing merc traits.
                 p.Trait = Mathf.Clamp(Mathf.RoundToInt(d[3]), 0, 50);
+                p.Peaceful = d[4] != 0f;
                 if (change) { p.Side = TowerRadar.PlayerSide(sender); p.SideName = Mercs.SideOf(p.Side); }
                 if (change) p.Agent = GepardCrew.Agent(ai);
             }
-            else if (d[0] == 3f && d.Length == Snapshot.Length && sender == MasterActor() && !Authority)
+            else if (d[0] == 6f && d.Length == Snapshot.Length && sender == MasterActor() && !Authority)
             {
                 for (int i = 0; i < Posts.Length; i++)
                 {
-                    int o = 1 + i * 4;
-                    int actor = Mathf.RoundToInt(d[o]), view = Mathf.RoundToInt(d[o + 1]);
+                    int o = 1 + i * 5;
+                    int index = Mathf.RoundToInt(d[o]);
+                    int actor = Mathf.RoundToInt(d[o + 1]), view = Mathf.RoundToInt(d[o + 2]);
                     MercAAPost p = Posts[i];
                     if (actor < 0 || view <= 0) { Clear(p); continue; }
-                    if (p.Actor != actor || p.View != view || p.Ai == null)
+                    if (p.Index != index || p.Actor != actor || p.View != view || p.Ai == null)
                     {
-                        Clear(p); p.Ai = Resolve(view, actor); p.Actor = actor; p.View = view;
+                        Clear(p); p.Index = index; p.Ai = Resolve(view, actor); p.Actor = actor; p.View = view;
                         if (p.Ai != null) p.Agent = GepardCrew.Agent(p.Ai);
                     }
                     MercUnit local = Mercs.UnitOf(p.Ai);
-                    if (local != null && (!IsOrder(local.Order) || PostOf(local) != i || local.AARetreat
-                        || local.Sense.Count > 0 || (local.Fight.Brain != null && local.Fight.Brain.Fighting)))
+                    if (local != null && (!IsOrder(local.Order) || PostOf(local) != index || local.AARetreat))
                     { Clear(p); continue; }
-                    p.Trait = Mathf.Clamp(Mathf.RoundToInt(d[o + 2]), 0, 50);
-                    int side = Mathf.RoundToInt(d[o + 3]);
+                    p.Peaceful = d[o + 3] < 0f;
+                    p.Trait = Mathf.Clamp(Mathf.RoundToInt(p.Peaceful ? -d[o + 3] - 1f : d[o + 3]), 0, 50);
+                    int side = Mathf.RoundToInt(d[o + 4]);
                     if (side != p.Side) { p.Side = side; p.SideName = Mercs.SideOf(side); }
                     p.Until = Time.time + 1.6f;
                 }
@@ -299,18 +321,18 @@ namespace NextDayRevival
             {
                 MercAAPost p = Posts[i];
                 if (p.Actor < 0) continue;
-                if (p.Until < Time.time || p.Ai == null || (Authority && (!Available(i, p.Actor) || !Flak.Up(p.Ai))))
+                if (p.Until < Time.time || p.Ai == null || (Authority && (!Available(p.Index, p.Actor) || !Flak.Up(p.Ai))))
                 { Clear(p); continue; }
                 any = true;
             }
             if (!Authority || Time.time < _nextSend) return;
             _nextSend = Time.time + 0.5f;
-            Snapshot[0] = 3f;
+            Snapshot[0] = 6f;
             for (int i = 0; i < Posts.Length; i++)
             {
-                int o = 1 + i * 4; MercAAPost p = Posts[i];
-                Snapshot[o] = p.Actor; Snapshot[o + 1] = p.View;
-                Snapshot[o + 2] = p.Trait; Snapshot[o + 3] = p.Side;
+                int o = 1 + i * 5; MercAAPost p = Posts[i];
+                Snapshot[o] = p.Index; Snapshot[o + 1] = p.Actor; Snapshot[o + 2] = p.View;
+                Snapshot[o + 3] = p.Peaceful ? -p.Trait - 1 : p.Trait; Snapshot[o + 4] = p.Side;
             }
             // Send an empty snapshot after release too, but no work when no posts ever existed.
             if (any || _sent) { MercRide.SendAAPacket(Snapshot); _sent = any; }
@@ -367,7 +389,7 @@ namespace NextDayRevival
                 MercAAPost p = Live(i);
                 if (p == null) continue;
                 Vector3 at; Quaternion rot;
-                if (!Pose(i, out at, out rot)) continue;
+                if (!Pose(p.Index, out at, out rot)) continue;
                 if (!p.Parked)
                 {
                     if (p.Agent != null) { p.Agent.updatePosition = false; p.Agent.updateRotation = false; }
@@ -390,7 +412,7 @@ namespace NextDayRevival
                 p.Ai.transform.position = at; p.Ai.transform.rotation = rot;
                 if (p.WeaponRenderers != null)
                     for (int k = 0; k < p.WeaponRenderers.Length; k++) if (p.WeaponRenderers[k] != null) p.WeaponRenderers[k].enabled = false;
-                if (i == animate) TechnicalCrew.Sitzen(p.Ai, 0);
+                if (i == animate && p.Index < 100 && p.Index != Radar) TechnicalCrew.Sitzen(p.Ai, p.Index >= 7 ? 1 : 0);
             }
         }
         static float _nextAnimation;
@@ -414,7 +436,7 @@ namespace NextDayRevival
             float hp = u.Fight.Health;
             if (hp < 0.35f) u.AARetreat = true;
             if (hp >= 0.5f) u.AARetreat = false;
-            if (!MercAACore.Safe(hp, u.AARetreat, u.Sense.Count > 0, danger, (u.Fight.Brain != null && u.Fight.Brain.Fighting)) || u.Deserting || u.Peaceful)
+            if (MercStationPlan.Retreat(hp, u.AARetreat, danger) || u.Deserting)
             {
                 MercAA.Release(u);
                 if (u.Sense.Pick.Found) at = u.Sense.Pick.Point.Pos;
@@ -424,8 +446,13 @@ namespace NextDayRevival
                 return;
             }
             if (post < 0 || !MercAA.Pose(post, out at, out rot)) { MercAA.Release(u); MercFollow(f, u, now); return; }
-            if (!MercAA.CanApproach(post, u.Ai)) { MercAA.Release(u); MercFollow(f, u, now); return; }
-            MercAAPost held = post == MercAA.Radar ? MercAA.Operator : MercAA.Gun(post);
+            if (!MercAA.CanApproach(post, u.Ai))
+            {
+                MercAA.Release(u);
+                if (!MercStations.Replace(u) && !MercFight(f, u, now)) MercCrouch(f, now);
+                return;
+            }
+            MercAAPost held = MercAA.Held(post);
             if (held != null && held.Ai == u.Ai)
             {
                 MercAA.RequestPost(u, post);
@@ -433,7 +460,7 @@ namespace NextDayRevival
                 if (u.KillTargetSet != null) SetMercKillTarget(f, u, null);
                 return;
             }
-            if ((at - f.Tr.position).sqrMagnitude > 16f) { MercAA.Release(u); MercMove(f, u, at, true, now); return; }
+            if ((at - f.Tr.position).sqrMagnitude > 16f) { MercAA.Release(u); MercStationApproach(f, u, at, now); return; }
             MercAA.RequestPost(u, post);
             f.Target = null; f.Sees = false; f.HasOrder = false;
             u.PlayerTarget = null;

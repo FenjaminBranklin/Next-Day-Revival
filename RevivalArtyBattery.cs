@@ -79,7 +79,7 @@ namespace NextDayRevival
     /// settlement gun. The gun itself is <see cref="Mortar"/>; the vehicle's
     /// geometry is <see cref="ArtyModel"/>.
     /// </summary>
-    public static class ArtyBattery
+    public static partial class ArtyBattery
     {
         // ------------------------------------------------------------- config
 
@@ -358,6 +358,7 @@ namespace NextDayRevival
         /// a MonoBehaviour and no settlement costs an Update of its own.</summary>
         class Post
         {
+            public float NextService;
             public int SettlementId;
             public GameObject Gun;          // the vehicle Mortar raised
             public Vector3 Centre;          // the settlement centre, the orbit's middle
@@ -774,20 +775,25 @@ namespace NextDayRevival
                         _posts.RemoveAt(i);
                         continue;
                     }
-                    Manning(p, now, master);
-                    Posted(p, now, master);
+                    bool service = now >= p.NextService;
+                    if (service)
+                    {
+                        p.NextService = now + 0.5f;
+                        Manning(p, now, master);
+                        Posted(p, now, master);
+                    }
                     // ... and every frame between two postings, the height
                     // alone: a man who is lifted must not be seen to rise at
                     // all, let alone climb (Hold).
                     Hold(p, master);
-                    Fly(p, now, me != null, mine);
+                    if (service || CombatLoad.LocalNear(p.Centre, 500f)) Fly(p, now, me != null, mine);
                     Warn(p, now, me, mine);
                     if (master)
                     {
                         Spot(p, now);
                         Mission(p, now);
                     }
-                    Resupply(p, now);
+                    if (service) Resupply(p, now);
                 }
 
                 // The settlements whose gun is still to come. Fly is the whole
@@ -805,7 +811,8 @@ namespace NextDayRevival
                         _ghosts.RemoveAt(i);
                         continue;
                     }
-                    Fly(g, now, me != null, mine);
+                    if (now >= g.NextService || CombatLoad.LocalNear(g.Centre, 500f))
+                    { g.NextService = now + 0.5f; Fly(g, now, me != null, mine); }
                 }
             }
             catch (Exception ex)
@@ -3522,6 +3529,7 @@ namespace NextDayRevival
             c._trail.transform.parent = root.transform;
             c._trail.transform.localPosition = Vector3.zero;
             FireEffect.SpawnDroneFire(c._trail, true);
+            CombatLoad.Debris(root, 120f);
         }
 
         void Update()
@@ -3649,6 +3657,8 @@ namespace NextDayRevival
             }
             finally { FrameProf.E(FrameProf.S_ArtyRecoil_LateUpdate); }
         }
+        static readonly ParticleSystem[] _smokePool = new ParticleSystem[8];
+        static int _nextSmoke;
         internal static void Smoke(Vector3 muzzle, Vector3 forward)
         {
             if (!Fx.On) return;   // NDR P9: [Effects] ParticleDensity
@@ -3672,7 +3682,18 @@ namespace NextDayRevival
                 texture.wrapMode = TextureWrapMode.Clamp;
                 _smoke.mainTexture = texture;
             }
-            GameObject cloud = new GameObject("NDR artillery muzzle smoke");
+            if (!CombatLoad.LocalNear(muzzle, 800f)) return;
+            int slot = _nextSmoke++ & 7;
+            ParticleSystem reused = _smokePool[slot];
+            if (reused != null)
+            {
+                reused.Stop(false, ParticleSystemStopBehavior.StopEmittingAndClear);
+                reused.transform.position = muzzle;
+                reused.transform.rotation = Quaternion.LookRotation(forward.normalized, Vector3.up);
+                reused.Play(false);
+                return;
+            }
+            GameObject cloud = new GameObject("NDR pooled artillery muzzle smoke");
             cloud.transform.position = muzzle;
             cloud.transform.rotation = Quaternion.LookRotation(forward);
             ParticleSystem ps = cloud.AddComponent<ParticleSystem>();
@@ -3715,7 +3736,7 @@ namespace NextDayRevival
             renderer.receiveShadows = false;
             ps.Play();
             Fx.Apply(ps);                         // NDR P9: [Effects] ParticleDensity
-            UnityEngine.Object.Destroy(cloud, 3.5f);
+            _smokePool[slot] = ps;
         }
     }
 }

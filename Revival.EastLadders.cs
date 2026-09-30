@@ -79,7 +79,8 @@ namespace NextDayRevival
             return v.sqrMagnitude < 1e-6f ? Vector3.forward : v.normalized;
         }
 
-        static void Wire(string scene, Transform g)
+        // Y B1: Revival.TowerRoof.cs wires its runtime tower ladder here too.
+        internal static void Wire(string scene, Transform g)
         {
             Transform lad = g.Find("Ladder");
             if (lad == null)

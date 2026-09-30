@@ -204,10 +204,19 @@ namespace NextDayRevival
                 if (_renderers[i] != null) _renderers[i].enabled = visible && _rendererEnabled[i];
         }
 
+        // Waiting bodies are hidden by the existing parachute visualization,
+        // but physically share their aircraft's full transform until release.
+        internal void Aboard(GameObject plane, int seat)
+        {
+            if (Gone || plane == null) return;
+            SeatBinding.BindSeat(Root, SeatBinding.AircraftSeat(plane.transform, true, seat), plane.transform);
+        }
+
         // Value types only; no query, animation evaluation or allocation here.
         internal void Drive(Vector3 position, float yaw, float sway, bool visible)
         {
             if (Gone) return;
+            SeatBinding.Detach(Root);
             Root.position = position;
             Root.rotation = Quaternion.Euler(0f, yaw, 0f);
             SetVisible(visible && _ready);
@@ -219,6 +228,7 @@ namespace NextDayRevival
         internal void Land(Vector3 ground, float yaw)
         {
             if (Gone) { Release(false); return; }
+            SeatBinding.Detach(Root);
             Root.position = ground;
             Root.rotation = Quaternion.Euler(0f, yaw, 0f);
             Release(true);
@@ -227,6 +237,7 @@ namespace NextDayRevival
         internal void Release(bool landed)
         {
             if (_released) return;
+            SeatBinding.Detach(Root);
             _released = true;
             Held.Remove(Ai);
             if (CanopyObject != null) UnityEngine.Object.Destroy(CanopyObject);

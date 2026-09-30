@@ -268,6 +268,14 @@ namespace NextDayRevival
         static AudioSource _src;
         static AudioClip _click;
         static bool _audioFailed;
+        static int _orderClickFrame = -1;
+
+        internal static void OrderClick(bool loud)
+        {
+            if (_orderClickFrame == Time.frameCount) return;
+            _orderClickFrame = Time.frameCount;
+            if (CfgClick == null || CfgClick.Value) Click(loud);
+        }
 
         static void Click(bool loud)
         {

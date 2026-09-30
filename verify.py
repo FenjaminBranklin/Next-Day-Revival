@@ -1565,6 +1565,31 @@ def check_retake_raids():
             + r.stderr.strip()[-200:])
 
 
+def check_tower_roof():
+    """[Y B1] Tower roof (Revival.TowerRoof.cs + the pure core
+    Revival.TowerRoofCore.cs, docs/ai/tasks/y-b1-tower-roof.md).
+
+    research/tower_roof_check.py compiles the production core with csc 3.5,
+    simulates mercs onto the roof and down (walk, climb, post), checks the
+    ladder, the game ladder points, the sandbag posts and the NPC's climb path
+    against the C1 collider boxes, and pins the seams.
+    """
+    print("[Y B1] Tower roof (outside ladder, mercs' climb, roof posts)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "tower_roof_check.py")
+    if not os.path.exists(check):
+        bad("research/tower_roof_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    if r.returncode == 0 and last.endswith(", 0 FAIL"):
+        ok("tower roof passes research/tower_roof_check.py")
+    else:
+        bad("research/tower_roof_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
 def check_bomb_damage():
     """W bomb damage: run the production queue/RPC and falloff offline."""
     import subprocess
@@ -4755,15 +4780,18 @@ def check_technical_crew():
         bad("Technical crew: a freshly spawned crew is solid until the next "
             "scan - a hundred physics steps of the truck fighting its men")
 
-    # 12 - a rider is upright, whatever the truck is doing
+    # 12 - Y B3 supersedes heading-only seating: riders share the full hull
+    # attitude and are directly parented, so a bank cannot put them through it.
     hold = _body(crew, "static void Halten(Truck t)")
-    upright = _body(crew, "static Quaternion Aufrecht(Truck t)")
-    if ("t.Root.rotation" not in hold and "Aufrecht(t)" in hold
-            and "dir.y = 0f;" in upright):
-        ok("a rider takes the truck's heading and stays on his feet")
+    attitude = _body(crew, "static Quaternion Aufrecht(Truck t)")
+    binding = io.open(os.path.join(ROOT, "Revival.SeatBinding.cs"), encoding="utf-8").read()
+    if ("SeatBinding.BindSeat(ai.transform, t.Seats.GetChild(seat), t.Root);" in hold
+            and "return t.Root.rotation;" in attitude
+            and "body.SetParent(r.Seat, true);" in binding
+            and "SeatBinding.Detach(ai.transform);" in _body(crew, "static void Absteigen(Truck t)")):
+        ok("riders bind directly to seats with full hull attitude and detach on exit")
     else:
-        bad("Technical crew: a rider is given the hull's full rotation - the "
-            "cab lies down with every slope the truck takes")
+        bad("Technical crew: direct seat parenting, full attitude or exit release is missing")
 
     # 13 - nobody alive in the cab, the truck stops
     fixed = _body(patrol, "public static void FixedTick()")
@@ -8421,6 +8449,7 @@ if __name__ == "__main__":
     check_npc_aircraft()
     check_air_events()
     check_retake_raids()
+    check_tower_roof()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

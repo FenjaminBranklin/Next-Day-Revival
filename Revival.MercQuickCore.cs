@@ -18,8 +18,7 @@ namespace NextDayRevival
         internal int Step(float now, bool down, bool held, bool up)
         {
             int action = 0;
-            if (_pending && now - _released >= DoubleSeconds)
-            { _pending = false; action |= Attack; }
+            if (_pending && now - _released >= DoubleSeconds) _pending = false;
             if (down)
             {
                 if (_pending)
@@ -41,7 +40,7 @@ namespace NextDayRevival
             {
                 _down = false;
                 if (_wheel) { _wheel = false; action |= Close; }
-                else { _pending = true; _released = now; action |= Capture; }
+                else { _pending = true; _released = now; action |= Capture | Attack; }
             }
             else if (_down && !held)
             { Cancel(); } // focus/input loss must not invent a release

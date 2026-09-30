@@ -2796,6 +2796,7 @@ namespace NextDayRevival
         /// </summary>
         sealed class Station
         {
+            internal Transform RiderSeat;
             public Component Vgs;
             public Transform Mount;
             public Transform Gun;
@@ -2954,13 +2955,24 @@ namespace NextDayRevival
                     return;
 
                 body.transform.position = stand;
-                if (!drehen) return;
-
-                Vector3 dir = st.Mount.forward;
-                dir.y = 0f;
-                if (dir.sqrMagnitude < 0.000001f) return;
-                body.transform.rotation = Quaternion.LookRotation(dir.normalized,
-                                                                  Vector3.up);
+                Quaternion rotation = st.Mount.rotation;
+                if (!drehen)
+                {
+                    Vector3 facing = Quaternion.Inverse(st.Vgs.transform.rotation) * body.transform.forward;
+                    facing.y = 0f;
+                    if (facing.sqrMagnitude > 0.000001f)
+                        rotation = st.Vgs.transform.rotation * Quaternion.LookRotation(facing, Vector3.up);
+                }
+                body.transform.rotation = rotation;
+                if (st.RiderSeat == null)
+                {
+                    Component carrier;
+                    Transform seats = Technical.FindSeatPoints(st.Vgs.gameObject, out carrier);
+                    if (seats != null && Technical.GunnerSeat < seats.childCount) st.RiderSeat = seats.GetChild(Technical.GunnerSeat);
+                }
+                if (st.RiderSeat != null)
+                    SeatBinding.BindWorld(body.transform, st.RiderSeat,
+                        st.Vgs.transform, stand, rotation);
             }
             catch { }
         }

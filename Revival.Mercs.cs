@@ -75,6 +75,7 @@ namespace NextDayRevival
         internal int Precise, Fast, Tanky, AAGunner;
         internal int AAView;
         internal float AANextSend;
+        internal float StationRetryAt;
         internal bool AARetreat;
         internal float Grade = 0.5f;         // M3: MercGrade.Of his traits and level (0..1, tiers 0..3)
         internal float MaxHealth;            // B3d: his full health at spawn (regeneration)
@@ -119,7 +120,8 @@ namespace NextDayRevival
         // threat nearest him then (NPC rounds carry no attacker), self-heal pace.
         internal MercHitNote LastHit;
         internal Transform LastHitBy;
-        internal float NextSelfHeal;
+        internal float NextSelfHeal; // short recovery cooldown after a new order
+        internal MercMedicine Medicine;
         float _base = -1f;
 
         internal bool Follow { get { return Order.Mode == MercOrder.Follow; } }
@@ -272,7 +274,10 @@ namespace NextDayRevival
                 if (mode == ManGun || mode == ManRadar)
                 {
                     if (pts.Count != 1 || float.IsNaN(fx) || float.IsInfinity(fx)
-                        || (mode == ManGun && (fx < 1f || fx > 7f || fx == 5f || fx != (float)Math.Floor(fx)))
+                        || (mode == ManGun && (fx == 0f || fx < -16777215f || fx > 8388708f || fx == 5f || fx == 12f
+                            || (fx > 14f && fx < 101f) || fx != (float)Math.Floor(fx)
+                            || (fx < 0f && (fz < 1f || fz > 32f || fz != (float)Math.Floor(fz)))
+                            || (fx > 0f && fz != 0f)))
                         || (mode == ManRadar && fx != 5f)) return o;
                     Vector3 p = pts[0];
                     if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z)
@@ -518,9 +523,13 @@ namespace NextDayRevival
             internal int Id;
             internal string ProfileId = "", Name = "";
             internal float Hp = 1f;
+            internal readonly MercMedicine Medicine = new MercMedicine();
             internal double PaidUntil, Deployed;
             internal bool Peaceful, Combat;
             internal MercOrder Order = MercOrder.FollowMe();
+            internal MercReceiptClock Receipt;
+            internal MercOrder ReceiptFor;
+            internal bool ReceiptFocus;
             internal bool Follow { get { return Order.Mode == MercOrder.Follow; } }
             internal bool Session;        // admin test merc, never saved
             internal MercUnit Unit;
@@ -904,6 +913,7 @@ namespace NextDayRevival
                 }
             }
             Merge(mercs, dead, wl);
+            MedicineAnswer(lines);
             CacheSave(lines);
             if (fallback)
             {
@@ -975,7 +985,7 @@ namespace NextDayRevival
             {
                 string l = lines[i];
                 if (l.StartsWith("m=", StringComparison.Ordinal) || l.StartsWith("dead=", StringComparison.Ordinal)
-                    || l.StartsWith("w=", StringComparison.Ordinal))
+                    || l.StartsWith("w=", StringComparison.Ordinal) || l.StartsWith("kit=", StringComparison.Ordinal))
                     body.Append(l).Append('\n');
             }
             string text = body.ToString();
@@ -1021,6 +1031,8 @@ namespace NextDayRevival
                 if (mercs.Count > Cap) mercs.RemoveRange(Cap, mercs.Count - Cap);
                 if (_link.Answered) return;
                 Merge(mercs, dead, wl);
+                // Cached supplies are informative only. Live server confirmation
+                // is required before consuming a persisted medkit.
                 _link.OnCacheLoaded();
                 RevivalPlugin.L.LogInfo("Mercs: last known roster read (" + mercs.Count + " merc(s), "
                     + days.ToString("0.0", CultureInfo.InvariantCulture) + " days old) - it spawns if the master server "
@@ -1550,7 +1562,7 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
-            MercUi.TickInput();
+            MercUi.PollCommands();
             float now = Time.time;
             MercMates.Tick(now);            // W: only while the map is open, 1 Hz
             if (now < _nextTick) return;
@@ -1584,6 +1596,7 @@ namespace NextDayRevival
             PumpOps(now);
             Gones(now);
             Units(now);
+            OrderReceipts(now);
             SurvivalOwner(owner, now);
             MercRide.StepOwner(now, owner);
             if (owner == null) return;
@@ -1689,7 +1702,8 @@ namespace NextDayRevival
                 u.Slot = slot++;
                 r.Hp = NpcWar.MercHealth(u.Ai);
                 r.Combat = NpcWar.MercInCombat(u, 10f);
-                SelfHeal(r, u, now);
+                // Y S5: active recovery runs through the cover/fight loop.
+                // No free competence self-heal in the lifecycle.
                 // B3d: paid while walking off (L, P): the debt is under the
                 // grace again, so he turns round instead of leaving.
                 if (u.Deserting && r.Deployed - r.PaidUntil < GraceHours)
@@ -1832,6 +1846,8 @@ namespace NextDayRevival
             u.Precise = p.Precise; u.Fast = p.Fast; u.Tanky = p.Tanky; u.AAGunner = p.AAGunner;
             u.Grade = MercGrade.Of(p.Precise, p.Fast, p.Tanky, p.Level);
             u.MaxHealth = health;
+            u.Medicine = r.Medicine; u.Medicine.MaxHealth = u.MaxHealth;
+            if (r.Session && !r.Medicine.Known) r.Medicine.SessionLoadout();
             if (!NpcWar.StartMerc("merc-" + r.Id, settlement, ai, u, man))
             {
                 RevivalPlugin.L.LogWarning("Mercs: NpcWar did not take " + r.Name + ".");
@@ -1940,6 +1956,7 @@ namespace NextDayRevival
 
         static void Despawn(Record r, bool destroy)
         {
+            MedicineCancel(r.Unit, Time.time);
             MercUnit u = r.Unit;
             if (u == null) return;
             MercRide.Forget(u);
@@ -2123,7 +2140,9 @@ namespace NextDayRevival
         static void Regen(Record r, float hours)
         {
             MercUnit u = r.Unit;
-            if (r.Combat || u.Deserting || u.MaxHealth <= 0f || r.Hp >= 0.999f) { r.RegenHp = 0f; return; }
+            if (r.Combat || u.Deserting || u.MaxHealth <= 0f || r.Hp >= 0.999f
+                || (u.Medicine != null && u.Medicine.Active != 0) || u.Sense.Exposed
+                || Time.time - u.LastHit.At < MercMedicine.AfterHit) { r.RegenHp = 0f; return; }
             r.RegenHp += hours * RegenPerHour;
             if (r.RegenHp < 1f) return;
             float add = Mathf.Floor(r.RegenHp);
@@ -2131,31 +2150,6 @@ namespace NextDayRevival
             float to = Mathf.Min(u.MaxHealth, r.Hp * u.MaxHealth + add);
             SetHealth(u.Ai, to);
             r.Hp = to / u.MaxHealth;
-        }
-
-        /// <summary>x-merc-competence: out of a fight (no target seen for 10 s)
-        /// and unhit for MercSelfHeal.HealAfter s he patches himself up,
-        /// MercSelfHeal.HealStep every HealEvery s - the server's +0.1 a 15 s
-        /// report, so the roster keeps up. 4 Hz lifecycle; nothing while full.</summary>
-        static void SelfHeal(Record r, MercUnit u, float now)
-        {
-            if (now < u.NextSelfHeal || u.Deserting || u.MaxHealth <= 0f || r.Hp >= 0.999f) return;
-            u.NextSelfHeal = now + MercSelfHeal.HealEvery;
-            float to = MercSelfHeal.Step(r.Hp, r.Combat, now - u.LastHit.At);
-            if (to <= r.Hp) return;
-            SetHealth(u.Ai, to * u.MaxHealth);
-            r.Hp = to;
-        }
-
-        /// <summary>M2: a field dressing in cover (Revival.MercFight.cs): share
-        /// of his full health back, never above it. The roster report takes
-        /// it to the server, which accepts +0.1 a report.</summary>
-        internal static void Dress(MercUnit u, float share)
-        {
-            if (u == null || u.Ai == null || u.MaxHealth <= 0f) return;
-            float have = NpcWar.MercHealth(u.Ai);
-            if (have <= 0f || have >= 0.999f) return;
-            SetHealth(u.Ai, Mathf.Min(u.MaxHealth, (have + share) * u.MaxHealth));
         }
 
         // ============================================================= upkeep
@@ -2228,7 +2222,7 @@ namespace NextDayRevival
             if (r.Session)
             {
                 if (cost > 0 && AddMoney(-cost) < 0) { r.NextPayTry = Time.time + 30f; return; }
-                r.PaidUntil += 24.0; r.WarnStage = 0;
+                r.PaidUntil += 24.0; r.WarnStage = 0; r.Medicine.Refill();
                 MercUi.Toast(r.Name + Loc.T(" оплачен: ", " paid: ") + Money0(cost), false);
                 return;
             }
@@ -2393,10 +2387,15 @@ namespace NextDayRevival
                 // B3d: a man PUN just took with the room still has his last
                 // health to store (D13: "and on despawn").
                 if (r.Session || r.Dead) continue;
-                if (Mathf.Abs(r.Hp - r.HpSent) < 0.01f && r.Deployed - r.DeployedSent < 0.05) continue;
+                if (Mathf.Abs(r.Hp - r.HpSent) < 0.01f && r.Deployed - r.DeployedSent < 0.05
+                    && r.Medicine.Revision == r.Medicine.SentRevision) continue;
                 if (sb == null) sb = new StringBuilder();
                 sb.Append("s=").Append(N(r.Id)).Append('|').Append(N(r.Hp)).Append('|')
-                  .Append(N(r.Deployed)).Append('|').Append(r.Combat ? "1" : "0").Append('\n');
+                  .Append(N(r.Deployed)).Append('|').Append(r.Combat ? "1" : "0");
+                if (r.Medicine.Known) sb.Append('|').Append(MercMedicine.Encode(r.Medicine.Used))
+                    .Append('|').Append(MercMedicine.Encode(r.Medicine.Completed));
+                sb.Append('\n');
+                r.Medicine.SentRevision = r.Medicine.Revision;
                 r.HpSent = r.Hp; r.DeployedSent = r.Deployed;
             }
             if (sb != null) Enqueue("state", sb.ToString(), null, 0f);
@@ -2560,7 +2559,6 @@ namespace NextDayRevival
             List<Record> sel = Selection();
             if (sel.Count == 0) return;
             Give(sel, MercOrder.FollowMe());
-            MercUi.Toast(Addressed(sel) + Loc.T(": СЛЕДОВАТЬ", ": FOLLOW ME"), false);
         }
 
         /// <summary>B3c FOLLOW MY VEHICLE: board the vehicle the owner sits in
@@ -2570,10 +2568,6 @@ namespace NextDayRevival
             List<Record> sel = Selection();
             if (sel.Count == 0) return;
             Give(sel, MercOrder.FollowVehicle());
-            string vehicle = MercRide.OwnerVehicleLabel;
-            MercUi.Toast(Addressed(sel) + Loc.T(": ЗА МОЕЙ ТЕХНИКОЙ", ": FOLLOW MY VEHICLE")
-                + (vehicle != null ? Loc.T(" - садятся: ", " - boarding the ") + vehicle
-                                   : Loc.T(" - сядут, когда вы сядете в машину", " - they board when you get in")), false);
         }
 
         internal static void OrderStay(Vector3 point, Vector3 facing)
@@ -2583,8 +2577,6 @@ namespace NextDayRevival
             MercOrder o = new MercOrder();
             o.Mode = MercOrder.Stay; o.Points = new Vector3[] { point }; o.Facing = facing;
             Give(sel, o);
-            float dist = _owner == null ? 0f : Vector3.Distance(_owner.transform.position, point) / 2.8f;
-            MercUi.Toast(Addressed(sel) + Loc.T(": СТОЯТЬ ", ": STAY ") + dist.ToString("0") + " m", false);
         }
 
         /// <summary>B3b PATROL: a loop through the owner's points. One point
@@ -2616,10 +2608,6 @@ namespace NextDayRevival
             MercOrder o = new MercOrder();
             o.Mode = MercOrder.Patrol; o.Points = route.ToArray();
             Give(sel, o);
-            float len = 0f;
-            for (int i = 0; i < route.Count; i++) len += Vector3.Distance(route[i], route[(i + 1) % route.Count]);
-            MercUi.Toast(Addressed(sel) + Loc.T(": ПАТРУЛЬ, точек ", ": PATROL, ") + route.Count
-                + Loc.T(", круг ", " points, loop ") + (len / 2.8f).ToString("0") + " m", false);
         }
 
         static MercOrder _lastPerim;
@@ -2643,10 +2631,6 @@ namespace NextDayRevival
             }
             _lastPerim = o; _lastPerimAt = Time.time;
             Give(sel, o);
-            float dist = Flat(OwnerPosition - o.Centre) / 2.8f;
-            MercUi.Toast(Addressed(sel) + Loc.T(": ПЕРИМЕТР ", ": PERIMETER ") + o.RadiusM.ToString("0")
-                + Loc.T(" м, центр в ", " m, centre ") + dist.ToString("0")
-                + Loc.T(" м (ещё раз = радиус)", " m away (again = radius)"), false);
         }
 
         /// <summary>The list's radius button: the next step for every selected
@@ -2663,7 +2647,7 @@ namespace NextDayRevival
             o.RadiusM = NextRadius(first.RadiusM);
             _lastPerim = o; _lastPerimAt = Time.time;
             Give(held, o);
-            MercUi.Toast(Addressed(held) + Loc.T(": радиус ", ": radius ") + o.RadiusM.ToString("0") + " m", false);
+
         }
 
         /// <summary>merc-attack-orders ATTACK: the selected mercs advance from
@@ -2717,10 +2701,6 @@ namespace NextDayRevival
             o.Facing = d / Mathf.Max(0.01f, d.magnitude);
             o.Team = new MercAttackTeam(ok.Count);
             Give(ok, o);
-            string how = kind == MercOrder.AtDirection ? Loc.T(" по направлению, конечная точка ", " along the direction, endpoint ")
-                : kind == MercOrder.AtMap ? Loc.T(" точка на карте ", " map point ") : Loc.T(" точка ", " point ");
-            MercUi.Toast(Addressed(ok) + Loc.T(": АТАКА -", ": ATTACK -") + how + (Flat(ground - OwnerPosition) / 2.8f).ToString("0")
-                + Loc.T(" м от вас. K K - отмена (за мной).", " m from you. K K cancels (FOLLOW)."), false);
         }
 
         static float NextRadius(float r)
@@ -2757,32 +2737,9 @@ namespace NextDayRevival
         /// with his place in the group, the map it belongs to, saved.</summary>
         internal static void OrderAAPost(bool radar, Vector3 selectedPoint)
         {
-            int post = MercAA.Nearest(radar, selectedPoint);
-            if (post < 0) { MercUi.Toast(Loc.T("Выберите пушку или консоль радара прицелом.", "Aim at a gun or the radar console."), true); return; }
-            List<Record> sel = Willing(Selection(), radar ? "MAN RADAR" : "MAN GUN");
-            if (sel.Count == 0) return;
-            // One merc per post. A group order uses a free man, keeping the gun
-            // staffed when the next order is MAN RADAR. A single selection may move.
-            if (sel.Count > 1)
-            {
-                int best = -1;
-                float score = -1f;
-                for (int i = 0; i < sel.Count; i++)
-                {
-                    if (MercAA.IsOrder(sel[i].Order)) continue;
-                    MercUnit u = sel[i].Unit;
-                    float rank = u == null ? 0f : radar ? u.Grade : u.AAGunner + u.Grade;
-                    if (rank > score) { score = rank; best = i; }
-                }
-                if (best < 0) { MercUi.Toast(Loc.T("Выберите другого наёмника для нового поста.", "Select another merc for the new post."), true); return; }
-                Record chosen = sel[best]; sel.Clear(); sel.Add(chosen);
-            }
-            Vector3 at; Quaternion rot;
-            if (!MercAA.Pose(post, out at, out rot)) return;
-            MercOrder o = new MercOrder(); o.Mode = radar ? MercOrder.ManRadar : MercOrder.ManGun;
-            o.Points = new Vector3[] { at }; o.Facing = new Vector3(post + 1, 0f, 0f);
-            Give(sel, o);
-            MercUi.Toast(Addressed(sel) + (radar ? Loc.T(": обслуживать радар", ": MAN RADAR") : Loc.T(": обслуживать пушку", ": MAN GUN")), false);
+            // Legacy callers now use owner proximity; no crosshair is required.
+            MercStations.Discover(radar);
+            MercStations.Order(radar, 0);
         }
 
         static void Give(List<Record> sel, MercOrder order)
@@ -2798,8 +2755,8 @@ namespace NextDayRevival
                 {
                     MercAA.Release(r.Unit);
                     r.Unit.Rally = sheltered && (order.Mode == MercOrder.Follow || order.Mode == MercOrder.Vehicle);
-                    if (r.Unit.Fight.Brain != null) r.Unit.Fight.Brain.Leave(MercCoverService.Field);
-                    r.Unit.Fight.Out = new FightOut();
+                    // Keep the current M1 cover/M2-M3 retreat while the new
+                    // objective and leash are picked up on the next AI Think.
                     r.Unit.Sense.NextPick = 0f; r.Unit.Sense.PickAt = -1000f;
                     r.Unit.Order = r.Order;
                     r.Unit.NextOrder = 0f;
@@ -2810,6 +2767,9 @@ namespace NextDayRevival
                     r.Unit.Attack.Reset();
                     if (order.Mode == MercOrder.Attack) r.Unit.Ride.Boarding = null;
                 }
+                Vector3 objective = order.Mode == MercOrder.Follow || order.Mode == MercOrder.Vehicle
+                    ? OwnerPosition : r.Order.Centre;
+                OrderReceived(r, false, objective);
             }
             SendOrders(sel);
         }
@@ -2823,10 +2783,10 @@ namespace NextDayRevival
             {
                 sel[i].Peaceful = on;
                 if (sel[i].Unit != null) sel[i].Unit.Peaceful = on;
+                MercUi.OrderReply(sel[i].Name + (on ? Loc.T(": мирный режим включён", ": peaceful on")
+                    : Loc.T(": мирный режим выключен", ": peaceful off")), false);
             }
             SendOrders(sel);
-            MercUi.Toast(Addressed(sel) + (on ? Loc.T(": МИРНЫЙ режим ВКЛ", ": PEACEFUL on")
-                                              : Loc.T(": МИРНЫЙ режим ВЫКЛ", ": PEACEFUL off")), false);
         }
 
         static void SendOrders(List<Record> sel)

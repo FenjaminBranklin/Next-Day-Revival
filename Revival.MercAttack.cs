@@ -22,6 +22,32 @@ namespace NextDayRevival
 {
     public static partial class NpcWar
     {
+        static void MercVisibleTail(Fighter f, float rangeSqr, float now)
+        {
+            int rays = 0, count = Mathf.Min(_scene.Count, 32);
+            for (int i = 0; i < count && rays < 2; i++)
+            {
+                if (f.MercLookCursor >= _scene.Count) f.MercLookCursor = 0;
+                Component c = _scene[f.MercLookCursor++];
+                if (c == null || c == f.Ai) continue;
+                Transform tr = c.transform;
+                if ((tr.position - f.Tr.position).sqrMagnitude >= rangeSqr) continue;
+                bool tried = false;
+                for (int k = 0; k < 3; k++) if (_cand[k] == tr) tried = true;
+                if (tried) continue;
+                Fighter other = FighterOf(c);
+                if (other != null && other.Squad == f.Squad) continue;
+                if (!Hostile(f.Hated, FactionOf(c)) || !Alive(c) || MercRide.HiddenRider(c)) continue;
+                if ((other == null || other.Squad == null) && !Targetable(c)) continue;
+                rays++;
+                float height;
+                if (!AimPoint(f, tr, out height)) continue;
+                f.Target = tr; f.TargetIsPlayer = false; f.Sees = true;
+                f.AimHeight = height; f.LastSeen = now;
+                break;
+            }
+        }
+
         static void MercAttackInputs(Fighter f, MercUnit u, float now, out MercAttackIn i)
         {
             i = new MercAttackIn();
@@ -37,6 +63,17 @@ namespace NextDayRevival
             i.Sees = i.Target && f.Sees;
             i.TargetAt = i.Target ? f.Target.position : i.Me;
             i.Danger = ft.In.Danger;
+            i.Protected = ft.Health < MercBrain.RetreatBelow || Reloading(f)
+                || (u.Sense.Exposed && now - u.Sense.ExposedAt < 0.8f);
+            MercAttackTeam team = u.Order.Team as MercAttackTeam;
+            if (team != null)
+                team.Covering(u.Order.K, now, ft.Brain != null
+                    && ft.Out.Act == FightAct.Fire && !ft.Out.NoShot && f.Armed
+                    && ft.Health >= MercBrain.RetreatBelow && !Reloading(f)
+                    && (ft.Brain.Cover.Found || !u.Sense.Exposed || now - u.Sense.ExposedAt >= 0.8f)
+                    && f.PlantedSince > 0f && now - f.PlantedSince >= PlantSeconds
+                    && (ft.Gate == MercFireGate.Shoot || ft.Gate == MercFireGate.Suppress)
+                    && f.MuzzleBlockedSince <= 0f && (i.Sees || ft.Out.Suppress));
         }
 
         /// <summary>ATTACK: may the brain fight here (MercMayStand)?</summary>
@@ -69,13 +106,59 @@ namespace NextDayRevival
             if (run.News != 0) MercAttackNews(u, run);
             if (a.Act == MercAttackAct.MoveTo)
             {
-                MercMove(f, u, a.Dest, a.Run, now);
+                Vector3 dest = MercAttackWaypoint(f, u, a.Dest, now);
+                // The same M3 board as the fight loop: a runner calls for
+                // covering/suppressing fire rather than disappearing from it.
+                MercSense sense = u.Sense;
+                MercTeam.Board.Post(u.Id, now, i.Me, sense.Count > 0, false, dest, false,
+                    true, true, false, sense.Count > 0, sense.Count > 0 ? sense.At[0] : dest,
+                    u.Fight.Health, MercBrain.Normal);
+                MercTeam.Board.PostLane(u.Id, now, false, dest, false);
+                MercMove(f, u, dest, true, now);
                 return;
             }
             if (a.Low) MercCrouch(f, now);
             else Hold(f, null, now);
             if (a.Sweep > 0f) MercLook(f, u, a.Face, a.Sweep, 2f, now);
             else FaceDir(f, a.Face);
+        }
+
+        /// <summary>M1 cover-to-cover advance. No cover: a short sprint,
+        /// retrying while moving; an unavailable pick never vetoes the order.</summary>
+        static Vector3 MercAttackWaypoint(Fighter f, MercUnit u, Vector3 goal, float now)
+        {
+            MercAttackRun run = u.Attack;
+            Vector3 me = f.Tr.position;
+            if (run.HaveMove && Flat(run.MoveAt - me) > MercAssault.Precise
+                && Flat(run.MoveAt - goal) < Flat(me - goal) + 2f
+                && (run.MoveCovered || now < run.NextCover || u.Sense.Count == 0)) return run.MoveAt;
+            Vector3 hop = MercAssault.HopTo(me, goal);
+            run.MoveCovered = false;
+            // The final hold spot remains exact. Cover decisions use the same
+            // globally throttled service and claims as M2, at most 2 Hz.
+            if (u.Sense.Count > 0 && Flat(goal - me) > MercAssault.Hop
+                && now >= run.NextCover && MercCoverService.MayQuery())
+            {
+                run.NextCover = now + MercAssault.CoverEvery;
+                CoverPick pick;
+                Vector3 leash; float radius;
+                run.Leash(u.Order, me, out leash, out radius);
+                Vector3 forward = goal - me; forward.y = 0f;
+                if (MercCoverService.Best(hop, u.Sense.At, u.Sense.Weight, u.Sense.Count,
+                    MercAssault.Hop, leash, radius, u.Id, out pick)
+                    && Flat(pick.Point.Pos - me) <= MercAssault.Hop + 2f
+                    && Flat(pick.Point.Pos - goal) + 2f < Flat(me - goal)
+                    && Vector3.Dot(pick.Point.Pos - me, forward) <= forward.sqrMagnitude
+                    && !MercTeam.Board.Crowded(pick.Point.Pos, u.Id, MercSquad.Spread, now))
+                {
+                    hop = pick.Point.Pos;
+                    MercCoverService.Field.Claim(u.Id, hop, now + 5f, now);
+                    run.MoveCovered = true;
+                }
+                else run.MoveCovered = false;
+            }
+            run.MoveAt = hop; run.HaveMove = true;
+            return hop;
         }
 
         static void MercAttackLeash(Fighter f, MercUnit u, out Vector3 centre, out float radius)

@@ -15,7 +15,8 @@
 // system (or Fx.Count / Fx.Keep for hand-emitted particles); an animation
 // asks Anim.Recoil, Anim.Radar, Anim.Tracers ...; a help text draws only with
 // Hints.Alpha(id, state) > 0. Nothing here changes damage, aim or any other
-// gameplay value - only what is drawn.
+// gameplay value - only what is drawn. One exception, a loadout choice: the
+// An-2 bomb load (Y B4, [An2Bombs] BombLoad, 8 x FAB-100 or 12 x FAB-50).
 //
 // Migration: every key is new, read with a tolerant parser (any case, unknown
 // text falls back to the default without rewriting the file), so an existing
@@ -546,6 +547,8 @@ namespace NextDayRevival
         static readonly string[] FarRu = { "Выкл", "Низко", "Норма" };
         static readonly string[] HintRu = { "Выкл", "Авто", "Всегда" };
         static readonly string[] HintEn = { "Off", "Auto", "Always" };
+        static readonly string[] BombRu = { "8 x ФАБ-100", "12 x ФАБ-50" };
+        static readonly string[] BombEn = { "8 x FAB-100", "12 x FAB-50" };
 
         static void Content(int id)
         {
@@ -596,6 +599,13 @@ namespace NextDayRevival
                                       + Hints.KeyLabel + "] - показать снова.",
                                       "Auto: a hint shows for " + Hints.Seconds.ToString("0") + " s, then fades. ["
                                       + Hints.KeyLabel + "] shows them again."));
+
+                GUILayout.Space(6f);
+                GUILayout.Label(Loc.T("Бомбовая загрузка Ан-2 (для пустых бомбодержателей)",
+                                      "An-2 bomb load (for empty racks)"));
+                int bl = An2Bombs.LoadIndex;
+                int nbl = GUILayout.Toolbar(bl, Loc.Lang() == 0 ? BombRu : BombEn);
+                if (nbl != bl) An2Bombs.SetLoad(nbl);
 
                 GUILayout.Space(6f);
                 GUILayout.Label(Loc.T("Всё сохраняется в BepInEx/config/nextday.revival.toolkit.cfg.",

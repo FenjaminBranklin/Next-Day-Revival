@@ -140,7 +140,7 @@ namespace NextDayRevival
     /// is anchored on this name, and a rename would buy nothing but a day of
     /// finding the places it was missed.
     /// </summary>
-    public static class Mortar
+    public static partial class Mortar
     {
         // THE SHELL'S ITEM ID. 2001..3000 is the AMMUNITION band, and an item's
         // inventory category comes from its id band alone (the range switch in
@@ -249,6 +249,8 @@ namespace NextDayRevival
         /// a diff with no behaviour in it.</summary>
         class Tube
         {
+            public bool PoseWritten;
+            public float PoseHull;
             public GameObject Go;
             public Transform Turret;   // turns about its local Y
             public Transform Barrel;   // elevates about its local X
@@ -260,6 +262,9 @@ namespace NextDayRevival
             public int Rounds;         // the PLAYER's shells, loaded by hand
             public float ReadyAt;      // Time.time the next mission may start
             public int SettlementId;
+            public int MercKey; // stable station identity, filled once on discovery
+            public float MercNextKeyAt, MercNextDriverAt;
+            public bool MercDriverUp;
             public Vector3 Centre;     // the settlement centre it belongs to
             /// <summary>The gun of a DRIVABLE howitzer (RevivalArtyVehicle.cs)
             /// rather than a settlement emplacement. It belongs to no
@@ -330,7 +335,9 @@ namespace NextDayRevival
         const int MaxTries = 8;
 
         static readonly List<Tube> _tubes = new List<Tube>();
-        static readonly List<Shell> _inFlight = new List<Shell>();
+        const int ShellCap = 128;
+        static readonly List<Shell> _inFlight = new List<Shell>(ShellCap);
+        static readonly Stack<Shell> _shellFree = new Stack<Shell>(ShellCap);
         static readonly Dictionary<int, bool> _placed = new Dictionary<int, bool>();
         static readonly Dictionary<int, int> _tries = new Dictionary<int, int>();
         // The shortest distance a failed attempt was made from. Getting much
@@ -1850,9 +1857,14 @@ namespace NextDayRevival
                     // then nothing below may touch it again this frame.
                     if (Travel(t, dt)) continue;
                 }
-                t.Yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
-                t.Pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
-                Point(t);
+                float yaw = Mathf.MoveTowardsAngle(t.Yaw, t.WantYaw, Traverse * dt);
+                float pitch = Mathf.MoveTowards(t.Pitch, t.WantPitch, Elevate * dt);
+                float hull = t.Mobile ? t.Go.transform.eulerAngles.y : 0f;
+                if (!t.PoseWritten || yaw != t.Yaw || pitch != t.Pitch || hull != t.PoseHull)
+                {
+                    t.PoseWritten = true; t.PoseHull = hull; t.Yaw = yaw; t.Pitch = pitch;
+                    Point(t);
+                }
             }
         }
 
@@ -2295,7 +2307,8 @@ namespace NextDayRevival
             }
 
             int want = Mathf.Clamp(I(_cfgRounds, 3), 1, 12);
-            int rounds = Mathf.Min(want, t.Rounds);
+            int rounds = Mathf.Min(Mathf.Min(want, t.Rounds), ShellCap - _inFlight.Count);
+            if (rounds <= 0) { Say(Loc.T("Орудия заняты", "Guns busy")); return; }
             t.Rounds -= rounds;
             t.ReadyAt = Time.time + Mathf.Max(0f, F(_cfgCooldown, 20f));
             _fireTarget = target;
@@ -2326,6 +2339,7 @@ namespace NextDayRevival
             float tof = Flight(dist);
             float gap = Mathf.Max(0.2f, F(_cfgRoundInterval, 1.4f));
             Vector3 muzzle = Muzzle(t);
+            rounds = Mathf.Min(rounds, ShellCap - _inFlight.Count);
             for (int i = 0; i < rounds; i++)
             {
                 // Uniform over the AREA of the dispersion circle, not over its
@@ -2337,7 +2351,8 @@ namespace NextDayRevival
                 float y;
                 if (!RevivalTroopInsertion.GroundY(flat, out y)) y = target.y;
 
-                Shell s = new Shell();
+                Shell s = _shellFree.Count > 0 ? _shellFree.Pop() : new Shell();
+                s.Left = false; s.Whistled = false;
                 s.Gun = t;
                 s.From = muzzle;
                 s.Point = new Vector3(flat.x, y, flat.z);
@@ -2399,6 +2414,7 @@ namespace NextDayRevival
                     else Impact(s.Point);
                 }
                 catch (Exception ex) { RevivalPlugin.L.LogError("Mortar impact: " + ex); }
+                finally { s.Gun = null; _shellFree.Push(s); }
             }
         }
 
@@ -3272,6 +3288,8 @@ namespace NextDayRevival
         /// for the same reason: there is no donor AudioClip to borrow.</summary>
         internal static class Sound
         {
+            static readonly AudioSource[] _voices = new AudioSource[CombatLoadPolicy.SoundCap];
+            static int _voice;
             static AudioClip _thump;
             static AudioClip _whistle;
 
@@ -3292,9 +3310,16 @@ namespace NextDayRevival
                 if (clip == null) return;
                 try
                 {
-                    GameObject go = new GameObject("NDR Mortar Sound");
-                    go.transform.position = at;
-                    AudioSource s = go.AddComponent<AudioSource>();
+                    if (!CombatLoad.LocalNear(at, max / 2.8f)) return;
+                    int slot = _voice;
+                    _voice = (_voice + 1) % _voices.Length;
+                    AudioSource s = _voices[slot];
+                    if (s == null)
+                    {
+                        GameObject go = new GameObject("NDR pooled mortar sound");
+                        s = go.AddComponent<AudioSource>(); _voices[slot] = s;
+                    }
+                    s.Stop(); s.transform.position = at; s.enabled = true;
                     s.clip = clip;
                     s.loop = false;
                     s.playOnAwake = false;
@@ -3305,7 +3330,7 @@ namespace NextDayRevival
                     s.maxDistance = max;
                     s.volume = 1f;
                     s.Play();
-                    UnityEngine.Object.Destroy(go, clip.length + 1f);
+
                 }
                 catch (Exception ex)
                 {
