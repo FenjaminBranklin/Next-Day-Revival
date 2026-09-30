@@ -61,6 +61,24 @@
 //             taking a better cover when one turns up (tier 1+), flanking.
 //             His aim over range is the adapter's (Fighter.RangeFalloff).
 //
+// merc-combat-response (docs/ai/tasks/merc-combat-response.md):
+//   SNAP      a fight that starts with a target in sight and nobody shooting
+//             at him opens with a burst from where he stands (Snap, up):
+//             no dash, no peek first. While no threat within its sight sees
+//             him and nothing hits him, he keeps that firing position -
+//             bursts with short aimed pauses. Seen, hit, blind, dry or hurt:
+//             the M2 choice (cover, else the strafe drill) takes over.
+//   CALM      the no-cover drill stops strafing while nobody sees or hits
+//             him and he has a target in sight: he fires from a stand.
+//   LANES     (FightIn.Lanes) his body in the owner's held aim or a mate's
+//             live line of fire: a short sideways run out of it (MercLane),
+//             fight or not, on his own side, never across another live line;
+//             a cover or a strafe point in or across a live line is not taken.
+//             A shooter holds his fire (the veto stays) up to LaneWait while
+//             a mate clears his line, then does what M3 did. Geometry that
+//             stops the step twice: the veto stays, LaneStuck counts it, no
+//             new step for LaneQuiet seconds (no oscillation).
+//
 // Units: game units (~2.8 per metre), seconds. C# 3.0, ASCII only.
 using System;
 using UnityEngine;
@@ -99,6 +117,10 @@ namespace NextDayRevival
         public Vector3 Owner;           // the owner's feet
         public bool HasOwner;           // the owner is here: never fire through him
         public bool Regroup;            // his order lets him fall back on the owner (follow / vehicle)
+        // merc-combat-response: lanes (false: the M3 behaviour, as in the older checks)
+        public bool Lanes;              // he steps out of the owner's held aim and his mates' live lines
+        public bool OwnerAims;          // the owner holds his aim: AimFrom -> AimTo is his line of fire
+        public Vector3 AimFrom, AimTo;
     }
 
     /// <summary>What he does until the next Think.</summary>
@@ -137,8 +159,9 @@ namespace NextDayRevival
     {
         internal const byte Off = 0, Dash = 1, Hide = 2, PeekOut = 3, Burst = 4, PeekBack = 5,
             Reloading = 6, Healing = 7, Evade = 8, Flee = 9;
+        internal const byte Snap = 10;    // merc-combat-response: up, firing from where he stands
         static readonly string[] Names =
-            { "OFF", "DASH", "HIDE", "PEEK", "BURST", "BACK", "RELOAD", "HEAL", "EVADE", "FLEE" };
+            { "OFF", "DASH", "HIDE", "PEEK", "BURST", "BACK", "RELOAD", "HEAL", "EVADE", "FLEE", "SNAP" };
         internal static string Name(byte s) { return s < Names.Length ? Names[s] : "?"; }
 
         internal const float ThinkEvery = 0.1f;
@@ -182,6 +205,13 @@ namespace NextDayRevival
         internal const float RetreatReach = 40f;                  // a retreat: the next cover back, not the far one
         internal const float StuckAfter = 0.6f;                   // a run that gets nowhere this long: another point
         internal const float BlockedCap = 0.6f;                   // a friend in the line this long: down again
+        // merc-combat-response
+        internal const float SnapPauseMin = 0.3f, SnapPauseMax = 0.6f; // aimed pause between two stand bursts
+        internal const float CalmAfterHit = 1.5f, CalmPressure = 0.35f; // hit this recently / felt this much: under fire
+        internal const float LaneCap = 2.5f;                      // one step out of a line takes this long at most
+        internal const float LaneQuiet = 4f;                      // after a failed step: no new one this long
+        internal const float LaneWait = 2.5f;                     // a shooter waits this long for a mate to clear
+        internal const int SelfSteps = 2;                         // steps a blocked shooter takes himself per fight
         const byte PlanNone = 0, PlanMode = 1, PlanFlank = 2, PlanUpgrade = 3, PlanSpread = 4;
 
         readonly int _id;
@@ -200,6 +230,16 @@ namespace NextDayRevival
         // M3 counters (F8, the offline check).
         internal int Covers, CoveredMoves, PlannedMoves, FlankRuns, Falls, Retreats, Upgrades, Spreads, HeldFire, Joined;
         internal float SuppressTime;
+        // merc-combat-response: the stand burst and the lanes.
+        bool _laneOn, _laneFight;
+        Vector3 _laneDest, _laneFrom, _laneTo;
+        float _laneUntil, _laneQuietUntil, _laneStart, _laneBegan, _laneStuckFor, _snapPause, _nextSnap;
+        float _laneSign;
+        int _laneTries, _selfSteps;
+        internal int Snaps, SnapBursts, LaneSteps, LaneCleared, LaneStuck, LaneKept, LaneAvoided, SelfMoves;
+        internal float LaneTime, LaneLongest;
+        /// <summary>Stepping out of a line of fire now.</summary>
+        internal bool Clearing { get { return _laneOn; } }
 
         internal byte State;
         internal float Since;                // when the state was entered
@@ -210,7 +250,7 @@ namespace NextDayRevival
         internal FightOut Order;             // what he does until the next Think
 
         float _nextThink, _lastThink, _dt, _until, _nextPeek, _fired, _burstLen, _upSince;
-        float _plantedAt, _seenAt, _lastEngaged, _lastHit, _pressure, _estFired, _nextClaim, _nextHeal, _kickAt;
+        float _plantedAt, _seenAt, _lastEngaged, _lastHit = -1000f, _pressure, _estFired, _nextClaim, _nextHeal, _kickAt;
         int _hits, _sameSide, _healsLeft = HealsPerFight, _blindPeeks, _evadeSign = 1;
         byte _hitSide;
         bool _evadeUp;
@@ -238,7 +278,7 @@ namespace NextDayRevival
         /// <summary>Up at a peek or firing: exposed on purpose.</summary>
         internal bool Up
         {
-            get { return State == PeekOut || State == Burst || State == PeekBack || (State == Evade && _evadeUp); }
+            get { return State == PeekOut || State == Burst || State == PeekBack || State == Snap || (State == Evade && _evadeUp); }
         }
 
         /// <summary>Crouched at his cover point (hidden if the cover holds).</summary>
@@ -288,10 +328,13 @@ namespace NextDayRevival
             Order = o;
             if (Squad != null)
             {
-                bool moving = State == Dash || State == Flee || State == Evade;
+                bool moving = State == Dash || State == Flee || State == Evade || _laneOn;
                 Squad.Post(_id, i.Now, i.Me, State != Off, State != Off && State != Dash && Cover.Found,
                     Cover.Point.Pos, Up, moving, _call, i.Sees, i.Count > 0,
                     i.Count > 0 ? i.Threats[0] : _lastThreat, i.Health, Mode);
+                // Lanes: up and aiming at a target (not a covering burst at a spot).
+                bool lane = Up && i.Target && i.Count > 0 && o.Act == FightAct.Fire;
+                Squad.PostLane(_id, i.Now, lane, lane ? i.Threats[0] : i.Me, _laneOn);
             }
         }
 
@@ -442,23 +485,27 @@ namespace NextDayRevival
             bool flank = State != Off && Squad != null && i.Count > 0 && Squad.Flanking(now);
             bool engaged = i.MayFight && (own || called || flank);
             if (engaged) _lastEngaged = now;
-            if (!i.MayFight || (State != Off && !engaged && now - _lastEngaged > Grace))
-            {
-                if (State != Off) Leave(field);
-                return;
-            }
+            bool fight = i.MayFight && (State == Off ? engaged : engaged || now - _lastEngaged <= Grace);
+            if (!fight && State != Off) Leave(field);
+            // Lanes: out of the owner's held aim or a mate's live line of
+            // fire, in a fight or not (a grenade comes first).
+            if (i.Lanes && !danger && Lanes(ref i, field, ref o, fight)) return;
+            if (!fight) return;
             if (State == Off)
             {
-                if (!engaged) return;
                 _healsLeft = HealsPerFight;
                 _blindPeeks = 0;
                 _fightStart = now;
                 _coverSince = now;
+                _selfSteps = 0;
+                _nextSnap = 0f;
                 Mode = Normal;
                 _plan = PlanNone;
                 if (!own) Joined++;
                 o.Repick = true;
                 if (danger) StartFlee(ref i, field, ref o);
+                // A target in sight and nobody shooting at him: fire first.
+                else if (SnapOk(ref i)) StartSnap(ref i, ref o);
                 else Choose(ref i, ref o);
                 return;
             }
@@ -491,6 +538,7 @@ namespace NextDayRevival
                 case Healing: StepHeal(ref i, field, ref o, hit); break;
                 case Evade: StepEvade(ref i, ref o, true); break;
                 case Flee: StepFlee(ref i, ref o); break;
+                case Snap: StepSnap(ref i, ref o, hit); break;
             }
         }
 
@@ -511,6 +559,8 @@ namespace NextDayRevival
             _call = false;
             _suppress = false;
             _regrouped = false;
+            _laneFight = false;
+            _selfSteps = 0;
         }
 
         // ------------------------------------------------------------ team
@@ -715,6 +765,19 @@ namespace NextDayRevival
             {
                 if (now < _planUntil) return false;
                 // No point for it in time.
+                if (_plan == PlanMode && Mode == Falling && i.Regroup)
+                {
+                    // Nothing near the owner: run to his side, cover from
+                    // there - (merc-combat-response) like every planned
+                    // move, under a mate's covering fire when one can give it.
+                    if (WaitForCover(ref i, ref o)) return true;
+                    if (Squad != null && Squad.MateUp(_id, now)) CoveredMoves++;
+                    _plan = PlanNone;
+                    _callSince = 0f;
+                    StartRunTo(ref i, ref o, _anchor);
+                    PlannedMoves++;
+                    return true;
+                }
                 byte gone = _plan;
                 _plan = PlanNone;
                 _callSince = 0f;
@@ -723,25 +786,9 @@ namespace NextDayRevival
                     _anchorOn = false;
                     if (Squad != null) Squad.EndFlank(_id, now);
                 }
-                else if (gone == PlanMode && Mode == Falling && i.Regroup)
-                {
-                    // Nothing near the owner: run to his side, cover from there.
-                    StartRunTo(ref i, ref o, _anchor);
-                    PlannedMoves++;
-                    return true;
-                }
                 return false;
             }
-            if (Squad != null && !Squad.MateUp(_id, now) && Squad.MatesDown(_id, now) > 0)
-            {
-                if (_callSince <= 0f) _callSince = now;
-                if (now - _callSince < CallWait)
-                {
-                    _call = true;
-                    HoldLow(ref i, ref o);
-                    return true;
-                }
-            }
+            if (WaitForCover(ref i, ref o)) return true;
             if (Squad != null && Squad.MateUp(_id, now)) CoveredMoves++;
             PlannedMoves++;
             byte plan = _plan;
@@ -752,6 +799,19 @@ namespace NextDayRevival
             else if (plan == PlanSpread) Spreads++;
             field.Release(_id);
             StartDash(ref i, ref o);
+            return true;
+        }
+
+        /// <summary>A planned move waits up to CallWait for a mate to come up
+        /// and cover it (while a mate is down who could). True: waiting.</summary>
+        bool WaitForCover(ref FightIn i, ref FightOut o)
+        {
+            float now = i.Now;
+            if (Squad == null || Squad.MateUp(_id, now) || Squad.MatesDown(_id, now) == 0) return false;
+            if (_callSince <= 0f) _callSince = now;
+            if (now - _callSince >= CallWait) return false;
+            _call = true;
+            HoldLow(ref i, ref o);
             return true;
         }
 
@@ -806,6 +866,8 @@ namespace NextDayRevival
             }
             else if (Flat(p - i.Me) > PickReach || Flat(i.PickFrom - i.Me) > 15f) return false;
             if (i.Danger && Flat(p - i.DangerAt) < DangerRadius) return false;
+            // Lanes: no cover in or across a live line of fire.
+            if (LaneBad(ref i, p)) return false;
             return true;
         }
 
@@ -1127,7 +1189,7 @@ namespace NextDayRevival
             float lastLook = Mathf.Max(_plantedAt, _seenAt);
             bool blind = !_suppress && i.Planted && !i.Sees && _plantedAt > 0f && i.Now - lastLook > PeekBlind;
             bool dry = (i.MaxRounds > 0 && i.Rounds <= 1) || i.Reloading;
-            bool friend = _blockedFor > BlockedCap;
+            bool friend = _blockedFor > BlockCap(i.Now);
             if (hit || dry || blind || friend || _fired >= _burstLen || i.Now - _upSince > PeekCap)
             {
                 if (_fired > 0f) { Bursts++; _blindPeeks = 0; }
@@ -1224,6 +1286,15 @@ namespace NextDayRevival
             Vector3 move = side * (_evadeSign * len);
             if (d < 25f) move = move - fwd * (len * 0.5f);
             Dest = i.Me + move;
+            if (LaneBad(ref i, Dest))
+            {
+                // Lanes: the other side, not across a live line of fire.
+                _evadeSign = -_evadeSign;
+                move = side * (_evadeSign * len);
+                if (d < 25f) move = move - fwd * (len * 0.5f);
+                Dest = i.Me + move;
+                LaneAvoided++;
+            }
             _until = i.Now + StrafeCap;
             Strafes++;
         }
@@ -1231,6 +1302,14 @@ namespace NextDayRevival
         void StepEvade(ref FightIn i, ref FightOut o, bool mayDash)
         {
             if (mayDash && Usable(ref i)) { StartDash(ref i, ref o); return; }
+            // Nobody sees or hits him and a target is in sight: no strafe,
+            // he fires from a stand (Snap) - a burst, an aimed pause, again.
+            if (!_evadeUp && i.Now >= _nextSnap && SnapOk(ref i) && Calm(ref i)
+                && !FriendInLine(ref i, i.Me, Primary(ref i)))
+            {
+                StartSnap(ref i, ref o);
+                return;
+            }
             if (_evadeUp)
             {
                 if (i.Planted && _plantedAt <= 0f) _plantedAt = i.Now;
@@ -1292,6 +1371,251 @@ namespace NextDayRevival
             }
             o.Act = FightAct.Run;
             o.Dest = Dest;
+        }
+
+        // ------------------------------------------ snap (merc-combat-response)
+
+        /// <summary>Hit this recently or suppressed: he is under fire.</summary>
+        bool UnderFire(ref FightIn i)
+        {
+            return i.Now - _lastHit <= CalmAfterHit || _pressure >= CalmPressure;
+        }
+
+        /// <summary>Not under fire and no threat within its sight sees him
+        /// (the adapter only counts a threat that can see that far).</summary>
+        bool Calm(ref FightIn i)
+        {
+            bool fresh = i.Now - i.SensedAt < 0.8f;
+            return !UnderFire(ref i) && !(i.Exposed && fresh && i.Count > 0);
+        }
+
+        /// <summary>He may open fire from where he stands: a target in sight,
+        /// not under fire, not hurt, a magazine to fire from.</summary>
+        bool SnapOk(ref FightIn i)
+        {
+            if (!i.Sees || !i.Target || i.Count == 0 || Mode != Normal || i.Health < RetreatBelow) return false;
+            if (UnderFire(ref i) || i.Reloading || NeedReload(ref i)) return false;
+            return true;
+        }
+
+        /// <summary>How long a blocked shot is held before he gives the
+        /// line up: longer while a mate is stepping out of it.</summary>
+        float BlockCap(float now)
+        {
+            return Squad != null && Squad.Clearing(_id, now) ? LaneWait : BlockedCap;
+        }
+
+        void StartSnap(ref FightIn i, ref FightOut o)
+        {
+            Enter(Snap, i.Now);
+            Snaps++;
+            _evadeUp = false;
+            _upSince = i.Now; _fired = 0f; _plantedAt = 0f; _seenAt = 0f; _blockedFor = 0f; _snapPause = 0f;
+            _suppress = false;
+            _burstLen = Range(BurstMin, BurstMax);
+            o.Act = FightAct.Fire;
+            o.Face = Primary(ref i);
+        }
+
+        /// <summary>Up where he stands: bursts with short aimed pauses while
+        /// he stays calm; seen, hit, blind, dry, hurt or blocked: the M2
+        /// choice (cover, else the strafe drill).</summary>
+        void StepSnap(ref FightIn i, ref FightOut o, bool hit)
+        {
+            float now = i.Now;
+            if (i.Planted && _plantedAt <= 0f) _plantedAt = now;
+            Vector3 aim = Primary(ref i);
+            bool blocked = FriendInLine(ref i, i.Me, aim);
+            if (blocked) { _blockedFor += _dt; HeldFire++; } else _blockedFor = 0f;
+            bool pause = now < _snapPause;
+            if (i.Sees) _seenAt = now;
+            if (i.Planted && i.Sees && !blocked && !pause) { _fired += _dt; _estFired += _dt * RoundsPerSecond; }
+            bool blind = i.Planted && !i.Sees && _plantedAt > 0f && now - Mathf.Max(_plantedAt, _seenAt) > PeekBlind;
+            bool dry = (i.MaxRounds > 0 && i.Rounds <= 1) || i.Reloading || (i.MaxRounds <= 0 && NeedReload(ref i));
+            if (hit || dry || blind || Mode != Normal || UnderFire(ref i)) { EndSnap(ref i, ref o); return; }
+            if (blocked && _blockedFor > BlockCap(now))
+            {
+                // Nobody clears his line (the owner, a mate who cannot): a
+                // short step of his own, SelfSteps a fight at most.
+                if (SelfStep(ref i, ref o, aim)) return;
+                EndSnap(ref i, ref o);
+                return;
+            }
+            if (_fired >= _burstLen)
+            {
+                Bursts++; SnapBursts++;
+                _blindPeeks = 0;
+                _fired = 0f;
+                // Seen by a threat within its sight: cover, or the strafe drill.
+                if (!Calm(ref i)) { EndSnap(ref i, ref o); return; }
+                _burstLen = Range(BurstMin, BurstMax);
+                _snapPause = now + Range(SnapPauseMin, SnapPauseMax);
+            }
+            o.Act = FightAct.Fire;
+            o.Face = aim;
+            o.NoShot = blocked || now < _snapPause;
+        }
+
+        void EndSnap(ref FightIn i, ref FightOut o)
+        {
+            if (_fired > 0f) { Bursts++; SnapBursts++; }
+            _fired = 0f;
+            _nextSnap = i.Now + 1.5f;
+            Choose(ref i, ref o);
+        }
+
+        // ----------------------------------------- lanes (merc-combat-response)
+
+        /// <summary>A move from his feet to dest crosses or ends in the
+        /// owner's held aim or a mate's live line of fire.</summary>
+        bool LaneBad(ref FightIn i, Vector3 dest)
+        {
+            if (!i.Lanes) return false;
+            if (i.OwnerAims && MercLane.Crosses(i.AimFrom, i.AimTo, i.Me, dest)) return true;
+            return Squad != null && Squad.LaneHit(i.Me, dest, _id, i.Now, false, i.Me, i.Me);
+        }
+
+        /// <summary>The line of fire his body stands in: the owner's held
+        /// aim first, then a mate's (shooter: his id, -1 for the owner).</summary>
+        bool Blocking(ref FightIn i, out Vector3 from, out Vector3 to, out int shooter)
+        {
+            if (i.OwnerAims && MercSquad.Near(i.AimFrom, i.AimTo, i.Me))
+            {
+                from = i.AimFrom; to = i.AimTo; shooter = -1;
+                return true;
+            }
+            if (Squad != null && Squad.LaneOf(_id, i.Me, i.Now, out from, out to, out shooter)) return true;
+            from = i.Me; to = i.Me; shooter = -1;
+            return false;
+        }
+
+        /// <summary>The friend nearest to him in the line from -> to.</summary>
+        bool Blocker(ref FightIn i, Vector3 from, Vector3 to, out Vector3 body)
+        {
+            if (i.HasOwner && MercSquad.Near(from, to, i.Owner)) { body = i.Owner; return true; }
+            if (Squad != null && Squad.Blocker(from, to, _id, i.Now, out body)) return true;
+            body = from;
+            return false;
+        }
+
+        /// <summary>Keep out of live lines of fire. True: this Think is a
+        /// step out of one (Run to _laneDest).</summary>
+        bool Lanes(ref FightIn i, CoverField field, ref FightOut o, bool fight)
+        {
+            float now = i.Now;
+            Vector3 from, to;
+            int shooter;
+            if (_laneOn)
+            {
+                bool inside = Blocking(ref i, out from, out to, out shooter);
+                float along, side;
+                MercLane.Offset(_laneFrom, _laneTo, i.Me, out along, out side);
+                bool arrived = Flat(_laneDest - i.Me) < 1f;
+                if (arrived || (!inside && Mathf.Abs(side) >= MercSquad.LineClear + 1f))
+                    return LaneDone(ref i, ref o, true);
+                if (_moved > 0.15f) _laneStuckFor = 0f; else _laneStuckFor += _dt;
+                if ((now - _laneStart > 0.4f && _laneStuckFor > StuckAfter) || now >= _laneUntil)
+                {
+                    // Something stands in the way: the other side, once.
+                    Vector3 other = MercLane.StepOut(_laneFrom, _laneTo, i.Me, -_laneSign);
+                    if (_laneTries == 0 && !LaneBad(ref i, other))
+                    {
+                        _laneTries = 1; _laneSign = -_laneSign; _laneDest = other;
+                        _laneStart = now; _laneUntil = now + LaneCap; _laneStuckFor = 0f;
+                        if (_laneFight) { Dest = other; _until = _laneUntil; }
+                        o.Act = FightAct.Run; o.Dest = other; o.Face = Primary(ref i);
+                        return true;
+                    }
+                    // Geometry: the shooter's veto stays, no new step for a while.
+                    LaneStuck++;
+                    _laneQuietUntil = now + LaneQuiet;
+                    return LaneDone(ref i, ref o, false);
+                }
+                o.Act = FightAct.Run; o.Dest = _laneDest; o.Face = Primary(ref i);
+                return true;
+            }
+            if (now < _laneQuietUntil) return false;
+            if (State == Dash || State == Flee || State == Reloading || State == Healing) return false;
+            if (!Blocking(ref i, out from, out to, out shooter)) return false;
+            // Two mercs in each other's line: the lower id stays, the other moves.
+            if (shooter >= 0 && _id < shooter && Up && i.Count > 0 && Squad.InLineOf(shooter, i.Me, i.Threats[0], now))
+            {
+                LaneKept++;
+                return false;
+            }
+            float al, sd;
+            MercLane.Offset(from, to, i.Me, out al, out sd);
+            float sign = sd > 0.05f ? 1f : sd < -0.05f ? -1f : ((_id & 1) == 0 ? 1f : -1f);
+            Vector3 dest = MercLane.StepOut(from, to, i.Me, sign);
+            if (LaneBad(ref i, dest)) { sign = -sign; dest = MercLane.StepOut(from, to, i.Me, sign); LaneAvoided++; }
+            if (LaneBad(ref i, dest))
+            {
+                LaneStuck++;
+                _laneQuietUntil = now + LaneQuiet;
+                return false;
+            }
+            BeginLane(ref i, field, ref o, from, to, sign, dest, fight && State != Off);
+            return true;
+        }
+
+        void BeginLane(ref FightIn i, CoverField field, ref FightOut o, Vector3 from, Vector3 to, float sign,
+            Vector3 dest, bool inFight)
+        {
+            float now = i.Now;
+            _laneFight = inFight;
+            if (inFight)
+            {
+                // His cover point is in the line: let it go for a while.
+                if (Cover.Found && field != null) { MarkBad(field, now, 6f); field.Release(_id); }
+                Cover = new CoverPick();
+                if (_plan == PlanFlank) { _anchorOn = false; if (Squad != null) Squad.EndFlank(_id, now); }
+                if (_plan != PlanMode) _plan = PlanNone;
+                _callSince = 0f;
+                _suppress = false;
+                Enter(Evade, now);
+                _evadeUp = false;
+                Dest = dest; _until = now + LaneCap;
+            }
+            _laneOn = true; _laneFrom = from; _laneTo = to; _laneSign = sign; _laneDest = dest;
+            _laneStart = now; _laneBegan = now; _laneUntil = now + LaneCap; _laneStuckFor = 0f; _laneTries = 0;
+            LaneSteps++;
+            o.Act = FightAct.Run; o.Dest = dest; o.Face = Primary(ref i);
+        }
+
+        /// <summary>A blocked shooter nobody makes way for: a step of his own,
+        /// sideways away from the body in his line.</summary>
+        bool SelfStep(ref FightIn i, ref FightOut o, Vector3 aim)
+        {
+            if (!i.Lanes || _selfSteps >= SelfSteps) return false;
+            Vector3 body;
+            if (!Blocker(ref i, i.Me, aim, out body)) return false;
+            float along, side;
+            if (!MercLane.Offset(i.Me, aim, body, out along, out side)) return false;
+            float sign = side >= 0f ? -1f : 1f;
+            Vector3 dest = MercLane.StepOut(i.Me, aim, i.Me, sign);
+            if (LaneBad(ref i, dest)) return false;
+            _selfSteps++;
+            SelfMoves++;
+            BeginLane(ref i, null, ref o, i.Me, aim, sign, dest, true);
+            return true;
+        }
+
+        bool LaneDone(ref FightIn i, ref FightOut o, bool cleared)
+        {
+            _laneOn = false;
+            if (cleared)
+            {
+                LaneCleared++;
+                float took = i.Now - _laneBegan;
+                LaneTime += took;
+                if (took > LaneLongest) LaneLongest = took;
+            }
+            _laneQuietUntil = Mathf.Max(_laneQuietUntil, i.Now + 0.5f);
+            bool resume = _laneFight && State != Off;
+            _laneFight = false;
+            if (!resume) return false;
+            Choose(ref i, ref o);
+            return true;
         }
 
         // ---------------------------------------------------------- danger

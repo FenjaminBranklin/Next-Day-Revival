@@ -422,6 +422,10 @@ namespace NextDayRevival
             MercSense s = u.Sense;
             Vector3 me = f.Tr.position;
             MercCoverService.Near(u, me, now);
+            // merc-combat-response: a target in sight while he knows no
+            // threat is sensed at once, not at the next 0.35..0.5 s tick - the
+            // brain can only answer a contact its sense lists.
+            if (s.Count == 0 && f.Sees && f.Target != null && f.Target) s.NextSense = 0f;
             if (now < s.NextSense) return;
             // M3: a higher grade is told sooner (0.5 s up to grade 0.5, 0.35 s at 1).
             s.NextSense = now + MercBrain.SenseEvery(u.Grade) + (u.Id & 7) * 0.01f;
@@ -476,12 +480,15 @@ namespace NextDayRevival
             }
 
             // Seen where he is? The two nearest threats and (M3) one of the
-            // others in turn, two rays each at most.
+            // others in turn, two rays each at most. merc-combat-response:
+            // only a threat within MercThreat.SightUnits counts (and costs a
+            // ray); a distant one with a geometric line is no reason to leave
+            // a firing position - its hits still are.
             bool low = f.Crouched || f.InCover;
             int extra = s.Count > 2 ? 2 + (s.Turn++ % (s.Count - 2)) : -1;
-            s.Exposed = MercCoverService.Exposed(me, low, s.At[0])
-                || (s.Count > 1 && MercCoverService.Exposed(me, low, s.At[1]))
-                || (extra > 0 && MercCoverService.Exposed(me, low, s.At[extra]));
+            s.Exposed = MercSeenFrom(me, low, s.At[0])
+                || (s.Count > 1 && MercSeenFrom(me, low, s.At[1]))
+                || (extra > 0 && MercSeenFrom(me, low, s.At[extra]));
             s.ExposedAt = now;
 
             // The pick: kept while it fits, re-chosen when it went stale.
@@ -526,6 +533,9 @@ namespace NextDayRevival
                     centre = o.Centre; radius = o.RadiusUnits + 40f; return;
                 case MercOrder.Stay:
                     centre = o.Centre; radius = MercStayLeash; return;
+                case MercOrder.Attack:
+                    // merc-attack-orders: the corridor near him, or his hold circle.
+                    MercAttackLeash(f, u, out centre, out radius); return;
                 case MercOrder.Follow:
                 case MercOrder.Vehicle:
                     if (u.Owner != null) { centre = u.Owner.position; radius = MercBreakOffUnits; return; }

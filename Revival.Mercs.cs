@@ -106,6 +106,8 @@ namespace NextDayRevival
         internal readonly MercWatch Watch = new MercWatch();
         // M2: his fight loop - cover, peek, burst, relocate (Revival.MercFight.cs).
         internal readonly MercFight Fight = new MercFight();
+        // merc-attack-orders: his progress through an ATTACK (Revival.MercAttackCore.cs).
+        internal readonly MercAttackRun Attack = new MercAttackRun();
         float _base = -1f;
 
         internal bool Follow { get { return Order.Mode == MercOrder.Follow; } }
@@ -125,11 +127,20 @@ namespace NextDayRevival
     /// place in the group: a start leg on a route, a sector of a perimeter).
     /// It travels to the server in the roster row's order field, so it has no
     /// '|' and no line break: mode~scene~k~n~radius~x,y,z;x,y,z~fx,fz.
-    /// B3c: VEHICLE (FOLLOW MY VEHICLE) is a bare "vehicle" like "follow".</summary>
+    /// B3c: VEHICLE (FOLLOW MY VEHICLE) is a bare "vehicle" like "follow".
+    /// merc-attack-orders: ATTACK is a FOLLOW extension the unchanged server
+    /// keeps verbatim (SafeOrder passes any "follow~" text of its own
+    /// characters) and an older client reads as plain FOLLOW:
+    /// follow~scene~k~n~radius~objective;origin~dx,dz~attack~p|d|m.</summary>
     internal sealed class MercOrder
     {
-        internal const int Follow = 0, Stay = 1, Patrol = 2, Perimeter = 3, Vehicle = 4, ManGun = 5, ManRadar = 6;
+        internal const int Follow = 0, Stay = 1, Patrol = 2, Perimeter = 3, Vehicle = 4, ManGun = 5, ManRadar = 6, Attack = 7;
         internal const int MaxPoints = 6;
+        // ATTACK: what the owner gave - a point he aimed at, a direction (no
+        // ground under the crosshair: a bounded endpoint) or a map click.
+        internal const byte AtPoint = 0, AtDirection = 1, AtMap = 2;
+        internal const float AttackMaxUnits = 1680f;     // 600 m from where it was given
+        internal const float AttackMinUnits = 28f;       // 10 m: nearer is no attack
         internal static readonly float[] Radii = { 15f, 25f, 40f, 60f };   // metres
 
         internal int Mode;
@@ -140,11 +151,15 @@ namespace NextDayRevival
         internal string Scene = "";
         internal int K, N = 1;
         internal float IssuedAt;
+        internal byte Kind;              // ATTACK: AtPoint / AtDirection / AtMap
+        internal object Team;            // ATTACK: the group's shared run state (MercAttackTeam), not saved
 
         internal static MercOrder FollowMe() { return new MercOrder(); }
         internal static MercOrder FollowVehicle() { MercOrder o = new MercOrder(); o.Mode = Vehicle; return o; }
 
         internal Vector3 Centre { get { return Points.Length > 0 ? Points[0] : Vector3.zero; } }
+        /// <summary>ATTACK: where the owner gave it (the corridor's start).</summary>
+        internal Vector3 Origin { get { return Points.Length > 1 ? Points[1] : Centre; } }
         internal float RadiusUnits { get { return RadiusM * 2.8f; } }
         internal bool Placed { get { return Mode == Stay || Mode == Patrol || Mode == Perimeter || Mode == ManGun || Mode == ManRadar; } }
 
@@ -176,6 +191,18 @@ namespace NextDayRevival
             if (Mode == Follow) return "follow";
             if (Mode == Vehicle) return "vehicle";
             StringBuilder sb = new StringBuilder();
+            if (Mode == Attack)
+            {
+                sb.Append("follow~").Append(SceneKey(Scene)).Append('~').Append(K.ToString(CultureInfo.InvariantCulture)).Append('~')
+                  .Append(N.ToString(CultureInfo.InvariantCulture)).Append('~').Append(F(RadiusM)).Append('~');
+                Vector3 a = Centre, b = Origin;
+                sb.Append(F(a.x)).Append(',').Append(F(a.y)).Append(',').Append(F(a.z)).Append(';')
+                  .Append(F(b.x)).Append(',').Append(F(b.y)).Append(',').Append(F(b.z));
+                sb.Append('~').Append(Facing.x.ToString("0.###", CultureInfo.InvariantCulture)).Append(',')
+                  .Append(Facing.z.ToString("0.###", CultureInfo.InvariantCulture));
+                sb.Append("~attack~").Append(Kind == AtDirection ? 'd' : Kind == AtMap ? 'm' : 'p');
+                return sb.ToString();
+            }
             sb.Append(Mode == Stay ? "stay" : Mode == Patrol ? "patrol" : Mode == ManGun ? "gun" : Mode == ManRadar ? "radar" : "perim").Append('~')
               .Append(SceneKey(Scene)).Append('~').Append(K.ToString(CultureInfo.InvariantCulture)).Append('~')
               .Append(N.ToString(CultureInfo.InvariantCulture)).Append('~').Append(F(RadiusM)).Append('~');
@@ -202,6 +229,7 @@ namespace NextDayRevival
             {
                 string[] c = text.Split('~');
                 if (c.Length < 7) return o;
+                if (c[0] == "follow") return DecodeAttack(c);
                 int mode = c[0] == "stay" ? Stay : c[0] == "patrol" ? Patrol : c[0] == "perim" ? Perimeter : c[0] == "gun" ? ManGun : c[0] == "radar" ? ManRadar : Follow;
                 if (mode == Follow) return o;
                 List<Vector3> pts = new List<Vector3>();
@@ -245,6 +273,52 @@ namespace NextDayRevival
                 return o;
             }
             catch { return new MercOrder(); }
+        }
+
+        static bool Finite(float v) { return !float.IsNaN(v) && !float.IsInfinity(v) && v > -1e6f && v < 1e6f; }
+
+        static bool Point(string text, out Vector3 p)
+        {
+            p = Vector3.zero;
+            string[] xyz = text.Split(',');
+            float x, y, z;
+            if (xyz.Length != 3
+                || !float.TryParse(xyz[0], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                || !float.TryParse(xyz[1], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+                || !float.TryParse(xyz[2], NumberStyles.Float, CultureInfo.InvariantCulture, out z)
+                || !Finite(x) || !Finite(y) || !Finite(z)) return false;
+            p = new Vector3(x, y, z);
+            return true;
+        }
+
+        /// <summary>merc-attack-orders: a "follow~..." row. Only a complete,
+        /// finite ATTACK with a sane length decodes as one; everything else is
+        /// FOLLOW (the old reading of the same text).</summary>
+        static MercOrder DecodeAttack(string[] c)
+        {
+            MercOrder o = new MercOrder();
+            if (c.Length != 9 || c[7] != "attack" || c[8].Length != 1) return o;
+            byte kind = c[8] == "p" ? AtPoint : c[8] == "d" ? AtDirection : c[8] == "m" ? AtMap : (byte)255;
+            if (kind == 255) return o;
+            string[] pts = c[5].Split(';');
+            Vector3 at, from;
+            if (pts.Length != 2 || !Point(pts[0], out at) || !Point(pts[1], out from)) return o;
+            float dx = at.x - from.x, dz = at.z - from.z;
+            float len = (float)Math.Sqrt(dx * dx + dz * dz);
+            if (len < AttackMinUnits * 0.5f || len > AttackMaxUnits + 60f) return o;
+            int k, n;
+            float r;
+            if (!int.TryParse(c[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out k)
+                || !int.TryParse(c[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out n)
+                || !float.TryParse(c[4], NumberStyles.Float, CultureInfo.InvariantCulture, out r) || !Finite(r)) return o;
+            if (n < 1 || n > 10 || k < 0 || k >= n) return o;
+            o.Mode = Attack; o.Kind = kind; o.Scene = c[1];
+            o.Points = new Vector3[] { at, from };
+            o.K = k; o.N = n;
+            o.RadiusM = Mathf.Clamp(r <= 0f ? 25f : r, 10f, 80f);
+            // The direction is the corridor's: origin to objective.
+            o.Facing = new Vector3(dx / len, 0f, dz / len);
+            return o;
         }
     }
 
@@ -1625,6 +1699,17 @@ namespace NextDayRevival
                 r.Order = order;
                 SendOrders(new List<Record>(new Record[] { r }));
             }
+            else if (order.Mode == MercOrder.Attack)
+            {
+                // merc-attack-orders: a relog, a restart or a new region never
+                // resumes an assault - he comes back beside the owner on FOLLOW.
+                RevivalPlugin.L.LogInfo("Mercs: " + r.Name + "'s attack order ended with the respawn, now FOLLOW.");
+                MercUi.Toast(r.Name + Loc.T(": атака прервана при возвращении - за мной.",
+                    ": the attack ended when he came back - FOLLOW."), false);
+                order = MercOrder.FollowMe();
+                r.Order = order;
+                SendOrders(new List<Record>(new Record[] { r }));
+            }
             u.Order = order;
             if (order.Survive) _survivalNotice = true;
             u.Approach = pos + (order.Facing.sqrMagnitude > 0.01f ? order.Facing : fwd) * 280f;
@@ -2402,6 +2487,63 @@ namespace NextDayRevival
             MercUi.Toast(Addressed(held) + Loc.T(": радиус ", ": radius ") + o.RadiusM.ToString("0") + " m", false);
         }
 
+        /// <summary>merc-attack-orders ATTACK: the selected mercs advance from
+        /// where they stand to the objective (a point under the crosshair, the
+        /// bounded end of a direction, a map click), fight on the way and hold
+        /// it. Unpaid and PEACEFUL mercs refuse with the reason; a point too
+        /// near, too far or without ground is no order at all.</summary>
+        internal static void OrderAttack(Vector3 objective, byte kind)
+        {
+            List<Record> sel = Willing(Selection(), Loc.T("атака", "attack"));
+            if (sel.Count == 0) return;
+            List<Record> ok = new List<Record>();
+            for (int i = 0; i < sel.Count; i++)
+            {
+                if (!sel[i].Peaceful) { ok.Add(sel[i]); continue; }
+                MercUi.Toast(sel[i].Name + Loc.T(" в МИРНОМ режиме и не атакует (K 6 - выключить).",
+                    " is PEACEFUL and will not attack (K 6 turns it off)."), true);
+            }
+            if (ok.Count == 0) return;
+            // The corridor starts where the attackers are (the owner's spot for
+            // those not in the world yet).
+            Vector3 from = Vector3.zero;
+            int placed = 0;
+            for (int i = 0; i < ok.Count; i++)
+                if (ok[i].Unit != null && ok[i].Unit.Ai != null) { from += ok[i].Unit.Ai.transform.position; placed++; }
+            from = placed > 0 ? from / placed : OwnerPosition;
+            float dist = Flat(objective - from);
+            if (dist < MercOrder.AttackMinUnits)
+            {
+                MercUi.Toast(Loc.T("Цель атаки слишком близко (", "Attack objective too close (") + (dist / 2.8f).ToString("0")
+                    + Loc.T(" м) - используйте СТОЯТЬ.", " m) - use STAY."), true);
+                return;
+            }
+            if (dist > MercOrder.AttackMaxUnits)
+            {
+                MercUi.Toast(Loc.T("Цель атаки слишком далеко: ", "Attack objective too far: ") + (dist / 2.8f).ToString("0")
+                    + Loc.T(" м (предел 600 м).", " m (the limit is 600 m)."), true);
+                return;
+            }
+            Vector3 ground;
+            if (!RevivalGroundEnemies.TryGround(objective, 12f, out ground))
+            {
+                MercUi.Toast(Loc.T("У цели атаки нет проходимой земли - приказ не отдан.",
+                    "No walkable ground at the attack objective - no order given."), true);
+                return;
+            }
+            MercOrder o = new MercOrder();
+            o.Mode = MercOrder.Attack; o.Kind = kind; o.RadiusM = MercOrder.Radii[1];
+            o.Points = new Vector3[] { ground, from };
+            Vector3 d = ground - from; d.y = 0f;
+            o.Facing = d / Mathf.Max(0.01f, d.magnitude);
+            o.Team = new MercAttackTeam(ok.Count);
+            Give(ok, o);
+            string how = kind == MercOrder.AtDirection ? Loc.T(" по направлению, конечная точка ", " along the direction, endpoint ")
+                : kind == MercOrder.AtMap ? Loc.T(" точка на карте ", " map point ") : Loc.T(" точка ", " point ");
+            MercUi.Toast(Addressed(ok) + Loc.T(": АТАКА -", ": ATTACK -") + how + (Flat(ground - OwnerPosition) / 2.8f).ToString("0")
+                + Loc.T(" м от вас. K K - отмена (за мной).", " m from you. K K cancels (FOLLOW)."), false);
+        }
+
         static float NextRadius(float r)
         {
             for (int i = 0; i < MercOrder.Radii.Length; i++)
@@ -2483,6 +2625,11 @@ namespace NextDayRevival
                     r.Unit.Order = r.Order;
                     r.Unit.NextOrder = 0f;
                     r.Unit.Chasing = false;
+                    // merc-attack-orders: a new order restarts his attack run; an
+                    // attack is on foot - a pending boarding ends now (a seated
+                    // rider gets out when the vehicle stands, MercRide).
+                    r.Unit.Attack.Reset();
+                    if (order.Mode == MercOrder.Attack) r.Unit.Ride.Boarding = null;
                 }
             }
             SendOrders(sel);

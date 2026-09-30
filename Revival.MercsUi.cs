@@ -243,7 +243,7 @@ namespace NextDayRevival
                         _wheelPick = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
                     }
                     else { _wheelVec = Vector2.zero; _wheelPick = -1; }
-                    for (int n = 1; n <= 8; n++)
+                    for (int n = 1; n <= SectorEn.Length; n++)
                         if (Input.GetKeyDown(KeyCode.Alpha0 + n)) { Issue(n - 1); _wheelOpen = false; _wheelArmed = false; return; }
                     if (Input.GetKeyDown(KeyCode.Escape) || Input.GetMouseButtonDown(1))
                     { _wheelOpen = false; _wheelArmed = false; return; }
@@ -258,15 +258,18 @@ namespace NextDayRevival
         }
 
         // Sector order clockwise from the top: FOLLOW, STAY, PATROL,
-        // PERIMETER, VEHICLE, PEACEFUL (the mockup's wheel).
-        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN GUN", "MAN RADAR" };
-        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР" };
+        // PERIMETER, VEHICLE, PEACEFUL (the mockup's wheel), the AA posts and
+        // (merc-attack-orders) ATTACK on key 9.
+        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN GUN", "MAN RADAR", "ATTACK" };
+        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР", "АТАКА" };
+        const int AttackSector = 8;
 
         static int Sector(Vector2 v)
         {
             float a = Mathf.Atan2(v.x, v.y) * Mathf.Rad2Deg;   // 0 = up, clockwise
             if (a < 0f) a += 360f;
-            return Mathf.FloorToInt(((a + 22.5f) % 360f) / 45f);
+            float step = 360f / SectorEn.Length;
+            return Mathf.FloorToInt(((a + step * 0.5f) % 360f) / step) % SectorEn.Length;
         }
 
         static void Issue(int sector)
@@ -303,6 +306,66 @@ namespace NextDayRevival
                         Toast(Loc.T("Наведите прицел на пушку или консоль.", "Aim at the gun or console."), true);
                     else Mercs.OrderAAPost(sector == 7, aaPoint);
                     break;
+                case AttackSector: AttackAtCrosshair(); break;
+            }
+        }
+
+        // ============================================== merc-attack-orders
+        // ATTACK from the wheel: the ground under the crosshair (300 m) is the
+        // objective; with none (sky, too far) the flat look direction gives a
+        // bounded endpoint - 150 m, or the first of 110 / 75 / 40 m with
+        // ground. From the map: the list's "Attack on the map..." and a click.
+        static readonly float[] DirectionSteps = { 420f, 308f, 210f, 112f };
+
+        static void AttackAtCrosshair()
+        {
+            Vector3 point, facing;
+            if (CrosshairPoint(out point, out facing)) { Mercs.OrderAttack(point, MercOrder.AtPoint); return; }
+            Vector3 end;
+            if (AttackDirection(facing, out end)) Mercs.OrderAttack(end, MercOrder.AtDirection);
+            else Toast(Loc.T("В этом направлении нет земли - наведите на землю или задайте точку на карте (L).",
+                "No ground in that direction - aim at the ground or set a map point (L list)."), true);
+        }
+
+        static bool AttackDirection(Vector3 facing, out Vector3 end)
+        {
+            Vector3 me = Mercs.OwnerPosition;
+            end = me;
+            facing.y = 0f;
+            if (facing.sqrMagnitude < 0.01f) return false;
+            facing.Normalize();
+            for (int i = 0; i < DirectionSteps.Length; i++)
+            {
+                Vector3 g;
+                if (RevivalGroundEnemies.TryGround(me + facing * DirectionSteps[i], 20f, out g)) { end = g; return true; }
+            }
+            return false;
+        }
+
+        static bool _placeAttack;
+
+        internal static void StartAttackMap()
+        {
+            _placing = true; _placeAttack = true; _route.Clear(); _placeSeen = Time.time; _placeKeyDown = -1f;
+            _lastWasTap = false;
+            Toast(Loc.T("АТАКА: кликните цель на карте, ", "ATTACK: click the objective on the map, ") + _wheelKeyText
+                + Loc.T(" - точка под прицелом, Esc - отмена.", " tap = the crosshair point, Esc = cancel."), false);
+        }
+
+        /// <summary>Per frame while an attack point is being set: key reads
+        /// only (the crosshair ray runs on a tap).</summary>
+        static void AttackInput(bool gameWindow)
+        {
+            float now = Time.time;
+            if (now - _placeSeen > 120f)
+            { CancelRoute(Loc.T("Точка атаки не задана (2 мин) - отмена.", "Attack point not set (2 min) - cancelled.")); return; }
+            if (!gameWindow && Input.GetKeyDown(KeyCode.Escape))
+            { CancelRoute(Loc.T("Атака отменена.", "Attack cancelled.")); return; }
+            if (_wheelKey == KeyCode.None || gameWindow) return;   // on the map the point is a click
+            if (Input.GetKeyDown(_wheelKey))
+            {
+                _placing = false; _placeAttack = false;
+                AttackAtCrosshair();
             }
         }
 
@@ -416,7 +479,7 @@ namespace NextDayRevival
 
         static void CancelRoute(string why)
         {
-            _placing = false; _route.Clear();
+            _placing = false; _placeAttack = false; _route.Clear();
             Toast(why, false);
         }
 
@@ -430,6 +493,12 @@ namespace NextDayRevival
             if (!MapTools.MouseWorld(out point)) return true;
             Vector3 g;
             if (RevivalGroundEnemies.TryGround(point, 12f, out g)) point = g;
+            if (_placeAttack)
+            {
+                _placing = false; _placeAttack = false;
+                Mercs.OrderAttack(point, MercOrder.AtMap);
+                return true;
+            }
             int before = _route.Count;
             AddRoutePoint(point);
             if (_placing && _route.Count > before)
@@ -442,6 +511,7 @@ namespace NextDayRevival
         /// crosshair ray runs on a tap, never per frame).</summary>
         static void RouteInput(bool gameWindow)
         {
+            if (_placeAttack) { AttackInput(gameWindow); return; }
             float now = Time.time;
             if (now - _placeSeen > 120f)
             { CancelRoute(Loc.T("Маршрут патруля отменён (2 мин без точек).", "Patrol route cancelled (2 min without a point).")); return; }
@@ -488,6 +558,7 @@ namespace NextDayRevival
         /// and a small panel with the keys.</summary>
         static void DrawPlacing()
         {
+            if (_placeAttack) { DrawAttackPlacing(); return; }
             Camera cam = CameraOwner.MainCamera();
             Vector3 me = Mercs.OwnerPosition;
             if (cam != null)
@@ -519,6 +590,21 @@ namespace NextDayRevival
                 ? Loc.T("1 точка = круг 30 м вокруг неё", "1 point = a 30 m loop around it") : "", _small);
         }
 
+        static void DrawAttackPlacing()
+        {
+            float w = 560f, h = 46f;
+            Rect r = new Rect(Screen.width * 0.5f - w * 0.5f, Screen.height - h - 110f, w, h);
+            Box(r, new Color(0f, 0f, 0f, 0.72f));
+            Box(new Rect(r.x, r.y, 3f, r.height), AttackRed);
+            Vector3 at;
+            bool hit = CrosshairCached(out at);
+            Centered(new Rect(r.x, r.y + 4f, w, 22f), "<b>" + Loc.T("ТОЧКА АТАКИ", "ATTACK POINT") + "</b>   "
+                + (hit ? Loc.T("прицел ", "crosshair ") + (FlatDist(Mercs.OwnerPosition, at) / 2.8f).ToString("0") + " m"
+                : Loc.T("прицел: нет земли - направление до 150 м", "crosshair: no ground - direction up to 150 m")), _label);
+            Centered(new Rect(r.x, r.y + 28f, w, 18f), Loc.T("клик по карте - цель   ", "map click = objective   ") + _wheelKeyText
+                + Loc.T(" - под прицелом   Esc - отмена", " tap = crosshair   Esc = cancel"), _small);
+        }
+
         // ======================================================== B3b map
         // Owner only (his own client draws it): each patrol route as a dashed
         // loop and each perimeter as a dashed circle in the native map ink
@@ -535,6 +621,8 @@ namespace NextDayRevival
             internal Vector3 LabelAt;
             internal string Label;
             internal int Seen;
+            internal Color Tint;
+            internal string Prefix = "";       // merc-attack-orders: "ATTACK " before the numbers
         }
 
         static readonly Dictionary<string, Ink> _inks = new Dictionary<string, Ink>();
@@ -542,6 +630,8 @@ namespace NextDayRevival
         static readonly List<string> _inkGone = new List<string>();
         static readonly Color InkGreen = new Color(0.22f, 0.78f, 0.30f, 1f);
         static readonly Color MateBlue = new Color(0.35f, 0.70f, 1.00f, 1f);
+        // merc-attack-orders: the target-ring red of the game's map markers.
+        static readonly Color AttackRed = new Color(0.72f, 0.13f, 0.125f, 1f);
         // Map labels without a string per frame: "<b>n</b>" is built once.
         static readonly string[] Numbers = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" };
         static int _inkFrame;
@@ -576,17 +666,17 @@ namespace NextDayRevival
                     if (m.Dead) continue;
                     number++;
                     MercOrder o = m.Order;
-                    if ((o.Mode != MercOrder.Patrol && o.Mode != MercOrder.Perimeter)
+                    if ((o.Mode != MercOrder.Patrol && o.Mode != MercOrder.Perimeter && o.Mode != MercOrder.Attack)
                         || MercOrder.SceneKey(o.Scene) != scene || o.Points.Length == 0) continue;
                     string key = InkKey(o);
                     Ink ink;
                     if (!_inks.TryGetValue(key, out ink)) { ink = NewInk(o); _inks[key] = ink; }
                     if (ink.Seen != _inkFrame)
                     {
-                        ink.Seen = _inkFrame; ink.Label = "";
+                        ink.Seen = _inkFrame; ink.Label = ink.Prefix;
                         _inkNow.Add(ink);
                     }
-                    ink.Label += (ink.Label.Length == 0 ? "" : " ") + "#" + number;
+                    ink.Label += (ink.Label.Length == ink.Prefix.Length ? "" : " ") + "#" + number;
                 }
                 for (int i = 0; i < _inkNow.Count; i++)
                 {
@@ -600,14 +690,14 @@ namespace NextDayRevival
                         if (layer == null) return;
                     }
                     for (int d = 0; d < ink.Dashes.Count; d++)
-                        layer.Draw(ink.Dashes[d].Bounds, ink.Dashes[d].Texture, InkGreen);
+                        layer.Draw(ink.Dashes[d].Bounds, ink.Dashes[d].Texture, ink.Tint);
                 }
                 _inkGone.Clear();
                 foreach (KeyValuePair<string, Ink> e in _inks) if (e.Value.Seen != _inkFrame) _inkGone.Add(e.Key);
                 for (int i = 0; i < _inkGone.Count; i++) { DropInk(_inks[_inkGone[i]]); _inks.Remove(_inkGone[i]); }
 
                 for (int i = 0; i < _inkNow.Count; i++)
-                    MapText(_inkNow[i].LabelAt, _inkNow[i].Label, InkGreen, texture, camera, world, map, full, view);
+                    MapText(_inkNow[i].LabelAt, _inkNow[i].Label, _inkNow[i].Tint, texture, camera, world, map, full, view);
                 number = 0;
                 for (int i = 0; i < roster.Count; i++)
                 {
@@ -679,6 +769,30 @@ namespace NextDayRevival
         {
             Ink ink = new Ink();
             ink.Loop = new List<Vector3>();
+            ink.Tint = InkGreen;
+            if (o.Mode == MercOrder.Attack)
+            {
+                // merc-attack-orders: one dashed stroke in the target red - the
+                // approach from where it was given to the hold circle, then
+                // once round the circle at the objective.
+                float r = o.RadiusUnits;
+                Vector3 c = o.Centre, d = o.Centre - o.Origin;
+                d.y = 0f;
+                float len = d.magnitude;
+                d = len < 0.01f ? Vector3.forward : d / len;
+                if (len > r + 4f) ink.Loop.Add(o.Origin);
+                float a0 = Mathf.Atan2(-d.x, -d.z);
+                for (int i = 0; i <= 48; i++)
+                {
+                    float a = a0 + i * Mathf.PI * 2f / 48f;
+                    ink.Loop.Add(c + new Vector3(Mathf.Sin(a), 0f, Mathf.Cos(a)) * r);
+                }
+                ink.Closed = false;
+                ink.LabelAt = c + new Vector3(0f, 0f, r);
+                ink.Tint = AttackRed;
+                ink.Prefix = Loc.T("АТАКА ", "ATTACK ");
+                return ink;
+            }
             if (o.Mode == MercOrder.Perimeter)
             {
                 float r = o.RadiusUnits;
@@ -959,9 +1073,22 @@ namespace NextDayRevival
                 case MercOrder.ManRadar: o = Loc.T("РАДАР", "MAN RADAR"); break;
                 case MercOrder.Patrol: o = Loc.T("ПАТРУЛЬ ", "PATROL ") + order.Points.Length; break;
                 case MercOrder.Perimeter: o = Loc.T("ПЕРИМ. ", "PERIM ") + order.RadiusM.ToString("0") + "m"; break;
+                case MercOrder.Attack: o = AttackText(m); break;
                 default: o = Loc.T("СТОИТ", "STAY"); break;
             }
             return m.Peaceful ? o + " (P)" : o;
+        }
+
+        /// <summary>merc-attack-orders: the attack's state in the list.</summary>
+        static string AttackText(Mercs.Record m)
+        {
+            MercUnit u = m.Unit;
+            byte phase = u == null || u.Attack.For != m.Order ? MercAttackRun.Advance : u.Attack.Phase;
+            if (phase == MercAttackRun.Holding) return Loc.T("АТАКА: ДЕРЖИТ", "ATTACK: HOLD");
+            if (phase == MercAttackRun.Stalled) return Loc.T("АТАКА: ЗАСТРЯЛ", "ATTACK: STUCK");
+            if (phase == MercAttackRun.Search) return Loc.T("АТАКА: ПОИСК", "ATTACK: SEARCH");
+            float d = u == null || u.Ai == null ? MercAttackGeo.Length(m.Order) : MercAttackGeo.Flat(m.Order.Centre - u.Ai.transform.position);
+            return Loc.T("АТАКА ", "ATTACK ") + (d / 2.8f).ToString("0") + "m";
         }
 
         // W-UI4: the order wheel in the UI kit's look - a round dark panel,
@@ -982,7 +1109,7 @@ namespace NextDayRevival
             int n = SectorEn.Length;
             float now = Time.unscaledTime;
             if (now >= _wheelTextAt || _wheelTextPick != _wheelPick) WheelTexts(now);
-            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, rad = UiKit.S(n > 6 ? 235f : 210f);
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, rad = UiKit.S(n > 8 ? 285f : n > 6 ? 235f : 210f);
             UiKit.Circle(new Rect(cx - rad - UiKit.S(4f), cy - rad, (rad + UiKit.S(4f)) * 2f, (rad + UiKit.S(4f)) * 2f), UiKit.Shadow);
             UiKit.Circle(new Rect(cx - rad, cy - rad, rad * 2f, rad * 2f), UiKit.Fade(UiKit.Panel, 0.82f));
             float pw = UiKit.S(124f), ph = UiKit.S(44f);
@@ -1018,7 +1145,7 @@ namespace NextDayRevival
                 ? _wheelKeysMemo.Set(kk, seat ? Loc.T("клавиши 1-", "keys 1-") + n : Loc.T("отпустить = приказ", "release = issue"))
                 : _wheelKeysMemo.Text;
             UiKit.Label(new Rect(cx - hub, cy + UiKit.S(2f), hub * 2f, UiKit.S(20f)), hint, UiFont.Small, UiFont.Center, UiKit.TextDim);
-            if (_wheelPick >= 1 && _wheelPick <= 3 && _wheelPoint != null)
+            if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector) && _wheelPoint != null)
             {
                 float tw = UiKit.S(520f), th = UiKit.S(30f);
                 Rect t = new Rect(cx - tw * 0.5f, cy + rad + UiKit.S(10f), tw, th);
@@ -1037,16 +1164,18 @@ namespace NextDayRevival
             _wheelWho = Mercs.Addressed(sel);
             _wheelPeaceful = sel.Count > 0 && sel[0].Peaceful;
             _wheelPoint = null;
-            if (_wheelPick < 1 || _wheelPick > 3) return;
+            if ((_wheelPick < 1 || _wheelPick > 3) && _wheelPick != AttackSector) return;
             Vector3 point;
             bool hit = CrosshairCached(out point);
             int m = hit ? Mathf.RoundToInt(Vector3.Distance(Mercs.OwnerPosition, point) / 2.8f) : -1;
             int key = _wheelPick * 1000003 + m * 2 + Loc.Lang();
             if (!_wheelPointMemo.Stale(key)) { _wheelPoint = _wheelPointMemo.Text; return; }
             string extra = _wheelPick == 2 ? Loc.T("  - первая точка маршрута", "  - first route point")
-                : _wheelPick == 3 ? Loc.T("  - центр (ещё раз = радиус 15/25/40/60)", "  - centre (again = radius 15/25/40/60)") : "";
-            _wheelPoint = _wheelPointMemo.Set(key, (hit ? Loc.T("точка под прицелом ", "target point ") + m + " m"
-                : Loc.T("нет точки: на вашем месте", "no point: at your position")) + extra);
+                : _wheelPick == 3 ? Loc.T("  - центр (ещё раз = радиус 15/25/40/60)", "  - centre (again = radius 15/25/40/60)")
+                : _wheelPick == AttackSector ? Loc.T("  - цель атаки (карта: список L)", "  - attack objective (map: L list)") : "";
+            string none = _wheelPick == AttackSector ? Loc.T("нет земли: направление, конец до 150 м", "no ground: direction, endpoint up to 150 m")
+                : Loc.T("нет точки: на вашем месте", "no point: at your position");
+            _wheelPoint = _wheelPointMemo.Set(key, (hit ? Loc.T("точка под прицелом ", "target point ") + m + " m" : none) + extra);
         }
 
         // ========================================================= trade tab
@@ -1519,6 +1648,13 @@ namespace NextDayRevival
             if (ButtonColored(new Rect(x0 + 382f, by3, 170f, 28f), ping ? Loc.T("Метка на карте: ВКЛ", "Map ping: ON")
                 : Loc.T("Метка на карте: ВЫКЛ", "Map ping: OFF"), dark, MercNotify.CfgPing != null))
                 MercNotify.CfgPing.Value = !ping;
+            // merc-attack-orders: ATTACK a point clicked on the map.
+            if (ButtonColored(new Rect(x0 + 558f, by3, 180f, 28f), Loc.T("Атака по карте...", "Attack on the map..."),
+                new Color(0.42f, 0.14f, 0.12f, 1f), selection.Count > 0))
+            {
+                _listOpen = false; RestoreCursor();
+                StartAttackMap();
+            }
             GUI.Label(new Rect(x0, by3 + 34f, r.width - 30f, 36f),
                 Loc.T("Галочки = кому приказ (Ctrl+1..5, Ctrl+0 все). ", "Checked rows are who the orders address (Ctrl+1..5, Ctrl+0 = all). ")
                 + _wheelKeyText + Loc.T(" удерж. - меню приказов, двойное нажатие - за мной (в машине - за моей техникой). Увольнение без возврата денег.",

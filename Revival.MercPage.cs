@@ -581,8 +581,8 @@ namespace NextDayRevival
             if (!dead)
             {
                 MercOrder o = m.Order;
-                int ok = (((o.Mode * 8 + Mathf.Min(o.Points.Length, 7)) * 128 + Mathf.Clamp((int)o.RadiusM, 0, 127)) * 2
-                    + (m.Peaceful ? 1 : 0)) * 2 + lang;
+                int ok = ((((o.Mode * 8 + Mathf.Min(o.Points.Length, 7)) * 128 + Mathf.Clamp((int)o.RadiusM, 0, 127)) * 2
+                    + (m.Peaceful ? 1 : 0)) * 2 + lang) * 1200 + AttackKey(m);
                 string order = row.Order.Stale(ok) ? row.Order.Set(ok, OrderText(m)) : row.Order.Text;
                 UiKit.Label(new Rect(ox, y, r.xMax - pad - whereW - ox, S(18f)), order, UiFont.Body, UiFont.Left, text);
                 int wk = row.WhereKey * 2 + lang;
@@ -676,9 +676,35 @@ namespace NextDayRevival
                         : Loc.T("Патруль, точек: ", "Patrol, points: ") + o.Points.Length;
                     break;
                 case MercOrder.Perimeter: t = Loc.T("Периметр ", "Perimeter ") + Mathf.RoundToInt(o.RadiusM) + " m"; break;
+                case MercOrder.Attack: t = AttackText(m); break;
                 default: t = Loc.T("Держит точку", "Holding a point"); break;
             }
             return m.Peaceful ? t + Loc.T(" - мирный", " - peaceful") : t;
+        }
+
+        /// <summary>merc-attack-orders: the attack's phase and the distance to
+        /// the objective in 10 m steps (0 for every other order).</summary>
+        static int AttackKey(Mercs.Record m)
+        {
+            if (m.Order.Mode != MercOrder.Attack) return 0;
+            MercUnit u = m.Unit;
+            int phase = u == null || u.Attack.For != m.Order ? MercAttackRun.Advance : u.Attack.Phase;
+            float d = u == null || u.Ai == null ? MercAttackGeo.Length(m.Order) : MercAttackGeo.Flat(m.Order.Centre - u.Ai.transform.position);
+            return 1 + phase * 199 + Mathf.Clamp((int)(d / 28f), 0, 198);
+        }
+
+        static string AttackText(Mercs.Record m)
+        {
+            int key = AttackKey(m) - 1;
+            int phase = key / 199, tens = key % 199;
+            switch (phase)
+            {
+                case MercAttackRun.Holding: return Loc.T("Атака: держит цель", "Attack: holding the objective");
+                case MercAttackRun.Stalled: return Loc.T("Атака: не пройти - держится", "Attack: stuck - holding short");
+                case MercAttackRun.Search: return Loc.T("Атака: ищет противника", "Attack: searching for the enemy");
+                case MercAttackRun.Overwatch: return Loc.T("Атака: прикрывает, до цели ", "Attack: covering, objective ") + tens * 10 + " m";
+                default: return Loc.T("Атака: наступает, до цели ", "Attack: advancing, objective ") + tens * 10 + " m";
+            }
         }
 
         static string WhereText(int key, int lang)

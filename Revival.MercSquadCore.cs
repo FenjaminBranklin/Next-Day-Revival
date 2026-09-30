@@ -22,6 +22,12 @@
 //             regroup on the owner.
 //   LINE      nobody fires while a mate's or the owner's body is near the
 //             line of fire.
+//   LANES     (merc-combat-response) a merc up and aiming at a target posts
+//             his line of fire (PostLane). A mate whose body stands in it -
+//             or in the owner's held aim - steps out sideways on his own
+//             side (MercLane.StepOut), never across another live line; the
+//             shooter holds (the veto stays) while a mate is clearing. Two
+//             mercs in each other's line: the lower id stays, the other moves.
 //   GRADE     the merc's traits as one number 0..1 (tiers 0..3) that the
 //             brain turns into reaction, peek pace, cover choice and range.
 //
@@ -80,6 +86,11 @@ namespace NextDayRevival
         readonly bool[] _sees = new bool[Max];
         readonly float[] _health = new float[Max];
         readonly byte[] _mode = new byte[Max];
+        // Lanes: his live line of fire (up, aiming at a target) and whether
+        // he is stepping out of a mate's line right now.
+        readonly bool[] _lane = new bool[Max];
+        readonly Vector3[] _laneTo = new Vector3[Max];
+        readonly bool[] _clearing = new bool[Max];
 
         int _peak;                  // most mercs fighting at once in this fight
         float _lastFight = -1000f;
@@ -125,10 +136,75 @@ namespace NextDayRevival
             _lastFight = now;
         }
 
+        /// <summary>Lanes: his line of fire this Think (MercBrain.Think calls
+        /// it right after Post). lane: up and aiming at to; clearing: he is
+        /// stepping out of a mate's or the owner's line.</summary>
+        internal void PostLane(int id, float now, bool lane, Vector3 to, bool clearing)
+        {
+            int k = Row(id, now, false);
+            if (k < 0) return;
+            _lane[k] = lane; _laneTo[k] = to; _clearing[k] = clearing;
+        }
+
+        /// <summary>The live line of fire of a mate that his body at me
+        /// stands in (MercSquad.Near, LineClear wide).</summary>
+        internal bool LaneOf(int self, Vector3 me, float now, out Vector3 from, out Vector3 to, out int shooter)
+        {
+            for (int k = 0; k < Max; k++)
+            {
+                if (!Live(k, self, now) || !_lane[k] || !Near(_pos[k], _laneTo[k], me)) continue;
+                from = _pos[k]; to = _laneTo[k]; shooter = _id[k];
+                return true;
+            }
+            from = me; to = me; shooter = -1;
+            return false;
+        }
+
+        /// <summary>Is the mate shooter's body at p inside HIS line of fire
+        /// (two mercs blocking each other)?</summary>
+        internal bool InLineOf(int shooter, Vector3 lineFrom, Vector3 lineTo, float now)
+        {
+            for (int k = 0; k < Max; k++)
+                if (_id[k] == shooter && now - _at[k] <= Stale) return Near(lineFrom, lineTo, _pos[k]);
+            return false;
+        }
+
+        /// <summary>A mate is stepping out of a line of fire now.</summary>
+        internal bool Clearing(int self, float now)
+        {
+            for (int k = 0; k < Max; k++) if (Live(k, self, now) && _clearing[k]) return true;
+            return false;
+        }
+
+        /// <summary>A move a -> b that crosses a mate's live line of fire or
+        /// the owner's held aim, or ends inside one.</summary>
+        internal bool LaneHit(Vector3 a, Vector3 b, int self, float now, bool ownerAims, Vector3 aimFrom, Vector3 aimTo)
+        {
+            if (ownerAims && MercLane.Crosses(aimFrom, aimTo, a, b)) return true;
+            for (int k = 0; k < Max; k++)
+                if (Live(k, self, now) && _lane[k] && MercLane.Crosses(_pos[k], _laneTo[k], a, b)) return true;
+            return false;
+        }
+
+        /// <summary>The body (a mate as posted) nearest to him along the
+        /// line from -> to that blocks it.</summary>
+        internal bool Blocker(Vector3 from, Vector3 to, int self, float now, out Vector3 at)
+        {
+            at = from;
+            float best = float.MaxValue;
+            for (int k = 0; k < Max; k++)
+            {
+                if (!Live(k, self, now) || !Near(from, to, _pos[k])) continue;
+                float d = Flat(_pos[k] - from);
+                if (d < best) { best = d; at = _pos[k]; }
+            }
+            return best < float.MaxValue;
+        }
+
         /// <summary>He is gone (dismissed, dead, despawned).</summary>
         internal void Drop(int id)
         {
-            for (int k = 0; k < Max; k++) if (_id[k] == id) _id[k] = -1;
+            for (int k = 0; k < Max; k++) if (_id[k] == id) { _id[k] = -1; _lane[k] = false; _clearing[k] = false; }
             if (_flankBy == id) _flankBy = -1;
         }
 
@@ -305,6 +381,66 @@ namespace NextDayRevival
             if (t < 0.5f || t > len - 1f) return false;
             float ox = px - ax * t, oz = pz - az * t;
             return ox * ox + oz * oz < LineClear * LineClear;
+        }
+
+        static float Flat(Vector3 v) { return Mathf.Sqrt(v.x * v.x + v.z * v.z); }
+    }
+
+    /// <summary>Lanes: flat geometry of a line of fire (from -> to) and a
+    /// body or a move beside it. Pure arithmetic, no allocation.</summary>
+    internal static class MercLane
+    {
+        internal const float Goal = 5f;          // a step out ends this far from the line (1.8 m)
+        internal const float MinStep = 1.5f;     // and moves him at least this far
+
+        /// <summary>Where p is beside the line: along (units from 'from')
+        /// and side (signed: + to the left of from -> to). False for a
+        /// line shorter than 4 units.</summary>
+        internal static bool Offset(Vector3 from, Vector3 to, Vector3 p, out float along, out float side)
+        {
+            float ax = to.x - from.x, az = to.z - from.z;
+            float len = Mathf.Sqrt(ax * ax + az * az);
+            along = 0f; side = 0f;
+            if (len < 4f) return false;
+            ax /= len; az /= len;
+            float px = p.x - from.x, pz = p.z - from.z;
+            along = px * ax + pz * az;
+            side = ax * pz - az * px;
+            return true;
+        }
+
+        /// <summary>The point Goal units beside the line on the side sign
+        /// (+1 left, -1 right), level with p: his step out of it.</summary>
+        internal static Vector3 StepOut(Vector3 from, Vector3 to, Vector3 p, float sign)
+        {
+            float along, side;
+            if (!Offset(from, to, p, out along, out side)) return p;
+            float ax = to.x - from.x, az = to.z - from.z;
+            float len = Mathf.Sqrt(ax * ax + az * az);
+            ax /= len; az /= len;
+            // The left normal of (ax, az) is (-az, ax).
+            float want = sign >= 0f ? Goal : -Goal;
+            float move = want - side;
+            if (Mathf.Abs(move) < MinStep) move = move >= 0f ? MinStep : -MinStep;
+            return new Vector3(p.x - az * move, p.y, p.z + ax * move);
+        }
+
+        /// <summary>A move a -> b that ends inside the line of fire (within
+        /// MercSquad.LineClear, MercSquad.Near) or crosses it between half a
+        /// unit past the shooter and its end. A move that starts inside and
+        /// leaves it does not count.</summary>
+        internal static bool Crosses(Vector3 from, Vector3 to, Vector3 a, Vector3 b)
+        {
+            if (MercSquad.Near(from, to, b)) return true;
+            float alongA, sideA, alongB, sideB;
+            if (!Offset(from, to, a, out alongA, out sideA) || !Offset(from, to, b, out alongB, out sideB)) return false;
+            if (MercSquad.Near(from, to, a)) return false;
+            if ((sideA > 0f) == (sideB > 0f)) return false;
+            // Where the move crosses the line, measured along it.
+            float t = sideA / (sideA - sideB);
+            float at = alongA + (alongB - alongA) * t;
+            float len = Flat(to - from);
+            return at >= 0.5f && at <= len - 1f;
         }
 
         static float Flat(Vector3 v) { return Mathf.Sqrt(v.x * v.x + v.z * v.z); }

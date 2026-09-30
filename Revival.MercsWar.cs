@@ -15,6 +15,9 @@
 //                 M2: in a fight every merc, whatever his order, runs to
 //                 cover, peeks, fires short bursts and relocates
 //                 (Revival.MercFight.cs); the order runs again after it.
+//                 merc-attack-orders ATTACK: advance along a corridor to the
+//                 objective, fight in it, hold the objective
+//                 (Revival.MercAttack.cs / Revival.MercAttackCore.cs).
 //                 B3c FOLLOW MY VEHICLE: on foot he runs to the seat
 //                 Revival.MercsRide.cs gave him, else FOLLOW; seated, RunGround
 //                 leaves him to the ride (MercSeated) and its vehicle gun.
@@ -47,6 +50,7 @@ namespace NextDayRevival
     {
         const float MercRunUnits = 45f;        // run to the slot beyond this
         const float MercBreakOffUnits = 75f;   // leave a fight to follow beyond this
+        const float MercFightLeashUnits = 120f; // merc-combat-response: in a fight, follow only beyond this (43 m)
         const float MercWarpUnits = 1000f;     // lost: put him beside the owner
         const float MercDefendSeconds = 20f;   // peaceful: fire back this long
         const float MercStayLeash = 60f;       // STAY: return after a chase this far
@@ -163,26 +167,37 @@ namespace NextDayRevival
                 case MercOrder.Vehicle:
                     // B3c: a man running to his seat does not stop for a fight.
                     if (u.Ride.Boarding != null) return false;
-                    return u.Owner == null || Flat(u.Owner.position - f.Tr.position) <= MercBreakOffUnits;
+                    // merc-combat-response: a fight already running holds him
+                    // to a longer leash (hysteresis) - a few steps of the owner
+                    // no longer cancel the shots to regain the follow slot.
+                    return u.Owner == null || Flat(u.Owner.position - f.Tr.position)
+                        <= (u.Fight.Brain != null && u.Fight.Brain.Fighting ? MercFightLeashUnits : MercBreakOffUnits);
                 case MercOrder.Patrol:
                     return RouteDistance(o, f.Tr.position) <= MercPatrolLeash;
                 case MercOrder.Perimeter:
                     return Flat(o.Centre - f.Tr.position) <= o.RadiusUnits + MercChaseUnits + 20f;
+                case MercOrder.Attack:
+                    // merc-attack-orders: the corridor and the threats decide,
+                    // never the owner's distance (Revival.MercAttack.cs).
+                    return MercAttackMayStand(f, u);
                 default:
                     return Flat(o.Centre - f.Tr.position) <= MercStayLeash;
             }
         }
 
-        /// <summary>How far a merc looks for a target: a perimeter guard
-        /// clearly further, and at least to 50 m past his circle.</summary>
+        /// <summary>How far a merc looks for a target: his weapon's reach
+        /// (merc-combat-response: a rifle 160 m, never less than the squad's
+        /// AssaultRange), a perimeter guard clearly further, and at least to
+        /// 50 m past his circle.</summary>
         static float MercSeekRange(Fighter f)
         {
             float r = RangeOf(f);
+            float reach = MercReachUnits(f);
             MercUnit u = f.Squad == null ? null : f.Squad.Merc;
-            if (u == null || !u.Alert) return r;
+            if (u == null || !u.Alert) return reach;
             // From a sector post (0.55 R out) the far edge is 1.55 R away.
             float edge = u.Order.RadiusUnits * (u.Order.N > 1 ? 1.55f : 1f) + 140f;
-            return Mathf.Min(Mathf.Max(r * 1.6f, edge), 600f);
+            return Mathf.Max(reach, Mathf.Min(Mathf.Max(r * 1.6f, edge), 600f));
         }
 
         /// <summary>The target scan interval: three times the rate on a
@@ -231,6 +246,7 @@ namespace NextDayRevival
                 case MercOrder.Perimeter: MercPerimeter(f, u, now); return;
                 case MercOrder.ManGun:
                 case MercOrder.ManRadar: MercPostStep(f, u, now); return;
+                case MercOrder.Attack: MercAttackStep(f, u, now); return;
                 default: MercStay(f, u, now); return;
             }
         }
@@ -247,6 +263,8 @@ namespace NextDayRevival
             int rank = u.Slot / 2;
             float lateral = u.Slot >= 4 ? 0f : (u.Slot % 2 == 0 ? -1f : 1f) * (7f + 5f * rank);
             Vector3 goal = owner.position - fwd * (12f + 8f * rank) + side * lateral;
+            // merc-combat-response: never a slot inside the owner's held aim.
+            goal = MercSlotOutOfAim(goal, now);
             float dist = Flat(owner.position - f.Tr.position);
             if (dist > MercWarpUnits && now >= u.NextWarp)
             {

@@ -45,7 +45,21 @@ namespace NextDayRevival
                     Record r = _roster[n]; MercUnit u = r.Unit;
                     if (u == null || u.Ai == null || r.Dead || u.Deserting) continue;
                     bool companion = r.Order.Mode == MercOrder.Follow || r.Order.Mode == MercOrder.Vehicle;
-                    if (!companion && owner != null && Flat(u.Ai.transform.position - owner.transform.position) > 168f) continue;
+                    bool far = owner != null && Flat(u.Ai.transform.position - owner.transform.position) > 168f;
+                    // merc-attack-orders: an ATTACK never outlives the owner. Nearby
+                    // attackers shelter like companions; a distant one keeps a post
+                    // where he stands (a STAY, as distant posts keep theirs) - no
+                    // assault runs on or resumes after the respawn.
+                    if (r.Order.Mode == MercOrder.Attack && far)
+                    {
+                        MercOrder post = new MercOrder(); post.Mode = MercOrder.Stay;
+                        post.Scene = MapScene.Current; post.Points = new Vector3[] { u.Ai.transform.position };
+                        post.Facing = r.Order.Facing;
+                        r.Order = post; u.Order = post;
+                        _shelterChanged.Add(r);
+                        continue;
+                    }
+                    if (!companion && r.Order.Mode != MercOrder.Attack && far) continue;
                     MercOrder hold = new MercOrder(); hold.Mode = MercOrder.Stay; hold.Survive = true;
                     hold.Scene = MapScene.Current; hold.Points = new Vector3[] { u.Ai.transform.position };
                     hold.Facing = u.Sense.Count > 0 ? (u.Sense.At[0] - hold.Centre).normalized : u.Ai.transform.forward;

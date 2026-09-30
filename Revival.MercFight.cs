@@ -43,6 +43,17 @@
 // is a scan of at most 8 rows per Think; the live line check is arithmetic
 // over the owner and the other mercs (no ray) while he fires.
 //
+// merc-combat-response (docs/ai/tasks/merc-combat-response.md): the fire
+// decision of a merc who is up is MercFireGate's (Revival.MercCombatResponseCore.cs,
+// run unchanged by research/merc_combat_response_check.py) - the live friendly
+// check right before it every frame, NpcWar.Shoot's for every round. A
+// player target's round is the game's own: when the gate holds while the NPC
+// is in Shooting, the state change to Aiming is not left to wait for the
+// 0.28 s state throttle. The brain is told the owner's held aim and whether
+// he may step out of lines of fire (not deserting, boarding or on a gun or
+// radar post). Each merc keeps a reaction trace (MercReaction: contact ->
+// decision -> first real round, what held a late one) for F8 and Debug.
+//
 // Mercenaries only: normal NPCs, squads and defenders never reach this file.
 // Units: game units (NpcWar SCALE note, ~2.8 per metre). C# 3.0, ASCII only.
 using System;
@@ -76,6 +87,11 @@ namespace NextDayRevival
         internal Transform Target;
         internal bool TargetIsPlayer, Sees;
         internal Vector3 At;
+        // merc-combat-response: the reaction trace and the last fire decision.
+        internal readonly MercReaction React = new MercReaction();
+        internal byte Gate;
+        internal float UnseenSince;
+        internal Transform TraceTarget;
 
         internal byte State { get { return Brain == null ? MercBrain.Off : Brain.State; } }
         internal bool Holding { get { return Brain != null && Brain.Holding; } }
@@ -277,6 +293,7 @@ namespace NextDayRevival
                 MercNotice(f, u, ft, now);           // W: the owner's toasts (Revival.MercNotify.cs)
             }
             FightOut act = ft.Out;
+            MercTrace(f, ft, act, now);
             if (act.Act == FightAct.None)
             {
                 if (ft.LastAct != FightAct.None) MercFightEnd(f, ft);
@@ -292,6 +309,7 @@ namespace NextDayRevival
                 case FightAct.Step:
                     f.Crouched = false;
                     f.InCover = false;
+                    f.MuzzleBlockedSince = 0f;           // another spot: the barrel is tried again
                     MercRun(f, u, ft, act.Dest, act.Act == FightAct.Run, now);
                     break;
                 case FightAct.Fire:
@@ -303,13 +321,36 @@ namespace NextDayRevival
                     bool target = f.Target != null && f.Target;
                     // M3: never through the owner or a mate - the brain's
                     // view (NoShot) and the live bodies, every frame.
-                    bool hold = act.NoShot || (ft.In.Survive && !b.SurvivalFire) || (target && MercFriendInLine(f, me, f.Target.position));
-                    if (target && f.Sees && !hold) Fire(f, now);
-                    else if (!ft.In.Survive && act.Suppress && !hold && MercSuppress(f, act.Face, now)) { }
+                    bool friend = MercFireGate.NeedFriendCheck(target, act.NoShot, ft.In.Survive, b.SurvivalFire)
+                        && MercFriendInLine(f, me, f.Target.position);
+                    byte gate = MercFireGate.Decide(target, f.Sees, act.NoShot, ft.In.Survive, b.SurvivalFire, friend,
+                        !ft.In.Survive && act.Suppress);
+                    ft.Gate = gate;
+                    if (gate == MercFireGate.Shoot)
+                    {
+                        int shots = f.Squad.Shots;
+                        Fire(f, now);
+                        ft.React.Decided(now);
+                        // A round at an NPC is NpcWar.Shoot's; at a player the game's own, in Shooting.
+                        if (f.Squad.Shots != shots || (f.TargetIsPlayer && IntField(f.Ai, _fAddState, -1) == AddFire))
+                        {
+                            bool first = ft.React.Open;
+                            ft.React.Fired(now);
+                            if (first && CfgDebug.Value) MercTraceLog(u, ft.React);
+                        }
+                        else ft.React.Held((f.PlantedSince <= 0f || now - f.PlantedSince < PlantSeconds ? MercReaction.Planting : 0)
+                            | (f.MuzzleBlockedSince > 0f ? MercReaction.Muzzle : 0) | (Reloading(f) ? MercReaction.Reload : 0));
+                    }
+                    else if (gate == MercFireGate.Suppress && MercSuppress(f, act.Face, now)) { }
                     else
                     {
+                        if (gate == MercFireGate.HoldFriend) ft.React.Held(MercReaction.Friend);
+                        else if (gate == MercFireGate.HoldUnseen) ft.React.Held(MercReaction.Unseen);
                         f.Stance = Stance.Hold;
                         f.HasOrder = false;
+                        // The game fires at a player target by itself while it is
+                        // in Shooting: out of it now, not after the state throttle.
+                        if (f.TargetIsPlayer && IntField(f.Ai, _fAddState, -1) == AddFire) f.NextState = 0f;
                         Drive(f, MainIdle, AddAim, PoseStand, now, true);
                         if (f.Target != null && f.Target) Face(f); else FaceDir(f, act.Face - me);
                     }
@@ -340,7 +381,10 @@ namespace NextDayRevival
             ft.In.SensedAt = s.ExposedAt;
             bool target = f.Target != null && f.Target;
             ft.In.Target = target;
-            ft.In.Sees = target && f.Sees;
+            // merc-combat-response: eyes over a wall the barrel does not clear
+            // (NpcWar.Shoot, 0.8 s as for a squad man) is no line of fire -
+            // the brain moves on instead of standing there aiming.
+            ft.In.Sees = target && f.Sees && !(f.MuzzleBlockedSince > 0f && now - f.MuzzleBlockedSince > 0.8f);
             ft.In.LastSeen = f.LastSeen;
             ft.In.Planted = f.PlantedSince > 0f && now - f.PlantedSince >= PlantSeconds;
             if (now >= ft.NextHealth) { ft.NextHealth = now + 0.5f; ft.Health = HealthFraction(f); }
@@ -357,7 +401,8 @@ namespace NextDayRevival
             if (ft.In.Survive) ft.In.MayFight = true;
             // A perimeter guard gives up the cover sooner: his B3b pursuit
             // takes over a target that went out of sight.
-            ft.In.Disengage = u.Order.Mode == MercOrder.Perimeter ? 6f : 8f;
+            // merc-attack-orders: an attacker too - the advance picks up sooner.
+            ft.In.Disengage = u.Order.Mode == MercOrder.Perimeter || u.Order.Mode == MercOrder.Attack ? 6f : 8f;
             ft.In.Pick = s.Pick;
             ft.In.PickFresh = s.Pick.Found && s.Count > 0 && s.PickFor == s.Who[0] && now - s.PickAt < 5f;
             if (ft.In.Survive) ft.In.PickFresh = s.Pick.Found && now - s.PickAt < 5f;
@@ -369,6 +414,14 @@ namespace NextDayRevival
             ft.In.Owner = ft.In.HasOwner ? owner.position : Vector3.zero;
             ft.In.Regroup = !ft.In.Survive && ft.In.HasOwner && (u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle)
                 && Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits;
+            // merc-combat-response: lanes - the owner's held aim, and whether
+            // he may step out of a line (not a deserter, a boarder, a gun or
+            // radar crewman).
+            ft.In.Lanes = MercLanesFree(u);
+            Vector3 aimFrom = ft.In.Me, aimTo = ft.In.Me;
+            ft.In.OwnerAims = ft.In.Lanes && ft.In.HasOwner && !ft.In.Survive && MercOwnerAim(now, out aimFrom, out aimTo);
+            ft.In.AimFrom = ft.In.OwnerAims ? aimFrom : ft.In.Me;
+            ft.In.AimTo = ft.In.OwnerAims ? aimTo : ft.In.Me;
             // What he fights, for his mates.
             ft.Target = target ? f.Target : null;
             ft.TargetIsPlayer = f.TargetIsPlayer;
@@ -532,6 +585,51 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>merc-combat-response: the reaction trace, every frame
+        /// (arithmetic; a string only for the Debug line of a late round).</summary>
+        static void MercTrace(Fighter f, MercFight ft, FightOut act, float now)
+        {
+            MercReaction r = ft.React;
+            bool target = f.Target != null && f.Target;
+            if (target && f.Sees)
+            {
+                ft.UnseenSince = 0f;
+                // Another target is another contact.
+                if (f.Target != ft.TraceTarget) { r.Lost(); ft.TraceTarget = f.Target; }
+                if (r.ContactAt < 0f) r.Sight(now, Flat(f.Target.position - f.Tr.position));
+            }
+            else if (r.ContactAt >= 0f)
+            {
+                if (ft.UnseenSince <= 0f) ft.UnseenSince = now;
+                else if (now - ft.UnseenSince > 1.5f) r.Lost();
+            }
+            if (act.Act == FightAct.None)
+            {
+                // Not a contact he may answer (his order bars the fight): no reaction to measure.
+                if (!target || !f.Sees || !ft.In.MayFight) r.Quiet();
+                else r.Held(MercReaction.Brain);
+                return;
+            }
+            if (!r.Open) return;
+            if (act.Act == FightAct.Run || act.Act == FightAct.Step) r.Held(MercReaction.Moving);
+            else if (act.Act == FightAct.Reload) r.Held(MercReaction.Reload);
+            else if (act.Act != FightAct.Fire || act.NoShot) r.Held(MercReaction.Brain);
+        }
+
+        /// <summary>Debug: one line per answered contact, distances in
+        /// metres and game units.</summary>
+        static void MercTraceLog(MercUnit u, MercReaction r)
+        {
+            RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " contact at " + (r.ContactUnits / MercWeaponReach.Metre).ToString("0")
+                + " m (" + r.ContactUnits.ToString("0") + " units): decision +"
+                + (r.DecideAt >= 0f ? (r.DecideAt - r.ContactAt).ToString("0.00") : "-") + " s, first round +"
+                + r.Last.ToString("0.00") + " s" + (r.Last > MercReaction.Prompt ? " (late, held:"
+                + ((r.Why & MercReaction.Moving) != 0 ? " moving" : "") + ((r.Why & MercReaction.Reload) != 0 ? " reload" : "")
+                + ((r.Why & MercReaction.Friend) != 0 ? " friend" : "") + ((r.Why & MercReaction.Muzzle) != 0 ? " muzzle" : "")
+                + ((r.Why & MercReaction.Planting) != 0 ? " planting" : "") + ((r.Why & MercReaction.Brain) != 0 ? " brain" : "")
+                + ((r.Why & MercReaction.Unseen) != 0 ? " unseen" : "") + ")" : "") + ".");
+        }
+
         /// <summary>The fight is over: out of cover, his order next.</summary>
         static void MercFightEnd(Fighter f, MercFight ft)
         {
@@ -574,13 +672,35 @@ namespace NextDayRevival
                         + (b.Mode != MercBrain.Normal ? "/" + MercBrain.ModeName(b.Mode) : "")
                         + " T" + MercGrade.Tier(units[i].Grade);
             }
+            int contacts = 0, answered = 0, late = 0, lMove = 0, lReload = 0, lFriend = 0, lMuzzle = 0, lBrain = 0;
+            int snaps = 0, laneSteps = 0, laneCleared = 0, laneStuck = 0, selfMoves = 0;
+            float react = 0f, reactMax = 0f, laneTime = 0f, laneMax = 0f;
+            for (int i = 0; i < units.Count; i++)
+            {
+                MercReaction r = units[i].Fight.React;
+                contacts += r.Contacts; answered += r.Answered; late += r.Late; react += r.Sum;
+                if (r.Max > reactMax) reactMax = r.Max;
+                lMove += r.LateMoving; lReload += r.LateReload; lFriend += r.LateFriend; lMuzzle += r.LateMuzzle; lBrain += r.LateBrain;
+                MercBrain b = units[i].Fight.Brain;
+                if (b == null) continue;
+                snaps += b.SnapBursts; laneSteps += b.LaneSteps; laneCleared += b.LaneCleared; laneStuck += b.LaneStuck;
+                selfMoves += b.SelfMoves; laneTime += b.LaneTime;
+                if (b.LaneLongest > laneMax) laneMax = b.LaneLongest;
+            }
             _status = each + " | peeks " + peeks + ", bursts " + bursts + ", relocations " + moves
                 + ", reloads " + reloads + ", heals " + heals + ", flees " + flees + ", strafes " + strafes
                 + " | team: covering peeks " + covers + ", moves " + planned + " (" + covered + " covered), flanks " + flanks
                 + ", fall-backs " + falls + ", retreats " + retreats + ", held fire " + held + ", call-outs " + joined
                 + " (" + MercTeam.Shared + " shared)"
                 + " | seen holding still " + still.ToString("0.0") + " s of " + fight.ToString("0") + " s in fights"
-                + " | blasts " + MercDanger.Seen + ", grenades " + MercDanger.Grenades;
+                + " | blasts " + MercDanger.Seen + ", grenades " + MercDanger.Grenades
+                + " | reaction " + answered + "/" + contacts + " contacts answered, mean "
+                + (answered > 0 ? react / answered : 0f).ToString("0.00") + " s, max " + reactMax.ToString("0.00")
+                + " s, late " + late + " (moving " + lMove + ", reload " + lReload + ", friend " + lFriend
+                + ", muzzle " + lMuzzle + ", brain " + lBrain + ") | stand bursts " + snaps
+                + " | lanes " + laneCleared + "/" + laneSteps + " cleared (mean "
+                + (laneCleared > 0 ? laneTime / laneCleared : 0f).ToString("0.00") + " s, max " + laneMax.ToString("0.00")
+                + " s), blocked by geometry " + laneStuck + ", own steps " + selfMoves;
             return _status;
         }
     }

@@ -382,7 +382,7 @@ namespace NextDayRevival
         // 3 (Q4): every gameplay feature on by default - [PlayerAn2] Enabled
         //    and [An2Repair] Enabled from a file before are switched on once
         //    (Settings.GameplayOn, asked by their BindConfig).
-        const int Layout = 3;
+        const int Layout = 4;
         /// <summary>The layout this config file had when the plugin started,
         /// before Migrate stamps the current one: -1 until first read.</summary>
         static int _fileLayout = -1;
@@ -432,6 +432,10 @@ namespace NextDayRevival
         /// <summary>Layout 3 turned every gameplay feature on by default.</summary>
         internal const int GameplayOnLayout = 3;
 
+        /// <summary>Layout 4 gave the 52-K its full-crew cadence key and the
+        /// 30 rpm defaults (Flak.MigrateCadence).</summary>
+        internal const int FlakCadenceLayout = 4;
+
         /// <summary>
         /// Rule since Q4: a gameplay feature is on by default; settings only
         /// tune graphics and performance. A key that was off by default in an
@@ -454,8 +458,10 @@ namespace NextDayRevival
         /// defaults. Layout 2 rewrites one value, [World] EastTile, and does
         /// that in EastWorld.BindConfig. Layout 3 switches the gameplay
         /// features that used to be off ([PlayerAn2] Enabled, [An2Repair]
-        /// Enabled) on once, through GameplayOn. The stamp lets a later layout migrate
-        /// from a known state.
+        /// Enabled) on once, through GameplayOn. Layout 4 moves the 52-K's shipped
+        /// cadence defaults (RateOfFire 15, ManualRateOfFire 18) to the new numbers
+        /// in Flak.MigrateCadence and keeps any other value's effective cadence.
+        /// The stamp lets a later layout migrate from a known state.
         /// </summary>
         static void Migrate()
         {
@@ -464,7 +470,7 @@ namespace NextDayRevival
             _version.Value = Layout;
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("Settings: config layout " + from + " -> " + Layout
-                    + " ([Effects], [Hints], [Settings] added; [World] EastTile, [PlayerAn2]/[An2Repair] Enabled on once; other values kept). "
+                    + " ([Effects], [Hints], [Settings] added; [World] EastTile, [PlayerAn2]/[An2Repair] Enabled on once; [Flak52K] shipped cadence defaults moved to 30 rpm; other values kept). "
                     + "Particles " + Fx.Names[Fx.Level] + ", hints " + Hints.Names[Hints.Mode] + ".");
         }
 

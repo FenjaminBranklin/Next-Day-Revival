@@ -1760,6 +1760,20 @@ namespace NextDayRevival
             return hit != null;
         }
 
+        /// <summary>The air contact a struck collider belongs to (the same
+        /// test Struck makes); null for the ground, a building or a vehicle.</summary>
+        internal static Contact AirOwner(List<Contact> contacts, GameObject go)
+        {
+            if (go == null || contacts == null) return null;
+            for (int i = 0; i < contacts.Count; i++)
+            {
+                Contact c = contacts[i];
+                if (c == null || c.Go == null || !c.Air) continue;
+                if (go.transform == c.Go.transform || go.transform.IsChildOf(c.Go.transform)) return c;
+            }
+            return null;
+        }
+
         /// <summary>A live round struck a collider.</summary>
         internal static void Struck(GameObject go, Vector3 point, Vector3 dir)
         {
@@ -2256,6 +2270,9 @@ namespace NextDayRevival
             public LineRenderer Line;
             public List<GepardGun.Contact> Npc;   // an NPC gunner's contacts; null = the local gunner's
             public int Credit = -1;               // W AA4: the actor paid for a kill; -1 = by Npc (0 or local)
+            public int Tag = -1;                  // the 52-K's shot tag (Flak.Tag); -1 = none
+            public bool Terminal;                 // a peer's proximity burst ended this picture (Terminate)
+            public Vector3 TerminalAt;
             // Another gun's ballistics (Revival.Flak.cs); the Gepard's own
             // rounds keep Spec null and read the [Gepard] config as before.
             public Spec Spec;
@@ -2282,6 +2299,33 @@ namespace NextDayRevival
             public bool PuffFx = true;           // Flak: draw the puff (the burst still happens)
             public float PuffScale = 1f;         // Flak: the puff's size (1 = 23 mm, the 52-K's 85 mm: larger)
             public Action<Vector3> BurstSound;   // the far bang of a puff; null = silent
+            // The 52-K (Flak && Exact) only; 0/null leaves every other gun as it was.
+            public float Proximity;              // armed: a pass this close to a contact bursts, u (0 = direct only)
+            public float ArmDistance;            // flight before proximity and impact bursts arm, u
+            public Action<Vector3> GroundBurst;  // armed impact off any aircraft: the blast, on the shot's authority
+            public Action<int, Vector3> Burst;   // a live round's proximity burst (tag, point): tell the peers
+        }
+
+        /// <summary>The tag the next Fire/FireExact gives its round
+        /// (Flak.Tag); the caller resets it to -1.</summary>
+        internal static int NextTag = -1;
+
+        /// <summary>A peer's live 52-K round burst by its proximity fuze
+        /// (FlakNet Burst): the local picture of that shot bursts there, once.
+        /// A picture already gone - impact, time fuze, a duplicate packet - is
+        /// left alone, so every client shows one burst.</summary>
+        internal static bool Terminate(int tag, Vector3 at)
+        {
+            if (tag < 0) return false;
+            for (int i = 0; i < _rounds.Count; i++)
+            {
+                Round r = _rounds[i];
+                if (r.Live || r.Terminal || r.Tag != tag || r.Spec == null) continue;
+                r.Terminal = true;
+                r.TerminalAt = at;
+                return true;
+            }
+            return false;
         }
 
         static int _tickFrame = -1;
@@ -2330,6 +2374,8 @@ namespace NextDayRevival
             r.Npc = contacts;
             r.Spec = spec;
             r.Credit = AirKills.NextShotCredit;
+            r.Tag = NextTag;
+            r.Terminal = false;
             r.Line = spec.Tracer ? Take() : null;
             if (r.Line != null)
             {
@@ -2477,7 +2523,10 @@ namespace NextDayRevival
         static bool Step(Round r, float dt, float g)
         {
             Spec spec = r.Spec;
+            if (r.Terminal && spec != null) { Puff(spec, r.TerminalAt); return true; }
             if (spec != null) g = r.Gravity;
+            // The 52-K: armed after ArmDistance of flight (network age included).
+            bool heavy = spec != null && spec.Flak && spec.Exact;
             if (spec != null && spec.Flak && spec.Exact) dt = Time.deltaTime;
             // Stop at the fuze time, even on a long frame. At 550 m/s a
             // one-frame overshoot used to miss a target by up to 27.5 m.
@@ -2512,6 +2561,10 @@ namespace NextDayRevival
                 }
                 else struck = Cast(collisionFrom, dir, len, r.Owner, out hit);
                 Vector3 end = struck ? hit.point : next;
+                // The 52-K arms ArmDistance from the muzzle: its flight up to
+                // `next` (network age included), judged at the terminal point -
+                // the 10 Hz sweep can find a wall well behind the shell.
+                float flown = heavy ? r.Age * spec.Speed : 0f;
                 if (r.Live)
                 {
                     GepardGun.Contact c;
@@ -2521,6 +2574,15 @@ namespace NextDayRevival
                         : r.Npc != null
                         ? GepardGun.Proximity(r.Npc, collisionFrom, end, out c, out at)
                         : GepardGun.Proximity(collisionFrom, end, out c, out at);
+                    // Armed, the proximity fuze reaches past the direct-hit
+                    // distance over the armed part of this whole step, so a long
+                    // frame cannot carry a shell through the radius.
+                    float armedPart = flown - (heavy ? spec.ArmDistance : 0f);
+                    if (!near && heavy && spec.Proximity > spec.Fuze && armedPart > 0f)
+                    {
+                        Vector3 from = armedPart >= len ? collisionFrom : next - dir * armedPart;
+                        near = GepardGun.Proximity(r.Npc, from, end, spec.Proximity, out c, out at);
+                    }
                     if (near)
                     {
                         if (spec != null && spec.Flak) Puff(spec, at);
@@ -2528,15 +2590,38 @@ namespace NextDayRevival
                         AirKills.HitCredit = RoundCredit(r);
                         try
                         {
-                            if (spec != null) GepardGun.Hit(c, at, dir, true, spec.HeliHits);
-                            else GepardGun.Hit(c, at, dir, r.Npc != null);
+                            // A 52-K pass within DirectHitDistance is a direct hit; a
+                            // proximity burst reaches its trigger with the cloud like
+                            // every other contact - once either way.
+                            bool direct = !heavy || (c.Pos - at).sqrMagnitude
+                                <= (Mathf.Max(0f, c.Radius) + spec.Fuze) * (Mathf.Max(0f, c.Radius) + spec.Fuze);
+                            if (direct)
+                            {
+                                if (spec != null) GepardGun.Hit(c, at, dir, true, spec.HeliHits);
+                                else GepardGun.Hit(c, at, dir, r.Npc != null);
+                            }
                             // W AA2: a 52-K cloud reaches every contact in its radius.
-                            if (spec != null && spec.Flak && spec.Exact)
-                                GepardGun.BurstAll(r.Npc, at, dir, spec.Splash, spec.HeliHits, c);
+                            if (heavy)
+                                GepardGun.BurstAll(r.Npc, at, dir, spec.Splash, spec.HeliHits, direct ? c : null);
                         }
                         finally { AirKills.HitCredit = -1; }
+                        if (heavy && spec.Burst != null && r.Tag >= 0)
+                        {
+                            try { spec.Burst(r.Tag, at); }
+                            catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak burst send: " + ex.Message); }
+                        }
                         return true;
                     }
+                }
+                if (struck && heavy && flown - (next - hit.point).magnitude >= spec.ArmDistance)
+                {
+                    // An armed 85 mm shell bursts where it strikes: the cloud and
+                    // the bang on every client (each steps the same exact shot),
+                    // the damage only on the shot's authority.
+                    Vector3 at = hit.point - dir * 0.15f;
+                    Puff(spec, at);
+                    if (r.Live) ImpactBurst(r, spec, hit.collider.gameObject, at, dir);
+                    return true;
                 }
                 if (struck)
                 {
@@ -2600,6 +2685,28 @@ namespace NextDayRevival
         static int RoundCredit(Round r)
         {
             return r.Credit >= 0 ? r.Credit : r.Npc != null ? 0 : -1;
+        }
+
+        /// <summary>A live armed 52-K shell struck a collider. An aircraft's:
+        /// a direct hit and the cloud on the others. Anything else - ground,
+        /// building, vehicle - the gun's ground blast (the game's explosion,
+        /// which also reaches NPC aircraft and AA objects through their own
+        /// hooks, so the cloud is not applied a second time).</summary>
+        static void ImpactBurst(Round r, Spec spec, GameObject go, Vector3 at, Vector3 dir)
+        {
+            AirKills.HitCredit = RoundCredit(r);
+            try
+            {
+                GepardGun.Contact c = GepardGun.AirOwner(r.Npc, go);
+                if (c != null)
+                {
+                    GepardGun.Hit(c, at, dir, true, spec.HeliHits);
+                    GepardGun.BurstAll(r.Npc, at, dir, spec.Splash, spec.HeliHits, c);
+                }
+                else if (spec.GroundBurst != null) spec.GroundBurst(at);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak impact burst: " + ex.Message); }
+            finally { AirKills.HitCredit = -1; }
         }
 
         static void Puff(Spec spec, Vector3 at)

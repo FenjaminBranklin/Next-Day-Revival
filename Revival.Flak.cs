@@ -187,7 +187,7 @@ namespace NextDayRevival
             CfgRpm, CfgDispersion, CfgFuze, CfgSplash, CfgTurn, CfgElev, CfgAccel, CfgPitchMin,
             CfgPitchMax, CfgInitialError, CfgWalk, CfgRadarWalk, CfgFloor, CfgEvade, CfgLag, CfgReaction,
             CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity, CfgMinHeight,
-            CfgManualRpm, CfgManualReload;
+            CfgManualRpm, CfgManualReload, CfgCrewRpm, CfgProximity, CfgImpactDamage, CfgImpactRadius;
         internal static ConfigEntry<int> CfgHeliHits, CfgRoundsPerLoad, CfgEventCode;
 
         public static void BindConfig(ConfigFile cfg)
@@ -252,7 +252,11 @@ namespace NextDayRevival
                 "An aircraft lower than this over the ground (metres) is not airborne and "
                 + "not engaged - the guns are for air targets only.");
             CfgRpm = cfg.Bind(G, "RateOfFire", 15f,
-                "Shots per minute (the real 52-K: 15 to 20). Every shot is one bracketing step.");
+                "Shots per minute of ONE man alone at the gun (he lays and loads himself). "
+                + "Every shot is one bracketing step. Gunner and loader: FullCrewRateOfFire.");
+            CfgCrewRpm = cfg.Bind(G, "FullCrewRateOfFire", 30f,
+                "Shots per minute with gunner and loader at the gun, 1..60. A gameplay "
+                + "tuning (one shot every 2 s), not the historical 15..20.");
             CfgDispersion = cfg.Bind(G, "Dispersion", 2.0f,
                 "Dispersion of a single shell in milliradians (the Gepard: 1.5).");
             CfgFuze = cfg.Bind(G, "DirectHitDistance", 1.5f,
@@ -261,6 +265,16 @@ namespace NextDayRevival
             CfgSplash = cfg.Bind(G, "BurstRadius", 12f,
                 "Metres from a burst within which its fragments hit an aircraft (beyond "
                 + "the aircraft's size).");
+            CfgProximity = cfg.Bind(G, "ProximityFuze", 10f,
+                "Metres: an armed shell passing this close to an aircraft (beyond its size) "
+                + "bursts at once, and its fragments reach it. Never wider than BurstRadius. "
+                + "0 = no proximity fuze (direct hits and the time fuze only).");
+            CfgImpactDamage = cfg.Bind(G, "ImpactDamage", 1200f,
+                "Blast damage of an armed shell bursting on the ground, a building or a "
+                + "vehicle (the game's own explosion; the LAW is 900).");
+            CfgImpactRadius = cfg.Bind(G, "ImpactRadius", 7f,
+                "Metres of full blast damage around such a burst (the game's explosion "
+                + "falls off to zero at twice this).");
             CfgHeliHits = cfg.Bind(G, "HeliHits", 2,
                 "85 mm hits (direct or fragments) that bring down a helicopter or the An-2.");
             CfgTurn = cfg.Bind(G, "TraverseSpeed", 20f, "Highest traverse rate, degrees per second.");
@@ -289,10 +303,38 @@ namespace NextDayRevival
             ShortRange.BindConfig(cfg);
             CfgReload = cfg.Bind(G, "ReloadSeconds", 25f,
                 "Bringing up the next rack, seconds (one man left alone: x 1.5).");
-            CfgManualRpm = cfg.Bind(G, "ManualRateOfFire", 18f,
-                "Player cadence, 15..20 rounds/minute. The ready rack supplies the loader.");
+            CfgManualRpm = cfg.Bind(G, "ManualRateOfFire", 30f,
+                "Player cadence, 10..40 rounds/minute (30: one shot every 2 s). The ready rack supplies the loader.");
             CfgManualReload = cfg.Bind(G, "ManualReloadSeconds", 6f,
                 "Player ready-rack refill in seconds. R refills early; an empty rack refills automatically.");
+            MigrateCadence(Settings.FileLayout(cfg));
+        }
+
+        /// <summary>
+        /// Settings layout 4: the 52-K's cadence. A file from before it holds
+        /// RateOfFire as the FULL crew's rate (one man alone fired at half of
+        /// it) and ManualRateOfFire under a 15..20 clamp. The shipped defaults
+        /// (15 and 18) take the new numbers - full crew 30, one man 15, player
+        /// 30. Any other value was a choice and keeps its effective cadence:
+        /// full crew X, one man X/2, the player's clamped to the old 15..20.
+        /// </summary>
+        internal static void MigrateCadence(int fileLayout)
+        {
+            if (fileLayout >= Settings.FlakCadenceLayout || CfgRpm == null || CfgCrewRpm == null || CfgManualRpm == null) return;
+            float crew = CfgRpm.Value, manual = CfgManualRpm.Value;
+            if (Mathf.Abs(crew - 15f) > 0.01f)
+            {
+                CfgCrewRpm.Value = crew;
+                CfgRpm.Value = crew * 0.5f;
+            }
+            float fresh = (float)CfgManualRpm.DefaultValue;   // already the new number (retune.py): kept
+            if (Mathf.Abs(manual - 18f) < 0.01f) CfgManualRpm.Value = fresh;
+            else if ((manual < 15f || manual > 20f) && Mathf.Abs(manual - fresh) > 0.01f)
+                CfgManualRpm.Value = Mathf.Clamp(manual, 15f, 20f);
+            if (RevivalPlugin.L != null)
+                Log("[Flak52K] cadence from layout " + fileLayout + ": full crew " + crew + " -> " + CfgCrewRpm.Value
+                    + " rpm (FullCrewRateOfFire), one man " + (crew * 0.5f) + " -> " + CfgRpm.Value
+                    + " rpm (RateOfFire), player " + manual + " -> " + CfgManualRpm.Value + " rpm (ManualRateOfFire).");
         }
 
         internal static bool On
@@ -1120,6 +1162,12 @@ namespace NextDayRevival
             _spec.Dispersion = Mathf.Max(0f, F(CfgDispersion, 2f));
             _spec.Fuze = Mathf.Max(0f, F(CfgFuze, 1.5f));
             _spec.Splash = Mathf.Max(0f, F(CfgSplash, 12f)) * K;
+            // Metres in the config, world units from here on. The proximity
+            // fuze never reaches past the cloud: its burst always hits its trigger.
+            _spec.Proximity = Mathf.Min(Mathf.Max(0f, F(CfgProximity, 10f)) * K, _spec.Splash);
+            _spec.ArmDistance = ArmMetres * K;
+            _spec.GroundBurst = GroundBurst;
+            _spec.Burst = FlakNet.SendBurst;
             _spec.HeliHits = Mathf.Max(1, CfgHeliHits == null ? 2 : CfgHeliHits.Value);
             _spec.Tracer = B(CfgTracers);
             _spec.Flak = true;
@@ -1133,6 +1181,38 @@ namespace NextDayRevival
         /// <summary>The 85 mm puff against the 23 mm one (GepardFx.Flak): a
         /// ball of black smoke some 15 m across that hangs for seconds.</summary>
         const float PuffScale = 2.4f;
+
+        /// <summary>A shell arms this far from the muzzle: no proximity burst
+        /// and no ground blast nearer the crew (a dud strikes with a spark).</summary>
+        internal const float ArmMetres = 30f;
+
+        /// <summary>An armed shell struck the ground, a building or a vehicle,
+        /// on the shot's authority: the game's own networked explosion carries
+        /// the blast to players, NPCs, vehicles and every explosion hook (AA
+        /// objects, fuel, NPC aircraft); frozen NPCs the native blast cannot
+        /// reach get the same profile (the BTR's HE rule).</summary>
+        static void GroundBurst(Vector3 at)
+        {
+            float dmg = Mathf.Max(0f, F(CfgImpactDamage, 1200f));
+            float radius = Mathf.Max(0f, F(CfgImpactRadius, 7f)) * K;
+            if (dmg <= 0f || radius <= 0f) return;
+            try
+            {
+                RocketHook.Detonate(at, dmg, radius, 3f);
+                ShellSplash.SweepFrozen(at, dmg, radius);
+            }
+            catch (Exception ex)
+            {
+                if (_blastWarned) return;
+                _blastWarned = true;
+                RevivalPlugin.L.LogWarning("Flak: 85 mm ground burst without the game's explosion - " + ex.Message);
+            }
+        }
+        static bool _blastWarned;
+
+        /// <summary>The replication tag of a gun's shot: the same on the
+        /// shooter and on every peer's picture of it.</summary>
+        internal static int Tag(Gun g, int seq) { return seq * 8 + (g.Index & 7); }
 
         /// <summary>One shell, with its flash, the muzzle brake's side blast,
         /// smoke, dust off the ground, the recoil and the report.
@@ -1167,8 +1247,9 @@ namespace NextDayRevival
             MercAAPost merc = MercAA.Gun(g.Index);
             AirKills.NextShotCredit = g == _manned ? Mathf.Max(0, Mercs.LocalActor)
                 : merc != null ? Mathf.Max(0, merc.Actor) : 0;
+            GepardShots.NextTag = Tag(g, g.Seq);
             try { GepardShots.Fire(Spec(), g.Owner, muzzle, dir, life, live, contacts); }
-            finally { AirKills.NextShotCredit = -1; }
+            finally { AirKills.NextShotCredit = -1; GepardShots.NextTag = -1; }
             if (live) FlakNet.SendShot(g, muzzle, dir, life);
             g.Recoil = 1f;
             g.CaseDue = true;
@@ -1191,14 +1272,29 @@ namespace NextDayRevival
             if (B(CfgGunSound)) FlakSound.Report(muzzle);
         }
 
+        /// <summary>One man alone at the gun (RateOfFire).</summary>
         internal static float Interval()
         {
             return 60f / Mathf.Clamp(F(CfgRpm, 15f), 1f, 60f);
         }
 
+        /// <summary>Gunner and loader (FullCrewRateOfFire).</summary>
+        internal static float CrewInterval()
+        {
+            return 60f / Mathf.Clamp(F(CfgCrewRpm, 30f), 1f, 60f);
+        }
+
         internal static float ManualInterval()
         {
-            return 60f / Mathf.Clamp(F(CfgManualRpm, 18f), 15f, 20f);
+            return 60f / Mathf.Clamp(F(CfgManualRpm, 30f), 10f, 40f);
+        }
+
+        /// <summary>The next shot's time. A shot taken on the first frame it
+        /// was due keeps the schedule (a frame's lateness is not added to every
+        /// interval); after a pause the count starts from now.</summary>
+        internal static float NextShot(float due, float now, float dt, float interval)
+        {
+            return (now - due <= Mathf.Max(0f, dt) ? due : now) + interval;
         }
 
         internal static float ManualReloadSeconds() { return Mathf.Max(0.5f, F(CfgManualReload, 6f)); }
@@ -1253,7 +1349,9 @@ namespace NextDayRevival
             g.Seq = seq;
             float age = Mathf.Repeat(RadarClock.Now - stamp + 100000f, 100000f);
             if (age > 10f) age = 0f; // clock fallback before the radar's first tick
-            GepardShots.FireExact(Spec(), g.Owner, muzzle, velocity, life, false, null, age, gravity);
+            GepardShots.NextTag = Tag(g, seq);
+            try { GepardShots.FireExact(Spec(), g.Owner, muzzle, velocity, life, false, null, age, gravity); }
+            finally { GepardShots.NextTag = -1; }
             g.Recoil = 1f; g.CaseDue = true; g.RemoteShotAt = g.LastShot = Time.time;
             if (B(CfgMuzzleFlash)) GepardFx.Muzzle(muzzle, velocity.normalized);
             if (B(CfgGunSound)) FlakSound.Report(muzzle);
@@ -2059,8 +2157,10 @@ namespace NextDayRevival
             g.LastVel = t.Vel;
             if (g.Fired > 0 && dv > 0.5f) g.Err += UnityEngine.Random.onUnitSphere * dv * tof * evade;
             Flak.Fire(g, aim, true, g.FuzeRange, g.Hostile, false);
-            // One man alone loads and lays: half the rate.
-            g.NextShot = now + Flak.Interval() * (both ? 1f : 2f) * UnityEngine.Random.Range(0.9f, 1.15f);
+            // Gunner and loader: FullCrewRateOfFire; one man alone loads and
+            // lays: RateOfFire. The jitter averages to the configured rate.
+            g.NextShot = Flak.NextShot(g.NextShot, now, Time.deltaTime,
+                (both ? Flak.CrewInterval() : Flak.Interval()) * UnityEngine.Random.Range(0.92f, 1.08f));
             // The correction for the next shot, from where this one bursts.
             float dist = Vector3.Distance(mid, t.Pos);
             AACalibration calibration = MercAA.Calibration(g);
@@ -2509,7 +2609,8 @@ namespace NextDayRevival
                     g.FuzeRange = Mathf.Clamp(fuze, 30f, MaxFuze(g));
                 }
                 Flak.Fire(g, Vector3.zero, false, g.FuzeRange, _air, true);
-                g.NextShot = Time.time + (g.ShortRange ? ShortRangeCore.ShotSeconds : Flak.ManualInterval());
+                g.NextShot = g.ShortRange ? Time.time + ShortRangeCore.ShotSeconds
+                    : Flak.NextShot(g.NextShot, Time.time, Time.deltaTime, Flak.ManualInterval());
                 if (g.Rounds <= 0) Flak.StartReload(g, ManualReload(g));
             }
             else Flak.Publish(g, true, false);
@@ -2966,6 +3067,8 @@ namespace NextDayRevival
     internal static class FlakNet
     {
         const int Pose = 1;
+        const int Burst = 2;
+        static readonly float[] _burst = new float[8];
         static bool _hooked, _failed;
         static MethodInfo _raise;
         static Type _optType;
@@ -3099,6 +3202,37 @@ namespace NextDayRevival
             catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak shot send: " + ex.Message); }
         }
 
+        // A live 52-K round's proximity burst: { 2, gun, seq, x, y, z, 0, 0 },
+        // reliable, from the shot's owner (after its reliable shot packet).
+        // A peer bursts its picture of that shot there, once; an older peer
+        // drops kind 2 and draws the shell on to its time fuze.
+        internal static void SendBurst(int tag, Vector3 at)
+        {
+            if (!_hooked || tag < 0) return;
+            try
+            {
+                float[] data = _burst;
+                data[0] = Burst; data[1] = tag & 7; data[2] = tag >> 3;
+                data[3] = at.x; data[4] = at.y; data[5] = at.z; data[6] = data[7] = 0f;
+                PrepareSender();
+                _send((byte)Code(), data, true, _options);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Flak burst send: " + ex.Message); }
+        }
+
+        /// <summary>Only the sender of that gun's exact shots is believed, a
+        /// picture only ever bursts (Terminate): no damage on this client.</summary>
+        internal static void OnBurst(float[] f, int sender)
+        {
+            if (f == null || f.Length < 6) return;
+            Flak.Gun g = Flak.ByIndex(Mathf.RoundToInt(f[1]));
+            if (g == null || g == Flak._manned || g.ShotSender != sender) return;
+            Vector3 at = new Vector3(f[3], f[4], f[5]);
+            float reach = Flak.MaxFuze * 1.2f;
+            if ((at - Flak.Mid(g)).sqrMagnitude > reach * reach) return;
+            GepardShots.Terminate(Flak.Tag(g, Mathf.RoundToInt(f[2])), at);
+        }
+
         internal static void SendPacket(float[] data, bool reliable)
         {
             if (!_hooked) return;
@@ -3122,6 +3256,7 @@ namespace NextDayRevival
                 int kind = Mathf.RoundToInt(f[0]);
                 if (kind >= AirDefenceDamage.BlastMsg && kind <= AirDefenceDamage.RepairMsg)
                 { AirDefenceDamage.OnPacket(f, sender); return; }
+                if (kind == Burst) { OnBurst(f, sender); return; }
                 if (kind != Pose) return;
                 Flak.Gun g = Flak.ByIndex(Mathf.RoundToInt(f[1]));
                 if (g == null) return;

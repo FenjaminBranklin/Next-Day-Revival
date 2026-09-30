@@ -139,6 +139,8 @@ namespace NextDayRevival
 
         public static void Install(Harmony harmony)
         {
+            // The shot-gate diagnosis watches the same Fire this file hooks.
+            PlayerFireDiagnostics.Install(harmony);
             try
             {
                 Type ctrl = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
@@ -188,26 +190,50 @@ namespace NextDayRevival
                     return m.Invoke(null, new object[] { value });
             throw new MissingMethodException(type.FullName, "op_Implicit(int)");
         }
+        /// <summary>The implicit ObscuredInt-to-int operator. Picked by return
+        /// type: ObscuredInt declares several op_Implicit(ObscuredInt) that
+        /// differ only in it, so Type.GetMethod(name, types) throws
+        /// AmbiguousMatchException (6.62.0 live log: thrown in FirePrefix, it
+        /// aborted the native Fire of every player firearm).</summary>
+        internal static MethodInfo ToInt(Type type)
+        {
+            MethodInfo[] ms = type.GetMethods(BindingFlags.Public | BindingFlags.Static);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != "op_Implicit" || ms[i].ReturnType != typeof(int)) continue;
+                ParameterInfo[] p = ms[i].GetParameters();
+                if (p.Length == 1 && p[0].ParameterType == type) return ms[i];
+            }
+            return null;
+        }
+        /// <summary>Null (cached) when the data carries no readable ItemID.</summary>
+        static Func<object, int> ItemReader(Type type)
+        {
+            FieldInfo item = AccessTools.Field(type, "ItemID");
+            if (item == null || type.IsValueType) return null;
+            MethodInfo convert = item.FieldType == typeof(int) ? null : ToInt(item.FieldType);
+            if (item.FieldType != typeof(int) && convert == null) return null;
+            DynamicMethod method = new DynamicMethod("StingerItem", typeof(int), new Type[] { typeof(object) }, typeof(Stinger), true);
+            ILGenerator il = method.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, type); il.Emit(OpCodes.Ldfld, item);
+            if (convert != null) il.Emit(OpCodes.Call, convert);
+            il.Emit(OpCodes.Ret);
+            return (Func<object, int>)method.CreateDelegate(typeof(Func<object, int>));
+        }
         public static bool IsStinger(object ctrl)
         {
             object data = Field(ctrl, "_weaponFirearmData");
             if (data == null) return false;
             Type type = data.GetType(); Func<object, int> read;
-            if (!ItemReaders.TryGetValue(type, out read))
-            {
-                FieldInfo item = AccessTools.Field(type, "ItemID");
-                if (item == null || type.IsValueType) return false;
-                MethodInfo convert = item.FieldType == typeof(int) ? null : item.FieldType.GetMethod("op_Implicit",
-                    BindingFlags.Public | BindingFlags.Static, null, new Type[] { item.FieldType }, null);
-                if (item.FieldType != typeof(int) && (convert == null || convert.ReturnType != typeof(int))) return false;
-                DynamicMethod method = new DynamicMethod("StingerItem", typeof(int), new Type[] { typeof(object) }, typeof(Stinger), true);
-                ILGenerator il = method.GetILGenerator();
-                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, type); il.Emit(OpCodes.Ldfld, item);
-                if (convert != null) il.Emit(OpCodes.Call, convert);
-                il.Emit(OpCodes.Ret);
-                read = (Func<object, int>)method.CreateDelegate(typeof(Func<object, int>)); ItemReaders[type] = read;
-            }
-            return read(data) == ItemId;
+            if (!ItemReaders.TryGetValue(type, out read)) { read = ItemReader(type); ItemReaders[type] = read; }
+            return read != null && read(data) == ItemId;
+        }
+        /// <summary>The prefixes' identity test. A weapon that cannot be
+        /// identified is not the Stinger: it keeps its native shot.</summary>
+        static bool SafeIsStinger(object ctrl)
+        {
+            try { return IsStinger(ctrl); }
+            catch (Exception ex) { Warn(ex); return false; }
         }
         static bool Local(object ctrl)
         {
@@ -224,7 +250,7 @@ namespace NextDayRevival
         }
         public static bool FirePrefix(object __instance)
         {
-            if (!IsStinger(__instance)) return true;
+            if (!SafeIsStinger(__instance)) return true;
             try { return CanLaunch(__instance); }
             catch (Exception ex) { ResetLock(); Warn(ex); return false; }
         }
@@ -236,7 +262,7 @@ namespace NextDayRevival
         }
         public static bool ShotPrefix(object __instance)
         {
-            if (!IsStinger(__instance)) return true;
+            if (!SafeIsStinger(__instance)) return true;
             try
             {
                 if (!CanLaunch(__instance) || _shotFrame == Time.frameCount) return false;
@@ -547,13 +573,14 @@ namespace NextDayRevival
                 if (slot < 0 || slot >= bullets.Length) return -1;
                 if (_roundArrayType != bullets.GetType())
                 {
-                    _roundArrayType = bullets.GetType();
-                    Type element = _roundArrayType.GetElementType();
+                    Type arrayType = bullets.GetType();
+                    Type element = arrayType.GetElementType();
                     DynamicMethod method = new DynamicMethod("StingerRound", typeof(int), new Type[] { typeof(Array), typeof(int) }, typeof(Stinger), true);
                     ILGenerator il = method.GetILGenerator();
-                    il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, _roundArrayType); il.Emit(OpCodes.Ldarg_1);
+                    il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, arrayType); il.Emit(OpCodes.Ldarg_1);
                     il.Emit(OpCodes.Ldelem, element); EmitInt(il, element); il.Emit(OpCodes.Ret);
                     _roundReader = (Func<Array, int, int>)method.CreateDelegate(typeof(Func<Array, int, int>));
+                    _roundArrayType = arrayType; // only once the reader exists
                 }
                 return _roundReader(bullets, slot);
             }
@@ -562,9 +589,8 @@ namespace NextDayRevival
         static void EmitInt(ILGenerator il, Type type)
         {
             if (type == typeof(int)) return;
-            MethodInfo convert = type.GetMethod("op_Implicit", BindingFlags.Public | BindingFlags.Static,
-                null, new Type[] { type }, null);
-            if (convert == null || convert.ReturnType != typeof(int)) throw new MissingMethodException(type.FullName, "op_Implicit(int)");
+            MethodInfo convert = ToInt(type);
+            if (convert == null) throw new MissingMethodException(type.FullName, "op_Implicit(int)");
             il.Emit(OpCodes.Call, convert);
         }
         static void Line(float x,float y,float w,float h)
