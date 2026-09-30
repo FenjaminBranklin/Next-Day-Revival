@@ -1943,6 +1943,9 @@ namespace NextDayRevival
                 // a frame behind the other two, which is what a turning gunner
                 // looks wrong from.
                 TechnicalCrew.LateFrame();
+                // A merc at a technical's MG the same way: his gun laid and he
+                // placed on it before the pose below (Revival.MercsRide.cs).
+                MercRide.LateTechnical();
                 // The recoil kick of every technical gun that just fired
                 // (Revival.BtrGun.cs), after the gun is laid and before the
                 // hands are solved, so they ride back with the grips.
@@ -2292,12 +2295,28 @@ namespace NextDayRevival
         ///
         /// A PLAYER ALWAYS WINS. He is the one the seat system knows about, and
         /// two bodies claiming one station would fight over it every frame.
+        ///
+        /// Third, a mercenary at the gun (Revival.MercsRide.cs, ours or another
+        /// owner's): <paramref name="merc"/> is then true. His gun is laid by
+        /// MercRide on every client (the owner's aim, event 199 elsewhere), so
+        /// nothing here reads a bearing off him; he is turned WITH the mount.
         /// </summary>
         static GameObject GunnerBody(Component vgs)
         {
+            bool merc;
+            return GunnerBody(vgs, out merc);
+        }
+
+        static GameObject GunnerBody(Component vgs, out bool merc)
+        {
+            merc = false;
             GameObject body = PassengerAt(vgs, Technical.GunnerSeat);
             if (body != null) return body;
-            return TechnicalCrew.GunnerBody(vgs);
+            body = TechnicalCrew.GunnerBody(vgs);
+            if (body != null) return body;
+            body = MercRide.TechnicalGunner(vgs);
+            merc = body != null;
+            return body;
         }
 
         /// <summary>True when this vehicle's gun is laid by its own crew and not
@@ -2729,8 +2748,11 @@ namespace NextDayRevival
                 if (vgs == null) return;
                 if (_manning && ReferenceEquals(vgs, _vgs)) return;   // ours
 
-                GameObject body = GunnerBody(vgs);
+                bool merc;
+                GameObject body = GunnerBody(vgs, out merc);
                 if (body == null) return;
+                // A merc's gun: MercRide lays it on every client.
+                if (merc) return;
                 // A gun the riding crew is laying itself: its own aim is the
                 // truth on this machine, and reading the bearing back off the
                 // gunner would only undo it. On every OTHER machine the man's
@@ -2786,6 +2808,7 @@ namespace NextDayRevival
             public MethodInfo SampleStand;
             public bool PoseTried;
             public float Blend;              // 0 = the game's animation, 1 = at the grips
+            public bool Merc;                // the body is a merc (Revival.MercsRide.cs)
         }
 
         static readonly List<Station> _stations = new List<Station>();
@@ -2858,19 +2881,23 @@ namespace NextDayRevival
                 // order leaves one of the three a frame behind the other two,
                 // which is what a turning gunner looks wrong from.
                 SlewRemote(st.Vgs);                       // returns at once for our own
-                GameObject body = GunnerBody(st.Vgs);
+                bool merc;
+                GameObject body = GunnerBody(st.Vgs, out merc);
 
                 // Who owns the bearing here? We do while WE man this gun - the
                 // mouse turns the mount and the man is turned with it. Otherwise
                 // the man owns it: SlewRemote has just read the mount's bearing
                 // off his body, so writing his rotation back would be a loop.
-                bool selbst = _manning && ReferenceEquals(st.Vgs, _vgs);
+                // A merc gunner is turned with the mount too: MercRide laid it
+                // this frame, before this pass (Technical.LateFrame).
+                bool selbst = (_manning && ReferenceEquals(st.Vgs, _vgs)) || merc;
                 // A local gunner who let go on purpose (G) is left alone
                 // altogether: he is standing in the place, not working the gun,
                 // and it is HIS bearing the mount is following.
                 bool losgelassen = !selbst && _atGun
                                    && ReferenceEquals(st.Vgs, _vgs);
                 StandingPose(st, body);
+                st.Merc = merc;
                 if (!losgelassen) Stellung(st, body, selbst);
 
                 Hands(st, body, dt);
@@ -2922,7 +2949,7 @@ namespace NextDayRevival
                 // position trails the moving truck by whatever the last sync
                 // cost. Disowning him for that is precisely the lag this whole
                 // arrangement exists to remove.
-                if (!TechnicalCrew.IsRider(st.Vgs, body)
+                if (!st.Merc && !TechnicalCrew.IsRider(st.Vgs, body)
                     && Vector3.Distance(body.transform.position, mitte) > 3f * radius)
                     return;
 

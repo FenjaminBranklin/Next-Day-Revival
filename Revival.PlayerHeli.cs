@@ -1721,6 +1721,7 @@ namespace NextDayRevival
                 int view = ViewId(go);
                 _busyUntil.Remove(view);
                 EngineApply(go, false);
+                AircraftAudio.StopEngines(go);
                 HeliEngine engine = EngineOf(go);
                 if (engine != null) engine.Kill();
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
@@ -2059,6 +2060,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + WreckLife();
+                AircraftAudio.StopEngines(go);
                 EngineApply(go, false);
                 HeliEngine e = EngineOf(go);
                 if (e != null) e.Kill();

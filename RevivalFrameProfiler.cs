@@ -236,7 +236,11 @@ namespace NextDayRevival
         public const int S_AirBoundaryH = 171;
         public const int S_GroundAliveT = 172;
         public const int S_ParatroopersT = 173;
-        public const int Count = 174;
+        // X perf-bisect: the admin Perf tab's frame line and auto test.
+        public const int S_PerfBisectT = 174;
+        public const int S_MercQuickT = 175;
+        public const int S_MercQuickD = 176;
+        public const int Count = 177;
 
         static readonly string[] Names = new string[]
         {
@@ -392,6 +396,9 @@ namespace NextDayRevival
             "  AirBoundary.Height.Sub",
             "GroundAlive.Tick",
             "Paratroopers.Tick",
+            "PerfBisect.Tick",
+            "  MercQuick.Input.Sub",
+            "  MercQuick.Ping.Sub",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested
@@ -504,6 +511,13 @@ namespace NextDayRevival
             _acc[slot] += Stopwatch.GetTimestamp() - _mark[slot];
             long grew = GC.GetTotalMemory(false) - _memMark[slot];
             if (grew > 0) _memAcc[slot] += grew;    // a GC inside reads negative: ignored
+        }
+
+        /// <summary>X perf-bisect: a slot's smoothed ms (what the overlay
+        /// shows); meaningful only while <see cref="On"/>.</summary>
+        internal static double SlotMs(int slot)
+        {
+            return slot < 0 || slot >= Count ? 0.0 : _ms[slot];
         }
 
         /// <summary>Called at the top of FixedUpdate: physics steps per frame.</summary>

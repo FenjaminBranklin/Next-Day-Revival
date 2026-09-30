@@ -4,7 +4,7 @@ Compiles the UNCHANGED production core (Revival.AirKillCore.cs) with csc 3.5
 and runs it against:
 
   A  the damage ledger: Tu-95 / An-2 hit points from flak, rifles, blasts;
-     credit (last player hit, else the biggest player share >= 25 %).
+     credit (owner of the final hit; NPC garrison kills pay nobody).
   B  the release decision: whole / damaged / badly damaged bombers over
      200000 rolls - share of sticks on the chosen line, wide, aborted.
   C  a sortie model that mirrors the runtime glue (AirEvents.LaunchBomber:
@@ -66,7 +66,7 @@ class Check {
   Ok(m.Winner() == 5, "credit: the player who fired the last hit");
   DamageLedger g = new DamageLedger();
   g.Add(0.5f, 9); g.Add(0.5f, 0);
-  Ok(g.Down && g.Winner() == 9, "credit: NPC garrison finishes, the player with 50 % is paid");
+  Ok(g.Down && g.Winner() == 0, "credit: NPC garrison finishes, even a 50 % player assist is not paid");
   DamageLedger h = new DamageLedger();
   h.Add(0.1f, 9); h.Add(0.95f, 0);
   Ok(h.Down && h.Winner() == 0, "credit: a 10 % assist is not paid, an NPC kill pays nobody");

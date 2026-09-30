@@ -20,9 +20,19 @@ namespace NextDayRevival
         static AudioSource _donor;
         static AudioListener _listener;
         static AudioReverbZone _reverb;
-        static float _scanAt, _retryAt;
+        static float _scanAt, _retryAt, _listenerAt, _donorAt;
+        // X perf-fix: F6 showed a 14-15 ms AirfieldAmbience.Tick peak every 5 s -
+        // Scan's FindObjectOfType walks every object of every loaded scene. The
+        // donor is looked up only while missing (every DonorEvery s), markers are
+        // rescanned every RescanEvery s once emitters exist, the AudioListener is
+        // searched at most once a second, and one missing clip loads per scan.
+        const float RescanEvery = 30f, DonorEvery = 10f, ListenerEvery = 1f;
         static Type _managerType;
         static FieldInfo _ambientField;
+        static PropertyInfo _managerInstance;   // static NetworkGameModesManager.Instance
+        static int _donorScans;                 // scene-wide fallback searches left out after 3
+        static Transform _reverbRoom;
+        static AudioReverbPreset _reverbPreset;
 
         sealed class Emitter
         {
@@ -50,12 +60,14 @@ namespace NextDayRevival
             {
                 if (now >= _scanAt)
                 {
-                    _scanAt = now + 5f;
+                    _scanAt = now + (_emitters.Count > 0 ? RescanEvery : 5f);
                     Scan();
                 }
-                if (_listener == null || !_listener.isActiveAndEnabled)
+                if (_emitters.Count == 0) { Reverb(false, Vector3.zero); return; }
+                if ((_listener == null || !_listener.isActiveAndEnabled) && now >= _listenerAt)
                 {
                     _listener = null;
+                    _listenerAt = now + ListenerEvery;
                     foreach (AudioListener candidate in UnityEngine.Object.FindObjectsOfType(typeof(AudioListener)))
                         if (candidate.isActiveAndEnabled) { _listener = candidate; break; }
                 }
@@ -84,7 +96,8 @@ namespace NextDayRevival
                             Mathf.Clamp(local.y, -half.y, half.y), Mathf.Clamp(local.z, -half.z, half.z));
                     }
                     e.source.transform.position = e.marker.position + e.marker.rotation * local;
-                    if (_donor != null) e.source.outputAudioMixerGroup = _donor.outputAudioMixerGroup;
+                    if (_donor != null && e.source.outputAudioMixerGroup != _donor.outputAudioMixerGroup)
+                        e.source.outputAudioMixerGroup = _donor.outputAudioMixerGroup;
                     bool near = active && Vector3.Distance(ear, e.source.transform.position) < e.radius;
                     float target = near ? e.gain * volume : 0f;
                     // Immediate mute for settings changes; smooth distance entrances/exits.
@@ -114,13 +127,15 @@ namespace NextDayRevival
             if (_managerType == null)
             {
                 _managerType = AccessTools.TypeByName("NetworkGameModesManager");
-                if (_managerType != null) _ambientField = AccessTools.Field(_managerType, "_ambientSource");
+                if (_managerType != null)
+                {
+                    _ambientField = AccessTools.Field(_managerType, "_ambientSource");
+                    _managerInstance = AccessTools.Property(_managerType, "Instance");
+                    MethodInfo get = _managerInstance == null ? null : _managerInstance.GetGetMethod(true);
+                    if (get == null || !get.IsStatic) _managerInstance = null;
+                }
             }
-            if (_ambientField != null)
-            {
-                UnityEngine.Object manager = UnityEngine.Object.FindObjectOfType(_managerType);
-                _donor = manager != null ? _ambientField.GetValue(manager) as AudioSource : null;
-            }
+            float now = Time.realtimeSinceStartup;
             bool foundScene = false;
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
@@ -159,9 +174,30 @@ namespace NextDayRevival
                 }
             }
             if (!foundScene) { Clear(); _scanAt = Time.realtimeSinceStartup + 5f; return; }
-            // Clips can become available after the additive scene loads. Retry missing clips.
-            foreach (Emitter e in _emitters)
-                if (e.source == null && e.marker != null) Load(e);
+            if (_ambientField != null && _donor == null && now >= _donorAt)
+            {
+                _donorAt = now + DonorEvery;
+                object manager = _managerInstance == null ? null : _managerInstance.GetValue(null, null);
+                // The scene-wide search is the 14 ms of the old peak: a fallback,
+                // three times at most, only while the singleton is not there.
+                if (manager == null && _donorScans < 3)
+                {
+                    _donorScans++;
+                    manager = UnityEngine.Object.FindObjectOfType(_managerType);
+                }
+                _donor = manager != null ? _ambientField.GetValue(manager) as AudioSource : null;
+            }
+            // Clips can become available after the additive scene loads. Retry
+            // missing clips - one per scan, a disk load is not a frame's work.
+            for (int i = 0; i < _emitters.Count; i++)
+            {
+                Emitter e = _emitters[i];
+                if (e.source != null || e.marker == null) continue;
+                Load(e);
+                if (e.source == null) continue;                 // still missing: a cheap lookup
+                _scanAt = Mathf.Min(_scanAt, now + 0.5f);       // loaded one: the next one soon
+                break;
+            }
         }
 
         static void Add(Transform marker, string path, Vector3 offset, float gain,
@@ -212,7 +248,8 @@ namespace NextDayRevival
             }
             if (room == null)
             {
-                if (_reverb != null) _reverb.enabled = false;
+                if (_reverb != null && _reverb.enabled) _reverb.enabled = false;
+                _reverbRoom = null;
                 return;
             }
             if (_reverb == null)
@@ -226,7 +263,13 @@ namespace NextDayRevival
             // Unity reverb zones are spheres: put a small sphere at the listener only
             // while inside the marker box. Never alter vanilla zones or listener effects.
             _reverb.transform.position = ear;
-            _reverb.reverbPreset = room.name.StartsWith("H1|") ? AudioReverbPreset.Hangar : AudioReverbPreset.Stoneroom;
+            if (room != _reverbRoom)
+            {
+                // The name is read once per room entered, not every frame inside.
+                _reverbRoom = room;
+                _reverbPreset = room.name.StartsWith("H1|") ? AudioReverbPreset.Hangar : AudioReverbPreset.Stoneroom;
+            }
+            if (_reverb.reverbPreset != _reverbPreset) _reverb.reverbPreset = _reverbPreset;
             _reverb.enabled = true;
         }
 
@@ -235,7 +278,7 @@ namespace NextDayRevival
             foreach (Emitter e in _emitters)
                 if (e.source != null) { e.source.Stop(); UnityEngine.Object.Destroy(e.source.gameObject); }
             if (_reverb != null) { _reverb.enabled = false; UnityEngine.Object.Destroy(_reverb.gameObject); }
-            _reverb = null; _donor = null; _listener = null;
+            _reverb = null; _donor = null; _listener = null; _reverbRoom = null; _donorScans = 0;
             _emitters.Clear(); _rooms.Clear(); _markers.Clear();
             _scanAt = 0f;
         }

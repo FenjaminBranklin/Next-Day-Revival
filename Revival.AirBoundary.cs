@@ -328,6 +328,10 @@ namespace NextDayRevival
 
         static GameObject _skirt, _pending;
         static Rect _skirtRect;
+
+        /// <summary>X perf-bisect: the built skirt's root (null before), which
+        /// the admin Perf tab hides and shows again.</summary>
+        internal static GameObject SkirtRoot { get { return _skirt; } }
         static float _nextTry, _mean;
         static bool _warned;
         static IEnumerator _build;

@@ -1675,6 +1675,7 @@ namespace NextDayRevival
         static void ShotDownHere(GameObject go, int view)
         {
             if (go == null || Burning(go) || Gliding(go)) return;
+            AircraftAudio.StopEngines(go);
             if (ReferenceEquals(go, _plane) && _pilot)
             {
                 Hint(Loc.T("Самолёт подбит!", "You are hit - the aeroplane is going down!"), 5f);
@@ -1733,6 +1734,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + Mathf.Max(5f, AirEvents.WreckSeconds(go, F(CfgWreckSeconds, 180f)));
+                AircraftAudio.StopEngines(go);
                 An2Repair.Wrecked(go);
                 An2Glide glide = go.GetComponent<An2Glide>();
                 if (glide != null) UnityEngine.Object.Destroy(glide);
@@ -1790,6 +1792,7 @@ namespace NextDayRevival
                 int view = ViewId(go);
                 _busyUntil.Remove(view);
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
+                AircraftAudio.StopEngines(go);
                 An2Glide g = go.AddComponent<An2Glide>();
                 g.Begin(vel, rot);
                 if (broadcast && view != 0)
@@ -2829,7 +2832,7 @@ namespace NextDayRevival
         public float Fuel;
         public float Throttle, Elevator, Aileron, Rudder;   // -1..1 (throttle 0..1)
         float _power, _spin, _e, _a, _r;
-        bool _dead;
+        bool _dead, _engineDead;
         Transform _root, _prop, _ailL, _ailR, _elev, _rud;
         Vector3 _axProp, _axAilL, _axAilR, _axElev, _axRud;
         AudioSource _audio;
@@ -2875,12 +2878,18 @@ namespace NextDayRevival
             _axRud = An2Model.AxisOf("rudder");
         }
 
+        internal void StopEngine()
+        {
+            _engineDead = true;
+            Running = false;
+            _power = 0f;
+            if (_audio != null) _audio.Stop();
+        }
+
         public void Kill()
         {
             _dead = true;
-            Running = false;
-            _power = 0f;
-            if (_audio != null) { try { _audio.Stop(); } catch { } }
+            StopEngine();
             if (_root == null) return;
             // Scorched: the skin burnt dark, the glass gone.
             Renderer[] rs = _root.GetComponentsInChildren<Renderer>(true);
@@ -2908,7 +2917,7 @@ namespace NextDayRevival
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
             if (!_dead) HideCarrier();
-            if (_dead) { _power = 0f; }
+            if (_dead || _engineDead) { _power = 0f; }
             else
             {
                 float step = dt / PlayerAn2.EngineSeconds();
@@ -2942,7 +2951,7 @@ namespace NextDayRevival
 
         void Sound(float rpm)
         {
-            if (_dead) return;
+            if (_dead || _engineDead) return;
             if (_audio == null)
             {
                 if (rpm <= 0.001f) return;

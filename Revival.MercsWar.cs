@@ -81,12 +81,14 @@ namespace NextDayRevival
                 f.Manpads = new MercStingerState();
             // Traits (docs/ai/tasks/mercenaries.md 4.6): precise sharpens his
             // NPC-versus-NPC shot, tanky takes a further share off every hit.
-            f.Skill = Mathf.Clamp(f.Skill * (1f + unit.Precise / 100f), 0.5f, 2f);
+            // x-merc-competence: a paid soldier on top - a steadier shot
+            // (MercCompetence.SkillScale), more of his hit chance over range
+            // (RangeFalloff 70 % .. 30 % of the falloff), a nerve that rounds
+            // past him shake less; his health multiple is Mercs.DamagePrefix's.
+            f.Skill = Mathf.Clamp(f.Skill * (1f + unit.Precise / 100f) * MercCompetence.SkillScale(unit.Grade), 0.5f, 2.5f);
             f.ArmorScale = Mathf.Clamp(f.ArmorScale * (1f - unit.Tanky / 200f), 0.2f, 1f);
-            // M3: his grade (MercGrade.Of his traits) - a higher tier keeps
-            // more of his hit chance over range (all of the falloff at grade
-            // 0, 40 % of it at grade 1).
-            f.RangeFalloff = MercGrade.Lerp(unit.Grade, 1f, 0.4f);
+            f.RangeFalloff = MercCompetence.RangeFalloff(unit.Grade);
+            f.Nerve = Mathf.Max(f.Nerve, MercCompetence.Nerve(unit.Grade));
             s.Men.Add(f); _armoured[ai.GetInstanceID()] = f;
             EnsurePointsRoot(); _squads.Add(s);
             return true;
@@ -210,13 +212,13 @@ namespace NextDayRevival
         }
 
         /// <summary>The moment between seeing a new target and the first
-        /// shot, shortened on a perimeter and (M3) by his grade: x1.15 at
-        /// grade 0 down to x0.7 at grade 1.</summary>
+        /// shot, shortened on a perimeter and (M3) by his grade;
+        /// x-merc-competence: x0.9 at grade 0 down to x0.55 at grade 1.</summary>
         static float MercReactScale(Fighter f)
         {
             MercUnit u = f.Squad == null ? null : f.Squad.Merc;
             if (u == null) return 1f;
-            return (u.Alert ? 0.35f : 1f) * MercGrade.Lerp(u.Grade, 1.15f, 0.7f);
+            return (u.Alert ? 0.35f : 1f) * MercGrade.Lerp(u.Grade, 0.9f, 0.55f);
         }
 
         /// <summary>One merc out of contact: walk or run where his order
@@ -258,11 +260,8 @@ namespace NextDayRevival
             Vector3 fwd = owner.forward; fwd.y = 0f;
             if (fwd.sqrMagnitude < 0.01f) fwd = Vector3.forward;
             fwd.Normalize();
-            Vector3 side = Side(fwd);
             // The wedge: two per rank behind the owner, the fifth at the tail.
-            int rank = u.Slot / 2;
-            float lateral = u.Slot >= 4 ? 0f : (u.Slot % 2 == 0 ? -1f : 1f) * (7f + 5f * rank);
-            Vector3 goal = owner.position - fwd * (12f + 8f * rank) + side * lateral;
+            Vector3 goal = MercHalt.Slot(owner.position, fwd, u.Slot);
             // merc-combat-response: never a slot inside the owner's held aim.
             goal = MercSlotOutOfAim(goal, now);
             float dist = Flat(owner.position - f.Tr.position);
@@ -273,12 +272,54 @@ namespace NextDayRevival
                 if (RevivalGroundEnemies.TryGround(goal, 12f, out spot)) MercWarp(f, spot);
                 return;
             }
+            // x-merc-competence: the owner halted - cover near the slot, low.
+            if (dist < 30f && MercHaltCover(f, u, owner.position, fwd, goal, now)) return;
             // Close to the owner and near his slot: stand, watch his front.
             if (Flat(goal - f.Tr.position) < 7f && dist < 30f)
             {
                 Hold(f, null, now); FaceDir(f, fwd); return;
             }
             MercMove(f, u, goal, dist > MercRunUnits, now);
+        }
+
+        static readonly Vector3[] _haltWatch = new Vector3[1];
+        static readonly float[] _haltWeight = { 1f };
+
+        /// <summary>x-merc-competence: never stand in the open. Once the owner
+        /// has stood still for MercHalt.After s, one M1 query (the one-a-frame
+        /// throttle) finds the cover nearest his slot that hides him from the
+        /// owner's front; he walks there, claims it and crouches facing out.
+        /// The owner moves or turns: the claim goes, the wedge again. False:
+        /// no halt cover (yet) - the stock slot.</summary>
+        static bool MercHaltCover(Fighter f, MercUnit u, Vector3 owner, Vector3 fwd, Vector3 slot, float now)
+        {
+            MercHalt h = u.Halt;
+            bool had = h.Has;
+            if (!h.Still(owner, fwd, now))
+            {
+                if (had) MercCoverService.Field.Release(u.Id);
+                return false;
+            }
+            if (!h.Has)
+            {
+                if (now < h.NextQuery || !MercCoverService.MayQuery()) return false;
+                h.NextQuery = now + MercHalt.Retry;
+                _haltWatch[0] = MercHalt.Watch(owner, fwd);
+                CoverPick pick;
+                if (!MercCoverService.Best(slot, _haltWatch, _haltWeight, 1, MercCoverService.Radius,
+                        slot, MercHalt.Leash, u.Id, out pick) || !pick.Confirmed) return false;
+                h.Take(pick);
+            }
+            Vector3 p = h.Pick.Point.Pos;
+            if (now >= h.NextClaim)
+            {
+                h.NextClaim = now + 2f;
+                MercCoverService.Field.Claim(u.Id, p, now + 5f, now);
+            }
+            if (Flat(p - f.Tr.position) > MercHalt.Arrive) { MercMove(f, u, p, false, now); return true; }
+            MercCrouch(f, now);
+            FaceDir(f, fwd);
+            return true;
         }
 
         /// <summary>B3c FOLLOW MY VEHICLE on foot: run to the door of the seat
@@ -780,6 +821,28 @@ namespace NextDayRevival
         {
             try { return Mathf.Clamp01(1f - ArmorScale(spec)); }
             catch { return 0f; }
+        }
+
+        /// <summary>x-merc-competence: who that is, for the death report - his
+        /// name, side and squad, and the weapon item in his hands (-1 unknown).
+        /// Once per merc death; reflection reads only.</summary>
+        internal static string MercKillerLabel(Transform t, out int item)
+        {
+            item = -1;
+            if (t == null || !t) return null;
+            try
+            {
+                if (!LookUp()) return t.name;
+                Component ai = _npcType == null ? null : t.GetComponent(_npcType);
+                if (ai == null) return t.name;
+                Fighter kf = FighterOf(ai);
+                if (kf != null) item = CurrentItem(kf);
+                else if (_fWeaponsManager != null) item = IntField(_fWeaponsManager.GetValue(ai) as Component, _fWeaponItem, -1);
+                object side = FactionOf(ai);
+                string squad = kf != null && kf.Squad != null && kf.Squad.Tag != null ? ", " + kf.Squad.Tag : "";
+                return "NPC '" + t.name + "' (" + (side != null ? side.ToString() : "?") + squad + ")";
+            }
+            catch { return t.name; }
         }
 
         /// <summary>Did he have something to shoot at in the last seconds?</summary>

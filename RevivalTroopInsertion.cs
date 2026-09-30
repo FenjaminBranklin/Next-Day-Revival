@@ -182,6 +182,13 @@ namespace NextDayRevival
 
         static readonly List<Landing> _landings = new List<Landing>();
         static readonly List<HeliFlight> _flights = new List<HeliFlight>();
+        sealed class PendingLanding
+        {
+            internal Landing Landing;
+            internal Vector3 Lz;
+            internal float Yaw, At;
+        }
+        static readonly List<PendingLanding> _pending = new List<PendingLanding>();
         static bool _loaded;
         static string[] _source;
 
@@ -200,7 +207,7 @@ namespace NextDayRevival
             {
                 Net.EnsureHooked();
                 Load(false);
-                if (!MasterClient()) return;
+                if (!MasterClient()) { _pending.Clear(); return; }
 
                 // A flight in the air finishes even while the local player is
                 // between lives; only new landings wait for a world.
@@ -208,6 +215,14 @@ namespace NextDayRevival
                     if (!_flights[i].Tick()) _flights.RemoveAt(i);
                 CleanOrphans();
                 if (!WorldUp()) return;
+                for (int i = _pending.Count - 1; i >= 0; i--)
+                {
+                    PendingLanding p = _pending[i];
+                    if (!p.Landing.Here) { _pending.RemoveAt(i); continue; }
+                    if (!RadarClarityCore.Due(true, true, p.Landing.Here, Time.time, p.At)) continue;
+                    _pending.RemoveAt(i);
+                    LaunchWarned(p.Landing, p.Lz, p.Yaw);
+                }
 
                 if (CfgSpawnKey != null && CfgSpawnKey.Value != KeyCode.None
                     && Input.GetKeyDown(CfgSpawnKey.Value))
@@ -332,6 +347,7 @@ namespace NextDayRevival
 
         static bool Busy(Landing d)
         {
+            for (int i = 0; i < _pending.Count; i++) if (_pending[i].Landing.Name == d.Name) return true;
             if (NpcWar.IsActive(d.Name)) return true;
             for (int i = 0; i < _flights.Count; i++)
                 if (_flights[i].Landing.Name == d.Name) return true;
@@ -353,6 +369,7 @@ namespace NextDayRevival
         /// <summary>Is a helicopter of this landing name still in the air?</summary>
         internal static bool Flying(string name)
         {
+            for (int i = 0; i < _pending.Count; i++) if (_pending[i].Landing.Name == name) return true;
             for (int i = 0; i < _flights.Count; i++)
                 if (_flights[i].Landing != null && _flights[i].Landing.Name == name) return true;
             return false;
@@ -362,6 +379,7 @@ namespace NextDayRevival
 
         static bool Begin(Landing d)
         {
+            if (!MasterClient() || Busy(d)) return false;
             Vector3 lz;
             // The helicopter faces the walk to the start line; with the zone on
             // the line itself it faces the arrow's FIRST leg, which is where the
@@ -393,20 +411,40 @@ namespace NextDayRevival
                 return false;
             }
 
+            PendingLanding pending = new PendingLanding();
+            pending.Landing = d; pending.Lz = lz; pending.Yaw = yaw;
+            pending.At = Time.time + RadarClarityCore.LandingLead;
+            _pending.Add(pending);
+            float eta = RadarClarityCore.LandingEta(
+                CfgApproachDist == null ? 1500f : Mathf.Clamp(CfgApproachDist.Value, 300f, 3000f),
+                CfgHeliSpeed == null ? 55f : Mathf.Clamp(CfgHeliSpeed.Value, 15f, 90f));
+            Net.SendWarning(lz, eta);
+            WarnLanding(lz, eta);
+            return true;
+        }
+
+        static void WarnLanding(Vector3 lz, float eta)
+        {
+            string cell = GridCell(lz);
+            Banner(0, cell);
+            _banner += Loc.T("; через ~", "; ETA ~") + Mathf.CeilToInt(eta).ToString(CultureInfo.InvariantCulture) + " s";
+            AirPicture.WarnAt(lz, RadarClarityText.Landing, eta, _banner);
+            RadarScope.Note("Mi-8 landing inbound, " + cell + ", ETA ~" + Mathf.CeilToInt(eta).ToString(CultureInfo.InvariantCulture) + " s");
+        }
+
+        static void LaunchWarned(Landing d, Vector3 lz, float yaw)
+        {
             string cell = GridCell(lz);
             HeliFlight flight = HeliFlight.Launch(d, lz, yaw);
             if (flight == null)
             {
                 RevivalPlugin.L.LogWarning("Troops: the helicopter could not be spawned - "
-                    + "the squad of " + d.Name + " is set down without it.");
-                return Drop(d, lz, yaw);
+                    + "the warned landing of " + d.Name + " is cancelled.");
+                return;
             }
             _flights.Add(flight);
-            Net.SendBanner(0, cell);
-            Banner(0, cell);
             RevivalPlugin.L.LogInfo("Troops: landing " + d.Name + " - " + d.Count + " "
                 + d.Faction + ", zone " + lz.ToString("0") + " (square " + cell + ").");
-            return true;
         }
 
         /// <summary>The squad gets out beside the helicopter door and receives
@@ -1148,6 +1186,11 @@ namespace NextDayRevival
                 Raise(kind == 0 ? 0 : 1, cell, true);
             }
 
+            internal static void SendWarning(Vector3 at, float eta)
+            {
+                Raise(0, new float[] { at.x, at.y, at.z, eta }, true);
+            }
+
             /// <summary>At most 40 shot events a second across all fights. The
             /// seventh value is 1 when the receiver must play the mod's report,
             /// 0 when the NPC's own weapon RPC already plays flash and sound.</summary>
@@ -1176,6 +1219,18 @@ namespace NextDayRevival
                         if (me == null || (me.transform.position - from).sqrMagnitude > 600f * 600f) return;
                         NpcWar.ShotEffect(from, to, f.Length == 6 || f[6] > 0.5f);
                         return;
+                    }
+                    if (!TowerSupport.FromMaster(sender)) return;
+                    if (art == 0)
+                    {
+                        float[] warning = content as float[];
+                        if (warning != null && warning.Length == 4)
+                        {
+                            for (int i = 0; i < warning.Length; i++)
+                                if (float.IsNaN(warning[i]) || float.IsInfinity(warning[i])) return;
+                            WarnLanding(new Vector3(warning[0], warning[1], warning[2]), Mathf.Clamp(warning[3], 30f, 600f));
+                            return;
+                        }
                     }
                     string cell = content as string;
                     if (cell == null || cell.Length > 4) return;

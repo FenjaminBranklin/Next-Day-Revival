@@ -213,6 +213,13 @@ namespace NextDayRevival
         internal const float LaneWait = 2.5f;                     // a shooter waits this long for a mate to clear
         internal const int SelfSteps = 2;                         // steps a blocked shooter takes himself per fight
         const byte PlanNone = 0, PlanMode = 1, PlanFlank = 2, PlanUpgrade = 3, PlanSpread = 4;
+        // x-merc-competence (docs/ai/tasks/x-merc-competence.md).
+        internal const float ToughAbove = 0.5f;                    // his armour takes hits: he finishes the burst
+        internal const float UpLoss = 0.22f;                       // ... while this peek cost him less than this share
+        internal const float HealClear = 70f;                      // no dressing with a threat this near (25 m)
+        internal const float HealAfterHit = 4f;                    // nor this soon after a hit
+        internal const float CloseIn = 56f;                        // a threat this near (20 m): look sooner
+        internal const float RetreatHop = 24f;                     // a retreat / fall-back bound: this far at most (8.5 m)
 
         readonly int _id;
         uint _rng;
@@ -229,6 +236,8 @@ namespace NextDayRevival
         float _alarmAt, _blockedFor, _calmSince, _lastMoveAt, _stuckSince, _lastSpotted = -1000f;
         // M3 counters (F8, the offline check).
         internal int Covers, CoveredMoves, PlannedMoves, FlankRuns, Falls, Retreats, Upgrades, Spreads, HeldFire, Joined;
+        int _upHits;                         // hits taken while up at this peek
+        float _upHealth;                     // his health when this peek began
         internal float SuppressTime;
         // merc-combat-response: the stand burst and the lanes.
         bool _laneOn, _laneFight;
@@ -581,7 +590,9 @@ namespace NextDayRevival
             float now = i.Now;
             if (now < _nextTeam) return;
             _nextTeam = now + 0.5f;
-            bool losing = i.Regroup && Squad != null && Squad.Losing(now);
+            // x-merc-competence: a team falls back; a lone merc retreats (his own
+            // health is the whole "team" - the long run to the owner cost him).
+            bool losing = i.Regroup && Squad != null && Squad.Losing(now) && Squad.Mates(_id, now) > 0;
             if (Mode == Retreating && i.Health >= RetreatUntil) EndMode(now);
             if (Mode == Falling)
             {
@@ -645,10 +656,16 @@ namespace NextDayRevival
             return d > 0.5f ? v / d : new Vector3(0f, 0f, -1f);
         }
 
-        /// <summary>Behind the owner, seen from the threat.</summary>
+        /// <summary>Behind the owner, seen from the threat. x-merc-competence:
+        /// further than a bound away, the next bound toward him - one long
+        /// run across open ground killed more mercs than it saved.</summary>
         Vector3 FallPoint(ref FightIn i)
         {
-            return i.Owner + Away(i.Owner, Primary(ref i)) * 6f;
+            Vector3 end = i.Owner + Away(i.Owner, Primary(ref i)) * 6f;
+            Vector3 to = end - i.Me;
+            to.y = 0f;
+            float d = Flat(to);
+            return d <= RetreatHop + FallNear ? end : i.Me + to * (RetreatHop / d);
         }
 
         /// <summary>Further back: toward the owner when he is further from
@@ -690,8 +707,11 @@ namespace NextDayRevival
             switch (_plan)
             {
                 case PlanMode:
-                    if (Mode == Falling) return i.Regroup && Flat(p - i.Owner) < FallNear + 12f;
-                    return Flat(p - t) >= Flat(i.Me - t) - 2f && Flat(p - i.Me) <= RetreatReach;
+                    // x-merc-competence: bounds of RetreatHop at most, each one nearer the owner / further back.
+                    if (Mode == Falling)
+                        return i.Regroup && Flat(p - i.Me) <= RetreatHop + 4f
+                            && (Flat(p - i.Owner) < FallNear + 12f || Flat(p - i.Owner) < Flat(i.Me - i.Owner) - 6f);
+                    return Flat(p - t) >= Flat(i.Me - t) - 2f && Flat(p - i.Me) <= RetreatHop;
                 case PlanFlank:
                 {
                     Vector3 a = (Cover.Found ? Cover.Point.Pos : i.Me) - t, b = p - t;
@@ -756,6 +776,14 @@ namespace NextDayRevival
             _nextFlankTry = now + 12f;
         }
 
+        /// <summary>Threats within their sight of him (MercThreat.SightUnits).</summary>
+        int InSight(ref FightIn i)
+        {
+            int n = 0;
+            for (int t = 0; t < i.Count; t++) if (MercThreat.InSight(i.Me, i.Threats[t])) n++;
+            return n;
+        }
+
         /// <summary>A planned move: its pick, cover for the run, and off.
         /// True: this Think is decided (waiting for cover, or running).</summary>
         bool StepPlan(ref FightIn i, CoverField field, ref FightOut o)
@@ -765,7 +793,7 @@ namespace NextDayRevival
             {
                 if (now < _planUntil) return false;
                 // No point for it in time.
-                if (_plan == PlanMode && Mode == Falling && i.Regroup)
+                if (_plan == PlanMode && Mode == Falling && i.Regroup && !Cover.Found)
                 {
                     // Nothing near the owner: run to his side, cover from
                     // there - (merc-combat-response) like every planned
@@ -1017,7 +1045,8 @@ namespace NextDayRevival
                 o.Kick = !i.Reloading;
                 return;
             }
-            if (quiet && _healsLeft > 0 && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal)
+            if (quiet && _healsLeft > 0 && i.Health > 0f && i.Health < HealBelow && i.Now >= _nextHeal
+                && (i.Survive || Quiet(ref i)))
             {
                 Enter(Healing, i.Now);
                 _until = i.Now + HealSeconds;
@@ -1044,6 +1073,8 @@ namespace NextDayRevival
             if (_plan != PlanNone && StepPlan(ref i, field, ref o)) return;
             // Retreating: down, unless a threat comes close.
             if (Mode == Retreating && !Pressed(ref i)) return;
+            // x-merc-competence: a threat closing in is a man in the open - look now.
+            if (i.Count > 0 && _nextPeek > i.Now + 0.3f && Nearest(ref i) < CloseIn) _nextPeek = i.Now + 0.3f;
             if (i.Now < _nextPeek || i.Count == 0) return;
             if (_blindPeeks < (Grade >= 0.67f ? 2 : 3) && TryPeek(ref i, field, ref o, false)) return;
             // No side sees anyone from here (the middle of a long wall, the
@@ -1135,6 +1166,8 @@ namespace NextDayRevival
                 _plantedAt = 0f;
                 _seenAt = 0f;
                 _upSince = i.Now;
+                _upHits = 0;
+                _upHealth = i.Health;
                 _blockedFor = 0f;
                 _suppress = covering;
                 _burstLen = covering ? Range(SuppressMin, SuppressMax) : Range(BurstMin, BurstMax);
@@ -1158,7 +1191,7 @@ namespace NextDayRevival
 
         void StepPeekOut(ref FightIn i, ref FightOut o, bool hit)
         {
-            if (hit) { _hitSide = PeekSide; LastSide = PeekSide; StartBack(ref i, ref o); return; }
+            if (hit && !ShrugOff(ref i)) { _hitSide = PeekSide; LastSide = PeekSide; StartBack(ref i, ref o); return; }
             o.Face = Primary(ref i);
             float d = Flat(PeekAt - i.Me);
             if (d < ArrivePeek || (d < PeekStall && _moved < 0.1f && i.Now - Since > 0.25f))
@@ -1190,6 +1223,7 @@ namespace NextDayRevival
             bool blind = !_suppress && i.Planted && !i.Sees && _plantedAt > 0f && i.Now - lastLook > PeekBlind;
             bool dry = (i.MaxRounds > 0 && i.Rounds <= 1) || i.Reloading;
             bool friend = _blockedFor > BlockCap(i.Now);
+            if (hit) hit = !ShrugOff(ref i);
             if (hit || dry || blind || friend || _fired >= _burstLen || i.Now - _upSince > PeekCap)
             {
                 if (_fired > 0f) { Bursts++; _blindPeeks = 0; }
@@ -1204,6 +1238,35 @@ namespace NextDayRevival
             o.Face = Primary(ref i);
             o.NoShot = blocked;
             o.Suppress = _suppress && !blocked && !i.Sees;
+        }
+
+        /// <summary>x-merc-competence: his paid armour takes a hit. Fit (at
+        /// least ToughAbove health) and this peek has cost him less than
+        /// UpLoss: he keeps up and finishes the burst - ducking at the first
+        /// round left him one shot a peek against men who react faster. The
+        /// budget is a share of his health, so it scales with his armour.
+        /// More lost, low health or a crowd in sight: down.</summary>
+        bool ShrugOff(ref FightIn i)
+        {
+            _upHits++;
+            return _upHealth - i.Health < UpLoss && i.Health >= ToughAbove && InSight(ref i) <= 2 && !i.Survive;
+        }
+
+        /// <summary>x-merc-competence: quiet enough for a dressing - no threat
+        /// within HealClear, no hit for HealAfterHit s.</summary>
+        bool Quiet(ref FightIn i)
+        {
+            if (i.Now - _lastHit < HealAfterHit) return false;
+            for (int t = 0; t < i.Count; t++) if (Flat(i.Threats[t] - i.Me) < HealClear) return false;
+            return true;
+        }
+
+        /// <summary>The nearest threat's flat distance (a big number: none).</summary>
+        float Nearest(ref FightIn i)
+        {
+            float best = 1e6f;
+            for (int t = 0; t < i.Count; t++) { float d = Flat(i.Threats[t] - i.Me); if (d < best) best = d; }
+            return best;
         }
 
         void StartBack(ref FightIn i, ref FightOut o)
@@ -1395,7 +1458,16 @@ namespace NextDayRevival
         {
             if (!i.Sees || !i.Target || i.Count == 0 || Mode != Normal || i.Health < RetreatBelow) return false;
             if (UnderFire(ref i) || i.Reloading || NeedReload(ref i)) return false;
+            // x-merc-competence: never stand up in the open to a group that sees him.
+            if (Crowded(ref i)) return false;
             return true;
+        }
+
+        /// <summary>x-merc-competence: seen (fresh M1 exposure) with two or
+        /// more threats within their sight - no stand burst, cover first.</summary>
+        bool Crowded(ref FightIn i)
+        {
+            return i.Exposed && i.Now - i.SensedAt < 0.8f && InSight(ref i) >= 2;
         }
 
         /// <summary>How long a blocked shot is held before he gives the
@@ -1432,7 +1504,7 @@ namespace NextDayRevival
             if (i.Planted && i.Sees && !blocked && !pause) { _fired += _dt; _estFired += _dt * RoundsPerSecond; }
             bool blind = i.Planted && !i.Sees && _plantedAt > 0f && now - Mathf.Max(_plantedAt, _seenAt) > PeekBlind;
             bool dry = (i.MaxRounds > 0 && i.Rounds <= 1) || i.Reloading || (i.MaxRounds <= 0 && NeedReload(ref i));
-            if (hit || dry || blind || Mode != Normal || UnderFire(ref i)) { EndSnap(ref i, ref o); return; }
+            if (hit || dry || blind || Mode != Normal || UnderFire(ref i) || Crowded(ref i)) { EndSnap(ref i, ref o); return; }
             if (blocked && _blockedFor > BlockCap(now))
             {
                 // Nobody clears his line (the owner, a mate who cannot): a

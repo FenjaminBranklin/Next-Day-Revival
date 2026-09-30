@@ -58,17 +58,11 @@ namespace NextDayRevival
             return Down;
         }
 
-        /// <summary>Who is paid for the kill: the player who fired the last
-        /// hit; if an NPC crew finished it, the player who did the most of
-        /// the work (at least a quarter). 0 = nobody.</summary>
+        /// <summary>Only the owner of the finishing weapon is paid.
+        /// A garrison's final hit pays nobody, regardless of earlier assists.</summary>
         internal int Winner()
         {
-            if (Last > 0) return Last;
-            int best = 0;
-            float share = AirKillCore.AssistShare - 1e-4f;
-            for (int i = 0; i < Slots; i++)
-                if (Actor[i] > 0 && Share[i] >= share) { best = Actor[i]; share = Share[i]; }
-            return best;
+            return Last;
         }
     }
 
@@ -78,6 +72,13 @@ namespace NextDayRevival
         /// <summary>Rifle and MG rounds that bring an An-2 down.</summary>
         internal const int SmallArmsHits = 30;
         internal const float AssistShare = 0.25f;
+
+        /// <summary>Snapshot the shooting gun's owner at launch. Explicit zero
+        /// means a garrison; never substitute the local player for it.</summary>
+        internal static int ShotCredit(int assigned, bool npc, int localActor)
+        {
+            return assigned >= 0 ? assigned : npc ? 0 : Math.Max(0, localActor);
+        }
 
         /// <summary>From this much damage a bomber's stick goes wide.</summary>
         internal const float WideFrom = 0.15f;

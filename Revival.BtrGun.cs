@@ -202,6 +202,19 @@ namespace NextDayRevival
         /// <summary>Length of the next NPC technical burst.</summary>
         public static int TechnicalBurst(int configured) { return Burst(Tech, configured); }
 
+        /// <summary>X merc gunner (Revival.MercGunDrillCore.cs): the shortest
+        /// and the longest burst TechnicalBurst / NpcBurst would draw.</summary>
+        public static void TechnicalBurstRange(int configured, out int lo, out int hi) { BurstRange(Tech, configured, out lo, out hi); }
+
+        public static void NpcBurstRange(int configured, out int lo, out int hi) { BurstRange(Btr, configured, out lo, out hi); }
+
+        static void BurstRange(Profile p, int configured, out int lo, out int hi)
+        {
+            if (!Live(p) || p.Bursts == null || !p.Bursts.Value) { lo = hi = Mathf.Max(1, configured); return; }
+            lo = Mathf.Max(1, p.BurstMin.Value);
+            hi = Mathf.Max(lo, p.BurstMax.Value);
+        }
+
         // ------------------------------------------------------------- state
 
         class Gun

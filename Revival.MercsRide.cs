@@ -45,6 +45,14 @@
 //              and spread by GunnerAI. The turret pose reaches the others on
 //              the channel each gun already has (Turret.Net, GepardNet); the
 //              technical's pintle has none and rides on this file's event.
+//              X (docs/ai/tasks/x-merc-technical-gunner.md): full-auto bursts
+//              at the gun's cadence, belt and reload (MercGunDrill,
+//              Revival.MercGunDrillCore.cs). At the technical's open MG he is
+//              TechnicalGun's third gunner body (player, crew, merc): laid and
+//              placed in LateTechnical before TechnicalGun.LateAll stands him
+//              behind the pintle, turns him with it and puts his hands on the
+//              grips - on every client - with his rifle holstered; badly hurt
+//              he leaves the open MG for a cab seat.
 //   NETWORK    Photon event 199 ([Mercs] NetworkEventCode): the owner's riders
 //              {1, n, (id, kind, view, seat, flags, yaw, pitch) x n} on every
 //              change (reliable) and once a second while anyone rides (5 Hz
@@ -127,9 +135,16 @@ namespace NextDayRevival
         internal Component TargetNpc, TargetCarrier;
         internal bool TargetPlayer, Suppress;
         internal Vector3 LastKnown, SpeedFrom;
-        internal float NextScan, Held, NextShot, LastSeen, LastContact, Vis, SpeedAt, TargetSpeed, NextPose;
-        internal int Burst, BurstLen, Rounds, Hits;
+        internal float NextScan, Held, LastSeen, LastContact, Vis, SpeedAt, TargetSpeed, NextPose;
+        internal int Rounds, Hits;
         internal int TargetHits;             // W: hits on this target (a kill toast needs one)
+        // X: bursts, belt and reload (Revival.MercGunDrillCore.cs); the
+        // rifle put away while he works the technical's MG (every client).
+        internal readonly MercGunDrill Drill = new MercGunDrill();
+        internal readonly List<Renderer> Holstered = new List<Renderer>();
+        internal Transform Hand;
+        internal float NextHolster;
+        internal int PlacedFrame = -1;        // frame the early technical pass placed him
 
         internal bool Seated { get { return Carrier != null; } }
     }
@@ -486,7 +501,7 @@ namespace NextDayRevival
         /// in seat order after the driver's; -1 when none is free.</summary>
         static int PickSeat(MercCarrier c, MercSeat st)
         {
-            if (c.GunKind != MercCarrier.GunNone && SeatFree(c, c.GunSeat, st)) return c.GunSeat;
+            if (c.GunKind != MercCarrier.GunNone && SeatFree(c, c.GunSeat, st) && !TooHurtForGun(c, st, HurtReturn)) return c.GunSeat;
             for (int i = c.Kind == MercCarrier.Ground ? 1 : 0; i < c.Seats; i++)
                 if (SeatFree(c, i, st)) return i;
             return -1;
@@ -644,12 +659,26 @@ namespace NextDayRevival
                     else GetOut(u, st, k, now, true);
                     return;
                 }
+                // X, survival first: a badly hurt merc does not stay up at the
+                // technical's open MG - he takes a free cab seat (the gun is
+                // left to a fitter man) and does not come back to it hurt.
+                if (st.Gunner && TooHurtForGun(c, st, HurtLeave))
+                {
+                    int cab = CabSeat(c, st);
+                    if (cab >= 0)
+                    {
+                        Toast(u.Name + Loc.T(" ранен и уходит от пулемёта", " is hurt and leaves the MG"));
+                        MoveSeat(u, st, cab);
+                        st.SeatedAt = now;
+                        return;
+                    }
+                }
                 // The gun came free (the owner left the turret for the wheel,
                 // a gunner got out): the first of ours on a passenger seat
                 // takes it after a moment, so an armed vehicle is not ridden
                 // with its gun idle.
                 if (!st.Gunner && c.GunKind != MercCarrier.GunNone && now - st.SeatedAt > 2f
-                    && SeatFree(c, c.GunSeat, st))
+                    && SeatFree(c, c.GunSeat, st) && !TooHurtForGun(c, st, HurtReturn))
                 {
                     MoveSeat(u, st, c.GunSeat);
                     st.SeatedAt = now;
@@ -695,6 +724,8 @@ namespace NextDayRevival
             st.Gunner = c.GunKind != MercCarrier.GunNone && seat == c.GunSeat;
             st.NoSeatSaid = false;
             ClearGun(st);
+            st.Drill.Reset();
+            if (st.Gunner) Drill(c, st.Drill);
             NpcWar.MercRideHold(u);
             ApplySeat(st, true);
             Place(st, true);
@@ -712,6 +743,8 @@ namespace NextDayRevival
             st.Seat = seat;
             st.Gunner = c.GunKind != MercCarrier.GunNone && seat == c.GunSeat;
             ClearGun(st);
+            st.Drill.Reset();
+            if (st.Gunner) Drill(c, st.Drill);
             _dirty = true;
             RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " moved to seat " + seat + " of the " + c.En
                 + (st.Gunner ? " - the gun." : "."));
@@ -877,6 +910,7 @@ namespace NextDayRevival
         {
             for (int i = 0; i < st.Off.Count; i++) if (st.Off[i] != null) st.Off[i].enabled = true;
             st.Off.Clear();
+            Unholster(st);
             UnityEngine.Object live = st.Ai;
             if (live != null) _hidden.Remove(st.Ai.GetInstanceID());
             st.Carrier = null; st.Seat = -1;
@@ -912,30 +946,175 @@ namespace NextDayRevival
             float now = Time.time;
             try
             {
+                int frame = Time.frameCount;
                 for (int i = 0; i < _riders.Count; i++)
                 {
                     MercUnit u = _riders[i];
                     MercSeat st = u.Ride;
-                    if (st.Carrier == null) continue;
+                    if (st.Carrier == null || st.PlacedFrame == frame) continue;
                     UnityEngine.Object live = u.Ai;
                     if (live == null || st.Carrier.Root == null) continue;
-                    Place(st, true);
-                    if (st.Gunner)
-                    {
-                        try { Gun(u, st, now); }
-                        catch (Exception ex) { Warn("gun " + u.Name, ex); ClearGun(st); }
-                    }
+                    OwnerFrame(u, st, now);
                 }
                 foreach (MercSeat st in _remote.Values)
                 {
-                    if (st.Carrier == null) continue;
+                    if (st.Carrier == null || st.PlacedFrame == frame) continue;
                     UnityEngine.Object live = st.Ai;
                     if (live == null || st.Carrier.Root == null) continue;
-                    Place(st, false);
-                    if (st.Gunner && st.Carrier.GunKind == MercCarrier.GunTechnical) SlewPintle(st.Carrier, st.GunYaw, st.GunPitch);
+                    RemoteFrame(st);
                 }
             }
             catch (Exception ex) { Warn("frame", ex); }
+        }
+
+        /// <summary>X: from Technical.LateFrame, BEFORE TechnicalGun.LateAll -
+        /// the merc on a technical's MG: his gun laid and he placed first, so
+        /// TechnicalGun walks him behind the pintle, stands him up and solves
+        /// his hands onto the grips of THIS frame's mount, as it does for a
+        /// player and a crew gunner. LateFrame skips whom this pass did; with
+        /// the technical switched off LateFrame does him itself.</summary>
+        internal static void LateTechnical()
+        {
+            if (_riders.Count == 0 && _remote.Count == 0) return;
+            FrameProf.S(FrameProf.S_MercsL);
+            try
+            {
+                float now = Time.time;
+                int frame = Time.frameCount;
+                for (int i = 0; i < _riders.Count; i++)
+                {
+                    MercUnit u = _riders[i];
+                    MercSeat st = u.Ride;
+                    if (!AtTechnicalGun(st)) continue;
+                    UnityEngine.Object live = u.Ai;
+                    if (live == null || st.Carrier.Root == null) continue;
+                    st.PlacedFrame = frame;
+                    OwnerFrame(u, st, now);
+                }
+                foreach (MercSeat st in _remote.Values)
+                {
+                    if (!AtTechnicalGun(st)) continue;
+                    UnityEngine.Object live = st.Ai;
+                    if (live == null || st.Carrier.Root == null) continue;
+                    st.PlacedFrame = frame;
+                    RemoteFrame(st);
+                }
+            }
+            catch (Exception ex) { Warn("technical frame", ex); }
+            finally { FrameProf.E(FrameProf.S_MercsL); }
+        }
+
+        /// <summary>The gun laid first, then the man put on his seat facing
+        /// it: his heading is this frame's mount, not the last one's.</summary>
+        static void OwnerFrame(MercUnit u, MercSeat st, float now)
+        {
+            if (st.Gunner)
+            {
+                try { Gun(u, st, now); }
+                catch (Exception ex) { Warn("gun " + u.Name, ex); ClearGun(st); }
+            }
+            Place(st, true);
+        }
+
+        static void RemoteFrame(MercSeat st)
+        {
+            if (st.Gunner && st.Carrier.GunKind == MercCarrier.GunTechnical) SlewPintle(st.Carrier, st.GunYaw, st.GunPitch);
+            Place(st, false);
+        }
+
+        // X: a merc leaves the technical's MG under this much health and does
+        // not take it (again) under the second - survival first.
+        const float HurtLeave = 0.35f, HurtReturn = 0.6f;
+
+        /// <summary>Only the technical's gunner stands in the open; a closed
+        /// hull's gunner cannot be hurt (D14).</summary>
+        static bool TooHurtForGun(MercCarrier c, MercSeat st, float below)
+        {
+            if (c.GunKind != MercCarrier.GunTechnical) return false;
+            Component ai = st.Ai;
+            return ai != null && NpcWar.MercSeatHealth(ai) < below;
+        }
+
+        /// <summary>A free seat that is not the gun's (the driver's excepted).</summary>
+        static int CabSeat(MercCarrier c, MercSeat st)
+        {
+            for (int i = 1; i < c.Seats; i++)
+                if (i != c.GunSeat && SeatFree(c, i, st)) return i;
+            return -1;
+        }
+
+        /// <summary>Standing at the technical's MG (not a closed hull).</summary>
+        static bool AtTechnicalGun(MercSeat st)
+        {
+            MercCarrier c = st.Carrier;
+            return c != null && st.Gunner && !st.Hidden && c.GunKind == MercCarrier.GunTechnical && st.Seat == c.GunSeat;
+        }
+
+        /// <summary>X: TechnicalGun.GunnerBody's third source, after a player
+        /// and the riding crew - the merc (ours or another owner's) at this
+        /// technical's MG, so the standing pose, the place behind the pintle
+        /// and the hands on the grips are his too. Null: none.</summary>
+        internal static GameObject TechnicalGunner(Component vgs)
+        {
+            if (ReferenceEquals(vgs, null) || (_riders.Count == 0 && _remote.Count == 0)) return null;
+            for (int i = 0; i < _riders.Count; i++)
+            {
+                MercSeat st = _riders[i].Ride;
+                if (!AtTechnicalGun(st) || !ReferenceEquals(st.Carrier.Vgs, vgs)) continue;
+                Component ai = st.Ai;
+                if (ai != null) return ai.gameObject;
+            }
+            foreach (MercSeat st in _remote.Values)
+            {
+                if (!AtTechnicalGun(st) || !ReferenceEquals(st.Carrier.Vgs, vgs)) continue;
+                Component ai = st.Ai;
+                if (ai != null) return ai.gameObject;
+            }
+            return null;
+        }
+
+        // ============================================================ holster
+        static readonly List<Renderer> _weapon = new List<Renderer>();
+
+        /// <summary>X: the merc's own rifle is not shown while his hands are
+        /// on the MG's grips - its renderers under Weapons_HelperR go off on
+        /// every client (TechnicalCrew.Entwaffnen's way, no RPC), looked at
+        /// five times a second because a redraw instantiates a fresh model,
+        /// and come back on when he leaves the gun.</summary>
+        static void Holster(MercSeat st, bool want, float now)
+        {
+            if (!want)
+            {
+                if (st.Holstered.Count > 0 || st.Hand != null) Unholster(st);
+                return;
+            }
+            if (now < st.NextHolster) return;
+            st.NextHolster = now + 0.2f;
+            Component ai = st.Ai;
+            if (ai == null) return;
+            if (st.Hand == null) st.Hand = TechnicalCrew.WeaponHand(ai);
+            if (st.Hand == null) return;
+            _weapon.Clear();
+            st.Hand.GetComponentsInChildren<Renderer>(true, _weapon);
+            for (int i = 0; i < _weapon.Count; i++)
+            {
+                Renderer r = _weapon[i];
+                if (r == null || !r.enabled) continue;
+                r.enabled = false;
+                st.Holstered.Add(r);
+            }
+            _weapon.Clear();
+            for (int i = st.Holstered.Count - 1; i >= 0; i--)
+                if (st.Holstered[i] == null) st.Holstered.RemoveAt(i);
+        }
+
+        static void Unholster(MercSeat st)
+        {
+            for (int i = 0; i < st.Holstered.Count; i++)
+                if (st.Holstered[i] != null) st.Holstered[i].enabled = true;
+            st.Holstered.Clear();
+            st.Hand = null;
+            st.NextHolster = 0f;
         }
 
         static void Place(MercSeat st, bool owner)
@@ -956,8 +1135,10 @@ namespace NextDayRevival
             tr.position = pos;
             tr.rotation = rot;
             if (owner) GepardCrew.Ruhig(ai);
+            Holster(st, AtTechnicalGun(st), Time.time);
             if (st.Hidden) return;
-            // The technical's gunner stands at the pintle; everybody else sits.
+            // The technical's gunner stands at the pintle (TechnicalGun poses
+            // him and puts his hands on the grips); everybody else sits.
             if (st.Carrier.GunKind == MercCarrier.GunTechnical && st.Seat == st.Carrier.GunSeat) return;
             TechnicalCrew.Sitzen(ai, 1);
         }
@@ -967,7 +1148,8 @@ namespace NextDayRevival
         {
             st.Target = null; st.TargetNpc = null; st.TargetCarrier = null;
             st.TargetPlayer = false; st.Suppress = false; st.Firing = false; st.TargetHits = 0;
-            st.Held = 0f; st.Burst = 0; st.BurstLen = 0; st.NextScan = 0f;
+            st.Held = 0f; st.NextScan = 0f;
+            st.Drill.BreakOff(Time.time);
         }
 
         static void StandDownGun(MercSeat st)
@@ -1059,7 +1241,8 @@ namespace NextDayRevival
         static void Gun(MercUnit u, MercSeat st, float now)
         {
             MercCarrier c = st.Carrier;
-            if (!GunReady(c) || PlayerIn(c, st.Seat)) { st.Firing = false; return; }
+            MercGunDrill drill = st.Drill;
+            if (!GunReady(c) || PlayerIn(c, st.Seat)) { drill.BreakOff(now); st.Firing = false; return; }
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float range = GunRange(c);
             Vector3 muzzle = Muzzle(c);
@@ -1067,6 +1250,7 @@ namespace NextDayRevival
             {
                 st.NextScan = now + 0.3f + UnityEngine.Random.value * 0.1f;
                 GunnerAI.Sync();
+                if (!drill.InBurst) Drill(c, drill);
                 Pick(u, st, c, muzzle, range, now);
             }
             if (st.Target == null || !st.Target.gameObject.activeInHierarchy
@@ -1078,6 +1262,11 @@ namespace NextDayRevival
                     st.Target = null; st.Held = 0f;
                 }
                 st.Firing = false;
+                drill.BreakOff(now);
+                // Quiet: a fresh belt now rather than an empty one in the next fight.
+                if (drill.Idle(now, now - st.LastContact))
+                    RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " loads a fresh belt on the " + c.En + "'s gun.");
+                drill.Ready(now);
                 Rest(c, st, dt, now);
                 PublishPose(c, st, now, false);
                 return;
@@ -1094,26 +1283,76 @@ namespace NextDayRevival
             if (!st.Suppress) st.Held += dt;
             float dist = to.magnitude;
             if (st.Held < GunnerAI.Reaction(st.TargetPlayer, dist, st.Vis)) return;
-            if (now < st.NextShot) return;
+            // X: bursts at the gun's cadence, a belt and its reload
+            // (Revival.MercGunDrillCore.cs). A burst opens laid within the
+            // gun's tolerance and runs on within twice that, walked onto
+            // the target by the laying above.
+            drill.Ready(now);                       // a reload that has run out is done
+            if (drill.Reloading || now < drill.NextShot) { st.Firing = drill.InBurst; return; }
             Vector3 bore = Bore(c);
-            if (Vector3.Angle(bore, dir) > LaidWithin(c)) return;
-            float vis = Sight(c, st, muzzle, real);
-            if (vis > 0f)
+            if (!drill.Laid(Vector3.Angle(bore, dir))) { drill.BreakOff(now); st.Firing = false; return; }
+            if (!drill.InBurst)
             {
-                st.Suppress = false; st.Vis = vis; st.LastSeen = now; st.LastKnown = real;
-            }
-            else
-            {
-                if (now - st.LastSeen > GunnerAI.T.SuppressSeconds) { st.Target = null; return; }
-                st.Suppress = true;
-            }
-            if (c.GunKind == MercCarrier.GunTank && !BlastSafe(u, c, point))
-            {
-                st.NextShot = now + 0.5f;
-                return;
+                // Sight once a burst: its rounds go where it was opened.
+                float vis = Sight(c, st, muzzle, real);
+                if (vis > 0f)
+                {
+                    st.Suppress = false; st.Vis = vis; st.LastSeen = now; st.LastKnown = real;
+                }
+                else
+                {
+                    if (now - st.LastSeen > GunnerAI.T.SuppressSeconds) { st.Target = null; return; }
+                    st.Suppress = true;
+                }
+                if (c.GunKind == MercCarrier.GunTank && !BlastSafe(u, c, point))
+                {
+                    drill.NextShot = now + 0.5f;
+                    return;
+                }
             }
             Shoot(u, st, c, muzzle, bore, dist, now);
         }
+
+        /// <summary>X: the gun's numbers for the drill - the player gun's
+        /// cadence, the NPC gunners' burst lengths, the gun's belt and reload.
+        /// Read on boarding and on the 3 Hz scan between bursts.</summary>
+        static void Drill(MercCarrier c, MercGunDrill d)
+        {
+            int lo, hi;
+            switch (c.GunKind)
+            {
+                case MercCarrier.GunTechnical:
+                    BtrGun.TechnicalBurstRange(TechnicalCrew.CfgBurst == null ? 8 : TechnicalCrew.CfgBurst.Value, out lo, out hi);
+                    d.Configure(BtrGun.TechnicalInterval(TechnicalGun.CfgDelay == null ? 0.11f : TechnicalGun.CfgDelay.Value),
+                        lo, hi, TechnicalCrew.CfgBurstPause == null ? 1.1f : TechnicalCrew.CfgBurstPause.Value,
+                        TechnicalGun.CfgBelt == null ? 50 : TechnicalGun.CfgBelt.Value,
+                        TechnicalGun.CfgReload == null ? 4.5f : TechnicalGun.CfgReload.Value, LaidWithin(c));
+                    return;
+                case MercCarrier.GunBtr:
+                    BtrGun.NpcBurstRange(5, out lo, out hi);
+                    d.Configure(BtrGun.ShotInterval(RevivalPlugin.CfgTurretDelay == null ? 0.12f : RevivalPlugin.CfgTurretDelay.Value),
+                        lo, hi, 1.1f, KpvtBelt, KpvtReload, LaidWithin(c));
+                    return;
+                case MercCarrier.GunTank:
+                    {
+                        // One shell, then the loader: the reload IS the interval.
+                        float load = Mathf.Max(1f, RevivalPlugin.CfgTankDelay == null ? 6f : RevivalPlugin.CfgTankDelay.Value);
+                        d.Configure(load, 1, 1, load, 1, load, LaidWithin(c));
+                        return;
+                    }
+                default:
+                    d.Configure(60f / Mathf.Max(60f, Gepard.CfgRpm == null ? 1100f : Gepard.CfgRpm.Value),
+                        6, 10, 1.1f,
+                        Gepard.CfgRoundsPerBelt == null ? 200 : Gepard.CfgRoundsPerBelt.Value,
+                        Gepard.CfgReloadSeconds == null ? 6f : Gepard.CfgReloadSeconds.Value, LaidWithin(c));
+                    return;
+            }
+        }
+
+        // The MTW's KPVT has no belt of its own in the player turret: the
+        // real one's 50-round belt, and a reload in a closed turret.
+        const int KpvtBelt = 50;
+        const float KpvtReload = 5.5f;
 
         static float LaidWithin(MercCarrier c)
         {
@@ -1171,7 +1410,8 @@ namespace NextDayRevival
             if (st.Target != had)
             {
                 if (had != null) GunKilled(u, st, had, hadNpc, hadPlayer);
-                st.Held = 0f; st.Burst = 0; st.TargetHits = 0;
+                st.Held = 0f; st.TargetHits = 0;
+                st.Drill.BreakOff(now);
                 if (st.Target != null) MercNotify.GunTarget(u, st.Target.position);
                 if (st.Target != null)
                     RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " on the " + c.En + "'s gun engages "
@@ -1388,40 +1628,28 @@ namespace NextDayRevival
 
         static void Shoot(MercUnit u, MercSeat st, MercCarrier c, Vector3 muzzle, Vector3 bore, float dist, float now)
         {
-            float interval, pause = 1.1f, damage, range = GunRange(c);
-            int burst;
+            float damage, range = GunRange(c);
             switch (c.GunKind)
             {
                 case MercCarrier.GunTechnical:
-                    interval = BtrGun.TechnicalInterval(TechnicalGun.CfgDelay == null ? 0.11f : TechnicalGun.CfgDelay.Value);
-                    burst = BtrGun.TechnicalBurst(8);
                     damage = TechnicalGun.CfgDamage == null ? 85f : TechnicalGun.CfgDamage.Value;
                     break;
                 case MercCarrier.GunBtr:
-                    interval = BtrGun.ShotInterval(RevivalPlugin.CfgTurretDelay == null ? 0.12f : RevivalPlugin.CfgTurretDelay.Value);
-                    burst = BtrGun.NpcBurst(5);
                     damage = RevivalPlugin.CfgTurretDamage == null ? 120f : RevivalPlugin.CfgTurretDamage.Value;
                     break;
                 case MercCarrier.GunTank:
-                    interval = Mathf.Max(1f, RevivalPlugin.CfgTankDelay == null ? 6f : RevivalPlugin.CfgTankDelay.Value);
-                    burst = 1; pause = interval;
                     damage = RevivalPlugin.CfgTankDamage == null ? 400f : RevivalPlugin.CfgTankDamage.Value;
                     break;
                 default:
-                    interval = 60f / Mathf.Max(60f, Gepard.CfgRpm == null ? 1100f : Gepard.CfgRpm.Value);
-                    burst = 8;
                     damage = Gepard.CfgInfantryDamage == null ? 150f : Gepard.CfgInfantryDamage.Value;
                     break;
             }
-            if (st.Burst == 0 || st.BurstLen <= 0) st.BurstLen = Mathf.Max(1, burst);
-            st.Burst++;
-            if (st.Burst >= st.BurstLen)
-            {
-                st.Burst = 0;
-                st.NextShot = now + Mathf.Max(interval, pause);
-                st.Firing = false;
-            }
-            else { st.NextShot = now + interval; st.Firing = true; }
+            MercGunDrill drill = st.Drill;
+            drill.Fire(now, UnityEngine.Random.value);
+            st.Firing = drill.InBurst;
+            if (drill.Reloading && drill.Belt > 1)
+                RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " reloads the " + c.En + "'s gun ("
+                    + drill.Reload.ToString("0.0") + " s).");
 
             float spread = GunnerAI.Spread(st.TargetPlayer, dist, st.TargetSpeed, st.Suppress ? 0f : st.Vis, st.Suppress);
             Vector3 dir = (bore.normalized * Mathf.Max(1f, dist) + GunnerAI.Offset(bore, spread)).normalized;
@@ -1810,6 +2038,20 @@ namespace NextDayRevival
             u.PlayerTarget = null;
             if (u.KillTargetSet != null) SetMercKillTarget(f, u, null);
             return true;
+        }
+
+        static Fighter _seatHealth;
+
+        /// <summary>X: health 0..1 of a merc on a seat (1 when unreadable);
+        /// MercHealth without its new Fighter per call.</summary>
+        internal static float MercSeatHealth(Component ai)
+        {
+            if (ai == null || !LookUp()) return 1f;
+            if (_seatHealth == null) _seatHealth = new Fighter();
+            _seatHealth.Ai = ai;
+            float h = HealthFraction(_seatHealth);
+            _seatHealth.Ai = null;
+            return h;
         }
 
         static Fighter MercFighter(MercUnit u)

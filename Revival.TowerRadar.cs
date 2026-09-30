@@ -1638,7 +1638,7 @@ namespace NextDayRevival
         {
             public int Id;
             public GameObject Go;
-            public int Kind;
+            public int Kind, Type;
             public float Radius;
             public Vector3 Pos, Vel;          // as painted
             public float PaintedAt = -100f, Height;
@@ -1655,6 +1655,7 @@ namespace NextDayRevival
         static readonly Dictionary<string, FlakState> _gunState = new Dictionary<string, FlakState>();
         static int _nextId = 1;
         static float _nextCollect, _lastSweep = -1f;
+        static string _mine;
         static Blip _selected;
         internal static bool InView;
         static bool _near;
@@ -1692,10 +1693,11 @@ namespace NextDayRevival
             if (now >= _nextCollect)
             {
                 _nextCollect = now + 0.25f;
+                _mine = MySide();
                 FlakFire.Collect(_air, eye, TowerRadar.ScopeRangeU);
                 RadarShadow.Scan(_air, eye);
                 Guns();
-                if (InView) Rows();   // W-UI4: the console's gun and track lines, only at the console
+                if (InView) Rows();   // Rows and advice use the existing 4 Hz snapshot.
             }
             FlakFire.FollowAll(_air, Time.deltaTime, 5f);
             Sweep(eye);
@@ -1712,7 +1714,7 @@ namespace NextDayRevival
             float span = Mathf.Repeat(a1 - a0, 360f);
             bool working = TowerRadar.Working;
             float range = TowerRadar.ScopeRangeU;
-            string mine = MySide();
+            string mine = _mine;
             for (int i = 0; i < _air.Count; i++)
             {
                 GepardGun.Contact c = _air[i];
@@ -1735,6 +1737,7 @@ namespace NextDayRevival
                     _blips.Add(b);
                 }
                 b.Kind = c.Kind;
+                b.Type = AirPicturePolicy.Type(c.Kind, c.Kind == 6 && NpcAircraft.IsTu95(c.Go));
                 b.Radius = c.Radius;
                 b.Pos = c.Pos;
                 b.Vel = c.Vel;
@@ -1780,9 +1783,10 @@ namespace NextDayRevival
         /// <summary>Guns opening fire and falling silent go to the log.</summary>
         static void Guns()
         {
-            List<FlakGunInfo> guns = Flak.Guns();
+            Flak.FillGuns(_gunSnapshot);
+            List<FlakGunInfo> guns = _gunSnapshot;
             _guns.Clear();
-            _guns.AddRange(guns);   // W-UI4: the scope and the console panel draw this 4 Hz snapshot
+            _guns.AddRange(guns);
             for (int i = 0; i < guns.Count; i++)
             {
                 FlakGunInfo g = guns[i];
@@ -1850,15 +1854,7 @@ namespace NextDayRevival
 
         static string Guess(Blip b)
         {
-            float kmh = new Vector3(b.Vel.x, 0f, b.Vel.z).magnitude / K * 3.6f;
-            switch (b.Kind)
-            {
-                case 0: return kmh < 20f ? "HELO (hover)" : "HELO, prob. Mi-8";
-                case 6: return kmh < 60f ? "SLOW FIXED-WING?" : "FIXED-WING, prob. An-2";
-                case 2: return "SMALL - DRONE (FPV?)";
-                case 3: return "SMALL - DRONE (recon?)";
-                default: return "UNKNOWN";
-            }
+            return RadarClarityText.Type(b.Type);
         }
 
         static string IffName(int iff) { return iff > 0 ? "FRIEND" : iff < 0 ? "FOE" : "UNKNOWN"; }
@@ -1925,6 +1921,7 @@ namespace NextDayRevival
             _cursor = new Vector2(UnityEngine.Screen.width * 0.35f, UnityEngine.Screen.height * 0.5f);
             _nextClaim = 0f;
             _nextCollect = 0f;   // the console's lines at once
+            WarmNumbers();
             TowerRadar.Log("the local player is at the console.");
         }
 
@@ -1951,7 +1948,9 @@ namespace NextDayRevival
             int kind = -1;
             if (cmd == TowerRadar.CmdEngage)
             {
-                if (_selected == null || _selected.Go == null) { Hint("Select a blip first.", 2f); return; }
+                if (!TowerRadar.Working || _selected == null || _selected.Go == null
+                    || Time.time - _selected.PaintedAt > TowerRadar.SweepSeconds * 2.2f)
+                { Hint("Select a live radar track first.", 2f); return; }
                 if (_selected.Iff > 0) { Hint("That track is FRIEND - the guns never fire on their own side.", 3f); return; }
                 GepardGun.Contact c = null;
                 for (int i = 0; i < _air.Count; i++) if (_air[i].Go == _selected.Go) { c = _air[i]; break; }
@@ -2015,8 +2014,11 @@ namespace NextDayRevival
         {
             public Blip B;
             public int RangeTenths, Brg, Hdg, Kmh, AltM;
+            public int Eta, Threat, Advice, GunRangeTenths;
+            public string GunId;
         }
 
+        static readonly List<FlakGunInfo> _gunSnapshot = new List<FlakGunInfo>();
         static readonly List<FlakGunInfo> _guns = new List<FlakGunInfo>();   // the 4 Hz snapshot
         static readonly List<GunRow> _gunRows = new List<GunRow>();
         static readonly List<AirRow> _airRows = new List<AirRow>();
@@ -2024,6 +2026,8 @@ namespace NextDayRevival
         static readonly Rect[] _airRects = new Rect[16];
         static readonly Blip[] _airHit = new Blip[16];
         static int _airShown;
+        static int _airPage, _airPageSize = 1;
+        static Rect _previousAir, _nextAir;
         static readonly UiMemo _controlText = new UiMemo(), _operatorText = new UiMemo(), _promptText = new UiMemo();
         static bool _obeyed;
         static int _who = -1;
@@ -2033,6 +2037,16 @@ namespace NextDayRevival
         static readonly string[] _radarChip = new string[102], _consoleChip = new string[102];
 
         static string Id2(int v) { v = Mathf.Clamp(v, 0, 99); return _id2[v] ?? (_id2[v] = v.ToString("00", CultureInfo.InvariantCulture)); }
+
+        // Cold console entry only: numeric labels never allocate during motion.
+        static bool _numbersWarm;
+        static void WarmNumbers()
+        {
+            if (_numbersWarm) return;
+            _numbersWarm = true;
+            for (int i = 0; i < 1000; i++) { Km(i); UiNum.Of(i); if (i < 360) Deg3(i); if (i < 100) Id2(i); }
+            for (int i = 0; i < 6; i++) AirPicture.Icon(i);
+        }
 
         static string Deg3(int v)
         {
@@ -2157,6 +2171,9 @@ namespace NextDayRevival
                 row.Kmh = Mathf.RoundToInt(v.magnitude / K * 3.6f);
                 row.Hdg = row.Kmh < 5 ? -1 : Mathf.RoundToInt(Mathf.Repeat(Mathf.Atan2(v.x, v.z) * Mathf.Rad2Deg, 360f));
                 row.AltM = Mathf.RoundToInt(b.Height / K);
+                row.Eta = RadarClarityCore.Eta(d.x, d.z, v.x, v.z);
+                row.Threat = RadarClarityCore.Threat(b.Iff, b.Type, row.Eta, row.RangeTenths);
+                Recommendation(row);
                 // insertion: foe (-1) before unknown (0) before friend (1), then nearer first
                 int at = _airRows.Count;
                 while (at > 0 && Before(row, _airRows[at - 1])) at--;
@@ -2166,8 +2183,40 @@ namespace NextDayRevival
 
         static bool Before(AirRow a, AirRow b)
         {
-            if (a.B.Iff != b.B.Iff) return a.B.Iff < b.B.Iff;
-            return a.RangeTenths < b.RangeTenths;
+            if (a.Threat != b.Threat) return a.Threat > b.Threat;
+            if (a.RangeTenths != b.RangeTenths) return a.RangeTenths < b.RangeTenths;
+            return a.B.Id < b.B.Id;
+        }
+
+        // Snapshot-only advice at 2 Hz. Gun crews still perform their own LOS,
+        // IFF and fire checks; advice is not a fire authorization or guaranteed hit.
+        static void Recommendation(AirRow row)
+        {
+            bool heavy = false, shortGun = false, own = false;
+            float bestH = float.MaxValue, bestS = float.MaxValue;
+            string hid = null, sid = null;
+            for (int i = 0; i < _guns.Count; i++)
+            {
+                FlakGunInfo g = _guns[i];
+                if (!TowerRadar.Follows(g, _who) || g.Health <= 0f || g.CrewAlive == 0 || g.PlayerManned) continue;
+                own = true;
+                if (g.Id.StartsWith("MT-", StringComparison.Ordinal) && !NoFly.TownContains(row.B.Pos)) continue;
+                Vector3 d = row.B.Pos - g.Position;
+                if (!RadarClarityCore.Reach(d.x, d.y, d.z, g.Range,
+                    g.ShortRange ? ShortRangeCore.CeilingM * K : Flak.CeilingU,
+                    g.ShortRange ? -10f : TowerRadar.F(Flak.CfgPitchMin, -3f),
+                    g.ShortRange ? 90f : TowerRadar.F(Flak.CfgPitchMax, 82f))) continue;
+                if (row.B.Height < (g.ShortRange && (row.B.Type == 3 || row.B.Type == 4) ? 0.5f
+                    : TowerRadar.F(Flak.CfgMinHeight, 3f)) * K) continue;
+                float dist = d.magnitude;
+                if (g.ShortRange && dist < bestS) { shortGun = true; bestS = dist; sid = g.Id; }
+                if (!g.ShortRange && dist < bestH) { heavy = true; bestH = dist; hid = g.Id; }
+            }
+            row.Advice = !_obeyed && row.B.Iff < 0 ? RadarClarityCore.Observe
+                : RadarClarityCore.Advice(row.B.Iff, row.B.Type, row.AltM, heavy, shortGun, own);
+            row.GunId = row.Advice == RadarClarityCore.Heavy ? hid : row.Advice == RadarClarityCore.Short ? sid : null;
+            row.GunRangeTenths = row.GunId == null ? 0 : Mathf.RoundToInt(
+                (row.Advice == RadarClarityCore.Heavy ? bestH : bestS) / K / 100f);
         }
 
         /// <summary>Who holds a gun: a player at the sight, the HQ's crew, nobody.</summary>
@@ -2303,8 +2352,9 @@ namespace NextDayRevival
                 Color c = b.Iff > 0 ? Green : b.Iff < 0 ? Foe : Unknown;
                 c.a = alpha;
                 GUI.color = c;
-                float s = b.Kind == 2 || b.Kind == 3 ? 4f : 6f;
-                GUI.DrawTexture(new Rect(p.x - s * 0.5f, p.y - s * 0.5f, s, s), _white);
+                float s = 20f;
+                GUI.DrawTexture(new Rect(p.x - s * 0.5f, p.y - s * 0.5f, s, s), AirPicture.Icon(b.Type));
+                if (b.Iff > 0) Bracket(p.x, p.y, 12f, c);
                 // the heading vector: where it will be in 20 s
                 Vector3 v = b.Vel;
                 v.y = 0f;
@@ -2313,7 +2363,8 @@ namespace NextDayRevival
                     Vector2 q = ToScreen(b.Pos + v * 20f);
                     Line(p.x, p.y, q.x, q.y, 1.2f);
                 }
-                SmallLabel(p.x + 6f, p.y + 2f, Id2(b.Id), c);
+                SmallLabel(p.x + 13f, p.y + 2f, Id2(b.Id), c);
+                if (b == _selected || _blips.Count <= 8) SmallLabel(p.x + 13f, p.y - 16f, Guess(b), c);
                 if (b == _selected) Bracket(p.x, p.y, 11f, new Color(1f, 1f, 1f, 0.95f));
                 if (TowerRadar.AssignedKind >= 0 && b.Kind == TowerRadar.AssignedKind
                     && (b.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
@@ -2379,7 +2430,7 @@ namespace NextDayRevival
             y += br.height + gap * 1.5f;
 
             // the selected track
-            float cardH = UiKit.S(78f);
+            float cardH = UiKit.S(104f);
             Rect card = new Rect(x, y, pw, cardH);
             UiKit.Fill(card, UiKit.CardFill, 1);
             if (_selected != null && _selected.Go != null)
@@ -2391,15 +2442,77 @@ namespace NextDayRevival
                 UiKit.Label(new Rect(ix + UiKit.S(64f), y + UiKit.S(6f), UiKit.S(40f), UiKit.S(24f)), Id2(b.Id), UiFont.Heading, UiFont.Left, UiKit.Text);
                 UiKit.Chip(new Rect(ix + UiKit.S(104f), y + UiKit.S(8f), UiKit.S(86f), UiKit.S(20f)), IffName(b.Iff), IffTone(b.Iff));
                 UiKit.Label(new Rect(ix + UiKit.S(200f), y + UiKit.S(6f), iw - UiKit.S(200f), UiKit.S(24f)), Guess(b), UiFont.Body, UiFont.Left, IffColor(b.Iff));
-                if (a != null) Numbers(new Rect(ix, y + UiKit.S(40f), iw, UiKit.S(26f)), a, UiFont.Body);
+                if (a != null)
+                {
+                    Numbers(new Rect(ix, y + UiKit.S(34f), iw, UiKit.S(26f)), a, UiFont.Body);
+                    AdviceLine(new Rect(ix, y + UiKit.S(66f), iw, UiKit.S(28f)), a);
+                }
             }
             else
                 UiKit.Label(new Rect(x + UiKit.S(12f), y, pw - UiKit.S(24f), cardH), "No track selected - click a blip on the scope or a line of the air picture.",
                     UiFont.Body, UiFont.Left, UiKit.TextDim);
             y += cardH + gap * 1.5f;
 
-            // the guns
+            // the air picture
             float small = UiKit.S(26f);
+            UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "AIR PICTURE");
+            y += UiKit.S(22f) + gap * 0.5f;
+            bool log = TowerRadar.B(TowerRadar.CfgLog);
+            float logMin = log ? UiKit.S(22f) + 4f * UiKit.S(17f) : 0f;
+            UiKit.Label(new Rect(x, y, pw, UiKit.S(18f)), RadarClarityText.Legend, UiFont.Small, UiFont.Left, UiKit.TextDim);
+            y += UiKit.S(20f);
+            float contactH = UiKit.S(68f);
+            float reserve = UiKit.S(22f + 20f + 28f) + _guns.Count * small + gap * 2f + logMin;
+            _airPageSize = Mathf.Clamp(Mathf.FloorToInt((bottom - y - reserve) / contactH), 1, 4);
+            int pages = Mathf.Max(1, (_airRows.Count + _airPageSize - 1) / _airPageSize);
+            _airPage = Mathf.Clamp(_airPage, 0, pages - 1);
+            _airShown = 0;
+            if (_airRows.Count == 0)
+            {
+                UiKit.Label(new Rect(x, y, pw, small), TowerRadar.Working ? "No air contact." : "No picture - the radar is dark.",
+                    UiFont.Body, UiFont.Left, UiKit.TextDim);
+                y += small;
+            }
+            for (int i = _airPage * _airPageSize; i < _airRows.Count && _airShown < _airPageSize; i++)
+            {
+                if (y + contactH > bottom - logMin)
+                {
+                    UiKit.Label(new Rect(x, y, pw, UiKit.S(18f)), "+ more tracks on the scope", UiFont.Small, UiFont.Left, UiKit.TextDim);
+                    y += UiKit.S(18f);
+                    break;
+                }
+                AirRow a = _airRows[i];
+                Rect r = new Rect(x, y, pw, contactH);
+                _airRects[_airShown] = r;
+                _airHit[_airShown] = a.B;
+                _airShown++;
+                bool sel = a.B == _selected;
+                bool hot = r.Contains(_cursor);
+                if (sel || hot || i % 2 == 0)
+                    UiKit.Fill(r, sel ? UiKit.Fade(UiKit.Accent, 0.25f) : hot ? UiKit.CardHover : UiKit.Fade(Color.white, 0.03f), 2);
+                GUI.color = IffColor(a.B.Iff);
+                GUI.DrawTexture(new Rect(r.x + UiKit.S(4f), r.y + UiKit.S(3f), UiKit.S(20f), UiKit.S(20f)), AirPicture.Icon(a.B.Type));
+                GUI.color = Color.white;
+                UiKit.Label(new Rect(r.x + UiKit.S(28f), r.y, UiKit.S(30f), small), Id2(a.B.Id), UiFont.Body, UiFont.Left, UiKit.Text);
+                UiKit.Chip(new Rect(r.x + UiKit.S(60f), r.y + UiKit.S(3f), UiKit.S(74f), small - UiKit.S(6f)), IffName(a.B.Iff), IffTone(a.B.Iff));
+                UiKit.Label(new Rect(r.x + UiKit.S(144f), r.y, pw - UiKit.S(152f), small), Guess(a.B), UiFont.Small, UiFont.Left, IffColor(a.B.Iff));
+                Numbers(new Rect(r.x + UiKit.S(8f), r.y + UiKit.S(24f), r.width - UiKit.S(16f), UiKit.S(20f)), a, UiFont.Small);
+                AdviceLine(new Rect(r.x + UiKit.S(8f), r.y + UiKit.S(44f), r.width - UiKit.S(16f), UiKit.S(22f)), a);
+                if (TowerRadar.AssignedKind >= 0 && a.B.Kind == TowerRadar.AssignedKind
+                    && (a.B.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
+                    UiKit.Fill(new Rect(r.x, r.y, UiKit.S(3f), r.height), UiKit.Bad, 0);
+                y += contactH;
+            }
+            y += gap;
+
+            _previousAir = new Rect(x, y, UiKit.S(84f), UiKit.S(24f));
+            _nextAir = new Rect(x + UiKit.S(92f), y, UiKit.S(84f), UiKit.S(24f));
+            ConsoleButton(_previousAir, "<", UiButton.Ghost, _airPage > 0, false);
+            ConsoleButton(_nextAir, ">", UiButton.Ghost, _airPage + 1 < pages, false);
+            UiKit.Label(new Rect(x + UiKit.S(188f), y, UiKit.S(40f), UiKit.S(24f)), UiNum.Of(_airPage + 1), UiFont.Small, UiFont.Left, UiKit.TextDim);
+            y += UiKit.S(28f) + gap;
+
+            // the guns
             UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "GUNS - OWNER / CREW / STATE");
             y += UiKit.S(22f) + gap * 0.5f;
             if (_gunRows.Count == 0 || _guns.Count == 0)
@@ -2407,7 +2520,7 @@ namespace NextDayRevival
                 UiKit.Label(new Rect(x, y, pw, small), "No AA guns on the air defence net.", UiFont.Body, UiFont.Left, UiKit.Warn);
                 y += small;
             }
-            for (int i = 0; i < _guns.Count && i < _gunRows.Count; i++)
+            for (int i = 0; i < _guns.Count && i < _gunRows.Count && y + small <= bottom - UiKit.S(20f); i++)
             {
                 GunRow g = _gunRows[i];
                 Rect r = new Rect(x, y, pw, small);
@@ -2426,46 +2539,6 @@ namespace NextDayRevival
             }
             UiKit.Label(new Rect(x, y, pw, UiKit.S(20f)), _operatorText.Text, UiFont.Small, UiFont.Left, UiKit.TextDim);
             y += UiKit.S(20f) + gap;
-
-            // the air picture
-            UiKit.Section(new Rect(x, y, pw, UiKit.S(22f)), "AIR PICTURE");
-            y += UiKit.S(22f) + gap * 0.5f;
-            bool log = TowerRadar.B(TowerRadar.CfgLog);
-            float logMin = log ? UiKit.S(22f) + 4f * UiKit.S(17f) : 0f;
-            _airShown = 0;
-            if (_airRows.Count == 0)
-            {
-                UiKit.Label(new Rect(x, y, pw, small), TowerRadar.Working ? "No air contact." : "No picture - the radar is dark.",
-                    UiFont.Body, UiFont.Left, UiKit.TextDim);
-                y += small;
-            }
-            for (int i = 0; i < _airRows.Count && _airShown < _airRects.Length; i++)
-            {
-                if (y + small > bottom - logMin)
-                {
-                    UiKit.Label(new Rect(x, y, pw, UiKit.S(18f)), "+ more tracks on the scope", UiFont.Small, UiFont.Left, UiKit.TextDim);
-                    y += UiKit.S(18f);
-                    break;
-                }
-                AirRow a = _airRows[i];
-                Rect r = new Rect(x, y, pw, small);
-                _airRects[_airShown] = r;
-                _airHit[_airShown] = a.B;
-                _airShown++;
-                bool sel = a.B == _selected;
-                bool hot = r.Contains(_cursor);
-                if (sel || hot || i % 2 == 0)
-                    UiKit.Fill(r, sel ? UiKit.Fade(UiKit.Accent, 0.25f) : hot ? UiKit.CardHover : UiKit.Fade(Color.white, 0.03f), 2);
-                UiKit.Label(new Rect(r.x + UiKit.S(8f), r.y, UiKit.S(30f), small), Id2(a.B.Id), UiFont.Body, UiFont.Left, UiKit.Text);
-                UiKit.Chip(new Rect(r.x + UiKit.S(40f), r.y + UiKit.S(3f), UiKit.S(74f), small - UiKit.S(6f)), IffName(a.B.Iff), IffTone(a.B.Iff));
-                UiKit.Label(new Rect(r.x + UiKit.S(122f), r.y, UiKit.S(170f), small), Guess(a.B), UiFont.Small, UiFont.Left, IffColor(a.B.Iff));
-                Numbers(new Rect(r.x + UiKit.S(296f), r.y, r.width - UiKit.S(300f), small), a, UiFont.Small);
-                if (TowerRadar.AssignedKind >= 0 && a.B.Kind == TowerRadar.AssignedKind
-                    && (a.B.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
-                    UiKit.Fill(new Rect(r.x, r.y, UiKit.S(3f), r.height), UiKit.Bad, 0);
-                y += small;
-            }
-            y += gap;
 
             // the log
             if (log && y + UiKit.S(22f) < bottom)
@@ -2515,13 +2588,23 @@ namespace NextDayRevival
         /// <summary>Range, bearing, heading, speed, height of a track in columns.</summary>
         static void Numbers(Rect r, AirRow a, int font)
         {
-            float c = r.width / 5f;
+            float c = r.width / 4f;
             Color dim = UiKit.TextDim, txt = UiKit.Text;
             Col(new Rect(r.x, r.y, c, r.height), "RNG", Km(a.RangeTenths), font, dim, txt);
-            Col(new Rect(r.x + c, r.y, c, r.height), "BRG", Deg3(a.Brg), font, dim, txt);
-            Col(new Rect(r.x + 2f * c, r.y, c, r.height), "HDG", a.Hdg < 0 ? "---" : Deg3(a.Hdg), font, dim, txt);
-            Col(new Rect(r.x + 3f * c, r.y, c, r.height), "KM/H", UiNum.Of(a.Kmh), font, dim, txt);
-            Col(new Rect(r.x + 4f * c, r.y, c, r.height), "ALT M", a.AltM < 1000 ? UiNum.Of(Mathf.Max(0, a.AltM)) : ">999", font, dim, txt);
+            Col(new Rect(r.x + c, r.y, c, r.height), "KM/H", UiNum.Of(Mathf.Clamp(a.Kmh, 0, 999)), font, dim, txt);
+            Col(new Rect(r.x + 2f * c, r.y, c, r.height), "AGL M", a.AltM < 1000 ? UiNum.Of(Mathf.Max(0, a.AltM)) : ">999", font, dim, txt);
+            Col(new Rect(r.x + 3f * c, r.y, c, r.height), RadarClarityText.Eta,
+                a.Eta < 0 ? "---" : UiNum.Of(a.Eta), font, dim, txt);
+        }
+
+        static void AdviceLine(Rect r, AirRow a)
+        {
+            float suffix = a.GunId == null ? 0f : UiKit.S(148f);
+            UiKit.Label(new Rect(r.x, r.y, r.width - suffix, r.height), RadarClarityText.Advice(a.Advice),
+                UiFont.Small, UiFont.Left, a.B.Iff > 0 ? UiKit.Good : UiKit.Warn);
+            if (a.GunId == null) return;
+            UiKit.Label(new Rect(r.xMax - suffix, r.y, UiKit.S(64f), r.height), a.GunId, UiFont.Small, UiFont.Left, UiKit.TextDim);
+            UiKit.Label(new Rect(r.xMax - UiKit.S(80f), r.y, UiKit.S(80f), r.height), Km(a.GunRangeTenths), UiFont.Small, UiFont.Right, UiKit.Text);
         }
 
         static void Col(Rect r, string label, string value, int font, Color dim, Color txt)
@@ -2566,6 +2649,8 @@ namespace NextDayRevival
                     Command(i == 0 ? TowerRadar.CmdEngage : i == 1 ? TowerRadar.CmdFree : i == 2 ? TowerRadar.CmdHold : TowerRadar.CmdClear);
                     return;
                 }
+            if (_previousAir.Contains(_cursor)) { if (_airPage > 0) _airPage--; return; }
+            if (_nextAir.Contains(_cursor)) { if ((_airPage + 1) * _airPageSize < _airRows.Count) _airPage++; return; }
             for (int i = 0; i < _airShown; i++)
                 if (_airRects[i].Contains(_cursor))
                 {

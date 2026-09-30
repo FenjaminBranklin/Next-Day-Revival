@@ -485,13 +485,20 @@ namespace NextDayRevival
         public static List<FlakGunInfo> Guns()
         {
             List<FlakGunInfo> list = new List<FlakGunInfo>(_guns.Count);
+            FillGuns(list);
+            return list;
+        }
+
+        // Caller-owned snapshot for periodic UI refreshes, without a new list.
+        internal static void FillGuns(List<FlakGunInfo> list)
+        {
+            list.Clear();
             for (int i = 0; i < _guns.Count; i++)
             {
                 Gun g = _guns[i];
                 if (g.Root == null) continue;
                 list.Add(Snapshot(g));
             }
-            return list;
         }
 
         static FlakGunInfo Snapshot(Gun g)

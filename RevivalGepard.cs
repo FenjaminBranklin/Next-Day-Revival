@@ -228,10 +228,23 @@ namespace NextDayRevival
             return "[Gepard] Enabled = false in the config - the spawn switches it on for this session";
         }
 
+        // X perf-fix: Transform.name builds a new string per read, and the
+        // gunner rescan (2.5 Hz) and the crew scan (5 Hz) ask this for every
+        // vehicle of the map - F6 "Gepard" 7.1 KB/frame. The answer is
+        // remembered per object; Umbauen, the only place that adds the mark,
+        // writes it when it renames.
+        static readonly Dictionary<int, bool> _istGepard = new Dictionary<int, bool>();
+
         public static bool IstGepard(Transform root)
         {
             if (root == null) return false;
-            return root.name.IndexOf(Marke, StringComparison.OrdinalIgnoreCase) >= 0;
+            int id = root.GetInstanceID();
+            bool known;
+            if (_istGepard.TryGetValue(id, out known)) return known;
+            if (_istGepard.Count > 4096) _istGepard.Clear();
+            known = root.name.IndexOf(Marke, StringComparison.OrdinalIgnoreCase) >= 0;
+            _istGepard[id] = known;
+            return known;
         }
 
         // ------------------------------------------------------------ rebuild
@@ -248,6 +261,7 @@ namespace NextDayRevival
             // Turret.InitCarPrefix would hang the BTR gunner's seat onto
             // anything whose name starts with "BTR-80A".
             car.name = "Gepard_" + car.name + Marke;
+            _istGepard[car.transform.GetInstanceID()] = true;
             try { Aufbauen(car); }
             catch (Exception ex) { RevivalPlugin.L.LogError("Gepard, rebuild: " + ex); }
             try { Validate(car); }
@@ -2269,7 +2283,7 @@ namespace NextDayRevival
             public Transform Owner;
             public LineRenderer Line;
             public List<GepardGun.Contact> Npc;   // an NPC gunner's contacts; null = the local gunner's
-            public int Credit = -1;               // W AA4: the actor paid for a kill; -1 = by Npc (0 or local)
+            public int Credit = -1;               // launch-time owner; 0 = garrison, nobody is paid
             public int Tag = -1;                  // the 52-K's shot tag (Flak.Tag); -1 = none
             public bool Terminal;                 // a peer's proximity burst ended this picture (Terminate)
             public Vector3 TerminalAt;
@@ -2373,7 +2387,8 @@ namespace NextDayRevival
             r.Owner = owner;
             r.Npc = contacts;
             r.Spec = spec;
-            r.Credit = AirKills.NextShotCredit;
+            r.Credit = AirKillCore.ShotCredit(AirKills.NextShotCredit, contacts != null,
+                contacts == null && AirKills.NextShotCredit < 0 ? Mercs.LocalActor : 0);
             r.Tag = NextTag;
             r.Terminal = false;
             r.Line = spec.Tracer ? Take() : null;
@@ -2479,6 +2494,8 @@ namespace NextDayRevival
             r.Live = live;
             r.Owner = rig.Vehicle;
             r.Npc = npc;
+            r.Credit = AirKillCore.ShotCredit(AirKills.NextShotCredit, npc != null,
+                npc == null && AirKills.NextShotCredit < 0 ? Mercs.LocalActor : 0);
             r.Line = Anim.Tracers ? Take() : null;   // NDR P9: [Effects] Tracers
             if (r.Line != null)
             {
@@ -2626,9 +2643,18 @@ namespace NextDayRevival
                 if (struck)
                 {
                     GepardFx.Impact(hit.point, hit.normal);
-                    if (r.Live && r.Npc != null)
-                        GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir, spec != null ? spec.HeliHits : 0);
-                    else if (r.Live && spec == null) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
+                    if (r.Live)
+                    {
+                        int previousCredit = AirKills.HitCredit;
+                        AirKills.HitCredit = RoundCredit(r);
+                        try
+                        {
+                            if (r.Npc != null)
+                                GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir, spec != null ? spec.HeliHits : 0);
+                            else if (spec == null) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
+                        }
+                        finally { AirKills.HitCredit = previousCredit; }
+                    }
                     return true;
                 }
                 r.Flown += len;
@@ -2679,12 +2705,10 @@ namespace NextDayRevival
             return false;
         }
 
-        /// <summary>W AA4: who a hit by this round is credited to - the
-        /// gun's own choice (a merc crew's owner, the player at a flak gun),
-        /// else an NPC gunner (0) or the local gunner (-1: the local actor).</summary>
+        /// <summary>The owner captured at launch; missing attribution pays nobody.</summary>
         static int RoundCredit(Round r)
         {
-            return r.Credit >= 0 ? r.Credit : r.Npc != null ? 0 : -1;
+            return Math.Max(0, r.Credit);
         }
 
         /// <summary>A live armed 52-K shell struck a collider. An aircraft's:

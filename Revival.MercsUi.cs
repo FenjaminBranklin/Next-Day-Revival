@@ -40,7 +40,7 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
-    internal static class MercUi
+    internal static partial class MercUi
     {
         // ============================================================ toasts
         sealed class ToastLine { internal string Text; internal float Until; internal bool Warn; }
@@ -184,6 +184,7 @@ namespace NextDayRevival
         internal static void TickInput()
         {
             Keys();
+            bool quickOwns = QuickInput();
             if (Input.anyKeyDown && !Input.GetMouseButtonDown(0)) Reply();
             if (_tabActive && Time.frameCount - _tabFrame > 2) CloseTab();
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
@@ -212,7 +213,7 @@ namespace NextDayRevival
             if (_placing && !_listOpen && (!gameWindow || GameUi.State == 8))
             { _wheelOpen = false; _wheelArmed = false; RouteInput(gameWindow); return; }
             if (gameWindow || _listOpen) { _wheelOpen = false; _wheelArmed = false; return; }
-            Wheel();
+            if (!quickOwns) Wheel();
         }
 
         static void Wheel()
@@ -361,8 +362,8 @@ namespace NextDayRevival
             { CancelRoute(Loc.T("Точка атаки не задана (2 мин) - отмена.", "Attack point not set (2 min) - cancelled.")); return; }
             if (!gameWindow && Input.GetKeyDown(KeyCode.Escape))
             { CancelRoute(Loc.T("Атака отменена.", "Attack cancelled.")); return; }
-            if (_wheelKey == KeyCode.None || gameWindow) return;   // on the map the point is a click
-            if (Input.GetKeyDown(_wheelKey))
+            if (gameWindow) return;   // on the map the point is a click
+            if (PlaceDown())
             {
                 _placing = false; _placeAttack = false;
                 AttackAtCrosshair();
@@ -519,15 +520,14 @@ namespace NextDayRevival
             if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) { FinishRoute(); return; }
             if (!gameWindow && Input.GetKeyDown(KeyCode.Escape))
             { CancelRoute(Loc.T("Маршрут патруля отменён.", "Patrol route cancelled.")); return; }
-            if (_wheelKey == KeyCode.None) return;
-            if (Input.GetKeyDown(_wheelKey)) _placeKeyDown = now;
-            if (_placeKeyDown >= 0f && Input.GetKey(_wheelKey) && now - _placeKeyDown > 0.4f)
+            if (PlaceDown()) _placeKeyDown = now;
+            if (_placeKeyDown >= 0f && PlaceHeld() && now - _placeKeyDown > 0.4f)
             {
                 _placeKeyDown = -1f;
                 FinishRoute();
                 return;
             }
-            if (_placeKeyDown >= 0f && Input.GetKeyUp(_wheelKey))
+            if (_placeKeyDown >= 0f && PlaceUp())
             {
                 _placeKeyDown = -1f;
                 if (gameWindow) return;           // on the map the points are clicks
@@ -538,16 +538,16 @@ namespace NextDayRevival
             }
         }
 
-        static int _crossFrame = -1;
+        static float _crossNext;
         static bool _crossHit;
         static Vector3 _crossPoint, _crossFacing;
 
-        /// <summary>CrosshairPoint once per frame for the OnGUI previews.</summary>
+        /// <summary>CrosshairPoint at most 5 Hz for all OnGUI previews.</summary>
         static bool CrosshairCached(out Vector3 point)
         {
-            if (_crossFrame != Time.frameCount)
+            if (Time.unscaledTime >= _crossNext)
             {
-                _crossFrame = Time.frameCount;
+                _crossNext = Time.unscaledTime + 0.2f;
                 _crossHit = CrosshairPoint(out _crossPoint, out _crossFacing);
             }
             point = _crossPoint;
@@ -1011,6 +1011,7 @@ namespace NextDayRevival
             if (_listOpen) DrawList();
             if (!window && !_listOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
             if (!window) DrawLocate();
+            DrawCommandPing();
             DrawToasts();
         }
 
@@ -1059,7 +1060,7 @@ namespace NextDayRevival
 
         static string Short(string s, int n) { return s.Length <= n ? s : s.Substring(0, n); }
 
-        static string OrderText(Mercs.Record m)
+        internal static string OrderText(Mercs.Record m)
         {
             MercOrder order = m.Order;
             if (order.Survive) return Loc.T("ВЫЖИТЬ", "SURVIVE");
@@ -1101,6 +1102,8 @@ namespace NextDayRevival
         static int _wheelTextPick = -2;
         static string _wheelWho, _wheelPoint;
         static bool _wheelPeaceful;
+        static readonly List<Mercs.Record> _wheelSelection = new List<Mercs.Record>(10);
+        static int _wheelWhoKey;
         static readonly UiMemo _wheelPointMemo = new UiMemo(), _wheelKeysMemo = new UiMemo();
 
         static void DrawWheel()
@@ -1160,8 +1163,24 @@ namespace NextDayRevival
         {
             _wheelTextAt = now + 0.2f;
             _wheelTextPick = _wheelPick;
-            List<Mercs.Record> sel = Mercs.Selection();
-            _wheelWho = Mercs.Addressed(sel);
+            // The held wheel is steady state: reuse its selection buffer and
+            // build the addressed text only when the selection/language changes.
+            List<Mercs.Record> sel = _wheelSelection;
+            sel.Clear();
+            List<Mercs.Record> roster = Mercs.Roster;
+            int alive = 0;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                if (roster[i].Dead) continue;
+                alive++;
+                if (roster[i].Selected) sel.Add(roster[i]);
+            }
+            if (sel.Count == 0)
+                for (int i = 0; i < roster.Count; i++) if (!roster[i].Dead) sel.Add(roster[i]);
+            int who = alive * 31 + Loc.Lang();
+            for (int i = 0; i < sel.Count; i++) who = unchecked(who * 31 + sel[i].Id);
+            if (_wheelWho == null || _wheelWhoKey != who)
+            { _wheelWhoKey = who; _wheelWho = Mercs.Addressed(sel); }
             _wheelPeaceful = sel.Count > 0 && sel[0].Peaceful;
             _wheelPoint = null;
             if ((_wheelPick < 1 || _wheelPick > 3) && _wheelPick != AttackSector) return;

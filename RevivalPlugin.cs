@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.63.0";
+        public const string VERSION = "6.64.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -2235,6 +2235,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_NativeActionProgressT); NativeActionProgress.Tick(); FrameProf.E(FrameProf.S_NativeActionProgressT);
             FrameProf.S(FrameProf.NetWatch);    NetWatch.Tick();          FrameProf.E(FrameProf.NetWatch);
             FrameProf.S(FrameProf.AdminTick);   Admin.Tick();            FrameProf.E(FrameProf.AdminTick);
+            FrameProf.S(FrameProf.S_PerfBisectT); PerfBisect.Tick(); FrameProf.E(FrameProf.S_PerfBisectT);   // X perf-bisect: admin Perf tab (frame line, auto test); gates below: PerfBisect.Run
             FrameProf.S(FrameProf.MapTeleTick); MapTeleport.Tick();      FrameProf.E(FrameProf.MapTeleTick);
             // Solange das Menue offen ist, gehoert der Zeiger dem Menue -
             // sonst zieht CursorGuard ihn jeden Frame zurueck ins Fenster und
@@ -2249,10 +2250,10 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_EastWorldT); EastWorld.Tick(); FrameProf.E(FrameProf.S_EastWorldT);                    // east world: tile load/unload, held spawn, WORLD_SIZE; on by default
             FrameProf.S(FrameProf.S_EastCrossingsT); EastCrossings.Tick(); FrameProf.E(FrameProf.S_EastCrossingsT);                // east world: saddle cuts, paint, NavMesh patches, seam links
             FrameProf.S(FrameProf.S_EastTileT); EastTile.Tick(); FrameProf.E(FrameProf.S_EastTileT);                     // research: east extension probe, off by default
-            FrameProf.S(FrameProf.S_AirfieldAmbienceT); AirfieldAmbience.Tick(); FrameProf.E(FrameProf.S_AirfieldAmbienceT);
+            if (PerfBisect.Run(PerfBisect.G_Ambience)) { FrameProf.S(FrameProf.S_AirfieldAmbienceT); AirfieldAmbience.Tick(); FrameProf.E(FrameProf.S_AirfieldAmbienceT); }
             FrameProf.S(FrameProf.S_EastZonesT); EastZones.Tick(); FrameProf.E(FrameProf.S_EastZonesT);                    // east world: logs the content marker (airfield greybox id) the player stands in
             FrameProf.S(FrameProf.S_BuildingNavT); BuildingNav.Tick(); FrameProf.E(FrameProf.S_BuildingNavT);                  // east world: walkable content buildings - links re-joined, self-check log
-            FrameProf.S(FrameProf.S_ContentPerfT); ContentPerf.Tick(); FrameProf.E(FrameProf.S_ContentPerfT);                  // east world: perf settings per content scene, interior occlusion
+            if (PerfBisect.Run(PerfBisect.G_ContentPerf)) { FrameProf.S(FrameProf.S_ContentPerfT); ContentPerf.Tick(); FrameProf.E(FrameProf.S_ContentPerfT); }                  // east world: perf settings per content scene, interior occlusion
             FrameProf.S(FrameProf.S_EastLaddersT); EastLadders.Tick(); FrameProf.E(FrameProf.S_EastLaddersT);                  // east world: wires the content ladders (chimney B1c) to the game's LadderObject
             FrameProf.S(FrameProf.S_FrameBenchT); FrameBench.Tick(); FrameProf.E(FrameProf.S_FrameBenchT);                   // research: east extension frame-time baseline, off by default
             FrameProf.S(FrameProf.S_BtrGunT); BtrGun.Tick(); FrameProf.E(FrameProf.S_BtrGunT);                       // NDR BTR gun: mount back at rest before the turret is read
@@ -2266,34 +2267,34 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_TechnicalT); Technical.Tick(); FrameProf.E(FrameProf.S_TechnicalT);                    // NDR technical: spawn key, durability cap, the MG
             FrameProf.S(FrameProf.S_ArtyVehicleT); ArtyVehicle.Tick(); FrameProf.E(FrameProf.S_ArtyVehicleT);                  // NDR drivable howitzer: optional spawn key, durability cap, gun stations
             FrameProf.S(FrameProf.S_KatyushaT); Katyusha.Tick(); FrameProf.E(FrameProf.S_KatyushaT);                   // NDR Katyusha: fire control, salvo, loading
-            FrameProf.S(FrameProf.S_GepardT); Gepard.Tick(); FrameProf.E(FrameProf.S_GepardT);                       // NDR Gepard: spawn key, gunner station, rounds in flight
-            FrameProf.S(FrameProf.S_FlakT); Flak.Tick(); FrameProf.E(FrameProf.S_FlakT);                         // east airfield flak: guns, crews, fire control, a manning player
+            if (PerfBisect.Run(PerfBisect.G_Gepard)) { FrameProf.S(FrameProf.S_GepardT); Gepard.Tick(); FrameProf.E(FrameProf.S_GepardT); }                       // NDR Gepard: spawn key, gunner station, rounds in flight
+            if (PerfBisect.Run(PerfBisect.G_Flak)) { FrameProf.S(FrameProf.S_FlakT); Flak.Tick(); FrameProf.E(FrameProf.S_FlakT); }                         // east airfield flak: guns, crews, fire control, a manning player
             FrameProf.S(FrameProf.S_AaDamageT); AirDefenceDamage.Tick(); FrameProf.E(FrameProf.S_AaDamageT);
             FrameProf.S(FrameProf.S_TowerSupportT); TowerSupport.Tick(); FrameProf.E(FrameProf.S_TowerSupportT);
-            FrameProf.S(FrameProf.S_TowerRadarT); TowerRadar.Tick(); FrameProf.E(FrameProf.S_TowerRadarT);                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
-            FrameProf.S(FrameProf.S_AirPictureT); AirPicture.Tick(); FrameProf.E(FrameProf.S_AirPictureT);                   // W-Tower1: the held radar's air picture (2 Hz) and early warning (1 Hz)
+            if (PerfBisect.Run(PerfBisect.G_Radar)) { FrameProf.S(FrameProf.S_TowerRadarT); TowerRadar.Tick(); FrameProf.E(FrameProf.S_TowerRadarT); }                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
+            if (PerfBisect.Run(PerfBisect.G_Radar)) { FrameProf.S(FrameProf.S_AirPictureT); AirPicture.Tick(); FrameProf.E(FrameProf.S_AirPictureT); }                   // W-Tower1: the held radar's air picture (2 Hz) and early warning (1 Hz)
             FrameProf.S(FrameProf.S_AirfieldHoldT); AirfieldHold.Tick(); FrameProf.E(FrameProf.S_AirfieldHoldT);             // W Tower 3: capture, income, An-2 access
             FrameProf.S(FrameProf.S_NoFlyT); NoFly.Tick(); FrameProf.E(FrameProf.S_NoFlyT);                        // no-fly zones: violators, warning, defenders, scripted flak
             FrameProf.S(FrameProf.S_AntiTankMineT); AntiTankMine.Tick(); FrameProf.E(FrameProf.S_AntiTankMineT);                 // NDR anti-tank mine (placement)
             FrameProf.S(FrameProf.S_ApMineT); ApMine.Tick(); FrameProf.E(FrameProf.S_ApMineT);                       // NDR anti-personnel mine (event channel, triggers)
             FrameProf.S(FrameProf.S_StingerT); Stinger.Tick(); FrameProf.E(FrameProf.S_StingerT);
             FrameProf.S(FrameProf.S_GasLauncherT); GasLauncher.Tick(); FrameProf.E(FrameProf.S_GasLauncherT);                  // NDR gas launcher (optional keys, cloud list)
-            FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick);
+            if (PerfBisect.Run(PerfBisect.G_Patrol)) { FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick); }
             FrameProf.S(FrameProf.ConvRepTick); ConvoyRepair.Tick();     FrameProf.E(FrameProf.ConvRepTick);  // NDR convoy vehicle repair
-            FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick);   // NDR convoy event
-            FrameProf.S(FrameProf.S_TroopInsertionT); RevivalTroopInsertion.Tick(); FrameProf.E(FrameProf.S_TroopInsertionT);        // NDR heli troop insertion (own light schedule)
-            FrameProf.S(FrameProf.S_GroundEnemiesT); RevivalGroundEnemies.Tick(); FrameProf.E(FrameProf.S_GroundEnemiesT);         // editor waiting/walking ground groups
+            if (PerfBisect.Run(PerfBisect.G_Convoy)) { FrameProf.S(FrameProf.ConvoyTick);  RevivalConvoy.Tick();    FrameProf.E(FrameProf.ConvoyTick); }   // NDR convoy event
+            if (PerfBisect.Run(PerfBisect.G_Convoy)) { FrameProf.S(FrameProf.S_TroopInsertionT); RevivalTroopInsertion.Tick(); FrameProf.E(FrameProf.S_TroopInsertionT); }        // NDR heli troop insertion (own light schedule)
+            if (PerfBisect.Run(PerfBisect.G_GroundNpcs)) { FrameProf.S(FrameProf.S_GroundEnemiesT); RevivalGroundEnemies.Tick(); FrameProf.E(FrameProf.S_GroundEnemiesT); }         // editor waiting/walking ground groups
             FrameProf.S(FrameProf.S_AirfieldT); Airfield.Tick(); FrameProf.E(FrameProf.S_AirfieldT);                     // east world: airfield loot points (master only)
-            FrameProf.S(FrameProf.S_MilitaryTownT); MilitaryTown.Tick(); FrameProf.E(FrameProf.S_MilitaryTownT);                 // east world: town guns, posted men, fight clock, spotter warning
+            if (PerfBisect.Run(PerfBisect.G_MilitaryTown)) { FrameProf.S(FrameProf.S_MilitaryTownT); MilitaryTown.Tick(); FrameProf.E(FrameProf.S_MilitaryTownT); }                 // east world: town guns, posted men, fight clock, spotter warning
             FrameProf.S(FrameProf.S_HelipadsT); Helipads.Tick(); FrameProf.E(FrameProf.S_HelipadsT);                     // editor helicopter landing pads (build on scene/data change)
             FrameProf.S(FrameProf.S_PlayerHeliT); PlayerHeli.Tick(); FrameProf.E(FrameProf.S_PlayerHeliT);                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
             FrameProf.S(FrameProf.S_PlayerAn2T); PlayerAn2.Tick(); FrameProf.E(FrameProf.S_PlayerAn2T);                    // NDR player-flown An-2 (apron spawn, boarding, flight)
             FrameProf.S(FrameProf.S_An2RepairT); An2Repair.Tick(); FrameProf.E(FrameProf.S_An2RepairT);                    // NDR An-2 repair: fit parts, refuel, save the state
             FrameProf.S(FrameProf.S_An2BombsT); An2Bombs.Tick(); FrameProf.E(FrameProf.S_An2BombsT);                     // NDR An-2 bombs: load, sight, release, falling bombs
-            FrameProf.S(FrameProf.S_AirEventsT); AirEvents.Tick(); FrameProf.E(FrameProf.S_AirEventsT);                  // NDR N11 air events: schedule, bombs, paratroopers, warnings
+            if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_AirEventsT); AirEvents.Tick(); FrameProf.E(FrameProf.S_AirEventsT); }                  // NDR N11 air events: schedule, bombs, paratroopers, warnings
             FrameProf.S(FrameProf.S_RetakeRaidsT); RetakeRaids.Tick(); FrameProf.E(FrameProf.S_RetakeRaidsT);             // W Tower 4: retake raids on a held airfield (master, 1 Hz)
             OrdnanceBlast.Tick();               // Bounded master-only bomb/rocket damage queue
-            FrameProf.S(FrameProf.S_NpcAircraftT); NpcAircraft.Tick(); FrameProf.E(FrameProf.S_NpcAircraftT);            // NDR NPC aircraft: the master flies the flight paths
+            if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_NpcAircraftT); NpcAircraft.Tick(); FrameProf.E(FrameProf.S_NpcAircraftT); }            // NDR NPC aircraft: the master flies the flight paths
             FrameProf.S(FrameProf.S_AirKillsT); AirKills.Tick(); FrameProf.E(FrameProf.S_AirKillsT);                      // W AA4: damage smoke, troop Mi-8 target, pit list
             FrameProf.S(FrameProf.S_FuelBalanceT); FuelBalance.Tick(); FrameProf.E(FrameProf.S_FuelBalanceT);                  // NDR fuel balance per vehicle class
             FrameProf.S(FrameProf.S_VehicleConditionT); VehicleCondition.Tick(); FrameProf.E(FrameProf.S_VehicleConditionT);   // N8 truck trunks, Mi-8 parts and fuel
@@ -2303,27 +2304,28 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_NewSettlementT); NewSettlement.Tick(); FrameProf.E(FrameProf.S_NewSettlementT);                // NDR bottom-left traitor settlement (Phase 1, isolated)
             FrameProf.S(FrameProf.S_CrocodileT); Crocodile.Tick(); FrameProf.E(FrameProf.S_CrocodileT);                    // NDR toxic crocodile swimming near the neutral base
             FrameProf.S(FrameProf.S_TraitorVendorT); TraitorVendor.Tick(); FrameProf.E(FrameProf.S_TraitorVendorT);                // NDR trader in the blue block at Litvinovka
-            FrameProf.S(FrameProf.S_MortarT); Mortar.Tick(); FrameProf.E(FrameProf.S_MortarT);                       // NDR settlement mortar (guns, aim mode, shells)
-            FrameProf.S(FrameProf.S_ArtyBatteryT); ArtyBattery.Tick(); FrameProf.E(FrameProf.S_ArtyBatteryT);                  // NDR settlement artillery (crew, recon drone, fire missions)
+            if (PerfBisect.Run(PerfBisect.G_SettlementGuns)) { FrameProf.S(FrameProf.S_MortarT); Mortar.Tick(); FrameProf.E(FrameProf.S_MortarT); }                       // NDR settlement mortar (guns, aim mode, shells)
+            if (PerfBisect.Run(PerfBisect.G_SettlementGuns)) { FrameProf.S(FrameProf.S_ArtyBatteryT); ArtyBattery.Tick(); FrameProf.E(FrameProf.S_ArtyBatteryT); }                  // NDR settlement artillery (crew, recon drone, fire missions)
             FrameProf.S(FrameProf.CrewDrone);   CrewDrone.Tick();        FrameProf.E(FrameProf.CrewDrone);
             FrameProf.S(FrameProf.DroneAlrtT);  DroneAlert.Tick();       FrameProf.E(FrameProf.DroneAlrtT);
             FrameProf.S(FrameProf.PeerTick); PeerCheck.Tick(); FrameProf.E(FrameProf.PeerTick);
-            FrameProf.S(FrameProf.S_NpcWarT); NpcWar.Tick(); FrameProf.E(FrameProf.S_NpcWarT);                       // NDR NPC-vs-NPC combat for troop squads
-            FrameProf.S(FrameProf.S_NpcDistT); NpcDistance.Tick(); FrameProf.E(FrameProf.S_NpcDistT);             // N2: NPC distance tiers + forest mask
+            if (PerfBisect.Run(PerfBisect.G_GroundNpcs)) { FrameProf.S(FrameProf.S_NpcWarT); NpcWar.Tick(); FrameProf.E(FrameProf.S_NpcWarT); }                       // NDR NPC-vs-NPC combat for troop squads
+            if (PerfBisect.Run(PerfBisect.G_NpcDistance)) { FrameProf.S(FrameProf.S_NpcDistT); NpcDistance.Tick(); FrameProf.E(FrameProf.S_NpcDistT); }             // N2: NPC distance tiers + forest mask
             FrameProf.S(FrameProf.S_EnginePerfT); EnginePerf.Tick(); FrameProf.E(FrameProf.S_EnginePerfT);       // W Perf2: physics step cap, animal culling (1 Hz)
-            FrameProf.S(FrameProf.S_MercsT); Mercs.Tick(); FrameProf.E(FrameProf.S_MercsT);                         // B3: mercenaries (keys per frame, roster/upkeep at 4 Hz)
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercsT); Mercs.Tick(); FrameProf.E(FrameProf.S_MercsT); }                         // B3: mercenaries (keys per frame, roster/upkeep at 4 Hz)
             FrameProf.S(FrameProf.S_UiKitT); UiKit.Tick(); UiDemo.Tick(); FrameProf.E(FrameProf.S_UiKitT);          // W-UI1: toast ring, demo link simulation (idle: two tests)
             FrameProf.S(FrameProf.S_MercNotifyT); MercNotify.Tick(); FrameProf.E(FrameProf.S_MercNotifyT);          // W: merc toasts (one bool while nothing is due)
             FrameProf.S(FrameProf.S_TraderT); TraderUi.Tick(); FrameProf.E(FrameProf.S_TraderT);                   // W-UI2: trader window (idle: one bool test)
-            FrameProf.S(FrameProf.S_MercAAT); MercAA.Tick(); FrameProf.E(FrameProf.S_MercAAT);
-            FrameProf.S(FrameProf.S_MercCoverT); MercCoverService.Tick(); FrameProf.E(FrameProf.S_MercCoverT);   // M1: merc cover mapping (budgeted rays, 0 once mapped)
-            FrameProf.S(FrameProf.S_FarForestT); FarForest.Tick(); FrameProf.E(FrameProf.S_FarForestT);           // N2b: far forest canopy
-            FrameProf.S(FrameProf.S_AirBoundaryT); AirBoundary.Tick(); FrameProf.E(FrameProf.S_AirBoundaryT);   // B6: terrain skirt beyond the map edge (built once per world)
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercAAT); MercAA.Tick(); FrameProf.E(FrameProf.S_MercAAT); }
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercCoverT); MercCoverService.Tick(); FrameProf.E(FrameProf.S_MercCoverT); }   // M1: merc cover mapping (budgeted rays, 0 once mapped)
+            if (PerfBisect.Run(PerfBisect.G_FarForest)) { FrameProf.S(FrameProf.S_FarForestT); FarForest.Tick(); FrameProf.E(FrameProf.S_FarForestT); }           // N2b: far forest canopy
+            if (PerfBisect.Run(PerfBisect.G_EdgeTerrain)) { FrameProf.S(FrameProf.S_AirBoundaryT); AirBoundary.Tick(); FrameProf.E(FrameProf.S_AirBoundaryT); }   // B6: terrain skirt beyond the map edge (built once per world)
         }
 
         void FixedUpdate()
         {
             FrameProf.FixedStep();              // F6: physics steps per frame
+            if (!PerfBisect.Run(PerfBisect.G_Patrol)) return;   // X perf-bisect: admin Perf tab switch
             FrameProf.S(FrameProf.PatrolFixed);
             try { Patrol.FixedTick(); }
             finally { FrameProf.E(FrameProf.PatrolFixed); }
@@ -2341,15 +2343,15 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_TechnicalL); Technical.LateFrame(); FrameProf.E(FrameProf.S_TechnicalL);
             // NDR Gepard crew: the men inside a patrol Gepard on their seats,
             // after the animator, on every client (RevivalGepardCrew.cs).
-            FrameProf.S(FrameProf.S_GepardCrewL); GepardCrew.LateFrame(); FrameProf.E(FrameProf.S_GepardCrewL);
+            if (PerfBisect.Run(PerfBisect.G_Gepard)) { FrameProf.S(FrameProf.S_GepardCrewL); GepardCrew.LateFrame(); FrameProf.E(FrameProf.S_GepardCrewL); }
             // NDR military town: the posted spotters and snipers on their
             // posts, after the animator, on every client (Revival.MilitaryTown.cs).
-            FrameProf.S(FrameProf.S_MilitaryTownL); MilitaryTown.LateFrame(); FrameProf.E(FrameProf.S_MilitaryTownL);
+            if (PerfBisect.Run(PerfBisect.G_MilitaryTown)) { FrameProf.S(FrameProf.S_MilitaryTownL); MilitaryTown.LateFrame(); FrameProf.E(FrameProf.S_MilitaryTownL); }
             // East airfield flak: mount and barrels, the crew on their seats
             // (after the animator, every client; Revival.Flak.cs).
-            FrameProf.S(FrameProf.S_FlakL); Flak.LateFrame(); FrameProf.E(FrameProf.S_FlakL);
+            if (PerfBisect.Run(PerfBisect.G_Flak)) { FrameProf.S(FrameProf.S_FlakL); Flak.LateFrame(); FrameProf.E(FrameProf.S_FlakL); }
             // Tower radar HQ: the NPC operator on his chair (Revival.TowerRadar.cs).
-            FrameProf.S(FrameProf.S_TowerRadarL); TowerRadar.LateFrame(); FrameProf.E(FrameProf.S_TowerRadarL);
+            if (PerfBisect.Run(PerfBisect.G_Radar)) { FrameProf.S(FrameProf.S_TowerRadarL); TowerRadar.LateFrame(); FrameProf.E(FrameProf.S_TowerRadarL); }
             // View distance level: far clip, fog, terrain, prop culling. Before
             // PlayerHeli.LateFrame, whose FlightView blends on top of it.
             FrameProf.S(FrameProf.S_ViewDistanceL); ViewDistance.LateTick(); FrameProf.E(FrameProf.S_ViewDistanceL);
@@ -2360,8 +2362,8 @@ namespace NextDayRevival
             // B3c: mercenaries riding a vehicle, on their seats after the
             // animator and after every vehicle has moved; the owner's gunners
             // lay and fire here (Revival.MercsRide.cs).
-            FrameProf.S(FrameProf.S_MercsL); MercRide.LateFrame(); FrameProf.E(FrameProf.S_MercsL);
-            FrameProf.S(FrameProf.S_MercAAL); MercAA.LateFrame(); FrameProf.E(FrameProf.S_MercAAL);
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercsL); MercRide.LateFrame(); FrameProf.E(FrameProf.S_MercsL); }
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercAAL); MercAA.LateFrame(); FrameProf.E(FrameProf.S_MercAAL); }
             // NDR traitor settlement trader: held behind his counter for the
             // same reason - a man placed in Update is back where the animation
             // put him before anything is drawn.

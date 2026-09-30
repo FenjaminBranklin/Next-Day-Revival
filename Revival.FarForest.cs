@@ -306,10 +306,15 @@ namespace NextDayRevival
 
             if (_build == null && (NpcDistance.MaskVersion != _builtVersion || level != _builtLevel))
             {
-                _builtVersion = NpcDistance.MaskVersion;
-                _builtLevel = level;
-                if (NpcDistance.Masks.Count > 0) { _buildFrames = 0; _build = Build(level); }
-                else Clear();
+                if (level == _builtLevel && KeepAfterEdit()) _builtVersion = NpcDistance.MaskVersion;
+                else
+                {
+                    _builtVersion = NpcDistance.MaskVersion;
+                    _builtLevel = level;
+                    _builtMasks = NpcDistance.Masks;
+                    if (NpcDistance.Masks.Count > 0) { _buildFrames = 0; _build = Build(level); }
+                    else Clear();
+                }
             }
             if (_build != null)
             {
@@ -327,6 +332,42 @@ namespace NextDayRevival
             CheckLods();
         }
 
+        // X perf-fix: an admin/editor helipad site that clears ~1500 trees moved
+        // NpcDistance's tree-count signature, and the far forest was built again
+        // from scratch - ground paint and 74,000 cards in 913 chunks, 139 s over
+        // 2780 frames on 6.63.0 (FarForest.Tick 134 KB/frame, 39 ms peaks, the
+        // control-texture uploads and basemap errors on top) while the game ran
+        // at 8-24 FPS. A change of at most ForestEdit.Keep of the forest cells
+        // the build was made from keeps the build; NPC hiding takes the new
+        // masks at once. Cards stay over a cleared site - they are only drawn
+        // past the tree distance. Level change, bench and relog still rebuild.
+        static List<NpcDistance.Mask> _builtMasks;      // swapped whole by NpcDistance, never edited
+        static string _kept = "";
+
+        static bool KeepAfterEdit()
+        {
+            List<NpcDistance.Mask> was = _builtMasks, now = NpcDistance.Masks;
+            if (was == null || now == null || was == now || now.Count == 0 || was.Count != now.Count) return false;
+            if (_chunks.Count == 0 && _grounds.Count == 0) return false;
+            int changed = 0, forest = 0;
+            for (int i = 0; i < now.Count; i++)
+            {
+                NpcDistance.Mask a = was[i], b = now[i];
+                if (a == null || b == null || a.Terrain == null || a.Terrain != b.Terrain
+                    || a.W != b.W || a.H != b.H || a.X0 != b.X0 || a.Z0 != b.Z0 || a.Cell != b.Cell) return false;
+                int d = ForestEdit.BitDiff(a.Bits, b.Bits);
+                if (d < 0) return false;
+                changed += d;
+                forest += a.Cells;
+            }
+            if (!ForestEdit.Keep(changed, forest)) return false;
+            _kept = changed + " of " + forest + " forest cells changed since the build, kept";
+            RevivalPlugin.L.LogInfo("FarForest: forest masks changed by " + changed + " of " + forest
+                + " cells (" + (100.0 * changed / Math.Max(1, forest)).ToString("0.00", CultureInfo.InvariantCulture)
+                + " %) - the far forest is kept as built, no rebuild (level change or relog rebuilds).");
+            return true;
+        }
+
         /// <summary>Canopy textures + cards on, or the plain forest floor and
         /// no cards (Off, bench, "before" shot). Swapping a prototype array of
         /// the same length keeps the paint.</summary>
@@ -341,6 +382,25 @@ namespace NextDayRevival
                 g.D.splatPrototypes = on ? g.Canopy : g.Plain;
             }
             if (_root != null) _root.SetActive(on);
+        }
+
+        static bool _bisectHid;
+
+        /// <summary>X perf-bisect (admin Perf tab): the look off like the
+        /// bench does it, and back on only if it was on. Tick is skipped by
+        /// RevivalPlugin meanwhile, so nothing switches it in between.</summary>
+        internal static void BisectLook(bool off)
+        {
+            if (off)
+            {
+                _bisectHid = _look;
+                if (_look) SetLook(false);
+            }
+            else if (_bisectHid)
+            {
+                _bisectHid = false;
+                if (!_look) SetLook(true);
+            }
         }
 
         // ============================================================ LOD hand-over
@@ -1910,7 +1970,49 @@ namespace NextDayRevival
             return "far forest " + Names[level] + ": " + _grounds.Count + " ground layer(s), " + _sCards + " cards in "
                 + _chunks.Count + " chunks (" + (_sTris / 1000) + "k tris), " + _sRendered + "/" + _sSlots
                 + " impostors rendered, trees to " + (td / K).ToString("0", CultureInfo.InvariantCulture) + " m, "
-                + F3(_tickMs) + " ms";
+                + F3(_tickMs) + " ms" + (_kept.Length > 0 ? "; " + _kept : "");
+        }
+    }
+
+    /// <summary>X perf-fix: is a forest mask change small enough to keep the
+    /// far forest as built (FarForest.KeepAfterEdit)? No UnityEngine here -
+    /// tests/x_perf_fix_check.py compiles this class with the .NET 3.5 csc.</summary>
+    internal static class ForestEdit
+    {
+        /// <summary>Changed cells tolerated: 3 % of the forest cells the build
+        /// was made from, at least KeepMin. The 6.63.0 helipad site changed
+        /// ~2,800 of ~245,000 (1.1 %).</summary>
+        internal const double KeepShare = 0.03;
+        internal const int KeepMin = 256;
+
+        static readonly byte[] _ones = Ones();
+
+        static byte[] Ones()
+        {
+            byte[] t = new byte[256];
+            for (int i = 0; i < 256; i++)
+            {
+                int n = 0;
+                for (int v = i; v != 0; v >>= 1) n += v & 1;
+                t[i] = (byte)n;
+            }
+            return t;
+        }
+
+        /// <summary>Cells that differ between two bit masks of one grid; -1 when
+        /// they are not the same grid.</summary>
+        internal static int BitDiff(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return -1;
+            int n = 0;
+            for (int i = 0; i < a.Length; i++) n += _ones[a[i] ^ b[i]];
+            return n;
+        }
+
+        internal static bool Keep(int changed, int forest)
+        {
+            if (changed < 0 || forest < 0) return false;
+            return changed <= Math.Max(KeepMin, (int)(forest * KeepShare));
         }
     }
 }

@@ -82,6 +82,11 @@ namespace NextDayRevival
         internal float NextOrder, NextSpeed, NextWarp, NextPlayerScan;
         internal Transform PlayerTarget;
         internal GameObject KillTargetSet;
+        internal Component QuickNpc;
+        internal GameObject QuickPlayer;
+        internal MercOrder QuickFor;
+        internal float QuickUntil;
+        internal string QuickSteam;
         internal float LastSpeedSet = -1f;
         // B3b: PATROL / PERIMETER (Revival.MercsWar.cs). Order is shared with
         // the roster record; the rest is this merc's own progress through it.
@@ -108,6 +113,13 @@ namespace NextDayRevival
         internal readonly MercFight Fight = new MercFight();
         // merc-attack-orders: his progress through an ATTACK (Revival.MercAttackCore.cs).
         internal readonly MercAttackRun Attack = new MercAttackRun();
+        // x-merc-competence: his halt cover under FOLLOW (Revival.MercsWar.cs MercHaltCover).
+        internal readonly MercHalt Halt = new MercHalt();
+        // x-merc-competence: the last hit as it landed (the death report), the
+        // threat nearest him then (NPC rounds carry no attacker), self-heal pace.
+        internal MercHitNote LastHit;
+        internal Transform LastHitBy;
+        internal float NextSelfHeal;
         float _base = -1f;
 
         internal bool Follow { get { return Order.Mode == MercOrder.Follow; } }
@@ -346,6 +358,7 @@ namespace NextDayRevival
                 "Hint: the small always-on strip bottom-left with each merc's health and order.");
             CfgToastSeconds = cfg.Bind("Mercs", "ToastSeconds", 4f,
                 "Hint: how long merc messages stay top right (1..15 s).");
+            MercQuick.BindConfig(cfg);
             MercRide.BindConfig(cfg);
             MercNotify.BindConfig(cfg);
             MercPage.BindConfig(cfg);            // W-UI3: [Mercs] Notifications (the page's filter)
@@ -1323,6 +1336,7 @@ namespace NextDayRevival
         // ============================================================ install
         internal static void Install(Harmony harmony)
         {
+            MercQuick.Install(harmony);
             LoadProfiles(DefaultProfiles, "built-in defaults");
             try
             {
@@ -1335,20 +1349,28 @@ namespace NextDayRevival
                 MethodInfo apply = null;
                 if (npc != null)
                     foreach (MethodInfo m in npc.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-                        if (m.Name == "ApplyDamage" && m.GetParameters().Length == 5
-                            && m.GetParameters()[0].ParameterType == typeof(float)
-                            && m.GetParameters()[3].ParameterType == typeof(int)) { apply = m; break; }
+                        if (m.Name == "ApplyDamage" && IsDamageRpc(m.GetParameters())) { apply = m; break; }
                 if (apply != null)
                     harmony.Patch(apply, new HarmonyMethod(typeof(Mercs).GetMethod("DamagePrefix")), null, null, null, null);
-                else RevivalPlugin.L.LogWarning("Mercs: NPC_AI2.ApplyDamage(float,int,int,int,Vector3) not found - "
+                else RevivalPlugin.L.LogWarning("Mercs: NPC_AI2.ApplyDamage(float,int,int,int,...) not found - "
                     + "owners can hurt their own mercs.");
+                // x-merc-no-traitor: the kill credit itself. A merc carries his
+                // owner's faction, so a death credited to the owner is an
+                // own-faction NPC kill: AddKillData(1, faction) ->
+                // CalculateReputationValue(faction, -1) -> reputation down and
+                // TraitorTimeLeft = 5400 (CONFIRMED IL).
+                MethodInfo credit = npc == null ? null : AccessTools.Method(npc, "SendAddKillData", null, null);
+                if (credit != null)
+                    harmony.Patch(credit, new HarmonyMethod(typeof(Mercs).GetMethod("KillCreditPrefix")), null, null, null, null);
+                else RevivalPlugin.L.LogWarning("Mercs: NPC_AI2.SendAddKillData not found - "
+                    + "a merc killed by his owner may still cost reputation.");
                 MercRide.Install(harmony);
                 MercDanger.Install(harmony);     // M2: blasts and grenades near mercs
                 MethodInfo kill = npc == null ? null : AccessTools.Method(npc, "SetKillTarget", null, null);
                 if (kill != null)
                     harmony.Patch(kill, new HarmonyMethod(typeof(Mercs).GetMethod("KillTargetPrefix")), null, null, null, null);
                 RevivalPlugin.L.LogInfo("Mercs: hooks installed (roster " + (recv != null) + ", damage "
-                    + (apply != null) + ", target veto " + (kill != null) + ").");
+                    + (apply != null) + ", kill credit " + (credit != null) + ", target veto " + (kill != null) + ").");
             }
             catch (Exception ex)
             {
@@ -1357,10 +1379,11 @@ namespace NextDayRevival
         }
 
         /// <summary>Prefix on NPC_AI2.ApplyDamage(damage, part, type, attacker,
-        /// point). The owner cannot hurt his own merc (D11); the attacker is
+        /// point, info). The owner cannot hurt his own merc (D11) - bullets,
+        /// grenade and blast splash, the bumper all carry his actor id; the attacker is
         /// remembered for PEACEFUL self-defence; a whitelisted player's round
         /// is taken and reported, never answered.</summary>
-        public static bool DamagePrefix(object __instance, float __0, int __3)
+        public static bool DamagePrefix(object __instance, ref float __0, int __2, int __3)
         {
             if (_units.Count == 0)
             {
@@ -1378,6 +1401,11 @@ namespace NextDayRevival
             // getting out, nothing reaches him (D14; Revival.MercsRide.cs).
             if (MercRide.Shielded(u)) return false;
             if (__0 <= 0f) return true;
+            // x-merc-competence: his paid armour takes its share of every hit
+            // (health x2.5 at tier 0 .. x3 at tier 3; NpcWar sizes a defender round
+            // from his own HealthMax, so more HealthMax alone would change nothing).
+            __0 *= MercCompetence.DamageScale(u.Grade);
+            Snapshot(u, __0, __2, __3);
             u.DefendUntil = Time.time + 20f;
             u.Fight.Hits++;                  // M2: a hit in cover means the cover failed
             if (__3 > 0)
@@ -1394,6 +1422,93 @@ namespace NextDayRevival
                 u.NextPlayerScan = 0f;
             }
             return true;
+        }
+
+        /// <summary>x-merc-competence: the hit as it landed, for the death
+        /// report - where he was, what his brain did, the threat nearest him
+        /// (an NPC round carries attacker 0). Arithmetic over at most four
+        /// sensed threats; no allocation.</summary>
+        static void Snapshot(MercUnit u, float damage, int type, int attacker)
+        {
+            MercHitNote h = new MercHitNote();
+            float now = Time.time;
+            h.At = now; h.Damage = damage; h.Type = type; h.Attacker = attacker;
+            MercBrain b = u.Fight.Brain;
+            if (b != null)
+            {
+                h.State = b.State; h.Mode = b.Mode; h.InCover = b.Down; h.Up = b.Up;
+            }
+            MercSense s = u.Sense;
+            h.Exposed = s.Exposed && now - s.ExposedAt < 0.8f;
+            h.Threats = s.Count;
+            h.HitsInFight = u.Fight.Hits + 1;
+            h.Health = Mathf.Max(0f, u.Fight.In.Health - (u.MaxHealth > 0f ? damage / u.MaxHealth : 0f));
+            h.Distance = -1f;
+            Transform by = null;
+            if (u.Ai != null && attacker <= 0)
+            {
+                Vector3 me = u.Ai.transform.position;
+                float best = float.MaxValue;
+                for (int i = 0; i < s.Count; i++)
+                {
+                    Transform t = s.Who[i];
+                    if (t == null) continue;
+                    float d = (s.At[i] - me).sqrMagnitude;
+                    if (d < best) { best = d; by = t; }
+                }
+                if (by != null) h.Distance = Mathf.Sqrt(best);
+            }
+            u.LastHitBy = by;
+            u.LastHit = h;
+        }
+
+        /// <summary>NPC_AI2.ApplyDamage is the RPC (damage, damagePart,
+        /// damageType, damageOwnerId, direction, PhotonMessageInfo info) -
+        /// six parameters (CONFIRMED metadata). Until x-merc-no-traitor the
+        /// lookup asked for exactly five, found nothing, and DamagePrefix was
+        /// never installed ("damage False" in the log): the owner's rounds,
+        /// grenades and bumper killed his merc and he took the kill.</summary>
+        internal static bool IsDamageRpc(ParameterInfo[] ps)
+        {
+            return ps != null && ps.Length >= 5
+                && ps[0].ParameterType == typeof(float)
+                && ps[3].ParameterType == typeof(int);
+        }
+
+        static int _creditVetoes;
+
+        /// <summary>Prefix on NPC_AI2.SendAddKillData(killer), called by
+        /// DecreaseHealth on the NPC's owner when the health reaches 0. A merc
+        /// is never a kill for his own owner: no AddKillData RPC, so no
+        /// kill statistic, no reputation change and no traitor timer. Only
+        /// mercs of this client (_units) and only the local player as the
+        /// killer; every other death and killer keeps the game's rule.
+        /// Runs once per NPC death; nothing per frame.</summary>
+        public static bool KillCreditPrefix(object __instance, object __0)
+        {
+            if (_units.Count == 0 || __0 == null) return true;
+            MercUnit u = UnitOf(__instance);
+            if (u == null) return true;
+            int local = LocalActor;
+            int killer = -2;
+            try
+            {
+                PropertyInfo id = _pId ?? __0.GetType().GetProperty("ID");
+                if (id != null) killer = Convert.ToInt32(id.GetValue(__0, null));
+            }
+            catch { }
+            if (!OwnerCredit(local, killer)) return true;
+            if (_creditVetoes++ < 20)
+                RevivalPlugin.L.LogInfo("Mercs: " + u.Name + "'s death is not credited to his owner "
+                    + "(no kill, no reputation, no traitor timer).");
+            return false;
+        }
+
+        /// <summary>The killer id is the local owner's actor. Pure; shared with
+        /// research/merc_traitor_check.py's model.</summary>
+        internal static bool OwnerCredit(int localActor, int killerActor)
+        {
+            return localActor > 0 && killerActor == localActor;
         }
 
         /// <summary>Prefix on NPC_AI2.SetKillTarget: a merc never takes his
@@ -1574,6 +1689,7 @@ namespace NextDayRevival
                 u.Slot = slot++;
                 r.Hp = NpcWar.MercHealth(u.Ai);
                 r.Combat = NpcWar.MercInCombat(u, 10f);
+                SelfHeal(r, u, now);
                 // B3d: paid while walking off (L, P): the debt is under the
                 // grace again, so he turns round instead of leaving.
                 if (u.Deserting && r.Deployed - r.PaidUntil < GraceHours)
@@ -1743,7 +1859,6 @@ namespace NextDayRevival
         /// players (NPCSpecifications.AimingDelay).</summary>
         static void Specs(Component ai, Profile p)
         {
-            if (p.Precise <= 0) return;
             try
             {
                 FieldInfo fs = AccessTools.Field(ai.GetType(), "Specifications");
@@ -1751,13 +1866,17 @@ namespace NextDayRevival
                 if (specs == null) return;
                 FieldInfo aim = AccessTools.Field(specs.GetType(), "AimingDelay");
                 if (aim == null || aim.FieldType != typeof(float)) return;
-                aim.SetValue(specs, (float)aim.GetValue(specs) * (1f - p.Precise / 100f));
+                // x-merc-competence: a quicker aim at players by grade, on top of precise.
+                float grade = MercGrade.Of(p.Precise, p.Fast, p.Tanky, p.Level);
+                aim.SetValue(specs, (float)aim.GetValue(specs) * (1f - p.Precise / 100f) * MercCompetence.AimDelayScale(grade));
                 if (specs.GetType().IsValueType) fs.SetValue(ai, specs);
             }
             catch { }
         }
 
         static MethodInfo _mSetHealth;
+        static ParameterInfo[] _setHealthPs;
+        static object[] _setHealthArgs;
 
         static void SetHealth(Component ai, float value)
         {
@@ -1765,8 +1884,15 @@ namespace NextDayRevival
             {
                 if (_mSetHealth == null) _mSetHealth = AccessTools.Method(ai.GetType(), "SetHealthValue", null, null);
                 if (_mSetHealth == null) return;
-                ParameterInfo[] ps = _mSetHealth.GetParameters();
-                object[] args = new object[ps.Length];
+                if (_setHealthPs == null)
+                {
+                    // x-merc-competence: the parameter list and the argument array
+                    // once (the self-heal calls this every few seconds).
+                    _setHealthPs = _mSetHealth.GetParameters();
+                    _setHealthArgs = new object[_setHealthPs.Length];
+                }
+                ParameterInfo[] ps = _setHealthPs;
+                object[] args = _setHealthArgs;
                 for (int i = 0; i < ps.Length; i++)
                 {
                     Type t = ps[i].ParameterType;
@@ -1834,6 +1960,7 @@ namespace NextDayRevival
         static void OnDeath(Record r, float now)
         {
             MercUnit u = r.Unit;
+            DeathReport(r, u, now);
             r.Dead = true; r.DeadAt = now; r.Hp = 0f;
             MercRide.Forget(u);
             NpcWar.StopMerc(u);
@@ -1850,6 +1977,44 @@ namespace NextDayRevival
             MercNotify.Fallen(r.Id, r.Name, live != null ? u.Ai.transform.position : Vector3.zero);
             RevivalPlugin.L.LogInfo("Mercs: " + r.Name + " (id " + r.Id + ") died.");
             EndContract(r, "died");
+        }
+
+        /// <summary>x-merc-competence: every merc death, with its cause, to the
+        /// BepInEx log and to the owner as a death toast - killer, weapon,
+        /// distance, cover, last order, brain state - from the snapshot of the
+        /// killing hit, so the next session shows real causes. Once per death.</summary>
+        static void DeathReport(Record r, MercUnit u, float now)
+        {
+            try
+            {
+                MercHitNote h = u.LastHit;
+                string killer = null, weapon = null;
+                Vector3 me = u.Ai != null ? u.Ai.transform.position : Vector3.zero;
+                if (h.At <= 0f) { killer = "no hit seen"; weapon = "unknown cause"; }
+                else if (h.Attacker > 0)
+                {
+                    GameObject p = PlayerByActor(h.Attacker);
+                    killer = (p != null ? NameOf(p) : "actor " + h.Attacker) + " (player)";
+                    if (p != null && u.Ai != null) h.Distance = Vector3.Distance(p.transform.position, me);
+                }
+                else if (u.LastHitBy != null)
+                {
+                    int item;
+                    killer = NpcWar.MercKillerLabel(u.LastHitBy, out item);
+                    weapon = MercDeathNote.WeaponName(item);
+                    if (u.Ai != null) h.Distance = Vector3.Distance(u.LastHitBy.position, me);
+                }
+                string order = MercUi.OrderText(r);
+                string state = MercBrain.Name(h.State), mode = MercBrain.ModeName(h.Mode);
+                string line = MercDeathNote.Line(r.Name, r.Id, killer, weapon, ref h, order, state, mode,
+                    Mathf.RoundToInt(u.Grade * 100f));
+                if (h.At > 0f && now - h.At > 3f) line += " Last hit " + (now - h.At).ToString("0.0") + " s before death.";
+                RevivalPlugin.L.LogInfo(line);
+                MercUi.Death(r.Name + Loc.T(": убит - ", ": killed by ") + (killer ?? Loc.T("неизвестно", "unknown"))
+                    + " (" + (weapon ?? MercDeathNote.DamageName(h.Type, h.Attacker)) + ", " + MercDeathNote.Metres(h.Distance)
+                    + ", " + MercDeathNote.Place(ref h) + "), " + order + ", " + state + ".");
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Mercs: death report for " + r.Name + " - " + ex.Message); }
         }
 
         static void Bodies(float now)
@@ -1966,6 +2131,20 @@ namespace NextDayRevival
             float to = Mathf.Min(u.MaxHealth, r.Hp * u.MaxHealth + add);
             SetHealth(u.Ai, to);
             r.Hp = to / u.MaxHealth;
+        }
+
+        /// <summary>x-merc-competence: out of a fight (no target seen for 10 s)
+        /// and unhit for MercSelfHeal.HealAfter s he patches himself up,
+        /// MercSelfHeal.HealStep every HealEvery s - the server's +0.1 a 15 s
+        /// report, so the roster keeps up. 4 Hz lifecycle; nothing while full.</summary>
+        static void SelfHeal(Record r, MercUnit u, float now)
+        {
+            if (now < u.NextSelfHeal || u.Deserting || u.MaxHealth <= 0f || r.Hp >= 0.999f) return;
+            u.NextSelfHeal = now + MercSelfHeal.HealEvery;
+            float to = MercSelfHeal.Step(r.Hp, r.Combat, now - u.LastHit.At);
+            if (to <= r.Hp) return;
+            SetHealth(u.Ai, to * u.MaxHealth);
+            r.Hp = to;
         }
 
         /// <summary>M2: a field dressing in cover (Revival.MercFight.cs): share

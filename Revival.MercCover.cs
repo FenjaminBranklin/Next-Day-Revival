@@ -143,6 +143,7 @@ namespace NextDayRevival
         internal int Turn;                       // M3: which of threats 3..4 is tested for exposure this tick
         internal bool Exposed;                   // a threat sees him where he is now
         internal float ExposedAt;                // when that was measured (M2 trusts it only fresh)
+        internal bool RushMissed;                // x-merc-competence: the near search found nothing, next one full
         internal CoverPick Pick;                 // the best cover toward the threats
         internal float PickAt;
         internal Vector3 PickFrom, PickThreat;   // his spot and the primary threat when chosen
@@ -504,8 +505,13 @@ namespace NextDayRevival
             float leashRadius;
             MercLeash(f, u, out leash, out leashRadius);
             CoverPick pick;
-            bool found = MercCoverService.Best(from, s.At, s.Weight, s.Count, MercCoverService.Radius,
-                leash, leashRadius, u.Id, out pick);
+            // x-merc-competence: seen in the open, the NEAR cover first
+            // (MercCompetence.Rush); nothing near: the full radius at once.
+            bool rush = MercCompetence.Rush(s.Exposed, u.Fight.Holding, u.Fight.Out.AnchorOn, s.RushMissed);
+            bool found = MercCoverService.Best(from, s.At, s.Weight, s.Count,
+                rush ? MercCompetence.RushRadius : MercCoverService.Radius, leash, leashRadius, u.Id, out pick);
+            s.RushMissed = rush && !found;
+            if (s.RushMissed) s.NextPick = now + MercCompetence.RushRetry;
             // M2: a merc holding a cover point keeps his claim on it; the
             // fight loop (MercBrain) claims it and moves it when he moves.
             if (!u.Fight.Holding)

@@ -469,6 +469,7 @@ namespace NextDayRevival
             if (_bench == BenchFull) tier = Near;
             else if (_bench == BenchMid) tier = Mid;
             else if (_bench == BenchFrozen) tier = Far;
+            if (_bisect) tier = Far;
 
             // The coarsest mesh as far as the tier reaches (vanilla: 350 u).
             if (n.Lod != null)
@@ -490,7 +491,8 @@ namespace NextDayRevival
             }
 
             bool throttle;
-            if (_bench == BenchNone) throttle = tier == Mid && _aiEvery > 1 && NoPlayerNear(p, near);
+            if (_bisect) throttle = false;
+            else if (_bench == BenchNone) throttle = tier == Mid && _aiEvery > 1 && NoPlayerNear(p, near);
             else throttle = _bench == BenchMid;
             if (throttle) _throttled.Add(n.Id); else _throttled.Remove(n.Id);
 
@@ -510,7 +512,7 @@ namespace NextDayRevival
                 if (n.Anim != null) n.Anim.enabled = true;
             }
 
-            bool hide = _bench == BenchFrozen || (_wakeU > 0f && InForest(p, d, n.Hide.Active));
+            bool hide = !_bisect && (_bench == BenchFrozen || (_wakeU > 0f && InForest(p, d, n.Hide.Active)));
             if (hide && !n.Hide.Active && _bench != BenchFrozen && InVehicle(ai)) hide = false;
             SetHidden(n.Hide, ai.gameObject, hide);
 
@@ -906,6 +908,24 @@ namespace NextDayRevival
         const float BenchSettle = 2f, BenchSample = 5f;
 
         static int _bench = BenchNone;
+        static bool _bisect;
+
+        /// <summary>X perf-bisect (admin Perf tab): every NPC back to the
+        /// game's own handling now - far tier, no forest hiding, no AI
+        /// throttle, LOD3 as the game had it; hidden remote players shown. RevivalPlugin skips Tick while
+        /// the switch is off; the next passes after it put the tiers back.</summary>
+        internal static void BisectOff()
+        {
+            if (!_installed) return;
+            _bisect = true;
+            try
+            {
+                foreach (KeyValuePair<int, Npc> e in _npcs) Apply(e.Value, false);
+                foreach (KeyValuePair<int, Player> e in _remote)
+                    if (e.Value.Go != null) SetHidden(e.Value.Hide, e.Value.Go, false);
+            }
+            finally { _bisect = false; }
+        }
         static bool _benchSampling;
         static float _benchPhaseStart;
         static int _benchFrames;

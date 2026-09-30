@@ -30,8 +30,8 @@
 //              its scripts; a built dome if it cannot be read) and sinks at
 //              ~5 m/s. Native NPCs are spawned at jump, held in a sampled game
 //              character pose, then released on the same feet at each landing.
-//              When the last man is down the master gives the existing squad the arrow
-//              (NpcWar.StartOperation) - the heli troop landing's own path.
+//              When the last man is down the master gives the existing squad a
+//              regroup/advance/hold mission (NpcWar.StartParatroopers).
 //   Warning    every client: the air raid siren at the target (the tower
 //              radar's SirenVoice, assets/ndr_siren.wav), a distant engine
 //              drone from the entry side, the radar's contact log
@@ -422,7 +422,9 @@ namespace NextDayRevival
             }
             r.Target = Ground(target);
             r.Drop = Ground(drop);
-            r.Attack = Ground(attack);
+            // A map/admin order names the objective itself, regardless of the
+            // template's offset or random flight edge. Bomb/drop geometry stays authored.
+            r.Attack = Ground(at.HasValue ? new Vector3(at.Value.x, 0f, at.Value.z) : attack);
 
             if (Safe(r.Target) && e.Bombers + e.Escorts > 0) r.NoBombs = true;
             if (Safe(r.Drop) && e.Transports > 0) r.NoDrop = true;
@@ -1140,7 +1142,7 @@ namespace NextDayRevival
         }
 
         /// <summary>Master: the stick has landed - release the existing NPCs,
-        /// with the arrow of the event, the heli troop landing's own way.</summary>
+        /// then regroup, advance and hold with the editor ground-group tactics.</summary>
         static void SpawnSquad(Stick s)
         {
             s.Spawned = true;
@@ -1163,7 +1165,6 @@ namespace NextDayRevival
                 Vector3 c = Vector3.zero;
                 for (int i = 0; i < s.Men.Count; i++) c += s.Men[i].Ground;
                 c /= Mathf.Max(1, s.Men.Count);
-                List<RevivalComposition.CrewMan> none = new List<RevivalComposition.CrewMan>();
                 GameObject settlement = s.Settlement;
                 Array men = s.Npcs;
                 if (settlement == null || men == null || men.Length == 0)
@@ -1172,11 +1173,15 @@ namespace NextDayRevival
                     if (settlement != null) UnityEngine.Object.Destroy(settlement);
                     return;
                 }
-                List<Vector3> arrow = new List<Vector3>();
-                arrow.Add(Ground(new Vector3(c.x, 0f, c.z)));
-                arrow.Add(r.Attack);
-                NpcWar.StartOperation("air-" + r.E.Name + "-" + r.Serial + "-" + s.View, settlement, men, arrow,
-                    r.E.PatrolMinutes * 60f, none);
+                // An absent arrow (head == drop zone) secures the DZ. Every
+                // stick regroups before advancing and holds instead of walking back.
+                if (!NpcWar.StartParatroopers("air-" + r.E.Name + "-" + r.Serial + "-" + s.View,
+                    settlement, men, Ground(new Vector3(c.x, 0f, c.z)), r.Attack,
+                    r.E.Faction, r.E.PatrolMinutes * 60f))
+                {
+                    RevivalPlugin.L.LogWarning("AirEvents: paratroop objective order could not start.");
+                    return;
+                }
                 float[] msg = new float[] { 5f, c.x, c.z };
                 Net.Send(msg, true);
                 OnLanded(msg);
@@ -1239,6 +1244,7 @@ namespace NextDayRevival
                 + Loc.T(" с направления ", " inbound from ") + CompassOf(from)
                 + Loc.T(" на квадрат ", " to square ") + cell + Loc.T(", через ~", ", ETA ~") + eta + " s";
             _bannerUntil = Time.time + 14f;
+            AirPicture.WarnAt(at, RadarClarityText.Raid, f[7], _banner);
             RevivalPlugin.L.LogInfo("AirEvents: warning - " + what + " from " + CompassOf(from) + " to " + cell
                 + ", siren " + Mathf.RoundToInt(siren) + " s" + (radar ? ", radar reports it." : "."));
         }

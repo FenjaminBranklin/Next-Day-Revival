@@ -2888,7 +2888,8 @@ def check_patrol_fall():
         bad("Patrol ground guard: a falling hull can still feed the stuck timer")
 
     if ("if (!u.Rail && GroundGuard(u)) continue;" not in code
-            or "if (u.Rail) { RailStep(u, Time.fixedDeltaTime); continue; }" in code):
+            or "if (u.Rail) { RailStep(u, Time.fixedDeltaTime); continue; }" in code
+            or "if (u.Rail) { RailStep(u, StepDt); continue; }" in code):
         ok("a hull the guard skips is one the rail carries, not one nobody moves")
     else:
         bad("Patrol ground guard: the rail skips the guard without carrying the hull")

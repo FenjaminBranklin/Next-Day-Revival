@@ -314,6 +314,15 @@ namespace NextDayRevival
             public float Stuck;          // seconds below walking speed
             public int Frees;
             public int Reported;         // last lap written to the log
+            public float LapLogAt;       // X perf-fix: lap / lap-skip lines at most every LapLogEvery s
+
+            // X perf-fix (FixedTick): the game time of this unit's last driver
+            // run (-1 = none yet), its round-robin slot, and whether no player
+            // is within FarDriveU (asked every FarCheckEvery s).
+            public float FixedAt = -1f;
+            public int Slot = -1;
+            public bool Far;
+            public float FarAt;
 
             // Refusals to warp in a row (FreeHold), cleared by the first warp
             // that happens (Free). A single refusal is a sensible answer; the
@@ -693,10 +702,84 @@ namespace NextDayRevival
             get { return RevivalPlugin.CfgPatrol.Value && Editor.IsOpen; }
         }
 
+        // X perf-fix: the driver runs once per RENDERED frame, not once per
+        // physics step. At 8 FPS Unity ran four steps a frame and this loop four
+        // times (F6: Patrol.FixedTick 4.2 ms, 4.0 steps). The first step of a
+        // frame does the work for the game time since the unit's last run
+        // (StepDt, was Time.fixedDeltaTime); the throttle/brake/steer inputs
+        // and the carried hull's velocity act on the remaining steps. A vehicle
+        // no player (and not the camera) is within FarDriveU of is driven every
+        // FarDriveEvery-th frame, round robin, with its own elapsed time.
+        static int _fixedFrame = -1;
+        static float _columnsAt = -1f;
+        static int _nextSlot;
+        static Vector3 _eye;
+        static bool _eyeKnown;
+        /// <summary>Game seconds the current driver run covers (one unit, or the
+        /// columns). Replaces Time.fixedDeltaTime in every FixedTick path.</summary>
+        static float StepDt = 0.02f;
+        internal const float MaxStepDt = 0.4f;
+        internal const float FarDriveU = 400f * 2.8f;
+        internal const int FarDriveEvery = 4;
+        const float FarCheckEvery = 0.5f;
+        const float LapLogEvery = 10f;
+
+        /// <summary>Game time since `at` (the last run), at least one physics
+        /// step, at most MaxStepDt; `at` moves to now.</summary>
+        internal static float Elapsed(ref float at, float now, float step)
+        {
+            float dt = at < 0f ? step : now - at;
+            at = now;
+            if (dt < step) dt = step;
+            if (dt > MaxStepDt) dt = MaxStepDt;
+            return dt;
+        }
+
+        /// <summary>True while this unit sits out this frame: no player or
+        /// camera within FarDriveU (asked twice a second), and not its turn.</summary>
+        static bool Resting(Unit u, int frame, float now)
+        {
+            if (now >= u.FarAt)
+            {
+                u.FarAt = now + FarCheckEvery;
+                u.Far = !Watched(u.Car.transform.position);
+            }
+            if (!u.Far) return false;
+            if (u.Slot < 0) u.Slot = (_nextSlot++) & 0xFFFF;
+            return (frame + u.Slot) % FarDriveEvery != 0;
+        }
+
+        static bool Watched(Vector3 p)
+        {
+            if (_eyeKnown)
+            {
+                Vector3 d = _eye - p;
+                d.y = 0f;
+                if (d.sqrMagnitude < FarDriveU * FarDriveU) return true;
+            }
+            List<GameObject> players = Crocodile.Players();
+            for (int i = 0; i < players.Count; i++)
+            {
+                if (players[i] == null) continue;
+                Vector3 d = players[i].transform.position - p;
+                d.y = 0f;
+                if (d.sqrMagnitude < FarDriveU * FarDriveU) return true;
+            }
+            return false;
+        }
+
         public static void FixedTick()
         {
             if (!RevivalPlugin.CfgPatrol.Value) return;
-            if (_units.Count == 0) return;
+            if (_units.Count == 0) { _columnsAt = -1f; return; }
+            int frame = Time.frameCount;
+            if (frame == _fixedFrame) return;       // a later physics step of this frame
+            _fixedFrame = frame;
+            float now = Time.fixedTime, step = Time.fixedDeltaTime;
+            Camera cam = CameraOwner.MainCamera();
+            _eyeKnown = cam != null;
+            if (_eyeKnown) _eye = cam.transform.position;
+            StepDt = Elapsed(ref _columnsAt, now, step);
 
             // NDR convoy column: an intact convoy is carried, not driven. This
             // puts every member of every intact column on its exact slot before
@@ -719,6 +802,8 @@ namespace NextDayRevival
                         Verloren();
                         continue;
                     }
+                    if (Resting(u, frame, now)) continue;
+                    StepDt = Elapsed(ref u.FixedAt, now, step);
                     if (!u.Armed) { Arm(u); continue; }
                     // NDR technical crew: a truck whose men were shot off it
                     // stops, and an abandoned one a player climbed into is let go.
@@ -758,7 +843,7 @@ namespace NextDayRevival
                     // on, so it is carried along it instead. Not driven, not
                     // held, and not steered - see the rail block above
                     // RailMetres.
-                    if (u.Rail) { RailStep(u, Time.fixedDeltaTime); continue; }
+                    if (u.Rail) { RailStep(u, StepDt); continue; }
                     Drive(u);
                 }
             }
@@ -2003,7 +2088,7 @@ namespace NextDayRevival
             }
             if (push.sqrMagnitude < 0.0001f) return;
 
-            float step = Mathf.Min(push.magnitude, SeparateStep * Time.fixedDeltaTime);
+            float step = Mathf.Min(push.magnitude, SeparateStep * StepDt);
             Vector3 want = t.position + push.normalized * step;
             float y;
             Vector3 normal;
@@ -2073,7 +2158,7 @@ namespace NextDayRevival
             }
             if (push.sqrMagnitude < 0.0001f) return;
 
-            float step = Mathf.Min(push.magnitude, SeparateStep * Time.fixedDeltaTime);
+            float step = Mathf.Min(push.magnitude, SeparateStep * StepDt);
             Vector3 want = t.position + push.normalized * step;
             float y;
             Vector3 normal;
@@ -2413,7 +2498,7 @@ namespace NextDayRevival
             {
                 HoldStill(u);
                 Roll(u.Body, Vector3.zero);
-                u.Stuck += Time.fixedDeltaTime;
+                u.Stuck += StepDt;
                 if (u.Stuck > BlockedPost) DeployGiveUp(u, t);
                 return;
             }
@@ -2435,7 +2520,7 @@ namespace NextDayRevival
             SetFloat(u.Rcc, "brakeInput", brake);
             SetFloat(u.Rcc, "steerInput", Mathf.Clamp(angle / FullLockAt, -1f, 1f));
             SetFloat(u.Rcc, "handbrakeInput", 0f);
-            if (Velocity(u.Body).magnitude < 0.8f) u.Stuck += Time.fixedDeltaTime;
+            if (Velocity(u.Body).magnitude < 0.8f) u.Stuck += StepDt;
             else u.Stuck = 0f;
             if (u.Stuck > 8f) DeployGiveUp(u, t);
         }
@@ -2474,7 +2559,7 @@ namespace NextDayRevival
             Quaternion want = Quaternion.LookRotation(to.normalized, t.up);
             if (Quaternion.Angle(t.rotation, want) > 3f)
                 t.rotation = Quaternion.RotateTowards(t.rotation, want,
-                    DeployTurnRate * Time.fixedDeltaTime);
+                    DeployTurnRate * StepDt);
 
             // Press the attack. DeployPost carries the whole candidate ring a
             // bound closer when the threat is beyond EngageWithin, and refuses to
@@ -2981,7 +3066,7 @@ namespace NextDayRevival
             Quaternion want = Quaternion.LookRotation(flat.normalized, normal);
             Transform t = u.Car.transform;
             Quaternion rotation = !u.Placed ? want : Quaternion.RotateTowards(
-                t.rotation, want, ColumnTurnRate * Time.fixedDeltaTime);
+                t.rotation, want, ColumnTurnRate * StepDt);
 
             // Compute clearance for the ACTUAL eased rotation. Raising only the
             // origin by a fixed lift leaves the nose/tail buried on a slope.
@@ -3125,7 +3210,7 @@ namespace NextDayRevival
         static void Columns()
         {
             if (_columns.Count == 0) return;
-            float dt = Time.fixedDeltaTime;
+            float dt = StepDt;
 
             // Q1 perf: the member lists are reused step to step (emptied, not
             // replaced) - a fresh List per convoy per physics step was garbage.
@@ -3948,7 +4033,7 @@ namespace NextDayRevival
 
         static void Arm(Unit u)
         {
-            u.Wait += Time.fixedDeltaTime;
+            u.Wait += StepDt;
 
             Type vgsType = RevivalPlugin.TypeByName("VehicleGameSystem");
             if (vgsType == null) { Drop(u, "VehicleGameSystem not found"); return; }
@@ -4340,7 +4425,7 @@ namespace NextDayRevival
             Vector3 pos = t.position;
             Route r = u.Route;
             int n = r.P.Count;
-            float dt = Time.fixedDeltaTime;
+            float dt = StepDt;
 
             Vector3 vel = Velocity(u.Body);
             float kmh = vel.magnitude * 3.6f;
@@ -4475,9 +4560,13 @@ namespace NextDayRevival
             SetFloat(u.Rcc, "steerInput", Mathf.Clamp(steer, -1f, 1f));
             SetFloat(u.Rcc, "handbrakeInput", 0f);
 
-            if (u.Lap != u.Reported)
+            // X perf-fix: at most one line per LapLogEvery s - a vehicle far
+            // off its route "completed" a lap per physics step (6.63 log: 678
+            // lap lines and 675 lap-skip warnings in 85 s).
+            if (u.Lap != u.Reported && Time.time >= u.LapLogAt)
             {
                 u.Reported = u.Lap;
+                u.LapLogAt = Time.time + LapLogEvery;
                 RevivalPlugin.L.LogInfo("Patrol: " + r.Name + " lap " + u.Lap
                     + " done, " + u.Frees + " free event(s) so far.");
             }
@@ -4528,10 +4617,13 @@ namespace NextDayRevival
                 }
             }
 
-            if (moved >= n)
+            if (moved >= n && Time.time >= u.LapLogAt)
+            {
+                u.LapLogAt = Time.time + LapLogEvery;
                 RevivalPlugin.L.LogWarning("Patrol: " + r.Name + " skipped a whole "
                     + "lap in one step - the vehicle is nowhere near its route. "
                     + "PassRadius too large, or the route has duplicate points.");
+            }
         }
 
         /// <summary>A point <paramref name="dist"/> metres along the route,
@@ -4799,7 +4891,25 @@ namespace NextDayRevival
         /// twenty-four of them at every spawn. The tag is asked FIRST, because
         /// it is one native compare and it is the exact marker.
         /// </summary>
+        // X perf-fix: the answer depends only on the object's tag and the
+        // components of it and five parents, which do not change - remembered
+        // per object instead of up to 30 GetComponent calls per road ray hit
+        // (RoadUnder casts several per carried hull per run).
+        static readonly Dictionary<int, bool> _lebendig = new Dictionary<int, bool>();
+
         static bool Lebendig(Transform t)
+        {
+            if (t == null) return false;
+            int id = t.GetInstanceID();
+            bool known;
+            if (_lebendig.TryGetValue(id, out known)) return known;
+            if (_lebendig.Count > 4096) _lebendig.Clear();
+            known = LebendigWalk(t);
+            _lebendig[id] = known;
+            return known;
+        }
+
+        static bool LebendigWalk(Transform t)
         {
             if (Knochen(t)) return true;
             Type[] typen = Marker();

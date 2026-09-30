@@ -239,6 +239,14 @@ namespace NextDayRevival
             return health / n < LosingHealth;
         }
 
+        /// <summary>x-merc-competence: how many mates still post (alive, thinking).</summary>
+        internal int Mates(int self, float now)
+        {
+            int n = 0;
+            for (int k = 0; k < Max; k++) if (Live(k, self, now)) n++;
+            return n;
+        }
+
         /// <summary>A mate fights here (a call-out brings him in).</summary>
         internal bool MateFighting(int self, Vector3 me, float now)
         {

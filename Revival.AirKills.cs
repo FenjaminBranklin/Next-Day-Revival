@@ -243,6 +243,7 @@ namespace NextDayRevival
             if (go == null) return;
             Vector3 at = new Vector3(f[2], f[3], f[4]);
             int phase = (int)f[5];
+            if (phase == 0 || phase == 1) AircraftAudio.StopEngines(go);
             if (phase == 0)
             {
                 if (!_downHelis.Contains(go)) _downHelis.Add(go);
@@ -303,7 +304,7 @@ namespace NextDayRevival
                     if (go != null) ShootDownHeli(go, new Vector3(f[2], f[3], f[4]), sender);
                     return;
                 }
-                if (!Master()) OnHeli(f, null);
+                if (!Master() && sender == MercAA.MasterActor()) OnHeli(f, null);
             }
         }
 

@@ -411,36 +411,113 @@ namespace NextDayRevival
         static Vector2 _world, _map;
         static Rect _view;
         static bool _hasView;
+        static Rect _fullView;
         static float _ctxAt;
 
         /// <summary>OnGUI: the banner over the game view or the map, the
         /// tracks over the map. One bool when the side does not hold the radar.</summary>
         internal static void Draw()
         {
-            if (!_held && Time.time >= _holdNoteUntil) return;
+            if (Time.time >= _pingUntil)
+            {
+                if (!_held && Time.time >= _holdNoteUntil) return;
+            }
             Event e = Event.current;
             if (e == null || e.type != EventType.Repaint) return;
             int ui = GameUi.State;
             if (ui != 0 && ui != 8) return;   // another game window is open
             try
             {
+                if (ui == 8 && Time.time < _pingUntil) DrawWarningMap();
                 if (_held && ui == 8 && _live > 0 && B(CfgMap)) DrawMap();
                 DrawBanner();
             }
             catch (Exception ex) { RevivalPlugin.L.LogError(ex); }
         }
 
+        // Event-only writes, fixed ring; warnings stay on the map through arrival,
+        // even without a working/owned radar. Existing AirPicture.Draw F6 slot.
+        const int PingCount = 8;
+        static readonly Vector3[] _pingPos = new Vector3[PingCount];
+        static readonly string[] _pingName = new string[PingCount];
+        static readonly float[] _pingEnd = new float[PingCount], _pingArrive = new float[PingCount];
+        static float _pingUntil;
+        static int _pingNext;
+
+        internal static void WarnAt(Vector3 at, string label, float eta, string toast)
+        {
+            int i = _pingNext;
+            _pingNext = (_pingNext + 1) % PingCount;
+            _pingPos[i] = at;
+            _pingName[i] = label;
+            _pingArrive[i] = Time.time + Mathf.Clamp(eta, 0f, 600f);
+            _pingEnd[i] = _pingArrive[i] + 30f;
+            _pingUntil = Mathf.Max(_pingUntil, _pingEnd[i]);
+            // Toasts and their backing strings are event allocations, never ticks.
+            UiKit.Toast(toast, UiTone.Warning);
+        }
+
+        static void DrawWarningMap()
+        {
+            if (!MapContext()) return;
+            Rect clip;
+            if (_hasView) clip = _view;
+            else clip = _fullView;
+            float now = Time.time;
+            float pulse = 0.5f + 0.5f * Mathf.Abs(Mathf.Sin(now * 4f));
+            for (int i = 0; i < PingCount; i++)
+            {
+                if (_pingName[i] == null || now >= _pingEnd[i]) continue;
+                Vector2 p;
+                if (!Gui(_pingPos[i], out p) || !clip.Contains(p)) continue;
+                float size = UiKit.S(14f + pulse * 8f);
+                Rect mark = new Rect(p.x - size * 0.5f, p.y - size * 0.5f, size, size);
+                // Clip all warning graphics to the native map viewport.
+                GUI.BeginClip(clip);
+                try
+                {
+                    mark.x -= clip.x; mark.y -= clip.y;
+                    UiKit.Outline(mark, UiKit.Bad);
+                    UiKit.Fill(new Rect(mark.center.x - 2f, mark.center.y - 2f, 4f, 4f), UiKit.Bad, 0);
+                    Rect label = new Rect(mark.xMax + UiKit.S(4f), mark.y - UiKit.S(6f), UiKit.S(224f), UiKit.S(42f));
+                    label.x = Mathf.Clamp(label.x, 0f, Mathf.Max(0f, clip.width - label.width));
+                    label.y = Mathf.Clamp(label.y, 0f, Mathf.Max(0f, clip.height - label.height));
+                    UiKit.Fill(label, UiKit.Header, 1);
+                    UiKit.Label(new Rect(label.x + 4f, label.y, label.width - 8f, label.height * 0.5f),
+                        _pingName[i], UiFont.Small, UiFont.Left, UiKit.Bad);
+                    UiKit.Label(new Rect(label.x + 4f, label.center.y, UiKit.S(70f), label.height * 0.5f),
+                        RadarClarityText.Eta, UiFont.Small, UiFont.Left, UiKit.TextDim);
+                    int left = Mathf.CeilToInt(_pingArrive[i] - now);
+                    UiKit.Label(new Rect(label.x + UiKit.S(80f), label.center.y, UiKit.S(100f), label.height * 0.5f),
+                        left <= 0 ? RadarClarityText.Arrived : PingSeconds(left), UiFont.Small, UiFont.Left, UiKit.Text);
+                }
+                finally { GUI.EndClip(); }
+            }
+        }
+
+        static readonly string[] _pingSeconds = MakePingSeconds();
+        static string[] MakePingSeconds()
+        {
+            string[] labels = new string[601];
+            for (int i = 0; i < labels.Length; i++) labels[i] = i.ToString(CultureInfo.InvariantCulture);
+            return labels;
+        }
+        static string PingSeconds(int n) { return _pingSeconds[Mathf.Clamp(n, 0, 600)]; }
+
         static bool MapContext()
         {
             float now = Time.realtimeSinceStartup;
-            if (_tex == null || _cam == null || now >= _ctxAt || !_tex.gameObject.activeInHierarchy)
+            bool valid = _tex != null && _cam != null && _tex.gameObject.activeInHierarchy;
+            if (!valid && now < _ctxAt) return false;
+            if (!valid || now >= _ctxAt)
             {
                 _ctxAt = now + 0.5f;
                 Component manager;
                 if (!MapTools.Context(out manager, out _tex, out _cam, out _world, out _map)) { _tex = null; return false; }
                 _hasView = MapTools.MapViewportRect(_tex, _cam, out _view);
+                MapTools.MapScreenRect(_tex, _cam, out _fullView);
             }
-            return _tex != null && _cam != null && EastWorld.Extends;
+            return _tex != null && _cam != null;
         }
 
         static bool Gui(Vector3 p, out Vector2 g)
@@ -450,7 +527,7 @@ namespace NextDayRevival
 
         static void DrawMap()
         {
-            if (!MapContext()) return;
+            if (!EastWorld.Extends || !MapContext()) return;
             // The whole picture: the world rectangle's corners, projected (the
             // east artwork is registered exactly on it); clipped to the viewport.
             Rect w = EastWorld.Extended;
@@ -623,7 +700,7 @@ namespace NextDayRevival
 
         /// <summary>Top-down silhouettes, nose up, baked once in white with a
         /// dark outline and tinted per IFF when drawn.</summary>
-        static Texture2D Icon(int type)
+        internal static Texture2D Icon(int type)
         {
             if (type < 0 || type >= _icons.Length) type = 5;
             if (_icons[type] != null) return _icons[type];

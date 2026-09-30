@@ -1100,6 +1100,7 @@ namespace NextDayRevival
 
         public static void Install(Harmony harmony)
         {
+            AdminFaction.Install(harmony);
             Net.EnsureHooked();
             try
             {
@@ -1230,6 +1231,8 @@ namespace NextDayRevival
                     RefreshLabels();
                     _nextLive = 0f;
                 }
+                else if (PerfBisect.OffCount > 0 && !PerfBisect.AutoRunning)
+                    UiKit.Toast("Perf tab: " + PerfBisect.OffCount + " feature(s) still switched off", UiTone.Warning);
                 RevivalPlugin.L.LogInfo("Adminmenue " + (Win.Open ? "auf" : "zu") + ".");
             }
             catch (Exception ex)
@@ -1240,7 +1243,7 @@ namespace NextDayRevival
 
         // ================================================= W-UI4: the kit window
         //
-        // The admin panel in the UI kit (docs/UI_KIT.md): one window, six
+        // The admin panel in the UI kit (docs/UI_KIT.md): one window, seven
         // tabs, every row a kit control on the AdminLayout cursor. The kit
         // frees and restores the cursor and closes on Esc. Nothing here
         // builds a string per frame: labels that carry a key or a count are
@@ -1248,19 +1251,19 @@ namespace NextDayRevival
         // 1 Hz for the visible tab only (RefreshLive).
 
         static readonly UiWindow Win = new UiWindow("Revival - Админ", "Revival - Admin", 680f, 720f);
-        const int TabPlayers = 0, TabVehicles = 1, TabWorld = 2, TabMercs = 3, TabItems = 4, TabTools = 5, TabCount = 6;
-        static readonly string[] TabsRu = { "Игроки", "Техника", "Мир", "Наёмники", "Предметы", "Сервис" };
-        static readonly string[] TabsEn = { "Players", "Vehicles", "World", "Mercs", "Items", "Tools" };
+        const int TabPlayers = 0, TabVehicles = 1, TabWorld = 2, TabMercs = 3, TabItems = 4, TabTools = 5, TabPerf = 6, TabCount = 7;
+        static readonly string[] TabsRu = { "Игроки", "Техника", "Мир", "Наёмники", "Предметы", "Сервис", "Произв." };
+        static readonly string[] TabsEn = { "Players", "Vehicles", "World", "Mercs", "Items", "Tools", "Perf" };
         static int _tab;
         static readonly UiScroll[] _scroll = { new UiScroll(), new UiScroll(), new UiScroll(),
-                                               new UiScroll(), new UiScroll(), new UiScroll() };
+                                               new UiScroll(), new UiScroll(), new UiScroll(), new UiScroll() };
         static readonly float[] _tabH = new float[TabCount];
         static float _viewH;
         static float _nextLive;
 
         // Built on open (keys, capacities, config switches).
         static string _lblKatyRockets, _lblKatyNote, _lblBombs, _lblBombsNote, _lblHeliNote, _lblAn2Note;
-        static string _lblTurret, _lblArena, _lblSpawnCar, _lblTank, _lblJump;
+        static string _lblTurret, _lblArena, _lblSpawnCar, _lblTank, _lblJump, _lblAuto;
         static int _labelsLang = -1;
         // Refreshed at 1 Hz while the tab shows them.
         static string _liveNpc, _liveForest, _liveBench, _liveMercs, _liveCover, _liveFights, _liveNotify, _liveMerc, _liveMines;
@@ -1297,6 +1300,7 @@ namespace NextDayRevival
                 case TabWorld: TabWorldTools(); break;
                 case TabMercs: TabMercTools(); break;
                 case TabItems: TabItemList(); break;
+                case TabPerf: TabPerfTools(); break;
                 default: TabDevTools(); break;
             }
             _tabH[_tab] = AdminLayout.Y;
@@ -1315,6 +1319,7 @@ namespace NextDayRevival
 
         static void TabPlayerTools()
         {
+            AdminFaction.Draw();
             AdminLayout.Section(Loc.T("ДЕНЬГИ (ТОЛЬКО СЕБЕ)", "MONEY (YOURSELF ONLY)"));
             Rect r = AdminLayout.Row();
             if (Btn(UiKit.Col(r, 0, 3), "+100k")) GiveMoney("100000");
@@ -1696,6 +1701,65 @@ namespace NextDayRevival
             }
         }
 
+        // --------------------------------------------------------------- Perf
+
+        /// <summary>X perf-bisect (Revival.PerfBisect.cs): every heavy feature
+        /// with a local on/off switch, the frame time, each one's own F6 ms,
+        /// the auto test and its table. Strings come from RefreshLive (1 Hz)
+        /// and the auto test's result; nothing is built here.</summary>
+        static void TabPerfTools()
+        {
+            AdminLayout.Section(Loc.T("ПРОИЗВОДИТЕЛЬНОСТЬ (ЛОКАЛЬНО, ДО ПЕРЕЗАПУСКА)", "PERFORMANCE (LOCAL, UNTIL RESTART)"));
+            AdminLayout.Text(AdminLayout.Row(), PerfBisect.LiveHead, UiKit.Text);
+            Rect r = AdminLayout.Row();
+            bool running = PerfBisect.AutoRunning;
+            if (UiKit.Button(AdminLayout.Part(r, 0f, 0.4f), running ? "Stop auto test" : _lblAuto,
+                    running ? UiButton.Danger : UiButton.Primary, true,
+                    "each feature 5 s off in turn (4 s on before it); hold still, frame ms with / without to this tab and the log"))
+                Melde(PerfBisect.AutoToggle());
+            if (Btn(AdminLayout.Part(r, 0.4f, 0.2f), "All on") && !running)
+            {
+                PerfBisect.AllOn();
+                _nextLive = 0f;
+            }
+            AdminLayout.Text(AdminLayout.Part(r, 0.6f, 0.4f), PerfBisect.LiveProgress, UiKit.TextDim);
+            AdminLayout.Note(Loc.T("Выключение: только у вас; как хост - патрули/авиасобытия/конвой стоят у всех.",
+                                   "Off = this client only; as host, patrols / air events / convoy pause for everyone."));
+
+            AdminLayout.Section(Loc.T("ФУНКЦИИ", "FEATURES"));
+            for (int f = 0; f < PerfBisect.Count; f++)
+            {
+                r = AdminLayout.Row();
+                bool on = !PerfBisect.IsOff(f);
+                bool want = UiKit.Toggle(AdminLayout.Part(r, 0f, 0.7f), on, PerfBisect.Names[f], PerfBisect.Tips[f]);
+                AdminLayout.Text(AdminLayout.Part(r, 0.7f, 0.3f), PerfBisect.LiveOwn(f), UiKit.TextDim);
+                if (want != on && !running)
+                {
+                    PerfBisect.SetOff(f, !want);
+                    _nextLive = 0f;
+                }
+            }
+
+            if (!PerfBisect.HaveResult) return;
+            AdminLayout.Section(Loc.T("АВТОТЕСТ: МС КАДРА", "AUTO TEST: FRAME MS"));
+            AdminLayout.Note(PerfBisect.ResultTitle);
+            r = AdminLayout.Row();
+            AdminLayout.Text(AdminLayout.Part(r, 0f, 0.55f), "feature", UiKit.TextDim);
+            AdminLayout.Text(AdminLayout.Part(r, 0.55f, 0.15f), "on", UiKit.TextDim);
+            AdminLayout.Text(AdminLayout.Part(r, 0.7f, 0.15f), "off", UiKit.TextDim);
+            AdminLayout.Text(AdminLayout.Part(r, 0.85f, 0.15f), "saved", UiKit.TextDim);
+            for (int f = 0; f < PerfBisect.Count; f++)
+            {
+                r = AdminLayout.Row();
+                int tone = PerfBisect.ResultTone(f);
+                Color c = tone == 2 ? UiKit.Warn : tone == 1 ? UiKit.Text : UiKit.TextDim;
+                AdminLayout.Text(AdminLayout.Part(r, 0f, 0.55f), PerfBisect.Names[f], c);
+                AdminLayout.Text(AdminLayout.Part(r, 0.55f, 0.15f), PerfBisect.ResultOn(f), c);
+                AdminLayout.Text(AdminLayout.Part(r, 0.7f, 0.15f), PerfBisect.ResultOff(f), c);
+                AdminLayout.Text(AdminLayout.Part(r, 0.85f, 0.15f), PerfBisect.ResultDelta(f), c);
+            }
+        }
+
         // ------------------------------------------------------------ texts
 
         /// <summary>On open and on a language change: the labels that carry a
@@ -1718,6 +1782,7 @@ namespace NextDayRevival
             _lblSpawnCar = Loc.T("Спавн техники (клавиша ", "Vehicle spawn (key ") + RevivalPlugin.CfgSpawnCarKey.Value + ")";
             _lblTank = Loc.T("Танк Т-72 (клавиша ", "T-72 tank (key ") + RevivalPlugin.CfgTankKey.Value + ")";
             _lblJump = Loc.T("Переход сцены (клавиша ", "Scene jump (key ") + RevivalPlugin.CfgJumpKey.Value + ")";
+            _lblAuto = "Auto test (~" + Mathf.CeilToInt(PerfBisect.AutoSeconds) + " s)";
             for (int i = 0; i < _players.Count; i++) _players[i].Label = null;
             LabelPlayers();
         }
@@ -1755,6 +1820,9 @@ namespace NextDayRevival
                         Mercs.Profile mp = mercProfiles[_mercPick];
                         _liveMerc = mp.Name + " (" + mp.Settlement + ", " + mp.Price + ")";
                     }
+                    break;
+                case TabPerf:
+                    PerfBisect.RefreshLive();
                     break;
                 case TabTools:
                     _liveNpc = NpcDistance.Status();

@@ -551,9 +551,10 @@ namespace NextDayRevival
             public bool GroundLoop, GroundForward = true;
             public int GroundLeg;
             public float GroundHold, GroundHoldUntil, GroundLegUntil, GroundContact;
-            // The alive layer of an editor group (Revival.GroundAlive.cs): its
-            // brain, null for every other squad, and the next sleeping upkeep.
+            // The editor-group tactics brain (also used by paratroopers), and
+            // the next sleeping upkeep; null for other squads.
             public GroundBrain Alive;
+            public ParaObjective Para;
             public float NextFar;
             public string Tag;
             public GameObject Settlement;
@@ -1552,7 +1553,12 @@ namespace NextDayRevival
                 return;
             }
             // An editor group with no player near sleeps (Revival.GroundAlive.cs).
+            // Mission lifetimes still expire while asleep, without scene queries.
+            if (s.Para != null && (now >= s.HardEnd
+                || (s.Para.Phase == ParaObjective.Hold && now >= s.Para.HoldUntil)))
+            { Remove(s, "paratroop objective hold over"); return; }
             if (s.Alive != null && !GroundAliveGate(s, now)) return;
+            if (s.Para != null) ParaObjectiveTick(s, now);
             if (now >= s.NextVehicleScan)
             {
                 s.NextVehicleScan = now + 0.5f;
@@ -1573,6 +1579,7 @@ namespace NextDayRevival
                 }
                 alive++;
                 if (!IsMine(f.Ai)) continue;
+                if (s.Para != null && !s.Alive.Men[i].Alive) continue;
                 if (s.Alive != null && i < s.Alive.Count)
                 {
                     if (slice >= 0 && (i & 1) != slice && f.Target == null) continue;
@@ -1611,6 +1618,7 @@ namespace NextDayRevival
                 }
                 // Alive layer: roam, and every duty in a fight or a search.
                 if (s.Alive != null && GroundAliveStep(f, s, i, now)) continue;
+                if (s.Para != null) { ParaObjectiveStep(f, s, now); continue; }
                 // The two behaviors that were given a place to be: the route
                 // the editor drew, and the perimeter around the point.
                 if (s.GroundDuty == GroundMode.Patrol) { PatrolStep(f, s, now); continue; }
@@ -2694,6 +2702,7 @@ namespace NextDayRevival
         static bool PickTargetForMan(Fighter f, float now)
         {
             float range = f.Squad != null && f.Squad.Merc != null ? MercSeekRange(f) : RangeOf(f);
+            if (f.Squad != null && f.Squad.Merc != null && MercQuickFocus(f, range, now)) return true;
             Component player = f.Squad != null && f.Squad.Merc != null
                 ? MercPlayerTarget(f, range, now) : KillTarget(f);
             if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
