@@ -472,6 +472,9 @@ namespace NextDayRevival
             // out of sight still keeps him standing.
             public float PlantedSince, SteadyUntil;
             public float NextTargetCheck;   // defender: next Targetable re-check
+            public float NextParaScan;      // K4b: bounded 5 Hz landing contacts
+            public int ParaCursor;
+            public bool ParaBlind;
             public int StepFailures;        // squad man: consecutive ManStep exceptions
 
             // 6.17: his class, what his armour leaves of a hit, the kneeling
@@ -516,6 +519,9 @@ namespace NextDayRevival
             public Vector3 Ordered;
             public GameObject Point;      // the walk point currently issued
             public float NextMove, MoveDeadline;
+            public NpcVaultMotion Vault;
+            public float NextVault;
+            public NpcNavState Navigation;
             public int WantMain = -1, WantAdd = -1, WantPose = -1;
             public float NextState, PauseUntil;
 
@@ -1632,11 +1638,13 @@ namespace NextDayRevival
                 Fighter f = s.Men[i];
                 if (f.Ai == null || f.Tr == null || !Alive(f.Ai))
                 {
+                    if (s.Merc != null) TowerRoof.Cancel(f.Tr, false);
                     if (s.Alive != null && i < s.Alive.Count) s.Alive.Men[i].Alive = false;
                     continue;
                 }
                 alive++;
-                if (!IsMine(f.Ai)) continue;
+                if (!IsMine(f.Ai)) { if (s.Merc != null) TowerRoof.Cancel(f.Tr, false); continue; }
+                if (s.Merc != null && Mercs.IsDown(s.Merc)) { TowerRoof.Cancel(f.Tr, false); continue; }
                 if (s.Para != null && !s.Alive.Men[i].Alive) continue;
                 if (s.Alive != null && i < s.Alive.Count)
                 {
@@ -1647,6 +1655,8 @@ namespace NextDayRevival
                 if (s.Merc != null && MercSeated(f, s.Merc, now)) continue;
                 // Y B1: a merc on the tower ladder belongs to the climb (Revival.TowerRoof.cs).
                 if (s.Merc != null && TowerRoof.Climbing(f.Tr)) continue;
+                if (VaultStep(f, now)) continue;
+                NavigationStep(f, now);
                 if (Regenerating(f, now)) continue;
                 EnsureArmed(f, now);
                 if (s.Merc == null || MercMayEngage(s.Merc, now)) Acquire(f, now);
@@ -1659,7 +1669,10 @@ namespace NextDayRevival
                 // fight is over his order runs again.
                 if (s.Merc != null)
                 {
-                    if (MercStationDuty(f, s.Merc, now)) { }
+                    if (MercRescueStep(f, s.Merc, now)) { }
+                    else if (MercTowerStep(f, s.Merc, now)) { }
+                    else if (MercResupplyDuty(f, s.Merc, now)) { }
+                    else if (MercStationDuty(f, s.Merc, now)) { }
                     else if (MercFight(f, s.Merc, now)) MercAA.Release(s.Merc);
                     else MercStep(f, s, now);
                     continue;
@@ -2096,6 +2109,8 @@ namespace NextDayRevival
         static void ManStep(Fighter f, Squad s, Vector3 anchor, Vector3 front,
                             Vector3 centre, float now)
         {
+            if (VaultStep(f, now)) return;
+            NavigationStep(f, now);
             // A defender kneeling in the game's own regeneration belongs to the
             // game: RegenerationActions heals him and ends the state, and any
             // order of ours - even the pause Quiet refreshes - would cut it short.
@@ -2355,6 +2370,8 @@ namespace NextDayRevival
         /// </summary>
         static void Unstick(Fighter f, Vector3 dest, float now)
         {
+            // Z K2 owns fast recovery for merc orders and combat movement.
+            if (NavigationEligible(f, now)) return;
             float limit = CfgStuckSeconds == null ? 6f : CfgStuckSeconds.Value;
             if (limit <= 0f) return;
             // The clock only runs while he is walking. A man who has been
@@ -2570,6 +2587,8 @@ namespace NextDayRevival
         /// attacked and may go to ground for it.</summary>
         static void RunDefender(Fighter d, float now)
         {
+            if (VaultStep(d, now)) return;
+            NavigationStep(d, now);
             EnsureArmed(d, now);
             Decay(d, now);
             Acquire(d, now);
@@ -2721,7 +2740,8 @@ namespace NextDayRevival
                     ? MercScanGap(f) : 0.3f + UnityEngine.Random.value * 0.15f);
                 Transform had = f.Target;
                 bool checkedLos;
-                if (f.Squad != null) checkedLos = PickTargetForMan(f, now);
+                if (ZuCrewPriority(f, now)) checkedLos = true;
+                else if (f.Squad != null) checkedLos = PickTargetForMan(f, now);
                 else checkedLos = PickTargetForDefender(f, now);
                 if (f.Target != null && f.Target != had)
                 {
@@ -2744,6 +2764,12 @@ namespace NextDayRevival
                 return;
             }
             if (now < f.NextLos) return;
+            if (merc && !MercParaInReach(f))
+            {
+                f.Target = null; f.TargetIsPlayer = false; f.Sees = false;
+                f.NextScan = now;
+                return;
+            }
             f.NextLos = now + (merc ? MercAssault.LosGap(UnityEngine.Random.value)
                 : 0.3f + UnityEngine.Random.value * 0.15f);
             float height;
@@ -2768,6 +2794,7 @@ namespace NextDayRevival
             if (f.Squad != null && f.Squad.Merc != null && MercQuickFocus(f, range, now)) return true;
             Component player = f.Squad != null && f.Squad.Merc != null
                 ? MercPlayerTarget(f, range, now) : KillTarget(f);
+            if (f.Squad.Merc != null && MercParaPick(f, now)) return true;
             if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
             {
                 if (f.TargetIsPlayer)
@@ -2780,7 +2807,7 @@ namespace NextDayRevival
                     Fighter current = cur == null ? null : FighterOf(cur);
                     if (cur != null && Alive(cur)
                         && (current == null || current.Squad != f.Squad)
-                        && ((current != null && current.Squad != null) || Targetable(cur))
+                        && ((current != null && current.Squad != null) || MercNpcTargetable(f, cur))
                         && Hostile(f.Hated, FactionOf(cur))
                         && Flat(f.Target.position - f.Tr.position) <= range * 1.1f)
                         return false;
@@ -2804,7 +2831,7 @@ namespace NextDayRevival
                 Fighter other = FighterOf(c);
                 if (other != null && other.Squad == f.Squad) continue;
                 if (!Hostile(f.Hated, FactionOf(c))) continue;
-                if ((other == null || other.Squad == null) && !Targetable(c)) continue;
+                if ((other == null || other.Squad == null) && !MercNpcTargetable(f, c)) continue;
                 if (!Alive(c)) continue;
                 // B3c: a merc inside a closed hull or an aircraft is no target.
                 if (MercRide.HiddenRider(c)) continue;
@@ -2871,7 +2898,7 @@ namespace NextDayRevival
             if (f.Sees && !f.TargetIsPlayer)
             {
                 Component ai = f.Target.GetComponent(_npcType);
-                if (ai != null && FighterOf(ai) == null && IsMine(ai)) Enlist(ai);
+                if (ai != null && FighterOf(ai) == null && IsMine(ai) && ParaPose.RunPrefix(ai)) Enlist(ai);
             }
             return true;
         }
@@ -3049,13 +3076,15 @@ namespace NextDayRevival
             if (from == Vector3.zero) return false;
             // Eyes can see over cover while the barrel is still behind it.
             bool hull = IsSquadVehicle(f, f.Target);
-            if (hull ? !VehicleClear(from, aimAt, f.Squad.Vehicle) : !Clear(from, aimAt, f.Target))
+            bool merc = f.Squad != null && f.Squad.Merc != null;
+            // MercLinePrefix checks the actual FireTo endpoint, cached at 10 Hz.
+            if (!merc && (hull ? !VehicleClear(from, aimAt, f.Squad.Vehicle) : !Clear(from, aimAt, f.Target)))
             {
                 if (f.MuzzleBlockedSince <= 0f) f.MuzzleBlockedSince = Time.time;
                 f.NextShot = Time.time + 0.2f;
                 return false;
             }
-            f.MuzzleBlockedSince = 0f;
+            if (!merc) f.MuzzleBlockedSince = 0f;
             // Never through a comrade of the line (M3: a merc, never through
             // his owner or another merc of this client either).
             if (f.Squad != null && (MateInLine(f, from, aimAt)
@@ -3123,9 +3152,9 @@ namespace NextDayRevival
             bool enemy = OtherFaction(f.Faction, FactionOf(hitAi)) && (f.Squad == null
                 ? hurt != null && hurt.Squad != null
                 : Hostile(f.Hated, FactionOf(hitAi))
-                  && ((hurt != null && hurt.Squad != null) || Targetable(hitAi)));
+                  && ((hurt != null && hurt.Squad != null) || MercNpcTargetable(f, hitAi)));
             if (!enemy) return true;
-            if (hurt == null && f.Squad != null && IsMine(hitAi)) Enlist(hitAi);
+            if (hurt == null && f.Squad != null && IsMine(hitAi) && ParaPose.RunPrefix(hitAi)) Enlist(hitAi);
 
             float damage = CfgDamage.Value;
             if (f.Squad == null && hurt != null && hurt.Squad != null)
@@ -3225,9 +3254,21 @@ namespace NextDayRevival
                 }
                 float before = FastField.GetFloat(_fRofDelay, weapon);
                 if (before >= Time.time) return 0;
-                if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
-                    _fAimingPoint.SetValue(f.Ai, aim);
-                _mFireTo.Invoke(weapon, new object[] { aim, true });
+                if (f.Squad != null && f.Squad.Merc != null)
+                {
+                    // The muzzle veto can retry: do not box vectors/bools or
+                    // allocate an Invoke argument array for each attempt.
+                    if (_mercFireCall == null) return 0;
+                    if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
+                        FastField.SetVector3(_fAimingPoint, f.Ai, aim);
+                    _mercFireCall(weapon, aim, true);
+                }
+                else
+                {
+                    if (_fAimingPoint != null && _fAimingPoint.FieldType == typeof(Vector3))
+                        _fAimingPoint.SetValue(f.Ai, aim);
+                    _mFireTo.Invoke(weapon, new object[] { aim, true });
+                }
                 float after = FastField.GetFloat(_fRofDelay, weapon);
                 return after != before ? 1 : 0;
             }
@@ -3489,7 +3530,7 @@ namespace NextDayRevival
         static bool AimPoseReady(Fighter f, float now)
         {
             if (!f.Armed || Reloading(f)
-                || IntField(f.Ai, _fMainState, -1) != MainIdle
+                || (IntField(f.Ai, _fMainState, -1) != MainIdle && !MercPositionAiming(f))
                 || IntField(f.Ai, _fPoseState, -1) != PoseStand)
             { f.PoseSince = 0f; return false; }
             int add = IntField(f.Ai, _fAddState, -1);
@@ -3548,7 +3589,11 @@ namespace NextDayRevival
             {
                 // Ground group destinations already passed the bounded path
                 // check. A second, wider projection could leave their radius.
+                Vector3 navGoal = NavDestination(f, dest, Time.time);
                 Vector3 target = f.Squad != null && f.Squad.GroundGroup ? dest : Ground(dest);
+                // A recovery waypoint already passed exact floor/body checks.
+                // The ordinary ground-group projection contract stays intact.
+                if (f.Navigation.Detouring) target = navGoal;
                 if (f.Point == null)
                 {
                     f.Point = new GameObject("NpcWarPoint");
@@ -4078,6 +4123,8 @@ namespace NextDayRevival
         /// by damage owner 0.</summary>
         internal static void Install(Harmony harmony)
         {
+            InstallMercLine(harmony);
+            InstallMercPositionShot();
             try
             {
                 Type sType = RevivalPlugin.TypeByName("NPC_Settlement");
@@ -4534,7 +4581,8 @@ namespace NextDayRevival
             try
             {
                 if (!a.isActiveAndEnabled || !a.isOnNavMesh || a.pathPending) return false;
-                Vector3 target = Ground(dest);
+                Vector3 navGoal = NavDestination(f, dest, now);
+                Vector3 target = f.Navigation.Detouring ? navGoal : Ground(navGoal);
                 f.Point.transform.position = target;
                 if (!a.SetDestination(target)) return false;
                 if (a.isStopped) a.isStopped = false;
@@ -5038,9 +5086,12 @@ namespace NextDayRevival
         /// a well-dressed man takes more than three.</summary>
         static float DefenderRound(Fighter man, float configured)
         {
-            float full = HealthMax(man);
-            if (full <= 0f) return configured;
-            return (full + 1f) / (TryDamageHead * DefenderHitsToKill);
+            // Owned and remote-watch mercs keep the weapon's configured damage.
+            // This prevents native target-relative scaling from erasing tier HP.
+            bool merc = man.Squad != null && (man.Squad.Merc != null
+                || (man.Squad.Watch && man.Squad.Tag.StartsWith("merc-watch:", StringComparison.Ordinal)));
+            return MercVital.DefenderDamage(merc, merc ? 0f : HealthMax(man), configured,
+                TryDamageHead, DefenderHitsToKill);
         }
 
         static FieldInfo _fLastKillerId;

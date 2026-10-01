@@ -21,11 +21,16 @@ namespace NextDayRevival
         // No catch-up volley after a slow frame. Correction is once per burst.
         internal static bool Shot(ref ShortBurst b, float now, bool ready, out bool corrected)
         {
+            return Shot(ref b, now, ready, 1f, out corrected);
+        }
+
+        internal static bool Shot(ref ShortBurst b, float now, bool ready, float pauseScale, out bool corrected)
+        {
             corrected = false;
             if (b.Active && (!ready || now >= b.End))
             {
                 b.Active = false;
-                b.PauseUntil = now + PauseSeconds;
+                b.PauseUntil = now + PauseSeconds * pauseScale;
                 corrected = true;
             }
             if (!ready || now < b.PauseUntil) return false;

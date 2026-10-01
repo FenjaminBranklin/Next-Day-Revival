@@ -12,6 +12,26 @@ namespace NextDayRevival
     internal static class MercAACore
     {
         internal const float RadarMetres = 7000f;
+        // A single hired specialist lays and loads at the complete crew rate.
+        // Keep the native garrison's two-seat cadence; eye control takes longer.
+        internal static float CadenceScale(bool merc, bool radar)
+        {
+            return merc && !radar ? 1.5f : 1f;
+        }
+        internal static float CrewInterval(float single, float full, bool merc, bool radar, bool both)
+        {
+            return (merc || both ? full : single) * CadenceScale(merc, radar);
+        }
+        internal static float ReloadScale(bool merc, bool both)
+        {
+            return merc || both ? 1f : 1.5f;
+        }
+        // Manned radar shares target coverage. Prefer an uncovered aircraft
+        // anywhere in radar range; retain distance ordering at equal coverage.
+        internal static float TargetScore(float distanceMetres, int coveringGuns)
+        {
+            return distanceMetres + Math.Max(0, coveringGuns) * RadarMetres;
+        }
         internal static float ApproachUnits(float lineLength, float worldPerMetre)
         {
             return (RadarMetres + 1000f) * worldPerMetre + Math.Max(0f, lineLength) * 0.5f;

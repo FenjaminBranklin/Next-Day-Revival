@@ -108,7 +108,7 @@ namespace NextDayRevival
     ///
     /// UNTESTED. Every line of this is read IL. Nothing here has run.
     /// </summary>
-    public static class Crew
+    public static partial class Crew
     {
         /// <summary>Metres between the walk points the crew wanders over.
         /// Wide enough that they spread out around the wreck, tight enough
@@ -627,6 +627,8 @@ namespace NextDayRevival
                 bool isMine;
                 if (ai == null || !SpawnData(ai, out data, out isMine)) return;
                 CombatLoad.RegisterNpc(ai);
+                // Warning-time paradrop objects arrive over Photon one at a time.
+                ParaPose.PreparedSpawn(ai, data, !isMine);
                 int[] appearance = data[1] as int[];
                 int weapon = Convert.ToInt32(data[2]);
 
@@ -796,6 +798,9 @@ namespace NextDayRevival
                 }
             object[] extended = new object[_groundKey == null ? 10 : 11];
             Array.Copy(data, extended, 5);
+            // A native one-man window still has a stable index in its full
+            // prepared settlement when Start runs on the following frame.
+            if (_preparedSpawnIndex >= 0) extended[4] = _preparedSpawnIndex;
             extended[5] = ReplicaSchema;
             extended[6] = (int)GetNumber(spawn, "Health");
             extended[7] = (int)GetNumber(spawn, "Level");
@@ -1197,6 +1202,7 @@ namespace NextDayRevival
                                       fraktion, composition, noFpv);
             }
             finally { _patrolWreck = false; }
+            CrewBlast.Release(car, settlement);
             if (settlement != null
                 && !NpcWar.StartGround("patrol-crew-" + settlement.GetInstanceID(), settlement,
                     Men(settlement), settlement.transform.position, false, 0f, composition))

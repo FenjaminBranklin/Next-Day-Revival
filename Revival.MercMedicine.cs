@@ -32,6 +32,7 @@ namespace NextDayRevival
         internal static bool MedicineWanted(MercUnit u, float now)
         {
             return u != null && u.Medicine != null && !u.Deserting && now >= u.NextSelfHeal
+                && u.RescueTarget == null
                 && u.Ride.Carrier == null && u.Ride.Boarding == null
                 && u.Medicine.Wants(u.Fight.Health, now, u.LastHit.At);
         }
@@ -87,6 +88,7 @@ namespace NextDayRevival
 
         internal static bool CanGiveMedkit(Record r)
         {
+            if (r != null && r.Down.Down) return CanRevive(r);
             if (r == null || r.Dead || r.Deserted || r.Unit == null || r.Unit.Ai == null
                 || r.Unit.Deserting || !r.Medicine.Known || r.Medicine.GiftPending || r.Medicine.Count >= MercMedicine.Capacity
                 || (!r.Session && (!_medicineServer || _support != 1)) || OwnerObject == null) return false;
@@ -97,6 +99,7 @@ namespace NextDayRevival
         // the count before/after. No inventory lookup in a frame or UI paint.
         internal static void GiveMedkit(Record r)
         {
+            if (r != null && r.Down.Down) { PlayerRevive(r); return; }
             if (!CanGiveMedkit(r)) return;
             int item = 0;
             for (int i = 7013; i <= 7016 && item == 0; i++)
@@ -133,6 +136,7 @@ namespace NextDayRevival
         }
         internal static string MedkitLabel(Record r)
         {
+            if (r != null && r.Down.Down) return Loc.T("Оживить", "Revive");
             int n = r != null && r.Medicine.Known ? Mathf.Clamp(r.Medicine.Count, 0, 5) : 6;
             return Loc.T(KitLabelsRu[n], KitLabelsEn[n]);
         }

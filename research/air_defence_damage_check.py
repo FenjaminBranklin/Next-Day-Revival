@@ -30,7 +30,7 @@ namespace UnityEngine {
  public static class GUI {public static void Label(Rect r,string s){}}
  public static class Time {public static float time;}
  public enum KeyCode {R}
- public static class Input {public static bool Held;public static bool GetKey(KeyCode k){return Held;}}
+ public static class Input {public static bool Held,Down;public static bool GetKey(KeyCode k){return Held;}public static bool GetKeyDown(KeyCode k){return Down;}}
  public static class Mathf {public static float Clamp(float f,float a,float b){return Math.Max(a,Math.Min(b,f));}public static int Max(int a,int b){return Math.Max(a,b);}public static int RoundToInt(float f){return (int)Math.Round(f);}}
 }
 namespace UnityEngine.SceneManagement {public struct Scene {public int buildIndex;}public static class SceneManager {public static Scene GetActiveScene(){Scene s=new Scene();s.buildIndex=1;return s;}}}
@@ -54,6 +54,7 @@ namespace NextDayRevival {
  static class MercAA {internal static int MasterActor(){return 1;}}
  static class GameUi {internal static bool WindowOpen;}
  static class NativeActionProgress {internal static bool Active;internal static bool IsActive(string s){return Active;}internal static bool Begin(string a,string b,float c,bool d,string e,string f){Active=true;return true;}internal static void End(string s){Active=false;}}
+ static class RepairTap {internal static bool CanStart {get{return !NativeActionProgress.Active;}}}
  static class Loc {internal static string T(string a,string b){return b;}}
  static class ConvoyRepair {internal const int DEF_TOOLKIT=2064;internal static bool InVehicle(){return false;}}
  static class PlayerHeli {internal static bool Aboard;}
@@ -142,16 +143,21 @@ class Check {
   Ok(!(bool)tools.Invoke(null,null),"cached reader detects toolkit removal without stale item cache");
   inv._backpackData.ItemID=new Obscured[]{2064};Ok((bool)tools.Invoke(null,null),"replacement inventory array and heavy toolkit accepted");
   AirDefenceDamage.Reset(0,8);Ok(AirDefenceDamage.Alive(0)&&AirDefenceDamage.Alive(7),"world unload resets damage state");
-  Time.time=65;AirDefenceDamage.ReportBlast(new Vector3(),6,1);Input.Held=true;AirDefenceDamage.Tick();
-  Ok(AirDefenceDamage.Repairing&&NativeActionProgress.Active&&States()[0].RepairActor==1,"hold R acquires native HUD and host repair lease");
+  Time.time=65;AirDefenceDamage.ReportBlast(new Vector3(),6,1);Input.Held=true;Input.Down=true;AirDefenceDamage.Tick();Input.Down=false;
+  Ok(AirDefenceDamage.Repairing&&NativeActionProgress.Active&&States()[0].RepairActor==1,"tap R acquires native HUD and host repair lease");
   inv._backpackData.ItemID[0]=0;Time.time=65.5f;AirDefenceDamage.Tick();
   Ok(!AirDefenceDamage.Repairing&&!NativeActionProgress.Active&&States()[0].RepairActor==-1,"tool loss ends native action and host lease");
   inv._backpackData.ItemID[0]=10005;Time.time=66;AirDefenceDamage.Tick();
   Ok(!AirDefenceDamage.Repairing,"cancelled action waits for key release before restarting");
-  Input.Held=false;Time.time=66.5f;AirDefenceDamage.Tick();Input.Held=true;Time.time=67;AirDefenceDamage.Tick();
-  Ok(AirDefenceDamage.Repairing,"key release permits a fresh repair with retained tools");
+  Input.Held=false;Time.time=66.5f;AirDefenceDamage.Tick();Input.Held=true;Input.Down=true;Time.time=67;AirDefenceDamage.Tick();Input.Down=false;
+  Ok(AirDefenceDamage.Repairing,"fresh tap permits repair with retained tools");
   Input.Held=false;Time.time=67.1f;AirDefenceDamage.Tick();
-  Ok(!AirDefenceDamage.Repairing&&States()[0].Work==0,"releasing R immediately cancels action and resets work");
+  Ok(AirDefenceDamage.Repairing,"releasing R keeps repair running");
+  NativeActionProgress.Active=false;Time.time=67.2f;AirDefenceDamage.Tick();
+  Ok(!AirDefenceDamage.Repairing&&States()[0].Work==0,"shared cancellation immediately resets host work");
+  Input.Down=true;Time.time=67.3f;AirDefenceDamage.Tick();Input.Down=false;Time.time=67.4f;AirDefenceDamage.Tick();
+  Time.time=67.5f;AirDefenceDamage.Tick();
+  Ok(AirDefenceDamage.Repairing,"short tap between 2 Hz scan ticks is retained");
  }
  public static int Main(){Core();Adapter();Console.WriteLine("AA7 RESULT: "+Checks+" checks, "+Bad+" failures");return Bad==0?0:1;}
 }
@@ -187,7 +193,7 @@ def main():
                                  'AirfieldOwnership.MasterSender(sender)', 'AirDefenceDamage.RadarHit',
                                  'dead == _screenDead'],
         'RevivalMortar.cs': ['if (shooter) AirDefenceDamage.ReportBlast'],
-        'RevivalPlugin.cs': ['S_AaDamageT); AirDefenceDamage.Tick()', 'S_AaDamageD); AirDefenceDamage.Draw()'],
+        'RevivalPlugin.cs': ['S_AaDamageT); AirDefenceDamage.Tick()', 'AirDefenceDamage.Draw(); FrameProf.E(FrameProf.S_AaDamageD)'],
         'sync_public.py': ['Revival.AirDefenceDamageCore.cs', 'research/air_defence_damage_check.py'],
     }
     for f, needles in contracts.items():

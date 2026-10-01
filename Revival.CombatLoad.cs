@@ -99,6 +99,7 @@ namespace NextDayRevival
                 if (_npcs[i] != null && _npcs[i].Go != null) continue;
                 if (_npcs[i] != null) _known.Remove(_npcs[i].Id);
                 Record r = new Record(ai.gameObject, ai);
+                PhysicsDiet.RegisterNpc(ai, r.Bodies);
                 _npcs[i] = r; _known[id] = r;
                 return;
             }
@@ -126,6 +127,7 @@ namespace NextDayRevival
             int id = go.GetInstanceID();
             for (int i = 0; i < rows.Length; i++) if (rows[i] != null && rows[i].Id == id) return;
             Record fresh = new Record(go, null);
+            PhysicsDiet.Track(fresh.Bodies, book == _wrecks ? 5 : 6);
             fresh.DeadAt = Time.unscaledTime;
             if (fresh.View != null && !Mine(fresh))
             {
@@ -357,9 +359,13 @@ namespace NextDayRevival
             {
                 Record r = rows[i];
                 if (r == null || r.Go == null) continue;
-                bodies += r.Bodies.Length; colliders += r.Wheels.Length;
+                // Lazy ragdolls and native destruction leave null slots in the
+                // cached arrays. Count existing actors rather than array capacity.
+                int live = 0;
+                for (int j = 0; j < r.Bodies.Length; j++) if (r.Bodies[j] != null) live++;
+                bodies += live; colliders += r.Wheels.Length;
                 particles += r.Particles.Length; audio += r.Audio.Length;
-                if (r.Frozen) frozen += r.Bodies.Length;
+                if (r.Frozen) frozen += live;
             }
         }
 

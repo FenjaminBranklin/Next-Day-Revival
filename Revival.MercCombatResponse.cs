@@ -51,6 +51,7 @@ namespace NextDayRevival
         /// Not a deserter, a man running to his seat, a gun or radar crewman.</summary>
         static bool MercLanesFree(MercUnit u)
         {
+            if (MercCrewPhases.Ground(u) && !u.Deserting && u.Ride.Boarding == null) return true;
             if (u.Deserting || u.Ride.Boarding != null || u.AAView > 0) return false;
             return u.Order.Mode != MercOrder.ManGun && u.Order.Mode != MercOrder.ManRadar;
         }

@@ -220,8 +220,8 @@ namespace NextDayRevival
                 }
             }
             else { _wheelVec = Vector2.zero; _wheelPick = -1; }
-            for (int n = 1; n <= SectorEn.Length; n++)
-                if (Input.GetKeyDown(KeyCode.Alpha0 + n)) { Issue(n - 1); return false; }
+            for (int n = 1; n <= Mathf.Min(10, SectorEn.Length); n++)
+                if (Input.GetKeyDown(n == 10 ? KeyCode.Alpha0 : KeyCode.Alpha0 + n)) { Issue(n - 1); return false; }
             return !Input.GetKeyDown(KeyCode.Escape) && !Input.GetMouseButtonDown(1);
         }
 

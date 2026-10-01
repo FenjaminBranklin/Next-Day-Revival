@@ -189,8 +189,8 @@ namespace NextDayRevival
     {
         internal const int Max = 10;
         internal const float Active = 3f;           // a row older than this is gone (dead, despawned)
+        internal const float FireActive = 0.6f;     // stopped/dead/reloading men cannot pin the covering pair
         internal const float ContactKeep = 15f;
-        internal const float BoundSeconds = 15f;
         internal const float ClearSeconds = 10f;
         internal const float StuckSeconds = 10f;    // no progress this long: he no longer holds the line back
 
@@ -202,10 +202,12 @@ namespace NextDayRevival
         readonly float[] _mark = new float[Max];     // along at his last progress
         readonly float[] _progAt = new float[Max];
         readonly float[] _coverAt = new float[Max]; // real covering fire, not just a sighting
+        readonly bool[] _marksman = new bool[Max];
+        readonly bool[] _ready = new bool[Max];
+        int _coverStart;
         internal float LastContact = -1000f;
         internal float LastSight = -1000f;          // a member had a target in sight (covering fire is possible)
-        internal int Moving;                        // bounding: the half (k & 1) that runs
-        internal float SwitchAt;
+        internal int Moving;                        // alternating priority for the next covering pair
         internal int Swaps;
         internal bool Complete, CompleteSaid;
         internal float CompleteAt = -1f;
@@ -213,7 +215,7 @@ namespace NextDayRevival
         internal MercAttackTeam(int size)
         {
             Size = Math.Max(1, Math.Min(Max, size));
-            for (int k = 0; k < Max; k++) { _seen[k] = -1000f; _coverAt[k] = -1000f; }
+            for (int k = 0; k < Max; k++) { _seen[k] = -1000f; _coverAt[k] = -1000f; _ready[k] = true; }
         }
 
         internal bool Contact(float now) { return now - LastContact < ContactKeep; }
@@ -225,7 +227,6 @@ namespace NextDayRevival
             _along[k] = along; _seen[k] = now; _phase[k] = phase;
             if (contact)
             {
-                if (!Contact(now)) SwitchAt = now + BoundSeconds;
                 LastContact = now;
             }
             if (sight) LastSight = now;
@@ -250,7 +251,7 @@ namespace NextDayRevival
             float rear = float.MaxValue;
             for (int i = 0; i < Size; i++)
             {
-                if (now - _seen[i] > Active || now - _progAt[i] > StuckSeconds) continue;
+                if (_marksman[i] || now - _seen[i] > Active || now - _progAt[i] > StuckSeconds) continue;
                 byte p = _phase[i];
                 if (p == MercAttackRun.Holding || p == MercAttackRun.Stalled) continue;
                 if (_along[i] < rear) rear = _along[i];
@@ -264,13 +265,42 @@ namespace NextDayRevival
             float front = -1f;
             for (int i = 0; i < Size; i++)
             {
-                if ((i & 1) == Moving || now - _seen[i] > Active) continue;
+                if (!Coverer(i, now) || _marksman[i] || now - _seen[i] > Active) continue;
                 if (_along[i] > front) front = _along[i];
             }
             return front;
         }
 
         internal void Arrived(int k) { if (k >= 0 && k < Max) _arrived[k] = true; }
+
+        internal void Station(int k, bool marksman, bool ready)
+        {
+            if (k < 0 || k >= Size) return;
+            _marksman[k] = marksman; _ready[k] = ready;
+            if (!ready) _coverAt[k] = -1000f;
+        }
+
+        // Two cover, the others advance. A pair uses one coverer; an isolated
+        // fighter supplies his own walking fire. Rear marksmen keep overwatch.
+        internal bool Coverer(int k, float now)
+        {
+            if (k < 0 || k >= Size || !_ready[k] || now - _seen[k] > FireActive) return false;
+            if (_marksman[k]) return true;
+            int active = 0, marksmen = 0;
+            for (int n = 0; n < Size; n++)
+                if (_ready[n] && now - _seen[n] <= FireActive) { active++; if (_marksman[n]) marksmen++; }
+            int seats = Math.Min(2, active - 1) - marksmen;
+            for (int pass = 0; pass < 2 && seats > 0; pass++)
+                for (int n = 0; n < Size; n++)
+                {
+                    int slot = (_coverStart + n) % Size;
+                    if (_marksman[slot] || !_ready[slot] || now - _seen[slot] > FireActive
+                        || (((slot & 1) != Moving) != (pass == 0))) continue;
+                    if (slot == k) return true;
+                    if (--seats == 0) break;
+                }
+            return false;
+        }
 
         internal void Covering(int k, float now, bool firing)
         {
@@ -280,47 +310,67 @@ namespace NextDayRevival
 
         internal bool Covered(int k, float now)
         {
+            int firing = 0;
             for (int i = 0; i < Size; i++)
-                if (i != k && (i & 1) != Moving && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) return true;
-            return false;
+                if (i != k && Coverer(i, now) && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) firing++;
+            return firing > 0 && firing >= Math.Min(2, ReadyCount(now) - 1);
+        }
+
+        internal int ReadyCount(float now)
+        {
+            int count = 0;
+            for (int i = 0; i < Size; i++) if (_ready[i] && now - _seen[i] <= FireActive) count++;
+            return count;
+        }
+
+        internal bool Front(float now, out float along)
+        {
+            along = 0f; bool found = false;
+            for (int i = 0; i < Size; i++)
+                if (!_marksman[i] && now - _seen[i] <= Active)
+                { along = found ? Math.Max(along, _along[i]) : _along[i]; found = true; }
+            return found;
         }
 
         internal bool HasCover(float now)
         {
+            int firing = 0;
             for (int i = 0; i < Size; i++)
-                if ((i & 1) != Moving && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) return true;
-            return false;
+                if (Coverer(i, now) && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) firing++;
+            return firing > 0 && firing >= Math.Min(2, ReadyCount(now) - 1);
         }
 
-        /// <summary>Is k in the running half of a bound under contact, not at
+        /// <summary>Is k outside the covering pair under contact, not at
         /// his bound yet, with an active mate to cover him while someone has
         /// the enemy in sight?</summary>
         internal bool Runner(int k, float now)
         {
-            if (Size < 2 || k < 0 || k >= Max || !Contact(now) || now - LastSight > 2f || (k & 1) != Moving || _arrived[k]) return false;
+            if (Size < 2 || k < 0 || k >= Size || !_ready[k] || !Contact(now) || now - LastSight > 2f || Coverer(k, now) || _arrived[k]) return false;
             byte p = _phase[k];
             if (p == MercAttackRun.Holding || p == MercAttackRun.Stalled || p == MercAttackRun.Search) return false;
-            return WatchFront(now) >= 0f && Covered(k, now);
+            return Covered(k, now);
         }
 
-        /// <summary>Swap the halves when every active runner is at his bound
-        /// or the bound took too long.</summary>
+        /// <summary>Swap on arrival or lost mobility, never a fixed timer.</summary>
         internal void MaybeSwap(float now)
         {
             if (Size < 2) return;
             bool all = true;
+            int runners = 0;
             for (int i = 0; i < Size; i++)
             {
-                if ((i & 1) != Moving || now - _seen[i] > Active) continue;
+                if (Coverer(i, now) || _marksman[i] || now - _seen[i] > Active || !_ready[i]) continue;
                 byte p = _phase[i];
                 if (p == MercAttackRun.Holding || p == MercAttackRun.Stalled) continue;
+                runners++;
+                if (now - _progAt[i] > 1.2f && now - _seen[i] < 0.6f) continue;
                 if (!_arrived[i]) { all = false; break; }
             }
-            if (!all && now < SwitchAt) return;
+            if (!all || runners == 0 || !Contact(now)) return;
             Moving ^= 1;
-            SwitchAt = now + BoundSeconds;
+            _coverStart = (_coverStart + 2) % Size;
             Swaps++;
-            for (int i = 0; i < Max; i++) _arrived[i] = false;
+            for (int i = 0; i < Max; i++) { _arrived[i] = false; _progAt[i] = now; _mark[i] = _along[i]; }
         }
     }
 
@@ -552,7 +602,7 @@ namespace NextDayRevival
             {
                 // Bounding overwatch.
                 team.MaybeSwap(now);
-                if ((o.K & 1) != team.Moving)
+                if (team.Coverer(o.K, now))
                 {
                     Phase = Overwatch;
                     Hold(ref a, dir, true, 30f);

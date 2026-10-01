@@ -16,6 +16,7 @@ namespace NextDayRevival
         static int _count;
         static int _cursor;
         static int _scene = -1;
+        static int _scenes = -1;
 
         internal static bool Visible(GameObject go)
         {
@@ -36,13 +37,18 @@ namespace NextDayRevival
             try
             {
                 int scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
-                if (_terrain == null || _scene != scene || (_terrain.Length > 0 && _terrain[0] == null))
+                int scenes = UnityEngine.SceneManagement.SceneManager.sceneCount;
+                // East terrain loads additively; the active scene's buildIndex
+                // does not change. Refresh only when scene topology changes.
+                if (_terrain == null || _scene != scene || _scenes != scenes
+                    || (_terrain.Length > 0 && _terrain[0] == null))
                 {
                     _scene = scene;
+                    _scenes = scenes;
                     _terrain = Terrain.activeTerrains;
                     _colliders = new TerrainCollider[_terrain.Length];
                     for (int i = 0; i < _terrain.Length; i++)
-                        if (_terrain[i] != null && _terrain[i].drawHeightmap)
+                        if (_terrain[i] != null)
                             _colliders[i] = _terrain[i].GetComponent<TerrainCollider>();
                 }
                 _count = Mathf.Min(Capacity, contacts.Count);

@@ -508,8 +508,9 @@ namespace NextDayRevival
             _near = go;
 
             int m = MaskOf(go);
-            string key = PlayerAn2.KeyOf(CfgKey, KeyCode.G).ToString();
-            bool pressed = Input.GetKeyDown(PlayerAn2.KeyOf(CfgKey, KeyCode.G));
+            string key = "R";
+            bool pressed = RepairTap.CanStart && (Input.GetKeyDown(KeyCode.R)
+                || Input.GetKeyDown(PlayerAn2.KeyOf(CfgKey, KeyCode.G)));
             bool tool = Turret.HasItem(ToolkitId) || Turret.HasItem(ConvoyRepair.DEF_TOOLKIT);
 
             int part = -1;

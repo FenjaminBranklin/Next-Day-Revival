@@ -188,7 +188,7 @@ namespace NextDayRevival
                 MercRide.StepOwner(Time.time, Mercs.OwnerObject);
                 if (u.Ride.Carrier == null) MercBoard(f, u, Time.time);
             }
-            else MercPostStep(f, u, Time.time);
+            else { MercCrewUpdate(f, u, Time.time); MercPostStep(f, u, Time.time); }
         }
 
         // Immediate orders still use M1/M2/M3 when badly hurt or when a blast
@@ -197,6 +197,7 @@ namespace NextDayRevival
         static bool MercStationDuty(Fighter f, MercUnit u, float now)
         {
             if (!MercAA.IsOrder(u.Order) || u.Deserting) return false;
+            bool groundDuty = MercCrewUpdate(f, u, now);
             Vector3 dangerAt;
             bool danger = MercDanger.Near(f.Tr.position, MercBrain.DangerRadius, now, out dangerAt);
             float health = HealthFraction(f);
@@ -205,6 +206,7 @@ namespace NextDayRevival
             if (health >= 0.5f) u.AARetreat = false;
             if (MercStationPlan.Retreat(health, u.AARetreat, danger))
             { MercAA.Release(u); return false; }
+            if (groundDuty) { MercAA.Release(u); return false; }
             if (MercAA.IsVehicle(u.Order))
             {
                 if (u.Ride.Boarding == null)

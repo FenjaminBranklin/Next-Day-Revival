@@ -2810,6 +2810,7 @@ namespace NextDayRevival
             public bool PoseTried;
             public float Blend;              // 0 = the game's animation, 1 = at the grips
             public bool Merc;                // the body is a merc (Revival.MercsRide.cs)
+            public float NextLate;
         }
 
         static readonly List<Station> _stations = new List<Station>();
@@ -2876,6 +2877,10 @@ namespace NextDayRevival
             {
                 Station st = _stations[i];
                 if (st.Vgs == null) continue;
+                bool local = _manning && ReferenceEquals(st.Vgs, _vgs);
+                bool near = local || TechnicalCrew.PoseNear(st.Vgs.transform.position);
+                if (!near && Time.time < st.NextLate) continue;
+                st.NextLate = Time.time + 0.2f + (i % 4) * 0.01f;
                 // In this order, and all three in the same late frame: the mount
                 // is final before the man is placed behind it, and the man is
                 // final before his arms are solved onto the grips. Any other
@@ -2897,11 +2902,11 @@ namespace NextDayRevival
                 // and it is HIS bearing the mount is following.
                 bool losgelassen = !selbst && _atGun
                                    && ReferenceEquals(st.Vgs, _vgs);
-                StandingPose(st, body);
+                if (near) StandingPose(st, body);
                 st.Merc = merc;
                 if (!losgelassen) Stellung(st, body, selbst);
 
-                Hands(st, body, dt);
+                if (near) Hands(st, body, dt);
             }
         }
 

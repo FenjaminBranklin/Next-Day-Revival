@@ -259,8 +259,8 @@ namespace NextDayRevival
         // Sector order clockwise from the top: FOLLOW, STAY, PATROL,
         // PERIMETER, VEHICLE, PEACEFUL (the mockup's wheel), the AA posts and
         // (merc-attack-orders) ATTACK on key 9.
-        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN NEAREST GUN", "MAN NEAREST RADAR", "ATTACK" };
-        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР", "АТАКА" };
+        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN GUNS", "MAN NEAREST RADAR", "ATTACK", "FETCH AIRDROP", "MEDIC DUTY", "TAKE COVER" };
+        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР", "АТАКА", "ЗАБРАТЬ ГРУЗ", "САНИТАР", "В УКРЫТИЕ" };
         const int AttackSector = 8;
 
         static int Sector(Vector2 v)
@@ -301,9 +301,13 @@ namespace NextDayRevival
                 case 6:
                 case 7:
                     if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) OpenStations(sector == 7);
-                    else Mercs.OrderAAPost(sector == 7, Mercs.OwnerPosition);
+                    else if (sector == 6) Mercs.OrderRaidGuns();
+                    else Mercs.OrderAAPost(true, Mercs.OwnerPosition);
                     break;
                 case AttackSector: AttackAtCrosshair(); break;
+                case 9: MercFetch.Start(); break;
+                case 10: Mercs.ToggleMedics(); break;
+                case 11: Mercs.OrderRaidCover(); break;
             }
         }
 
@@ -343,6 +347,7 @@ namespace NextDayRevival
 
         internal static void StartAttackMap()
         {
+            _placeDrive = false;
             _placing = true; _placeAttack = true; _route.Clear(); _placeSeen = Time.time; _placeKeyDown = -1f;
             _lastWasTap = false;
             Toast(Loc.T("АТАКА: кликните цель на карте, ", "ATTACK: click the objective on the map, ") + _wheelKeyText
@@ -439,6 +444,7 @@ namespace NextDayRevival
 
         internal static void StartRoute(bool atCrosshair)
         {
+            _placeDrive = false;
             _placing = true; _route.Clear(); _placeSeen = Time.time; _placeKeyDown = -1f;
             _lastWasTap = false;
             if (atCrosshair)
@@ -476,6 +482,7 @@ namespace NextDayRevival
 
         static void CancelRoute(string why)
         {
+            _placeDrive = false;
             _placing = false; _placeAttack = false; _route.Clear();
             Toast(why, false);
         }
@@ -488,6 +495,7 @@ namespace NextDayRevival
             if (!_placing) return false;
             Vector3 point;
             if (!MapTools.MouseWorld(out point)) return true;
+            if (_placeDrive) { DriveMapClick(point); return true; }
             Vector3 g;
             if (RevivalGroundEnemies.TryGround(point, 12f, out g)) point = g;
             if (_placeAttack)
@@ -508,6 +516,7 @@ namespace NextDayRevival
         /// crosshair ray runs on a tap, never per frame).</summary>
         static void RouteInput(bool gameWindow)
         {
+            if (_placeDrive) { DriveInput(gameWindow); return; }
             if (_placeAttack) { AttackInput(gameWindow); return; }
             float now = Time.time;
             if (now - _placeSeen > 120f)
@@ -554,6 +563,7 @@ namespace NextDayRevival
         /// and a small panel with the keys.</summary>
         static void DrawPlacing()
         {
+            if (_placeDrive) { DrawDrivePlacing(); return; }
             if (_placeAttack) { DrawAttackPlacing(); return; }
             Camera cam = CameraOwner.MainCamera();
             Vector3 me = Mercs.OwnerPosition;
@@ -701,8 +711,8 @@ namespace NextDayRevival
                     if (m.Dead) continue;
                     number++;
                     if (m.Unit == null || m.Unit.Ai == null) continue;
-                    MapSquare(m.Unit.Ai.transform.position, number < Numbers.Length ? Numbers[number] : number.ToString(),
-                        Located(m.Id) ? Gold : InkGreen, texture, camera, world, map, full, view);
+                    MapSquare(m.Unit.Ai.transform.position, m.Down.Down ? "SOS" : number < Numbers.Length ? Numbers[number] : number.ToString(),
+                        m.Down.Down ? Red : Located(m.Id) ? Gold : InkGreen, texture, camera, world, map, full, view);
                 }
                 if (Mercs.ShelterLabel.Length > 0)
                     MapSquare(Mercs.ShelterAt, Mercs.ShelterLabel, Gold, texture, camera, world, map, full, view);
@@ -713,7 +723,7 @@ namespace NextDayRevival
                 {
                     Component ai = mates[i].Ai;
                     if (ai == null) continue;
-                    MapSquare(ai.transform.position, mates[i].Label, MateBlue, texture, camera, world, map, full, view);
+                    MapSquare(ai.transform.position, MercDownPose.Down(ai) ? "SOS" : mates[i].Label, MercDownPose.Down(ai) ? Red : MateBlue, texture, camera, world, map, full, view);
                 }
                 for (int i = 0; i < _route.Count && _placing; i++)
                     MapSquare(_route[i], "P" + (i + 1), Gold, texture, camera, world, map, full, view);
@@ -1044,7 +1054,7 @@ namespace NextDayRevival
             internal string FullName;
             internal readonly GUIContent Name = new GUIContent(), Order = new GUIContent();
             internal MercOrder For;
-            internal bool Dead, Peaceful, Rally, Survive;
+            internal bool Dead, Peaceful, Rally, Survive, Down;
             internal int Mode, Phase, Metres, Points, Radius, Lang = -1;
         }
         static readonly List<StripRow> _strip = new List<StripRow>(12);
@@ -1094,11 +1104,11 @@ namespace NextDayRevival
                     metres = (int)Math.Round(d / 2.8f, MidpointRounding.AwayFromZero);
                 }
                 int points = order.Points.Length, radius = (int)Math.Round(order.RadiusM, MidpointRounding.AwayFromZero);
-                if (changed || row.For != order || row.Mode != order.Mode || row.Dead != m.Dead || row.Peaceful != m.Peaceful
+                if (changed || row.For != order || row.Mode != order.Mode || row.Dead != m.Dead || row.Down != m.Down.Down || row.Peaceful != m.Peaceful
                     || row.Rally != rally || row.Survive != order.Survive || row.Lang != lang
                     || row.Phase != phase || row.Metres != metres || row.Points != points || row.Radius != radius)
                 {
-                    row.For = order; row.Mode = order.Mode; row.Dead = m.Dead; row.Peaceful = m.Peaceful;
+                    row.For = order; row.Mode = order.Mode; row.Dead = m.Dead; row.Down = m.Down.Down; row.Peaceful = m.Peaceful;
                     row.Rally = rally; row.Survive = order.Survive; row.Lang = lang;
                     row.Phase = phase; row.Metres = metres; row.Points = points; row.Radius = radius;
                     row.Order.text = m.Dead ? "DEAD" : OrderText(m);
@@ -1134,14 +1144,16 @@ namespace NextDayRevival
 
         internal static string OrderText(Mercs.Record m)
         {
+            if (m.Down.Down) return Loc.T("НУЖНА ПОМОЩЬ", "DOWNED / SOS");
             MercOrder order = m.Order;
-            if (order.Survive) return Loc.T("ВЫЖИТЬ", "SURVIVE");
+            if (order.Survive) return Loc.T("В УКРЫТИИ", "TAKING COVER");
             if (m.Unit != null && m.Unit.Rally) return Loc.T("СБОР", "RALLY");
             string o;
             switch (order.Mode)
             {
                 case MercOrder.Follow: o = Loc.T("ЗА МНОЙ", "FOLLOW"); break;
                 case MercOrder.Vehicle: o = Loc.T("ТЕХНИКА", "VEHICLE"); break;
+                case MercOrder.Drive: o = Loc.T("ПОЕЗДКА", "DRIVE"); break;
                 case MercOrder.ManGun: o = Loc.T("ПУШКА", "MAN GUN"); break;
                 case MercOrder.ManRadar: o = Loc.T("РАДАР", "MAN RADAR"); break;
                 case MercOrder.Patrol: o = Loc.T("ПАТРУЛЬ ", "PATROL ") + order.Points.Length; break;
@@ -1169,7 +1181,7 @@ namespace NextDayRevival
         // the addressed mercs in the hub. Sector count and spacing follow
         // SectorEn. The texts come from tables or are rebuilt at 5 Hz while
         // the wheel is open (the selection and the crosshair ray with them).
-        static readonly string[] KeyCaps = { "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+        static readonly string[] KeyCaps = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
         static float _wheelTextAt;
         static int _wheelTextPick = -2;
         static string _wheelWho, _wheelPoint;
@@ -1184,7 +1196,7 @@ namespace NextDayRevival
             int n = SectorEn.Length;
             float now = Time.unscaledTime;
             if (now >= _wheelTextAt || _wheelTextPick != _wheelPick) WheelTexts(now);
-            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, rad = UiKit.S(n > 8 ? 285f : n > 6 ? 235f : 210f);
+            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, rad = UiKit.S(n > 9 ? 320f : n > 8 ? 285f : n > 6 ? 235f : 210f);
             UiKit.Circle(new Rect(cx - rad - UiKit.S(4f), cy - rad, (rad + UiKit.S(4f)) * 2f, (rad + UiKit.S(4f)) * 2f), UiKit.Shadow);
             UiKit.Circle(new Rect(cx - rad, cy - rad, rad * 2f, rad * 2f), UiKit.Fade(UiKit.Panel, 0.82f));
             float pw = UiKit.S(124f), ph = UiKit.S(44f);
@@ -1217,7 +1229,7 @@ namespace NextDayRevival
             bool seat = MercRide.OwnerInVehicle;
             int kk = n * 4 + lang * 2 + (seat ? 1 : 0);
             string hint = _wheelKeysMemo.Stale(kk)
-                ? _wheelKeysMemo.Set(kk, seat ? Loc.T("клавиши 1-", "keys 1-") + n : Loc.T("отпустить = приказ", "release = issue"))
+                ? _wheelKeysMemo.Set(kk, seat ? (n >= 10 ? Loc.T("клавиши 1-9, 0", "keys 1-9, 0") : Loc.T("клавиши 1-", "keys 1-") + n) : Loc.T("отпустить = приказ", "release = issue"))
                 : _wheelKeysMemo.Text;
             UiKit.Label(new Rect(cx - hub, cy + UiKit.S(2f), hub * 2f, UiKit.S(20f)), hint, UiFont.Small, UiFont.Center, UiKit.TextDim);
             if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector || _wheelPick == 6 || _wheelPick == 7) && _wheelPoint != null)
@@ -1567,7 +1579,7 @@ namespace NextDayRevival
             string chips = "";
             if (p.Precise > 0) chips += Loc.T("точный +", "precise +") + p.Precise + "%  ";
             if (p.Fast > 0) chips += Loc.T("быстрый +", "fast +") + p.Fast + "%  ";
-            if (p.AAGunner > 0) chips += Loc.T("зенитчик +", "AA gunner +") + p.AAGunner + "%  ";
+            if (p.AAGunner > 0) chips += Loc.T("зенитчик ", "Flak gunner ") + p.AAGunner + "/50  ";
             if (p.Tanky > 0) chips += Loc.T("живучий +", "tanky +") + p.Tanky + "%";
             GUI.Label(new Rect(c.x + 8f, y, c.width - 16f, 18f), chips.Length == 0 ? Loc.T("без особенностей", "no traits") : chips,
                 chips.Length == 0 ? _small : _chip);
@@ -1660,7 +1672,7 @@ namespace NextDayRevival
             float[] cols = MercCols;
             for (int i = 1; i < heads.Length; i++) GUI.Label(new Rect(x0 + cols[i], y0, 140f, 18f), heads[i], _small);
             List<Mercs.Record> roster = Mercs.Roster;
-            Rect view = new Rect(0f, y0 + 20f, r.width, r.height - y0 - 20f - 128f);
+            Rect view = new Rect(0f, y0 + 20f, r.width, r.height - y0 - 20f - 160f);
             Rect content = new Rect(0f, 0f, r.width - 20f, Mathf.Max(view.height - 2f, roster.Count * 40f));
             _listScroll = GUI.BeginScrollView(view, _listScroll, content);
             Vector3 me = Mercs.OwnerPosition;
@@ -1702,7 +1714,7 @@ namespace NextDayRevival
                     "No mercenaries. Hire them at a settlement trader, tab \"Mercenaries\"."), _label);
             GUI.EndScrollView();
 
-            float by = r.height - 154f;
+            float by = r.height - 186f;
             List<Mercs.Record> selection = Mercs.Selection();
             if (ButtonColored(new Rect(x0, by, 130f, 28f), Loc.T("Оплатить всё (P)", "Pay all due (P)"), Green, true)) Mercs.PayAllDue();
             Mercs.Record one = selection.Count == 1 ? selection[0] : null;
@@ -1771,7 +1783,12 @@ namespace NextDayRevival
             }
             if (ButtonColored(new Rect(x0 + 744f, by3, 80f, 28f), Mercs.MedkitLabel(one),
                 Green, Mercs.CanGiveMedkit(one))) Mercs.GiveMedkit(one);
-            GUI.Label(new Rect(x0, by3 + 34f, r.width - 30f, 36f),
+            DriveButtons(new Rect(x0, by3 + 32f, r.width - 30f, 28f), dark, selection.Count > 0);
+            MercFetch.EscortRequested = GUI.Toggle(new Rect(x0 + 270f, by3 + 66f, 282f, 28f), MercFetch.EscortRequested,
+                Loc.T("Сопровождение: 2 последних выбранных", "Escort: last 2 selected"));
+            if (ButtonColored(new Rect(x0 + 558f, by3 + 66f, 266f, 28f), Loc.T("Забрать воздушный груз", "Fetch airdrop"),
+                dark, selection.Count > 0)) MercFetch.Start();
+            GUI.Label(new Rect(x0, by3 + 100f, 548f, 36f),
                 Loc.T("Галочки = кому приказ (Ctrl+1..5, Ctrl+0 все). ", "Checked rows are who the orders address (Ctrl+1..5, Ctrl+0 = all). ")
                 + _wheelKeyText + Loc.T(" удерж. - меню приказов, двойное нажатие - за мной (в машине - за моей техникой). Увольнение без возврата денег.",
                     " held = order wheel, double tap = follow me (in a vehicle: follow my vehicle). Dismiss asks twice, no refund."), _small);

@@ -55,7 +55,7 @@ namespace UnityEngine {
 }
 namespace UnityEngine.SceneManagement {
  public struct Scene {public int buildIndex;}
- public static class SceneManager {public static Scene GetActiveScene(){Scene s=new Scene();s.buildIndex=1;return s;}}
+ public static class SceneManager {public static int sceneCount=1;public static Scene GetActiveScene(){Scene s=new Scene();s.buildIndex=1;return s;}}
 }
 namespace NextDayRevival {
  static class FrameProf {internal const int S_RadarShadowT=0,S_Mi8FlaresT=1;internal static void S(int s){} internal static void E(int s){} }
@@ -200,7 +200,9 @@ class NativeReadCheck {
   return GC.GetTotalMemory(false)-before<1024&&GC.CollectionCount(0)==gc;
  }
 '''
-    readers += '\n'.join(method(s) for s in ('static object Field(', 'public static bool IsStinger(', 'static int Loaded(', 'static void EmitInt(')) + '\n}\n'
+    readers += '\n'.join(method(s) for s in ('static object Field(', 'internal static MethodInfo ToInt(',
+                                          'static Func<object, int> ItemReader(', 'public static bool IsStinger(',
+                                          'static int Loaded(', 'static void EmitInt(')) + '\n}\n'
     harness.write_text(HARNESS + readers.replace('AccessTools.', 'HarmonyLib.AccessTools.'), encoding='ascii')
     exe = work / 'check.exe'
     compiler = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Microsoft.NET/Framework64/v3.5/csc.exe'

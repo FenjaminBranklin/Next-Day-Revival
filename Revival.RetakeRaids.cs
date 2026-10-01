@@ -5,13 +5,13 @@
 // strikes back on its own - not only when an admin schedules an air event:
 // bombers on the tower, the guns or the fuel depot, An-2 paratroopers and Mi-8
 // troop landings that retake the tower, optionally an An-2 escort that bombs
-// the AA guns first. The rhythm rises the longer the side holds on.
+// the AA guns first. K5b2 adds close sticks, a second air wave and quiet windows.
 // docs/ai/tasks/w-tower4-retake-raids.md has the design, numbers and checks.
 //
 // PIECES
 //   Core      Revival.RetakeRaidsCore.cs (pure, csc-tested offline by
 //             research/retake_raids_check.py): the editor settings, the hold
-//             clock (first raid, shrinking gap), the raid composition (growth
+//             clock (first raid, interval/window), the raid composition (growth
 //             per raid, target rotation, no new troops while old ones fight).
 //   Holder    who holds the airfield (master, 1 Hz). On this base: the
 //             garrison while its HQ operator (radar/c1/op) lives at the
@@ -73,7 +73,7 @@ namespace NextDayRevival
         const int EscortBombs = 4;
         // Seconds after the raid's start: escort first, the bombers behind it,
         // the paratroopers after the bombs, the Mi-8 last.
-        const float BomberDelay = 25f, TransportDelay = 70f, HeliDelay = 75f, QuickHeliDelay = 15f, HeliStagger = 20f;
+        const float BomberDelay = 25f, TransportDelay = 70f, HeliDelay = 75f, HeliStagger = 20f;
 
         /// <summary>The runway centre line (x 4578..4686, Revival.Airfield.cs):
         /// open ground next to the tower for the drop zone and the Mi-8.</summary>
@@ -88,6 +88,10 @@ namespace NextDayRevival
         static float _nextStep, _nextPresence;
         static int _serial, _sticky = -1, _errors;
         static bool _wasMaster;
+        static bool _askedClock, _remoteClock;
+        static readonly RetakeClock _remote = new RetakeClock();
+        internal const int ClockMessage = 9, ClockRequest = 10; // AirEvents channel; 6..8 = AirKills
+        static readonly float[] _clockRequest = { ClockRequest };
         static AirEvents.Event _flying;
 
         sealed class PendingHeli
@@ -102,8 +106,8 @@ namespace NextDayRevival
         {
             CfgEnabled = cfg.Bind("RetakeRaids", "Enabled", true,
                 "Host: the airfield's garrison strikes back when a side takes the airfield (bombers on the "
-                + "tower/guns/fuel depot, paratroopers, Mi-8 landings, An-2 escort on the guns), more often "
-                + "the longer it is held. Frequency, strength and composition are in the map editor (Air "
+                + "tower/guns/fuel depot, paratroopers, Mi-8 landings, An-2 escort on the guns). "
+                + "Interval, random window, quiet floor, strength and composition are in the map editor (Air "
                 + "events -> Retake raids). Off: no automatic retake raids (the admin button still works).");
         }
 
@@ -131,7 +135,10 @@ namespace NextDayRevival
                 + s.Strength.ToString("0.##") + ", " + s.Bombers + " Tu-95 x " + s.Bombs + " on "
                 + (s.HitTower ? "T" : "") + (s.HitGuns ? "G" : "") + (s.HitFuel ? "F" : "") + ", "
                 + s.Transports + " An-2 x " + s.Paratroopers + ", " + s.Helis + " Mi-8 x " + s.HeliTroops
-                + ", escort " + (s.Escort ? s.Escorts.ToString() : "off") + ", side " + s.Faction;
+                + ", escort " + (s.Escort ? s.Escorts.ToString() : "off") + ", side " + s.Faction
+                + ", close drops " + s.CloseDrops + ", second air wave " + s.SecondWave
+                + " (+" + s.SecondWaveDelaySeconds + " s), interval " + s.IntervalMinutes
+                + " +0.." + s.RandomWindowMinutes + " min, quiet floor " + s.QuietMinutes + " min"                + ", approach " + s.ApproachMode + ", flight heading " + s.ApproachHeading.ToString("0.##");
         }
 
         // =============================================================== frame
@@ -150,23 +157,28 @@ namespace NextDayRevival
                     // Only the master flies raids; a later master starts its own clock.
                     if (_wasMaster) { _clock.Step(now, -1, _settings, false, false, 0); _helis.Clear(); _sticky = -1; }
                     _wasMaster = false;
+                    if (!_askedClock) _askedClock = AirEvents.Net.Send(_clockRequest, true);
                     return;
                 }
                 _wasMaster = true;
+                _askedClock = false;
                 TickHelis(now);
                 int before = _clock.Holder;
+                float beforeWindow = _clock.Earliest;
+                bool beforeClear = _clock.AwaitClear;
                 int holder = TowerRadar.On && TowerRadar.Built ? Holder(now) : -1;
-                bool busy = AirEvents.Flying(_flying) || _helis.Count > 0;
-                bool due = _clock.Step(now, holder, _settings, true, busy, UnityEngine.Random.Range(0, 3));
+                bool busy = AirBusy();
+                bool due = _clock.Step(now, holder, _settings, true, busy, UnityEngine.Random.Range(0, int.MaxValue));
                 if (_clock.Holder != before) HolderChanged(before, now);
                 if (due)
                 {
                     RevivalPlugin.L.LogInfo("RetakeRaids: raid " + (_clock.Level + 1) + " - " + Fly(now, false));
                     _clock.Flown(now, _settings);
-                    RevivalPlugin.L.LogInfo("RetakeRaids: next raid in "
-                        + Mathf.RoundToInt((_clock.Next - now) / 60f) + " min (held "
-                        + _clock.HeldHours(now).ToString("0.00") + " h).");
+                    RevivalPlugin.L.LogInfo("RetakeRaids: next quiet window starts when this air operation clears; "
+                        + _settings.QuietMinutes + " min minimum.");
                 }
+                if (due || before != _clock.Holder || beforeWindow != _clock.Earliest || beforeClear != _clock.AwaitClear)
+                    PublishClock();
                 _errors = 0;
             }
             catch (Exception ex)
@@ -215,6 +227,44 @@ namespace NextDayRevival
             return false;
         }
 
+        static bool AirBusy()
+        {
+            if (AirEvents.Flying(_flying) || _helis.Count > 0) return true;
+            for (int i = 0; i < _heliNames.Count; i++)
+                if (RevivalTroopInsertion.Flying(_heliNames[i])) return true;
+            return false;
+        }
+
+        // Transition-only reliable snapshots, plus one request when a client joins.
+        // Relative time is conservative by the network transit time on receivers.
+        internal static void PublishClock()
+        {
+            if (!Crocodile.IsMaster()) return;
+            float now = Time.time;
+            float[] msg = new float[] { ClockMessage, _clock.Holder, _clock.Level,
+                !_settings.Enabled || (CfgEnabled != null && !CfgEnabled.Value) || _clock.Next < 0f
+                    ? -1f : _clock.AwaitClear ? 1f : 0f,
+                Mathf.Max(0f, _clock.Earliest - now), Mathf.Max(0f, _clock.Latest - now) };
+            AirEvents.Net.Send(msg, true);
+            ReceiveClock(msg);
+        }
+
+        internal static void ReceiveClock(float[] f)
+        {
+            if (f == null || f.Length != 6) return;
+            for (int i = 1; i < 6; i++) if (float.IsNaN(f[i]) || float.IsInfinity(f[i])) return;
+            _remote.Holder = (int)f[1]; _remote.Level = (int)f[2];
+            _remote.AwaitClear = f[3] > 0f;
+            _remote.Next = f[3] < 0f ? -1f : 0f;
+            _remote.Earliest = Time.time + Mathf.Max(0f, f[4]);
+            _remote.Latest = Time.time + Mathf.Max(0f, f[5]);
+            _remoteClock = true;
+            if (_remote.Holder >= 0 && _remote.Next >= 0f)
+                RadarScope.Note(_remote.AwaitClear ? "RETAKE: air active; quiet window follows."
+                    : "RETAKE: quiet at least " + Mathf.CeilToInt(f[4] / 60f)
+                        + " min, next raid window ends in " + Mathf.CeilToInt(f[5] / 60f) + " min.");
+        }
+
         /// <summary>Master: compose and launch the raid for the clock's level.</summary>
         static string Fly(float now, bool quick)
         {
@@ -242,10 +292,20 @@ namespace NextDayRevival
                 d.Count = plan.HeliTroops;
                 d.PatrolMinutes = PatrolMinutes;
                 PendingHeli h = new PendingHeli();
-                h.At = now + (quick ? QuickHeliDelay : HeliDelay) + k * HeliStagger;
+                // Do not let a short heli route arrive before the AA lead from a far edge.
+                h.At = now + (e != null ? e.ArrivalLead : quick ? AirEvents.QuickWarnSeconds : AirEvents.WarnSeconds)
+                    + HeliDelay + k * HeliStagger;
                 h.Landing = d;
                 _helis.Add(h);
                 _heliNames.Add(d.Name);
+            }
+            if (e == null && plan.Helis > 0)
+            {
+                // From behind the landing's attack arrow, as TroopInsertion flies it.
+                float from = AirPicturePolicy.Bearing(RunwayX - TowerRadar.TowerSpot.x,
+                    HeliZ[0] - TowerRadar.TowerSpot.y);
+                AirEvents.WarnRetakeHelis(new Vector3(RunwayX, 0f, HeliZ[0]), from,
+                    plan.Helis, (quick ? AirEvents.QuickWarnSeconds : 180f) + HeliDelay);
             }
             string summary = RetakePlan.TargetNames[plan.Target] + " (" + target.x.ToString("0") + ", "
                 + target.z.ToString("0") + "): " + plan.Escorts + " escort An-2, " + plan.Bombers + " Tu-95 x "
@@ -262,29 +322,15 @@ namespace NextDayRevival
         {
             Vector3 tower = new Vector3(TowerRadar.TowerSpot.x, 0f, TowerRadar.TowerSpot.y);
             List<Vector3> guns = AirfieldGuns();
-            float heading = UnityEngine.Random.Range(0, 8) * 45f;
+            float heading = RetakeTactics.Heading(_settings, serial);
             float length = 350f, width = 80f;
             target = new Vector3((TowerRadar.TowerSpot.x + TowerRadar.MastSpot.x) * 0.5f, 0f,
                                  (TowerRadar.TowerSpot.y + TowerRadar.MastSpot.y) * 0.5f);
             if (plan.Target == RetakePlan.TargetGuns && guns.Count > 0)
             {
-                if (guns.Count == 1) { target = guns[0]; length = 300f; }
-                else
-                {
-                    // One stick down the line of the two positions.
-                    Vector3 a = guns[0], b = guns[1];
-                    float span = new Vector2(b.x - a.x, b.z - a.z).magnitude;
-                    target = (a + b) * 0.5f;
-                    target.y = 0f;
-                    if (span > 20f && span < 1300f)
-                    {
-                        heading = Mathf.Atan2(b.x - a.x, b.z - a.z) * Mathf.Rad2Deg;
-                        if (UnityEngine.Random.value < 0.5f) heading += 180f;
-                        heading = Mathf.Repeat(heading, 360f);
-                        length = Mathf.Clamp(span + 200f, 200f, 1500f);
-                    }
-                    else { target = a; length = 300f; }
-                }
+                // Aim at one position; do not deliberately join two guns with a carpet.
+                target = guns[serial % guns.Count];
+                length = 300f;
             }
             else if (plan.Target == RetakePlan.TargetFuel)
             {
@@ -294,12 +340,14 @@ namespace NextDayRevival
 
             AirEvents.Event e = new AirEvents.Event();
             e.Name = NamePrefix + serial;
+            e.WarningLeadSeconds = 180f;
             e.Enabled = true;
+            e.Coordinated = true;
             e.X = target.x; e.Z = target.z;
             e.Heading = heading;
             e.Length = length; e.Width = width;
             e.Edge = "auto";
-            // The paratroopers jump over the runway abeam the tower and attack it.
+            // Legacy event arrow stays the tower; raid sticks override it below.
             e.DropX = RunwayX; e.DropZ = tower.z;
             e.AttackX = tower.x; e.AttackZ = tower.z;
             e.Faction = faction;
@@ -325,13 +373,58 @@ namespace NextDayRevival
             }
             if (plan.Transports > 0)
             {
+                Vector3 dropCentre = _settings.CloseDrops ? CloseDropCentre(tower) : tower;
+                int zones = RetakeTactics.Zones(plan.Transports, _settings.DropZones);
+                for (int k = 0; k < plan.Transports; k++)
+                {
+                    int zone = RetakeTactics.Zone(k, zones);
+                    float bearing = RetakeTactics.Bearing(heading, zone, zones);
+                    float rad = bearing * Mathf.Deg2Rad;
+                    Vector3 outward = new Vector3(Mathf.Sin(rad), 0f, Mathf.Cos(rad));
+                    AirEvents.Wave w = new AirEvents.Wave();
+                    w.Count = 1;
+                    w.Delay = TransportDelay + k * 3f;
+                    w.Load = plan.Paratroopers;
+                    w.OwnDrop = true;
+                    w.CloseDrop = _settings.CloseDrops;
+                    // Inward flight; the canopy's forward throw is corrected at launch.
+                    w.Direction = Mathf.Repeat(bearing + 180f, 360f);
+                    w.Drop = dropCentre + outward * ((_settings.CloseDrops ? RetakeTactics.CloseRadiusM
+                        : _settings.DropRadiusM) * PlayerAn2.K + (k / zones) * 30f);
+                    w.Attack = guns.Count > 0 && RetakeTactics.AttackCrew(k, plan.Transports, _settings.CrewAttackPercent)
+                        ? guns[(serial + k) % guns.Count] : tower;
+                    e.Waves.Add(w);
+                }
+            }
+            // A second air strike during the ground fight, never another troop batch.
+            // Reuse the raid's selected target; no silent change to bomb/fire choices.
+            if (_settings.SecondWave && _settings.Bombers > 0 && plan.Bombers > 0)
+            {
                 AirEvents.Wave w = new AirEvents.Wave();
-                w.Count = plan.Transports;
-                w.Delay = TransportDelay;
-                w.Load = plan.Paratroopers;
+                w.Bomber = true; w.Count = plan.Bombers; w.Load = plan.Bombs;
+                w.Delay = TransportDelay + _settings.SecondWaveDelaySeconds;
                 e.Waves.Add(w);
             }
             return e.Waves.Count > 0 ? e : null;
+        }
+
+        // Nearest live airfield ZU, so future layout changes move close DZs too.
+        // No AA immunity or fixed world coordinates; absent ZU falls back to C1.
+        static Vector3 CloseDropCentre(Vector3 tower)
+        {
+            Vector3 centre = tower;
+            float best = float.MaxValue;
+            List<FlakGunInfo> guns = Flak.Guns();
+            for (int i = 0; i < guns.Count; i++)
+            {
+                FlakGunInfo g = guns[i];
+                if (g.Health <= 0f || g.Id == null || !g.Id.StartsWith("ZU-", StringComparison.Ordinal)) continue;
+                float x = g.Position.x - tower.x, z = g.Position.z - tower.z;
+                float dist = x * x + z * z;
+                if (dist >= best) continue;
+                best = dist; centre = new Vector3(g.Position.x, 0f, g.Position.z);
+            }
+            return centre;
         }
 
         static List<Vector3> AirfieldGuns()
@@ -341,7 +434,9 @@ namespace NextDayRevival
             {
                 List<FlakGunInfo> guns = Flak.Guns();
                 for (int i = 0; i < guns.Count; i++)
-                    if (guns[i].Id != null && guns[i].Id.StartsWith("AA-", StringComparison.Ordinal))
+                    if (guns[i].Health > 0f && guns[i].Id != null
+                        && (guns[i].Id.StartsWith("AA-", StringComparison.Ordinal)
+                            || guns[i].Id.StartsWith("ZU-", StringComparison.Ordinal)))
                         list.Add(new Vector3(guns[i].Position.x, 0f, guns[i].Position.z));
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("RetakeRaids: gun list - " + ex.Message); }
@@ -364,7 +459,7 @@ namespace NextDayRevival
         // =============================================================== admin
 
         /// <summary>The admin's "Retake raid now": the master flies one at the
-        /// clock's level (the schedule is not moved), anyone else asks.</summary>
+        /// clock's level and restarts its quiet window, anyone else asks.</summary>
         internal static string Ask(bool quick)
         {
             if (Crocodile.IsMaster()) return Now(quick);
@@ -377,20 +472,27 @@ namespace NextDayRevival
         {
             if (!Crocodile.IsMaster()) return "Retake raid: only the host can launch.";
             if (!TowerRadar.On || !TowerRadar.Built) return "Retake raid: the east airfield is not loaded here.";
-            return Fly(Time.time, quick);
+            if (AirBusy()) return "Retake raid: the previous air operation is still active.";
+            string result = Fly(Time.time, quick);
+            if (_clock.Holder >= 0) _clock.Flown(Time.time, _settings);
+            PublishClock();
+            return result;
         }
 
         /// <summary>One line for the admin panel.</summary>
         internal static string Status()
         {
             if (CfgEnabled != null && !CfgEnabled.Value) return "Retake raids: off ([RetakeRaids] Enabled).";
-            if (!_wasMaster) return "Retake raids: (host)";
+            if (!_wasMaster && !_remoteClock) return "Retake raids: waiting for host clock.";
             if (!_settings.Enabled) return "Retake raids: off in the editor.";
-            if (_clock.Holder < 0) return "Retake raids: the garrison holds the airfield.";
+            RetakeClock c = _wasMaster ? _clock : _remote;
+            if (c.Holder < 0) return "Retake raids: the garrison holds the airfield.";
+            if (c.Next < 0f) return "Retake raids: off at the host.";
             float now = Time.time;
-            return "Retake raids: " + TowerRadar.SideLabel(_clock.Holder) + " hold it "
-                + _clock.HeldHours(now).ToString("0.0") + " h, " + _clock.Level + " raid(s), next "
-                + (_clock.Next < 0f ? "-" : Mathf.Max(0, Mathf.RoundToInt((_clock.Next - now) / 60f)) + " min");
+            if (c.AwaitClear) return "Retake raids: air operation active; quiet countdown starts after it clears.";
+            return "Retake raids: " + TowerRadar.SideLabel(c.Holder) + " hold it, " + c.Level + " raid(s), quiet for "
+                + Mathf.Max(0, Mathf.CeilToInt((c.Earliest - now) / 60f)) + " min, raid window ends in "
+                + Mathf.Max(0, Mathf.CeilToInt((c.Latest - now) / 60f)) + " min";
         }
     }
 }

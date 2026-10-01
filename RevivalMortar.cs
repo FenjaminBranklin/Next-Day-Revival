@@ -47,8 +47,8 @@
 // separate things make sure of it, in order of how much they are relied on:
 //
 //   1. EVERY NPC CASUALTY IS AN ANONYMOUS ONE. The kill is applied through
-//      NPC_AI2.ApplyDamage with damageOwnerId 0 (Turret.TryDamage fills every
-//      non-damage argument with its type default). Owner 0 is not a player:
+//      NPC_AI2.ApplyDamage with damageOwnerId 0 through the bounded W
+//      registry queue, on the NPC's Photon owner. Owner 0 is not a player:
 //      Revival.NpcCombat.cs:4260 states it plainly - "A real player id is NOT
 //      an option: kill credit, counter-attack and settlement hostility would
 //      all go to that player." Nobody is credited, so nothing can be held
@@ -2474,13 +2474,12 @@ namespace NextDayRevival
             int npc, veh, plr;
             Sweep(point, true, out npc, out veh, out plr);
 
-            // 3) The master owns the settlement NPCs. If we are not it, ask it
-            //    to run the same sweep for the ones it owns.
+            // 3) If we are not the master, ask it to queue NPCs/vehicles.
+            //    The W queue then delivers NPC damage to each health owner.
             if (!Master()) Net.SendImpact(point);
 
             RevivalPlugin.L.LogInfo("Mortar: impact at " + point.ToString("0")
-                + " r=" + Radius.ToString("0") + " - " + npc + " NPC, " + veh
-                + " vehicle, " + plr + " player hit.");
+                + " r=" + Radius.ToString("0") + " - registry damage queued.");
         }
 
         /// <summary>
@@ -2521,8 +2520,7 @@ namespace NextDayRevival
             Net.SendNpcImpact(point);
 
             RevivalPlugin.L.LogInfo("Mortar: NPC crew impact at " + point.ToString("0")
-                + " r=" + Radius.ToString("0") + " - " + npc + " NPC, " + veh
-                + " vehicle.");
+                + " r=" + Radius.ToString("0") + " - registry damage queued; player impact replicated.");
         }
 
         /// <summary>The blast on our OWN player, and on nobody else's. Called on
@@ -2530,22 +2528,7 @@ namespace NextDayRevival
         /// that fired it.</summary>
         internal static void Self(Vector3 point)
         {
-            try
-            {
-                GameObject me = MapTools.LocalPlayer();
-                if (me == null) return;
-                float d = Vector3.Distance(me.transform.position, point);
-                if (d > Radius) return;
-                float dmg = Mathf.Max(0f, F(_cfgPlayerDamage, 260f)) * Falloff(d, Radius);
-                if (dmg < 1f) return;
-                if (PlayerDamage(me, dmg, point))
-                    RevivalPlugin.L.LogInfo("Mortar: NPC crew shell caught us at "
-                        + d.ToString("0") + " m for " + dmg.ToString("0") + ".");
-            }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Mortar: own blast damage: " + ex.Message);
-            }
+            OrdnanceBlast.EnqueueOwnPlayer(point, Radius, Mathf.Max(0f, F(_cfgPlayerDamage, 260f)));
         }
 
         /// <summary>The impact sweep. <paramref name="shooter"/> is true on the
@@ -2562,120 +2545,20 @@ namespace NextDayRevival
                   out npcHits, out vehicleHits, out playerHits);
         }
 
-        /// <summary>The same sweep with its own radius and peaks: the An-2's
-        /// bombs (Revival.An2Bombs.cs) go off through exactly these rules -
-        /// owner 0 on NPCs, vehicles on the master, players from the shooter
-        /// and never one of his own faction.</summary>
-        /// <summary>N11: set around a Sweep by an NPC air strike, which is
-        /// nobody's faction - every player in the blast is hit.</summary>
+        /// <summary>The mortar's player faction policy. Other ordnance uses
+        /// its own shared queue entry point and default physical blast policy.</summary>
         internal static bool AnyFaction;
 
         internal static void Sweep(Vector3 point, bool shooter, float radius,
                                    float npcPeak, float vehiclePeak, float playerPeak,
                                    out int npcHits, out int vehicleHits, out int playerHits)
         {
-            npcHits = 0;
-            vehicleHits = 0;
-            playerHits = 0;
-            radius = Mathf.Max(0.5f, radius);
-            // W AA7: mod bombs, rockets and AT sweeps also damage fixed AA.
-            if (shooter) AirDefenceDamage.ReportBlast(point, radius, Mathf.Clamp(vehiclePeak / 700f, 0f, 2f));
-
-            // ---- NPCs. Turret.TryDamage fills every argument but the damage
-            //      with its type default, so damageOwnerId goes in as 0 - the
-            //      anonymous owner that is credited to nobody.
-            if (LookUp() && _npcType != null)
-            {
-                float peak = npcPeak;
-                UnityEngine.Object[] all = NpcScan.All();
-                for (int i = 0; i < all.Length; i++)
-                {
-                    Component ai = all[i] as Component;
-                    if (ai == null || ai.gameObject == null) continue;
-                    float d = Vector3.Distance(ai.transform.position, point);
-                    if (d > radius) continue;
-                    // W AA4: a gun crew in its sandbag ring dies only from a
-                    // bomb in the pit, not from a carpet beside it.
-                    if (AirKills.Sheltered(ai.transform.position, point)) continue;
-                    if (!Alive(ai) || !Hurtable(ai)) continue;
-                    float dmg = peak * Falloff(d, radius);
-                    if (dmg < 1f) continue;
-                    BreakKillStreak(ai);
-                    try
-                    {
-                        if (Turret.TryDamage(ai.gameObject, "NPC_AI2", "ApplyDamage", dmg))
-                            npcHits++;
-                    }
-                    catch (Exception ex)
-                    {
-                        // The man is dead either way - DecreaseHealth runs before
-                        // the statistics do. Never let one casualty end the sweep,
-                        // or the rest of the beaten zone survives the bomb.
-                        if (!_streakWarned)
-                        {
-                            _streakWarned = true;
-                            RevivalPlugin.L.LogWarning("Mortar: NPC_AI2.ApplyDamage threw - "
-                                + ex.Message);
-                        }
-                    }
-                }
-            }
-
-            // ---- Vehicles, master only. Part type 14 is the explosion part, the
-            //      same one the anti-tank mine uses - so VehicleArmor re-balances
-            //      a tank hit exactly as it does for every other blast.
-            if (Master())
-            {
-                float peak = vehiclePeak;
-                Type vgs = RevivalPlugin.TypeByName("VehicleGameSystem");
-                MethodInfo apply = vgs == null ? null : AccessTools.Method(vgs, "ApplyDamage",
-                    new Type[] { typeof(float), typeof(int) }, null);
-                if (apply != null)
-                {
-                    Component[] cars = VehicleScan.All();
-                    for (int i = 0; i < cars.Length; i++)
-                    {
-                        Component c = cars[i];
-                        if (c == null) continue;
-                        float d = Vector3.Distance(c.transform.position, point);
-                        if (d > radius) continue;
-                        float dmg = peak * Falloff(d, radius);
-                        if (dmg < 1f) continue;
-                        try { apply.Invoke(c, new object[] { dmg, 14 }); vehicleHits++; }
-                        catch (Exception ex)
-                        {
-                            RevivalPlugin.L.LogWarning("Mortar: vehicle damage: " + ex.Message);
-                        }
-                    }
-                }
-            }
-
-            // ---- Players, shooter only, and never one of our own faction.
-            if (shooter)
-            {
-                float peak = playerPeak;
-                List<GameObject> players = Players();
-                for (int i = 0; i < players.Count; i++)
-                {
-                    GameObject go = players[i];
-                    if (go == null) continue;
-                    float d = Vector3.Distance(go.transform.position, point);
-                    if (d > radius) continue;
-                    if (AirKills.Sheltered(go.transform.position, point)) continue;   // W AA4: gun pit
-                    // THE FACTION RULE for players. A man of our own faction is
-                    // not hit at all - the only way to be certain his death can
-                    // never be booked against us. Where a faction cannot be read
-                    // on either side the shot goes through: "unknown" is not
-                    // "ours", and refusing every unreadable player would quietly
-                    // turn the mortar into a blank.
-                    // N11 air strikes (Revival.AirEvents.cs) belong to no player
-                    // faction: the master sweeps every player in the blast.
-                    if (!AnyFaction && FactionShield.SameFactionAsLocal(go)) continue;
-                    float dmg = peak * Falloff(d, radius);
-                    if (dmg < 1f) continue;
-                    if (PlayerDamage(go, dmg, point)) playerHits++;
-                }
-            }
+            // One bounded registry traversal on the master for NPCs/vehicles;
+            // only the firing client sends players their owner RPCs. The NPC
+            // crew's player path remains Self on each receiving client.
+            OrdnanceBlast.EnqueueMortar(point, shooter, radius, npcPeak, vehiclePeak, playerPeak, AnyFaction);
+            // Results are asynchronous, so these are no longer immediate hit counts.
+            npcHits = 0; vehicleHits = 0; playerHits = 0;
         }
 
         /// <summary>Linear to zero at the rim. Simple on purpose: a curve nobody
@@ -2693,7 +2576,7 @@ namespace NextDayRevival
         /// <summary>Damage on a player the way the game does it: health lives on
         /// the victim's own client, so this is an RPC, not a call on our copy.
         /// The argument list is the one FireOneShot uses (Revival.Patrol.cs:4459):
-        /// damage, body part 0, damage kind 4, hit point, shooter position.</summary>
+        /// damage, body part 1, explosion kind 14, hit point, blast position.</summary>
         static bool PlayerDamage(GameObject victimGo, float damage, Vector3 point)
         {
             if (!DamageLookUp()) return false;
@@ -2707,7 +2590,7 @@ namespace NextDayRevival
                 if (view == null) return false;
                 _rpc.Invoke(view, new object[] {
                     "PlayerApplyDamage", victim,
-                    new object[] { damage, 0, 4, point, point + Vector3.up * 50f } });
+                    new object[] { damage, OrdnanceBlast.Body, OrdnanceBlast.Explosion, point, point } });
                 return true;
             }
             catch (Exception ex)
@@ -3642,7 +3525,7 @@ namespace NextDayRevival
                     int npc, veh, plr;
                     Sweep(point, false, out npc, out veh, out plr);
                     RevivalPlugin.L.LogInfo("Mortar: impact from player #" + sender
-                        + " applied - " + npc + " NPC, " + veh + " vehicle.");
+                        + " - NPC/vehicle registry damage queued.");
                 }
                 catch (Exception ex)
                 {

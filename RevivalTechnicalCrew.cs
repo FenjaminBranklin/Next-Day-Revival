@@ -213,6 +213,7 @@ namespace NextDayRevival
             public bool Asked;
             public int Tries;
             public float NextTry;
+            public float NextHold;
             public bool Released;                // the men are the wreck crew now
 
             // every client
@@ -834,7 +835,16 @@ namespace NextDayRevival
                     Truck t = _trucks[i];
                     if (t.Vgs == null || t.Root == null || t.Released) continue;
                     if (master) Zielen(t);
-                    Halten(t);
+                    // SeatBinding carries riders with the hull every frame.
+                    // Navigation/intentions only need renewing before the 1.4 s pause ends.
+                    if (Time.time >= t.NextHold)
+                    {
+                        t.NextHold = Time.time + 0.2f + (i % 4) * 0.01f;
+                        Halten(t);
+                    }
+                    else if (PoseNear(t.Root.position))
+                        for (int k = 0; k < t.Cab.Count; k++)
+                            if (t.Cab[k] != null) Sitzen(t.Cab[k], k);
                 }
             }
             catch (Exception ex)
@@ -888,6 +898,21 @@ namespace NextDayRevival
         {
             return ai != null && ai.gameObject.activeInHierarchy
                 && NpcWar.GroundAlive(ai);
+        }
+
+        static float _poseCameraAt;
+        static Vector3 _poseCamera;
+        static bool _poseCameraOk;
+        internal static bool PoseNear(Vector3 position)
+        {
+            if (Time.time >= _poseCameraAt)
+            {
+                _poseCameraAt = Time.time + 0.2f;
+                Camera cam = CameraOwner.ViewCamera();
+                _poseCameraOk = cam != null;
+                if (_poseCameraOk) _poseCamera = cam.transform.position;
+            }
+            return _poseCameraOk && (position - _poseCamera).sqrMagnitude < 420f * 420f;
         }
 
         /// <summary>Is this man still alive at all - the question Patrol's
@@ -1284,6 +1309,7 @@ namespace NextDayRevival
         {
             try
             {
+                if (ai == null || !PoseNear(ai.transform.position)) return;
                 if (!SitClips()) return;
                 UnityEngine.Object clip = seat == 0 ? _clipDriver : _clipPassenger;
                 if (clip == null) clip = _clipBench;

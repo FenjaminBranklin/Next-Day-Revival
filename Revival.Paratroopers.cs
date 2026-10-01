@@ -2,6 +2,7 @@
 // No cloned character, skin replacement, per-frame animation or scene scan.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -13,6 +14,9 @@ namespace NextDayRevival
     {
         const string HangName = "ndr_paratrooper_hang";
         static readonly Dictionary<Component, ParaPose> Held = new Dictionary<Component, ParaPose>();
+        static readonly List<ParaPose> Prepared = new List<ParaPose>();
+        static int _preparedCursor;
+        static int _refreshFrame = -1;
         static Type _npcType, _viewType;
         static MethodInfo _findView, _destroy, _activate, _visualize;
         static Func<double> _clock;
@@ -35,6 +39,51 @@ namespace NextDayRevival
         bool _agentEnabled, _kinematic, _animationEnabled, _animatorEnabled;
         bool _ready, _released, _visible;
         float _readyAt;
+        bool _preparing = true;
+        double _expires;
+        bool _remoteContext;
+        CrewReplica _replica;
+
+        internal bool Ready { get { return _ready; } }
+        internal static bool HasPrepared { get { return Prepared.Count > 0; } }
+        internal void Use() { _preparing = false; }
+
+        internal static void PreparedSpawn(Component ai, object[] data, bool remote)
+        {
+            if (data == null || data.Length != 11) return;
+            string key = data[10] as string;
+            const string prefix = "ndr-ground-1:para/";
+            if (key == null || !key.StartsWith(prefix, StringComparison.Ordinal)) return;
+            double expiry;
+            if (!double.TryParse(key.Substring(prefix.Length), NumberStyles.Float,
+                CultureInfo.InvariantCulture, out expiry)) return;
+            Install();
+            ParaPose p = Hold(ai);
+            if (p != null) { p._expires = expiry; p._remoteContext = remote; }
+        }
+
+        // One cached body per frame, including peers that receive warning-time
+        // Photon spawns. Ready bodies need no further discovery or sampling.
+        internal static void TickPrepared()
+        {
+            if (Prepared.Count == 0) return;
+            if (_preparedCursor >= Prepared.Count) _preparedCursor = 0;
+            ParaPose p = Prepared[_preparedCursor];
+            if (p.Gone || !p._preparing)
+            {
+                if (p.Gone) p.Release(false);
+                Prepared.RemoveAt(_preparedCursor);
+                return;
+            }
+            if (Clock() > p._expires)
+            {
+                if (MasterClient()) { p.DestroyAboard(); Prepared.RemoveAt(_preparedCursor); }
+                else _preparedCursor++;
+                return;
+            }
+            _preparedCursor++;
+            if (!p._ready) p.Refresh();
+        }
 
         internal static void Install()
         {
@@ -47,7 +96,7 @@ namespace NextDayRevival
             {
                 MethodInfo m = AccessTools.Method(_npcType, methods[i], null, null);
                 if (m == null) throw new MissingMethodException("NPC_AI2", methods[i]);
-                h.Patch(m, new HarmonyMethod(typeof(ParaPose).GetMethod("RunPrefix")), null, null, null, null);
+                h.Patch(m, new HarmonyMethod(typeof(ParaPose).GetMethod(i == 0 ? "RunPrefix" : "SwitchPrefix")), null, null, null, null);
             }
             MethodInfo state = AccessTools.Method(_npcType, "SetStateWithAnimAndSync", null, null);
             if (state == null) throw new MissingMethodException("NPC_AI2", "SetStateWithAnimAndSync");
@@ -69,6 +118,15 @@ namespace NextDayRevival
         {
             Component ai = __instance as Component;
             return Held.Count == 0 || ai == null || !Held.ContainsKey(ai);
+        }
+
+        // Native setup/peer repair must finish before the pose is ready. Update
+        // remains blocked throughout, so a staged body never starts ground AI.
+        public static bool SwitchPrefix(object __instance)
+        {
+            ParaPose p;
+            Component ai = __instance as Component;
+            return ai == null || !Held.TryGetValue(ai, out p) || !p._ready;
         }
 
         public static bool VisualPrefix(object __instance, bool __0)
@@ -119,6 +177,7 @@ namespace NextDayRevival
             if (Held.TryGetValue(ai, out p)) return p;
             p = new ParaPose(ai);
             Held.Add(ai, p);
+            Prepared.Add(p);
             return p;
         }
 
@@ -135,6 +194,7 @@ namespace NextDayRevival
             CaptureRenderers();
             // Native Start and the remote appearance repair must run first.
             _readyAt = Time.time + 0.5f;
+            _expires = Clock() + 120.0;
         }
 
         void CaptureRenderers()
@@ -154,8 +214,17 @@ namespace NextDayRevival
         internal void Refresh()
         {
             if (Gone) return;
+            // Do not freeze the native switches before CrewReplica has rebuilt
+            // the peer's settlement, collision and weapon context.
+            if (_remoteContext && !_ready)
+            {
+                if (_replica == null) _replica = Ai.GetComponent<CrewReplica>();
+                if (_replica == null || (!_replica.Ready && !_replica.Abandoned)) return;
+            }
             if (!NpcWar.GroundAlive(Ai)) { Release(false); return; }
             if (_ready || Time.time < _readyAt) return;
+            if (_refreshFrame == Time.frameCount) return;
+            _refreshFrame = Time.frameCount;
             _readyAt = Time.time + 0.1f;
             _animation = Ai.GetComponentInChildren<Animation>();
             if (_animation == null) return;
@@ -170,6 +239,10 @@ namespace NextDayRevival
                 if (_clip == null) RevivalPlugin.L.LogWarning("Paratroopers: game parachute pose clip missing.");
             }
             if (_clip == null) return;
+            // Start/remote repair may have restored native navigation while
+            // the held pose was still being initialized.
+            if (_agent != null) _agent.enabled = false;
+            if (_rigidbody != null) _rigidbody.isKinematic = true;
             CaptureRenderers();
             _animationEnabled = _animation.enabled;
             _animator = Ai.GetComponentInChildren<Animator>();
@@ -239,6 +312,10 @@ namespace NextDayRevival
             if (_released) return;
             SeatBinding.Detach(Root);
             _released = true;
+            _preparing = false;
+            // Landing retains the known native contact for remote ground
+            // targeting; death/cancelled drops remove it immediately.
+            if (!landed) MercParas.Forget(Ai);
             Held.Remove(Ai);
             if (CanopyObject != null) UnityEngine.Object.Destroy(CanopyObject);
             CanopyObject = null;

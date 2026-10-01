@@ -12,6 +12,10 @@
 //   COVER     on contact he SPRINTS to the cover the M1 sense picked (hides a
 //             crouching man from the primary threat, ranked over all
 //             threats). There he crouches, facing the threat.
+//   K3b       supported lateral peeks slowly strafe while firing, turn after
+//             a varied real-shot window or before the M1 endpoint, and fire
+//             on the return. Unsupported/vertical/suppression peeks use the
+//             original planted path below. No extra scene queries or tick.
 //   PEEK      after a varied wait he steps to a peek spot (LEFT / RIGHT of the
 //             face, or stands up behind a low one: OVER), fires one short
 //             burst once his feet are planted and he sees a target, and goes
@@ -103,6 +107,11 @@ namespace NextDayRevival
         public bool Sees;               // and a line of fire to it
         public float LastSeen;          // when he last had that line
         public bool Planted;            // feet planted in the standing aim clip (ready to fire)
+        public bool MoveShoot;          // K3a: proven gait is available for a continuous peek
+        public int MovingShots;         // successful moving rounds, never inferred from sight
+        public bool Attack, AttackMove; // K4a: calm fire and movement toward the explicit order
+        public bool AttackRear;         // marksman regains rear overwatch while facing the enemy
+        public Vector3 AttackDest;
         public float Health;            // 0..1
         public bool HasMedkit;
         public float MedkitSeconds;
@@ -123,6 +132,9 @@ namespace NextDayRevival
         public bool Lanes;              // he steps out of the owner's held aim and his mates' live lines
         public bool OwnerAims;          // the owner holds his aim: AimFrom -> AimTo is his line of fire
         public Vector3 AimFrom, AimTo;
+        // Z K1b: a short validated move to a lane; fire at its first opening.
+        public bool PositionMove, PositionFire;
+        public Vector3 PositionDest;
     }
 
     /// <summary>What he does until the next Think.</summary>
@@ -139,6 +151,7 @@ namespace NextDayRevival
         // M3
         public bool NoShot;             // Fire: aim, do not fire - a mate or the owner is in the line
         public bool Suppress;           // Fire: covering fire at Face while the target is out of sight
+        public bool FireOnMove;         // Z K1b: native upper-body fire during the short lane move
         public bool AnchorOn;           // the sense searches cover from Anchor instead of his spot
         public Vector3 Anchor;          //   (a flank, the fall-back on the owner, a retreat)
     }
@@ -163,8 +176,9 @@ namespace NextDayRevival
         internal const byte Off = 0, Dash = 1, Hide = 2, PeekOut = 3, Burst = 4, PeekBack = 5,
             Reloading = 6, Healing = 7, Evade = 8, Flee = 9;
         internal const byte Snap = 10;    // merc-combat-response: up, firing from where he stands
+        internal const byte AttackFire = 11;
         static readonly string[] Names =
-            { "OFF", "DASH", "HIDE", "PEEK", "BURST", "BACK", "RELOAD", "HEAL", "EVADE", "FLEE", "SNAP" };
+            { "OFF", "DASH", "HIDE", "PEEK", "BURST", "BACK", "RELOAD", "HEAL", "EVADE", "FLEE", "SNAP", "ADVANCE FIRE" };
         internal static string Name(byte s) { return s < Names.Length ? Names[s] : "?"; }
 
         internal const float ThinkEvery = 0.1f;
@@ -263,6 +277,11 @@ namespace NextDayRevival
         float _nextThink, _lastThink, _dt, _until, _nextPeek, _fired, _burstLen, _upSince;
         float _plantedAt, _seenAt, _lastEngaged, _lastHit = -1000f, _pressure, _estFired, _nextClaim, _nextHeal, _kickAt;
         int _hits, _sameSide, _blindPeeks, _evadeSign = 1;
+        int _peekShots;
+        float _peekSpeed = 3f, _turnAfter = 0.3f, _firstPeekShot = -1f;
+        // K3b: only the outward part is deliberately slow (about 1 m/s).
+        // Returning under fire uses K3a's full walking speed.
+        internal float WalkingPeekSpeed { get { return State == PeekOut && !_suppress ? _peekSpeed : 4.2f; } }
         byte _hitSide;
         bool _evadeUp;
         Vector3 _bad0, _bad1, _lastThreat, _prevMe;
@@ -289,7 +308,7 @@ namespace NextDayRevival
         /// <summary>Up at a peek or firing: exposed on purpose.</summary>
         internal bool Up
         {
-            get { return State == PeekOut || State == Burst || State == PeekBack || State == Snap || (State == Evade && _evadeUp); }
+            get { return State == PeekOut || State == Burst || State == PeekBack || State == Snap || State == AttackFire || (State == Evade && _evadeUp); }
         }
 
         /// <summary>Crouched at his cover point (hidden if the cover holds).</summary>
@@ -342,12 +361,14 @@ namespace NextDayRevival
             Order = o;
             if (Squad != null)
             {
-                bool moving = State == Dash || State == Flee || State == Evade || _laneOn;
+                bool moving = State == Dash || State == Flee || State == Evade || _laneOn
+                    || i.PositionMove || (i.MoveShoot && o.Act == FightAct.Step);
                 Squad.Post(_id, i.Now, i.Me, State != Off, State != Off && State != Dash && Cover.Found,
                     Cover.Point.Pos, Up, moving, _call, i.Sees, i.Count > 0,
                     i.Count > 0 ? i.Threats[0] : _lastThreat, i.Health, Mode);
                 // Lanes: up and aiming at a target (not a covering burst at a spot).
-                bool lane = Up && i.Target && i.Count > 0 && o.Act == FightAct.Fire;
+                bool lane = Up && i.Target && i.Count > 0 && (o.Act == FightAct.Fire
+                    || (i.MoveShoot && o.Act == FightAct.Step && i.Sees));
                 Squad.PostLane(_id, i.Now, lane, lane ? i.Threats[0] : i.Me, _laneOn);
             }
         }
@@ -491,7 +512,8 @@ namespace NextDayRevival
             // M3: a threat that saw him keeps the fight on like a target he
             // saw (a group he cannot see from his cover is still there).
             if (i.Exposed && fresh && i.Count > 0) _lastSpotted = now;
-            bool own = (i.Count > 0 && (i.Sees || (i.Target && now - i.LastSeen < i.Disengage) || (i.Exposed && fresh)
+            bool own = (i.Count > 0 && (i.Sees || i.PositionMove || i.PositionFire
+                    || (i.Target && now - i.LastSeen < i.Disengage) || (i.Exposed && fresh)
                     || now - _lastSpotted < i.Disengage))
                 || now - _lastHit < 3f || danger;
             // M3: a mate who sees a threat calls it out.
@@ -507,6 +529,15 @@ namespace NextDayRevival
             // fire, in a fight or not (a grenade comes first).
             if (i.Lanes && !danger && Lanes(ref i, field, ref o, fight)) return;
             if (!fight) return;
+            // Orders keep their direction. Sight/exposure alone is not incoming
+            // fire; pressure, wounds, empty weapons and danger invoke M1/M2.
+            if (i.Attack && Attack(ref i, field, ref o, danger)) return;
+            if (State == AttackFire)
+            {
+                if (danger) StartFlee(ref i, field, ref o);
+                else { Team(ref i, ref o); Choose(ref i, ref o); }
+                return;
+            }
             if (State == Off)
             {
                 _blindPeeks = 0;
@@ -542,6 +573,20 @@ namespace NextDayRevival
             }
             Team(ref i, ref o);
 
+            // Friends, commands, danger and team retreat have already run.
+            // A blocked building face must not trap him in repeated blind peeks.
+            if (Mode == Normal && !i.Reloading && !NeedReload(ref i)
+                && State != Healing && State != Reloading && State != Flee)
+            {
+                if (i.PositionMove)
+                {
+                    o.Act = FightAct.Step; o.Dest = i.PositionDest; o.FireOnMove = i.PositionFire;
+                    o.Face = Primary(ref i); _call = true;
+                    return;
+                }
+                if (i.PositionFire) { StartSnap(ref i, ref o); return; }
+            }
+
             switch (State)
             {
                 case Dash: StepDash(ref i, field, ref o); break;
@@ -555,6 +600,58 @@ namespace NextDayRevival
                 case Flee: StepFlee(ref i, ref o); break;
                 case Snap: StepSnap(ref i, ref o, hit); break;
             }
+        }
+
+        /// <summary>K4a: fire continuously while the situation permits a bound.
+        /// Coverers fire from their lane; runners keep the K3 walking aim.</summary>
+        bool Attack(ref FightIn i, CoverField field, ref FightOut o, bool danger)
+        {
+            if (danger || UnderFire(ref i) || Mode != Normal || i.Health < RetreatUntil
+                || i.Reloading || NeedReload(ref i) || State == Healing || State == Reloading
+                || State == Flee || !i.Target || !i.Sees || i.Count == 0) return false;
+            if (State == AttackFire && Order.Act == FightAct.Step && Stuck(ref i))
+            {
+                o.Repick = true;
+                Relocate(ref i, field, ref o);
+                return true;
+            }
+            if (State != AttackFire)
+            {
+                if (State == Off)
+                {
+                    _fightStart = i.Now; _coverSince = i.Now;
+                    _blindPeeks = 0; _selfSteps = 0;
+                }
+                if (field != null) field.Release(_id);
+                Cover = new CoverPick(); _anchorOn = false; _plan = PlanNone; _suppress = false;
+                Enter(AttackFire, i.Now);
+            }
+            FightTime += _dt;
+            if (i.MaxRounds <= 0) _estFired += _dt * RoundsPerSecond;
+            o.Face = Primary(ref i);
+            o.NoShot = FriendInLine(ref i, i.Me, o.Face);
+            o.Act = FightAct.Fire;
+            _blockedFor = o.NoShot ? _blockedFor + _dt : 0f;
+            if (o.NoShot && _blockedFor > BlockCap(i.Now))
+            {
+                if (SelfStep(ref i, ref o, o.Face)) return true;
+                Choose(ref i, ref o);
+                return true;
+            }
+            // Do not cross another live firing lane or walk past a visible
+            // enemy. Finish this fight if he is already beside/behind us.
+            Vector3 move = i.AttackDest - i.Me; move.y = 0f;
+            float distance = Flat(move);
+            if (!i.AttackMove || !i.MoveShoot || o.NoShot || distance <= 0.3f) return true;
+            Vector3 enemy = o.Face - i.Me; enemy.y = 0f;
+            float ahead = Vector3.Dot(enemy, move / distance) - 7f;
+            if (i.AttackRear && ahead < -7f) ahead = distance;
+            if (ahead <= 0.3f) return true;
+            Vector3 dest = i.Me + move * (Mathf.Min(distance, ahead) / distance);
+            if (LaneBad(ref i, dest)) return true;
+            o.Act = FightAct.Step; o.Dest = dest; Dest = dest;
+            _call = true;
+            return true;
         }
 
         /// <summary>The fight is over (or he left it for his order): his claim
@@ -932,7 +1029,9 @@ namespace NextDayRevival
             Enter(Hide, i.Now);
             _alarmAt = 0f;
             // Just arrived: a short look first; back from a peek: the drawn wait.
-            _nextPeek = i.Now + (arrived ? Range(0.3f, 0.8f) * Pace() : HideTime());
+            bool fluid = !arrived && i.MoveShoot && Cover.Confirmed && !i.Survive && Mode == Normal;
+            _nextPeek = i.Now + (fluid ? Range(0.25f, 0.65f) * Pace() * (1f + _pressure)
+                : arrived ? Range(0.3f, 0.8f) * Pace() : HideTime());
             HoldLow(ref i, ref o);
         }
 
@@ -1170,6 +1269,14 @@ namespace NextDayRevival
                 PeekAt = at;
                 Peeks++;
                 _fired = 0f;
+                _peekShots = i.MovingShots;
+                _firstPeekShot = -1f;
+                if (i.MoveShoot && Cover.Confirmed && !covering && !i.Survive
+                    && Flat(at - Cover.Point.Pos) >= 0.6f)
+                {
+                    _peekSpeed = Range(2.5f, 3.4f);
+                    _turnAfter = Range(0.22f, 0.42f);
+                }
                 _plantedAt = 0f;
                 _seenAt = 0f;
                 _upSince = i.Now;
@@ -1187,7 +1294,7 @@ namespace NextDayRevival
                     return true;
                 }
                 Enter(PeekOut, i.Now);
-                _until = i.Now + 0.8f + Flat(at - i.Me) / 4f;
+                _until = i.Now + 0.8f + Flat(at - i.Me) / (i.MoveShoot && !covering ? _peekSpeed : 4f);
                 o.Act = FightAct.Step;
                 o.Dest = at;
                 return true;
@@ -1199,8 +1306,35 @@ namespace NextDayRevival
         void StepPeekOut(ref FightIn i, ref FightOut o, bool hit)
         {
             if (hit && !ShrugOff(ref i)) { _hitSide = PeekSide; LastSide = PeekSide; StartBack(ref i, ref o); return; }
+            // Native reload disables MoveShoot in the adapter input. Return
+            // before that capability gate, rather than continuing out unarmed.
+            if (i.Reloading || (i.MaxRounds > 0 && i.Rounds <= 1))
+            { LastSide = PeekSide; StartBack(ref i, ref o); return; }
             o.Face = Primary(ref i);
             float d = Flat(PeekAt - i.Me);
+            // K3b: fire throughout a slow outward strafe, then reverse before
+            // the agent stops. Time the short open window from a REAL round,
+            // not from leaving cover or merely seeing a target. The proven M1
+            // endpoint is the limit: never extend into unmeasured geometry.
+            if (i.MoveShoot && Cover.Confirmed && !_suppress && !i.Survive)
+            {
+                bool fired = i.MovingShots > _peekShots;
+                if (fired && _firstPeekShot < 0f) _firstPeekShot = i.Now;
+                bool blocked = FriendInLine(ref i, i.Me, Primary(ref i));
+                if (blocked) { _blockedFor += _dt; HeldFire++; } else _blockedFor = 0f;
+                // One Think of travel plus arrival margin anticipates the stop.
+                bool edge = d <= ArrivePeek + _peekSpeed * ThinkEvery;
+                if (edge || (fired && i.Now - _firstPeekShot >= _turnAfter)
+                    || _blockedFor > BlockCap(i.Now) || i.Now >= _until)
+                {
+                    if (fired) { Bursts++; _blindPeeks = 0; }
+                    else { Blind++; _blindPeeks++; }
+                    LastSide = PeekSide; StartBack(ref i, ref o); return;
+                }
+                o.Act = FightAct.Step; o.Dest = PeekAt;
+                o.NoShot = blocked;
+                return;
+            }
             if (d < ArrivePeek || (d < PeekStall && _moved < 0.1f && i.Now - Since > 0.25f))
             {
                 Enter(Burst, i.Now);

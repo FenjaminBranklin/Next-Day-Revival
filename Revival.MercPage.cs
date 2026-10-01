@@ -113,17 +113,17 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ cards (hire)
 
-        const float CardH = 214f;
+        const float CardH = 236f;
         const float RowH = 136f;
-        const float StripH = 62f;
+        const float StripH = 96f;
 
         sealed class Card
         {
             internal Mercs.Profile P;
             internal string Name, Price, Upkeep, Weapon, Armour, Tier, Number, HireText, ConfirmText, Where;
             internal int TierN;
-            internal readonly string[] Chips = new string[3];
-            internal readonly string[] ChipTips = new string[3];
+            internal readonly string[] Chips = new string[4];
+            internal readonly string[] ChipTips = new string[4];
             internal int ChipCount;
         }
 
@@ -170,15 +170,16 @@ namespace NextDayRevival
                 if (p.Tanky > 0) AddChip(k, Loc.T("Живучесть +", "Tough +") + p.Tanky + "%",
                     Loc.T("Здоровье +", "Health +") + p.Tanky + Loc.T("%, броня держит ещё ", "%, armour stops a further ")
                     + (p.Tanky / 2) + "%");
-                if (p.AAGunner > 0) AddChip(k, Loc.T("Зенитчик +", "AA gunner +") + p.AAGunner + "%",   // W-AA3
-                    Loc.T("Лучше за зенитной пушкой: +", "Better on an AA gun: +") + p.AAGunner + "%");
+                if (p.AAGunner > 0) AddChip(k, Loc.T("Зенитчик ", "Flak gunner ") + p.AAGunner + "/50",
+                    Loc.T("Точнее наводит 52-К, быстрее корректирует огонь и точнее ставит взрыватель. 25 - стандартный специалист. Исправный радар с оператором усиливает всю батарею.",
+                        "Steadier 52-K aim, faster bracketing and tighter fuze timing. 25 is the standard specialist. A working, manned radar improves the whole battery."));
                 _cards.Add(k);
             }
         }
 
         static void AddChip(Card k, string text, string tip)
         {
-            if (k.ChipCount >= 3) return;
+            if (k.ChipCount >= k.Chips.Length) return;
             k.Chips[k.ChipCount] = text; k.ChipTips[k.ChipCount] = tip; k.ChipCount++;
         }
 
@@ -384,16 +385,18 @@ namespace NextDayRevival
             UiKit.Label(new Rect(tx, y + S(42f), tw, S(20f)), k.Price, UiFont.Heading, UiFont.Left, UiKit.Warn);
             y += S(68f);
 
-            // Traits as percent buffs.
+            // Percentage buffs and the Flak gunner's calibration strength.
             Rect chips = new Rect(x, y, w, S(18f));
             if (k.ChipCount == 0) UiKit.Chip(UiKit.Col(chips, 0, 3), Loc.T("без навыков", "no traits"), UiTone.Info);
+            int columns = k.ChipCount > 3 ? 2 : 3;
             for (int i = 0; i < k.ChipCount; i++)
             {
-                Rect cr = UiKit.Col(chips, i, 3);
+                Rect cr = UiKit.Col(chips, i % columns, columns);
+                cr.y += S(22f) * (i / columns);
                 UiKit.Chip(cr, k.Chips[i], UiTone.Success);
                 UiKit.Tip(cr, k.ChipTips[i]);
             }
-            y += S(24f);
+            y += S(k.ChipCount > 3 ? 46f : 24f);
             UiKit.Label(new Rect(x, y, w, S(18f)), k.Upkeep, UiFont.Small, UiFont.Left, UiKit.TextDim);
             y += S(18f);
             UiKit.Label(new Rect(x, y, w, S(18f)), k.Weapon, UiFont.Body, UiFont.Left, UiKit.Text);
@@ -612,19 +615,19 @@ namespace NextDayRevival
             // Line 4: Locate, Order, Pay, Dismiss, native medkit gift.
             Rect btns = new Rect(x, y, w, S(26f));
             bool spawned = m.Unit != null && m.Unit.Ai != null;
-            if (UiKit.Button(UiKit.Col(btns, 0, 5), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
+            if (UiKit.Button(UiKit.Col(btns, 0, 6), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
                 Loc.T("Отметить на карте и на экране на 30 с", "Mark him on the map and on screen for 30 s")))
                 Locate(m, row, lang);
             bool open = _orderFor == m.Id;
-            if (UiKit.Button(UiKit.Col(btns, 1, 5), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
+            if (UiKit.Button(UiKit.Col(btns, 1, 6), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
                 UiButton.Secondary, !deserting, null))
             { _orderFor = open ? NoRow : m.Id; _orderAll = false; MercUi.Reply(); }
             bool canPay = m.Unpaid && !m.PayPending && !m.PayWanted && !deserting;
-            if (UiKit.Button(UiKit.Col(btns, 2, 5), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
+            if (UiKit.Button(UiKit.Col(btns, 2, 6), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
                 canPay ? UiButton.Primary : UiButton.Secondary, canPay, null))
             { MercUi.Reply(); Mercs.Pay(m, true); }
             bool armed = _dismissId == m.Id && now < _dismissUntil;
-            if (UiKit.Button(UiKit.Col(btns, 3, 5), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
+            if (UiKit.Button(UiKit.Col(btns, 3, 6), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
                 UiButton.Danger, true, Loc.T("Без возврата денег; второй щелчок увольняет", "No refund; a second click dismisses")))
             {
                 MercUi.Reply();
@@ -638,10 +641,14 @@ namespace NextDayRevival
                     return true;
                 }
             }
-            if (UiKit.Button(UiKit.Col(btns, 4, 5), Mercs.MedkitLabel(m),
+            if (UiKit.Button(UiKit.Col(btns, 4, 6), Mercs.MedkitLabel(m),
                 UiButton.Secondary, Mercs.CanGiveMedkit(m),
-                Loc.T("Дать аптечку из рюкзака (10 м); оплата пополняет запас",
+                m.Down.Down ? Loc.T("Оживить аптечкой из рюкзака (3 м); оставайтесь рядом", "Revive with an inventory medkit within 3 m; stay nearby")
+                : Loc.T("Дать аптечку из рюкзака (10 м); оплата пополняет запас",
                     "Give one native medkit within 10 m; upkeep refills supplies"))) Mercs.GiveMedkit(m);
+            if (UiKit.Button(UiKit.Col(btns, 5, 6), Mercs.MedicLabel(m), UiButton.Secondary, Mercs.CanMedic(m),
+                Loc.T("Дополнительная роль: сражается, спасает раненых, расходует аптечки", "Extra duty: fights, rescues and treats allies using finite medkits")))
+                Mercs.SetMedic(m, !m.Medic);
             if (open)
             {
                 y += S(26f) + S(UiKit.Gap);
@@ -670,6 +677,9 @@ namespace NextDayRevival
         static string OrderText(Mercs.Record m)
         {
             MercOrder o = m.Order;
+            if (o.Survive) return Loc.T("В укрытии", "Taking cover");
+            if (o.Mode == MercOrder.ManGun) return Loc.T("У пушки", "Manning gun");
+            if (o.Mode == MercOrder.ManRadar) return Loc.T("У радара", "Manning radar");
             string t;
             switch (o.Mode)
             {
@@ -760,6 +770,10 @@ namespace NextDayRevival
             float bh = S(28f), g = S(6f);
             Rect r1 = new Rect(r.x, r.y, r.width, bh), r2 = new Rect(r.x, r.y + bh + g, r.width, bh);
             int act = -1;
+            Rect r3 = new Rect(r.x, r.y + (bh + g) * 2f, r.width, bh);
+            if (UiKit.Button(UiKit.Col(r3, 0, 3), Loc.T("В укрытие", "Take cover"), UiButton.Secondary, true, null)) act = 6;
+            if (UiKit.Button(UiKit.Col(r3, 1, 3), Loc.T("К пушкам", "Man guns"), UiButton.Secondary, true, null)) act = 7;
+            if (UiKit.Button(UiKit.Col(r3, 2, 3), Loc.T("К радару", "Man radar"), UiButton.Secondary, true, null)) act = 8;
             if (UiKit.Button(UiKit.Col(r1, 0, 3), Loc.T("За мной", "Follow me"), UiButton.Secondary, true, null)) act = 0;
             if (UiKit.Button(UiKit.Col(r1, 1, 3), Loc.T("Стоять здесь", "Stay here"), UiButton.Secondary, true,
                 Loc.T("Держать ваше текущее место", "Hold your current spot"))) act = 1;
@@ -801,6 +815,9 @@ namespace NextDayRevival
                     case 3: Mercs.OrderPatrol(new List<Vector3>()); break;
                     case 4: if (o != null) Mercs.OrderPerimeter(o.transform.position, o.transform.forward); break;
                     case 5: Mercs.TogglePeaceful(); break;
+                    case 6: Mercs.OrderRaidCover(); break;
+                    case 7: Mercs.OrderRaidGuns(); break;
+                    case 8: Mercs.OrderAAPost(true, Mercs.OwnerPosition); break;
                 }
             }
             finally

@@ -15,6 +15,8 @@ namespace NextDayRevival
         static Vector3 _target;
         static string _faction, _controller;
         static bool _busy, _committing, _refunding, _owner, _missionConfirmed;
+        static bool _self, _dispatching;
+        static int _ownerService;
         static int _expected = -1, _ownerNonce;
         static float _next, _until, _expectUntil;
         static string _ownerController;
@@ -27,12 +29,14 @@ namespace NextDayRevival
         internal static bool Begin(int actor, int service, int cost, Vector3 target, string faction)
         {
             if (_busy || _owner || TowerPaymentWire.Pending) return false;
+            if (actor == Crocodile.LocalActor() && Mercs.MoneyBusy) return false;
             string owner = Mercs.SteamOf(Crocodile.PlayerByActor(actor));
             string controller = Mercs.SteamOf(Crocodile.PlayerByActor(Crocodile.LocalActor()));
             if (string.IsNullOrEmpty(owner) || string.IsNullOrEmpty(controller)) return false;
             _nonce = 1 + (Guid.NewGuid().GetHashCode() & 0x7fffffff) % 16777214;
             _actor = actor; _service = service; _cost = cost; _target = target;
             _faction = faction; _controller = controller; _generation = TowerSupport.WorldGeneration;
+            _self = actor == Crocodile.LocalActor(); _dispatching = false;
             _busy = true; _committing = false; _refunding = false; _until = Time.time + 45f;
             bool sent = TowerPaymentWire.Send(_nonce, "op=reserve\nowner=" + owner
                 + "\ncost=" + N(cost) + "\nservice=" + N(service) + "\n", Reserved);
@@ -49,33 +53,48 @@ namespace NextDayRevival
             if (!Valid()) { Cancel(); return; }
             // Cost is split into exact 16-bit pieces: float cannot carry every
             // Int32 wallet amount without rounding.
-            RadarNet.Send(new float[] { 8f, _actor, _nonce, _service, _cost >> 16, _cost & 65535 });
+            if (_self && TowerDeliveryCore.Service(_service))
+            {
+                TowerPaymentWire.Send(_nonce, Args("accept") + "cost=" + N(_cost) + "\nservice=" + N(_service) + "\n", SelfAccepted);
+            }
+            else RadarNet.Send(new float[] { 8f, _actor, _nonce, _service, _cost >> 16, _cost & 65535 });
             _next = Time.time + 0.5f;
         }
         static bool Valid()
         {
             return Crocodile.IsMaster() && _generation == TowerSupport.WorldGeneration
                 && (_service != 1 || Fraktion.Eigene(_faction) == Fraktion.Spielerseite(Crocodile.PlayerByActor(_actor)))
-                && TowerSupport.RecheckRemote(_actor, _service, _cost, _target) == 0;
+                && (TowerDeliveryCore.Service(_service) ? TowerDelivery.Recheck(_actor, _service, _cost, _target)
+                    : TowerSupport.RecheckRemote(_actor, _service, _cost, _target)) == 0;
         }
         static void Finish(int reason)
         {
             _busy = false; _committing = false; _refunding = false;
-            TowerSupport.PaymentReply(_actor, reason);
+            PaymentReply(_actor, _service, reason);
         }
         static void Cancel()
         {
+            if (TowerDeliveryCore.Service(_service)) TowerDelivery.Abort();
+            _dispatching = false;
             _refunding = true;
             if (!TowerPaymentWire.Send(_nonce, Args("refund"), Refunded)) _next = Time.time + 0.5f;
         }
         static void Refunded(TowerPaymentWire.Reply reply)
         {
-            if (reply.Result == "ok" && (reply.State == "refunded" || reply.State == "cancelled")) Finish(7);
+            if (reply.Result == "ok" && (reply.State == "refunded" || reply.State == "cancelled"))
+            {
+                if (_self && TowerDeliveryCore.Service(_service))
+                {
+                    if (!ApplyWallet(reply.Balance)) { _next = Time.time + 1f; return; }
+                    TowerPaymentWire.Send(_nonce, Args("sync") + "balance=" + N(reply.Balance) + "\n", SelfSynced);
+                }
+                Finish(7);
+            }
             else
             {
                 // Unknown transport outcome is queried/retried with the same
                 // nonce. Never report success or initiate a second purchase.
-                TowerSupport.PaymentReply(_actor, 9); _next = Time.time + 1f;
+                PaymentReply(_actor, _service, 9); _next = Time.time + 1f;
             }
         }
         static void Status(TowerPaymentWire.Reply reply)
@@ -86,6 +105,13 @@ namespace NextDayRevival
             if (reply.State == "committed" && _committing) { Committed(reply); return; }
             if (reply.State == "paid")
             {
+                if (_self && !ApplyWallet(reply.Balance)) { Cancel(); return; }
+                if (TowerDeliveryCore.Service(_service) && !_committing)
+                {
+                    if (!TowerDelivery.Launch(_actor, _service, _target)) { Cancel(); return; }
+                    _dispatching = true;
+                    return;
+                }
                 _committing = true;
                 if (!TowerPaymentWire.Send(_nonce, Args("commit"), Committed)) Cancel();
             }
@@ -95,25 +121,58 @@ namespace NextDayRevival
         {
             if (reply.Result == "timeout") { _next = Time.time + 0.5f; return; }
             if (reply.Result != "ok" || reply.State != "committed" || !Valid()) { Cancel(); return; }
-            bool launched = TowerSupport.LaunchRemote(_actor, _service, _target, _faction);
+            if (_dispatching) return;
+            bool delivery = TowerDeliveryCore.Service(_service);
+            bool launched = delivery ? TowerDelivery.Release()
+                : TowerSupport.LaunchRemote(_actor, _service, _target, _faction);
             if (!launched) { Cancel(); return; }
+            if (delivery) PaymentReply(_actor, _service, 0);
             _busy = false; _committing = false;
+            if (delivery && _self)
+            {
+                int balance = Mercs.Money;
+                if (balance >= 0) TowerPaymentWire.Send(_nonce, Args("sync") + "balance=" + N(balance) + "\n", SelfSynced);
+            }
+        }
+
+        static void PaymentReply(int actor, int service, int reason)
+        { if (TowerDeliveryCore.Service(service)) TowerDelivery.PaymentReply(actor, reason); else TowerSupport.PaymentReply(actor, reason); }
+        static void SelfAccepted(TowerPaymentWire.Reply reply)
+        {
+            if (reply.Result == "timeout") { _next = Time.time + 0.5f; return; }
+            if (reply.Result != "ok" || reply.State != "paid" || !ApplyWallet(reply.Balance)) { Cancel(); return; }
+            if (!Valid()) { Cancel(); return; }
+            Status(reply);
+        }
+        static void SelfSynced(TowerPaymentWire.Reply reply)
+        { if (reply.Result != "ok") RevivalPlugin.L.LogWarning("Tower delivery wallet sync pending; backend protects the balance until reconnect."); }
+        internal static void DeliveryFinished(bool success)
+        {
+            if (!_dispatching) return;
+            _dispatching = false;
+            if (!success) { Cancel(); return; }
+            if (!Valid()) { Cancel(); return; }
+            _committing = true;
+            if (!TowerPaymentWire.Send(_nonce, Args("commit"), Committed)) Cancel();
         }
 
         internal static void Challenge(float[] msg, int sender)
         {
             if (msg.Length != 6 || !TowerSupport.FromMaster(sender) || _owner || TowerPaymentWire.Pending
                 || (int)msg[1] != Crocodile.LocalActor() || _expected < 0 || Time.time > _expectUntil
-                || (int)msg[3] != _expected || !TowerSupport.Selecting
-                || Mercs.MoneyBusy
-                || TowerRadar.OperatorActor != Crocodile.LocalActor() || !TowerRadar.ConsoleAlive) return;
+                || (int)msg[3] != _expected
+                || Mercs.MoneyBusy) return;
             for (int i = 1; i < 6; i++) if (msg[i] != Mathf.RoundToInt(msg[i])) return;
             if (msg[2] < 1f || msg[2] > 16777215f || msg[4] < 0f || msg[4] > 32767f
                 || msg[5] < 0f || msg[5] > 65535f) return;
             int cost = ((int)msg[4] << 16) | (int)msg[5];
             if (cost < 1) return;
+            if (TowerDeliveryCore.Service((int)msg[3]))
+            { if (!TowerDelivery.ChallengeAllowed((int)msg[3], cost)) return; }
+            else if (!TowerSupport.Selecting || TowerRadar.OperatorActor != Crocodile.LocalActor() || !TowerRadar.ConsoleAlive) return;
             _ownerController = Mercs.SteamOf(Crocodile.PlayerByActor(sender));
             if (string.IsNullOrEmpty(_ownerController)) return;
+            _ownerService = (int)msg[3];
             _ownerNonce = (int)msg[2]; _controllerActor = sender; _owner = true; _missionConfirmed = false; _expected = -1;
             _until = Time.time + 75f;
             if (!TowerPaymentWire.Send(_ownerNonce, "op=accept\ncontroller=" + _ownerController
@@ -122,7 +181,7 @@ namespace NextDayRevival
         static void OwnerAnswer(TowerPaymentWire.Reply reply)
         {
             if (reply.Result == "err:funds")
-            { TowerSupport.PaymentReply(Crocodile.LocalActor(), 8); _owner = false; return; }
+            { PaymentReply(Crocodile.LocalActor(), _ownerService, 8); _owner = false; return; }
             if (reply.Result == "ok" && reply.Balance >= 0)
             {
                 if (!ApplyWallet(reply.Balance)) { _next = Time.time + 1f; return; }
@@ -162,7 +221,7 @@ namespace NextDayRevival
         {
             TowerPaymentWire.Tick();
             if (!_busy && !_owner) return;
-            if (TowerPaymentWire.Pending || Time.time < _next) return;
+            if (_dispatching || TowerPaymentWire.Pending || Time.time < _next) return;
             if (_busy)
             {
                 if (_refunding || !Valid() || Time.time >= _until) Cancel();

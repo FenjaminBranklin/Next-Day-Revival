@@ -87,6 +87,21 @@ namespace NextDayRevival
         static readonly Dictionary<string, string> _contentScenes = new Dictionary<string, string>();   // bundle file -> scene
         static readonly List<string> _contentLoaded = new List<string>();                             // files queued this time
         static bool _contentQueued;
+        // Z F3: construction waits for the queued additive scenes, not a timer.
+        internal static bool ContentReady
+        {
+            get
+            {
+                if (!_contentQueued) return false;
+                for (int i = 0; i < _contentLoaded.Count; i++)
+                {
+                    string name;
+                    if (!_contentScenes.TryGetValue(_contentLoaded[i], out name)
+                        || !SceneManager.GetSceneByName(name).isLoaded) return false;
+                }
+                return true;
+            }
+        }
         // The combined greyboxes keep, switched off, the pieces each building
         // bundle replaces (root/Fallback/<bundle name>): east_airfield.bundle
         // for the east_af_* bundles, east_town.bundle for the military town's
@@ -262,6 +277,7 @@ namespace NextDayRevival
             _contentLoaded.Clear();
             foreach (string file in ContentFiles())
             {
+                if (AirfieldObjectsCore.SkipBundle(file)) continue;
                 try
                 {
                     string path = Path.Combine(RevivalPlugin.AssetDir, file);
@@ -453,6 +469,8 @@ namespace NextDayRevival
                     ApplyFallback(s, AirfieldRoot, "airfield");
                 else if (s.name == TownScene)
                     ApplyFallback(s, TownRoot, "town");
+                AirfieldGround.Loaded(s); // load-only field ground; existing bundles supported
+                AirfieldObjects.Loaded(s); // sparse field objects and removed-building navigation
             };
             SceneManager.sceneUnloaded += delegate(Scene s)
             {

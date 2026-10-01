@@ -66,7 +66,7 @@ namespace NextDayRevival
     ///
     /// UNTESTED: all of it. Nothing in this class has been seen in the game.
     /// </summary>
-    public static class Patrol
+    public static partial class Patrol
     {
         /// <summary>Below this speed the driver coasts instead of braking,
         /// because braking here means reverse gear. See the class comment.</summary>
@@ -652,6 +652,7 @@ namespace NextDayRevival
 
         static bool Owned(object instance)
         {
+            if (MercDrive.Owns(instance)) return true;
             if (_owned.Count == 0) return false;
             UnityEngine.Object o = instance as UnityEngine.Object;
             if (o == null) return false;
@@ -6862,6 +6863,10 @@ namespace NextDayRevival
                 float infDamage = Mathf.Max(0f, RevivalPlugin.CfgPatrolShellInfantryDamage.Value);
                 float infRadius = Mathf.Max(0.1f, RevivalPlugin.CfgPatrolShellInfantryRadius.Value);
                 float core = Mathf.Clamp(RevivalPlugin.CfgPatrolShellLethalRadius.Value, 0f, infRadius);
+                // D1a: people come from their position registries, independent
+                // of the gun's visible target cache, and health runs on its owner.
+                OrdnanceBlast.EnqueuePatrolPeople(point, u.Seite, u.Car.transform,
+                    infDamage, infRadius, core, damage, radius);
                 float reach = Mathf.Max(radius, infRadius);
                 for (int i = 0; i < _targets.Count; i++)
                 {
@@ -6869,7 +6874,7 @@ namespace NextDayRevival
                     // W Perf1: the cheap range test first - Feind is reflection
                     // and was asked for every target on the map per shell. Both
                     // are pure filters, so the set of victims is unchanged.
-                    if (c == null || c.Tr == null) continue;
+                    if (c == null || c.Tr == null || c.Vehicle == null) continue;
                     Vector3 to = Zielpunkt(c.Tr);
                     if (c != direct && Vector3.Distance(point, to) > reach + 20f) continue;
                     if (!Feind(u, c)) continue;
@@ -6904,7 +6909,8 @@ namespace NextDayRevival
                     if (hurt) u.Hits++;
                 }
                 RevivalPlugin.L.LogInfo("Patrol gun: " + u.Seite + " shell hit "
-                    + (u.Hits - before) + " hostile actor(s) at " + point + ".");
+                    + (u.Hits - before) + " hostile vehicle(s) at " + point
+                    + "; person registry damage queued.");
             }
 
             /// <summary>Is there hard cover between the impact and this target?

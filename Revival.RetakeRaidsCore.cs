@@ -10,10 +10,9 @@
 //             (on). A row that does not parse changes nothing.
 //   CLOCK     the master's hold clock. The garrison holds: nothing. A side
 //             takes the airfield: the first raid FirstMinutes later, then
-//             every GapMinutes, the gap shrinking the longer the side holds
-//             (1 + Ramp per hour held), never below MinGapMinutes; all
-//             divided by the editor's frequency. A raid that is still in the
-//             air when the next falls due pushes it back by a minute. A new
+//             an editor interval plus a positive random window. The quiet
+//             floor is never shortened by frequency or time held. Scheduling
+//             starts after the previous air operation clears. A new
 //             holder (or the garrison back) starts over.
 //   COMPOSE   one raid: its counts grow with the raids already flown in this
 //             hold (+Growth per raid up to MaxGrowthLevel), times the
@@ -53,6 +52,16 @@ namespace NextDayRevival
         /// else traitor / looter / civilian / neutral.</summary>
         public string Faction = "auto";
 
+        // Optional tail keeps existing 14-column tables valid.
+        public int DropZones = 3;            // distinct directions, limited by aircraft count
+        public float DropRadiusM = 100f;     // 60..180 metres from the tower
+        public int CrewAttackPercent = 50;   // whole sticks; the others attack the tower
+        // K5b2 optional six-cell tail (14/17-cell older tables remain valid).
+        public bool CloseDrops = true, SecondWave = true;
+        public float SecondWaveDelaySeconds = 180f; // after the first stick's jump
+        public float IntervalMinutes = 30f, RandomWindowMinutes = 6f, QuietMinutes = 10f;
+        public string ApproachMode = "vary"; // vary per raid, or fixed editor bearing
+        public float ApproachHeading;       // clockwise from +Z; flight, not entry bearing
         public const int Columns = 14;
 
         /// <summary>The row "#retake\t..." of the air event table into a new
@@ -89,6 +98,32 @@ namespace NextDayRevival
                 if (f != "auto" && f != "traitor" && f != "looter" && f != "civilian" && f != "neutral")
                     throw new FormatException("unknown faction '" + f + "'");
                 s.Faction = f;
+                if (c.Length > Columns)
+                {
+                    if (c.Length < Columns + 3) throw new FormatException("incomplete retake tactics tail");
+                    s.DropZones = ClampI(F(c[14]), 2, 3);
+                    s.DropRadiusM = Clamp(F(c[15]), 60f, 180f);
+                    s.CrewAttackPercent = ClampI(F(c[16]), 0, 100);
+                }
+                if (c.Length > 17 && c[17].Trim() != "vary" && c[17].Trim() != "fixed")
+                {
+                    if (c.Length < 23) throw new FormatException("incomplete retake rhythm tail");
+                    s.CloseDrops = c[17].Trim() != "0";
+                    s.SecondWave = c[18].Trim() != "0";
+                    s.SecondWaveDelaySeconds = Clamp(F(c[19]), 90f, 600f);
+                    s.IntervalMinutes = Clamp(F(c[20]), 3f, 120f);
+                    s.RandomWindowMinutes = Clamp(F(c[21]), 0f, 60f);
+                    s.QuietMinutes = Clamp(F(c[22]), 3f, 60f);
+                }
+                int approach = c.Length >= 23 ? 23 : 17;
+                if (c.Length > approach)
+                {
+                    if (c.Length < approach + 2) throw new FormatException("incomplete retake approach tail");
+                    s.ApproachMode = c[approach].Trim().ToLowerInvariant();
+                    if (s.ApproachMode != "vary" && s.ApproachMode != "fixed")
+                        throw new FormatException("unknown approach mode '" + s.ApproachMode + "'");
+                    s.ApproachHeading = Clamp(F(c[approach + 1]), 0f, 359.99f);
+                }
                 return s;
             }
             catch (Exception ex)
@@ -167,12 +202,8 @@ namespace NextDayRevival
         public const float FirstMinutes = 8f;
         public const float GapMinutes = 30f;
         public const float MinGapMinutes = 10f;
-        /// <summary>The gap shrinks by 1 + Ramp per hour held.</summary>
-        public const float Ramp = 0.6f;
         /// <summary>Never two raids closer than this, whatever the frequency.</summary>
         public const float FloorMinutes = 3f;
-        /// <summary>A due raid waits this long while the previous one still flies.</summary>
-        public const float BusyRetrySeconds = 60f;
 
         // Growth of the counts per raid flown in this hold.
         public const float Growth = 0.35f;
@@ -189,14 +220,14 @@ namespace NextDayRevival
             return Max(FloorMinutes, FirstMinutes / f) * 60f;
         }
 
-        /// <summary>Seconds from one raid to the next after
-        /// <paramref name="heldHours"/> of holding.</summary>
+        /// <summary>Minimum seconds after the last air operation clears.
+        /// heldHours is reserved for later heat integration; it does not erode quiet.</summary>
         public static float GapSeconds(RetakeSettings s, float heldHours)
         {
             float f = s == null ? 1f : RetakeSettings.Clamp(s.Frequency, 0.25f, 4f);
-            float h = heldHours < 0f ? 0f : heldHours;
-            float gap = Max(MinGapMinutes, GapMinutes / (1f + Ramp * h)) / f;
-            return Max(FloorMinutes, gap) * 60f;
+            float interval = s == null ? GapMinutes : RetakeSettings.Clamp(s.IntervalMinutes, 3f, 120f);
+            float quiet = s == null ? MinGapMinutes : RetakeSettings.Clamp(s.QuietMinutes, 3f, 60f);
+            return Max(quiet, interval / f) * 60f;
         }
 
         public static float Scale(RetakeSettings s, int level)
@@ -240,14 +271,14 @@ namespace NextDayRevival
             }
             // The escort goes along whenever there is anything to cover; it
             // grows at most to twice the editor's count.
-            if (s.Escort && (r.Bombers + r.Transports + r.Helis) > 0)
+            if (s.Escort && s.HitGuns && (r.Bombers + r.Transports + r.Helis) > 0)
                 r.Escorts = Count(s.Escorts, Min(k, 2f), MaxEscorts);
             // Nothing at all (every count 0 in the editor, or all troops held
             // with no bombers): one bomber so a due raid is never silent.
             if (r.Bombers + r.Transports + r.Helis + r.Escorts == 0)
             {
                 r.Bombers = 1;
-                if (s.Escort) r.Escorts = RetakeSettings.ClampI(s.Escorts, 1, MaxEscorts);
+                if (s.Escort && s.HitGuns) r.Escorts = RetakeSettings.ClampI(s.Escorts, 1, MaxEscorts);
             }
             return r;
         }
@@ -263,6 +294,76 @@ namespace NextDayRevival
         static float Min(float a, float b) { return a < b ? a : b; }
     }
 
+    // Raid-only tactics. No Unity calls or allocations on the scheduling path.
+    internal static class RetakeTactics
+    {
+        // Golden-angle progression covers all quadrants without adjacent repeats.
+        // Serial counts actual launches, including manual raids and holder changes.
+        public static float Heading(RetakeSettings s, int serial)
+        {
+            double h = s.ApproachHeading;
+            if (s.ApproachMode != "fixed") h += Math.Max(0, serial - 1) * 137.5;
+            return (float)(h % 360.0);
+        }
+        public const float ApproachSeconds = 60f;
+        public const float CloseRadiusM = 35f, CloseSpreadM = 20f;
+        public static float DropSpread(bool close, int men, float normalSpread, float unitsPerM)
+        { return men < 2 ? 0f : close ? CloseSpreadM * unitsPerM : normalSpread; }
+        public static int Zones(int transports, int requested)
+        { return Math.Min(transports, Math.Max(2, Math.Min(3, requested))); }
+        public static int Zone(int aircraft, int zones) { return aircraft % zones; }
+        public static float Bearing(float start, int zone, int zones)
+        { return (start + zone * (360f / zones)) % 360f; }
+        public static bool AttackCrew(int aircraft, int transports, int percent)
+        {
+            int count = (int)Math.Round(transports * percent / 100.0, MidpointRounding.AwayFromZero);
+            if (transports > 1 && percent > 0 && percent < 100)
+                count = Math.Max(1, Math.Min(transports - 1, count));
+            return aircraft < count;
+        }
+        // All arrivals have the same base, so map-edge distance cannot invert the lead.
+        public static float ArrivalLead(float warn, float eta, float delay)
+        { return Math.Max(warn, eta - delay); }
+        public static float LaunchDelay(float lead, float delay, float eta)
+        { return Math.Max(0f, lead + delay - eta); }
+    }
+
+    internal struct RaidCarpetPlan
+    {
+        public float AlongM, AcrossM, Scatter;
+    }
+
+    // Each surviving bomber contributes its own frayed strip. No binary abort
+    // roll: increasing damage progressively removes bombs and widens the miss.
+    internal static class RaidCarpetCore
+    {
+        public const float MaxShiftM = 180f;
+        public static RaidCarpetPlan Plan(float damage, float timingRoll, float crossRoll)
+        {
+            float d = RetakeSettings.Clamp(damage, 0f, 1f);
+            RaidCarpetPlan p = new RaidCarpetPlan();
+            p.AlongM = (timingRoll < 0.5f ? -1f : 1f) * MaxShiftM * d;
+            p.AcrossM = (RetakeSettings.Clamp(crossRoll, 0f, 1f) * 2f - 1f) * 80f * d;
+            p.Scatter = 1f + 10f * d;
+            return p;
+        }
+
+        public static int Load(int bombs, float damage)
+        {
+            if (bombs <= 0 || damage >= 0.999f) return 0;
+            return Math.Max(1, (int)Math.Floor(bombs * (1.0 - RetakeSettings.Clamp(damage, 0f, 1f))));
+        }
+
+        // Keep the original spacing/time: holes, rather than compressing all
+        // remaining bombs into a complete shorter carpet. No replacement strip.
+        public static bool Keep(int index, int bombs, float damage)
+        {
+            if (index < 0 || index >= bombs) return false;
+            int load = Load(bombs, damage);
+            return (index + 1) * load / bombs != index * load / bombs;
+        }
+    }
+
     /// <summary>
     /// The master's hold clock: fed once a second with who holds the airfield
     /// (-1 = its garrison) and the time; says when a raid is due and which.
@@ -274,6 +375,18 @@ namespace NextDayRevival
         public float Next = -1f;         // time of the next raid, -1 none
         public int Level;                // raids flown in this hold
         public int Start;                // the hold's start in the target rotation
+        public float Earliest = -1f, Latest = -1f;
+        public bool AwaitClear;           // quiet countdown starts after every aircraft clears
+        uint _random;
+
+        void Schedule(float now, float delay, RetakeSettings s)
+        {
+            Earliest = now + delay;
+            Latest = Earliest + RetakeSettings.Clamp(s.RandomWindowMinutes, 0f, 60f) * 60f;
+            // Local host seed; one scalar roll per scheduled raid, no allocation.
+            _random = unchecked(_random * 1664525u + 1013904223u);
+            Next = Earliest + (Latest - Earliest) * ((_random >> 8) / 16777215f);
+        }
 
         public float HeldHours(float now) { return Holder < 0 ? 0f : (now - HeldSince) / 3600f; }
 
@@ -290,19 +403,30 @@ namespace NextDayRevival
                 Holder = holder;
                 Level = 0;
                 HeldSince = now;
-                Start = startRoll < 0 ? -startRoll : startRoll;
-                Next = holder < 0 ? -1f : now + RetakePlan.FirstDelaySeconds(s);
+                _random = unchecked((uint)startRoll);
+                Start = (int)(_random % 3u);
+                AwaitClear = false;
+                Next = Earliest = Latest = -1f;
+                if (holder >= 0 && s != null) Schedule(now, RetakePlan.FirstDelaySeconds(s), s);
             }
             if (Holder < 0 || !enabled || s == null || !s.Enabled)
             {
                 // Switched off while held: nothing is due; switched on again,
                 // the first raid comes a first delay later.
-                if (Holder >= 0) Next = -1f;
+                if (Holder >= 0) Next = Earliest = Latest = -1f;
+                AwaitClear = false;
                 return false;
             }
-            if (Next < 0f) { Next = now + RetakePlan.FirstDelaySeconds(s); return false; }
+            if (AwaitClear)
+            {
+                if (busy) return false;
+                AwaitClear = false;
+                Schedule(now, RetakePlan.GapSeconds(s, HeldHours(now)), s);
+                return false;
+            }
+            if (Next < 0f) { Schedule(now, RetakePlan.FirstDelaySeconds(s), s); return false; }
             if (now < Next) return false;
-            if (busy) { Next = now + RetakePlan.BusyRetrySeconds; return false; }
+            if (busy) { AwaitClear = true; return false; }
             return true;
         }
 
@@ -310,7 +434,9 @@ namespace NextDayRevival
         public void Flown(float now, RetakeSettings s)
         {
             Level++;
-            Next = now + RetakePlan.GapSeconds(s, HeldHours(now));
+            AwaitClear = true;
+            // Provisional bounds; Step anchors them to the actual air-clear time.
+            Schedule(now, RetakePlan.GapSeconds(s, HeldHours(now)), s);
         }
     }
 }

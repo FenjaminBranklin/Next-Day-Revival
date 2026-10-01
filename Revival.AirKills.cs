@@ -108,6 +108,8 @@ namespace NextDayRevival
         internal static void Downed(NpcAircraft.Flight f, Vector3 at)
         {
             string label = f.Label ?? "";
+            if (label.StartsWith(AirEvents.BomberTag + RetakeRaids.NamePrefix, StringComparison.Ordinal))
+                AirEvents.StopCarpet(PlayerAn2.View(f.Go));
             int what = label.StartsWith(AirEvents.BomberTag, StringComparison.Ordinal) ? 0
                 : label.StartsWith(AirEvents.TransportTag, StringComparison.Ordinal) ? 1 : 3;
             Pay(f.Ledger.Winner(), what, at);
@@ -257,6 +259,12 @@ namespace NextDayRevival
             try
             {
                 HeliWreckModel.Apply(go);
+                if (go.GetComponent<HeliWreckSettle>() == null)
+                {
+                    float floor;
+                    if (!AircraftWreck.Surface(at, go.transform, out floor)) floor = at.y;
+                    go.AddComponent<HeliWreckSettle>().Begin(floor);
+                }
                 FireEffect.SpawnHeliBlast(at + Vector3.up * (1.5f * K), 22f);
                 if (!FireEffect.SpawnHeliFire(go)) FireEffect.SpawnWreck(go, false);
                 HeliCrashSound.Play(at);

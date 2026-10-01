@@ -47,8 +47,16 @@ using UnityEngine.SceneManagement;
 namespace NextDayRevival
 {
     /// <summary>The cover field's world: PhysX rays and the NavMesh.</summary>
-    internal sealed class PhysicsCoverWorld : ICoverWorld
+    internal sealed class PhysicsCoverWorld : ICoverWorld, IMercRaidProtection
     {
+        public bool Revetment(Vector3 at)
+        {
+            // Existing registered earth-walled gun pits already stop outside
+            // blasts on the master. No new damage immunity or safe zone.
+            return AirKills.Sheltered(at, at + Vector3.right * 280f)
+                && AirKills.Sheltered(at, at - Vector3.right * 280f);
+        }
+
         const byte Solid = 1, Moving = 2, Person = 3;
         const int KindCap = 4096;
 
@@ -190,6 +198,7 @@ namespace NextDayRevival
 
         static CoverField _field;
         static PhysicsCoverWorld _world;
+        internal static ICoverWorld World { get { return _world; } }
         static int _scene = int.MinValue;
         static int _queryFrame = -1;
         static float _nextStat;
@@ -451,7 +460,8 @@ namespace NextDayRevival
                 s.Add(t, 0.6f);
             }
             if (s.Count > 0) u.Approach = s.At[0];
-            if (s.Count == 0 && (u.Order.Survive || u.Rally || Mercs.MedicineWanted(u, now)))
+            if (s.Count == 0 && (u.Order.Survive || u.Rally || Mercs.MedicineWanted(u, now)
+                || MercCrewPhases.Ground(u)))
             {
                 // A virtual approach ranks shelter, but is never a combat contact.
                 s.At[0] = u.Approach; s.Weight[0] = 1f;
@@ -463,10 +473,26 @@ namespace NextDayRevival
                     Vector3 quietFrom = u.Fight.Out.AnchorOn ? u.Fight.Out.Anchor : me;
                     CoverPick quiet;
                     bool bound = u.Rally && u.Fight.Out.AnchorOn;
-                    MercCoverService.Best(quietFrom, s.At, s.Weight, 1, MercCoverService.Radius,
-                        bound ? quietFrom : me, bound ? 24f : 60f, u.Id, out quiet);
+                    Vector3 quietLeash = bound ? quietFrom : me;
+                    float quietRadius = bound ? 24f : 60f;
+                    if (MercCrewPhases.Ground(u)) MercLeash(f, u, out quietLeash, out quietRadius);
+                    bool roof = MercRaidCover.Pick(u, quietFrom, now, out quiet);
+                    if (u.RaidProbeDeferred) s.NextPick = now + 0.1f;
+                    if (!roof)
+                        MercCoverService.Best(quietFrom, s.At, s.Weight, 1, MercCoverService.Radius,
+                            quietLeash, quietRadius, u.Id, out quiet);
+                    else if (u.Fight.Holding && u.Fight.Brain != null
+                        && (u.Fight.Brain.Cover.Point.Pos - quiet.Point.Pos).sqrMagnitude > 9f
+                        && (u.Medicine == null || u.Medicine.Active == 0))
+                    {
+                        // Once mapped, a roof replaces open sandbags in a quiet
+                        // raid; real contact still uses the normal fight loop.
+                        u.Fight.Brain.Leave(MercCoverService.Field);
+                        u.Fight.Out = default(FightOut);
+                    }
                     s.Pick = quiet; s.PickAt = now; s.PickFrom = quietFrom; s.PickFor = null;
                 }
+                if (MercRaidCover.Sheltered(u, me, now)) s.Exposed = false;
                 return;
             }
             if (s.Count == 0)
@@ -532,6 +558,9 @@ namespace NextDayRevival
                 centre = bound ? u.Fight.Out.Anchor : f.Tr.position;
                 radius = bound ? 24f : 60f; return;
             }
+            Flak.Gun gun = MercCrewPhases.Gun(u);
+            if (MercCrewPhases.Ground(u) && gun != null)
+            { centre = gun.Earthwork.position; radius = MercCrewPhase.PostRadius; return; }
             MercOrder o = u.Order;
             switch (o.Mode)
             {

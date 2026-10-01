@@ -58,6 +58,8 @@
 //
 // Seams: RevivalPlugin.Awake (BindConfig, Install), RevivalPlugin.Update
 // (Tick, slot S_NpcDistT), Admin panel (Bench, Status).
+// Z P3c2: aircraft occupants get a local frozen lowest-LOD tier to 1500 m.
+// AirNpcVisual owns the renderer snapshots/hooks; no visualization/AI wake.
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments. ASCII only.
 using System;
@@ -78,7 +80,7 @@ namespace NextDayRevival
         /// <summary>World units per real metre (PlayerAn2.K).</summary>
         const float K = 2.8f;
 
-        const byte Near = 0, Mid = 1, Far = 2, None = 255;
+        const byte Near = 0, Mid = 1, Far = 2, Air = 3, None = 255;
         const int PerFrame = 16;
         const float CheckSeconds = 3f;          // safety-net recheck per NPC
         const float HideMarginM = 15f;          // forest: hide past trees + this
@@ -89,9 +91,15 @@ namespace NextDayRevival
         static ConfigEntry<float> _cfgNear, _cfgAir, _cfgGround, _cfgElevated;
         static ConfigEntry<int> _cfgAiEvery;
         static ConfigEntry<bool> _cfgForest;
+        static ConfigEntry<float> _cfgAirVisible;
 
         internal static void BindConfig(ConfigFile cfg)
         {
+            _cfgAirVisible = cfg.Bind("NpcDistance", "AircraftVisibleRange", 1500f,
+                "Metres. Local aircraft occupants see distant NPCs at their lowest "
+                + "body LOD, frozen and without shadows. No AI/collider wake. "
+                + "NearRange stays normal; forest concealment stays active. "
+                + "Maximum 3000 m. 0 = off.");
             _cfgNear = cfg.Bind("NpcDistance", "NearRange", 150f,
                 "Metres. Closer NPCs are left exactly as the game runs them. Between "
                 + "this and the wake range they are the middle tier: animated at a "
@@ -140,6 +148,8 @@ namespace NextDayRevival
             public bool AnimFrozen;      // bench: Animation disabled by this file
             public float NextCheck;
             public readonly Hide Hide = new Hide();
+            public AirNpcVisual.State AirVisual;
+            public float NextAirPass;
         }
 
         sealed class Player
@@ -159,6 +169,8 @@ namespace NextDayRevival
         static Vector3 _view;
         static bool _haveView;
         static bool _airborne;
+        static bool _airViewer;
+        static int _newAirFrame = -1, _airEnterFrame = -1;
         static Vector3 _forward;
         static float _coneCos2;
         static bool _viewerWasActive;
@@ -215,6 +227,7 @@ namespace NextDayRevival
                 _mSwitch = AccessTools.Method(_aiType, "SwitchAnimationByStates", null, null);
                 if (_mSwitch != null && _mSwitch.GetParameters().Length != 3) _mSwitch = null;
                 if (_lodType != null) _fLod3 = AccessTools.Field(_lodType, "LOD3_Distance");
+                AirNpcVisual.Install(harmony, _aiType);
                 if (ngs != null)
                 {
                     _ngsInstance = AccessTools.Property(ngs, "Instance");
@@ -333,7 +346,9 @@ namespace NextDayRevival
                 _airborne = HeightOverTerrain(_view) > Mathf.Max(0f, _cfgElevated.Value) * K;
             }
             int owner = CameraOwner.Owner;
-            bool viewer = _haveView && (_airborne || PlayerAn2.Aboard || PlayerHeli.Aboard
+            // Aircraft occupancy, not elevated terrain/optics or a remote pilot.
+            _airViewer = _haveView && _cfgAirVisible.Value > 0f && (PlayerAn2.Aboard || PlayerHeli.Aboard);
+            bool viewer = _haveView && (_airborne || _airViewer || PlayerAn2.Aboard || PlayerHeli.Aboard
                 || Drone.Flying || (_scopeViewer && Time.frameCount - _scopeFrame <= 1)
                 || owner == CameraOwner.Turm || owner == CameraOwner.GunTruck
                 || owner == CameraOwner.Gepard || owner == CameraOwner.Flak || Katyusha.Aiming
@@ -371,7 +386,7 @@ namespace NextDayRevival
             }
             int end = Mathf.Min(_pass.Length, _passIndex + PerFrame);
             long start = Stopwatch.GetTimestamp();
-            long budget = Stopwatch.Frequency / 10000; // 0.1 ms, cooperative between NPCs.
+            long budget = Stopwatch.Frequency / (_airViewer ? 16667 : 10000); // 0.06 / 0.1 ms, cooperative.
             for (; _passIndex < end; _passIndex++)
             {
                 Process(_pass[_passIndex]);
@@ -395,7 +410,11 @@ namespace NextDayRevival
         {
             _drop.Clear();
             foreach (KeyValuePair<int, Npc> e in _npcs)
-                if (e.Value.Ai == null) _drop.Add(e.Key);
+                if (e.Value.Ai == null)
+                {
+                    if (e.Value.AirVisual != null) e.Value.AirVisual.Exit();
+                    _drop.Add(e.Key);
+                }
             for (int i = 0; i < _drop.Count; i++) { _npcs.Remove(_drop[i]); _throttled.Remove(_drop[i]); }
             for (int i = _known.Count - 1; i >= 0; i--)
                 if (_known[i].Ai == null) _known.RemoveAt(i);
@@ -454,22 +473,55 @@ namespace NextDayRevival
             if (ai == null) return;
             int id = ai.GetInstanceID();
             Npc n;
-            if (!_npcs.TryGetValue(id, out n)) { n = Make(ai, id); _npcs.Add(id, n); _known.Add(n); }
+            if (!_npcs.TryGetValue(id, out n))
+            {
+                // Cache growth/discovery is transient and spread over frames in flight.
+                if (_airViewer && _newAirFrame == Time.frameCount) return;
+                _newAirFrame = Time.frameCount;
+                n = Make(ai, id); _npcs.Add(id, n); _known.Add(n);
+            }
             Apply(n, true);
         }
 
         static void Apply(Npc n, bool count)
         {
             Component ai = n.Ai;
-            if (ai == null) return;
+            if (ai == null) { if (n.AirVisual != null) n.AirVisual.Exit(); return; }
             Vector3 p = ai.transform.position;
             float d = (p - _view).magnitude;
             float near = _cfgNear.Value * K;
+            if (!_bisect && _bench == BenchNone && _airViewer && n.Tier == Air && d >= near && Time.time < n.NextAirPass) return;
+            n.NextAirPass = Time.time + 0.2f;
             byte tier = d < near ? Near : _wakeU > 0f && d < _wakeU && InViewCone(p - _view) ? Mid : Far;
+            if (WantAir(_airViewer, d, near, AircraftVisibleUnits, InViewCone(p - _view))
+                && _mAlive != null && FastCall.Bool(_mAlive, ai) && !InForest(p, d, n.Hide.Active)) tier = Air;
             if (_bench == BenchFull) tier = Near;
             else if (_bench == BenchMid) tier = Mid;
             else if (_bench == BenchFrozen) tier = Far;
             if (_bisect) tier = Far;
+
+            if (tier == Air && (n.AirVisual == null || !n.AirVisual.Active))
+            {
+                // One cold LOD/renderer cache and activation per frame, even for
+                // a town full of already-known NPCs on a sudden camera handover.
+                if (_airEnterFrame == Time.frameCount) return;
+                _airEnterFrame = Time.frameCount;
+            }
+            FrameProf.S(FrameProf.S_AirNpcVisual);
+            try
+            {
+                if (tier == Air)
+                {
+                    // Hand back the old animated middle tier before snapshotting.
+                    if (n.Tier == Mid) { Restore(n); if (n.Forced) Unforce(n); }
+                    SetHidden(n.Hide, ai.gameObject, false);
+                    if (n.AirVisual == null) n.AirVisual = new AirNpcVisual.State(ai, n.Anim, n.Lod);
+                    if (n.AirVisual.Available) n.AirVisual.Enter();
+                    else tier = Far; // Do not draw an arbitrary high-detail fallback.
+                }
+                if (tier != Air && n.AirVisual != null) n.AirVisual.Exit();
+            }
+            finally { FrameProf.E(FrameProf.S_AirNpcVisual); }
 
             // The coarsest mesh as far as the tier reaches (vanilla: 350 u).
             if (n.Lod != null)
@@ -484,7 +536,7 @@ namespace NextDayRevival
 
             if (tier != n.Tier)
             {
-                if (tier == Mid) Cheap(n); else Restore(n);
+                if (tier == Mid) Cheap(n); else if (tier != Air) Restore(n);
                 if (tier == Far && n.Forced) Unforce(n);
                 n.Tier = tier;
                 n.NextCheck = 0f;
@@ -509,7 +561,7 @@ namespace NextDayRevival
             else if (n.AnimFrozen)
             {
                 n.AnimFrozen = false;
-                if (n.Anim != null) n.Anim.enabled = true;
+                if (n.Anim != null && tier != Air) n.Anim.enabled = true;
             }
 
             bool hide = !_bisect && (_bench == BenchFrozen || (_wakeU > 0f && InForest(p, d, n.Hide.Active)));
@@ -521,6 +573,17 @@ namespace NextDayRevival
             if (throttle) _wThrottled++;
             if (n.Forced) _wForced++;
             if (n.Hide.Active) _wHiddenNpc++;
+        }
+
+        internal static bool WantAir(bool aircraft, float distance, float near, float range, bool inView)
+        {
+            return aircraft && inView && distance >= near && distance < range;
+        }
+
+        internal static float AircraftVisibleUnits
+        {
+            get { return _cfgAirVisible == null || !(_cfgAirVisible.Value > 0f) || !(PlayerAn2.Aboard || PlayerHeli.Aboard)
+                ? 0f : Mathf.Min(3000f, _cfgAirVisible.Value) * K; }
         }
 
         static void Cheap(Npc n)

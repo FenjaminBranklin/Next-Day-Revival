@@ -173,6 +173,35 @@ namespace NextDayRevival
             r.Until = Time.time + 6f;
         }
 
+        // Z K9b: a read-only view of native aircraft board announcements.
+        // Unresolved bodies still report occupied until the existing lease ends.
+        internal static bool SeatOccupant(GameObject vehicle, int index, GameObject local, out GameObject body)
+        {
+            body = null;
+            SeatBindingHost host;
+            Transform seat = vehicle != null && Hosts.TryGetValue(vehicle.transform, out host)
+                && host != null && index >= -1 && index + 1 < host.Seats.Length ? host.Seats[index + 1] : null;
+            for (int i = 0; i < Riders.Count; i++)
+            {
+                Rider r = Riders[i];
+                if (r.Vehicle == null || r.Vehicle.gameObject != vehicle || r.Body == null || r.Seat == null) continue;
+                // MercRide binds NPCs to these same aircraft markers. Local
+                // player identity and remote board leases distinguish players.
+                if (r.Body.gameObject != local) continue;
+                if (seat == null || r.Seat != seat) continue;
+                body = r.Body.gameObject;
+                return true;
+            }
+            for (int i = 0; i < Remotes.Count; i++)
+            {
+                Remote r = Remotes[i];
+                if (r.Vehicle != vehicle || r.Index != index || Time.time > r.Until) continue;
+                body = r.Body == null ? null : r.Body.gameObject;
+                return true;
+            }
+            return false;
+        }
+
         internal static void LateFrame()
         {
             if (Riders.Count == 0 && Remotes.Count == 0) return;

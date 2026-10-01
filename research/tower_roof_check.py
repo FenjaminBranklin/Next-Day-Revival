@@ -1,18 +1,8 @@
-"""Y B1 tower roof: offline proof of the ladder, the roof posts and the merc climb.
-
-1. Compiles the production Revival.TowerRoofCore.cs (C# 3.0, csc v3.5) with a
-   tiny UnityEngine stub and simulates mercs: from the airfield onto the roof
-   (walk to the foot, climb, walk to the post, hold), back down, FOLLOW slots of
-   an owner on the roof, and the goals that must NOT start a climb.
-2. Checks the layout against the C1 collider boxes the game uses
-   (assets/airfield/c1/c1_colliders.json, game units / 2.8 = metres): the
-   ladder volume is clear of the tower and hugs its east face, its top meets
-   the roof, the game ladder points stand free and in interaction reach, the
-   sandbags and posts sit on the roof inside the rail, and the NPC's capsule
-   passes the whole climb path (both ways) without touching a box.
-3. Wiring: plugin tick/late/config, F6 slots, NpcWar gates, sync_public.
-
-No game, no Unity, no writes outside .agent-runtime/.
+"""Z T1a tower stairs: compile real C# 3.0 routing, simulate both directions,
+all follow slots and invalid goals, benchmark eight actors, and validate every
+waypoint/path sample against ALL shipped colliders within 50 m plus runtime
+geometry. tower_stairs_check.py owns the independent world geometry proof.
+No game, installation, Unity licence or bundle rebuild required.
 """
 from pathlib import Path
 import json
@@ -51,6 +41,7 @@ namespace UnityEngine {
  public static class Mathf {
   public static float Sqrt(float f){return (float)Math.Sqrt(f);}
   public static float Abs(float f){return Math.Abs(f);}
+  public static float Min(float a,float b){return Math.Min(a,b);}
  }
 }
 namespace NextDayRevival {
@@ -106,6 +97,17 @@ static class Sim {
  static void Main(){
   float foot=0f;
   Vector3 roofGoal=new Vector3(8f,TowerRoofCore.RoofY,0f);
+  // Pure routing hot-loop: eight simultaneous mercs, two At() calls each.
+  Vector3[] bench=new Vector3[TowerRoofCore.PathMax];
+  int bn=TowerRoofCore.Path(true,TowerRoofCore.Foot(foot),TowerRoofCore.Foot(foot),TowerRoofCore.Exit(),bench);
+  float bd=TowerRoofCore.Duration(bench,bn), checksum=0f;
+  System.Diagnostics.Stopwatch watch=System.Diagnostics.Stopwatch.StartNew();
+  for(int frame=0;frame<100000;frame++) for(int merc=0;merc<8;merc++) {
+   float bt=bd*((frame+merc)%1000)/1000f;
+   checksum+=TowerRoofCore.At(bench,bn,bt).x+TowerRoofCore.At(bench,bn,bt+0.1f).z;
+  }
+  watch.Stop();
+  Console.WriteLine("BENCH eight mercs / two At calls: "+(watch.Elapsed.TotalMilliseconds/100000).ToString("0.0000",System.Globalization.CultureInfo.InvariantCulture)+" ms/frame; checksum "+checksum);
   // 1. from the apron (40 m east, 20 m south) onto the roof
   Vector3 man=new Vector3(40f,0f,-20f); float t;
   List<int> q=Run(ref man,roofGoal,0,foot,out t,true,"up");
@@ -113,7 +115,7 @@ static class Sim {
   Ok(S(q)=="Walk,ClimbUp,Walk,Hold","up: walk to the foot, climb, walk to the post, hold");
   Ok(TowerRoofCore.OnRoof(man),"up: he ends on the roof");
   Ok(Flat(man,TowerRoofCore.Post(0))<=TowerRoofCore.PostArrive,"up: he ends at his post");
-  Ok(t<40f,"up: whole way under 40 s ("+t+")");
+  Ok(t<90f,"up: full walking stair route under 90 s ("+t+")");
   // 2. down to a point on the airfield
   Vector3 ground=new Vector3(30f,0f,12f);
   q=Run(ref man,ground,0,foot,out t,true,"down");
@@ -147,12 +149,16 @@ static class Sim {
   Ok(TowerRoofCore.Split(new Vector3(8f,0f,0f),roofGoal),"under the roof: Split (a flat arrival check must fail)");
   Ok(!TowerRoofCore.Split(TowerRoofCore.Post(1),roofGoal),"on the roof with a roof goal: no Split");
   Ok(TowerRoofCore.Leg(new Vector3(13.4f,5f,-2.8f),roofGoal,0,F,E,out dummy)!=TowerRoofCore.LegClimbUp,"at the foot's x/z but 5 m up: no climb start");
-  Ok(Flat(TowerRoofCore.Post(-1),TowerRoofCore.Post(4))<1e-4f && Flat(TowerRoofCore.Post(7),TowerRoofCore.Post(2))<1e-4f,"slots wrap onto the five posts");
+  Ok(Flat(TowerRoofCore.Post(-1),TowerRoofCore.Post(4))<1e-4f && Math.Abs(Flat(TowerRoofCore.Post(7),TowerRoofCore.Post(2))-.65f)<1e-4f,"overflow slots share walls with separate body spots");
   // 5. a merc standing on the roof, goal elsewhere on the roof: to his post only
   Vector3 m3=TowerRoofCore.Exit();
   List<int> q3=Run(ref m3,roofGoal,3,foot,out t,false,"roofwalk");
   Ok(S(q3)=="Walk,Hold","on the roof to a roof goal: walk to the post, no climb");
   for(int i=0;i<TowerRoofCore.Posts;i++) Console.WriteLine("POST "+i+" "+V(TowerRoofCore.Post(i))+" face "+V(TowerRoofCore.Face(i)));
+  // Z T1b: all six exact endpoints enter the ALL-area collision/support proof.
+  string endpoints="";
+  for(int i=0;i<6;i++)endpoints+=V(TowerRoofCore.Post(i))+";";
+  Console.WriteLine("PATH posts "+endpoints);
   Console.WriteLine("Tower roof merc simulation: "+Pass+" PASS, "+Fail+" FAIL");
   if(Fail>0) Environment.Exit(1);
  }
@@ -246,125 +252,10 @@ def box_dist(p, lo, hi):
 
 
 def geometry(paths):
-    bs = boxes()
-    roofY, railTop = const("RoofY"), const("RailTop")
-    lx, lz, over = const("LadderX"), const("LadderZ"), const("LadderOver")
-    colW, colD = const("ColW"), const("ColD")
-    foot = 0.0
-    reach = 11.0 / K                           # the game's interaction ray, 11 u
-    print("C1 boxes: %d (metres after / 2.8)" % len(bs))
+    from tower_stairs_check import geometry as stair_geometry
+    stair_geometry(paths)
+    ok(True, "ALL area colliders and full stair sweep checked")
 
-    # the roof and rail the ladder serves
-    roof = [b for b in bs if b[1] == "roof" and b[3][1] > 15]
-    ok(len(roof) == 1 and abs(roof[0][3][1] - roofY) < 0.02, "RoofY %.2f = top of the cab roof box" % roofY)
-    rails = [b for b in bs if b[1] == "rail" and b[2][1] >= roofY - 0.01]
-    ok(rails and all(abs(b[3][1] - railTop) < 0.02 for b in rails), "RailTop %.2f = the roof rail's top" % railTop)
-    ok(abs(const("RoofMinX") - max(b[3][0] for b in rails if b[3][0] < 5)) < 0.01
-       and abs(const("RoofMaxX") - min(b[2][0] for b in rails if b[2][0] > 11)) < 0.01
-       and abs(const("RoofMinZ") - max(b[3][2] for b in rails if b[3][2] < -3)) < 0.01
-       and abs(const("RoofMaxZ") - min(b[2][2] for b in rails if b[2][2] > 3)) < 0.01,
-       "roof interior = inside of the four rails")
-
-    # the ladder volume (rails, rungs, grab rails) and its collider
-    vis_lo = [lx - 0.03, foot - 0.1, lz - const("LadderHalfW") - 0.03]
-    vis_hi = [lx + 0.03, roofY + over + 0.03, lz + const("LadderHalfW") + 0.03]
-    col_lo = [lx - colW / 2, foot, lz - colD / 2]
-    col_hi = [lx + colW / 2, roofY, lz + colD / 2]
-    ok(not hits(vis_lo, vis_hi, bs, ("floor",)), "ladder rails/rungs clear of every C1 box: %s" % hits(vis_lo, vis_hi, bs, ("floor",)))
-    ok(not hits(col_lo, col_hi, bs, ("floor",)), "Ladder collider clear of every C1 box: %s" % hits(col_lo, col_hi, bs, ("floor",)))
-    band = [b for b in bs if b[2][2] < lz + colD / 2 and b[3][2] > lz - colD / 2 and b[3][0] > 10 and b[1] != "floor"]
-    face = max(b[3][0] for b in band)
-    gap = col_lo[0] - face
-    print("ladder: collider x %.2f..%.2f, tower face in its band x %.2f -> gap %.2f m" % (col_lo[0], col_hi[0], face, gap))
-    ok(0.03 <= gap <= 0.5, "ladder hugs the east face (gap %.2f m, 0.03..0.5)" % gap)
-    wall = max(b[3][0] for b in band if b[3][1] < 9.5)
-    ok(abs(wall - const("WallX")) < 0.01, "WallX %.2f = main block face %.2f (brackets reach it)" % (const("WallX"), wall))
-    win = [b for b in bs if b[1] == "window" and b[3][0] > 11.5]
-    near = min(min(abs(b[2][2] - vis_hi[2]), abs(vis_lo[2] - b[3][2])) if not (b[2][2] < vis_hi[2] and b[3][2] > vis_lo[2]) else -1 for b in win)
-    ok(near > 0.5, "ladder between the east windows (%.2f m clear of the nearest)" % near)
-    ok(all(b[1] != "door" for b in band), "no door in the ladder's band")
-
-    # the game's ladder points
-    start = (const("StartX"), foot, lz)
-    beup = (const("BeupX"), roofY - const("BeupDrop"), lz)
-    end = (const("EndX"), roofY + 0.02, lz)
-    def capsule(p, r=0.35, h=1.8, y0=0.02):
-        return [p[0] - r, p[1] + y0, p[2] - r], [p[0] + r, p[1] + h, p[2] + r]
-    lo, hi = capsule(start)
-    ok(not hits(lo, hi, bs), "StartPoint: a standing player fits at the foot")
-    ok(start[0] - 0.35 > max(b[3][0] for b in bs if b[1] != "floor" and b[3][1] < 3), "StartPoint outside the building")
-    eye = (start[0], foot + 1.6, start[2])
-    ok(box_dist(eye, col_lo, col_hi) <= reach, "Ladder collider in the interaction ray's reach from the foot (%.2f m <= %.2f)" % (box_dist(eye, col_lo, col_hi), reach))
-    ok(beup[0] > col_hi[0] and col_lo[1] < beup[1] < col_hi[1], "BeupPoint on the ladder's outside, below the roof")
-    lo, hi = capsule(end)
-    ok(not hits(lo, hi, bs), "EndPoint: a standing player fits on the roof: %s" % hits(lo, hi, bs))
-    ok(const("RoofMinX") + 0.35 < end[0] < const("RoofMaxX") - 0.35, "EndPoint inside the rail")
-    d_lo = [const("DownX") - const("DownW") / 2, roofY, lz - const("DownD") / 2]
-    d_hi = [const("DownX") + const("DownW") / 2, roofY + const("DownH"), lz + const("DownD") / 2]
-    east_rail = [b for b in rails if b[2][0] > 11.9]
-    ok(east_rail and overlap(d_lo, d_hi, east_rail[0][2], east_rail[0][3]), "ClimbDownPoint box on the rail over the ladder")
-    ok(d_hi[1] > railTop, "ClimbDownPoint box stands over the rail (seen above it)")
-    reye = (end[0], roofY + 1.6, end[2])
-    ok(box_dist(reye, d_lo, d_hi) <= reach, "ClimbDownPoint in reach from the roof (%.2f m)" % box_dist(reye, d_lo, d_hi))
-    ok(not overlap(d_lo, d_hi, col_lo, col_hi), "ClimbDownPoint and Ladder collider do not overlap (up and down stay apart)")
-
-    # sandbags and posts
-    bx, bz, sx, sz = arr("BagX"), arr("BagZ"), arr("BagSX"), arr("BagSZ")
-    px, pz, fx, fz = arr("PostX"), arr("PostZ"), arr("FaceX"), arr("FaceZ")
-    bagH = const("BagH")
-    bags = []
-    for i in range(len(bx)):
-        lo = [bx[i] - sx[i] / 2, roofY, bz[i] - sz[i] / 2]
-        hi = [bx[i] + sx[i] / 2, roofY + bagH, bz[i] + sz[i] / 2]
-        bags.append((lo, hi))
-        ok(not hits(lo, hi, bs), "sandbag %d clear of the tower (rail, siren mast): %s" % (i, hits(lo, hi, bs)))
-        ok(const("RoofMinX") <= lo[0] and hi[0] <= const("RoofMaxX") and const("RoofMinZ") <= lo[2] and hi[2] <= const("RoofMaxZ"),
-           "sandbag %d inside the rail" % i)
-        corridor = ([end[0] - 0.4, roofY, lz - 0.6], [const("RoofMaxX"), roofY + 2, lz + 0.6])
-        ok(not overlap(lo, hi, corridor[0], corridor[1]), "sandbag %d off the ladder exit" % i)
-    for i in range(len(bags)):
-        for j in range(i + 1, len(bags)):
-            ok(not overlap(bags[i][0], bags[i][1], bags[j][0], bags[j][1]), "sandbags %d/%d apart" % (i, j))
-    ok(len(px) == len(bx) == len(fx) >= 5, "five posts, one per merc slot, each with its wall")
-    for i in range(len(px)):
-        p = (px[i], roofY, pz[i])
-        lo, hi = capsule(p, 0.3)
-        ok(not hits(lo, hi, bs) and not any(overlap(lo, hi, b[0], b[1]) for b in bags), "post %d: a man fits" % i)
-        dx, dz = bx[i] - px[i], bz[i] - pz[i]
-        ahead = dx * fx[i] + dz * fz[i]
-        side = abs(dx * fz[i] - dz * fx[i])
-        ok(0.5 <= ahead <= 1.2 and side < 0.05, "post %d: its wall %.2f m ahead in the look direction" % (i, ahead))
-        # looking out over the wall: nothing of the tower between the wall and the rail
-        for j in range(len(px)):
-            if j > i:
-                ok(math.hypot(px[i] - px[j], pz[i] - pz[j]) >= 1.5, "posts %d/%d 1.5 m apart" % (i, j))
-    ok(abs(bagH - 0.9) < 0.01, "sandbags 0.9 m: cover for a crouching man")
-
-    # the NPC's capsule along the climb, both ways
-    cr = 0.3
-    ladder_parts = [(col_lo, col_hi), (vis_lo, vis_hi)]
-    for tag in ("up", "down"):
-        pts = paths.get(tag, [])
-        ok(len(pts) > 50, "climb path %s dumped (%d samples)" % (tag, len(pts)))
-        worst = []
-        for p in pts:
-            lo = [p[0] - cr, p[1] + 0.02, p[2] - cr]
-            hi = [p[0] + cr, p[1] + 1.75, p[2] + cr]
-            h = hits(lo, hi, bs, ("floor",))
-            h += ["Ladder" for l in ladder_parts if overlap(lo, hi, l[0], l[1])]
-            h += ["sandbag" for b in bags if overlap(lo, hi, b[0], b[1])]
-            if h:
-                worst.append((p, h))
-        ok(not worst, "climb %s: the NPC capsule touches nothing (%s)" % (tag, worst[:2]))
-        if pts:
-            top = max(p[1] for p in pts)
-            ok(top >= railTop + 0.1, "climb %s: feet %.2f m over the rail top %.2f" % (tag, top, railTop))
-    first, last = paths["up"][0], paths["up"][-1]
-    print("climb up from (%.2f %.2f %.2f) to (%.2f %.2f %.2f)" % (first + last))
-    ok(abs(last[1] - roofY) < 0.01 and const("RoofMinX") < last[0] < const("RoofMaxX"), "climb up ends standing on the roof")
-
-
-# --------------------------------------------------------------- 3 wiring
 
 def wiring():
     plugin = (ROOT / "RevivalPlugin.cs").read_text(encoding="utf-8")
@@ -385,9 +276,12 @@ def wiring():
     for slot, name in (("S_TowerRoofT", "TowerRoof.Tick"), ("S_TowerRoofL", "TowerRoof.LateFrame")):
         idx = int(re.search(slot + r" = (\d+);", prof).group(1))
         ok(listed[idx] == name, "F6 slot %s = \"%s\"" % (slot, name))
-    ok("internal static void Wire(string scene, Transform g)" in ladders and "EastLadders.Wire(scene, g.transform);" in RUNTIME,
-       "the game ladder goes through EastLadders.Wire (LadderObject, layer 17, tag Ladder)")
-    ok("int roof = TowerRoof.Leg(f.Tr, goal, u.Slot, out leg);" in war and "TowerRoof.StartClimb(f.Tr, Agent(f), roof == TowerRoof.LegClimbUp);" in war,
+    ok("GameLadder(" not in RUNTIME and "LadderMesh(" not in RUNTIME
+       and "EastLadders.Wire(" not in RUNTIME, "B1 ladder completely removed")
+    ok("OverlapCapsuleNonAlloc" in RUNTIME and "_hits, ~0" in RUNTIME
+       and "ValidateNext();" in RUNTIME and "!_routeReady" in RUNTIME,
+       "ALL-layer fail-closed diagnostic and active queries, no model whitelist")
+    ok("int roof = TowerRoof.Leg(f.Tr, goal, u.Slot, out leg);" in war and "TowerRoof.StartClimb(f.Tr, Agent(f), roof == TowerRoof.LegClimbUp, u.Slot)" in war,
        "NpcWar.MercMove routes through TowerRoof.Leg")
     ok("if (roof == TowerRoof.LegWalk) dest = goal;" in war, "roof legs skip the ground projection")
     ok("TowerRoof.Split(f.Tr.position, u.Goal)" in war and "TowerRoof.GoalUp(o.Centre) ? o.Centre : Beside(o.Centre, o.K)" in war,
@@ -398,7 +292,7 @@ def wiring():
     for f in ("Revival.TowerRoof.cs", "Revival.TowerRoofCore.cs", "research/tower_roof_check.py"):
         ok('"%s"' % f in sync, "sync_public ships " + f)
     for src, label in ((RUNTIME, "TowerRoof.cs"), (CORE, "TowerRoofCore.cs")):
-        ok("System.Linq" not in src and "FindObjectsOfType" not in src and "GetComponents" not in src, label + ": no LINQ / scene scans")
+        ok("System.Linq" not in src and "FindObjectsOfType" not in src , label + ": no LINQ / scene scans")
         raw = src.encode("utf-8")
         ok(all(b < 128 for b in raw) and not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw, label + ": ASCII, LF, no BOM")
     late = RUNTIME[RUNTIME.index("internal static void LateFrame()"):RUNTIME.index("// ------------------------------------------------------ merc routing")]

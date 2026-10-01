@@ -77,7 +77,7 @@ namespace NextDayRevival
             for (int n = 0; n < _roster.Count; n++)
             {
                 Record r = _roster[n]; MercUnit u = r.Unit;
-                if (r.Dead || !r.Order.Survive || u == null || u.Ai == null) continue;
+                if (r.Dead || r.Down.Down || !r.Order.Survive || u == null || u.Ai == null) continue;
                 if (count++ == 0) first = u.Ai.transform.position;
                 if (now >= _nextShelterSave && u.Fight.Holding && u.Fight.Brain != null)
                 {

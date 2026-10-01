@@ -249,7 +249,49 @@ namespace NextDayRevival
         public const int S_TowerRoofT = 182;
         public const int S_TowerRoofL = 183;
         public const int S_SeatBindingL = 184;
-        public const int Count = 185;
+        public const int S_AirfieldGroundLoad = 185;
+        public const int S_AirfieldObjectsLoad = 186;
+        public const int S_AirfieldObjectsNav = 187;
+        public const int S_FlakEarthworkBuild = 188;
+        public const int S_FlakAmmoT = 189;
+        public const int S_AmmoDepotT = 190;
+        public const int S_AmmoDepotD = 191;
+        public const int S_MercDownT = 192;
+        public const int S_MercMedicT = 193;
+        public const int S_TowerCommandRoomLoad = 194;
+        public const int S_MercResupplyT = 195;
+        public const int S_TowerDeliveryT = 196;
+        public const int S_TowerDeliveryD = 197;
+        public const int S_TowerDeliveryGate = 198;
+        public const int S_VehicleSeatsT = 199;
+        public const int S_VehicleSeatsD = 200;
+        public const int S_MercDriveT = 201;
+        public const int S_MercFetchT = 202;
+        public const int S_MercFetchGate = 203;
+        public const int S_ParaPrepareT = 204;
+        public const int S_PhysicsDietT = 205;
+        public const int S_RenderCounterT = 206;
+        public const int S_AirNpcVisual = 207;
+        public const int S_OfflineStartT = 208;
+        public const int S_OfflineAi = 209;
+        public const int S_ScenarioT = 210;
+        public const int S_ScenarioEvent = 211;
+        public const int S_ScenarioObserve = 212;
+        public const int S_ParkedTu95Nav = 213;
+        public const int S_MercLineT = 214;
+        public const int S_MercPositionT = 215;
+        public const int S_MercMoveShootPose_Update = 216;
+        public const int S_NpcVaultT = 217;
+        public const int S_NpcVaultL = 218;
+        public const int S_NpcNavT = 219;
+        public const int S_MercMoveShoot_Fire = 220;
+        public const int S_MercParas = 221;
+        public const int S_MercRaidT = 222;
+        public const int S_MercRaidCoverT = 223;
+        public const int S_MercCrewPhase = 224;
+        public const int S_ZuGround = 225;
+        public const int S_RepairTapT = 226;
+        public const int Count = 227;
 
         static readonly string[] Names = new string[]
         {
@@ -416,6 +458,48 @@ namespace NextDayRevival
             "TowerRoof.Tick",
             "TowerRoof.LateFrame",
             "SeatBinding.LateFrame",
+            "AirfieldGround.Load",
+            "AirfieldObjects.Load",
+            "AirfieldObjects.Nav",
+            "FlakEarthwork.Build",
+            "  FlakAmmo.Tick.Sub",
+            "AmmoDepot.Tick",
+            "AmmoDepot.Draw",
+            "  MercDown.Tick.Sub",
+            "  MercMedic.Tick.Sub",
+            "TowerCommandRoom.Load",
+            "MercResupply.Tick",
+            "TowerDelivery.Tick",
+            "TowerDelivery.Draw",
+            "  TowerDelivery.CrateGate.Sub",
+            "VehicleSeats.Tick",
+            "VehicleSeats.Draw",
+            "MercDrive.Tick",
+            "MercFetch.Tick",
+            "  MercFetch.CrateGate.Sub",
+            "Paratroopers.Prepare",
+            "PhysicsDiet.Tick",
+            "RenderCounter.Tick",
+            "AirNpcVisual.Sub",
+            "OfflineStart.Tick",
+            "OfflineStart.AI",
+            "  Scenario.Tick.Sub",
+            "  Scenario.Event.Sub",
+            "  Scenario.Observe.Sub",
+            "ParkedTu95.Nav",
+            "  MercLine.Fire.Sub",
+            "  MercPosition.Think.Sub",
+            "MercMoveShootPose.Update",
+            "  NpcVault.Probe.Sub",
+            "NpcVault.LateUpdate",
+            "  NpcNav.Recovery.Sub",
+            "  MercMoveShoot.Fire.Sub",
+            "  MercParas.Scan.Sub",
+            "  MercRaid.Orders.Sub",
+            "  MercRaid.Shelter.Sub",
+            "  MercCrewPhase.Think.Sub",
+            "  ZuGround.Control.Sub",
+            "RepairTap.Tick",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested
@@ -439,10 +523,16 @@ namespace NextDayRevival
 
         // Per-slot: start stamp and memory (this frame), accumulated ticks and
         // bytes (this frame).
-        static readonly long[] _mark = new long[Count];
         static readonly long[] _acc  = new long[Count];
-        static readonly long[] _memMark = new long[Count];
         static readonly long[] _memAcc = new long[Count];
+        // Exclusive nesting: the parent owns only work outside its children.
+        // Fixed arrays also support a re-entered slot without overwriting marks.
+        static readonly int[] _scopeSlot = new int[Count];
+        static readonly long[] _scopeStart = new long[Count];
+        static readonly long[] _scopeMem = new long[Count];
+        static readonly long[] _scopeChild = new long[Count];
+        static readonly long[] _scopeChildMem = new long[Count];
+        static int _scopeDepth;
         // Smoothed per-slot milliseconds and KB, shown in the overlay.
         static readonly double[] _ms = new double[Count];
         static readonly double[] _kb = new double[Count];
@@ -511,23 +601,37 @@ namespace NextDayRevival
             return _toggle;
         }
 
-        /// <summary>Start of a bracket. No-op while the overlay is off.</summary>
+        /// <summary>Start of a bracket. Enabled by F6 or an explicit scenario.</summary>
         public static void S(int slot)
         {
-            if (!On) return;
+            if (!On && !ScenarioRun.Measuring) return;
             if (slot < 0 || slot >= Count) return;
-            _memMark[slot] = GC.GetTotalMemory(false);
-            _mark[slot] = Stopwatch.GetTimestamp();
+            if (_scopeDepth >= Count) return;
+            int depth = _scopeDepth++;
+            _scopeSlot[depth] = slot;
+            _scopeChild[depth] = _scopeChildMem[depth] = 0;
+            _scopeMem[depth] = GC.GetTotalMemory(false);
+            _scopeStart[depth] = Stopwatch.GetTimestamp();
         }
 
-        /// <summary>End of a bracket. No-op while the overlay is off.</summary>
+        /// <summary>End of a bracket. Enabled by F6 or an explicit scenario.</summary>
         public static void E(int slot)
         {
-            if (!On) return;
+            if (!On && !ScenarioRun.Measuring) return;
             if (slot < 0 || slot >= Count) return;
-            _acc[slot] += Stopwatch.GetTimestamp() - _mark[slot];
-            long grew = GC.GetTotalMemory(false) - _memMark[slot];
-            if (grew > 0) _memAcc[slot] += grew;    // a GC inside reads negative: ignored
+            if (_scopeDepth == 0 || _scopeSlot[_scopeDepth - 1] != slot) return;
+            int depth = --_scopeDepth;
+            long span = Stopwatch.GetTimestamp() - _scopeStart[depth];
+            long grew = Math.Max(0L, GC.GetTotalMemory(false) - _scopeMem[depth]);
+            long exclusive = Math.Max(0L, span - _scopeChild[depth]);
+            if (ScenarioRun.Measuring) ScenarioRun.Module(slot, exclusive);
+            if (On) _acc[slot] += exclusive;
+            if (On) _memAcc[slot] += Math.Max(0L, grew - _scopeChildMem[depth]);
+            if (depth > 0)
+            {
+                _scopeChild[depth - 1] += span;
+                _scopeChildMem[depth - 1] += grew;
+            }
         }
 
         /// <summary>X perf-bisect: a slot's smoothed ms (what the overlay
@@ -536,6 +640,9 @@ namespace NextDayRevival
         {
             return slot < 0 || slot >= Count ? 0.0 : _ms[slot];
         }
+
+        internal static string SlotName(int slot) { return Names[slot]; }
+        internal static int SlotKind(int slot) { return Kind[slot]; }
 
         /// <summary>Called at the top of FixedUpdate: physics steps per frame.</summary>
         public static void FixedStep() { _fixedThis++; }
@@ -547,6 +654,9 @@ namespace NextDayRevival
         /// </summary>
         public static void NewFrame()
         {
+            // A missing End (exception/toggle) must not contaminate later frames.
+            _scopeDepth = 0;
+            ScenarioRun.FrameBoundary();
             try
             {
                 int fixedSteps = _fixedThis;
@@ -555,6 +665,7 @@ namespace NextDayRevival
                 if (Input.GetKeyDown(ToggleKey()))
                 {
                     On = !On;
+                    if (!On) RenderCounter.Reset();
                     if (On)
                     {
                         // Entering: clear stale spans so the first shown frame is
@@ -672,6 +783,9 @@ namespace NextDayRevival
                         _allocKb, Names[topKb], _kb[topKb], _heapMb,
                         GC.CollectionCount(0) - _gcStart, _fixedAvg, RenderLine(), EnginePerf.StatusLine() + "; " + CombatLoad.StatusLine()));
                 }
+                S(S_RenderCounterT);
+                try { RenderCounter.Tick(); }
+                finally { E(S_RenderCounterT); }
             }
             catch { /* diagnostics must never throw into the frame loop */ }
         }
@@ -706,11 +820,11 @@ namespace NextDayRevival
                 return string.Format(
                     "far {0:0} m, shadows {1:0} m x{2}, LOD bias {3:0.00}, q{4}, "
                     + "terrains {5}: trees {6:0}/{7:0} m, grass {8:0} m x{9:0.00}, pixErr {10:0}",
-                    cam != null ? cam.farClipPlane : 0f, QualitySettings.shadowDistance,
+                    cam != null ? cam.farClipPlane / 2.8f : 0f, QualitySettings.shadowDistance / 2.8f,
                     QualitySettings.shadowCascades, QualitySettings.lodBias,
                     QualitySettings.GetQualityLevel(), all != null ? all.Length : 0,
-                    t != null ? t.treeDistance : 0f, t != null ? t.treeBillboardDistance : 0f,
-                    t != null ? t.detailObjectDistance : 0f, t != null ? t.detailObjectDensity : 0f,
+                    t != null ? t.treeDistance / 2.8f : 0f, t != null ? t.treeBillboardDistance / 2.8f : 0f,
+                    t != null ? t.detailObjectDistance / 2.8f : 0f, t != null ? t.detailObjectDensity : 0f,
                     t != null ? t.heightmapPixelError : 0f);
             }
             catch { return "render settings unavailable"; }
@@ -720,8 +834,8 @@ namespace NextDayRevival
 
         static Texture2D _bg;
         const int Shown = 12;
-        static readonly string[] _text = new string[Shown + 13];
-        static readonly Color[] _tint = new Color[Shown + 13];
+        static readonly string[] _text = new string[Shown + 14];
+        static readonly Color[] _tint = new Color[Shown + 14];
         static int _lines;
         static float _textAt;
 
@@ -787,8 +901,10 @@ namespace NextDayRevival
                 _allocKb, _allocKb * _fpsAvg, _heapMb),
                 _allocKb > 8.0 ? new Color(1f, 0.6f, 0.45f, 1f) : plain);
             Add(RenderLine(), soft);
+            Add(RenderCounter.StatusLine(), soft);
             Add(EnginePerf.StatusLine(), soft);
             Add(CombatLoad.StatusLine(), soft);
+            Add(PhysicsDiet.StatusLine(), soft);
             Add("Spike: " + (_lastSpike.Length > 0 ? _lastSpike : "none since F6"),
                 _lastSpike.Length > 0 ? new Color(1f, 0.8f, 0.5f, 1f) : soft);
             Add("Engine/GPU are the rest of the frame. Peak = last 4 s.", soft);

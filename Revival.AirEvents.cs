@@ -59,6 +59,7 @@
 //                clock high, clock low, yaw, npc view, ground x/y/z, ... }
 //   3 request  { 3, x, y, z, template, quick }                      -> master
 //   4 clear    { 4 }                                                -> master
+//   9 stop     { 9, view } -> all: cancel bombs still in a retake bomber's bay
 //
 // C# 3.0 (csc from .NET 3.5): no optional arguments, no expression-tree
 // lambdas. Player-facing strings through Loc.T with real Cyrillic, so this
@@ -86,7 +87,7 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
-    internal static class AirEvents
+    internal static partial class AirEvents
     {
         // ------------------------------------------------------------ numbers
         // Real metres and km/h; the world is PlayerAn2.K (2.8) times real size.
@@ -146,6 +147,9 @@ namespace NextDayRevival
                 + "with its own altitude in the map editor uses that one instead.");
             CfgBanner = cfg.Bind("Hints", "AirRaidBanner", true,
                 "Hint: the air raid warning and the paratroop landing are shown as a banner.");
+            // Install once at startup, outside any raid/drop tick bracket.
+            try { ParaPose.Install(); }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("AirEvents: parachute hooks: " + ex.Message); }
         }
 
         // =============================================================== data
@@ -157,6 +161,10 @@ namespace NextDayRevival
             /// table): aircraft k bombs Aims[k % Aims.Length], Load bombs.</summary>
             public bool Escort;
             public Vector3[] Aims;
+            // Raid-only per-stick corridor and objective; ordinary events keep their arrow.
+            public bool OwnDrop, CloseDrop;
+            public Vector3 Drop, Attack;
+            public float Direction;
             public int Count = 1;
             public float Delay;
             public int Load;
@@ -177,6 +185,11 @@ namespace NextDayRevival
             /// <summary>Tu-95 height above the ground, real metres; 0 = the
             /// host's [AirEvents] BomberAltitude.</summary>
             public float AltitudeM;
+            // Runtime retake events get a longer strategic warning; editor events keep 60 s.
+            public float WarningLeadSeconds;
+            public bool Coordinated; // retake arrivals: AA lead before main attack
+            internal float ArrivalLead;
+            public float SpeedFactor; // 0 inherits host; positive overrides NPC global factor.
             internal float Next = -1f;
             public bool Here { get { return MapScene.Owns(Scene); } }
             public int Bombers { get { int n = 0; for (int i = 0; i < Waves.Count; i++) if (Waves[i].Bomber) n += Waves[i].Count; return n; } }
@@ -245,6 +258,10 @@ namespace NextDayRevival
                 // Column 18 (B8a) is optional: an older table flies at the host's default.
                 float alt = c.Length > 18 && c[18].Trim().Length > 0 ? F(c[18]) : 0f;
                 e.AltitudeM = alt > 0f ? Mathf.Clamp(alt, MinBomberAltitudeM, MaxBomberAltitudeM) : 0f;
+                float factor = c.Length > 19 && c[19].Trim().Length > 0 ? F(c[19]) : 0f;
+                if (factor != 0f && (factor < 0.2f || factor > 1.5f))
+                    throw new FormatException("air event " + e.Name + ": speed factor must be 0 or 0.2..1.5");
+                e.SpeedFactor = factor;
                 list.Add(e);
             }
             return list;
@@ -373,6 +390,7 @@ namespace NextDayRevival
             public float At;
             public Wave W;
             public int Index;       // aircraft in its wave
+            public PreparedDrop Prepared;
         }
 
         sealed class Raid
@@ -381,6 +399,7 @@ namespace NextDayRevival
             public float Heading;
             public Vector3 Target, Drop, Attack;
             public float Start;
+            public float SpeedFactor;
             public readonly List<Sortie> Pending = new List<Sortie>();
             public readonly List<GameObject> Flying = new List<GameObject>();
             public bool NoBombs, NoDrop;
@@ -401,6 +420,7 @@ namespace NextDayRevival
         {
             Raid r = new Raid();
             r.E = e;
+            r.SpeedFactor = NpcAircraft.SpeedFactor(e.SpeedFactor);
             r.Heading = HeadingFor(e);
             Vector3 target = new Vector3(e.X, 0f, e.Z);
             Vector3 drop = new Vector3(e.DropX, 0f, e.DropZ);
@@ -427,7 +447,7 @@ namespace NextDayRevival
             r.Attack = Ground(at.HasValue ? new Vector3(at.Value.x, 0f, at.Value.z) : attack);
 
             if (Safe(r.Target) && e.Bombers + e.Escorts > 0) r.NoBombs = true;
-            if (Safe(r.Drop) && e.Transports > 0) r.NoDrop = true;
+            if (!e.Coordinated && Safe(r.Drop) && e.Transports > 0) r.NoDrop = true;
             if ((r.NoBombs || e.Bombers + e.Escorts == 0) && (r.NoDrop || e.Transports == 0))
             {
                 RevivalPlugin.L.LogInfo("AirEvents: " + e.Name + " not flown - its target is in a safe zone.");
@@ -437,16 +457,32 @@ namespace NextDayRevival
 
             // The first aircraft over the target WarnSeconds after the warning:
             // the launches wait for the lead the flight from the edge does not give.
-            float warn = quick ? QuickWarnSeconds : WarnSeconds;
+            float warn = AirPicturePolicy.WarningLead(quick, e.WarningLeadSeconds, WarnSeconds, QuickWarnSeconds);
             float firstEta = 1e9f;
             for (int i = 0; i < e.Waves.Count; i++)
             {
                 Wave w = e.Waves[i];
                 if (Skipped(r, w)) continue;
-                float eta = w.Delay + Eta(Over(r, w, 0), r.Heading, w.Bomber, e.Length);
+                float eta = w.Delay + WaveEta(r, w, 0);
                 firstEta = Mathf.Min(firstEta, eta);
             }
             float lead = Mathf.Max(0f, warn - firstEta);
+            if (e.Coordinated)
+            {
+                lead = warn;
+                for (int i = 0; i < e.Waves.Count; i++)
+                {
+                    Wave w = e.Waves[i];
+                    if (Skipped(r, w)) continue;
+                    for (int k = 0; k < w.Count; k++)
+                        lead = RetakeTactics.ArrivalLead(lead, WaveEta(r, w, k), w.Delay);
+                }
+                // Warning/radar ETA follows coordinated arrival, not launch + edge ETA.
+                firstEta = 1e9f;
+                for (int i = 0; i < e.Waves.Count; i++)
+                    if (!Skipped(r, e.Waves[i])) firstEta = Mathf.Min(firstEta, e.Waves[i].Delay);
+            }
+            e.ArrivalLead = e.Coordinated ? lead : 0f;
             r.Start = Time.time;
             for (int i = 0; i < e.Waves.Count; i++)
             {
@@ -457,8 +493,11 @@ namespace NextDayRevival
                     Sortie s = new Sortie();
                     s.W = w; s.Index = k;
                     // A wave flies abreast, the wingmen a second and a half apart.
-                    s.At = r.Start + lead + w.Delay + k * 1.5f;
+                    s.At = r.Start + (e.Coordinated
+                        ? RetakeTactics.LaunchDelay(lead, w.Delay, WaveEta(r, w, k))
+                        : lead + w.Delay) + k * 1.5f;
                     r.Pending.Add(s);
+                    if (!w.Bomber && !w.Escort) QueuePreparation(r, s);
                 }
             }
             r.Serial = ++_serial;
@@ -469,7 +508,7 @@ namespace NextDayRevival
             int escorts = r.NoBombs ? 0 : e.Escorts;
             transports += escorts;
             float from = Mathf.Repeat(r.Heading + 180f, 360f);
-            float siren = lead + Mathf.Min(firstEta, 120f) + 45f;
+            float siren = lead + firstEta + 45f;
             Vector3 alarm = bombers > 0 || escorts > 0 ? r.Target : r.Drop;
             float[] warnMsg = new float[] { 0f, alarm.x, alarm.z, siren, from, bombers, transports, lead + firstEta };
             Net.Send(warnMsg, true);
@@ -495,14 +534,14 @@ namespace NextDayRevival
         /// <summary>Is this wave dropped by a safe zone (bombs or the paradrop)?</summary>
         static bool Skipped(Raid r, Wave w)
         {
-            return (w.Bomber || w.Escort) ? r.NoBombs : r.NoDrop;
+            return (w.Bomber || w.Escort) ? r.NoBombs : r.NoDrop || (w.OwnDrop && Safe(w.Drop));
         }
 
         /// <summary>The point aircraft k of a wave flies over.</summary>
         static Vector3 Over(Raid r, Wave w, int k)
         {
             if (w.Escort && w.Aims != null && w.Aims.Length > 0) return w.Aims[k % w.Aims.Length];
-            return w.Bomber || w.Escort ? r.Target : r.Drop;
+            return w.Bomber || w.Escort ? r.Target : w.OwnDrop ? w.Drop : r.Drop;
         }
 
         /// <summary>W Tower 4 (Revival.RetakeRaids.cs): the master flies an event
@@ -519,15 +558,36 @@ namespace NextDayRevival
             return e != null && Running(e);
         }
 
-        static float Eta(Vector3 over, float heading, bool bomber, float lineLength)
+        static float Eta(Vector3 over, float heading, Wave wave, float lineLength, float factor)
         {
             Vector2 from, to;
             FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
-            float speed = (bomber ? BomberKmh : TransportKmh) / 3.6f * K;
+            float speed = NpcAircraft.Speed((wave.Bomber ? BomberKmh : wave.Escort ? EscortKmh : TransportKmh) / 3.6f * K, factor);
             float run = (new Vector2(over.x, over.z) - from).magnitude;
-            if (bomber) run = Mathf.Max(run, MercAACore.ApproachUnits(lineLength, K));
+            float strip = wave.Bomber ? lineLength : wave.Escort ? EscortStick : JumpSpread;
+            run = Mathf.Max(run, MercAACore.ApproachUnits(strip, K));
             return run / speed;
         }
+
+        static float WaveEta(Raid r, Wave w, int k)
+        {
+            if (!r.E.Coordinated) return Eta(Over(r, w, k), r.Heading, w, r.E.Length, r.SpeedFactor);
+            Vector3 over = Over(r, w, k);
+            float heading = w.OwnDrop ? w.Direction : r.Heading;
+            Vector2 from, to;
+            FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
+            float run = (new Vector2(over.x, over.z) - from).magnitude;
+            float speed = NpcAircraft.Speed((w.Escort ? EscortKmh : w.Bomber ? BomberKmh : TransportKmh) / 3.6f * K, r.SpeedFactor);
+            if (w.Bomber) run = Mathf.Max(run, MercAACore.ApproachUnits(r.E.Length, K));
+            if (w.OwnDrop)
+            {
+                run -= RetakeTactics.DropSpread(w.CloseDrop, w.Load, JumpSpread, K) * 0.5f + 25f * K;
+                run = Mathf.Max(run, RetakeTactics.ApproachSeconds * speed);
+            }
+            return run / speed;
+        }
+
+        static float _nextRetakeLaunch;
 
         static void TickRaids()
         {
@@ -537,7 +597,10 @@ namespace NextDayRevival
                 for (int j = r.Pending.Count - 1; j >= 0; j--)
                 {
                     Sortie s = r.Pending[j];
-                    if (Time.time < s.At) continue;
+                    if (Time.time < s.At || (s.Prepared != null && !s.Prepared.Finished)) continue;
+                    // Path/physics construction is spawn work, capped at 2 Hz for retakes.
+                    if (r.E.Coordinated && Time.time < _nextRetakeLaunch) continue;
+                    if (r.E.Coordinated) _nextRetakeLaunch = Time.time + 0.5f;
                     r.Pending.RemoveAt(j);
                     GameObject go = s.W.Escort ? LaunchEscort(r, s) : s.W.Bomber ? LaunchBomber(r, s) : LaunchTransport(r, s);
                     if (go != null) r.Flying.Add(go);
@@ -547,6 +610,7 @@ namespace NextDayRevival
                         r.Flying.RemoveAt(j);
                 if (r.Pending.Count == 0 && r.Flying.Count == 0 && _drops.Count == 0)
                 {
+                    CancelPreparations(r);
                     RevivalPlugin.L.LogInfo("AirEvents: " + r.E.Name + " is over.");
                     _raids.RemoveAt(i);
                 }
@@ -562,9 +626,14 @@ namespace NextDayRevival
 
         static FlightPath PathOver(Vector3 over, float heading, float altitudeM, float kmh)
         {
+            return PathOver(over, heading, altitudeM, kmh, NpcAircraft.SpeedFactor(0f));
+        }
+
+        static FlightPath PathOver(Vector3 over, float heading, float altitudeM, float kmh, float factor)
+        {
             Vector2 from, to;
             FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
-            return FlightPath.Straight(from, to, altitudeM * K, kmh / 3.6f * K);
+            return FlightPath.Straight(from, to, altitudeM * K, NpcAircraft.Speed(kmh / 3.6f * K, factor));
         }
 
         static GameObject LaunchBomber(Raid r, Sortie s)
@@ -572,7 +641,7 @@ namespace NextDayRevival
             Vector2 d = Dir(r.Heading);
             Vector3 fwd = new Vector3(d.x, 0f, d.y), right = new Vector3(d.y, 0f, -d.x);
             Vector3 centre = r.Target + right * Offset(s.Index, s.W.Count, r.E.Width);
-            FlightPath path = PathOver(centre, r.Heading, BomberAltitude(r.E), BomberKmh);
+            FlightPath path = PathOver(centre, r.Heading, BomberAltitude(r.E), BomberKmh, r.SpeedFactor);
             // A map-edge spawn was too close for even the best radar crew.
             // Keep the chosen target, heading and bomb line; extend inbound only.
             path.ExtendApproach(path.Project(centre), MercAACore.ApproachUnits(r.E.Length, K));
@@ -580,6 +649,10 @@ namespace NextDayRevival
             Vector3 lineEnd = centre + fwd * (r.E.Length * 0.5f);
             int bombs = s.W.Load;
             bool released = false;
+            // One seed per bomber; evaluating damage before release allocates
+            // nothing and never rerolls a wounded aircraft into a perfect run.
+            float timingRoll = r.E.Coordinated ? UnityEngine.Random.value : 0f;
+            float crossRoll = r.E.Coordinated ? UnityEngine.Random.value : 0f;
             float sLine = path.Project(lineStart);
             float groundY = Ground(centre).y;
             string name = r.E.Name;
@@ -589,18 +662,35 @@ namespace NextDayRevival
                     if (released) return;
                     float h = Mathf.Max(20f, path.At(at).y - groundY);
                     float fall = Mathf.Sqrt(2f * h / Gravity);
-                    if (at < sLine - path.Speed * fall) return;
-                    released = true;
+                    float releaseAt = sLine - path.Speed * fall;
+                    float early = r.E.Coordinated ? RaidCarpetCore.MaxShiftM * K : 0f;
+                    if (at < releaseAt - early) return;
                     // W AA4: the damage it carries to this point decides the run.
                     NpcAircraft.Flight self = NpcAircraft.Find(go);
                     float damage = self == null ? 0f : self.Ledger.Damage;
-                    ReleasePlan plan = AirKills.PlanRelease(damage);
+                    ReleasePlan plan = new ReleasePlan();
+                    if (r.E.Coordinated)
+                    {
+                        RaidCarpetPlan carpet = RaidCarpetCore.Plan(damage, timingRoll, crossRoll);
+                        // Shift the actual bay opening as well as the impacts.
+                        if (at < releaseAt + carpet.AlongM * K) return;
+                        released = true;
+                        if (RaidCarpetCore.Load(bombs, damage) == 0) return;
+                        plan.Kind = damage > 0f ? ReleaseKind.Wide : ReleaseKind.Normal;
+                        plan.AlongM = carpet.AlongM; plan.AcrossM = carpet.AcrossM;
+                        plan.Scatter = carpet.Scatter;
+                    }
+                    else
+                    {
+                        released = true;
+                        plan = AirKills.PlanRelease(damage);
+                    }
                     if (plan.Kind == ReleaseKind.Abort)
                     {
                         AirKills.Aborted(go, name, damage);
                         return;
                     }
-                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, plan, damage, false, false);
+                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, plan, damage, false, false, r.E.Coordinated);
                 },
                 null);
             if (f == null) return null;
@@ -613,12 +703,15 @@ namespace NextDayRevival
         static GameObject LaunchEscort(Raid r, Sortie s)
         {
             Vector3 aim = Ground(Over(r, s.W, s.Index));
+            if (Safe(aim)) return null;
             Vector2 d = Dir(r.Heading);
             Vector3 fwd = new Vector3(d.x, 0f, d.y), right = new Vector3(d.y, 0f, -d.x);
             // Two on one gun do not fly through each other: a wingman is 40 u aside.
             int round = s.W.Aims != null && s.W.Aims.Length > 0 ? s.Index / s.W.Aims.Length : 0;
             Vector3 centre = aim + right * (round * 40f);
-            FlightPath path = PathOver(centre, r.Heading, EscortAltitudeM, EscortKmh);
+            FlightPath path = PathOver(centre, r.Heading, EscortAltitudeM, EscortKmh, r.SpeedFactor);
+            // The radar battery needs the same fair inbound window as for bombers.
+            path.ExtendApproach(path.Project(centre), MercAACore.ApproachUnits(EscortStick, K));
             Vector3 lineStart = aim - fwd * (EscortStick * 0.5f);
             Vector3 lineEnd = aim + fwd * (EscortStick * 0.5f);
             int bombs = Mathf.Clamp(s.W.Load, 1, 8);
@@ -633,7 +726,7 @@ namespace NextDayRevival
                     float fall = Mathf.Sqrt(2f * h / Gravity);
                     if (at < sLine - path.Speed * fall) return;
                     released = true;
-                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, AirKills.PlanRelease(0f), 0f, true, false);
+                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, AirKills.PlanRelease(0f), 0f, true, false, false);
                 },
                 null);
             return f == null ? null : f.Go;
@@ -641,24 +734,66 @@ namespace NextDayRevival
 
         static GameObject LaunchTransport(Raid r, Sortie s)
         {
-            Vector2 d = Dir(r.Heading);
+            float heading = s.W.OwnDrop ? s.W.Direction : r.Heading;
+            Vector2 d = Dir(heading);
             Vector3 fwd = new Vector3(d.x, 0f, d.y), right = new Vector3(d.y, 0f, -d.x);
-            Vector3 centre = r.Drop + right * Offset(s.Index, s.W.Count, Mathf.Min(r.E.Width, 200f));
-            FlightPath path = PathOver(centre, r.Heading, TransportAltitudeM, TransportKmh);
+            Vector3 centre = Over(r, s.W, s.Index) + right * Offset(s.Index, s.W.Count, Mathf.Min(r.E.Width, 200f));
+            FlightPath path = s.Prepared == null ? PathOver(centre, heading, TransportAltitudeM, TransportKmh, r.SpeedFactor) : s.Prepared.Path;
+            if (s.Prepared != null && s.Prepared.Failed) return null;
+            if (s.Prepared == null) path.ExtendApproach(path.Project(centre), MercAACore.ApproachUnits(JumpSpread, K));
             int men = s.W.Load;
-            float spread = men > 1 ? JumpSpread : 0f;
-            float sJump = path.Project(centre - fwd * (spread * 0.5f));
+            float spread = RetakeTactics.DropSpread(s.W.CloseDrop, men, JumpSpread, K);
+            if (s.W.OwnDrop && !RetakeCorridor(centre, fwd, men, spread))
+            {
+                RevivalPlugin.L.LogInfo("AirEvents: " + r.E.Name + " stick stays aboard: blocked drop corridor.");
+                return null;
+            }
+            Vector3 first = centre - fwd * (spread * 0.5f + (s.W.OwnDrop ? 25f * K : 0f));
+            if (s.W.OwnDrop && s.Prepared == null) path.ExtendApproach(path.Project(first), RetakeTactics.ApproachSeconds * path.Speed);
+            float sJump = path.Project(first);
             bool jumped = false;
             Raid raid = r;
+            if (s.W.OwnDrop)
+            {
+                // Separate context survives until this stick lands; Photon receives
+                // the existing jump packet with this heading and these ground points.
+                raid = new Raid();
+                raid.E = r.E; raid.Serial = r.Serial; raid.Heading = heading;
+                raid.Drop = Ground(centre); raid.Attack = Ground(s.W.Attack);
+            }
             NpcAircraft.Flight f = NpcAircraft.Launch(path, true, TransportTag + r.E.Name,
                 delegate(GameObject go, float at)
                 {
                     if (jumped || at < sJump) return;
-                    jumped = true;
-                    Jump(go, raid, men, spread / Mathf.Max(1, men - 1) / path.Speed, path);
+                    jumped = JumpPrepared(go, raid, men, spread / Mathf.Max(1, men - 1) / path.Speed, path, s.Prepared);
                 },
                 null);
+            if (f != null && s.Prepared != null) { s.Prepared.Plane = f.Go; s.Prepared.Launched = true; }
             return f == null ? null : f.Go;
+        }
+
+        // All collider layers, not only the tower boxes. No recurring scan.
+        static bool RetakeCorridor(Vector3 centre, Vector3 fwd, int men, float spread)
+        {
+            for (int i = 0; i < men; i++)
+            {
+                Vector3 p = centre + fwd * (men > 1 ? -spread * 0.5f + i * spread / (men - 1) : 0f);
+                float floor;
+                if (!TowerSupportPolicy.OnMap(p.x, p.z) || Safe(p)
+                    || !RevivalTroopInsertion.TerrainHeight(p, out floor)) return false;
+                RaycastHit hit;
+                // A slab is a walkable floor; roofs/trees/props above it reject the corridor.
+                if (Physics.Raycast(new Vector3(p.x, floor + 200f * K, p.z), Vector3.down,
+                    out hit, 201f * K, ~0, QueryTriggerInteraction.Ignore))
+                {
+                    if (hit.point.y - floor > 1f * K || hit.normal.y < 0.85f) return false;
+                    floor = hit.point.y;
+                }
+                Vector3 feet = new Vector3(p.x, floor + 1f * K, p.z);
+                if (Physics.CheckCapsule(feet, feet + Vector3.up * (0.8f * K), 0.7f * K,
+                    ~0, QueryTriggerInteraction.Ignore)) return false;
+            }
+            return true;
         }
 
         // W Tower 2: one friendly An-2, using the existing network carrier,
@@ -709,6 +844,7 @@ namespace NextDayRevival
             float releaseAt = path.Project(first);
             bool released = false;
             int generation = TowerSupport.WorldGeneration;
+            PreparedDrop prepared = parachutes ? QueueSupportPreparation(raid, path, first) : null;
             NpcAircraft.Flight flight = NpcAircraft.Launch(path, false, "tower-support",
                 delegate(GameObject plane, float at)
                 {
@@ -716,17 +852,17 @@ namespace NextDayRevival
                     if (parachutes)
                     {
                         if (at < releaseAt) return;
-                        released = true;
-                        Jump(plane, raid, 8, 200f / 7f / path.Speed, path);
+                        released = JumpPrepared(plane, raid, 8, 200f / 7f / path.Speed, path, prepared);
                     }
                     else
                     {
                         float fall = Mathf.Sqrt(2f * Mathf.Max(20f, path.At(at).y - ground) / Gravity);
                         if (at < releaseAt - path.Speed * fall) return;
                         released = true;
-                        Release(plane, first, target + forward * 60f, 6, fall, path.Speed, AirKills.PlanRelease(0f), 0f, false, true);
+                        Release(plane, first, target + forward * 60f, 6, fall, path.Speed, AirKills.PlanRelease(0f), 0f, false, true, false);
                     }
                 }, null);
+            if (flight != null && prepared != null) { prepared.Plane = flight.Go; prepared.Launched = true; }
             return flight != null;
         }
 
@@ -737,7 +873,7 @@ namespace NextDayRevival
         /// <param name="light">W Tower 4: an escort An-2's FAB-100.</param>
         /// <param name="small">W Tower 2: a support An-2's FAB-50 (flagged on the wire).</param>
         static void Release(GameObject plane, Vector3 lineStart, Vector3 lineEnd, int n, float fall, float speed,
-                            ReleasePlan plan, float damage, bool light, bool small)
+                            ReleasePlan plan, float damage, bool light, bool small, bool graded)
         {
             if (light)
             {
@@ -757,6 +893,7 @@ namespace NextDayRevival
             int kept = 0, safe = 0;
             for (int i = 0; i < n; i++)
             {
+                if (graded && !RaidCarpetCore.Keep(i, n, damage)) continue;
                 Vector3 p = Vector3.Lerp(lineStart, lineEnd, (i + 0.5f) / n) + miss;
                 // Dispersion of a level release from ~550 m: a few metres along,
                 // a little more across (the bombs leave a swaying bay).
@@ -774,6 +911,7 @@ namespace NextDayRevival
                 + " releases " + kept + (light ? " FAB-100 (" : small ? " FAB-50 (" : " FAB-250 (")
                 + safe + " held over a safe zone), fall " + fall.ToString("0.0") + " s, stick "
                 + Mathf.RoundToInt((lineEnd - lineStart).magnitude) + " u"
+                + (graded ? ", " + (n - RaidCarpetCore.Load(n, damage)) + " bombs lost to damage" : "")
                 + (plan.Kind == ReleaseKind.Wide ? ", DAMAGED " + Mathf.RoundToInt(damage * 100f) + " %: wide by "
                     + Mathf.RoundToInt(miss.magnitude / K) + " m, scatter x" + scatter.ToString("0.0") : "") + ".");
         }
@@ -799,6 +937,25 @@ namespace NextDayRevival
         }
 
         static readonly List<Bomb> _bombs = new List<Bomb>();
+
+        // Kill notification, not a new polling tick. Reliable on the same
+        // channel as OnStick; already airborne bombs continue on every client.
+        internal static void StopCarpet(int view)
+        {
+            if (!Master() || view == 0) return;
+            bool pending = false;
+            for (int i = 0; i < _bombs.Count; i++)
+                if (_bombs[i].View == view && !_bombs[i].Out) { pending = true; break; }
+            if (!pending) return;
+            Net.Send(new float[] { 111f, view }, true);
+            OnCarpetStopped(view);
+        }
+
+        static void OnCarpetStopped(int view)
+        {
+            for (int i = _bombs.Count - 1; i >= 0; i--)
+                if (_bombs[i].View == view && !_bombs[i].Out) _bombs.RemoveAt(i);
+        }
 
         static void OnStick(float[] f)
         {
@@ -915,6 +1072,7 @@ namespace NextDayRevival
             public ParaPose Body;
             public bool Done;
             public float NextResolve;
+            public bool Boarded;
         }
 
         sealed class Stick
@@ -927,6 +1085,7 @@ namespace NextDayRevival
             public GameObject Settlement, Plane;
             public Array Npcs;
             public float Heading, NextCheck, NextDrive;
+            public Vector3 LandingCentre;
             public bool PlaneDown, Near;
         }
 
@@ -935,6 +1094,7 @@ namespace NextDayRevival
         {
             int count = 0;
             for (int i = 0; i < _drops.Count; i++) if (!_drops[i].Spawned) count += _drops[i].Men.Count;
+            count += ReservedParatroopers();
             return count;
         }
         const float ParaRange = 1400f;    // 500 m: expensive visual work only near the local player
@@ -942,22 +1102,18 @@ namespace NextDayRevival
         static float _paraViewerAt;
 
         /// <summary>Master: the transport is at the drop line - the men go.</summary>
-        static void Jump(GameObject plane, Raid r, int men, float interval, FlightPath path)
+        static bool JumpPrepared(GameObject plane, Raid r, int men, float interval, FlightPath path, PreparedDrop prepared)
         {
-            if (r != null && Safe(r.Drop)) return;
-            if (!Master() || r == null) return;
-            ParaPose.Install();
+            if (!Master() || r == null) return true;
+            if (prepared == null || prepared.Failed) return true;
+            if (!prepared.Finished) return false;
+            if (prepared.Boarded < prepared.Total) return false;
+            if (Safe(r.Drop)) { prepared.Cancel(); return true; }
             Vector3 p = plane.transform.position;
             Vector3 v = path.Velocity(path.Project(p));
             float descent = DescentMs * K;
             men = Mathf.Clamp(men, 1, 12);
-            int present = NpcWar.ParatrooperPopulation();
-            present += PendingParatroopers();
-            if (!CombatLoadPolicy.CanDrop(present, men))
-            {
-                RevivalPlugin.L.LogInfo("AirEvents: paratrooper capacity reached; this stick stays aboard.");
-                return;
-            }
+            men = prepared.Stick.Men.Count;
             float[] msg = new float[13 + men * 4];
             msg[0] = 2f; msg[1] = PlayerAn2.View(plane); msg[2] = men;
             msg[3] = interval; msg[4] = descent;
@@ -967,30 +1123,33 @@ namespace NextDayRevival
             double start = ParaPose.Clock() + 0.75;
             msg[10] = (float)(Math.Floor(start / 1024.0) * 1024.0);
             msg[11] = (float)(start - msg[10]); msg[12] = r.Heading;
-            Stick s = PlanJump(msg, false);
+            Stick s = prepared.Stick;
+            s.LandingCentre = Vector3.zero;
+            for (int i = 0; i < s.Men.Count; i++) s.LandingCentre += s.Men[i].Ground;
+            if (s.Men.Count > 0) s.LandingCentre /= s.Men.Count;
+            s.View = (int)msg[1];
             s.Support = r.E.Name == "tower-support";
-            s.R = r; s.Plane = plane;
-            Vector3[] at = new Vector3[men];
-            Vector3 centre = Vector3.zero;
-            for (int i = 0; i < men; i++) { at[i] = s.Men[i].Ground; centre += at[i]; }
-            centre /= men;
-            s.Settlement = Crew.DropSquadAt(centre, at, r.Heading, r.E.Faction, null);
-            s.Npcs = Crew.Men(s.Settlement);
+            s.R = r; s.Heading = r.Heading; s.Plane = plane;
+            if (ScenarioRun.Measuring && s.Npcs != null)
+                for (int i = 0; i < s.Npcs.Length; i++) ScenarioRun.TrackParatrooper(r.E.Name, s.Npcs.GetValue(i) as Component);
             if (s.Npcs == null || s.Npcs.Length == 0)
             {
                 RevivalPlugin.L.LogWarning("AirEvents: no native paratroopers could be spawned.");
                 if (s.Settlement != null) { Crew.Forget(s.Settlement); UnityEngine.Object.Destroy(s.Settlement); }
-                return;
+                prepared.Cancel();
+                return true;
             }
             for (int i = 0; i < men; i++)
             {
                 Jumper j = s.Men[i];
                 Component ai = i < s.Npcs.Length ? s.Npcs.GetValue(i) as Component : null;
-                j.Body = ParaPose.Hold(ai);
+                j.From = p + v * (i * interval) + v.normalized * (25f * K) + Vector3.down * (15f * K);
+                j.Jump = Time.time + 0.75f + i * interval;
+                j.Land = j.Jump + Mathf.Max(3f, (j.From.y - j.Ground.y) / descent);
                 if (j.Body != null)
                 {
-                    j.Body.Drive(j.From, s.Heading, 0f, false);
-                    j.Body.Aboard(plane, i);
+                    j.Body.Use();
+                    MercParas.Register(ai, j.Ground, s.LandingCentre, j.Jump, j.Land);
                 }
                 j.NpcView = ai == null ? 0 : PlayerAn2.View(ai.gameObject);
                 j.Done = ai == null;
@@ -998,6 +1157,7 @@ namespace NextDayRevival
                 msg[b] = j.NpcView; msg[b + 1] = j.Ground.x; msg[b + 2] = j.Ground.y; msg[b + 3] = j.Ground.z;
             }
             _drops.Add(s);
+            prepared.Used = true;
             if (s.Support)
             {
                 // W Tower 2: optional tail = a support drop (older clients reject the stick).
@@ -1009,6 +1169,7 @@ namespace NextDayRevival
             Net.Send(msg, true);
             RevivalPlugin.L.LogInfo("AirEvents: An-2 " + PlayerAn2.View(plane) + " drops " + men
                 + " paratroopers over " + p.ToString("0") + ".");
+            return true;
         }
 
         static Stick OnJump(float[] f)
@@ -1047,7 +1208,9 @@ namespace NextDayRevival
                 j.Done = received && j.NpcView <= 0;
                 j.Land = j.Jump + Mathf.Max(3f, (j.From.y - j.Ground.y) / descent);
                 s.Men.Add(j);
+                s.LandingCentre += j.Ground;
             }
+            s.LandingCentre /= n;
             return s;
         }
 
@@ -1109,12 +1272,21 @@ namespace NextDayRevival
                     {
                         j.NextResolve = now + 0.1f;
                         j.Body = ParaPose.Hold(ParaPose.Find(j.NpcView));
-                        if (j.Body != null) j.Body.Drive(j.From, s.Heading, 0f, false);
+                        if (j.Body != null)
+                        {
+                            j.Body.Use();
+                            MercParas.Register(j.Body.Ai, j.Ground, s.LandingCentre, j.Jump, j.Land);
+                            j.Body.Drive(j.From, s.Heading, 0f, false);
+                        }
                     }
                     if (j.Body != null && j.Body.Gone) { j.Body.Release(false); j.Done = true; continue; }
                     if (now < j.Jump)
                     {
-                        if (j.Body != null && s.Plane != null) j.Body.Aboard(s.Plane, k);
+                        if (j.Body != null && s.Plane != null && !j.Boarded)
+                        {
+                            j.Body.Aboard(s.Plane, k);
+                            j.Boarded = true;
+                        }
                         // Still aboard: a transport going down takes them with it.
                         if (s.PlaneDown && master)
                         {
@@ -1218,17 +1390,30 @@ namespace NextDayRevival
         static float _sirenUntil, _droneUntil, _warnAt;
         static Vector3 _droneFrom, _droneTo;
 
+        // Helicopter-only retakes have no AirEvents aircraft to announce them.
+        // Reuse the master warning packet; optional ninth field carries Mi-8 count.
+        internal static void WarnRetakeHelis(Vector3 at, float from, int count, float eta)
+        {
+            if (!Crocodile.IsMaster() || count <= 0) return;
+            float[] message = new float[] { 0f, at.x, at.z, eta + 45f, from, 0f, 0f, eta, count };
+            Net.Send(message, true);
+            OnWarn(message);
+        }
+
         static void OnWarn(float[] f)
         {
             if (f.Length < 8) return;
             Vector3 at = Ground(new Vector3(f[1], 0f, f[2]));
-            float siren = Mathf.Clamp(f[3], 10f, 400f);
+            float siren = Mathf.Clamp(f[3], 10f, 3600f);
+            Mercs.RaidWarning(at, siren);
             float from = f[4];
             int bombers = (int)f[5], transports = (int)f[6];
+            int helis = f.Length > 8 ? Mathf.Max(0, (int)f[8]) : 0;
             int eta = Mathf.RoundToInt(f[7]);
             string cell = Cell(at);
             string what = (bombers > 0 ? bombers + " Tu-95" : "") + (bombers > 0 && transports > 0 ? " + " : "")
-                + (transports > 0 ? transports + " An-2" : "");
+                + (transports > 0 ? transports + " An-2" : "")
+                + (helis > 0 ? (bombers + transports > 0 ? " + " : "") + helis + " Mi-8" : "");
             // The siren at the target, the radar's report, the drone from the entry side.
             _warnAt = Time.time;
             _sirenUntil = Time.time + siren;
@@ -1240,16 +1425,19 @@ namespace NextDayRevival
                     _siren.Position = at + Vector3.up * (12f * K);
                     _siren.Tick(true);
                 }
-                Vector2 d = Dir(from);
-                _droneTo = at + Vector3.up * (BomberAltitude(null) * K);
-                _droneFrom = _droneTo + new Vector3(d.x, 0f, d.y) * 4200f;
-                _droneUntil = Time.time + Mathf.Max(8f, f[7]);
-                if (_drone == null) _drone = Source("NDR air raid drone", Tu95Visual.DroneClip(), 400f, 9000f);
-                if (_drone != null) { _drone.transform.position = _droneFrom; _drone.volume = 0f; if (!_drone.isPlaying) _drone.Play(); }
+                if (bombers + transports > 0)
+                {
+                    Vector2 d = Dir(from);
+                    _droneTo = at + Vector3.up * (BomberAltitude(null) * K);
+                    _droneFrom = _droneTo + new Vector3(d.x, 0f, d.y) * 4200f;
+                    _droneUntil = Time.time + Mathf.Max(8f, f[7]);
+                    if (_drone == null) _drone = Source("NDR air raid drone", Tu95Visual.DroneClip(), 400f, 9000f);
+                    if (_drone != null) { _drone.transform.position = _droneFrom; _drone.volume = 0f; if (!_drone.isPlaying) _drone.Play(); }
+                }
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("AirEvents warning sound: " + ex.Message); }
             // W-Tower1: the side holding the manned tower radar gets bearing and ETA to itself.
-            try { AirPicture.Raid(at, Dir(from), eta, (bombers > 0 ? BomberKmh : TransportKmh) / 3.6f * K, what); }
+            try { if (bombers + transports > 0) AirPicture.Raid(at, Dir(from), eta, (bombers > 0 ? BomberKmh : TransportKmh) / 3.6f * K, what); }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("AirEvents air picture: " + ex.Message); }
             bool radar = TowerRadar.On && TowerRadar.RadarAlive;
             if (radar)
@@ -1262,7 +1450,8 @@ namespace NextDayRevival
                 + Loc.T(" с направления ", " inbound from ") + CompassOf(from)
                 + Loc.T(" на квадрат ", " to square ") + cell + Loc.T(", через ~", ", ETA ~") + eta + " s";
             _bannerUntil = Time.time + 14f;
-            AirPicture.WarnAt(at, RadarClarityText.Raid, f[7], _banner);
+            if (!AirPicture.HolderRaidWarning(at, from, f[7]))
+                AirPicture.WarnAt(at, RadarClarityText.Raid, f[7], _banner);
             RevivalPlugin.L.LogInfo("AirEvents: warning - " + what + " from " + CompassOf(from) + " to " + cell
                 + ", siren " + Mathf.RoundToInt(siren) + " s" + (radar ? ", radar reports it." : "."));
         }
@@ -1347,6 +1536,7 @@ namespace NextDayRevival
                 Net.EnsureHooked();
                 Load(false);
                 TickBombs();
+                TickPreparation();
                 TickDrops();
                 TickWarning();
                 BurstFx.Tick();
@@ -1459,6 +1649,7 @@ namespace NextDayRevival
         static string ClearHere()
         {
             int raids = _raids.Count;
+            CancelPreparations(null);
             _raids.Clear();
             int planes = NpcAircraft.ClearAll();
             return "Air strike: " + raids + " raid(s) called off, " + planes + " aircraft removed.";
@@ -1581,7 +1772,7 @@ namespace NextDayRevival
             catch (Exception ex) { RevivalPlugin.L.LogWarning("AirEvents Tu-95 visual: " + ex.Message); }
         }
 
-        static bool IsBomber(GameObject go)
+        internal static bool IsBomber(GameObject go)
         {
             return go != null && go.GetComponentInChildren<Tu95Visual>(true) != null;
         }
@@ -1736,7 +1927,7 @@ namespace NextDayRevival
                     int kind = (int)f[0];
                     // Master alone originates aircraft effects (including paid
                     // support). A client cannot forge a bomb stick or a drop.
-                    if ((kind == 0 || kind == 1 || kind == 2 || kind == 5)
+                    if ((kind == 0 || kind == 1 || kind == 2 || kind == 5 || kind == RetakeRaids.ClockMessage || kind == 111)
                         && !TowerSupport.FromMaster(sender)) return;
                     switch (kind)
                     {
@@ -1744,6 +1935,11 @@ namespace NextDayRevival
                         case 1: OnStick(f); break;
                         case 2: OnJump(f); break;
                         case 5: OnLanded(f); break;
+                        case RetakeRaids.ClockMessage: RetakeRaids.ReceiveClock(f); break;
+                        case RetakeRaids.ClockRequest:
+                            if (Master()) RetakeRaids.PublishClock();
+                            break;
+                        case 111: if (f.Length >= 2) OnCarpetStopped((int)f[1]); break;
                         case 3:
                             // W Tower 4: template -2 = the admin's "retake raid now".
                             if (Master() && f.Length >= 6 && Mathf.RoundToInt(f[4]) == RetakeRaids.RequestTemplate)
@@ -2163,7 +2359,7 @@ namespace NextDayRevival
     {
         static bool _loaded, _ok;
         internal static Mesh Body, Glass, Decals, Prop, BayL, BayR, WreckMesh;
-        internal static Material Skin, Clear, Cutout;
+        internal static Material Skin, Clear, Cutout, WreckSkin;
         internal static readonly List<KeyValuePair<string, Vector3>> Props = new List<KeyValuePair<string, Vector3>>();
         internal static Vector3 BayLAt, BayRAt;
         internal static readonly List<Bounds> Boxes = new List<Bounds>();
@@ -2194,6 +2390,14 @@ namespace NextDayRevival
                 Skin.mainTexture = tex;
                 if (Skin.HasProperty("_Glossiness")) Skin.SetFloat("_Glossiness", 0.35f);
                 if (Skin.HasProperty("_Metallic")) Skin.SetFloat("_Metallic", 0.25f);
+                // The wreck uses the same atlas, with opaque matte burnt metal.
+                // Keep the flight material shared and unchanged for other aircraft.
+                WreckSkin = new Material(Skin);
+                WreckSkin.name = "NDR_Tu95_WreckSkin";
+                WreckSkin.color = new Color(0.32f, 0.30f, 0.28f, 1f);
+                if (WreckSkin.HasProperty("_Glossiness")) WreckSkin.SetFloat("_Glossiness", 0.05f);
+                if (WreckSkin.HasProperty("_Metallic")) WreckSkin.SetFloat("_Metallic", 0f);
+                WreckSkin.renderQueue = 2000;
                 Cutout = new Material(sh);
                 Cutout.name = "NDR_Tu95_Decals";
                 Cutout.mainTexture = tex;
@@ -2416,7 +2620,12 @@ namespace NextDayRevival
             if (_audio != null) _audio.Stop();
             for (int i = 0; i < _hull.Count; i++) if (_hull[i] != null) Destroy(_hull[i]);
             _hull.Clear();
-            if (_fly != null) _fly.gameObject.SetActive(false);
+            // Disable immediately (Destroy is deferred) and remove both intact
+            // models. LOD callbacks must never draw them through the wreck.
+            if (_fly != null) { _fly.gameObject.SetActive(false); Destroy(_fly.gameObject); _fly = null; }
+            if (_an2 != null) { _an2.gameObject.SetActive(false); Destroy(_an2.gameObject); _an2 = null; }
+            _drawn.Clear();
+            _props.Clear();
             if (Tu95Model.WreckMesh == null) return;
             GameObject w = new GameObject("NDR_Tu95Wreck");
             _wreck = w.transform;
@@ -2425,13 +2634,13 @@ namespace NextDayRevival
             // Level on the ground, whatever the carrier's crash attitude.
             Vector3 f = transform.forward;
             float yaw = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;
-            float y;
             Vector3 p = transform.position;
-            if (RevivalTroopInsertion.GroundY(p, out y)) p.y = y;
             _wreck.position = p;
             _wreck.rotation = Quaternion.Euler(0f, yaw, 0f);
-            Part(_wreck, "Wreck", Tu95Model.WreckMesh, Tu95Model.Skin, Vector3.zero);
+            Part(_wreck, "Wreck", Tu95Model.WreckMesh, Tu95Model.WreckSkin, Vector3.zero);
+            AircraftWreck.Place(transform.parent, _wreck, true);
             ModelLod.Apply(w, ModelLod.Kind.Wreck);          // P2
+            enabled = false;
         }
 
         // ------------------------------------------------------- far draw

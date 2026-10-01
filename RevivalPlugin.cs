@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.65.0";
+        public const string VERSION = "6.66.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -466,6 +466,8 @@ namespace NextDayRevival
             AssetDir = Path.Combine(Path.GetDirectoryName(Info.Location), "assets");
             L.LogInfo("Asset-Verzeichnis: " + AssetDir);
 
+            OfflineStart.Configure();           // explicit flag, marked test copy only
+
             BindConfig();
             MapUnblock.Install(gameObject, Config);
             RoadClear.Install(gameObject, Config);   // every road free of objects and trees
@@ -478,10 +480,12 @@ namespace NextDayRevival
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
             ContentPerf.BindConfig(Config);      // east world: LOD/cull, shadows, colliders, interiors, batching of content scenes
             ViewDistance.BindConfig(Config);     // view distance Low/Medium/High/Ultra (far clip, prop culling, fog)
+            RenderCounter.Bind(gameObject);      // F6 census includes the persistent scene
             NpcDistance.BindConfig(Config);      // N2: NPC distance tiers (wake at aircraft range, mid tier, forest mask)
             EnginePerf.BindConfig(Config);       // W Perf2: physics catch-up cap, off-screen animal animation
             FarForest.BindConfig(Config);        // N2b: forest canopy past the tree draw distance (same mask)
             Mercs.BindConfig(Config);            // B3: mercenary keys and hints (no gameplay switch)
+            MercFetch.BindConfig(Config);       // Z M5b: selected mercs fetch paid supply crates
             AirBoundary.BindConfig(Config);      // B6: soft map edge for player aircraft + terrain skirt beyond it
             DroneGear.BindConfig(Config);
             VehicleModules.BindConfig(Config);   // NDR vehicle modules
@@ -524,6 +528,7 @@ namespace NextDayRevival
             GepardCrew.BindConfig(Config);       // NDR Gepard as an NPC vehicle: riding crew, air-first gunner
             Flak.BindConfig(Config);             // east airfield: ZU-23-2 flak guns on the AA positions (P4)
             TowerSupport.BindConfig(Config);
+            TowerDelivery.BindConfig(Config);
             AirfieldHold.BindConfig(Config);     // W Tower 3: holding the airfield (An-2, income, announcement)
             TowerRadar.BindConfig(Config);       // east airfield: the tower C1 as air defence HQ, radar + console (P5)
             TowerRoof.BindConfig(Config);        // Y B1: the tower's outside ladder to the cab roof, mercs' climb, roof posts
@@ -541,10 +546,13 @@ namespace NextDayRevival
             VehicleModules.RegisterItems();      // NDR vehicle modules
 
             _harmony = new Harmony(GUID);
-            ClientIntegrity.Install(_harmony);
+            OfflineStart.Install(_harmony);
+            if (!OfflineStart.Active) ClientIntegrity.Install(_harmony);
             VehicleScan.Install(_harmony);       // Q1 perf: vehicle/NPC/inventory registries instead of scene scans
             OrdnanceBlast.Install(_harmony);     // Bomb/rocket damage on the Photon health owner
+            NativeBlast.Install(_harmony);       // Position-based people for native explosions
             EnginePerf.Install(_harmony);        // W Perf2: Animal_AI registry
+            PhysicsDiet.Install(_harmony);       // Z P3b: lazy plugin ragdolls and physics census
             GunnerOptics.Install(_harmony);      // P1b: explosion hooks instead of a 10 Hz scene scan in the optics
             PatchCursor();
             GameplayCursor.Install(_harmony);   // B5: group/window close and guarded gameplay recovery
@@ -580,6 +588,7 @@ namespace NextDayRevival
             FuelDepot.Install(_harmony);         // NDR POL depot: explosion and firearm hits on the tanks
             NpcWar.Install(_harmony);            // NDR troop squad armour, kill-streak guard
             Mercs.Install(_harmony);             // B3: roster channel (storage 7700), owner damage drop, target veto
+            MercFetch.Install(_harmony);        // Z M5b: cached optional drive/depot and native cargo hooks
             TraderUi.Install(_harmony);          // W-UI2: trader/safe window on the UI kit (game trade logic unchanged)
             Admin.Install(_harmony);
             EastWorld.Install(_harmony);         // east world: nothing is patched while [World] EastTile is off
@@ -594,7 +603,10 @@ namespace NextDayRevival
             GepardCrew.Install(_harmony);        // NDR Gepard crew: the men inside cannot be hurt through the hull
             MilitaryTown.Install(_harmony);      // east world: explosions on the town guns (only with the town on)
             Flak.Install(_harmony);              // east airfield flak: event channel, the manning player's input lock
+            AmmoDepotCargo.Install(_harmony);    // native cargo owner serializes depot unloading
+            AmmoDepot.Warm();                    // stock labels allocate once during startup
             TowerRadar.Install(_harmony);        // tower radar HQ: the console's input lock, hits on the radar and console
+            TowerDelivery.Install(_harmony);
             TowerPaymentWire.Install(_harmony);  // authenticated remote support wallet channel
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             ApMine.Install(_harmony);            // NDR anti-personnel mine
@@ -1810,8 +1822,10 @@ namespace NextDayRevival
 
             // The 122 mm shell for the settlement gun (own file).
             Mortar.AddItems(Items);
+            FlakAmmo.AddItems(Items);
 
             // The parachute a man jumps out of a helicopter with (own file).
+            TowerDelivery.AddItems(Items);
             Parachute.AddItems(Items);
 
             L.LogInfo("Item-Tabelle: " + Items.Count + " Eintraege");
@@ -2227,17 +2241,21 @@ namespace NextDayRevival
             // then everything below is measured against this frame's gap. The S/E
             // pairs are no-ops unless the F6 diagnostics overlay is toggled on.
             FrameProf.NewFrame();
+            FrameProf.S(FrameProf.S_OfflineStartT); OfflineStart.Tick(); FrameProf.E(FrameProf.S_OfflineStartT);
             FrameProf.S(FrameProf.S_CombatLoadT); CombatLoad.Tick(); FrameProf.E(FrameProf.S_CombatLoadT);
+            FrameProf.S(FrameProf.S_PhysicsDietT); PhysicsDiet.Tick(); FrameProf.E(FrameProf.S_PhysicsDietT);
             // Input before world/AI ticks: optional feature errors cannot starve
             // merc commands, and owner AI sees new orders in this same frame.
             if (PerfBisect.Run(PerfBisect.G_Mercs)) MercUi.PollCommands();
             VehicleUi.Tick();                    // Q5: window state when inventory/map open in or after a vehicle
-            FrameProf.S(FrameProf.S_LiveRoutesT); LiveRoutes.Tick(); VehicleFinds.Tick(); FrameProf.E(FrameProf.S_LiveRoutesT);
+            FrameProf.S(FrameProf.S_VehicleSeatsT); VehicleSeats.Tick(); FrameProf.E(FrameProf.S_VehicleSeatsT);
+            FrameProf.S(FrameProf.S_LiveRoutesT); if (!OfflineStart.Active) LiveRoutes.Tick(); VehicleFinds.Tick(); FrameProf.E(FrameProf.S_LiveRoutesT);
             FrameProf.S(FrameProf.S_ClientIntegrityT); ClientIntegrity.Tick(); FrameProf.E(FrameProf.S_ClientIntegrityT);
             // Before the features run: an action whose own loop stopped gets
             // the interaction bar taken from it here, and a bar that survived
             // its hide is swept off the HUD. Without this a cancelled action
             // could leave an empty bar standing for the rest of the session.
+            FrameProf.S(FrameProf.S_RepairTapT); RepairTap.Tick(); FrameProf.E(FrameProf.S_RepairTapT);
             FrameProf.S(FrameProf.S_NativeActionProgressT); NativeActionProgress.Tick(); FrameProf.E(FrameProf.S_NativeActionProgressT);
             FrameProf.S(FrameProf.NetWatch);    NetWatch.Tick();          FrameProf.E(FrameProf.NetWatch);
             FrameProf.S(FrameProf.AdminTick);   Admin.Tick();            FrameProf.E(FrameProf.AdminTick);
@@ -2276,6 +2294,7 @@ namespace NextDayRevival
             if (PerfBisect.Run(PerfBisect.G_Gepard)) { FrameProf.S(FrameProf.S_GepardT); Gepard.Tick(); FrameProf.E(FrameProf.S_GepardT); }                       // NDR Gepard: spawn key, gunner station, rounds in flight
             if (PerfBisect.Run(PerfBisect.G_Flak)) { FrameProf.S(FrameProf.S_FlakT); Flak.Tick(); FrameProf.E(FrameProf.S_FlakT); }                         // east airfield flak: guns, crews, fire control, a manning player
             FrameProf.S(FrameProf.S_AaDamageT); AirDefenceDamage.Tick(); FrameProf.E(FrameProf.S_AaDamageT);
+            FrameProf.S(FrameProf.S_TowerDeliveryT); TowerDelivery.Tick(); FrameProf.E(FrameProf.S_TowerDeliveryT);
             FrameProf.S(FrameProf.S_TowerSupportT); TowerSupport.Tick(); FrameProf.E(FrameProf.S_TowerSupportT);
             if (PerfBisect.Run(PerfBisect.G_Radar)) { FrameProf.S(FrameProf.S_TowerRadarT); TowerRadar.Tick(); FrameProf.E(FrameProf.S_TowerRadarT); }                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
             FrameProf.S(FrameProf.S_TowerRoofT); TowerRoof.Tick(); FrameProf.E(FrameProf.S_TowerRoofT);                      // Y B1: tower roof ladder + sandbag posts, built once the HQ has found C1
@@ -2292,6 +2311,7 @@ namespace NextDayRevival
             if (PerfBisect.Run(PerfBisect.G_Convoy)) { FrameProf.S(FrameProf.S_TroopInsertionT); RevivalTroopInsertion.Tick(); FrameProf.E(FrameProf.S_TroopInsertionT); }        // NDR heli troop insertion (own light schedule)
             if (PerfBisect.Run(PerfBisect.G_GroundNpcs)) { FrameProf.S(FrameProf.S_GroundEnemiesT); RevivalGroundEnemies.Tick(); FrameProf.E(FrameProf.S_GroundEnemiesT); }         // editor waiting/walking ground groups
             FrameProf.S(FrameProf.S_AirfieldT); Airfield.Tick(); FrameProf.E(FrameProf.S_AirfieldT);                     // east world: airfield loot points (master only)
+            AmmoDepot.Tick();                    // finite D2a storage; own F6 slot
             if (PerfBisect.Run(PerfBisect.G_MilitaryTown)) { FrameProf.S(FrameProf.S_MilitaryTownT); MilitaryTown.Tick(); FrameProf.E(FrameProf.S_MilitaryTownT); }                 // east world: town guns, posted men, fight clock, spotter warning
             FrameProf.S(FrameProf.S_HelipadsT); Helipads.Tick(); FrameProf.E(FrameProf.S_HelipadsT);                     // editor helicopter landing pads (build on scene/data change)
             FrameProf.S(FrameProf.S_PlayerHeliT); PlayerHeli.Tick(); FrameProf.E(FrameProf.S_PlayerHeliT);                   // NDR player-flown Mi-8 (spawn key, boarding, flight)
@@ -2320,10 +2340,12 @@ namespace NextDayRevival
             if (PerfBisect.Run(PerfBisect.G_NpcDistance)) { FrameProf.S(FrameProf.S_NpcDistT); NpcDistance.Tick(); FrameProf.E(FrameProf.S_NpcDistT); }             // N2: NPC distance tiers + forest mask
             FrameProf.S(FrameProf.S_EnginePerfT); EnginePerf.Tick(); FrameProf.E(FrameProf.S_EnginePerfT);       // W Perf2: physics step cap, animal culling (1 Hz)
             if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercsT); Mercs.Tick(); FrameProf.E(FrameProf.S_MercsT); }                         // B3: mercenaries (keys per frame, roster/upkeep at 4 Hz)
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercDriveT); MercDrive.Tick(); FrameProf.E(FrameProf.S_MercDriveT); }
+            FrameProf.S(FrameProf.S_MercFetchT); MercFetch.Tick(); FrameProf.E(FrameProf.S_MercFetchT);
             FrameProf.S(FrameProf.S_UiKitT); UiKit.Tick(); UiDemo.Tick(); FrameProf.E(FrameProf.S_UiKitT);          // W-UI1: toast ring, demo link simulation (idle: two tests)
             FrameProf.S(FrameProf.S_MercNotifyT); MercNotify.Tick(); FrameProf.E(FrameProf.S_MercNotifyT);          // W: merc toasts (one bool while nothing is due)
             FrameProf.S(FrameProf.S_TraderT); TraderUi.Tick(); FrameProf.E(FrameProf.S_TraderT);                   // W-UI2: trader window (idle: one bool test)
-            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercAAT); MercAA.Tick(); FrameProf.E(FrameProf.S_MercAAT); }
+            if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercAAT); MercAA.Tick(); FrameProf.E(FrameProf.S_MercAAT); MercResupply.Tick(); }
             if (PerfBisect.Run(PerfBisect.G_Mercs)) { FrameProf.S(FrameProf.S_MercCoverT); MercCoverService.Tick(); FrameProf.E(FrameProf.S_MercCoverT); }   // M1: merc cover mapping (budgeted rays, 0 once mapped)
             if (PerfBisect.Run(PerfBisect.G_FarForest)) { FrameProf.S(FrameProf.S_FarForestT); FarForest.Tick(); FrameProf.E(FrameProf.S_FarForestT); }           // N2b: far forest canopy
             if (PerfBisect.Run(PerfBisect.G_EdgeTerrain)) { FrameProf.S(FrameProf.S_AirBoundaryT); AirBoundary.Tick(); FrameProf.E(FrameProf.S_AirBoundaryT); }   // B6: terrain skirt beyond the map edge (built once per world)
@@ -2419,7 +2441,9 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_KatyushaD); Katyusha.Draw(); FrameProf.E(FrameProf.S_KatyushaD);                   // NDR Katyusha: map target area (map open), seat line (checks GameUi itself)
             FrameProf.S(FrameProf.S_GepardD); if (seatHud) Gepard.Draw(); FrameProf.E(FrameProf.S_GepardD);                       // NDR Gepard: sight reticle, radar scope, target boxes
             FrameProf.S(FrameProf.S_FlakD); if (seatHud) Flak.Draw(); FrameProf.E(FrameProf.S_FlakD);                         // east airfield flak: the man-the-gun prompt and the ZU-23 sight
+            FrameProf.S(FrameProf.S_AmmoDepotD); if (seatHud) AmmoDepot.Draw(); FrameProf.E(FrameProf.S_AmmoDepotD);
             FrameProf.S(FrameProf.S_AaDamageD); if (repaint) AirDefenceDamage.Draw(); FrameProf.E(FrameProf.S_AaDamageD);
+            FrameProf.S(FrameProf.S_TowerDeliveryD); TowerDelivery.Draw(); FrameProf.E(FrameProf.S_TowerDeliveryD);
             FrameProf.S(FrameProf.S_TowerSupportD); TowerSupport.Draw(); FrameProf.E(FrameProf.S_TowerSupportD);
             FrameProf.S(FrameProf.S_TowerRadarD); TowerRadar.Draw(); FrameProf.E(FrameProf.S_TowerRadarD);                   // tower radar HQ: the console prompt and the PPI radar view
             FrameProf.S(FrameProf.S_AirPictureD); AirPicture.Draw(); FrameProf.E(FrameProf.S_AirPictureD);                   // W-Tower1: aircraft on the holder's map, early warning banner
@@ -2429,6 +2453,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_PeerCheckD); if (repaint) PeerCheck.Draw(); FrameProf.E(FrameProf.S_PeerCheckD);                    // NDR version badge + mismatch banner
             FrameProf.S(FrameProf.S_ClientIntegrityD); ClientIntegrity.Draw(); FrameProf.E(FrameProf.S_ClientIntegrityD);              // Required verified-launch recovery message
             FrameProf.S(FrameProf.S_NpcWarD); if (repaint) NpcWar.Draw(); FrameProf.E(FrameProf.S_NpcWarD);                       // NDR NPC-vs-NPC combat debug status
+            FrameProf.S(FrameProf.S_VehicleSeatsD); if (seatHud) VehicleSeats.Draw(); FrameProf.E(FrameProf.S_VehicleSeatsD);
             FrameProf.S(FrameProf.S_MercsD); MercUi.Draw(); FrameProf.E(FrameProf.S_MercsD);                         // B3: trader Mercenaries tab, order wheel, merc list, HUD strip
             FrameProf.S(FrameProf.S_MercCoverD); if (repaint && Admin.IsOpen && MercCoverService.Show) MercCoverService.Draw(); FrameProf.E(FrameProf.S_MercCoverD);   // M1: F8 "Show merc cover" overlay (off: one bool)
             // W-UI4: the admin panel is a UI kit window now - drawn late, over the
@@ -2450,6 +2475,7 @@ namespace NextDayRevival
             Patrol.FinishSave();
             CursorGuard.Release();
             EnginePerf.Shutdown();
+            PhysicsDiet.Shutdown();
             CombatLoad.Shutdown();
         }
     }

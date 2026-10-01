@@ -8,6 +8,7 @@ namespace NextDayRevival
     {
         static void OrderReceived(Record r, bool focus, Vector3 objective)
         {
+            RaidReceived(r);
             MercUnit u = r.Unit;
             Vector3 at = u == null || u.Ai == null ? OwnerPosition : u.Ai.transform.position;
             r.ReceiptFor = r.Order; r.ReceiptFocus = focus;
@@ -25,10 +26,12 @@ namespace NextDayRevival
 
         static string OrderAction(MercOrder o)
         {
+            if (o.Survive) return Loc.T("иду в укрытие", "taking cover");
             switch (o.Mode)
             {
                 case MercOrder.Follow: return Loc.T("следую за вами", "following you");
                 case MercOrder.Vehicle: return Loc.T("следую за техникой", "following your vehicle");
+                case MercOrder.Drive: return Loc.T("сажусь для поездки", "boarding for vehicle trip");
                 case MercOrder.Stay: return Loc.T("занимаю позицию", "taking position");
                 case MercOrder.Patrol: return Loc.T("патрулирую", "patrolling");
                 case MercOrder.Perimeter: return Loc.T("охраняю периметр", "securing perimeter");
@@ -53,6 +56,7 @@ namespace NextDayRevival
                 bool settled = !r.ReceiptFocus && NpcWar.MercOrderSettled(u);
                 // A stolen gun is a refusal even if the fallback FOLLOW moved.
                 bool taken = u != null && u.Ai != null && MercAA.IsOrder(r.Order)
+                    && !MercCrewPhases.Ground(u)
                     && !MercAA.IsVehicle(r.Order) && !MercAA.CanApproach(MercAA.PostOf(u), u.Ai);
                 if (taken) r.Receipt.Pending = false;
                 if (taken || r.Receipt.Check(now, at, NpcWar.MercOrderShots(u), settled))
@@ -83,6 +87,9 @@ namespace NextDayRevival
         {
             Fighter f = MercOrderFighter(u);
             if (f == null) return;
+            Mercs.RescueCancelFor(u, Time.time);
+            MercResupply.StopLocal(u, Time.time, false);
+            TowerRoof.Cancel(f.Tr, true);
             Mercs.MedicineCancel(u, Time.time);
             f.HasOrder = false; f.MoveDeadline = 0f; f.NextScan = 0f; f.NextLos = 0f;
             u.GoalFor = null; u.GoalLeg = -1; u.NextOrder = 0f;
@@ -94,11 +101,15 @@ namespace NextDayRevival
             if (u == null || u.Ai == null || u.Deserting) return false;
             Vector3 me = u.Ai.transform.position;
             MercOrder o = u.Order;
+            if (o.Mode == MercOrder.Drive) return u.Ride.Carrier != null;
             if (o.Mode == MercOrder.Follow || o.Mode == MercOrder.Vehicle)
                 return (u.Ride.Carrier != null && o.Mode == MercOrder.Vehicle)
                     || (u.Owner != null && Flat(me - u.Owner.position) <= 22f);
             if (MercAA.IsOrder(o))
             {
+                Flak.Gun gun = MercCrewPhases.Gun(u);
+                if (MercCrewPhases.Ground(u) && gun != null)
+                    return MercCrewPhase.InPost(me.x - gun.Earthwork.position.x, me.z - gun.Earthwork.position.z);
                 if (MercAA.IsVehicle(o)) return u.Ride.Carrier != null && u.Ride.Carrier.View == -Mathf.RoundToInt(o.Facing.x)
                     && u.Ride.Seat == Mathf.RoundToInt(o.Facing.z) - 1;
                 MercAAPost post = MercAA.Held(MercAA.PostOf(u));
@@ -113,6 +124,7 @@ namespace NextDayRevival
         internal static string MercOrderReason(MercUnit u, bool focus)
         {
             if (u == null || u.Ai == null) return Loc.T("ещё не развёрнут", "not deployed yet");
+            if (Mercs.IsDown(u)) return Loc.T("нужна помощь", "downed: needs a medkit");
             if (u.Deserting) return Loc.T("покидаю отряд: нет оплаты", "deserting: unpaid");
             MercBrain b = u.Fight.Brain;
             if (b != null && (b.Mode == MercBrain.Retreating || b.Mode == MercBrain.Falling))

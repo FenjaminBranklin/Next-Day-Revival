@@ -115,7 +115,7 @@ namespace NextDayRevival
     {
         internal MercCarrier Carrier;         // the vehicle he sits in; null = on foot
         internal int Seat = -1;
-        internal bool Hidden, Gunner, Firing;
+        internal bool Hidden, Gunner, Firing, DriveEscort;
         internal float GunYaw, GunPitch;      // technical pintle, sent to the others
         // owner: getting in
         internal MercCarrier Boarding;
@@ -217,6 +217,8 @@ namespace NextDayRevival
         internal static string StateText(MercUnit u)
         {
             if (u == null) return null;
+            string trip = MercDrive.State(u);
+            if (trip != null) return trip;
             MercSeat st = u.Ride;
             if (st.Carrier != null)
                 return st.Gunner ? Loc.T("у орудия", "on the gun") : Loc.T("едет", "riding");
@@ -490,7 +492,7 @@ namespace NextDayRevival
         static bool SeatFree(MercCarrier c, int seat, MercSeat self)
         {
             if (c == null || seat < 0 || seat >= c.Seats) return false;
-            if (c.Kind == MercCarrier.Ground) { if (seat == 0 || PlayerIn(c, seat)) return false; }
+            if (c.Kind == MercCarrier.Ground) { if ((seat == 0 && !MercDrive.DriverClaim(c, self)) || PlayerIn(c, seat)) return false; }
             else if (seat == LocalCabinSeat(c)) return false;
             if (c.Kind == MercCarrier.Ground)
             {
@@ -503,6 +505,8 @@ namespace NextDayRevival
                 Mercs.Record r = roster[i];
                 if (r.Dead || r.Deserted || (r.Unit != null && r.Unit.Ride == self)) continue;
                 if (MercAA.IsVehicle(r.Order) && -Mathf.RoundToInt(r.Order.Facing.x) == c.View
+                    && Mathf.RoundToInt(r.Order.Facing.z) == seat + 1) return false;
+                if (r.Order.Mode == MercOrder.Drive && -Mathf.RoundToInt(r.Order.Facing.x) == c.View
                     && Mathf.RoundToInt(r.Order.Facing.z) == seat + 1) return false;
             }
             MercSeat other = Claimant(c, seat, self);
@@ -622,7 +626,7 @@ namespace NextDayRevival
             for (int i = 0; i < roster.Count; i++)
             {
                 MercUnit u = roster[i].Unit;
-                if (u == null) continue;
+                if (u == null || roster[i].Down.Down) continue;
                 UnityEngine.Object live = u.Ai;
                 if (live == null) continue;
                 u.Ride.Ai = u.Ai;
@@ -651,7 +655,9 @@ namespace NextDayRevival
         {
             bool station = MercAA.IsVehicle(u.Order);
             if (station) oc = Assigned(u, now);
-            bool want = (u.Order.Mode == MercOrder.Vehicle || station) && !u.Deserting && !u.Rally;
+            bool drive = u.Order.Mode == MercOrder.Drive;
+            if (drive) oc = MercDrive.Carrier(u);
+            bool want = (u.Order.Mode == MercOrder.Vehicle || station || (drive && oc != null)) && !u.Deserting && !u.Rally;
             if (station && MercStationPlan.Retreat(NpcWar.MercSeatHealth(u.Ai), u.AARetreat, false))
             { u.AARetreat = true; want = false; }
             else if (station) u.AARetreat = false;
@@ -698,7 +704,7 @@ namespace NextDayRevival
                 // a gunner got out): the first of ours on a passenger seat
                 // takes it after a moment, so an armed vehicle is not ridden
                 // with its gun idle.
-                if (!st.Gunner && c.GunKind != MercCarrier.GunNone && now - st.SeatedAt > 2f
+                if (!drive && !st.Gunner && c.GunKind != MercCarrier.GunNone && now - st.SeatedAt > 2f
                     && SeatFree(c, c.GunSeat, st) && !TooHurtForGun(c, st, HurtReturn))
                 {
                     MoveSeat(u, st, c.GunSeat);
@@ -715,7 +721,7 @@ namespace NextDayRevival
             float d = Flat(at - oc.Root.position);
             if (d > BoardReach + oc.Radius) { st.Boarding = null; return; }
             int desired = Mathf.RoundToInt(u.Order.Facing.z) - 1;
-            int free = station ? (SeatFree(oc, desired, st) ? desired : -1) : PickSeat(oc, st);
+            int free = station || drive ? (SeatFree(oc, desired, st) ? desired : -1) : PickSeat(oc, st);
             if (free < 0)
             {
                 st.Boarding = null;
@@ -744,6 +750,7 @@ namespace NextDayRevival
             st.Carrier = c; st.Seat = seat; st.SeatedAt = now;
             st.Hidden = c.Closed;
             st.Gunner = c.GunKind != MercCarrier.GunNone && seat == c.GunSeat;
+            st.DriveEscort = u.Order.Mode == MercOrder.Drive && seat > 0;
             st.NoSeatSaid = false;
             ClearGun(st);
             st.Drill.Reset();
@@ -847,6 +854,7 @@ namespace NextDayRevival
         internal static void Forget(MercUnit u)
         {
             if (u == null) return;
+            MercDrive.Forget(u);
             MercSeat st = u.Ride;
             st.Boarding = null;
             if (st.Carrier == null) return;
@@ -937,7 +945,7 @@ namespace NextDayRevival
             if (live != null) _hidden.Remove(st.Ai.GetInstanceID());
             if (live != null) SeatBinding.Detach(st.Ai.transform);
             st.Carrier = null; st.Seat = -1;
-            st.Hidden = false; st.Gunner = false; st.Firing = false;
+            st.Hidden = false; st.Gunner = false; st.Firing = false; st.DriveEscort = false;
         }
 
         /// <summary>Another owner's merc off his seat on this client: his
@@ -1160,13 +1168,14 @@ namespace NextDayRevival
                 : c.SeatPoints.GetChild(st.Seat);
             if (AtTechnicalGun(st)) SeatBinding.BindWorld(tr, anchor, c.Root, pos, rot);
             else SeatBinding.BindSeat(tr, anchor, c.Root);
-            if (owner) GepardCrew.Ruhig(ai);
+            if (owner && !DriveRifle(st)) GepardCrew.Ruhig(ai);
             Holster(st, AtTechnicalGun(st), Time.time);
             if (st.Hidden) return;
             // The technical's gunner stands at the pintle (TechnicalGun poses
             // him and puts his hands on the grips); everybody else sits.
             if (st.Carrier.GunKind == MercCarrier.GunTechnical && st.Seat == st.Carrier.GunSeat) return;
-            TechnicalCrew.Sitzen(ai, 1);
+            if (DriveRifle(st)) return; // Native upper-body rifle aim/fire owns the pose.
+            TechnicalCrew.Sitzen(ai, st.Seat == 0 ? 0 : 1);
         }
 
         // ================================================================ gun
@@ -1853,7 +1862,7 @@ namespace NextDayRevival
                 data[o++] = st.Carrier.Kind;
                 data[o++] = st.Carrier.View;
                 data[o++] = st.Seat;
-                data[o++] = (st.Hidden ? 1f : 0f) + (st.Gunner ? 2f : 0f) + (st.Firing ? 4f : 0f);
+                data[o++] = (st.Hidden ? 1f : 0f) + (st.Gunner ? 2f : 0f) + (st.Firing ? 4f : 0f) + (st.DriveEscort ? 8f : 0f);
                 data[o++] = st.GunYaw;
                 data[o++] = st.GunPitch;
             }
@@ -1913,6 +1922,12 @@ namespace NextDayRevival
             try
             {
                 float[] d = content as float[];
+                if (d != null && d.Length > 0 && d[0] == 7f) { MercDownPose.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && d[0] == 8f) { MercResupply.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && (d[0] == 106f || d[0] == 107f)) { MercDrive.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && d[0] == 102f) { VehicleSeats.OnVitals(d, sender); return; }
+                if (d != null && d.Length > 0 && d[0] == 103f) { MercMoveShootPose.OnPacket(d, sender); return; }
+                if (d != null && d.Length > 0 && d[0] == 104f) { NpcVaultMotion.OnPacket(d, sender); return; }
                 if (d != null && d.Length > 0 && d[0] == 4f) { MercMedPose.OnPacket(d, sender); return; }
                 if (d != null && d.Length > 0 && (d[0] == 2f || d[0] == 3f || d[0] == 6f)) { MercAA.OnPacket(d, sender); return; }
                 if (d == null || d.Length < 2 || Mathf.RoundToInt(d[0]) != 1) return;
@@ -1942,6 +1957,7 @@ namespace NextDayRevival
                     st.Hidden = (flags & 1) != 0;
                     st.Gunner = (flags & 2) != 0;
                     st.Firing = (flags & 4) != 0;
+                    st.DriveEscort = (flags & 8) != 0;
                     st.GunYaw = d[o + 5]; st.GunPitch = d[o + 6];
                 }
                 List<string> gone = new List<string>();
@@ -1975,10 +1991,10 @@ namespace NextDayRevival
                 if (c == null || !Alive(c)) { if (st.Carrier != null) ReleaseRemote(st); continue; }
                 if (st.Carrier != c || st.Seat != st.WantSeat)
                 {
-                    bool hidden = st.Hidden, gunner = st.Gunner;
+                    bool hidden = st.Hidden, gunner = st.Gunner, escort = st.DriveEscort;
                     if (st.Carrier != null) ReleaseSeat(st);
                     st.Carrier = c; st.Seat = Mathf.Clamp(st.WantSeat, 0, Mathf.Max(0, c.Seats - 1));
-                    st.Hidden = hidden; st.Gunner = gunner;
+                    st.Hidden = hidden; st.Gunner = gunner; st.DriveEscort = escort;
                     ApplySeat(st, false);
                 }
                 else Maintain(st, now);
@@ -2061,6 +2077,7 @@ namespace NextDayRevival
         static bool MercSeated(Fighter f, MercUnit u, float now)
         {
             if (u.Ride.Carrier == null) return false;
+            if (MercRide.DriveRifle(u.Ride)) { MercDriveRifle(f, u, now); return true; }
             f.Target = null; f.Sees = false; f.TargetIsPlayer = false;
             f.HasOrder = false;
             u.PlayerTarget = null;

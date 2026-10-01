@@ -3,7 +3,7 @@
 1. Compiles the production core Revival.RetakeRaidsCore.cs UNCHANGED with the
    .NET 3.5 csc into a deterministic simulation and runs it:
    settings parse (defaults, the shipped row, bad rows, clamps), the hold
-   clock (first raid, shrinking gap, floor, frequency, busy, holder changes,
+   clock (first raid, fixed interval, floor, frequency, busy, holder changes,
    switched off), the composition (growth, target rotation, troops held,
    escort, never silent), a six-hour hold with troop lifetimes (the NPC
    bound), and the step cost plus managed allocation of the per-second path.
@@ -115,6 +115,7 @@ namespace NextDayRevival
         {
             System.Console.WriteLine("Clock (frequency 1)");
             RetakeSettings s = new RetakeSettings();
+            s.RandomWindowMinutes = 0f; // deterministic rhythm; window tested in raid_rhythm_check
             RetakeClock c = new RetakeClock();
             bool any = false;
             for (int t = 0; t < 7200; t++) any |= c.Step(t, -1, s, true, false, 0);
@@ -134,26 +135,27 @@ namespace NextDayRevival
             }
             System.Console.WriteLine("        raid minutes after the capture: " + times.ToString() + "...");
             Ok(first - cap == 480f, "first raid 8 min after the capture (" + (first - cap) + " s)");
-            Ok(System.Math.Abs(firstGap - 30f * 60f / (1f + 0.6f * (8f / 60f))) < 2f,
-               "then ~30 min, already shrinking with the time held (" + firstGap.ToString("0") + " s)");
-            Ok(minGap >= 600f && minGap <= 602f, "the gap bottoms out at the 10 min floor (" + minGap + " s)");
-            Ok(raids >= 25 && raids <= 40, "6 h held: " + raids + " raids (rhythm rises)");
+            Ok(System.Math.Abs(firstGap - 1800f) < 2f,
+               "then 30 min after air clear (" + firstGap.ToString("0") + " s)");
+            Ok(minGap >= 1800f && minGap <= 1802f, "holding longer preserves the interval (" + minGap + " s)");
+            Ok(raids >= 11 && raids <= 13, "6 h held: " + raids + " raids (fixed rhythm)");
 
             RetakeSettings f2 = new RetakeSettings(); f2.Frequency = 2f;
             Ok(RetakePlan.FirstDelaySeconds(f2) == 240f && RetakePlan.GapSeconds(f2, 0f) == 900f
-               && RetakePlan.GapSeconds(f2, 10f) == 300f, "frequency 2: first 4 min, gap 15 min .. 5 min");
+               && RetakePlan.GapSeconds(f2, 10f) == 900f, "frequency 2: first 4 min, fixed gap 15 min");
             RetakeSettings f4 = new RetakeSettings(); f4.Frequency = 4f;
-            Ok(RetakePlan.GapSeconds(f4, 10f) == 180f && RetakePlan.FirstDelaySeconds(f4) == 180f,
-               "frequency 4: never closer than the 3 min floor");
+            Ok(RetakePlan.GapSeconds(f4, 10f) == 600f && RetakePlan.FirstDelaySeconds(f4) == 180f,
+               "frequency 4: quiet floor 10 min, first delay floor 3 min");
             RetakeSettings slow = new RetakeSettings(); slow.Frequency = 0.25f;
             Ok(RetakePlan.FirstDelaySeconds(slow) == 1920f && RetakePlan.GapSeconds(slow, 0f) == 7200f,
                "frequency 0.25: first 32 min, gap 2 h");
 
             RetakeClock b = new RetakeClock();
             b.Step(0f, 5, s, true, false, 0);
-            Ok(!b.Step(480f, 5, s, true, true, 0) && b.Next == 540f, "a due raid while the last one flies waits 60 s");
-            Ok(b.Step(540f, 5, s, true, false, 0), "... and goes when it is down");
-            b.Flown(540f, s);
+            Ok(!b.Step(480f, 5, s, true, true, 0) && b.AwaitClear, "a due raid while air is active waits for clear");
+            Ok(!b.Step(540f, 5, s, true, false, 0) && b.Next == 2340f, "... and starts a full quiet interval on clear");
+            Ok(b.Step(2340f, 5, s, true, false, 0), "... and goes after the quiet interval");
+            b.Flown(2340f, s);
             Ok(b.Level == 1, "flown: level 1");
             Ok(!b.Step(600f, -1, s, true, false, 0) && b.Next < 0f && b.Level == 0, "garrison back: the raids stop, level reset");
             b.Step(700f, 5, s, true, false, 0);

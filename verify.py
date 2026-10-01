@@ -1603,6 +1603,13 @@ def check_bomb_damage():
     else:
         bad("OrdnanceBlast offline check: " + (proc.stdout + proc.stderr)[-1800:])
 
+    position = os.path.join(ROOT, "research", "blast_position_check.py")
+    proc = subprocess.run([sys.executable, position], cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode == 0 and "BLAST POSITION CHECK PASS" in proc.stdout:
+        ok("OrdnanceBlast: disabled-collider registry, native/AA/mortar/patrol blasts and owner RPC PASS")
+    else:
+        bad("Blast position offline check: " + (proc.stdout + proc.stderr)[-1800:])
+
 
 def check_air_events():
     """Editor air events (task N11, Revival.AirEvents.cs, airdef.py,
@@ -1670,7 +1677,8 @@ def check_air_events():
     master_blast = ("if (!master) return;" in src and "OrdnanceBlast.Enqueue(at, radius," in src
                     and "if (!_ready || !_master()) return;" in ordnance
                     and '"PlayerApplyDamage", victim,' in ordnance
-                    and "FactionShield.SameFactionAsLocal" not in ordnance)
+                    and "b.FactionShield = !anyFaction" in ordnance
+                    and "b.FactionShield = false" in ordnance)
     need(master_blast or ("if (!master) return;" in src and "Mortar.AnyFaction = true;" in src
          and "!AnyFaction && FactionShield.SameFactionAsLocal(go)" in read("RevivalMortar.cs")),
          "one damage sweep per impact, on the master, every player's faction",
@@ -1689,8 +1697,9 @@ def check_air_events():
     # Editor and plugin agree.
     adef = read("airdef.py")
     cols = re.search(r"TSV_COLUMNS = \[(.*?)\]", adef, re.S)
-    need(cols is not None and len(re.findall(r'"[A-Za-z]+"', cols.group(1))) == 19
-         and "if (c.Length < 17)" in src and "c.Length > 18" in src,
+    need(cols is not None and len(re.findall(r'"[A-Za-z]+"', cols.group(1))) == 20
+         and "if (c.Length < 17)" in src and "c.Length > 18" in src
+         and "c.Length > 19" in src and "e.SpeedFactor = factor;" in src,
          "editor and plugin count the same columns", "airdef.py and AirEvents.Parse disagree on the columns")
     need("MIN_BOMBS, MAX_BOMBS, DEFAULT_BOMBS = 20, 60, 48" in adef
          and "Mathf.Clamp(Mathf.RoundToInt(F(p[3])), 20, 60)" in src
@@ -3373,6 +3382,7 @@ def check_mortar():
         bad("RevivalMortar.cs fehlt")
         return
     s = io.open(mortar_p, encoding="utf-8").read()
+    ordnance = io.open(os.path.join(ROOT, "Revival.OrdnanceBlast.cs"), encoding="utf-8").read()
     plug = io.open(plug_p, encoding="utf-8").read() if os.path.exists(plug_p) else ""
 
     def need(cond, good, why):
@@ -3405,10 +3415,11 @@ def check_mortar():
     need('"BlastDamage", 0f' in s,
          "sichtbare Explosion ohne Schaden (BlastDamage 0)",
          "BlastDamage ist nicht 0 - dann gehoert jeder Tote dem Schuetzen")
-    need('Turret.TryDamage(ai.gameObject, "NPC_AI2", "ApplyDamage", dmg)' in s,
-         "NPC-Schaden anonym (Turret.TryDamage, Besitzer 0)",
-         "NPC-Schaden laeuft nicht mehr ueber Turret.TryDamage")
-    need("FactionShield.SameFactionAsLocal(go)" in s,
+    need('OrdnanceBlast.EnqueueMortar(point, shooter, radius, npcPeak, vehiclePeak, playerPeak, AnyFaction)' in s
+         and 'new object[] { damage, Body, Explosion, 0, direction }' in ordnance,
+         "NPC damage queued anonymously to the Photon health owner",
+         "Mortar must use the position registry and anonymous NPC owner RPC")
+    need("Mortar.FactionShield.SameFactionAsLocal(go)" in ordnance,
          "eigene Fraktion wird gar nicht getroffen",
          "der Schutz der eigenen Fraktion fehlt im Spielerdurchlauf")
     need("FactionShield.Arm();" in s and "const int Traitor = 6;" in s,
@@ -3423,7 +3434,8 @@ def check_mortar():
          "FactionShield liest GetPlayerInfo() nicht am Spieler - jede Spielerfraktion ist unbekannt")
 
     # --- the owner-0 price: StatsOnNpcKilled throws on PhotonPlayer.Find(0).
-    need("BreakKillStreak(ai);" in s and '"_lastKillerId"' in s,
+    need("Mortar.BreakKillStreak(__instance as Component)" in ordnance
+         and '"_lastKillerId"' in s,
          "Abschussserie mit Besitzer 0 wird gebrochen",
          "keine _lastKillerId-Wache - ein raeumender Treffer wirft")
 
@@ -3478,7 +3490,8 @@ def check_mortar():
     need('cfg.Bind("Mortar", "SkipSafeSettlements"' not in s,
          "SkipSafeSettlements ist aus dem Code genommen",
          "SkipSafeSettlements wird noch gebunden, entscheidet aber nichts mehr")
-    need("if (Master())" in s and "{ dmg, 14 }" in s,
+    need("if (_master())" in ordnance and "{ damage, Explosion }" in ordnance
+         and "Body = 1, Explosion = 14" in ordnance,
          "Fahrzeugschaden nur auf dem Master, ueber Teil 14",
          "Fahrzeugschaden nicht auf den Master begrenzt")
 
@@ -5405,12 +5418,25 @@ def check_player_heli():
          "the settle rests on one floor sample or on its lowest corner - the "
          "wreck then hangs over a rise or is buried in a slope")
     drop = _body(settle, "void Drop()")
-    need("MeshRenderer" in drop and "at.y -= gap;" in drop
-         and "at.y +=" not in drop,
-         "what is DRAWN has the last word, and it can only be lowered",
-         "nothing measures the swapped wreck mesh, or the check may raise "
-         "the wreck - a mesh sitting higher than the one it replaced then "
-         "leaves the machine in the air")
+    legacy_drop = ("MeshRenderer" in drop and "at.y -= gap;" in drop
+                   and "at.y +=" not in drop)
+    wreck_place = read("Revival.AircraftWreck.cs")
+    geometry_drop = (
+        "AircraftWreck.Place(transform, transform, false);" in drop
+        and all(s in wreck_place for s in (
+            "f.sharedMesh.vertices", "matrix.MultiplyPoint3x4(vertices[v])",
+            "needed = y - support[i].y", "shift - Bed", "Physics.RaycastAll",
+            "QueryTriggerInteraction.Ignore", "c.transform.IsChildOf(aircraft)",
+            "RevivalTroopInsertion.TerrainHeight(at, out y)"))
+        and os.path.exists(os.path.join(ROOT, "research", "aircraft_wreck_check.py")))
+    need(legacy_drop or geometry_drop,
+         "what is DRAWN has the last word: bounds lowering or actual mesh support on solid ground",
+         "nothing measures the swapped wreck mesh against its ground")
+    if geometry_drop:
+        need("void Update(" not in wreck_place and "FindObjectsOfType" not in wreck_place
+             and "internal const float Bed = 0.15f * 2.8f;" in wreck_place,
+             "W1: wreck support is crash-only, excludes the carrier and beds the mesh 15 cm",
+             "W1: wreck placement polls or lacks the specified bedding")
     need("HeliWreckModel.Apply(go);" in burn and "settle.Begin(floor);" in burn
          and burn.index("HeliWreckModel.Apply(go);")
              < burn.index("settle.Begin(floor);"),
@@ -7359,8 +7385,22 @@ def check_airfield():
     slots = re.findall(r'new Slot\("([A-Za-z0-9]+)", (\d), "([a-z]+)",\s*(-?[\d.]+)f,\s*(-?[\d.]+)f,\s*([\d.]+)f\)', a)
     pools = set(re.findall(r'p\["([a-z]+)"\] = new string\[\]', a))
     need(len(slots) >= 20, "%d Lootpunkte" % len(slots), "weniger als 20 Lootpunkte gefunden")
-    unknown = sorted(set(s[0] for s in slots) - ids)
-    need(not unknown, "jeder Lootpunkt nennt eine Greybox-ID",
+    field_slots = re.findall(r'FieldSlot\(new Slot\("([A-Za-z0-9]+)", (\d), "([a-z]+)",\s*(-?[\d.]+)f,\s*(-?[\d.]+)f,\s*([\d.]+)f\),\s*"([A-Za-z0-9]+)",\s*(-?[\d.]+)f,\s*(-?[\d.]+)f\)', a)
+    if field_slots:
+        # TU95 rolls sit in the parked bomber's hold (z-v2), not on a recipe id
+        anchored = set()
+        if 'if (s.Building == "TU95")' in a and "ParkedTu95.Loot(" in a:
+            anchored.add("TU95")
+        plain = re.findall(r'(?<!FieldSlot\()new Slot\("([A-Za-z0-9]+)"', a)
+        need(all(pid in anchored for pid in plain), "every field loot roll has a surviving anchor",
+             "partial field loot relocation loses recipe validation: " + ", ".join(sorted(set(plain) - anchored)))
+        target_ids = set(s[6] for s in field_slots)
+        need(all(2500 < float(s[7]) < 6500 and abs(float(s[8])) < 2500 for s in field_slots),
+             "field loot anchors remain on the east tile", "field loot anchor is off the tile")
+    else:
+        target_ids = set(s[0] for s in slots)
+    unknown = sorted(target_ids - ids)
+    need(not unknown, "jeder aktive Lootpunkt nennt eine Greybox-ID",
          "Lootpunkte an IDs, die es im Greybox-Rezept nicht gibt: " + ", ".join(unknown))
     used = set(s[0] for s in slots)
     for must in ("H1", "H2", "C1", "F1", "B1", "D1", "D2a", "D3", "S1", "S2", "S4", "W1", "M1a", "AN"):

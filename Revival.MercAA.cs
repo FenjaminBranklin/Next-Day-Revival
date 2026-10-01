@@ -45,7 +45,7 @@ namespace NextDayRevival
         static int _localId = -1;
         internal static bool Authority { get { return MasterActor() == LocalActor() && _localId >= 0; } }
 
-        static int LocalActor()
+        internal static int LocalActor()
         {
             if (_localProperty == null)
             {
@@ -181,6 +181,40 @@ namespace NextDayRevival
             return IsVehicle(u.Order) ? -1 : Mathf.RoundToInt(u.Order.Facing.x) - 1;
         }
 
+        internal static Component ViewComponent(Component ai)
+        { return ai != null && Look() ? ai.GetComponent(_viewType) : null; }
+
+        static System.Func<object, int> _readOwner;
+
+        internal static bool Owns(Component view, int actor)
+        {
+            if (view == null || !Look()) return false;
+            if (_ownerField != null) return FastField.GetInt(_ownerField, view) == actor;
+            if (_readOwner == null)
+            {
+                // Property-only PUN versions use a typed delegate, bound once.
+                System.Reflection.Emit.DynamicMethod dm = new System.Reflection.Emit.DynamicMethod(
+                    "MercSupplyOwner", typeof(int), new Type[] { typeof(object) }, typeof(MercAA), true);
+                System.Reflection.Emit.ILGenerator il = dm.GetILGenerator();
+                il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+                il.Emit(System.Reflection.Emit.OpCodes.Castclass, _viewType);
+                il.Emit(System.Reflection.Emit.OpCodes.Call, _owner.GetGetMethod(true));
+                il.Emit(System.Reflection.Emit.OpCodes.Ret);
+                _readOwner = (System.Func<object, int>)dm.CreateDelegate(typeof(System.Func<object, int>));
+            }
+            return _readOwner(view) == actor;
+        }
+
+        internal static int ViewOf(MercUnit u)
+        {
+            if (u.AAView == 0 && Look())
+            {
+                Component v = u.Ai.GetComponent(_viewType);
+                if (v != null) u.AAView = Convert.ToInt32(_id.GetValue(v, null));
+            }
+            return u.AAView;
+        }
+
         internal static void RequestPost(MercUnit u, int post)
         {
             if (u.AAView == 0 && Look())
@@ -228,7 +262,7 @@ namespace NextDayRevival
             p.WeaponRenderers = null; p.WeaponOn = null;
         }
 
-        static Component Resolve(int view, int actor)
+        internal static Component Resolve(int view, int actor)
         {
             if (!Look()) return null;
             FindArgs[0] = view;
@@ -289,7 +323,8 @@ namespace NextDayRevival
                         if (p.Ai != null) p.Agent = GepardCrew.Agent(p.Ai);
                     }
                     MercUnit local = Mercs.UnitOf(p.Ai);
-                    if (local != null && (!IsOrder(local.Order) || PostOf(local) != index || local.AARetreat))
+                    if (local != null && (!IsOrder(local.Order) || PostOf(local) != index || local.AARetreat
+                        || MercCrewPhases.Ground(local)))
                     { Clear(p); continue; }
                     p.Peaceful = d[o + 3] < 0f;
                     p.Trait = Mathf.Clamp(Mathf.RoundToInt(p.Peaceful ? -d[o + 3] - 1f : d[o + 3]), 0, 50);
@@ -445,6 +480,7 @@ namespace NextDayRevival
                 else MercCrouch(f, now);
                 return;
             }
+            if (MercCrewPhases.Ground(u)) { MercCrewHold(f, u, now); return; }
             if (post < 0 || !MercAA.Pose(post, out at, out rot)) { MercAA.Release(u); MercFollow(f, u, now); return; }
             if (!MercAA.CanApproach(post, u.Ai))
             {

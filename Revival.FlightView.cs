@@ -291,6 +291,9 @@ namespace NextDayRevival
             {
                 val = Blend(_far.Adopt(_cam.farClipPlane),
                             Mathf.Max(1f, V(_cfgFarClip, 1.6f)), b, 1f, 12000f);
+                // The cheap aircraft NPC tier must fit inside the camera and
+                // linear haze even on the short Medium ground-view profile.
+                val = Mathf.Max(val, Mathf.Min(12000f, NpcDistance.AircraftVisibleUnits * 1.28f));
                 if (Changed(_far, val)) _cam.farClipPlane = val;
             }
 
@@ -300,6 +303,8 @@ namespace NextDayRevival
             val = Blend(_fogStart.Adopt(RenderSettings.fogStartDistance), 1f / fog, b, -100000f, 100000f);
             if (Changed(_fogStart, val)) RenderSettings.fogStartDistance = val;
             val = Blend(_fogEnd.Adopt(RenderSettings.fogEndDistance), 1f / fog, b, -100000f, 100000f);
+            if (RenderSettings.fogMode == FogMode.Linear && _cam != null && NpcDistance.AircraftVisibleUnits > 0f)
+                val = Mathf.Max(val, Mathf.Min(_cam.farClipPlane * 0.98f, NpcDistance.AircraftVisibleUnits * 1.25f));
             if (Changed(_fogEnd, val)) RenderSettings.fogEndDistance = val;
         }
 

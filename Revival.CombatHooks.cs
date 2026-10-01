@@ -387,6 +387,9 @@ namespace NextDayRevival
 
         internal static int SweepFrozen(Vector3 point, float damage, float radius)
         {
+            // D1a: the native explosion now queues every registered person.
+            // Retain the old fallback only if its native hook failed to install.
+            if (NativeBlast.Ready) return 0;
             if (damage <= 0f || radius <= 0f) return 0;
             FieldInfo vis = Visual();
             if (vis == null) return 0;

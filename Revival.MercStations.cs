@@ -220,7 +220,13 @@ namespace NextDayRevival
             if (ButtonColored(new Rect(230f, 74f, 160f, 28f), Loc.T("Обновить список", "Refresh list"), Grey, true)) MercStations.Discover(_stationRadar);
             if (ButtonColored(new Rect(396f, 74f, 140f, 28f), _stationRadar ? Loc.T("Пушки", "Guns") : Loc.T("Радар", "Radar"), Grey, true))
             { _stationRadar = !_stationRadar; MercStations.Discover(_stationRadar); }
-            Rect view = new Rect(10f, 112f, r.width - 20f, r.height - 124f);
+            if (ButtonColored(new Rect(14f, 108f, 166f, 28f), Loc.T("Флак: авто", "Flak: AUTO"), Grey, true))
+                MercCrewPhases.OverrideSelected(MercCrewPhase.Auto);
+            if (ButtonColored(new Rect(186f, 108f, 166f, 28f), Loc.T("Флак: воздух", "Flak: AIR"), Grey, true))
+                MercCrewPhases.OverrideSelected(MercCrewPhase.Air);
+            if (ButtonColored(new Rect(358f, 108f, 178f, 28f), Loc.T("Флак: земля", "Flak: GROUND"), Grey, true))
+                MercCrewPhases.OverrideSelected(MercCrewPhase.Ground);
+            Rect view = new Rect(10f, 146f, r.width - 20f, r.height - 158f);
             Rect content = new Rect(0f, 0f, view.width - 24f, Mathf.Max(view.height - 2f, MercStations.Rows.Count * 34f));
             _stationScroll = GUI.BeginScrollView(view, _stationScroll, content);
             for (int i = 0; i < MercStations.Rows.Count; i++)

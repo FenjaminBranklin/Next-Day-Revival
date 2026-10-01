@@ -124,6 +124,7 @@ namespace NextDayRevival
                     if (m == null) continue;
                     foreach (Transform t in m)
                     {
+                        if (!t.gameObject.activeInHierarchy) continue;
                         int bar = t.name.IndexOf('|');
                         Box b = new Box();
                         b.id = bar > 0 ? t.name.Substring(0, bar) : t.name;

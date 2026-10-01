@@ -23,6 +23,13 @@ namespace NextDayRevival
             return npcOperator || operatorSide == holder;
         }
 
+        /// <summary>Strategic raid lead; quick admin tests retain their short lead.</summary>
+        internal static float WarningLead(bool quick, float configured, float normal, float quickSeconds)
+        {
+            if (quick) return quickSeconds;
+            return configured > normal && !float.IsInfinity(configured) ? configured : normal;
+        }
+
         /// <summary>1 friend, -1 foe, 0 unknown, as the viewer's side sees the
         /// pilot. An NPC raid aircraft is always a foe; an empty aircraft or an
         /// unreadable pilot is unknown and never raises a warning.</summary>

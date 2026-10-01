@@ -1806,6 +1806,12 @@ namespace NextDayRevival
         internal static void Struck(List<Contact> contacts, Transform own, bool npc,
                                     GameObject go, Vector3 point, Vector3 dir, int heliHits)
         {
+            Struck(contacts, own, npc, go, point, dir, heliHits, 0f);
+        }
+
+        internal static void Struck(List<Contact> contacts, Transform own, bool npc,
+                                    GameObject go, Vector3 point, Vector3 dir, int heliHits, float infantryDamage)
+        {
             if (go == null || contacts == null) return;
             for (int i = 0; i < contacts.Count; i++)
             {
@@ -1824,10 +1830,10 @@ namespace NextDayRevival
                 if (vehicle.transform != own) VehicleHit(vehicle);
                 return;
             }
-            float dmg = Gepard.CfgInfantryDamage.Value;
-            if (Turret.TryDamage(go, "NPC_AI2", "ApplyDamage", dmg)) return;
+            float dmg = infantryDamage > 0f ? infantryDamage : Gepard.CfgInfantryDamage.Value;
+            // Step queued the person splash from the registry. Applying a
+            // direct collider hit as well would hit the same person twice.
             if (Turret.TryDamage(go, "Animal_AI", "NetworkApplyDamage", dmg)) return;
-            Turret.TryDamage(go, "PlayerNetworkController", "PlayerApplyDamage", dmg);
         }
 
         /// <summary>A hit on a known contact, through each kind's own entry
@@ -2274,6 +2280,7 @@ namespace NextDayRevival
     /// </summary>
     internal static class GepardShots
     {
+        static readonly List<GepardGun.Contact> EmptyContacts = new List<GepardGun.Contact>(0);
         sealed class Round
         {
             public Vector3 Pos, Vel;
@@ -2307,6 +2314,7 @@ namespace NextDayRevival
             public float CollisionSeconds;      // > 0: swept collision checks throttled to this cadence
             public float Splash;                 // a timed burst this close to an aircraft hits it, u (0 = none)
             public int HeliHits;                 // 0 = [Gepard] HeliHits
+            public float InfantryDamage;         // 0 = [Gepard]; ZU direct hit uses its own calibre
             public bool Tracer = true;
             public bool Flak;                    // self-destruct as a black flak puff with its own sound
             public bool Exact;                   // launch dispersion has already been applied by the sender
@@ -2602,6 +2610,7 @@ namespace NextDayRevival
                     }
                     if (near)
                     {
+                        if (!heavy || armedPart >= 0f) PersonBurst(r, spec, at);
                         if (spec != null && spec.Flak) Puff(spec, at);
                         else GepardFx.Burst(at, 1f);
                         AirKills.HitCredit = RoundCredit(r);
@@ -2645,11 +2654,14 @@ namespace NextDayRevival
                     GepardFx.Impact(hit.point, hit.normal);
                     if (r.Live)
                     {
+                        PersonBurst(r, spec, hit.point);
                         int previousCredit = AirKills.HitCredit;
                         AirKills.HitCredit = RoundCredit(r);
                         try
                         {
-                            if (r.Npc != null)
+                            if (spec != null && spec.InfantryDamage > 0f)
+                                GepardGun.Struck(r.Npc ?? EmptyContacts, r.Owner, r.Npc != null, hit.collider.gameObject, hit.point, dir, spec.HeliHits, spec.InfantryDamage);
+                            else if (r.Npc != null)
                                 GepardGun.Struck(r.Npc, r.Owner, true, hit.collider.gameObject, hit.point, dir, spec != null ? spec.HeliHits : 0);
                             else if (spec == null) GepardGun.Struck(hit.collider.gameObject, hit.point, dir);
                         }
@@ -2667,6 +2679,7 @@ namespace NextDayRevival
             r.Pos = next;
             if (r.Age >= r.Life)
             {
+                PersonBurst(r, spec, r.Pos);
                 if (spec != null && spec.Flak)
                 {
                     // The flak gunner's fuze: a black puff where he set it, and
@@ -2711,6 +2724,20 @@ namespace NextDayRevival
             return Math.Max(0, r.Credit);
         }
 
+        // Event work only: exactly one queued person pass when a live round
+        // bursts, never while it is flying or when a peer draws its picture.
+        // Existing air contact hits remain separate from person splash.
+        static void PersonBurst(Round r, Spec spec, Vector3 at)
+        {
+            if (!r.Live) return;
+            float radius = spec != null && spec.Splash > 0f ? spec.Splash : 3f * 2.8f;
+            float peak = spec != null && spec.Exact
+                ? Flak.CfgImpactDamage == null ? 1200f : Flak.CfgImpactDamage.Value
+                : spec != null && spec.InfantryDamage > 0f ? spec.InfantryDamage
+                : Gepard.CfgInfantryDamage == null ? 180f : Gepard.CfgInfantryDamage.Value;
+            OrdnanceBlast.EnqueuePeople(at, radius, Mathf.Max(0f, peak), false);
+        }
+
         /// <summary>A live armed 52-K shell struck a collider. An aircraft's:
         /// a direct hit and the cloud on the others. Anything else - ground,
         /// building, vehicle - the gun's ground blast (the game's explosion,
@@ -2724,6 +2751,7 @@ namespace NextDayRevival
                 GepardGun.Contact c = GepardGun.AirOwner(r.Npc, go);
                 if (c != null)
                 {
+                    PersonBurst(r, spec, at);
                     GepardGun.Hit(c, at, dir, true, spec.HeliHits);
                     GepardGun.BurstAll(r.Npc, at, dir, spec.Splash, spec.HeliHits, c);
                 }

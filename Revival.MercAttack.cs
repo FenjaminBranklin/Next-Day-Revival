@@ -38,7 +38,7 @@ namespace NextDayRevival
                 Fighter other = FighterOf(c);
                 if (other != null && other.Squad == f.Squad) continue;
                 if (!Hostile(f.Hated, FactionOf(c)) || !Alive(c) || MercRide.HiddenRider(c)) continue;
-                if ((other == null || other.Squad == null) && !Targetable(c)) continue;
+                if ((other == null || other.Squad == null) && !MercNpcTargetable(f, c)) continue;
                 rays++;
                 float height;
                 if (!AimPoint(f, tr, out height)) continue;
@@ -63,17 +63,72 @@ namespace NextDayRevival
             i.Sees = i.Target && f.Sees;
             i.TargetAt = i.Target ? f.Target.position : i.Me;
             i.Danger = ft.In.Danger;
-            i.Protected = ft.Health < MercBrain.RetreatBelow || Reloading(f)
-                || (u.Sense.Exposed && now - u.Sense.ExposedAt < 0.8f);
+            i.Protected = ft.Health < MercBrain.RetreatUntil || Reloading(f)
+                || f.Suppression >= MercBrain.CalmPressure
+                || (u.Medicine != null && u.Medicine.Active != 0)
+                || (ft.Brain != null && ft.Brain.Mode != MercBrain.Normal);
             MercAttackTeam team = u.Order.Team as MercAttackTeam;
             if (team != null)
+            {
+                team.Station(u.Order.K, ft.Overwatch.Role == MercRole.Marksman,
+                    f.Armed && !i.Protected && !i.Danger);
                 team.Covering(u.Order.K, now, ft.Brain != null
-                    && ft.Out.Act == FightAct.Fire && !ft.Out.NoShot && f.Armed
+                    && (ft.Out.Act == FightAct.Fire || (ft.WalkingFire && ft.Out.Act == FightAct.Step))
+                    && now - ft.LastShotAt < 0.6f && !ft.Out.NoShot && f.Armed
                     && ft.Health >= MercBrain.RetreatBelow && !Reloading(f)
-                    && (ft.Brain.Cover.Found || !u.Sense.Exposed || now - u.Sense.ExposedAt >= 0.8f)
-                    && f.PlantedSince > 0f && now - f.PlantedSince >= PlantSeconds
+                    && !i.Protected && !i.Danger
                     && (ft.Gate == MercFireGate.Shoot || ft.Gate == MercFireGate.Suppress)
                     && f.MuzzleBlockedSince <= 0f && (i.Sees || ft.Out.Suppress));
+            }
+        }
+
+        /// <summary>K4a: the same order step feeds the calm fight, so a visible
+        /// contact changes gait and fire, rather than discarding forward motion.</summary>
+        static void MercAttackFight(Fighter f, MercUnit u, MercFight ft, float now)
+        {
+            ft.In.Attack = u.Order.Mode == MercOrder.Attack && !ft.In.Survive;
+            ft.In.AttackMove = false;
+            ft.In.AttackRear = false;
+            ft.In.AttackDest = ft.In.Me;
+            if (!ft.In.Attack) return;
+            MercAttackIn input;
+            MercAttackInputs(f, u, now, out input);
+            MercAttackRun run = u.Attack;
+            run.Gate(u.Order, ref input);
+            // Maintenance and retreat remain M2/M3's responsibility. They do
+            // not spend the advance's stall budget while unable to move.
+            if (input.Protected || input.Danger || ft.In.Reloading) return;
+            MercAttackGround(run);
+            MercAttackTeam team = u.Order.Team as MercAttackTeam;
+            float front = 0f;
+            bool overwatch = ft.Overwatch.Role == MercRole.Marksman && team != null
+                && team.Front(now, out front) && now - team.LastSight <= 2f;
+            if (overwatch)
+            {
+                // Y S3's proven 60..150 m rear/flank formation, relative to
+                // the assault front. The explicit objective resumes on clear.
+                Vector3 anchor = u.Order.Origin + MercAttackGeo.Dir(u.Order) * front;
+                Vector3 goal = MercRole.Slot(MercRole.Marksman, anchor, MercAttackGeo.Dir(u.Order), u.Order.K, 0);
+                ft.In.AttackDest = MercAttackWaypoint(f, u, goal, now);
+                ft.In.AttackMove = !MercRole.InPosition(ft.In.Me, anchor, MercAttackGeo.Dir(u.Order));
+                ft.In.AttackRear = ft.In.AttackMove;
+                return;
+            }
+            MercAttackAct act;
+            run.Step(u.Order, ref input, out act);
+            if (run.News != 0) MercAttackNews(u, run);
+            if (act.Act != MercAttackAct.MoveTo) return;
+            ft.In.AttackMove = team == null || team.ReadyCount(now) <= 1
+                || !team.Contact(now) || now - team.LastSight > 2f || team.Runner(u.Order.K, now);
+            if (ft.In.AttackMove) ft.In.AttackDest = MercAttackWaypoint(f, u, act.Dest, now);
+        }
+
+        static void MercAttackGround(MercAttackRun run)
+        {
+            if (run.Grounded) return;
+            run.Grounded = true;
+            Vector3 ground;
+            if (RevivalGroundEnemies.TryGround(run.HoldAt, 10f, out ground)) run.HoldAt = ground;
         }
 
         /// <summary>ATTACK: may the brain fight here (MercMayStand)?</summary>
@@ -92,15 +147,22 @@ namespace NextDayRevival
             if (run.For != o) run.Begin(o, now, f.Tr.position);
             // The hold spot on the ground, once per order (MercMayStand may
             // have begun the run in the fight's Think).
-            if (!run.Grounded)
-            {
-                run.Grounded = true;
-                Vector3 g;
-                if (RevivalGroundEnemies.TryGround(run.HoldAt, 10f, out g)) run.HoldAt = g;
-            }
+            MercAttackGround(run);
             MercAttackIn i;
             MercAttackInputs(f, u, now, out i);
             run.Gate(o, ref i);
+            MercAttackTeam team = o.Team as MercAttackTeam;
+            float front;
+            if (!i.Protected && !i.Danger && u.Fight.Overwatch.Role == MercRole.Marksman
+                && team != null && team.Front(now, out front) && now - team.LastSight <= 2f)
+            {
+                Vector3 anchor = o.Origin + MercAttackGeo.Dir(o) * front;
+                Vector3 goal = MercRole.Slot(MercRole.Marksman, anchor, MercAttackGeo.Dir(o), o.K, 0);
+                if (!MercRole.InPosition(i.Me, anchor, MercAttackGeo.Dir(o)))
+                    MercMove(f, u, MercAttackWaypoint(f, u, goal, now), true, now);
+                else { MercCrouch(f, now); FaceDir(f, MercAttackGeo.Dir(o)); }
+                return;
+            }
             MercAttackAct a;
             run.Step(o, ref i, out a);
             if (run.News != 0) MercAttackNews(u, run);

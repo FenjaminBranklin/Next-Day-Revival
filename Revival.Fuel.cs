@@ -234,9 +234,11 @@ namespace NextDayRevival
         static readonly List<Column> _cols = new List<Column>();
         static Type _type;
         static FieldInfo _stock;
-        static float _nextScan, _nextBeat, _lastTick;
-        static int _scanSig;
-        static float _scanAt = -100f;
+        static float _nextScan, _nextBeat, _lastTick, _nextStock;
+        static int _scanSig = int.MinValue;
+        static readonly SceneSweep _columnSweep = new SceneSweep();
+        static readonly SceneSweep.Visitor _columnVisit = VisitColumn;
+        static float[] _stockPacket = new float[0];
 
         static float Cap { get { return Mathf.Max(0f, CfgCanisters.Value) * 100f; } }
 
@@ -253,20 +255,21 @@ namespace NextDayRevival
             }
             if (_stock == null) return;
             FuelDepot.EnsureNet();             // receive the master's stocks
-            // P1b: the columns are map objects - FindObjectsOfType (a walk over
-            // every MonoBehaviour) again when a scene came or went, else once a
-            // minute, instead of every 10 s.
+            // Columns are static map objects. Rediscover only on scene changes,
+            // and walk the hierarchy in small slices instead of one world scan.
             if (Time.time >= _nextScan)
             {
-                _nextScan = Time.time + 10f;
+                _nextScan = Time.time + 0.5f;
                 int sig = SceneSweep.LoadedSignature();
-                if (sig != _scanSig || Time.time >= _scanAt + 60f)
+                if (sig != _scanSig)
                 {
                     _scanSig = sig;
-                    _scanAt = Time.time;
-                    Scan();
+                    _columnSweep.Begin("");
                 }
             }
+            if (_columnSweep.Active) _columnSweep.Step(0.075, _columnVisit);
+            if (Time.time < _nextStock) return;
+            _nextStock = Time.time + 0.2f;
 
             float dt = Time.realtimeSinceStartup - _lastTick;
             _lastTick = Time.realtimeSinceStartup;
@@ -296,23 +299,20 @@ namespace NextDayRevival
             if (master && (changed || Time.time >= _nextBeat)) { _nextBeat = Time.time + 15f; Beat(); }
         }
 
-        static void Scan()
+        static bool VisitColumn(Transform t, string name)
         {
-            UnityEngine.Object[] all = UnityEngine.Object.FindObjectsOfType(_type);
-            for (int i = 0; i < all.Length; i++)
-            {
-                Component c = all[i] as Component;
-                if (c == null || Find(c) != null) continue;
+                Component c = t.GetComponent(_type);
+                if (c == null || !c.gameObject.activeInHierarchy || Find(c) != null) return true;
                 Column col = new Column();
                 col.C = c;
                 col.Pos = c.transform.position;
-                float s = Mathf.Min((float)_stock.GetValue(c), Cap);
-                _stock.SetValue(c, s);
+                float s = Mathf.Min(FastField.GetFloat(_stock, c), Cap);
+                FastField.SetFloat(_stock, c, s);
                 col.Seen = s;
                 _cols.Add(col);
                 RevivalPlugin.L.LogInfo("Fuel: station at " + Mathf.RoundToInt(col.Pos.x) + ", "
                     + Mathf.RoundToInt(col.Pos.z) + " holds " + Mathf.RoundToInt(s) + " of " + Mathf.RoundToInt(Cap) + ".");
-            }
+                return true;
         }
 
         static Column Find(Component c)
@@ -333,13 +333,16 @@ namespace NextDayRevival
 
         static void Beat()
         {
-            List<float> f = new List<float>();
-            for (int i = 0; i < _cols.Count && i < 200; i++)
+            int count = Mathf.Min(_cols.Count, 200);
+            if (_stockPacket.Length != count * 3) _stockPacket = new float[count * 3];
+            for (int i = 0; i < count; i++)
             {
                 if (_cols[i].C == null) continue;
-                f.Add(_cols[i].Pos.x); f.Add(_cols[i].Pos.z); f.Add(_cols[i].Seen);
+                _stockPacket[i * 3] = _cols[i].Pos.x;
+                _stockPacket[i * 3 + 1] = _cols[i].Pos.z;
+                _stockPacket[i * 3 + 2] = _cols[i].Seen;
             }
-            if (f.Count > 0) FuelDepot.Send(FuelDepot.OpStations, f.ToArray());
+            if (count > 0) FuelDepot.Send(FuelDepot.OpStations, _stockPacket);
         }
 
         /// <summary>Master: a client filled a canister at a column.</summary>

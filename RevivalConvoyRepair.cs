@@ -285,7 +285,7 @@ namespace NextDayRevival
         {
             _prompt = null;
 
-            bool key = Input.GetKeyDown(CfgKey.Value);
+            bool key = RepairTap.CanStart && (Input.GetKeyDown(KeyCode.R) || Input.GetKeyDown(CfgKey.Value));
 
             // Only on foot, never while seated in a vehicle.
             if (InVehicle())
@@ -309,7 +309,7 @@ namespace NextDayRevival
             bool haveExt = Turret.HasItem(ExtId);
             bool haveKit = Turret.HasItem(KitId);
             bool pressed = key;
-            string keyName = CfgKey.Value.ToString();
+            string keyName = "R";
 
             if (burning)
             {

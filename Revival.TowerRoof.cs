@@ -1,43 +1,14 @@
 // Next Day: Survival - Revival Toolkit
 //
-// Y B1 TOWER ROOF: the roof of the tower C1 (the radar HQ's cab, 15.35 m up)
-// had no way up - the stairs end in the cab. This module, on every client,
-// once the HQ has found the C1 model (TowerRadar.Tower):
-//
-//   1  THE LADDER. A steel ladder on the tower's east face, straight from the
-//      ground to the cab roof and 1.1 m on over its rail, between the window
-//      columns (Revival.TowerRoofCore.cs has the layout). Players climb it
-//      with the game's own ladder: the plain group Ladder / ClimbDownPoint /
-//      StartPoint / BeupPoint / EndPoint goes through EastLadders.Wire, the
-//      same wiring as the chimney B1c (a LadderObject, layer 17, tag Ladder).
-//      Look at the ladder and press the interact key: up; on the roof look at
-//      the rail over the ladder: down.
-//   2  THE MERCS' CLIMB. A merc whose move ends on the roof (STAY there, or
-//      FOLLOW an owner standing up there) walks to the ladder's foot, climbs
-//      (a few seconds, the agent parked, the body moved on the ladder in
-//      LateFrame) and steps onto the roof; ordered down he walks to the top,
-//      climbs down and goes on. NpcWar.MercMove asks Leg(); RunGround leaves a
-//      climbing merc alone (Climbing()). The merc AI runs on its owner's
-//      client, so the climb does too; the other clients see the NPC's own
-//      Photon replication of his position - nothing new is sent.
-//   3  THE POSTS. Five sandbag walls (0.9 m, crouch cover, box colliders) at
-//      the roof's edges; each merc slot has its post behind one and holds it
-//      crouched, looking out. In a fight up there he stays on the roof
-//      (KeepUp: a run to a spot below becomes a run to his post).
-//   4  ROOF NAVMESH. The C1 bake has a roof level (unconnected: that is the
-//      point of the ladder); where the roof has no NavMesh a small patch is
-//      baked asynchronously over it once (CrossingCore.Settings).
-//
-// COST (F6 TowerRoof.Tick / TowerRoof.LateFrame): Tick is a 1 Hz check until
-// the tower is found, then a 1 Hz liveness test; the one-time build (two
-// merged meshes, eight boxes, one async NavMesh patch where needed) runs on
-// one frame. LateFrame returns at once when nobody climbs; a climb is a few
-// float operations per climbing merc. Leg() is a flat distance test per merc
-// move away from the tower. Nothing here allocates after the build.
-//
-// Acts with [World] EastTile and [TowerRadar] Enabled; [TowerRadar]
-// RoofLadder (default on) switches only this module.
-// C# 3.0 (csc from .NET 3.5). ASCII only.
+// Z T1a: the tower's north outside staircase replaces the unusable B1 ladder.
+// Upper stairs/crossover are deterministic collision + merged visual geometry
+// on every client; merc authority/Photon position replication use existing hooks.
+// No new frame tick: F6 slots TowerRoof.Tick / TowerRoof.LateFrame are reused.
+// Z T1b: 2 s stalls hop a waypoint, 24 s total goes to the post / foot.
+// Physics: ALL-layer diagnostics at 10 Hz, active lookahead at 5 Hz per merc,
+// round-robin one actor query per frame. Zero idle physics/managed allocations.
+// Steady active target < 0.1 ms average / < 0.5 ms peak; F6 measurement pending.
+// C# 3.0, ASCII.
 using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
@@ -61,7 +32,11 @@ namespace NextDayRevival
 
         static GameObject _root;
         static bool _built, _roofNav, _patched, _navSaid;
-        static float _next, _nextNav;
+        static float _next, _nextNav, _nextCheck, _routeWantedUntil;
+        static bool _routeReady, _routeSaid;
+        static int _checkSegment = 1;
+        static float _checkDistance;
+        static readonly Collider[] _hits = new Collider[64];
         static Vector3 _base, _centre;
         static Quaternion _rot = Quaternion.identity, _inv = Quaternion.identity;
         static float _footY;
@@ -74,23 +49,25 @@ namespace NextDayRevival
         {
             public Transform Man;
             public NavMeshAgent Agent;
-            public bool Busy, Up, Pos, Rot;
-            public float T0, Duration;
-            public int N;
+            public bool Busy, Up, Pos, Rot, Blocked, WasEnabled;
+            public float NextCheck;
+            public int N, Slot;
+            public TowerRoofCore.Walk Walk;
+            public Vector3 EndPoint;
             public readonly Vector3[] Pts = new Vector3[TowerRoofCore.PathMax];
         }
 
         static readonly Climb[] _climbs = new Climb[ClimbCap];
         static int _active;
+        static int _queryCursor;
 
         static void Log(string s) { RevivalPlugin.L.LogInfo("TowerRoof: " + s); }
 
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgOn = cfg.Bind("TowerRadar", "RoofLadder", true,
-                "Y B1: an outside ladder on the tower C1's east face from the ground to the cab roof (players climb it "
-                + "with the game's ladder, mercs ordered onto the roof walk to it and climb), and five sandbag posts "
-                + "on the roof as cover.");
+                "Outside staircase access to the C1 cab roof and five sandbag posts. "
+                + "Legacy RoofLadder key retained; no ladder is built. Enabled by default.");
         }
 
         static bool On { get { return (CfgOn == null || CfgOn.Value) && EastWorld.On && TowerRadar.On; } }
@@ -114,10 +91,15 @@ namespace NextDayRevival
         internal static void Tick()
         {
             float now = Time.realtimeSinceStartup;
-            if (now < _next) return;
-            _next = now + 1f;
             try
             {
+                if (On && Ready && !_routeReady && AirfieldObjects.Ready && AirfieldObjects.Pending == 0
+                    && now >= _nextCheck && (CombatLoad.AnyNear(_base, 80f) || now < _routeWantedUntil)) {
+                    _nextCheck = now + 0.1f;
+                    ValidateNext();
+                }
+                if (now < _next) return;
+                _next = now + 1f;
                 if (!On || TowerRadar.Tower == null || !TowerRadar.Built)
                 {
                     if (_built) Clear(!On ? "off" : "the tower went away");
@@ -130,33 +112,45 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("TowerRoof: " + ex);
-                _next = now + 30f;
+                _next = _nextCheck = now + 30f;
             }
         }
 
         /// <summary>Every client after the animator: the climbing mercs of
-        /// this client on the ladder.</summary>
+        /// this client on the outside stairs.</summary>
         internal static void LateFrame()
         {
             if (_active == 0) return;
             float now = Time.time;
-            for (int i = 0; i < ClimbCap; i++)
+            bool queried = false;
+            int first = _queryCursor;
+            for (int scan = 0; scan < ClimbCap; scan++)
             {
+                int i = (first + scan) % ClimbCap;
                 Climb c = _climbs[i];
                 if (c == null || !c.Busy) continue;
-                if (c.Man == null || !Ready || (c.Agent != null && !c.Agent.enabled)) { End(c, false); continue; }
-                float t = now - c.T0;
-                if (t >= c.Duration) { End(c, true); continue; }
-                Vector3 l = TowerRoofCore.At(c.Pts, c.N, t);
-                c.Man.position = World(l);
-                Vector3 dir;
-                if (TowerRoofCore.OnRungs(l, _footY)) dir = _rot * Vector3.left;         // facing the wall
-                else
-                {
-                    Vector3 ahead = TowerRoofCore.At(c.Pts, c.N, t + 0.1f) - l;
-                    ahead.y = 0f;
-                    dir = ahead.sqrMagnitude > 1e-6f ? _rot * ahead : _rot * (c.Up ? Vector3.left : Vector3.right);
+                if (c.Man == null || !Ready || (c.WasEnabled && c.Agent != null && !c.Agent.enabled)) { End(c, false); continue; }
+                Vector3 at = Local(c.Man.position);
+                at.y -= TowerRoofCore.FootLift;
+
+                if (!queried && now >= c.NextCheck) {
+                    queried = true;
+                    _queryCursor = (i + 1) % ClimbCap;
+                    c.NextCheck = now + 0.2f;
+                    int target = Math.Min(c.Walk.Next, c.N - 1);
+                    Vector3 ahead = TowerRoofCore.Advance(at, c.Pts[target], 0.1f);
+                    c.Blocked = !ClearPoint(ahead, c.Man);
                 }
+                Vector3 l;
+                int action = TowerRoofCore.Step(ref c.Walk, c.Pts, c.N, at,
+                    now, Time.deltaTime, !c.Blocked, out l);
+                if (action == TowerRoofCore.Finished || action == TowerRoofCore.Fallback) { End(c, true); continue; }
+                if (action == TowerRoofCore.Hop) c.Blocked = true;
+                Vector3 dir = l - at;
+                l.y += TowerRoofCore.FootLift;
+                c.Man.position = World(l);
+                dir.y = 0f;
+                dir = _rot * dir;
                 if (dir.sqrMagnitude > 1e-6f) c.Man.rotation = Quaternion.LookRotation(dir, Vector3.up);
             }
         }
@@ -172,15 +166,19 @@ namespace NextDayRevival
             if (!Ready || man == null) return LegNone;
             Vector3 m = man.position;
             if (FlatSq(m, _centre) > Near * Near && FlatSq(goal, _centre) > Near * Near) return LegNone;
+            _routeWantedUntil = Time.realtimeSinceStartup + 30f;
             Vector3 l;
             int r = TowerRoofCore.Leg(Local(m), Local(goal), slot, _footL, _exitL, out l);
             switch (r)
             {
                 case LegWalk:
-                    if (TowerRoofCore.OnRoof(Local(m)))
-                        leg = TowerRoofCore.GoalUp(Local(goal)) ? _postNav[Wrap(slot)] : _exitNav;
-                    else leg = _footNav;
-                    return r;
+                    // A cross-map order still approaches normally. Recovery
+                    // begins inside the tower's existing nearby-move radius.
+                    if (FlatSq(m, _centre) > Near * Near) { leg = _footNav; return LegWalk; }
+                    // Approach, stairs AND final post belong to the bounded
+                    // direct walk; no NavMesh path can veto the roof order.
+                    leg = World(l);
+                    return TowerRoofCore.GoalUp(Local(goal)) ? LegClimbUp : LegClimbDown;
                 case LegHold:
                     leg = _rot * l;
                     return r;
@@ -205,7 +203,7 @@ namespace NextDayRevival
             return Ready && FlatSq(w, _centre) < Near * Near && TowerRoofCore.GoalUp(Local(w));
         }
 
-        /// <summary>Man and goal on different sides of the ladder (world): a
+        /// <summary>Man and goal on different ends of the outside stairs (world): a
         /// flat arrival check must not count him there.</summary>
         internal static bool Split(Vector3 man, Vector3 goal)
         {
@@ -219,9 +217,9 @@ namespace NextDayRevival
         internal static bool KeepUp(Vector3 man, Vector3 goal, int slot, out Vector3 post)
         {
             post = goal;
-            if (!Ready || !_roofNav || FlatSq(man, _centre) > Near * Near) return false;
+            if (!Ready || FlatSq(man, _centre) > Near * Near) return false;
             if (!TowerRoofCore.OnRoof(Local(man)) || TowerRoofCore.OnRoof(Local(goal))) return false;
-            post = _postNav[Wrap(slot)];
+            post = World(TowerRoofCore.Post(slot));
             return true;
         }
 
@@ -229,21 +227,16 @@ namespace NextDayRevival
         {
             if (_active == 0 || man == null) return false;
             for (int i = 0; i < ClimbCap; i++)
-                if (_climbs[i] != null && _climbs[i].Man == man) return true;
+                if (_climbs[i] != null && _climbs[i].Busy && _climbs[i].Man == man) return true;
             return false;
         }
 
-        /// <summary>Start a climb (up from the foot, down from the top). False
-        /// when it cannot: no roof NavMesh (yet) to put him on, or full.</summary>
-        internal static bool StartClimb(Transform man, NavMeshAgent agent, bool up)
+        /// <summary>Start the direct route immediately, including approach and
+        /// the roof post. Live validation and roof NavMesh are diagnostic only.</summary>
+        internal static bool StartClimb(Transform man, NavMeshAgent agent, bool up, int slot)
         {
             if (!Ready || man == null) return false;
             if (Climbing(man)) return true;
-            if (!RoofNavOk())
-            {
-                if (!_navSaid) { _navSaid = true; Log("the roof has no NavMesh yet - mercs wait at the ladder."); }
-                return false;
-            }
             Climb c = null;
             for (int i = 0; i < ClimbCap && c == null; i++)
             {
@@ -254,10 +247,19 @@ namespace NextDayRevival
             c.Busy = true;
             c.Man = man;
             c.Agent = agent;
+            c.WasEnabled = agent != null && agent.enabled;
             c.Up = up;
-            c.N = TowerRoofCore.Path(up, Local(man.position), _footL, _exitL, c.Pts);
-            c.Duration = TowerRoofCore.Duration(c.Pts, c.N);
-            c.T0 = Time.time;
+            c.Slot = slot;
+            c.Blocked = true;
+            c.NextCheck = 0f;
+            Vector3 start = Local(man.position);
+            if (up && TowerRoofCore.OnRoof(start)) {
+                c.Pts[0] = start;
+                c.N = 1;
+            } else c.N = TowerRoofCore.Path(up, start, TowerRoofCore.Foot(_footY), TowerRoofCore.Exit(), c.Pts);
+            if (up) c.Pts[c.N++] = TowerRoofCore.Post(slot);
+            c.EndPoint = World(c.Pts[c.N - 1]);
+            TowerRoofCore.Begin(ref c.Walk, c.Pts, c.N, Time.time);
             c.Pos = c.Rot = true;
             if (agent != null)
             {
@@ -271,8 +273,23 @@ namespace NextDayRevival
                 agent.updatePosition = false;
                 agent.updateRotation = false;
             }
+            man.position = World(start + Vector3.up * TowerRoofCore.FootLift);
             _active++;
             return true;
+        }
+
+        // A superseding order can never leave an unbound agent halfway up.
+        // Death/authority loss only release the pose; never move a dead/peer body.
+        internal static void Cancel(Transform man, bool land)
+        {
+            if (man == null || _active == 0) return;
+            for (int i = 0; i < ClimbCap; i++) {
+                Climb c = _climbs[i];
+                if (c == null || !c.Busy || c.Man != man) continue;
+                if (land) c.EndPoint = TowerRoofCore.OnRoof(Local(man.position)) ? World(TowerRoofCore.Post(c.Slot)) : _footNav;
+                End(c, land);
+                return;
+            }
         }
 
         /// <summary>The climb is over (done: put him on the NavMesh at its end)
@@ -283,11 +300,11 @@ namespace NextDayRevival
             Transform man = c.Man;
             if (done && man != null)
             {
-                Vector3 end = c.Up ? _exitNav : _footNav;
+                Vector3 end = c.EndPoint;
                 man.position = end;
                 if (a != null && a.isActiveAndEnabled)
                 {
-                    try { a.Warp(end); } catch { }
+                    try { if (!a.Warp(end)) a.nextPosition = end; } catch { }
                 }
             }
             if (a != null)
@@ -296,6 +313,7 @@ namespace NextDayRevival
                 a.updateRotation = c.Rot;
                 try { if (a.isActiveAndEnabled && a.isOnNavMesh) a.isStopped = false; } catch { }
             }
+            if (done && man != null) man.position = c.EndPoint;
             c.Man = null;
             c.Agent = null;
             c.Busy = false;
@@ -324,37 +342,67 @@ namespace NextDayRevival
             if (steel == null) steel = Mat("NDR_Roof_Steel", new Color(0.33f, 0.36f, 0.3f), 0.3f, 0.3f);
             if (_sand == null) _sand = Mat("NDR_Roof_Sandbag", new Color(0.50f, 0.45f, 0.32f), 0f, 0.1f);
             List<CombineInstance> parts = new List<CombineInstance>(128);
-            LadderMesh(parts);
-            Finish(parts, "Ladder mesh", steel, root.transform);
+            UpperStairs(parts, root.transform);
+            Finish(parts, "Outside upper stairs", steel, root.transform);
             BagMesh(parts);
             Finish(parts, "Sandbags", _sand, root.transform);
             BagColliders(root.transform);
-            GameLadder(root.transform, scene.name);
 
-            _footNav = Sample(World(TowerRoofCore.Foot(_footY)), 4f, 3f, World(TowerRoofCore.Foot(_footY)));
+            _footNav = Sample(World(TowerRoofCore.Foot(_footY)), 0.6f * K, 0.3f * K, World(TowerRoofCore.Foot(_footY)));
             _footL = Local(_footNav);
             _exitNav = World(TowerRoofCore.Exit());
             _exitL = TowerRoofCore.Exit();
             _built = true;
             _roofNav = _patched = _navSaid = false;
-            _nextNav = 0f;
+            _nextNav = _nextCheck = 0f;
+            _checkSegment = 1; _checkDistance = 0f;
+            _routeReady = _routeSaid = false;
             RoofNavOk();
-            Log("built on \"" + tower.name + "\": ladder " + (TowerRoofCore.RoofY - _footY).ToString("F1")
-                + " m from the ground to the roof at " + World(TowerRoofCore.Exit()) + ", " + TowerRoofCore.Posts
-                + " sandbag posts, roof NavMesh " + (_roofNav ? "from the bake" : "pending") + ".");
+            Log("outside stairs built on " + tower.name + "; checking every route sample against ALL live colliders.");
         }
 
-        /// <summary>The ground at the ladder's foot (tower frame, m): a ray
-        /// down there, the terrain where it misses.</summary>
-        static float FootY()
+        static float FootY() { return TowerRoofCore.Stair[0].y; }
+
+        // The global broadphase includes ALL colliders (also slabs, props,
+        // fences, terrain and runtime geometry), with no C1/model/layer whitelist.
+        // A 50 m area subset cannot contain an obstacle missed by this query.
+        static bool ClearPoint(Vector3 local, Transform man)
         {
-            Vector3 top = World(new Vector3(TowerRoofCore.StartX, 4f, TowerRoofCore.LadderZ));
-            RaycastHit hit;
-            if (Physics.Raycast(top, Vector3.down, out hit, 8f * K, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
-                return Mathf.Clamp(Local(hit.point).y, -2f, 2f);
-            float y;
-            if (EastWorld.TerrainHeight(top, out y)) return Mathf.Clamp((y - _base.y) / K, -2f, 2f);
-            return 0f;
+            Vector3 foot = World(local + Vector3.up * TowerRoofCore.FootLift);
+            float r = TowerRoofCore.CapsuleRadius * K;
+            int n = Physics.OverlapCapsuleNonAlloc(foot + Vector3.up * r,
+                foot + Vector3.up * (TowerRoofCore.CapsuleHeight * K - r), r,
+                _hits, ~0, QueryTriggerInteraction.Ignore);
+            if (n >= _hits.Length) return false; // fail closed on overflow
+            for (int i = 0; i < n; i++) {
+                Collider hit = _hits[i];
+                if (hit != null && (man == null || (hit.transform != man && !hit.transform.IsChildOf(man)))) return false;
+            }
+            RaycastHit support;
+            return Physics.Raycast(foot + Vector3.up * (0.15f * K), Vector3.down,
+                out support, 0.5f * K, ~0, QueryTriggerInteraction.Ignore)
+                && Mathf.Abs(Local(support.point).y - local.y) < 0.25f;
+        }
+
+        static void ValidateNext()
+        {
+            Vector3 a = TowerRoofCore.Stair[_checkSegment - 1], b = TowerRoofCore.Stair[_checkSegment];
+            float length = (b - a).magnitude;
+            Vector3 p = Vector3.Lerp(a, b, length < 0.001f ? 1f : Mathf.Min(1f, _checkDistance / length));
+            if (!ClearPoint(p, null)) {
+                if (!_routeSaid) { _routeSaid = true; Log("stair route blocked at " + World(p) + "; bounded merc recovery remains active."); }
+                _nextCheck = Time.realtimeSinceStartup + 2f;
+                return;
+            }
+            _checkDistance += 0.2f;
+            if (_checkDistance > length + 0.2f) {
+                _checkDistance = 0f;
+                _checkSegment++;
+                if (_checkSegment >= TowerRoofCore.Stair.Length) {
+                    _routeReady = true;
+                    Log("outside stair route validated against ALL live colliders; merc roof access ready.");
+                }
+            }
         }
 
         static Vector3 Sample(Vector3 w, float radius, float maxDy, Vector3 fallback)
@@ -428,7 +476,7 @@ namespace NextDayRevival
             _root = null;
             if (_patched && _patch.valid) NavMesh.RemoveNavMeshData(_patch);
             _patch = new NavMeshDataInstance();
-            _built = _roofNav = _patched = false;
+            _built = _roofNav = _patched = _routeReady = false;
             Log("cleared (" + why + ").");
         }
 
@@ -476,32 +524,70 @@ namespace NextDayRevival
             return m;
         }
 
-        /// <summary>Two rails, a rung every 0.3 m, stand-off brackets to the
-        /// wall; the rails run on 1.1 m over the roof as grab rails.</summary>
-        static void LadderMesh(List<CombineInstance> p)
+        // Three new sections above the main roof: ordinary treads on both
+        // slopes, flat crossover over the existing rail, full side guardrails.
+        static void UpperStairs(List<CombineInstance> p, Transform root)
         {
-            const float x = TowerRoofCore.LadderX, z = TowerRoofCore.LadderZ, w = TowerRoofCore.LadderHalfW;
-            float y0 = _footY - 0.1f, y1 = TowerRoofCore.RoofY + TowerRoofCore.LadderOver;
-            float h = y1 - y0;
-            Box(p, new Vector3(x, y0 + h * 0.5f, z - w), new Vector3(0.06f, h, 0.06f));
-            Box(p, new Vector3(x, y0 + h * 0.5f, z + w), new Vector3(0.06f, h, 0.06f));
-            for (float y = _footY + TowerRoofCore.RungStep; y < TowerRoofCore.RoofY + 0.05f; y += TowerRoofCore.RungStep)
-                Box(p, new Vector3(x, y, z), new Vector3(0.035f, 0.035f, w * 2f));
-            // grab rails bend back to the roof's rail at their top
-            Box(p, new Vector3((x + 12.05f) * 0.5f, y1, z - w), new Vector3(x - 12.05f + 0.06f, 0.06f, 0.06f));
-            Box(p, new Vector3((x + 12.05f) * 0.5f, y1, z + w), new Vector3(x - 12.05f + 0.06f, 0.06f, 0.06f));
-            // brackets: to the main block's wall, the cab wall, the roof's edge
-            float[] bh = { 1.5f, 4.5f, 7.5f, 12.4f, 15.1f };
-            float[] bx = { TowerRoofCore.WallX, TowerRoofCore.WallX, TowerRoofCore.WallX, 11.5f, 12.15f };
-            for (int i = 0; i < bh.Length; i++)
-            {
-                float len = x - bx[i];
-                Box(p, new Vector3(bx[i] + len * 0.5f, bh[i], z - w), new Vector3(len, 0.05f, 0.05f));
-                Box(p, new Vector3(bx[i] + len * 0.5f, bh[i], z + w), new Vector3(len, 0.05f, 0.05f));
+            for (int i = 8; i < TowerRoofCore.Stair.Length; i++) {
+                if (i > 10 && i <= TowerRoofCore.UpperFirst) continue;
+                Vector3 a = TowerRoofCore.Stair[i - 1], b = TowerRoofCore.Stair[i];
+                Vector3 delta = b - a;
+                Vector3 axis = delta.normalized;
+                Vector3 side = Vector3.Cross(axis, Vector3.up).normalized;
+                Vector3 normal = Vector3.Cross(side, axis).normalized;
+                Quaternion rot = Quaternion.LookRotation(side, normal);
+                Vector3 size = new Vector3(delta.magnitude, 0.12f, 1.3f);
+                Vector3 centre = (a + b) * 0.5f - normal * 0.06f;
+                GameObject go = new GameObject("StairSupport_" + i);
+                go.transform.SetParent(root, false);
+                go.transform.localPosition = centre * K;
+                go.transform.localRotation = rot;
+                go.AddComponent<BoxCollider>().size = size * K;
+                if (Mathf.Abs(delta.y) < 0.01f) RotBox(p, centre, size, rot);
+                else {
+                    int n = Mathf.CeilToInt(Mathf.Abs(delta.y) / 0.1875f);
+                    for (int j = 0; j < n; j++) {
+                        Vector3 c = Vector3.Lerp(a, b, (j + 0.5f) / n);
+                        c.y = Mathf.Max(a.y + delta.y * j / n, a.y + delta.y * (j + 1) / n) - 0.05f;
+                        Vector3 flat = delta; flat.y = 0f;
+                        RotBox(p, c, new Vector3(flat.magnitude / n, 0.1f, 1.3f),
+                            Quaternion.LookRotation(side, Vector3.up));
+                    }
+                }
+                if (i == 8 || i == 10 || i == TowerRoofCore.UpperFirst + 2) continue; // Existing landing rails protect the short threshold ramp.
+                for (int sign = -1; sign <= 1; sign += 2) {
+                    float trimStart = (i == TowerRoofCore.UpperFirst + 1 || i == TowerRoofCore.UpperFirst + 3) ? 0.75f : 0f;
+                    float trimEnd = i == TowerRoofCore.UpperFirst + 1 ? 0.75f : 0f;
+                    Vector3 c = (a + b) * 0.5f + axis * ((trimStart - trimEnd) * 0.5f) + side * (sign * 0.65f) + Vector3.up * 0.55f;
+                    RotBox(p, c, new Vector3(delta.magnitude - trimStart - trimEnd, 1.1f, 0.06f), rot);
+                    GameObject rail = new GameObject("StairGuard_" + i + "_" + sign);
+                    rail.transform.SetParent(root, false);
+                    rail.transform.localPosition = c * K;
+                    rail.transform.localRotation = rot;
+                    rail.AddComponent<BoxCollider>().size = new Vector3(delta.magnitude - trimStart - trimEnd, 1.1f, 0.06f) * K;
+                }
             }
+            CornerGuard(p, root, "LandingGuardNorth", new Vector3(8f, 17.05f, 6.35f), new Vector3(1.3f, 1.1f, 0.06f));
+            CornerGuard(p, root, "LandingGuardEast", new Vector3(8.65f, 17.05f, 5.65f), new Vector3(0.06f, 1.1f, 1.4f));
         }
 
-        /// <summary>Each wall three courses of staggered bags.</summary>
+        // Close the OUTSIDE corner of the L landing. Inside rails are trimmed
+        // for the turn; these two guards keep the exposed drop protected.
+        static void CornerGuard(List<CombineInstance> p, Transform root, string name, Vector3 c, Vector3 size)
+        {
+            RotBox(p, c, size, Quaternion.identity);
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(root, false); go.transform.localPosition = c * K;
+            go.AddComponent<BoxCollider>().size = size * K;
+        }
+
+        static void RotBox(List<CombineInstance> p, Vector3 centre, Vector3 size, Quaternion rot)
+        {
+            if (_cube == null) Box(p, Vector3.zero, Vector3.zero);
+            CombineInstance c = new CombineInstance(); c.mesh = _cube;
+            c.transform = Matrix4x4.TRS(centre * K, rot, size * K); p.Add(c);
+        }
+
         static void BagMesh(List<CombineInstance> p)
         {
             const float course = TowerRoofCore.BagH / 3f, bag = 0.55f;
@@ -544,29 +630,5 @@ namespace NextDayRevival
             }
         }
 
-        /// <summary>The plain ladder group, wired like the content ladders.</summary>
-        static void GameLadder(Transform root, string scene)
-        {
-            GameObject g = new GameObject("TowerRoofLadder");
-            g.transform.SetParent(root, false);
-            float h = TowerRoofCore.RoofY - _footY;
-            Part(g.transform, "Ladder", new Vector3(TowerRoofCore.LadderX, _footY + h * 0.5f, TowerRoofCore.LadderZ),
-                new Vector3(TowerRoofCore.ColW, h, TowerRoofCore.ColD));
-            Part(g.transform, "ClimbDownPoint",
-                new Vector3(TowerRoofCore.DownX, TowerRoofCore.RoofY + TowerRoofCore.DownH * 0.5f, TowerRoofCore.LadderZ),
-                new Vector3(TowerRoofCore.DownW, TowerRoofCore.DownH, TowerRoofCore.DownD));
-            Part(g.transform, "StartPoint", new Vector3(TowerRoofCore.StartX, _footY, TowerRoofCore.LadderZ), Vector3.zero);
-            Part(g.transform, "BeupPoint", new Vector3(TowerRoofCore.BeupX, TowerRoofCore.RoofY - TowerRoofCore.BeupDrop, TowerRoofCore.LadderZ), Vector3.zero);
-            Part(g.transform, "EndPoint", new Vector3(TowerRoofCore.EndX, TowerRoofCore.RoofY + 0.02f, TowerRoofCore.LadderZ), Vector3.zero);
-            EastLadders.Wire(scene, g.transform);
-        }
-
-        static void Part(Transform g, string name, Vector3 centreM, Vector3 sizeM)
-        {
-            GameObject go = new GameObject(name);
-            go.transform.SetParent(g, false);
-            go.transform.localPosition = centreM * K;
-            if (sizeM != Vector3.zero) go.AddComponent<BoxCollider>().size = sizeM * K;
-        }
     }
 }

@@ -21,6 +21,7 @@ namespace NextDayRevival
         static int _boom, _near = -1, _job = -1, _jobRevision, _sendId, _scene = -1;
         static float _next, _nextSend, _nextPulse;
         static bool _master, _waitRelease;
+        static bool _pressed;
         static string _prompt;
 
         static AaDamageState[] Fresh()
@@ -51,10 +52,28 @@ namespace NextDayRevival
             return _authority != null ? _authority() : Crocodile.IsMaster();
         }
 
-        internal static string DestroyedPrompt { get { return Loc.T("Орудие уничтожено - удерживайте R для ремонта", "Gun destroyed - hold R to repair"); } }
+        internal static string DestroyedPrompt { get { return Loc.T("Орудие уничтожено - нажмите R для ремонта", "Gun destroyed - tap R to repair"); } }
         internal static bool Repairing { get { return _job >= 0; } }
         internal static bool Alive(int id) { return id >= 0 && id < Count && States[id].Hp > 0f; }
         internal static float Hp(int id) { return id >= 0 && id < Count ? States[id].Hp : 1f; }
+        internal static int Revision(int id) { return id >= 0 && id < Count ? States[id].Revision : -1; }
+        internal static bool DepotRepairNeeded(int id)
+        { return id >= 0 && id < Count && id != 4 && Root(id) != null && States[id].Hp < 1f && States[id].RepairActor < 0; }
+        internal static bool DepotRepairPoint(int id, out Vector3 point)
+        {
+            Quaternion rotation;
+            if (MercAA.Pose(id >= Radar ? MercAA.Radar : id, out point, out rotation)) return true;
+            Transform root = Root(id); point = root == null ? Vector3.zero : root.position;
+            return root != null;
+        }
+        // MercSupplyLedger already owns the finite toolkit, elapsed work and
+        // authenticated carrier. Damage revisions prevent repairing a new hit.
+        internal static bool DepotRepair(int id, int revision)
+        {
+            if (!Authority() || !DepotRepairNeeded(id) || revision != States[id].Revision) return false;
+            States[id].Hp = 1f; States[id].Revision++; AaDamageCore.Cancel(ref States[id]);
+            Apply(id); SendState(id); return true;
+        }
         static float Seconds(int id) { return id < Radar ? AaDamageCore.GunSeconds : AaDamageCore.RadarSeconds; }
 
         static Transform Root(int id)
@@ -92,7 +111,7 @@ namespace NextDayRevival
             if (c == null) return;
             Vector3 at = c.transform.position;
             // Native explosions elsewhere in the world do not read radius data.
-            bool near = false;
+            bool near = (AmmoDepot.At - at).sqrMagnitude < 650f * 650f;
             for (int i = 0; i < Count; i++)
             {
                 Transform root = Root(i);
@@ -124,6 +143,7 @@ namespace NextDayRevival
             }
             Booms[_boom] = new Vector4(at.x, at.y, at.z, Time.time);
             _boom = (_boom + 1) % Booms.Length;
+            AmmoDepot.Blast(at, radius, peak);
             for (int id = 0; id < Radar; id++)
             {
                 Transform root = Root(id);
@@ -228,10 +248,13 @@ namespace NextDayRevival
         static void TickInner()
         {
             // No scans, inventory reads, queries or network sends per frame.
-            if (_job >= 0 && (!Input.GetKey(KeyCode.R) || !NativeActionProgress.IsActive(Progress))) Stop();
-            if (!Input.GetKey(KeyCode.R)) _waitRelease = false;
+            if (_job >= 0 && !NativeActionProgress.IsActive(Progress)) { Stop(); return; }
+            // Capture the edge every frame; the existing 2 Hz scan must not miss a tap.
+            if (_job < 0 && RepairTap.CanStart && Input.GetKeyDown(KeyCode.R))
+            { _pressed = true; _waitRelease = false; }
             if (Time.time < _next) return;
             _next = Time.time + 0.5f;
+            bool pressed = _pressed; _pressed = false;
             int scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
             if (scene != _scene)
             {
@@ -283,9 +306,9 @@ namespace NextDayRevival
                 if (Time.time >= _nextPulse) { _nextPulse = Time.time + 0.5f; Repair(true); }
                 return;
             }
-            _prompt = near < 0 ? null : Loc.T("Удерживайте R: ремонт (набор инструментов, 45/60 с)",
-                "Hold R: repair (toolkit, gun 45 s / radar 60 s)");
-            if (near < 0 || _waitRelease || !Input.GetKey(KeyCode.R) || GameUi.WindowOpen
+            _prompt = near < 0 ? null : Loc.T("Нажмите R: ремонт (набор инструментов, 45/60 с); R ещё раз: отмена",
+                "Tap R: repair (toolkit, gun 45 s / radar 60 s); R again: cancel");
+            if (near < 0 || _waitRelease || !pressed || !RepairTap.CanStart || GameUi.WindowOpen
                 || Flak._manned != null || RadarScope.InView || !Crocodile.PlayerUp(me)) return;
             ToolContainers.Clear(); // refresh ownership/containers once per new interaction
             if (!Tools()) { Turret.Hinweis(Loc.T("Нужен набор инструментов", "A toolkit is needed"), 2f); _waitRelease = true; return; }
@@ -310,6 +333,7 @@ namespace NextDayRevival
             if (_job < 0) return;
             Repair(false); NativeActionProgress.End(Progress);
             _job = -1; _waitRelease = true;
+            _pressed = false;
         }
         internal static void Draw()
         {

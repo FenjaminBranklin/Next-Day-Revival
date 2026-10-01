@@ -75,6 +75,49 @@ namespace NextDayRevival
         public float Length;
         public Vector2 Dir;
         float[] _y;
+        bool[] _profileKnown;
+        int _profileIndex;
+        float _profileHighest;
+        bool _profileAny;
+        internal bool ProfileReady { get { return _profileKnown == null; } }
+
+        // Paradrop warning preparation samples only a few terrain positions per
+        // frame. The finished profile is identical to synchronous Profile below.
+        internal static FlightPath BeginStraight(Vector2 from, Vector2 to, float agl, float speed)
+        {
+            FlightPath p = new FlightPath();
+            p.From = from; p.To = to;
+            p.Agl = Mathf.Max(10f, agl); p.Speed = Mathf.Max(5f, speed);
+            Vector2 d = to - from;
+            p.Length = d.magnitude;
+            p.Dir = p.Length > 0.01f ? d / p.Length : new Vector2(0f, 1f);
+            int n = Mathf.Max(2, Mathf.CeilToInt(p.Length / Step) + 1);
+            p._y = new float[n]; p._profileKnown = new bool[n];
+            return p;
+        }
+
+        internal bool ProfileStep()
+        {
+            if (_profileKnown == null) return true;
+            int end = Mathf.Min(_y.Length, _profileIndex + 4);
+            for (; _profileIndex < end; _profileIndex++)
+            {
+                Vector2 xz = From + Dir * Mathf.Min(Length, _profileIndex * Step);
+                float y;
+                if (!Ground(new Vector3(xz.x, 0f, xz.y), out y)) continue;
+                _y[_profileIndex] = y; _profileKnown[_profileIndex] = true;
+                if (!_profileAny || y > _profileHighest) _profileHighest = y;
+                _profileAny = true;
+            }
+            if (_profileIndex < _y.Length) return false;
+            for (int i = 0; i < _y.Length; i++)
+                _y[i] = (_profileKnown[i] ? _y[i] : _profileHighest) + Agl;
+            float drop = MaxSlope * Step;
+            for (int i = 1; i < _y.Length; i++) _y[i] = Mathf.Max(_y[i], _y[i - 1] - drop);
+            for (int i = _y.Length - 2; i >= 0; i--) _y[i] = Mathf.Max(_y[i], _y[i + 1] - drop);
+            _profileKnown = null;
+            return true;
+        }
 
         /// <summary>W AA3: extend only the inbound off-map leg. Reuse the
         /// already sampled edge height; no new terrain or physics calls.
@@ -246,6 +289,21 @@ namespace NextDayRevival
         const float BlastSlack = 9f * PlayerAn2.K;
 
         internal static ConfigEntry<int> CfgEventCode;
+        internal static ConfigEntry<float> CfgSpeedFactor;
+
+        // Host-only planning policy. Network paths already contain effective speed.
+        internal static float SpeedFactor(float eventFactor)
+        {
+            float value = eventFactor > 0f ? eventFactor
+                : CfgSpeedFactor == null ? 0.6f : CfgSpeedFactor.Value;
+            if (float.IsNaN(value) || float.IsInfinity(value)) value = 0.6f;
+            return Mathf.Clamp(value, 0.2f, 1.5f);
+        }
+
+        internal static float Speed(float nominal, float factor)
+        {
+            return Mathf.Max(5f, nominal * factor);
+        }
 
         internal sealed class Flight
         {
@@ -278,6 +336,10 @@ namespace NextDayRevival
 
         internal static void BindConfig(ConfigFile cfg)
         {
+            CfgSpeedFactor = cfg.Bind("NpcAircraft", "SpeedFactor", 0.6f,
+                "NPC aircraft speed multiplier (0.2..1.5, 1 = original). Host plans bombers, "
+                + "transports, flyovers, aid and troop Mi-8 flights; editor air events can override it. "
+                + "Player An-2 and Mi-8 flight is unchanged.");
             CfgEventCode = cfg.Bind("NpcAircraft", "NetworkEventCode", 159,
                 "Photon event code (0..199) of the NPC aircraft (admin test flyover): "
                 + "flyover requests and hits to the master. Every client must use the same value.");
@@ -613,6 +675,11 @@ namespace NextDayRevival
         {
             try
             {
+                Type heli = RevivalPlugin.TypeByName("HelicopterDummy");
+                MethodInfo start = heli == null ? null : AccessTools.Method(heli, "Start", null, null);
+                if (start != null)
+                    h.Patch(start, null, new HarmonyMethod(typeof(NpcAircraft).GetMethod("HeliSpeedPostfix")), null, null, null);
+                else RevivalPlugin.L.LogWarning("NpcAircraft: HelicopterDummy.Start missing - aid heli speed unchanged.");
                 Type fw = RevivalPlugin.TypeByName("PlayerFirearmWeaponController");
                 MethodInfo shot = fw == null ? null : AccessTools.Method(fw, "FireOneShot", null, null);
                 if (shot != null)
@@ -626,6 +693,25 @@ namespace NextDayRevival
                 RevivalPlugin.L.LogInfo("NpcAircraft: firearm and explosion hooks installed.");
             }
             catch (Exception e) { RevivalPlugin.L.LogError("NpcAircraft.Install: " + e); }
+        }
+
+        // Vanilla aid heli only. All plugin carriers have instantiation data and
+        // their own movers (including the player's An-2/Mi-8). No new frame tick.
+        public static void HeliSpeedPostfix(object __instance)
+        {
+            if (!RevivalTroopInsertion.MasterClient()) return;
+            try
+            {
+                MethodInfo pv = AccessTools.Method(__instance.GetType(), "get_photonView", null, null);
+                object view = pv == null ? null : pv.Invoke(__instance, null);
+                if (view == null) return;
+                MethodInfo inst = AccessTools.PropertyGetter(view.GetType(), "instantiationData");
+                if (inst == null || inst.Invoke(view, null) != null) return;
+                FieldInfo speed = AccessTools.Field(__instance.GetType(), "move_speed");
+                if (speed != null && speed.FieldType == typeof(float))
+                    speed.SetValue(__instance, Speed((float)speed.GetValue(__instance), SpeedFactor(0f)));
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("NpcAircraft aid speed: " + ex.Message); }
         }
 
         // ------------------------------------------------------------ network
@@ -786,7 +872,7 @@ namespace NextDayRevival
             float speed = Mathf.Clamp(speedKmh, MinSpeed, MaxSpeed) / 3.6f * PlayerAn2.K;
             Vector2 from, to;
             FlightPath.AcrossMap(over, bearing, out from, out to);
-            FlightPath path = FlightPath.Straight(from, to, alt, speed);
+            FlightPath path = FlightPath.Straight(from, to, alt, NpcAircraft.Speed(speed, NpcAircraft.SpeedFactor(0f)));
             // The bomber tag makes every client build the Tu-95 on the carrier.
             NpcAircraft.Flight f = NpcAircraft.Launch(path, true,
                 bomber ? AirEvents.BomberTag + "test flyover" : "test flyover", null, null);

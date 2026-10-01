@@ -1094,7 +1094,7 @@ namespace NextDayRevival
                 if (_claimBy[i] == who) _claimBy[i] = -1;
         }
 
-        bool Claimed(Vector3 p, int claimant, float now)
+        internal bool Claimed(Vector3 p, int claimant, float now)
         {
             for (int i = 0; i < MaxClaims; i++)
             {

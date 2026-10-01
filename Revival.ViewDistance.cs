@@ -34,9 +34,9 @@
 //      turning the head does not pop them.
 //   5. terrain: pixel error and tree distance per level (billboards stay the
 //      game's setting; basemap is EastWorld's business).
-//   6. lodBias per level.
-//   7. linear fog: the end is pushed to 1.07 x the far clip when that is
-//      further than the game's, the start scaled with it - the far edge fades
+//   6. lodBias 1.1 by default; explicit config / external choices win.
+//   7. linear fog: fully faded by 0.98 x the far clip, the start scaled
+//      with the end - the far edge fades
 //      into the haze instead of being cut, and the air in between is clearer.
 //      Exponential fog (never set by GW_Scene_1) is left alone.
 //      P2 haze: the end never goes past HazeEndU (1.6 km), so every level is
@@ -87,27 +87,27 @@ namespace NextDayRevival
         sealed class Profile
         {
             public string Name;
-            public float Far, Trees, Pixel, LodBias, Small, Medium,
+            public float Far, Trees, Pixel, Small, Medium,
                 Items, Camp, Bush, Ragdoll;
         }
 
         // Game units. Medium: twice today's far clip, paid for by the props
         // between 250 and 1000 u that are not drawn any more and a slightly
-        // coarser far terrain. Trees stop at 1000 u - exactly where the game's
-        // 1000 u far clip stopped them before P12 (its own tree distance of
-        // 2000 was clipped there). Q1 perf: 6.57.0 had 1200 u, i.e. 44 % more
+        // coarser far terrain. P3c1: trees stop at 900 u on Medium, with the
+        // FarForest hand-over following that distance and haze hiding the far
+        // plane. Q1 perf: 6.57.0 had 1200 u, i.e. 44 % more
         // billboard area than 6.55 over the east tile's 67,738 terrain trees,
         // and legacy terrain rebuilds billboards on the main thread.
         static readonly Profile[] Profiles = new Profile[]
         {
             null,
-            new Profile { Name = "Low",    Far = 1000f, Trees =  800f, Pixel = 15f, LodBias = 1.5f,
+            new Profile { Name = "Low",    Far = 1000f, Trees =  750f, Pixel = 15f,
                           Small = 150f, Medium =  450f, Items = 120f, Camp = 200f, Bush = 300f, Ragdoll = 300f },
-            new Profile { Name = "Medium", Far = 2000f, Trees = 1000f, Pixel = 12f, LodBias = 2.0f,
+            new Profile { Name = "Medium", Far = 2000f, Trees =  900f, Pixel = 12f,
                           Small = 250f, Medium =  700f, Items = 150f, Camp = 250f, Bush = 400f, Ragdoll = 500f },
-            new Profile { Name = "High",   Far = 3500f, Trees = 2000f, Pixel = 10f, LodBias = 2.0f,
+            new Profile { Name = "High",   Far = 3500f, Trees = 1600f, Pixel = 10f,
                           Small = 350f, Medium = 1000f, Items = 200f, Camp = 300f, Bush = 500f, Ragdoll = 600f },
-            new Profile { Name = "Ultra",  Far = 6000f, Trees = 3000f, Pixel =  8f, LodBias = 2.5f,
+            new Profile { Name = "Ultra",  Far = 6000f, Trees = 2200f, Pixel =  8f,
                           Small = 500f, Medium = 1500f, Items = 250f, Camp = 400f, Bush = 600f, Ragdoll = 800f },
         };
 
@@ -115,7 +115,8 @@ namespace NextDayRevival
 
         const float SmallSize = 8f;          // bounds diagonal, u
         const float LargeSize = 40f;         // bounds diagonal / LODGroup size, u
-        const float FogOverFar = 1.07f;
+        // Fully faded before the far plane; do not spend detail on its edge.
+        const float FogOverFar = 0.98f;
         // P2 haze (docs/ai/tasks/p2-render-batching.md): the linear fog ends no
         // farther than HazeEndU on the ground, so on every level the air is at
         // least half haze by 800 m (2240 u) - Low and Medium already were, High
@@ -136,10 +137,15 @@ namespace NextDayRevival
         // =========================================================== config
 
         static ConfigEntry<string> _cfgLevel, _cfgCycleKey, _cfgBenchKey;
-        static ConfigEntry<float> _cfgSettle, _cfgSample;
+        static ConfigEntry<float> _cfgSettle, _cfgSample, _cfgLodBias;
 
         internal static void BindConfig(ConfigFile cfg)
         {
+            _cfgLodBias = cfg.Bind("ViewDistance", "LodBias", 0f,
+                "0 = automatic 1.1 instead of the game's authored 2.0; preserve "
+                + "other initial values and later game/options changes. A positive "
+                + "value explicitly selects the player's LOD bias (0.25..8). Off "
+                + "restores the game. FlightView keeps its own airborne control.");
             _cfgLevel = cfg.Bind("ViewDistance", "Level", "Medium",
                 "How far the world is drawn: Off (the game untouched), Low, Medium, "
                 + "High, Ultra. Far clip / combat range 1000 / 2000 / 3500 / 6000 u; "
@@ -249,6 +255,34 @@ namespace NextDayRevival
 
         static int _applied = -1;
         static bool _baselineLogged, _failed;
+        // The authored 2.0 is not a player LOD option (all quality tiers use
+        // it). A later external write, including 2.0 after applying options,
+        // is respected for this session. Off / level cycling preserves that.
+        static bool _lodPlayerChoice;
+
+        static void ObserveLodChoice(float current)
+        {
+            if ((_lod.Has && !Mine(_lod, current))
+                || (!_lod.Has && Mathf.Abs(current - 2f) > Eps(2f)))
+                _lodPlayerChoice = true;
+        }
+
+        static void ApplyLodBias()
+        {
+            float current = QualitySettings.lodBias;
+            bool external = _lod.Has && !Mine(_lod, current);
+            ObserveLodChoice(current);
+            Settle(_lod, current);
+            float choice = _cfgLodBias == null ? 0f : _cfgLodBias.Value;
+            if (float.IsNaN(choice) || float.IsInfinity(choice)) choice = 0f;
+            float target = choice > 0f ? Mathf.Clamp(choice, 0.25f, 8f)
+                : (_lodPlayerChoice ? _lod.Base : 1.1f);
+            bool changed = Put(_lod, target);
+            if (changed) QualitySettings.lodBias = target;
+            // Last-LOD thresholds must use the actual bias, including a
+            // player's override; the existing sliced pass handles changes.
+            if (changed || external) _scanAt = Time.unscaledTime;
+        }
 
         /// <summary>LateUpdate, after the game's writers and before
         /// FlightView. Seam: RevivalPlugin.LateUpdate.</summary>
@@ -280,8 +314,7 @@ namespace NextDayRevival
                     ApplyCamera(p);
                     ApplyFog();
                     ApplyTerrains(p);
-                    Settle(_lod, QualitySettings.lodBias);
-                    if (Put(_lod, p.LodBias)) QualitySettings.lodBias = p.LodBias;
+                    ApplyLodBias();
                 }
                 Props(p);
             }
@@ -351,7 +384,8 @@ namespace NextDayRevival
             if (!RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear || _cam == null) return;
             Settle(_fogEnd, RenderSettings.fogEndDistance);
             Settle(_fogStart, RenderSettings.fogStartDistance);
-            float end = Mathf.Max(_fogEnd.Base, Mathf.Min(_cam.farClipPlane * FogOverFar, HazeEndU));
+            float edge = _cam.farClipPlane * FogOverFar;
+            float end = Mathf.Min(edge, Mathf.Max(_fogEnd.Base, Mathf.Min(edge, HazeEndU)));
             float k = _fogEnd.Base > 1f ? end / _fogEnd.Base : 1f;
             float start = _fogStart.Base * k;
             if (Put(_fogEnd, end)) RenderSettings.fogEndDistance = end;
@@ -395,6 +429,8 @@ namespace NextDayRevival
         static void Withdraw()
         {
             RestoreCamera();
+            // An options write and a level change can land in the same frame.
+            if (!FlightView.Active) ObserveLodChoice(QualitySettings.lodBias);
             if (Mine(_lod, QualitySettings.lodBias)) QualitySettings.lodBias = _lod.Base;
             if (Mine(_fogEnd, RenderSettings.fogEndDistance)) RenderSettings.fogEndDistance = _fogEnd.Base;
             if (Mine(_fogStart, RenderSettings.fogStartDistance)) RenderSettings.fogStartDistance = _fogStart.Base;
@@ -814,7 +850,7 @@ namespace NextDayRevival
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             _lFar = Mathf.Min(Mathf.Max(p.Far, _cam.farClipPlane), HazeDetailDistance());
             _lTan = Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
-            _lBias = p.LodBias;
+            _lBias = QualitySettings.lodBias;
             _lIdx = _lExt = _lFrames = 0;
             _lAll = _cLods.ToArray();
             _cLods.Clear();

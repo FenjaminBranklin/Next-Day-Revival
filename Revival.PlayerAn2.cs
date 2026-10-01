@@ -1750,6 +1750,9 @@ namespace NextDayRevival
                 float side = (ViewId(go) % 2 == 0) ? 1f : -1f;
                 tr.position = p + Vector3.down * (0.35f * K);
                 tr.rotation = Quaternion.Euler(4f, heading + side * 12f, side * 11f);
+                // The bomber installs its own wreck below; an An-2 keeps its
+                // scorched mesh, placed by geometry rather than model origin.
+                if (!AirEvents.IsBomber(go)) AircraftWreck.Place(tr, tr.Find("NDR_An2"), true);
 
                 FireEffect.SpawnHeliBlast(where + Vector3.up * (1.5f * K), 16f);
                 // SpawnHeliFire places its flame beds in the Mi-8's hull frame
@@ -2907,6 +2910,7 @@ namespace NextDayRevival
         {
             m.color = new Color(0.20f, 0.18f, 0.16f, 1f);
             if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.05f);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", 0f);
         };
 
         void Update()

@@ -77,6 +77,12 @@ namespace NextDayRevival
         internal float AANextSend;
         internal float StationRetryAt;
         internal bool AARetreat;
+        internal bool RaidCover;
+        internal int RaidProbe;
+        internal CoverPick RaidRoof;
+        internal float RaidRoofAt;
+        internal bool RaidProbeDeferred;
+        internal float TierDamageScale = 1f; // Cached at spawn; owner applies incoming armor.
         internal float Grade = 0.5f;         // M3: MercGrade.Of his traits and level (0..1, tiers 0..3)
         internal float MaxHealth;            // B3d: his full health at spawn (regeneration)
         internal float AttackerUntil;        // B3d: LastAttacker is answered until then
@@ -122,6 +128,11 @@ namespace NextDayRevival
         internal Transform LastHitBy;
         internal float NextSelfHeal; // short recovery cooldown after a new order
         internal MercMedicine Medicine;
+        internal Mercs.Record RescueTarget;
+        internal float NextRescue;
+        internal readonly MercMedicRoute MedicRoute = new MercMedicRoute();
+        internal byte WeaponRole;
+        internal readonly MercSupplyTrip Supply = new MercSupplyTrip();
         float _base = -1f;
 
         internal bool Follow { get { return Order.Mode == MercOrder.Follow; } }
@@ -148,7 +159,7 @@ namespace NextDayRevival
     /// follow~scene~k~n~radius~objective;origin~dx,dz~attack~p|d|m.</summary>
     internal sealed class MercOrder
     {
-        internal const int Follow = 0, Stay = 1, Patrol = 2, Perimeter = 3, Vehicle = 4, ManGun = 5, ManRadar = 6, Attack = 7;
+        internal const int Follow = 0, Stay = 1, Patrol = 2, Perimeter = 3, Vehicle = 4, ManGun = 5, ManRadar = 6, Attack = 7, Drive = 8;
         internal const int MaxPoints = 6;
         // ATTACK: what the owner gave - a point he aimed at, a direction (no
         // ground under the crosshair: a bounded endpoint) or a map click.
@@ -202,6 +213,8 @@ namespace NextDayRevival
 
         internal string Encode()
         {
+            // Driving is a session lease: never resume an unattended trip after relog.
+            if (Mode == Drive) return "follow";
             if (Mode == Follow) return "follow";
             if (Mode == Vehicle) return "vehicle";
             StringBuilder sb = new StringBuilder();
@@ -368,6 +381,7 @@ namespace NextDayRevival
             MercNotify.BindConfig(cfg);
             MercPage.BindConfig(cfg);            // W-UI3: [Mercs] Notifications (the page's filter)
             MercCoverService.BindConfig(cfg);
+            MercMoveShoot.BindConfig(cfg);
         }
 
         // ========================================================== profiles
@@ -376,6 +390,7 @@ namespace NextDayRevival
             internal string Settlement, Id, Name, WeaponLabel, ArmourLabel;
             internal int Price, Upkeep, Weapon, Headwear, Mask, Body, Hands, Legs, Backpack;
             internal int Precise, Fast, Tanky, Level, Health, AAGunner;
+            internal int HealthPercent = 0, ArmorPercent = -1;
             float _protection = -1f;
 
             internal RevivalComposition.CrewMan Loadout(string role)
@@ -396,7 +411,9 @@ namespace NextDayRevival
                 get
                 {
                     if (_protection < 0f)
-                        _protection = Mathf.Clamp01(NpcWar.MercProtection(Loadout(null)) + Tanky / 200f);
+                        _protection = Mathf.Clamp01(1f - (1f - NpcWar.MercProtection(Loadout(null)))
+                            * (1f - Tanky / 200f) * MercVital.DamageScale(
+                                MercGrade.Of(Precise, Fast, Tanky, Level), ArmorPercent));
                     return _protection;
                 }
             }
@@ -405,7 +422,7 @@ namespace NextDayRevival
         // mercdef.to_tsv(assets/editor/mercs.json) - verify.py keeps them equal.
         static readonly string[] DefaultProfiles = new string[]
         {
-            "cap\t5",
+            "cap\t6",
             "grace\t24",
             "p\tcivilian\tciv-watch\tWatchman\t700000\t60000\t1201\t4106\t0\t4312\t0\t0\t0\t0\t0\t0\t3\t150\tMakarov Pistol\tCap (Black), Black Jacket\t0",
             "p\tcivilian\tciv-rifle\tRifleman\t1200000\t100000\t1006\t4005\t0\t4323\t0\t0\t0\t15\t0\t0\t3\t150\tAKS74U\tMilitary Helmet (Green), Militia shirt with a bulletproof vest\t0",
@@ -421,7 +438,7 @@ namespace NextDayRevival
         };
 
         static List<Profile> _profiles = new List<Profile>();
-        static int _profileCap = 5, _profileGrace = 24;
+        static int _profileCap = 6, _profileGrace = 24;
         static string _profileSource = "built-in";
 
         /// <summary>Validation only (LiveRoutes, worker thread): throws on a bad table.</summary>
@@ -443,7 +460,7 @@ namespace NextDayRevival
                 string[] c = line.Split('\t');
                 if (c[0] == "cap" && c.Length == 2) { cap = Whole(c[1], 1, 10); continue; }
                 if (c[0] == "grace" && c.Length == 2) { grace = Whole(c[1], 1, 240); continue; }
-                if (c[0] != "p" || (c.Length != 20 && c.Length != 21) || result.Count >= 48)
+                if (c[0] != "p" || (c.Length != 20 && c.Length != 21 && c.Length != 23) || result.Count >= 48)
                     throw new IOException("Invalid mercenary profile row");
                 Profile p = new Profile();
                 p.Settlement = c[1];
@@ -461,7 +478,13 @@ namespace NextDayRevival
                 p.Precise = Whole(c[13], 0, 50); p.Fast = Whole(c[14], 0, 50); p.Tanky = Whole(c[15], 0, 50);
                 p.Level = Whole(c[16], 1, 10); p.Health = Whole(c[17], 50, 1000);
                 p.WeaponLabel = c[18]; p.ArmourLabel = c[19];
-                p.AAGunner = c.Length == 21 ? Whole(c[20], 0, 50) : 0;
+                p.AAGunner = c.Length >= 21 ? Whole(c[20], 0, 50) : 0;
+                if (c.Length == 23)
+                {
+                    p.HealthPercent = Whole(c[21], 0, 500);
+                    if (p.HealthPercent != 0 && p.HealthPercent < 100) throw new IOException("Merc HP percent must be 0 or 100..500");
+                    p.ArmorPercent = Whole(c[22], -1, 90);
+                }
                 result.Add(p);
             }
             if (cap < 0 || grace < 0) throw new IOException("Mercenary table without cap/grace");
@@ -524,9 +547,15 @@ namespace NextDayRevival
             internal string ProfileId = "", Name = "";
             internal float Hp = 1f;
             internal readonly MercMedicine Medicine = new MercMedicine();
+            internal readonly MercDownState Down = new MercDownState();
+            internal readonly MercMedicAid Aid = new MercMedicAid();
+            internal bool Medic, MedicPending;
+            internal float HelpAt;
+            internal bool DownConfirmed;
             internal double PaidUntil, Deployed;
             internal bool Peaceful, Combat;
             internal MercOrder Order = MercOrder.FollowMe();
+            internal readonly MercRaidState Raid = new MercRaidState();
             internal MercReceiptClock Receipt;
             internal MercOrder ReceiptFor;
             internal bool ReceiptFocus;
@@ -914,6 +943,8 @@ namespace NextDayRevival
             }
             Merge(mercs, dead, wl);
             MedicineAnswer(lines);
+            MedicAnswer(lines);
+            DownAnswer(lines);
             CacheSave(lines);
             if (fallback)
             {
@@ -1066,6 +1097,8 @@ namespace NextDayRevival
                 if (fresh)
                 {
                     r.Order = MercOrder.Decode(c[5]);
+                    // Zero HP cached/server rows must never redeploy as healthy.
+                    if (hp <= 0f) r.Down.Enter(Time.time);
                     r.Peaceful = c[6] == "1";
                     r.DeployedSent = r.Deployed; r.HpSent = r.Hp;
                     // Last saved in a fight (design 3.4 vector 2: the owner
@@ -1083,6 +1116,7 @@ namespace NextDayRevival
                 if (r.Session || r.Dead) continue;
                 if (seen.Contains(r.Id) && !_dead.Contains(r.Id)) continue;
                 // Gone on the server (dismissed, deserted, died elsewhere).
+                if (r.Down.Down && _dead.Contains(r.Id)) FinalDown(r, Time.time);
                 Despawn(r, !_dead.Contains(r.Id));
                 _roster.RemoveAt(i);
             }
@@ -1349,6 +1383,7 @@ namespace NextDayRevival
         internal static void Install(Harmony harmony)
         {
             MercQuick.Install(harmony);
+            DownInstall(harmony);
             LoadProfiles(DefaultProfiles, "built-in defaults");
             try
             {
@@ -1377,6 +1412,7 @@ namespace NextDayRevival
                 else RevivalPlugin.L.LogWarning("Mercs: NPC_AI2.SendAddKillData not found - "
                     + "a merc killed by his owner may still cost reputation.");
                 MercRide.Install(harmony);
+                MercSupplyDepot.Bind(); // Cold startup binding; no delegate generation in a duty tick.
                 MercDanger.Install(harmony);     // M2: blasts and grenades near mercs
                 MethodInfo kill = npc == null ? null : AccessTools.Method(npc, "SetKillTarget", null, null);
                 if (kill != null)
@@ -1411,12 +1447,12 @@ namespace NextDayRevival
             if (__3 > 0 && __3 == LocalActor) return false;
             // B3c: inside a closed hull or an aircraft, and for a moment after
             // getting out, nothing reaches him (D14; Revival.MercsRide.cs).
+            if (DownHit(u, ref __0)) return false;
             if (MercRide.Shielded(u)) return false;
             if (__0 <= 0f) return true;
-            // x-merc-competence: his paid armour takes its share of every hit
-            // (health x2.5 at tier 0 .. x3 at tier 3; NpcWar sizes a defender round
-            // from his own HealthMax, so more HealthMax alone would change nothing).
-            __0 *= MercCompetence.DamageScale(u.Grade);
+            // Z K6a: tier armor replaces the old competence reduction. Native
+            // gear/tanky protection stays separate; real HP is set at spawn.
+            __0 *= u.TierDamageScale;
             Snapshot(u, __0, __2, __3);
             u.DefendUntil = Time.time + 20f;
             u.Fight.Hits++;                  // M2: a hit in cover means the cover failed
@@ -1501,6 +1537,7 @@ namespace NextDayRevival
             if (_units.Count == 0 || __0 == null) return true;
             MercUnit u = UnitOf(__instance);
             if (u == null) return true;
+            if (DownEligible(u) && !RecordOf(u).Down.Final) return false;
             int local = LocalActor;
             int killer = -2;
             try
@@ -1595,7 +1632,10 @@ namespace NextDayRevival
             }
             PumpOps(now);
             Gones(now);
+            MedicTick(now);
+            DownTick(now, owner);
             Units(now);
+            RaidTick(now);
             OrderReceipts(now);
             SurvivalOwner(owner, now);
             MercRide.StepOwner(now, owner);
@@ -1614,7 +1654,7 @@ namespace NextDayRevival
         {
             for (int i = 0; i < _ops.Count; i++) if (_ops[i].Name == "get") return;
             if (_flight != null && _flight.Name == "get") return;
-            Enqueue("get", null, _linkDone, delay);
+            Enqueue("get", "session=" + _downSession + "\n", _linkDone, delay);
         }
 
         // One delegate for every roster request (no closure per ask).
@@ -1691,6 +1731,7 @@ namespace NextDayRevival
                 UnityEngine.Object live = u.Ai;
                 if (live == null)
                 {
+                    if (r.Down.Down) { FinalDown(r, now); continue; }
                     // PUN took him with a room change: back beside the owner.
                     Despawn(r, false);
                     r.NextSpawn = now + 3f;
@@ -1698,6 +1739,7 @@ namespace NextDayRevival
                     continue;
                 }
                 if (!NpcWar.MercAlive(u.Ai)) { OnDeath(r, now); continue; }
+                if (r.Down.Down) { r.Hp = 0f; r.Combat = true; continue; }
                 u.Owner = ownerTr; u.OwnerGo = _owner;
                 u.Slot = slot++;
                 r.Hp = NpcWar.MercHealth(u.Ai);
@@ -1731,7 +1773,7 @@ namespace NextDayRevival
             for (int i = 0; i < _roster.Count; i++)
             {
                 Record r = _roster[i];
-                if (r.Unit != null || r.Dead || r.Deserted || now < r.NextSpawn) continue;
+                if (r.Unit != null || r.Dead || r.Deserted || r.Down.Down || now < r.NextSpawn) continue;
                 if (!r.Session && !roster) continue;
                 if (_dead.Contains(r.Id)) continue;
                 if (!r.Session && !_fallbackLogged && _link.OnFallback(now))
@@ -1785,7 +1827,8 @@ namespace NextDayRevival
             int faction = FactionOf(owner);
             string key = KeyPrefix + LocalActor + "/" + r.Id;
             RevivalComposition.CrewMan man = p.Loadout(r.Name);
-            float health = p.Health * (1f + p.Tanky / 100f);
+            float grade = MercGrade.Of(p.Precise, p.Fast, p.Tanky, p.Level);
+            float health = MercVital.MaxHealth(p.Health, p.Tanky, grade, p.HealthPercent);
             int level = p.Level;
             GameObject settlement = Crew.DropOwnedSquad(pos, new Vector3[] { pos }, SideOf(faction),
                 new List<RevivalComposition.CrewMan>(new RevivalComposition.CrewMan[] { man }), key,
@@ -1841,10 +1884,12 @@ namespace NextDayRevival
                 SendOrders(new List<Record>(new Record[] { r }));
             }
             u.Order = order;
+            u.RaidCover = r.Raid.Cover == order;
             if (order.Survive) _survivalNotice = true;
             u.Approach = pos + (order.Facing.sqrMagnitude > 0.01f ? order.Facing : fwd) * 280f;
             u.Precise = p.Precise; u.Fast = p.Fast; u.Tanky = p.Tanky; u.AAGunner = p.AAGunner;
-            u.Grade = MercGrade.Of(p.Precise, p.Fast, p.Tanky, p.Level);
+            u.Grade = grade;
+            u.TierDamageScale = MercVital.DamageScale(grade, p.ArmorPercent);
             u.MaxHealth = health;
             u.Medicine = r.Medicine; u.Medicine.MaxHealth = u.MaxHealth;
             if (r.Session && !r.Medicine.Known) r.Medicine.SessionLoadout();
@@ -1854,6 +1899,7 @@ namespace NextDayRevival
             }
             _units[ai.GetInstanceID()] = u;
             r.Unit = u;
+            MedicRole(u, r);
             r.SpawnAtSet = false;
             Specs(ai, p);
             if (r.Hp > 0.01f && r.Hp < 0.995f) SetHealth(ai, health * r.Hp);
@@ -1912,7 +1958,7 @@ namespace NextDayRevival
                 for (int i = 0; i < ps.Length; i++)
                 {
                     Type t = ps[i].ParameterType;
-                    args[i] = i == 0 ? (object)Mathf.Max(1f, value)
+                    args[i] = i == 0 ? (object)Mathf.Max(0f, value)
                         : t == typeof(Vector3) ? (object)ai.transform.position
                         : t.IsValueType ? Activator.CreateInstance(t) : null;
                 }
@@ -1959,6 +2005,7 @@ namespace NextDayRevival
             MedicineCancel(r.Unit, Time.time);
             MercUnit u = r.Unit;
             if (u == null) return;
+            DownForget(r);
             MercRide.Forget(u);
             NpcWar.StopMerc(u);
             UnityEngine.Object live = u.Ai;
@@ -1979,6 +2026,7 @@ namespace NextDayRevival
             MercUnit u = r.Unit;
             DeathReport(r, u, now);
             r.Dead = true; r.DeadAt = now; r.Hp = 0f;
+            DownForget(r);
             MercRide.Forget(u);
             NpcWar.StopMerc(u);
             UnityEngine.Object live = u.Ai;
@@ -2386,7 +2434,7 @@ namespace NextDayRevival
                 Record r = _roster[i];
                 // B3d: a man PUN just took with the room still has his last
                 // health to store (D13: "and on despawn").
-                if (r.Session || r.Dead) continue;
+                if (r.Session || r.Dead || r.Down.Down) continue;
                 if (Mathf.Abs(r.Hp - r.HpSent) < 0.01f && r.Deployed - r.DeployedSent < 0.05
                     && r.Medicine.Revision == r.Medicine.SentRevision) continue;
                 if (sb == null) sb = new StringBuilder();

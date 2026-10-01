@@ -52,10 +52,12 @@ namespace UnityEngine {
 namespace NextDayRevival {
  ORDER
  POST
- class MercUnit {public MercOrder Order=new MercOrder();public bool AARetreat;}
+ class MercUnit {public MercOrder Order=new MercOrder();public bool AARetreat,GroundPhase;}
+ static class MercCrewPhases {public static bool Ground(MercUnit u){return u.GroundPhase;}}
  static class Mercs {
   public static bool Any=true;public static string SideOf(int s){return "side";}
-  public static MercUnit UnitOf(Component c){return null;}
+  public static Component LocalBody;public static MercUnit LocalUnit;
+  public static MercUnit UnitOf(Component c){return c==LocalBody?LocalUnit:null;}
  }
  static class Flak {
   public class Gun {public int Index;public Transform SeatGunner=new Transform(),SeatLoader=new Transform(),Mount=new Transform(); public Component Gunner,Loader;public float ClaimedUntil;}
@@ -154,6 +156,13 @@ class Check {
   MercAA.Authority=false;
   MercAA.OnPacket(remote,2);Ok(MercAA.Held(1)==null,"non-master snapshot cannot claim crew");
   MercAA.OnPacket(remote,1);Ok(MercAA.Held(1)!=null&&MercAA.Held(1).Actor==2,"master snapshot places remote crew by stable ID");
+  Mercs.LocalBody=MercAA.Bodies[2];Mercs.LocalUnit=new MercUnit();
+  Mercs.LocalUnit.Order.Mode=MercOrder.ManGun;Mercs.LocalUnit.Order.Facing=new Vector3(2,0,0);
+  Mercs.LocalUnit.GroundPhase=true;MercAA.OnPacket(remote,1);
+  Ok(MercAA.Held(1)==null,"stale master seat snapshot cannot repark dismounted local ground crew");
+  Mercs.LocalUnit.GroundPhase=false;MercAA.OnPacket(remote,1);
+  Ok(MercAA.Held(1)!=null,"fresh air phase accepts master lease again");
+  Mercs.LocalBody=null;Mercs.LocalUnit=null;
   Ok(MercOrder.Decode("gun~East~0~1~25~1,2,3~50,0").Mode==MercOrder.Follow,"unregistered fixed post rejected");
   // Stable working buffers: no heap traffic or GC over one million allocations.
   for(int i=0;i<13;i++){seats[i].Free=true;seats[i].Distance=i;}

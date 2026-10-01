@@ -23,7 +23,7 @@
 // 2 Hz. Nothing runs past a bool test while the viewer's side does not hold
 // the radar. F6: AirPicture.Tick, AirPicture.Draw.
 //
-// C# 3.0 (csc from .NET 3.5). ASCII only.
+// C# 3.0 (csc from .NET 3.5). UTF-8; Cyrillic only in Loc.T player strings.
 
 using System;
 using System.Collections.Generic;
@@ -139,6 +139,8 @@ namespace NextDayRevival
                     int op = -1;
                     if (!TowerRadar.NpcOperatorUp && TowerRadar.OperatorActor >= 0)
                         op = Side(Crocodile.PlayerByActor(TowerRadar.OperatorActor));
+                    MercAAPost merc = MercAA.Operator;
+                    if (merc != null) op = merc.Side;
                     held = AirPicturePolicy.Held(true, AirfieldOwnership.Holder, side, TowerRadar.NpcOperatorUp, op);
                 }
             }
@@ -304,6 +306,28 @@ namespace NextDayRevival
             _raidSpeed = speedU;
             _raidWhat = what;
             _nextSlow = 0f;   // tell the holder at once, not up to a second later
+        }
+
+        /// <summary>Event-only, no proximity gate: the holder and every faction
+        /// member receive radar intelligence wherever they are on the map.</summary>
+        internal static bool HolderRaidWarning(Vector3 at, float from, float eta)
+        {
+            if (!B(CfgEnabled) || !B(CfgWarn) || !TowerRadar.On || !TowerRadar.Built) return false;
+            GameObject me = MapTools.LocalPlayer();
+            int op = -1;
+            if (TowerRadar.OperatorActor >= 0)
+                op = Side(Crocodile.PlayerByActor(TowerRadar.OperatorActor));
+            MercAAPost merc = MercAA.Operator;
+            if (merc != null) op = merc.Side;
+            if (!AirPicturePolicy.Held(TowerRadar.Working, AirfieldOwnership.Holder,
+                Side(me), TowerRadar.NpcOperatorUp, op)) return false;
+            int seconds = Mathf.Max(0, Mathf.CeilToInt(eta));
+            string wait = seconds >= 60 ? Mathf.CeilToInt(seconds / 60f) + Loc.T(" мин", " min")
+                : seconds + Loc.T(" с", " s");
+            string text = Loc.T("РЛС: налет через ", "RADAR: Raid inbound, ") + wait
+                + Loc.T(", с направления ", ", from ") + AirPicturePolicy.Compass(from);
+            WarnAt(at, text, eta, text);
+            return true;
         }
 
         static void Warn(GameObject me, float now)

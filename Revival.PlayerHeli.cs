@@ -3432,8 +3432,8 @@ namespace NextDayRevival
             {
                 Vector3 off = _to * Vector3.Scale(Corner(i), scale);
                 float floor;
-                _under[i] = PlayerHeli.CrashFloor(
-                    new Vector3(at.x + off.x, at.y, at.z + off.z), out floor)
+                _under[i] = AircraftWreck.Surface(
+                    new Vector3(at.x + off.x, at.y, at.z + off.z), transform, out floor)
                     ? floor : _floor;
             }
         }
@@ -3474,12 +3474,9 @@ namespace NextDayRevival
         /// has stopped moving: whatever is DRAWN must touch the ground. The box
         /// above belongs to the intact prefab; HeliWreckModel has since swapped
         /// a different mesh into those renderers, and a mesh whose own origin
-        /// sits lower than the one it replaced leaves the whole wreck in the
-        /// air. So the mesh renderers are measured - particle renderers are not
-        /// MeshRenderers and the fire cannot get into this - and anything still
-        /// standing clear of the highest ground under the hull is lowered by
-        /// exactly that gap. Never raised: a wreck bedded into a hillside is
-        /// what a crash looks like, a floating one is not.
+        /// sits lower than the one it replaced needs a fresh support answer.
+        /// Actual bottom vertices and downward rays include concrete and props,
+        /// exclude the carrier and fire, and bed the visible hull into its surface.
         /// </summary>
         void Drop()
         {
@@ -3487,31 +3484,7 @@ namespace NextDayRevival
             _dropped = true;
             try
             {
-                MeshRenderer[] drawn = GetComponentsInChildren<MeshRenderer>(false);
-                bool any = false;
-                float bottom = 0f;
-                for (int i = 0; i < drawn.Length; i++)
-                {
-                    if (drawn[i] == null || !drawn[i].enabled) continue;
-                    float b = drawn[i].bounds.min.y;
-                    if (!any || b < bottom) bottom = b;
-                    any = true;
-                }
-                if (!any) return;
-
-                float ground = _under[0];
-                for (int i = 1; i < 8; i++) if (_under[i] > ground) ground = _under[i];
-                float gap = bottom - ground;
-                if (gap <= 0.1f * PlayerHeli.K) return;
-
-                Vector3 at = transform.position;
-                at.y -= gap;
-                transform.position = at;
-                if (RevivalPlugin.L != null)
-                    RevivalPlugin.L.LogInfo("PlayerHeli: the drawn wreck stood "
-                        + (gap / PlayerHeli.K).ToString("0.0") + " m clear of its "
-                        + "ground - the hull box does not fit the swapped mesh, "
-                        + "and the wreck was put down the rest of the way.");
+                AircraftWreck.Place(transform, transform, false);
             }
             catch (Exception ex)
             {
@@ -3529,10 +3502,10 @@ namespace NextDayRevival
             _slope = Vector3.up;
             float e = 5f * PlayerHeli.K;
             float west, east, south, north;
-            if (!PlayerHeli.CrashFloor(at + new Vector3(-e, 0f, 0f), out west)
-                || !PlayerHeli.CrashFloor(at + new Vector3(e, 0f, 0f), out east)
-                || !PlayerHeli.CrashFloor(at + new Vector3(0f, 0f, -e), out south)
-                || !PlayerHeli.CrashFloor(at + new Vector3(0f, 0f, e), out north))
+            if (!AircraftWreck.Surface(at + new Vector3(-e, 0f, 0f), transform, out west)
+                || !AircraftWreck.Surface(at + new Vector3(e, 0f, 0f), transform, out east)
+                || !AircraftWreck.Surface(at + new Vector3(0f, 0f, -e), transform, out south)
+                || !AircraftWreck.Surface(at + new Vector3(0f, 0f, e), transform, out north))
                 return Quaternion.identity;
 
             Vector3 n = Vector3.Cross(
@@ -3833,7 +3806,7 @@ namespace NextDayRevival
                     if (m == null || string.IsNullOrEmpty(m.name)) continue;
                     string n = m.name.ToLowerInvariant();
                     if (n.IndexOf("mi-8_rusty") < 0 || n.IndexOf("_lod") >= 0) continue;
-                    _skin = m;
+                    _skin = ModelLod.SharedCopy(m, "Mi-8 wreck matte", AircraftWreck.Matte);
                     break;
                 }
                 RevivalPlugin.L.LogInfo("PlayerHeli: broken Mi-8 lookup - hull "
@@ -3856,8 +3829,7 @@ namespace NextDayRevival
             if (m == null) return false;
             if (m.HasProperty("_Color"))
                 m.SetColor("_Color", new Color(0.13f, 0.12f, 0.11f, 1f));
-            if (m.HasProperty("_EmissionColor"))
-                m.SetColor("_EmissionColor", Color.black);
+            AircraftWreck.Matte(m);
             return true;
         }
     }

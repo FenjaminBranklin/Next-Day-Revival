@@ -186,7 +186,7 @@ namespace NextDayRevival
         {
             internal Landing Landing;
             internal Vector3 Lz;
-            internal float Yaw, At;
+            internal float Yaw, At, Speed;
         }
         static readonly List<PendingLanding> _pending = new List<PendingLanding>();
         static bool _loaded;
@@ -221,7 +221,7 @@ namespace NextDayRevival
                     if (!p.Landing.Here) { _pending.RemoveAt(i); continue; }
                     if (!RadarClarityCore.Due(true, true, p.Landing.Here, Time.time, p.At)) continue;
                     _pending.RemoveAt(i);
-                    LaunchWarned(p.Landing, p.Lz, p.Yaw);
+                    LaunchWarned(p.Landing, p.Lz, p.Yaw, p.Speed);
                 }
 
                 if (CfgSpawnKey != null && CfgSpawnKey.Value != KeyCode.None
@@ -414,10 +414,12 @@ namespace NextDayRevival
             PendingLanding pending = new PendingLanding();
             pending.Landing = d; pending.Lz = lz; pending.Yaw = yaw;
             pending.At = Time.time + RadarClarityCore.LandingLead;
+            pending.Speed = NpcAircraft.Speed(CfgHeliSpeed == null ? 55f : Mathf.Clamp(CfgHeliSpeed.Value, 15f, 90f),
+                NpcAircraft.SpeedFactor(0f));
             _pending.Add(pending);
             float eta = RadarClarityCore.LandingEta(
                 CfgApproachDist == null ? 1500f : Mathf.Clamp(CfgApproachDist.Value, 300f, 3000f),
-                CfgHeliSpeed == null ? 55f : Mathf.Clamp(CfgHeliSpeed.Value, 15f, 90f));
+                pending.Speed);
             Net.SendWarning(lz, eta);
             WarnLanding(lz, eta);
             return true;
@@ -432,10 +434,10 @@ namespace NextDayRevival
             RadarScope.Note("Mi-8 landing inbound, " + cell + ", ETA ~" + Mathf.CeilToInt(eta).ToString(CultureInfo.InvariantCulture) + " s");
         }
 
-        static void LaunchWarned(Landing d, Vector3 lz, float yaw)
+        static void LaunchWarned(Landing d, Vector3 lz, float yaw, float speed)
         {
             string cell = GridCell(lz);
-            HeliFlight flight = HeliFlight.Launch(d, lz, yaw);
+            HeliFlight flight = HeliFlight.Launch(d, lz, yaw, speed);
             if (flight == null)
             {
                 RevivalPlugin.L.LogWarning("Troops: the helicopter could not be spawned - "
@@ -1282,7 +1284,7 @@ namespace NextDayRevival
         static MethodInfo _instantiate, _destroy;
         static bool _looked;
 
-        internal static HeliFlight Launch(RevivalTroopInsertion.Landing d, Vector3 lz, float yaw)
+        internal static HeliFlight Launch(RevivalTroopInsertion.Landing d, Vector3 lz, float yaw, float speed)
         {
             if (!LookUp()) return null;
             HeliFlight f = new HeliFlight();
@@ -1321,8 +1323,7 @@ namespace NextDayRevival
                 if (mover != null && startField != null) startField.SetValue(mover, Vector3.zero);
                 f.Go.transform.position = at;
                 f._lastPos = at;
-                f._speed = RevivalTroopInsertion.CfgHeliSpeed == null ? 55f
-                    : Mathf.Clamp(RevivalTroopInsertion.CfgHeliSpeed.Value, 15f, 90f);
+                f._speed = speed;
                 f._started = f._stageAt = Time.time;
                 return f;
             }

@@ -1,10 +1,14 @@
 # ndr_airevents.tsv - written by the map editor (Air events).
-# name	enabled	x	z	heading	length	width	edge	dropX	dropZ	attackX	attackZ	faction	patrolMinutes	intervalMin	intervalMax	waves	scene	altitude
+# name	enabled	x	z	heading	length	width	edge	dropX	dropZ	attackX	attackZ	faction	patrolMinutes	intervalMin	intervalMax	waves	scene	altitude	speedFactor
 # heading = degrees clockwise from +Z; length/width metres; edge one of auto N E S W random.
 # waves = type:count:delay:load;... (b = Tu-95 bomber, load bombs; t = An-2, load paratroopers).
 # interval hours 0/0 = admin panel only; scene empty = the default map.
-# altitude = Tu-95 metres above the ground.
+# altitude = Tu-95 metres above the ground; speedFactor = 0 inherits host, 0.2..1.5 overrides.
 # #retake = the garrison's retake raids (W Tower 4): enabled frequency strength bombers bombs
 #   targets(t g f) transports paratroopers helis heliTroops escort escorts faction.
-#retake	1	1.00	1.00	1	36	tgf	2	8	1	8	1	2	auto
-Airfield-raid	1	4632.00	0.00	180.0	900.0	150.0	auto	4380.00	-500.00	4250.00	1250.00	traitor	60	2.500	3.500	b:1:0:48;t:2:90:10		550
+#   Optional tactics: dropZones(2..3) dropRadiusM(60..180) crewAttackPercent(0..100).
+#   Optional rhythm: closeDrops secondWave secondWaveDelaySeconds(90..600) intervalMinutes(3..120)
+#   randomWindowMinutes(0..60) quietMinutes(3..60); quiet starts after all raid air clears.
+#   Optional approach: approachMode(vary/fixed) approachHeading(0..359.99, flight clockwise from +Z).
+#retake	1	1.00	1.00	1	36	tgf	2	8	1	8	1	2	auto	3	100.00	50	1	1	180.00	30.00	6.00	10.00	vary	0.00
+Airfield-raid	1	4632.00	0.00	180.0	900.0	150.0	auto	4380.00	-500.00	4250.00	1250.00	traitor	60	2.500	3.500	b:1:0:48;t:2:90:10		550	0.000

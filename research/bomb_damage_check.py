@@ -29,6 +29,7 @@ using System.Reflection;
 using UnityEngine;
 using HarmonyLib;
 namespace UnityEngine {
+    public static class Time { public static int frameCount; }
     public struct Vector3 {
         public float x,y,z;
         public Vector3(float a,float b,float c) { x=a;y=b;z=c; }
@@ -39,7 +40,7 @@ namespace UnityEngine {
         public static Vector3 Lerp(Vector3 a,Vector3 b,float t) { return a+(b-a)*t; }
         public static float Distance(Vector3 a,Vector3 b) { Vector3 d=a-b;return (float)Math.Sqrt(d.x*d.x+d.y*d.y+d.z*d.z); }
     }
-    public class Transform { public Vector3 position; }
+    public class Transform { public Vector3 position; public bool IsChildOf(Transform other) { return this==other; } }
     public class GameObject {
         public Transform transform=new Transform();
         public NextDayRevival.PhotonView View;
@@ -55,6 +56,8 @@ namespace UnityEngine {
         public static float Abs(float a) { return Math.Abs(a); }
         public static float Clamp01(float a) { return Math.Max(0f,Math.Min(1f,a)); }
         public static float Pow(float a,float b) { return (float)Math.Pow(a,b); }
+        public const float PI=(float)Math.PI;
+        public static float Cos(float a) { return (float)Math.Cos(a); }
     }
 }
 namespace HarmonyLib {
@@ -72,6 +75,14 @@ namespace HarmonyLib {
     }
 }
 namespace NextDayRevival {
+    // Crew handoff is exercised with real production hooks by crew_blast_check.
+    // This older person-routing harness deliberately has no vehicle lifecycle.
+    internal static class CrewBlast {
+        public struct Profile { }
+        internal static void Install(Harmony h,MethodInfo m) { }
+        internal static Profile Begin(Vector3 p,float r,float peak,bool n) { return new Profile(); }
+        internal static void End(Profile p) { }
+    }
     public class Log { public void LogWarning(string s) { Console.WriteLine(s); } public void LogError(string s) { throw new Exception(s); } }
     public static class RevivalPlugin {
         public static Log L=new Log();
@@ -150,12 +161,31 @@ namespace NextDayRevival {
         public static NetworkGameServer Instance { get { return One; } }
         public ArrayList NetworkPlayers=new ArrayList();
     }
-    public static class NpcScan { public static Component[] Items=new Component[0]; public static Component[] All() { return Items; } }
+    public static class NpcScan { public static Component[] Items=new Component[0]; public static Component[] All() { return Items; } public static Component[] BlastTargets() { return Items; } }
     public static class VehicleScan { public static Component[] Items=new Component[0]; public static Component[] All() { return Items; } }
+    public static class PlayerScan {
+        public static Component[] BlastTargets() {
+            ArrayList players=NetworkGameServer.Instance.NetworkPlayers;
+            Component[] result=new Component[players.Count];
+            for(int i=0;i<players.Count;i++) result[i]=((GameObject)players[i]).Actor;
+            return result;
+        }
+    }
+    public static class AirKills { public static bool Sheltered(Vector3 a,Vector3 b) { return false; } }
+    public static class NpcWar { public static string PatrolFaction(Component npc) { return "enemy"; } }
+    public static class Fraktion {
+        public static string Spielerseite(GameObject go) { return ((Player)go.Actor).SameFaction?"ally":"enemy"; }
+        public static bool Feind(string a,string b) { return a!=b; }
+    }
+    public static class GunnerAI {
+        public static Component Carrier(Transform t) { return null; }
+        public static bool Armoured(Component c) { return false; }
+    }
     public static class FrameProf { public const int S_OrdnanceBlastT=140; public static int Ticks; public static void S(int n) { Ticks++; } public static void E(int n) { } }
     // W AA7 (merged): Enqueue also reports the blast to the fixed AA.
     public static class AirDefenceDamage { public static int Reports; public static void ReportBlast(Vector3 at, float radius, float peak) { Reports++; } }
     public static class Mortar {
+        public static class FactionShield { public static bool SameFactionAsLocal(GameObject go) { return ((Player)go.Actor).SameFaction; } }
         static bool _streakLooked, _killerLooked;
         static FieldInfo _mySettlement,_lastKillerId;
         /*GUARDS*/

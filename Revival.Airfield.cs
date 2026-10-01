@@ -24,8 +24,8 @@
 // DEFENDERS. Four pockets N1-N4 (six editor-style groups, 18 men) are handed
 // to RevivalGroundEnemies as built-in groups: its spawn, NavMesh checks,
 // patrol/guard behaviour, adoption and respawn delay run them unchanged. The
-// editor's own ground channel cannot carry them - its parser keeps groups on
-// the home map (-2500..2500). A pocket does not respawn while a player is
+// editor's ground channel can override each pocket by its stable name.
+// A pocket does not respawn while a player is
 // inside the airfield.
 //
 // EVENT BUDGET. A troop landing whose zone or arrow reaches the airfield and
@@ -195,27 +195,73 @@ namespace NextDayRevival
             internal int Count;
             internal float Radius;
             internal Vector3[] Route;
-            internal Pocket(string name, string behavior, int count, float radius, params Vector3[] route)
-            { Name = name; Behavior = behavior; Count = count; Radius = radius; Route = route; }
+            internal RevivalComposition.CrewMan[] Loadout;
+            internal Pocket(string name, string behavior, int count, float radius,
+                RevivalComposition.CrewMan[] loadout, params Vector3[] route)
+            { if (count != loadout.Length) throw new InvalidOperationException("Airfield roster size: " + name);
+                Name = name; Behavior = behavior; Count = count;
+                Radius = radius; Route = route; Loadout = loadout; }
         }
 
         static Vector3 P(float x, float z) { return new Vector3(x, 0f, z); }
 
-        // Every point stands outside the building shells, on the service road,
-        // the apron or a hardstand, so it lies on the tile's NavMesh. N1 is
-        // the front door, N2 the repair compound with its C1 observer, N3 the
-        // shelter line (a part of it, not the 2 km zone), N4 holds D2 and does
-        // not wander north. 5 + 5 + 4 + 4 = 18 men.
+        // One authored row per man, never a short roster that repeats a LAW.
+        // Explicit rifles also bypass Crew's automatic LAW/MG fallback.
+        // Only N4's single antitank class can draw a LAW as its second weapon.
+        // All uniforms travel through Crew's Photon customization overlay.
+        static RevivalComposition.CrewMan Defender(string role, string soldierClass,
+            int weapon, int helmet, int body, int legs)
+        {
+            RevivalComposition.CrewMan man = new RevivalComposition.CrewMan();
+            man.Role = role; man.Class = soldierClass; man.Fpv = false;
+            man.Weapons = new int[] { weapon };
+            man.Headwear = helmet; man.Body = body; man.Legs = legs;
+            man.Hands = 4602;
+            return man;
+        }
+
+        // Field routes use dirt and grass beside retained structures.
+        // Six groups, 5 + 5 + 4 + 4 = 18 men; no removed pad posts.
         static readonly Pocket[] Pockets = new Pocket[] {
-            new Pocket("airfield-N1-gate", "guard", 2, 30f, P(4100f, 1655f)),
+            new Pocket("airfield-N1-gate", "guard", 2, 30f,
+                new RevivalComposition.CrewMan[] {
+                    Defender("nco", "regular", 1006, 4007, 4308, 4504),
+                    Defender("rifleman", "regular", 1001, 4005, 4321, 4514)
+                }, P(4100f, 1655f)),
             new Pocket("airfield-N1-duty", "patrol", 3, 250f,
-                P(4135f, 1615f), P(4140f, 1490f), P(4200f, 1400f), P(4280f, 1395f)),
+                new RevivalComposition.CrewMan[] {
+                    Defender("nco", "regular", 1002, 4007, 4308, 4504),
+                    Defender("rifleman", "regular", 1001, 4006, 4322, 4515),
+                    Defender("mg", "regular", 1016, 4008, 4307, 4503)
+                },
+                P(4100f, 1640f), P(4180f, 1570f), P(4180f, 1395f), P(4280f, 1395f)),
             new Pocket("airfield-N2-repair", "patrol", 4, 320f,
-                P(4320f, 1360f), P(4325f, 1240f), P(4385f, 1165f), P(4390f, 1030f), P(4290f, 1015f)),
-            new Pocket("airfield-N2-observer", "waiting", 1, 25f, P(4300f, 1335f)),
+                new RevivalComposition.CrewMan[] {
+                    Defender("nco", "regular", 1006, 4007, 4308, 4504),
+                    Defender("rifleman", "regular", 1002, 4005, 4321, 4514),
+                    Defender("rifleman", "regular", 1001, 4006, 4322, 4515),
+                    Defender("mg", "regular", 1023, 4008, 4307, 4503)
+                },
+                P(4320f, 1360f), P(4350f, 1240f), P(4440f, 1165f), P(4450f, 1005f), P(4290f, 1005f)),
+            new Pocket("airfield-N2-observer", "guard", 1, 12f,
+                new RevivalComposition.CrewMan[] {
+                    Defender("marksman", "sniper", 1010, 4008, 4307, 4503)
+                }, P(4300f, 1335f)),
             new Pocket("airfield-N3-shelters", "patrol", 4, 500f,
-                P(4410f, 600f), P(4410f, 200f), P(4410f, -50f), P(4410f, -380f)),
-            new Pocket("airfield-N4-ammo", "guard", 4, 60f, P(4130f, -1110f))
+                new RevivalComposition.CrewMan[] {
+                    Defender("nco", "regular", 1002, 4007, 4308, 4504),
+                    Defender("rifleman", "regular", 1001, 4005, 4321, 4514),
+                    Defender("mg", "regular", 1016, 4006, 4322, 4515),
+                    Defender("marksman", "sniper", 1009, 4008, 4307, 4503)
+                },
+                P(4425f, 245f), P(4425f, 200f), P(4425f, -50f), P(4430f, -380f)),
+            new Pocket("airfield-N4-ammo", "guard", 4, 15f,
+                new RevivalComposition.CrewMan[] {
+                    Defender("nco", "regular", 1002, 4007, 4308, 4504),
+                    Defender("rifleman", "regular", 1001, 4005, 4321, 4514),
+                    Defender("mg", "regular", 1023, 4008, 4307, 4503),
+                    Defender("antitank", "antitank", 1001, 4006, 4322, 4515)
+                }, P(4130f, -1110f))
         };
 
         // W Perf1: remembered per config text - the tower radar asks this
@@ -249,12 +295,25 @@ namespace NextDayRevival
         /// list, in the form Parse itself produces.</summary>
         internal static void AddGroups(List<RevivalGroundEnemies.Group> into)
         {
-            if (GroupsVersion() == 0) return;
+            bool on = GroupsVersion() != 0;
             string faction = Faction();
             float respawn = RespawnSeconds();
             for (int i = 0; i < Pockets.Length; i++)
             {
                 Pocket p = Pockets[i];
+                RevivalGroundEnemies.Group authored = null;
+                for (int k = 0; k < into.Count; k++)
+                    if (into[k].Name == p.Name) { authored = into[k]; break; }
+                if (authored != null)
+                {
+                    if (authored.Scene != MapScene.Home)
+                        throw new InvalidOperationException("Airfield pocket on another map");
+                    // Keep capture, no-pop-in, and respawn gates on overrides.
+                    authored.Builtin = true;
+                    if (!on) authored.Enabled = false;
+                    continue;
+                }
+                if (!on) continue;
                 RevivalGroundEnemies.Group g = new RevivalGroundEnemies.Group();
                 g.Name = p.Name; g.Enabled = true; g.Builtin = true;
                 g.X = p.Route[0].x; g.Z = p.Route[0].z;
@@ -263,15 +322,19 @@ namespace NextDayRevival
                 g.Loop = false; g.Hold = p.Behavior == "patrol" ? 20f : 0f;
                 if (p.Behavior == "patrol")
                     for (int k = 0; k < p.Route.Length; k++) g.Route.Add(p.Route[k]);
-                // The default kit, like the one row an empty editor roster
-                // exports; loadouts are a later decision (concept section 7).
-                RevivalComposition.CrewMan man = new RevivalComposition.CrewMan();
-                man.Role = ""; man.Class = "regular"; man.Fpv = false;
-                g.Loadout.Add(man);
+                for (int k = 0; k < p.Loadout.Length; k++) g.Loadout.Add(p.Loadout[k]);
                 string row = p.Name + "\t" + faction + "\t" + p.Count + "\t" + p.Behavior
                     + "\t" + p.Radius.ToString("0") + "\t" + respawn.ToString("0");
                 for (int k = 0; k < p.Route.Length; k++)
                     row += "\t" + p.Route[k].x.ToString("0") + "," + p.Route[k].z.ToString("0");
+                // Include the kit in the adoption key: an old default-kit actor
+                // must not be adopted as a newly authored rifleman or LAW slot.
+                for (int k = 0; k < p.Loadout.Length; k++)
+                {
+                    RevivalComposition.CrewMan man = p.Loadout[k];
+                    row += "\t" + man.Role + "," + man.Class + "," + man.MainWeapon
+                        + "," + man.Headwear + "," + man.Body + "," + man.Legs;
+                }
                 g.Rows.Append(row).Append('\n');
                 g.Meta = row;
                 // The key travels in the spawn data and a new master adopts
@@ -279,6 +342,30 @@ namespace NextDayRevival
                 g.Key = p.Name + ":" + Fnv(row).ToString("x8");
                 into.Add(g);
             }
+        }
+
+        // Pure data check, also called by Parse on the download worker before
+        // publishing a snapshot. Include every pocket left on its defaults.
+        internal static void ValidateGroups(List<RevivalGroundEnemies.Group> into)
+        {
+            int laws = 0;
+            foreach (Pocket p in Pockets)
+            {
+                RevivalGroundEnemies.Group g = null;
+                for (int k = 0; k < into.Count; k++)
+                    if (into[k].Name == p.Name) { g = into[k]; break; }
+                if (g != null && g.Scene != MapScene.Home)
+                    throw new InvalidOperationException("Airfield pocket on another map");
+                if (g != null && !g.Enabled) continue;
+                int count = g == null ? p.Count : g.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    RevivalComposition.CrewMan man = g == null ? p.Loadout[i % p.Loadout.Length]
+                        : g.Loadout[i % g.Loadout.Count];
+                    if (man.Class == "antitank" || man.MainWeapon == 1162) laws++;
+                }
+            }
+            if (laws > 1) throw new InvalidOperationException("Airfield supports at most one MLAW soldier");
         }
 
         static uint Fnv(string text)
@@ -294,6 +381,7 @@ namespace NextDayRevival
         internal static bool HoldSpawn(RevivalGroundEnemies.Group g)
         {
             if (g == null || !g.Builtin || !g.Name.StartsWith("airfield-", StringComparison.Ordinal)) return false;
+            if (!AirfieldObjects.Ready) return true;
             AirfieldOwnership.Ensure(false);
             if (AirfieldOwnership.Captured) return true;
             if (g.Seen) return PlayerInside(60f);
@@ -316,6 +404,7 @@ namespace NextDayRevival
             // shell must stay inside this rectangle (the HQ compound for the
             // armoury), else it goes to the nearest walkable spot to Anchor.
             internal bool World, Keep;
+            internal bool Fixed; // Z F3 surveyed world anchor beside its surviving building
             internal float KeepMinX, KeepMaxX, KeepMinZ, KeepMaxZ, AnchorX, AnchorZ;
             // Runtime, master only.
             internal GameObject Item;
@@ -350,77 +439,73 @@ namespace NextDayRevival
 
         static int _airfieldCount;
 
+        // Keep the original roll as authoring provenance; runtime uses the
+        // surviving marker and surveyed world anchor supplied by the layout.
+        static Slot FieldSlot(Slot s, string building, float x, float z)
+        {
+            s.Building = building;
+            s.Fixed = s.Keep = true; s.AnchorX = x; s.AnchorZ = z;
+            s.KeepMinX = x - 2f; s.KeepMaxX = x + 2f;
+            s.KeepMinZ = z - 2f; s.KeepMaxZ = z + 2f;
+            return s;
+        }
+
+        // Z F3: all 51 original rolls consolidated into surviving sites.
+        // Explicit anchors are surveyed against every collider, not marker fractions.
         static readonly Slot[] AirfieldSlots = new Slot[] {
-            // H1 repair hangar: the parts cage and the lockers along the west
-            // wall; the floor stays empty. No fuel here - that is D1.
-            new Slot("H1", 3, "parts",   -0.38f,  0.36f, 1f),
-            new Slot("H1", 2, "tools",   -0.38f, -0.36f, 0f),
-            new Slot("H1", 2, "tools",   -0.10f,  0.40f, 0f),
-            new Slot("H1", 2, "salvage", -0.10f, -0.40f, 0f),
-            // H2 workshop ruin: salvage, a low chance of a signature part.
-            new Slot("H2", 2, "salvage", -0.30f,  0.20f, 0f),
-            new Slot("H2", 2, "salvage",  0.00f, -0.25f, 0f),
-            new Slot("H2", 2, "salvage",  0.25f,  0.20f, 0f),
-            new Slot("H2", 3, "parts",   -0.35f, -0.20f, 0.12f),
-            // C1 tower: communications and observation in the lower block.
-            new Slot("C1", 2, "comms",   -0.30f,  0.25f, 0f),
-            new Slot("C1", 2, "comms",   -0.30f, -0.25f, 0f),
-            new Slot("C1", 1, "field",    0.00f,  0.30f, 0f),
-            // F1 fire station: dependable medicine, no military tier 3.
-            new Slot("F1", 2, "medical", -0.35f,  0.30f, 1f),
-            new Slot("F1", 2, "medical", -0.35f, -0.30f, 0f),
-            new Slot("F1", 2, "medical",  0.10f,  0.35f, 0f),
-            new Slot("F1", 1, "field",    0.10f, -0.35f, 0f),
-            // B1 duty barracks: basic resupply after the gate.
-            new Slot("B1", 1, "guard",    0.00f,  0.35f, 0f),
-            new Slot("B1", 1, "guard",    0.00f,  0.10f, 0f),
-            new Slot("B1", 1, "field",    0.00f, -0.15f, 0f),
-            new Slot("B1", 2, "military", 0.00f, -0.38f, 0.2f),
-            // G1 gatehouse: modest guard supplies.
-            new Slot("G1a", 1, "guard",   0.00f,  0.00f, 0f),
-            // D3 technical stores: components, one low-volume signature slot.
-            new Slot("D3", 2, "tools",   -0.35f,  0.20f, 0f),
-            new Slot("D3", 2, "tools",    0.00f,  0.25f, 0f),
-            new Slot("D3", 2, "tools",    0.30f,  0.20f, 0f),
-            new Slot("D3", 3, "parts",   -0.10f, -0.20f, 0.3f),
-            // D1 fuel compound: the pump house always has fuel, the bund may.
-            new Slot("D1c", 3, "fuel",    0.00f,  0.00f, 1f),
-            new Slot("D1", 3, "fuel",    -0.23f, -0.25f, 0.4f),
-            new Slot("D1", 2, "fuel",     0.25f, -0.30f, 0f),
-            // D2a open ammunition store. D2b stays sealed (key/event, later).
-            new Slot("D2a", 3, "military", -0.10f,  0.15f, 1f),
-            new Slot("D2a", 3, "military", -0.10f, -0.15f, 0f),
-            new Slot("D2a", 2, "military",  0.10f,  0.00f, 0f),
-            // Shelters: scattered military salvage; S2's rear breach hides
-            // the smuggler cache. S3 (door shut) has no loot on purpose.
-            new Slot("S1", 1, "guard",    0.05f,  0.10f, 0f),
-            new Slot("S1", 2, "salvage",  0.05f, -0.10f, 0f),
-            new Slot("S2", 2, "salvage",  0.05f,  0.10f, 0f),
-            new Slot("S2", 2, "military",-0.18f,  0.00f, 0.5f),
-            new Slot("S4", 1, "guard",    0.05f,  0.00f, 0f),
-            new Slot("S4", 2, "salvage",  0.05f, -0.12f, 0f),
-            // W1 scrap yard: aircraft and vehicle salvage by the Mi-8 hulk.
-            new Slot("W1", 2, "salvage", -0.20f,  0.15f, 0f),
-            new Slot("W1", 2, "salvage",  0.20f, -0.10f, 0f),
-            new Slot("W1", 3, "parts",   -0.15f, -0.10f, 0.15f),
-            // V1-V3 revetments: sparse field caches.
-            new Slot("V1", 0, "dressing", -0.20f, 0.00f, 0f),
-            new Slot("V2", 0, "dressing", -0.20f, 0.00f, 0f),
-            new Slot("V3", 0, "dressing", -0.20f, 0.00f, 0f),
-            // N9a (docs/ai/tasks/n09a-east-loot-spots.md): the buildings and
-            // hulks phase 1 left bare. M1 radio/radar compound: what the
-            // signallers left. The wrecks: vanilla-style car loot beside the
-            // hulk (the point moves off a solid hull onto walkable ground).
-            new Slot("M1a", 2, "comms",   0.30f,  0.30f, 0f),
-            new Slot("M1b", 2, "comms",  -0.30f,  0.00f, 0f),
-            new Slot("W1a", 3, "parts",   0.45f,  0.00f, 0.2f),
-            new Slot("W1c", 2, "salvage", 0.45f,  0.00f, 0f),
-            new Slot("W2a", 1, "salvage", 0.45f,  0.00f, 0f),
-            new Slot("W2b", 1, "medical", 0.45f,  0.00f, 0f),
-            new Slot("W2c", 2, "fuel",    0.45f,  0.00f, 0f),
-            new Slot("W2d", 1, "salvage", 0.45f,  0.00f, 0f),
-            // The An-2 stand: a toolbox under the wing for the repair loop.
-            new Slot("AN", 2, "tools",   -0.45f, -0.45f, 0f)
+            FieldSlot(new Slot("H1", 3, "parts", -0.38f, 0.36f, 1.00f), "H1", 4220.00f, 1055.00f),
+            FieldSlot(new Slot("H1", 2, "tools", -0.38f, -0.36f, 0.00f), "H1", 4250.00f, 1055.00f),
+            FieldSlot(new Slot("H1", 2, "tools", -0.10f, 0.40f, 0.00f), "H1", 4260.00f, 1055.00f),
+            FieldSlot(new Slot("H1", 2, "salvage", -0.10f, -0.40f, 0.00f), "H1", 4280.00f, 1055.00f),
+            FieldSlot(new Slot("H2", 2, "salvage", -0.30f, 0.20f, 0.00f), "H1", 4300.00f, 1055.00f),
+            FieldSlot(new Slot("H2", 2, "salvage", 0.00f, -0.25f, 0.00f), "H1", 4220.00f, 1075.00f),
+            FieldSlot(new Slot("H2", 2, "salvage", 0.25f, 0.20f, 0.00f), "H1", 4250.00f, 1075.00f),
+            FieldSlot(new Slot("H2", 3, "parts", -0.35f, -0.20f, 0.12f), "H1", 4260.00f, 1075.00f),
+            FieldSlot(new Slot("C1", 2, "comms", -0.30f, 0.25f, 0.00f), "C1", 4302.00f, 1318.00f),
+            FieldSlot(new Slot("C1", 2, "comms", -0.30f, -0.25f, 0.00f), "C1", 4302.00f, 1326.00f),
+            FieldSlot(new Slot("C1", 1, "field", 0.00f, 0.30f, 0.00f), "C1", 4302.00f, 1334.00f),
+            FieldSlot(new Slot("F1", 2, "medical", -0.35f, 0.30f, 1.00f), "S1", 4270.00f, 180.00f),
+            FieldSlot(new Slot("F1", 2, "medical", -0.35f, -0.30f, 0.00f), "S1", 4290.00f, 180.00f),
+            FieldSlot(new Slot("F1", 2, "medical", 0.10f, 0.35f, 0.00f), "S1", 4310.00f, 180.00f),
+            FieldSlot(new Slot("F1", 1, "field", 0.10f, -0.35f, 0.00f), "S1", 4270.00f, 200.00f),
+            FieldSlot(new Slot("B1", 1, "guard", 0.00f, 0.35f, 0.00f), "S2", 4270.00f, -70.00f),
+            FieldSlot(new Slot("B1", 1, "guard", 0.00f, 0.10f, 0.00f), "S2", 4290.00f, -70.00f),
+            FieldSlot(new Slot("B1", 1, "field", 0.00f, -0.15f, 0.00f), "S2", 4310.00f, -70.00f),
+            FieldSlot(new Slot("B1", 2, "military", 0.00f, -0.38f, 0.20f), "S2", 4270.00f, -50.00f),
+            FieldSlot(new Slot("G1a", 1, "guard", 0.00f, 0.00f, 0.00f), "S4", 4300.00f, -1370.00f),
+            FieldSlot(new Slot("D3", 2, "tools", -0.35f, 0.20f, 0.00f), "H1", 4280.00f, 1075.00f),
+            FieldSlot(new Slot("D3", 2, "tools", 0.00f, 0.25f, 0.00f), "H1", 4300.00f, 1075.00f),
+            FieldSlot(new Slot("D3", 2, "tools", 0.30f, 0.20f, 0.00f), "H1", 4220.00f, 1095.00f),
+            FieldSlot(new Slot("D3", 3, "parts", -0.10f, -0.20f, 0.30f), "H1", 4250.00f, 1095.00f),
+            FieldSlot(new Slot("D1c", 3, "fuel", 0.00f, 0.00f, 1.00f), "D1c", 4158.00f, 515.00f),
+            FieldSlot(new Slot("D1", 3, "fuel", -0.23f, -0.25f, 0.40f), "D1", 4155.00f, 575.00f),
+            FieldSlot(new Slot("D1", 2, "fuel", 0.25f, -0.30f, 0.00f), "D1", 4145.00f, 580.00f),
+            FieldSlot(new Slot("D2a", 3, "military", -0.10f, 0.15f, 1.00f), "D2a", 4090.00f, -1020.00f),
+            FieldSlot(new Slot("D2a", 3, "military", -0.10f, -0.15f, 0.00f), "D2a", 4090.00f, -1040.00f),
+            FieldSlot(new Slot("D2a", 2, "military", 0.10f, 0.00f, 0.00f), "D2a", 4090.00f, -1060.00f),
+            FieldSlot(new Slot("S1", 1, "guard", 0.05f, 0.10f, 0.00f), "S1", 4290.00f, 200.00f),
+            FieldSlot(new Slot("S1", 2, "salvage", 0.05f, -0.10f, 0.00f), "S1", 4310.00f, 200.00f),
+            FieldSlot(new Slot("S2", 2, "salvage", 0.05f, 0.10f, 0.00f), "S2", 4290.00f, -50.00f),
+            FieldSlot(new Slot("S2", 2, "military", -0.18f, 0.00f, 0.50f), "S2", 4310.00f, -50.00f),
+            FieldSlot(new Slot("S4", 1, "guard", 0.05f, 0.00f, 0.00f), "S4", 4320.00f, -1370.00f),
+            FieldSlot(new Slot("S4", 2, "salvage", 0.05f, -0.12f, 0.00f), "S4", 4340.00f, -1370.00f),
+            FieldSlot(new Slot("W1", 2, "salvage", -0.20f, 0.15f, 0.00f), "H1", 4260.00f, 1095.00f),
+            FieldSlot(new Slot("W1", 2, "salvage", 0.20f, -0.10f, 0.00f), "H1", 4280.00f, 1095.00f),
+            FieldSlot(new Slot("W1", 3, "parts", -0.15f, -0.10f, 0.15f), "H1", 4300.00f, 1095.00f),
+            FieldSlot(new Slot("V1", 0, "dressing", -0.20f, 0.00f, 0.00f), "S1", 4270.00f, 220.00f),
+            FieldSlot(new Slot("V2", 0, "dressing", -0.20f, 0.00f, 0.00f), "S2", 4270.00f, -30.00f),
+            FieldSlot(new Slot("V3", 0, "dressing", -0.20f, 0.00f, 0.00f), "S4", 4300.00f, -1350.00f),
+            FieldSlot(new Slot("M1a", 2, "comms", 0.30f, 0.30f, 0.00f), "C1", 4302.00f, 1342.00f),
+            FieldSlot(new Slot("M1b", 2, "comms", -0.30f, 0.00f, 0.00f), "C1", 4302.00f, 1350.00f),
+            FieldSlot(new Slot("W1a", 3, "parts", 0.45f, 0.00f, 0.20f), "H1", 4220.00f, 1115.00f),
+            FieldSlot(new Slot("W1c", 2, "salvage", 0.45f, 0.00f, 0.00f), "H1", 4250.00f, 1115.00f),
+            FieldSlot(new Slot("W2a", 1, "salvage", 0.45f, 0.00f, 0.00f), "H1", 4260.00f, 1115.00f),
+            FieldSlot(new Slot("W2b", 1, "medical", 0.45f, 0.00f, 0.00f), "S4", 4320.00f, -1350.00f),
+            FieldSlot(new Slot("W2c", 2, "fuel", 0.45f, 0.00f, 0.00f), "D1c", 4158.00f, 505.00f),
+            FieldSlot(new Slot("W2d", 1, "salvage", 0.45f, 0.00f, 0.00f), "H1", 4280.00f, 1115.00f),
+            FieldSlot(new Slot("AN", 2, "tools", -0.45f, -0.45f, 0.00f), "AN", 4368.00f, 1060.00f),
+            new Slot("TU95", 3, "parts", 0f, 0f, 0f),
+            new Slot("TU95", 2, "bomberAmmo", 1f, 0f, 0f),
         };
 
         // What each pool rolls: ItemSpawnCategory names of the game's own
@@ -448,6 +533,7 @@ namespace NextDayRevival
                 "MilitaryWeaponFirearm", "SpecialWeaponFirearm", "MilitaryWeaponUsableItem",
                 "SpecialClotheJackets" };
             p["parts"] = new string[] { "VehicleItems", "CraftComponents", "RareItem" };
+            p["bomberAmmo"] = new string[] { "MilitaryAmmunation", "SpecialAmmunation" };
             // NDR military town (military-town-gameplay.md). The armoury is
             // the best tier of the east: special weapons and ammunition
             // twice over, so they are drawn twice as often.
@@ -508,6 +594,8 @@ namespace NextDayRevival
             {
                 Slot s = Slots[i];
                 if (!s.Placed) continue;
+                // D2a's goods are reported by the storage HUD, not loot rolls.
+                if (s.Building == "D2a") continue;
                 placed++;
                 if (s.Item != null) full++;
                 if (me == null) continue;
@@ -589,6 +677,7 @@ namespace NextDayRevival
 
         static bool Place()
         {
+            if (_airfieldCount > 0 && !AirfieldObjects.Ready) return false;
             Vector3 c0, h0;
             Quaternion r0;
             // The first point's building stands for its scene: H1 for the
@@ -610,11 +699,19 @@ namespace NextDayRevival
                 }
                 Slot s = Slots[i];
                 if (s.Placed) { placed++; continue; }
+                if (s.Building == "TU95")
+                {
+                    Vector3 hold;
+                    if (!ParkedTu95.Loot((int)s.Fx, out hold)) { missing++; continue; }
+                    s.At = hold; s.Placed = true; placed++; continue;
+                }
                 Vector3 centre, half;
                 Quaternion rot;
                 if (!EastZones.Find(s.Building, out centre, out half, out rot)) { missing++; continue; }
                 Vector3 top;
-                if (s.World)
+                if (s.Fixed)
+                    top = new Vector3(s.AnchorX, centre.y + half.y + 2f, s.AnchorZ);
+                else if (s.World)
                 {
                     Vector3 ext = Extent(half, rot);
                     top = centre + new Vector3(s.Fx * ext.x * 2f, ext.y + 2f, s.Fz * ext.z * 2f);
@@ -625,9 +722,17 @@ namespace NextDayRevival
                     top = centre + rot * local + Vector3.up * (half.y + 2f);
                 }
                 Vector3 floor;
-                bool moved;
-                if (!Floor(top, half.y * 2f + 12f, out floor) || !Walkable(ref floor, out moved))
+                bool moved = false;
+                if (!Floor(top, half.y * 2f + 12f, out floor))
                 { missing++; continue; }
+                if (s.Fixed)
+                {
+                    UnityEngine.AI.NavMeshHit nav;
+                    if (!UnityEngine.AI.NavMesh.SamplePosition(floor, out nav, 3f, UnityEngine.AI.NavMesh.AllAreas)
+                        || !Kept(s, nav.position)) { missing++; continue; }
+                    floor = nav.position;
+                }
+                else if (!Walkable(ref floor, out moved)) { missing++; continue; }
                 if (moved && s.Keep && !Kept(s, floor) && !Anchor(s, out floor))
                 { missing++; continue; }
                 if (moved) beside++;
@@ -773,6 +878,8 @@ namespace NextDayRevival
             {
                 Slot s = Slots[i];
                 if (!s.Placed) continue;
+                // Keep F3's surveyed provenance, but never roll/refill storage.
+                if (s.Building == "D2a") continue;
                 if (s.NextAt < 0f)
                 {
                     if (s.Item != null) continue;

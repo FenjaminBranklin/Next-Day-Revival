@@ -81,6 +81,7 @@ namespace NextDayRevival
         {
             _harmony = harmony;
             EnsureShowPatch();
+            RepairTap.Install(harmony);
         }
 
         static bool EnsureShowPatch()
@@ -212,6 +213,7 @@ namespace NextDayRevival
                                  string useItemAnimation)
         {
             if (string.IsNullOrEmpty(owner)) return false;
+            if (RepairTap.IsRepair(owner) && !RepairTap.CanStart) return false;
             // Never replace another action's presentation while its gameplay
             // timer is still running. Callers acquire before starting a timer.
             if (_owner != null && IsActive(_owner)) return false;
@@ -230,6 +232,12 @@ namespace NextDayRevival
                 End(owner);
                 return false;
             }
+            if (RepairTap.IsRepair(owner))
+            {
+                KeyCode key = owner == "convoy-repair" ? ConvoyRepair.CfgKey.Value
+                    : owner == "an2-repair" ? PlayerAn2.KeyOf(An2Repair.CfgKey, KeyCode.G) : KeyCode.R;
+                if (!RepairTap.Begin(owner, key)) { End(owner); return false; }
+            }
             RevivalPlugin.L.LogInfo("Native action progress: begin " + owner
                 + ", HUD=" + _hud.GetType().Name + "." + _show.Name
                 + ", seconds=" + seconds + ".");
@@ -245,6 +253,7 @@ namespace NextDayRevival
         public static bool IsActive(string owner)
         {
             if (_owner == null || _owner != owner) return false;
+            if (RepairTap.IsRepair(owner) && !RepairTap.Check()) return false;
             UnityEngine.Object hudObject = _hud as UnityEngine.Object;
             if (_player == null || !_player.activeInHierarchy
                 || _player != MapTools.LocalPlayer()
@@ -261,6 +270,7 @@ namespace NextDayRevival
         public static void End(string owner)
         {
             if (_owner == null || _owner != owner) return;
+            RepairTap.End(owner);
             StopAnimation();
             Hide();
             ClearHud();

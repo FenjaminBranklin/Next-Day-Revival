@@ -29,7 +29,7 @@ namespace NextDayRevival
         internal const int MaxRoutePoints = 8;
         internal sealed class Group
         {
-            internal string Name, Faction, Behavior, Key, Meta;
+            internal string Name, Faction, Behavior, Key, Meta, Scene = MapScene.Home;
             internal bool Enabled, Seen, Loop;
             // Airfield.cs's defender pockets and the military town's groups
             // (Revival.MilitaryTown.cs): not from the editor channel.
@@ -69,17 +69,22 @@ namespace NextDayRevival
                 // A snapshot from an editor before the routes carries the nine
                 // old metadata columns; it reads as a group without a route.
                 if (c.Length == 17) c = WithoutRoute(c);
-                if (c.Length != 20 || !Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
+                if ((c.Length != 20 && c.Length != 22) || !Regex.IsMatch(c[0], "^[A-Za-z0-9_.-]{1,64}$"))
                     throw new IOException("Invalid ground row");
+                string scene = c.Length == 22 ? c[21] : MapScene.Home;
+                if (scene != "GW_Scene_1" && scene != "GW_Scene_2" && scene != "GW_Scene_3"
+                    && scene != "Bunker_A65" && scene != "Catacombs" && scene != "Underground_Lab")
+                    throw new IOException("Invalid ground scene");
                 Group g;
-                string meta = String.Join("\t", c, 0, 12);
+                string meta = String.Join("\t", c, 0, 12) + "\t" + scene;
                 if (!names.TryGetValue(c[0], out g))
                 {
                     if (result.Count >= MaxGroups) throw new IOException("Too many ground groups");
-                    g = new Group(); g.Name = c[0]; g.Meta = meta;
+                    g = new Group(); g.Name = c[0]; g.Meta = meta; g.Scene = scene;
                     if (c[1] != "0" && c[1] != "1") throw new IOException("Invalid ground enabled flag");
                     g.Enabled = c[1] == "1";
-                    g.X = Number(c[2], -2501f, 2501f); g.Z = Number(c[3], -2501f, 2501f);
+                    float maxX = scene == MapScene.Home ? 7501f : 2501f;
+                    g.X = Number(c[2], -2501f, maxX); g.Z = Number(c[3], -2501f, 2501f);
                     g.Faction = c[4];
                     if (g.Faction != "traitor" && g.Faction != "looter"
                         && g.Faction != "civilian" && g.Faction != "neutral")
@@ -92,9 +97,11 @@ namespace NextDayRevival
                         throw new IOException("Invalid ground behavior");
                     // Old data: the old default stood on the spot; it roams now.
                     if (g.Behavior == "waiting") g.Behavior = "roam";
-                    g.Radius = Number(c[7], 25f, 500f);
+                    if (g.Behavior != "guard") g.Radius = Number(c[7], 25f, 500f);
+                    else g.Radius = Number(c[7], 1f, 500f);
                     g.Respawn = Number(c[8], 5f, 240f) * 60f;
-                    Route(c[9], g.Route);
+                    if (scene == MapScene.Home) Route(c[9], g.Route);
+                    else Route(c[9], g.Route, maxX);
                     if (c[10] != "loop" && c[10] != "pingpong")
                         throw new IOException("Invalid ground route mode");
                     g.Loop = c[10] == "loop";
@@ -111,7 +118,9 @@ namespace NextDayRevival
                 else if (g.Meta != meta) throw new IOException("Conflicting ground metadata");
                 if (g.Loadout.Count >= MaxGroupSize) throw new IOException("Too many ground loadout rows");
                 RevivalComposition.CrewMan man = new RevivalComposition.CrewMan();
-                man.Role = c[12]; man.Class = "regular"; man.Fpv = false;
+                man.Role = c[12]; man.Class = c.Length == 22 ? c[20] : "regular"; man.Fpv = false;
+                if (man.Class != "regular" && man.Class != "sniper" && man.Class != "antitank")
+                    throw new IOException("Invalid ground class");
                 if (man.Role.Length > 0 && !Regex.IsMatch(man.Role, "^[A-Za-z0-9_. -]{1,40}$"))
                     throw new IOException("Invalid ground role");
                 int weapon = Integer(c[13], 0, Int32.MaxValue);
@@ -126,6 +135,7 @@ namespace NextDayRevival
                 g.Loadout.Add(man);
                 g.Rows.Append(raw).Append('\n');
             }
+            Airfield.ValidateGroups(result);
             foreach (Group g in result)
                 using (SHA256 sha = SHA256.Create())
                     g.Key = g.Name + ":" + BitConverter.ToString(sha.ComputeHash(
@@ -150,6 +160,11 @@ namespace NextDayRevival
         /// sit, so a published route can never cost more than it says.</summary>
         static void Route(string text, List<Vector3> into)
         {
+            Route(text, into, 7501f);
+        }
+
+        static void Route(string text, List<Vector3> into, float maxX)
+        {
             if (text.Length == 0 || text == "-") return;
             if (text.Length > 256) throw new IOException("Ground route too long");
             string[] points = text.Split(';');
@@ -158,7 +173,7 @@ namespace NextDayRevival
             {
                 string[] xz = point.Split(',');
                 if (xz.Length != 2) throw new IOException("Invalid ground route point");
-                Vector3 p = new Vector3(Number(xz[0], -2501f, 2501f), 0f,
+                Vector3 p = new Vector3(Number(xz[0], -2501f, maxX), 0f,
                     Number(xz[1], -2501f, 2501f));
                 if (into.Count > 0 && (into[into.Count - 1] - p).magnitude < 5f)
                     throw new IOException("Ground route leg is too short");
@@ -254,7 +269,7 @@ namespace NextDayRevival
         {
             Dictionary<string, Group> desired = _desired;
             desired.Clear();
-            foreach (Group g in _groups) if (g.Enabled) desired.Add(g.Key, g);
+            foreach (Group g in _groups) if (g.Enabled && MapScene.Owns(g.Scene)) desired.Add(g.Key, g);
             List<string> remove = _remove;
             remove.Clear();
             foreach (KeyValuePair<string, string> running in _running)
@@ -307,7 +322,7 @@ namespace NextDayRevival
             bool spawned = false;
             foreach (Group g in _groups)
             {
-                if (!g.Enabled) continue;
+                if (!g.Enabled || !desired.ContainsKey(g.Key)) continue;
                 if (NpcWar.IsActive(g.Tag))
                 { g.Seen = true; g.NextSpawn = -1f; _running[g.Tag] = g.Key; continue; }
                 List<Component> men;

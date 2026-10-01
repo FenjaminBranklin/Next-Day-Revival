@@ -1,0 +1,23 @@
+{
+  "source_commit": "e211c21ecd7be05fc976e01c66ceac3d6a622e84",
+  "player_sets": 4,
+  "npc_sets": 8,
+  "legacy_only": true,
+  "directional_gaits": [
+    "asr_walk_aiming",
+    "asr_walk_back_aiming",
+    "asr_walk_left_aiming",
+    "asr_walk_right_aiming",
+    "hg_walk_aiming",
+    "hg_walk_back_aiming",
+    "hg_walk_left_aiming",
+    "hg_walk_right_aiming",
+    "rifle_walk_aiming",
+    "rifle_walk_back_aiming",
+    "rifle_walk_left_aiming",
+    "rifle_walk_right_aiming"
+  ],
+  "masked_rig_checks": 144,
+  "unmatched_body_paths": [],
+  "clip_legacy": true
+}

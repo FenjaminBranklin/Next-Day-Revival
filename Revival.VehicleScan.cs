@@ -65,6 +65,8 @@ namespace NextDayRevival
         readonly List<int> _dead = new List<int>();
         readonly List<Component> _scratch = new List<Component>();
         Component[] _snapshot = Empty;
+        Component[] _registered = Empty;
+        readonly List<Component> _blastScratch = new List<Component>();
         float _until;
         bool _dirty = true;
 
@@ -160,6 +162,15 @@ namespace NextDayRevival
         /// knows it has just spawned or destroyed a member).</summary>
         public void Touch() { _dirty = true; _until = 0f; }
 
+        /// <summary>Explosion victims include registered inactive objects.
+        /// Collider, renderer, animation and AI enabled states are irrelevant.
+        /// Like All(), snapshots remain immutable when membership changes.</summary>
+        public Component[] Registered()
+        {
+            All();
+            return _hooked ? _registered : _snapshot;
+        }
+
         /// <summary>
         /// The members whose GameObject is active, at most TTL old - the result
         /// FindObjectsOfType(type) would give, without the scene walk. Never
@@ -233,11 +244,13 @@ namespace NextDayRevival
         {
             _dirty = false;
             _scratch.Clear();
+            _blastScratch.Clear();
             _dead.Clear();
             foreach (KeyValuePair<int, Component> kv in _live)
             {
                 Component c = kv.Value;
                 if (c == null) { _dead.Add(kv.Key); continue; }   // destroyed without OnDestroy
+                _blastScratch.Add(c);
                 if (!c.gameObject.activeInHierarchy) continue;
                 _scratch.Add(c);
             }
@@ -249,6 +262,10 @@ namespace NextDayRevival
             for (int i = 0; same && i < _scratch.Count; i++)
                 if (!ReferenceEquals(_scratch[i], _snapshot[i])) same = false;
             if (!same) _snapshot = _scratch.ToArray();
+            same = _blastScratch.Count == _registered.Length;
+            for (int i = 0; same && i < _blastScratch.Count; i++)
+                if (!ReferenceEquals(_blastScratch[i], _registered[i])) same = false;
+            if (!same) _registered = _blastScratch.ToArray();
         }
 
         static Component[] Scan(Type t)
@@ -300,6 +317,7 @@ namespace NextDayRevival
 
         /// <summary>Active NPC_AI2 components. Never null; shared array.</summary>
         public static Component[] All() { return Registry.All(); }
+        public static Component[] BlastTargets() { return Registry.Registered(); }
     }
 
     /// <summary>
@@ -329,6 +347,7 @@ namespace NextDayRevival
 
         /// <summary>Active PlayerNetworkController components. Never null; shared array.</summary>
         public static Component[] All() { return Registry.All(); }
+        public static Component[] BlastTargets() { return Registry.Registered(); }
     }
 
     /// <summary>

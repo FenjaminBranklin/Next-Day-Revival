@@ -79,6 +79,7 @@ namespace NextDayRevival
             f.GroundDest = f.Tr.position;
             Equip(f, spec);
             unit.Fight.Overwatch.Role = MercRole.Of(spec.Weapons != null && spec.Weapons.Length > 0 ? spec.Weapons[0] : 0);
+            unit.WeaponRole = unit.Fight.Overwatch.Role;
             if (spec.Weapons != null && spec.Weapons.Length > 0 && spec.Weapons[0] == Stinger.ItemId)
                 f.Manpads = new MercStingerState();
             // Traits (docs/ai/tasks/mercenaries.md 4.6): precise sharpens his
@@ -163,10 +164,15 @@ namespace NextDayRevival
         static bool MercMayStand(Fighter f, MercUnit u)
         {
             if (u.Deserting) return false;
-            if (u.Order.Survive || u.Rally) return true;
+            if (u.Order.Survive || u.Rally || u.Supply.Active) return true;
             MercOrder o = u.Order;
             switch (o.Mode)
             {
+                case MercOrder.Drive:
+                    // Current M2 inputs are already sampled. Urgent evasion and
+                    // a wounded man's retreat shape his approach to the seat.
+                    return u.Ride.Boarding == null || u.Fight.In.Danger || u.Fight.Health < 0.35f
+                        || (u.Fight.Brain != null && u.Fight.Brain.Mode == MercBrain.Retreating && u.Fight.Health < 0.5f);
                 case MercOrder.Follow:
                 case MercOrder.Vehicle:
                     // B3c: a man running to his seat does not stop for a fight.
@@ -185,6 +191,12 @@ namespace NextDayRevival
                     // merc-attack-orders: the corridor and the threats decide,
                     // never the owner's distance (Revival.MercAttack.cs).
                     return MercAttackMayStand(f, u);
+                case MercOrder.ManGun:
+                    Flak.Gun gun = MercCrewPhases.Gun(u);
+                    if (MercCrewPhases.Ground(u) && gun != null)
+                        return MercCrewPhase.InPost(f.Tr.position.x - gun.Earthwork.position.x,
+                            f.Tr.position.z - gun.Earthwork.position.z);
+                    return Flat(o.Centre - f.Tr.position) <= MercStayLeash;
                 default:
                     return Flat(o.Centre - f.Tr.position) <= MercStayLeash;
             }
@@ -253,6 +265,7 @@ namespace NextDayRevival
             {
                 case MercOrder.Follow: MercFollow(f, u, now); return;
                 case MercOrder.Vehicle: MercBoard(f, u, now); return;
+                case MercOrder.Drive: MercBoard(f, u, now); return;
                 case MercOrder.Patrol: MercPatrol(f, u, now); return;
                 case MercOrder.Perimeter: MercPerimeter(f, u, now); return;
                 case MercOrder.ManGun:
@@ -270,8 +283,11 @@ namespace NextDayRevival
             if (fwd.sqrMagnitude < 0.01f) fwd = Vector3.forward;
             fwd.Normalize();
             bool marksman = u.Fight.Overwatch.Role == MercRole.Marksman;
-            Vector3 goal = marksman ? MercOverwatchGoal(f, u, fwd, now)
+            bool medic = Mercs.IsMedic(u);
+            if (medic) marksman = false;
+            Vector3 goal = TowerRoof.GoalUp(owner.position) ? owner.position : marksman ? MercOverwatchGoal(f, u, fwd, now)
                 : MercRole.Slot(MercRole.Assault, owner.position, fwd, u.Slot, 0);
+            if (medic) goal = owner.position - fwd * 16.8f + new Vector3(fwd.z, 0f, -fwd.x) * ((u.Slot & 1) == 0 ? -8.4f : 8.4f);
             // merc-combat-response: never a slot inside the owner's held aim.
             goal = MercSlotOutOfAim(goal, now);
             float dist = Flat(owner.position - f.Tr.position);
@@ -344,7 +360,7 @@ namespace NextDayRevival
             MercSeat st = u.Ride;
             if (st.Boarding == null) { MercFollow(f, u, now); return; }
             if (Flat(st.BoardAt - f.Tr.position) < 3f) { Hold(f, null, now); return; }
-            if (MercAA.IsVehicle(u.Order)) MercStationApproach(f, u, st.BoardAt, now);
+            if (MercAA.IsVehicle(u.Order) || u.Order.Mode == MercOrder.Drive) MercStationApproach(f, u, st.BoardAt, now);
             else MercMove(f, u, st.BoardAt, true, now);
         }
 
@@ -354,6 +370,8 @@ namespace NextDayRevival
             // Y B1: a STAY on the tower roof keeps its height (Beside would put
             // it on the ground under the roof); the roof ladder takes it there.
             if (u.GoalFor != o) { u.GoalFor = o; u.Goal = TowerRoof.GoalUp(o.Centre) ? o.Centre : Beside(o.Centre, o.K); }
+            if (Mercs.IsMedic(u) && !TowerRoof.GoalUp(o.Centre) && !TowerRoof.Split(f.Tr.position, u.Goal)
+                && MercHaltCover(f, u, o.Centre, o.Facing.sqrMagnitude > .01f ? o.Facing.normalized : f.Tr.forward, u.Goal, now)) return;
             float dist = Flat(u.Goal - f.Tr.position);
             if (dist < 4f && !TowerRoof.Split(f.Tr.position, u.Goal))
             {
@@ -539,21 +557,25 @@ namespace NextDayRevival
         /// when it changes, never per frame.</summary>
         static void MercMove(Fighter f, MercUnit u, Vector3 goal, bool run, float now)
         {
-            // Y B1: the tower roof is joined to the ground by its outside
-            // ladder only (Revival.TowerRoof.cs): walk to the foot or the top,
-            // climb, then hold the roof post behind its sandbags.
+            // Z T1b: bounded direct stair walk, including entry and roof post.
             Vector3 leg;
             int roof = TowerRoof.Leg(f.Tr, goal, u.Slot, out leg);
             if (roof == TowerRoof.LegClimbUp || roof == TowerRoof.LegClimbDown)
             {
-                Hold(f, null, now);
-                TowerRoof.StartClimb(f.Tr, Agent(f), roof == TowerRoof.LegClimbUp);
+                if (TowerRoof.StartClimb(f.Tr, Agent(f), roof == TowerRoof.LegClimbUp, u.Slot)) {
+                    Mercs.MedicineCancel(u, now);
+                    MercCoverService.Forget(u);
+                    f.HasOrder = false; f.NextState = 0f;
+                    u.NextOrder = 0f; u.Sense.NextSense = 0f;
+                    Drive(f, MainWalk, AddNone, PoseStand, now, false);
+                }
+                else Hold(f, null, now);
                 return;
             }
             if (roof == TowerRoof.LegHold) { MercCrouch(f, now); FaceDir(f, leg); return; }
             if (roof == TowerRoof.LegWalk) goal = leg;
             int state = run ? MainRun : MainWalk;
-            float precision = u.Order.Mode == MercOrder.Attack ? 1f : 6f;
+            float precision = u.Order.Mode == MercOrder.Attack || u.Supply.Active ? 1f : 6f;
             bool reorder = !f.HasOrder || now >= f.MoveDeadline || Flat(f.Ordered - goal) > precision
                 || f.WantMain != state;
             if (reorder && now >= u.NextOrder)
@@ -566,6 +588,30 @@ namespace NextDayRevival
             }
             else if (f.HasOrder) Drive(f, state, AddNone, PoseStand, now, false);
             if (now >= u.NextSpeed) { u.NextSpeed = now + 1f; MercSpeed(f, u); }
+        }
+
+        // Roof orders take the established traversal hook before the fight
+        // overlay. Once landed, M1 cover and M2/M3 fighting resume as usual.
+        static bool MercTowerStep(Fighter f, MercUnit u, float now)
+        {
+            if (u.Deserting) return false;
+            Vector3 goal;
+            switch (u.Order.Mode) {
+                case MercOrder.Follow:
+                case MercOrder.Vehicle:
+                    if (u.Owner == null) return false;
+                    goal = u.Owner.position;
+                    break;
+                case MercOrder.Stay:
+                case MercOrder.Attack:
+                case MercOrder.Perimeter:
+                    goal = u.Order.Centre;
+                    break;
+                default: return false;
+            }
+            if (!TowerRoof.Split(f.Tr.position, goal)) return false;
+            MercMove(f, u, goal, false, now);
+            return TowerRoof.Climbing(f.Tr);
         }
 
         static float RouteDistance(MercOrder o, Vector3 p)
