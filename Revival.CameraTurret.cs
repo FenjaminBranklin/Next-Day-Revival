@@ -1651,6 +1651,12 @@ namespace NextDayRevival
         /// <summary>Kurze Einblendung ueber dem Fadenkreuz.</summary>
         internal static void Hinweis(string text, float sekunden)
         {
+            Hinweis(text, sekunden, NativeMessage.Inventory);
+        }
+
+        internal static void Hinweis(string text, float sekunden, int type)
+        {
+            if (NativeMessage.Show(text, type)) { _hinweis = null; return; }
             _hinweis = text;
             _hinweisBis = Time.time + sekunden;
         }
@@ -2876,23 +2882,14 @@ namespace NextDayRevival
             float side = Mathf.Max(Screen.width, Screen.height);
             Rect r = new Rect((Screen.width - side) * 0.5f,
                               (Screen.height - side) * 0.5f, side, side);
-            GUI.DrawTexture(r, tex, ScaleMode.StretchToFill, true);
+            VanillaUi.Texture(r, tex, ScaleMode.StretchToFill, true);
         }
 
         /// <summary>Einblendung ueber dem Fadenkreuz - "keine Munition" und aehnliches.</summary>
         static void DrawHinweis()
         {
             if (_hinweis == null || Time.time > _hinweisBis) return;
-            float w = Mathf.Max(280f, Screen.width * 0.36f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.5f - Mathf.Max(60f, Screen.height * 0.10f);
-
-            Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x, y, w, 24f), Punkt());
-            GUI.color = new Color(1f, 0.72f, 0.35f, 0.95f);
-            GUI.Label(new Rect(x + 8f, y + 3f, w - 16f, 22f), _hinweis);
-            GUI.color = old;
+            VanillaUi.Notice(_hinweis, NativeMessage.Inventory);
         }
 
         /// <summary>
@@ -2931,7 +2928,7 @@ namespace NextDayRevival
 
             // Mittelpunkt: der eigentliche Treffpunkt.
             GUI.color = new Color(1f, 0.35f, 0.2f, 0.95f);
-            GUI.DrawTexture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), _dot);
+            VanillaUi.Texture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), _dot);
 
             // Entfernungsstriche unter der Mitte, alle 25 Bildpunkte einer.
             GUI.color = new Color(0.85f, 1f, 0.85f, 0.55f);
@@ -2939,7 +2936,7 @@ namespace NextDayRevival
             {
                 float y = cy + arm + gap + i * Mathf.Max(10f, Screen.height * 0.022f);
                 float w = 10f - i * 2f;
-                GUI.DrawTexture(new Rect(cx - w, y, w * 2f, 1.5f), _dot);
+                VanillaUi.Texture(new Rect(cx - w, y, w * 2f, 1.5f), _dot);
             }
 
             GUI.color = old;
@@ -2983,10 +2980,10 @@ namespace NextDayRevival
 
         static void Bars(float cx, float cy, float gap, float arm, float th)
         {
-            GUI.DrawTexture(new Rect(cx - gap - arm, cy - th * 0.5f, arm, th), _dot);
-            GUI.DrawTexture(new Rect(cx + gap, cy - th * 0.5f, arm, th), _dot);
-            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy - gap - arm, th, arm), _dot);
-            GUI.DrawTexture(new Rect(cx - th * 0.5f, cy + gap, th, arm), _dot);
+            VanillaUi.Texture(new Rect(cx - gap - arm, cy - th * 0.5f, arm, th), _dot);
+            VanillaUi.Texture(new Rect(cx + gap, cy - th * 0.5f, arm, th), _dot);
+            VanillaUi.Texture(new Rect(cx - th * 0.5f, cy - gap - arm, th, arm), _dot);
+            VanillaUi.Texture(new Rect(cx - th * 0.5f, cy + gap, th, arm), _dot);
         }
 
         // ------------------------------------------------------------- Helfer

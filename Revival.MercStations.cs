@@ -1,4 +1,4 @@
-// Y S4: command-time discovery, explicit seats and nearby station picker.
+// Y S4: station discovery and explicit seats for existing order adapters.
 using System;
 using System.Collections.Generic;
 using UnityEngine;
@@ -21,8 +21,7 @@ namespace NextDayRevival
         static readonly MercStationChoice[] Choices = new MercStationChoice[128];
         static readonly List<Mercs.Record> Replacement = new List<Mercs.Record>(1);
 
-        // No polling discovery. Called only by an order, opening the picker or
-        // its refresh button. Vehicle components are cached by MercRide.
+        // Command-time discovery. Vehicle components are cached by MercRide.
         internal static void Discover(bool radar)
         {
             Rows.Clear();
@@ -123,6 +122,7 @@ namespace NextDayRevival
         // most twice a second; only a successful replacement creates an order.
         internal static bool Replace(MercUnit u)
         {
+            if (Mercs.AirDefenceManaged(u)) return false;
             if (Time.time < u.StationRetryAt) return false;
             u.StationRetryAt = Time.time + 0.5f;
             bool radar = u.Order.Mode == MercOrder.ManRadar;
@@ -197,46 +197,4 @@ namespace NextDayRevival
         }
     }
 
-    internal static partial class MercUi
-    {
-        static bool _stationRadar;
-        static float _stationRefreshAt;
-        static Vector2 _stationScroll;
-
-        static void OpenStations(bool radar)
-        {
-            _stationRadar = radar; MercStations.Discover(radar);
-            _listOpen = true; _listTab = 2; _stationRefreshAt = Time.time + 0.5f;
-        }
-
-        static void StationRows(Rect r)
-        {
-            if (Time.time >= _stationRefreshAt)
-            { _stationRefreshAt = Time.time + 0.5f; MercStations.Refresh(); }
-            GUI.Label(new Rect(14f, 44f, r.width - 28f, 24f), Loc.T("Выбранный расчёт: все места этой пушки, затем соседние. Радиус 60 м.",
-                "Selected mercs: fill this gun, then nearby guns. Range 60 m."), _label);
-            if (ButtonColored(new Rect(14f, 74f, 210f, 28f), Loc.T("Занять ближайшую", "Man nearest"), Green, true))
-            { MercStations.Discover(_stationRadar); MercStations.Order(_stationRadar, 0); }
-            if (ButtonColored(new Rect(230f, 74f, 160f, 28f), Loc.T("Обновить список", "Refresh list"), Grey, true)) MercStations.Discover(_stationRadar);
-            if (ButtonColored(new Rect(396f, 74f, 140f, 28f), _stationRadar ? Loc.T("Пушки", "Guns") : Loc.T("Радар", "Radar"), Grey, true))
-            { _stationRadar = !_stationRadar; MercStations.Discover(_stationRadar); }
-            if (ButtonColored(new Rect(14f, 108f, 166f, 28f), Loc.T("Флак: авто", "Flak: AUTO"), Grey, true))
-                MercCrewPhases.OverrideSelected(MercCrewPhase.Auto);
-            if (ButtonColored(new Rect(186f, 108f, 166f, 28f), Loc.T("Флак: воздух", "Flak: AIR"), Grey, true))
-                MercCrewPhases.OverrideSelected(MercCrewPhase.Air);
-            if (ButtonColored(new Rect(358f, 108f, 178f, 28f), Loc.T("Флак: земля", "Flak: GROUND"), Grey, true))
-                MercCrewPhases.OverrideSelected(MercCrewPhase.Ground);
-            Rect view = new Rect(10f, 146f, r.width - 20f, r.height - 158f);
-            Rect content = new Rect(0f, 0f, view.width - 24f, Mathf.Max(view.height - 2f, MercStations.Rows.Count * 34f));
-            _stationScroll = GUI.BeginScrollView(view, _stationScroll, content);
-            for (int i = 0; i < MercStations.Rows.Count; i++)
-            {
-                MercStation row = MercStations.Rows[i];
-                if (ButtonColored(new Rect(4f, i * 34f, content.width - 8f, 30f), row.Label, row.Free ? Green : Grey, row.Free))
-                { MercStations.Refresh(); MercStations.Order(_stationRadar, row.Group); }
-            }
-            if (MercStations.Rows.Count == 0) GUI.Label(new Rect(4f, 4f, content.width, 30f), Loc.T("Нет пушек или радара поблизости.", "No guns or radar nearby."), _label);
-            GUI.EndScrollView();
-        }
-    }
 }

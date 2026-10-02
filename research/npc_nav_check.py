@@ -301,14 +301,19 @@ def main():
     npc = (ROOT / 'Revival.NpcCombat.cs').read_text(encoding='utf-8')
     prof = (ROOT / 'RevivalFrameProfiler.cs').read_text(encoding='utf-8')
     adapter = (ROOT / 'Revival.NpcNav.cs').read_text(encoding='ascii')
+    # Merged queues append profiler slots and ladder cleanup to the guard.
+    # Validate the actual named slot and guarded continue, not old formatting.
+    slot = int(re.search(r'const int S_NpcNavT = (\d+)', prof).group(1))
+    names = re.findall(r'"([^"\n]*)"', prof.split('static readonly string[] Names', 1)[1].split('};', 1)[0])
     checks = {
         'three existing combat loops + both native movement seams':
             npc.count('NavigationStep(') == 3 and npc.count('NavDestination(') == 2,
         'legacy recovery cannot compete with fast combat recovery': 'if (NavigationEligible(f, now)) return;' in npc,
-        'new unique F6 slot': 'S_NpcNavT = 187' in prof and 'NpcNav.Recovery.Sub' in prof,
+        'new unique F6 slot': names[slot].strip() == 'NpcNav.Recovery.Sub' and names.count(names[slot]) == 1,
         'bounded/nonalloc queries, no scene scans/corners/reflection invokes':
             'OverlapSphereNonAlloc' in adapter and not any(x in adapter for x in ['FindObjectsOfType', '.corners', '.Invoke(', 'Physics.OverlapSphere(']),
-        'native authority guards remain in caller': 'if (!IsMine(f.Ai)) continue;' in npc,
+        'native authority guards remain in caller': bool(re.search(
+            r'if \(!IsMine\(f\.Ai\)\)\s*(?:continue;|\{[^}]*\bcontinue;[^}]*\})', npc)),
     }
     for label, passed in checks.items():
         print(('PASS ' if passed else 'FAIL ') + label)

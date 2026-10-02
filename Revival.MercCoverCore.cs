@@ -212,6 +212,9 @@ namespace NextDayRevival
         readonly int[] _claimBy = new int[MaxClaims];
         readonly Vector3[] _claimAt = new Vector3[MaxClaims];
         readonly float[] _claimUntil = new float[MaxClaims];
+        readonly int[] _orderBy = new int[MaxClaims];
+        readonly Vector3[] _orderAt = new Vector3[MaxClaims];
+        readonly float[] _orderUntil = new float[MaxClaims];
 
         // Query scratch: the best faces and the two best crests.
         const int TopMax = 5;
@@ -239,7 +242,7 @@ namespace NextDayRevival
             _slots = new CoverCell[capacity + 1];
             for (int i = 0; i < _slots.Length; i++) _slots[i] = new CoverCell();
             _index = new Dictionary<int, int>(capacity * 2);
-            for (int i = 0; i < MaxClaims; i++) _claimBy[i] = -1;
+            for (int i = 0; i < MaxClaims; i++) { _claimBy[i] = -1; _orderBy[i] = -1; }
         }
 
         internal int Capacity { get { return _slots.Length - 1; } }
@@ -286,7 +289,7 @@ namespace NextDayRevival
             _index.Clear();
             _queued = 0;
             _building = -1;
-            for (int i = 0; i < MaxClaims; i++) _claimBy[i] = -1;
+            for (int i = 0; i < MaxClaims; i++) { _claimBy[i] = -1; _orderBy[i] = -1; }
         }
 
         /// <summary>A merc is here: keep the 3 x 3 cells around him built,
@@ -1094,12 +1097,37 @@ namespace NextDayRevival
                 if (_claimBy[i] == who) _claimBy[i] = -1;
         }
 
+        // Orders reserve destinations independently of a fighter's current
+        // cover. Normal Best/Rank queries respect both sets; no second search.
+        internal void ReserveOrder(int who, Vector3 at, float until, float now)
+        {
+            int slot = -1;
+            for (int i = 0; i < MaxClaims; i++)
+            {
+                if (_orderBy[i] == who) { slot = i; break; }
+                if (slot < 0 && (_orderBy[i] < 0 || _orderUntil[i] <= now)) slot = i;
+            }
+            if (slot < 0) return;
+            _orderBy[slot] = who; _orderAt[slot] = at; _orderUntil[slot] = until;
+        }
+
+        internal void ReleaseOrder(int who)
+        {
+            for (int i = 0; i < MaxClaims; i++)
+                if (_orderBy[i] == who) _orderBy[i] = -1;
+        }
+
         internal bool Claimed(Vector3 p, int claimant, float now)
         {
             for (int i = 0; i < MaxClaims; i++)
             {
                 if (_claimBy[i] < 0 || _claimBy[i] == claimant || _claimUntil[i] <= now) continue;
                 if (Flat(_claimAt[i] - p) < ClaimRadius) return true;
+            }
+            for (int i = 0; i < MaxClaims; i++)
+            {
+                if (_orderBy[i] < 0 || _orderBy[i] == claimant || _orderUntil[i] <= now) continue;
+                if (Flat(_orderAt[i] - p) < 7f) return true;
             }
             return false;
         }

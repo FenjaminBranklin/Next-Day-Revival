@@ -17,9 +17,10 @@ namespace NextDayRevival
             "pol_tank_horizontal 1", "pol_tank_horizontal 2",
             "pol_loading_stand 1", "fuel_bowser_trailer 1"
         };
+        // A1: the three bundle AA rings stay off. Since L1b no gun stands in
+        // them (the four field pits are the gun positions); 6.66 hid them too.
         internal static readonly string[] Shelters = {
-            "S1 shelter_ubs (south leaf jammed)", "S2 shelter_ubs_open", "S4 shelter_ubs_open",
-            "AA position north", "AA position S2-S3", "AA position V3 (empty)"
+            "S1 shelter_ubs (south leaf jammed)", "S2 shelter_ubs_open", "S4 shelter_ubs_open"
         };
         internal static readonly string[] RemovedIds = {
             "H2", "F1", "B1", "D3", "G1", "G1a", "G1b", "G1c", "G1d", "G1e", "G1f", "G1g",
@@ -56,6 +57,15 @@ namespace NextDayRevival
                 || name == "east_af_fuel_water";
         }
 
+        // Category containers of the assembly scenes. A1: "Shelters" was
+        // missing, so the walker took it for a model and hid the whole
+        // shelters bundle - S1, S2 and S4 included - in 6.66.
+        internal static bool Container(string scene, string name)
+        {
+            return name == scene + "Root" || name == "Apron" || name == "Runway" || name == "Compound"
+                || name == "Depot" || name == "Plant" || name == "Shelters";
+        }
+
         // An assembly model is the direct root named in its source recipe.
         // Other category containers/mesh descendants are traversed normally.
         internal static bool RemoveModel(string scene, string name, bool model)
@@ -68,20 +78,23 @@ namespace NextDayRevival
             return true;
         }
 
+        // A1: the S3 shelter stays removed, but its greybox floor (a fallback
+        // slab the shelter model normally replaces) becomes the hardstand at
+        // the end of the restored "T3 Dispersal branch to S3".
+        internal const string KeptFloor = "S3f S3 shelter floor";
+
+        // A1: only the compact fuel depot moves; the bowser trailer parks
+        // beside the loading stand (F3 had the two overlapping). Windsocks
+        // and the apron ladder/cart keep their vanilla places beside the
+        // restored concrete.
         internal static bool Move(string name, out float x, out float z)
         {
             x = z = 0f;
             switch (name) {
-                case "Windsock 0": x=4510f; z=-1240f; return true;
-                case "Windsock 1": x=4510f; z=1200f; return true;
-                case "Maintenance ladder": x=4360f; z=1065f; return true;
-                case "Ground power cart": x=4370f; z=1065f; return true;
                 case "pol_tank_horizontal 1": x=4100f; z=560f; return true;
                 case "pol_tank_horizontal 2": x=4100f; z=578f; return true;
                 case "pol_loading_stand 1": x=4137f; z=550f; return true;
-                case "fuel_bowser_trailer 1": x=4150f; z=550f; return true;
-                case "AA position S2-S3": x=4190f; z=-250f; return true;
-                case "AA position V3 (empty)": x=4420f; z=-1180f; return true;
+                case "fuel_bowser_trailer 1": x=4140f; z=540f; return true;
             }
             return false;
         }

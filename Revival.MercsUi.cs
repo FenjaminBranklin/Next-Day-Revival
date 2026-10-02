@@ -73,6 +73,9 @@ namespace NextDayRevival
         {
             if (!MercPageNote.Pass(MercPage.NoteMode, kind, Time.frameCount == _replyFrame)) return;
             if (Time.frameCount == _replyFrame) MercNotify.OrderClick(warn);
+            int nativeType = kind == MercPageNote.Death ? NativeMessage.Kill
+                : warn ? NativeMessage.Warning : NativeMessage.Group;
+            if (NativeMessage.Show(text, nativeType)) return;
             float secs = Mathf.Clamp(Mercs.CfgToastSeconds == null ? 4f : Mercs.CfgToastSeconds.Value, 1f, 15f);
             ToastLine t = new ToastLine();
             t.Text = text; t.Until = Time.time + secs * (warn ? 1.5f : 1f); t.Warn = warn;
@@ -153,7 +156,7 @@ namespace NextDayRevival
             Box(new Rect(x - 5f, y - 5f, 10f, 10f), Gold);
             Rect t = new Rect(x - 90f, y - 30f, 180f, 20f);
             Box(t, new Color(0f, 0f, 0f, 0.6f));
-            GUI.Label(t, _locateText, _locateStyle);
+            VanillaUi.Label(t, _locateText, _locateStyle);
         }
 
         // ============================================================= input
@@ -191,10 +194,16 @@ namespace NextDayRevival
         internal static void TickInput()
         {
             Keys();
+            Mercs.MedicineInteractionTick();
             CacheStrip();
             bool quickOwns = QuickInput();
             if (Input.anyKeyDown && !Input.GetMouseButtonDown(0)) Reply();
             if (_tabActive && Time.frameCount - _tabFrame > 2) CloseTab();
+            if (_tabActive)
+            {
+                Vector3 pointer = Input.mousePosition;
+                NguiMouse(!_listOpen && !VanillaSkin.Asking && !_panelRect.Contains(new Vector2(pointer.x, Screen.height - pointer.y)));
+            }
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
             {
                 if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && GameplayCursor.CommandUiState == 0
@@ -257,10 +266,10 @@ namespace NextDayRevival
         }
 
         // Sector order clockwise from the top: FOLLOW, STAY, PATROL,
-        // PERIMETER, VEHICLE, PEACEFUL (the mockup's wheel), the AA posts and
+        // PERIMETER, VEHICLE, PEACEFUL, AIR DEFENCE, TAKE COVER and
         // (merc-attack-orders) ATTACK on key 9.
-        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "MAN GUNS", "MAN NEAREST RADAR", "ATTACK", "FETCH AIRDROP", "MEDIC DUTY", "TAKE COVER" };
-        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ПУШКА", "РАДАР", "АТАКА", "ЗАБРАТЬ ГРУЗ", "САНИТАР", "В УКРЫТИЕ" };
+        static readonly string[] SectorEn = { "FOLLOW", "STAY", "PATROL", "PERIMETER", "VEHICLE", "PEACEFUL", "Man air defence", "TAKE COVER", "ATTACK", "FETCH AIRDROP", "MEDIC DUTY" };
+        static readonly string[] SectorRu = { "ЗА МНОЙ", "СТОЯТЬ", "ПАТРУЛЬ", "ПЕРИМЕТР", "ТЕХНИКА", "МИРНЫЙ", "ЗАНЯТЬ ПВО", "В УКРЫТИЕ", "АТАКА", "ЗАБРАТЬ ГРУЗ", "САНИТАР" };
         const int AttackSector = 8;
 
         static int Sector(Vector2 v)
@@ -298,16 +307,11 @@ namespace NextDayRevival
                     break;
                 case 4: Mercs.OrderVehicle(); break;
                 case 5: Mercs.TogglePeaceful(); break;
-                case 6:
-                case 7:
-                    if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) OpenStations(sector == 7);
-                    else if (sector == 6) Mercs.OrderRaidGuns();
-                    else Mercs.OrderAAPost(true, Mercs.OwnerPosition);
-                    break;
+                case 6: Mercs.ToggleAirDefence(); break;
+                case 7: Mercs.OrderRaidCover(); break;
                 case AttackSector: AttackAtCrosshair(); break;
                 case 9: MercFetch.Start(); break;
                 case 10: Mercs.ToggleMedics(); break;
-                case 11: Mercs.OrderRaidCover(); break;
             }
         }
 
@@ -576,7 +580,7 @@ namespace NextDayRevival
                     Rect m = new Rect(s.x - 7f, Screen.height - s.y - 7f, 14f, 14f);
                     Box(new Rect(m.x - 1f, m.y - 1f, 16f, 16f), new Color(0f, 0f, 0f, 0.8f));
                     Box(m, Gold);
-                    GUI.Label(new Rect(m.x + 18f, m.y - 3f, 120f, 20f), "<b>" + (i + 1) + "</b>  "
+                    VanillaUi.Label(new Rect(m.x + 18f, m.y - 3f, 120f, 20f), "<b>" + (i + 1) + "</b>  "
                         + (FlatDist(me, _route[i]) / 2.8f).ToString("0") + " m", _chip);
                 }
             }
@@ -627,6 +631,8 @@ namespace NextDayRevival
             internal Vector3 LabelAt;
             internal string Label;
             internal int Seen;
+            internal bool Move;
+            internal int MoveMask, MoveLabelMask;
             internal Color Tint;
             internal string Prefix = "";       // merc-attack-orders: "ATTACK " before the numbers
         }
@@ -637,6 +643,7 @@ namespace NextDayRevival
         static readonly Color InkGreen = new Color(0.22f, 0.78f, 0.30f, 1f);
         static readonly Color MateBlue = new Color(0.35f, 0.70f, 1.00f, 1f);
         // merc-attack-orders: the target-ring red of the game's map markers.
+        static readonly Color MoveBlue = new Color(0.32f, 0.75f, 0.88f, 1f);
         static readonly Color AttackRed = new Color(0.72f, 0.13f, 0.125f, 1f);
         // Map labels without a string per frame: "<b>n</b>" is built once.
         static readonly string[] Numbers = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" };
@@ -672,21 +679,25 @@ namespace NextDayRevival
                     if (m.Dead) continue;
                     number++;
                     MercOrder o = m.Order;
-                    if ((o.Mode != MercOrder.Patrol && o.Mode != MercOrder.Perimeter && o.Mode != MercOrder.Attack)
-                        || MercOrder.SceneKey(o.Scene) != scene || o.Points.Length == 0) continue;
+                    if (o.MoveNear && o.MoveInkScene == null) o.MoveInkScene = MercOrder.SceneKey(o.Scene);
+                    if ((o.Mode != MercOrder.Patrol && o.Mode != MercOrder.Perimeter && o.Mode != MercOrder.Attack && !o.MoveNear)
+                        || (o.MoveNear ? o.MoveInkScene : MercOrder.SceneKey(o.Scene)) != scene || o.Points.Length == 0) continue;
                     string key = InkKey(o);
                     Ink ink;
                     if (!_inks.TryGetValue(key, out ink)) { ink = NewInk(o); _inks[key] = ink; }
                     if (ink.Seen != _inkFrame)
                     {
-                        ink.Seen = _inkFrame; ink.Label = ink.Prefix;
+                        ink.Seen = _inkFrame; ink.MoveMask = 0;
+                        if (!ink.Move) ink.Label = ink.Prefix;
                         _inkNow.Add(ink);
                     }
-                    ink.Label += (ink.Label.Length == ink.Prefix.Length ? "" : " ") + "#" + number;
+                    if (ink.Move) ink.MoveMask |= 1 << number;
+                    else ink.Label += (ink.Label.Length == ink.Prefix.Length ? "" : " ") + "#" + number;
                 }
                 for (int i = 0; i < _inkNow.Count; i++)
                 {
                     Ink ink = _inkNow[i];
+                    if (ink.Move) MoveInkLabel(ink);
                     if (ink.Dashes == null || ink.East != EastWorld.Extends || (ink.Size - size).sqrMagnitude > 0.01f)
                         BuildInk(ink, size);
                     if (ink.Dashes.Count == 0) continue;
@@ -765,10 +776,23 @@ namespace NextDayRevival
 
         static string InkKey(MercOrder o)
         {
+            if (o.MoveNear && o.MoveInkKey != null) return o.MoveInkKey;
             string e = o.Encode();
             string[] c = e.Split('~');
             // mode, radius and points: the group index does not change the line.
-            return c.Length >= 7 ? c[0] + "~" + c[4] + "~" + c[5] : e;
+            string key = c.Length >= 7 ? c[0] + "~" + c[4] + "~" + c[5] : e;
+            if (o.MoveNear) { key += "~move"; o.MoveInkKey = key; }
+            return key;
+        }
+
+        static void MoveInkLabel(Ink ink)
+        {
+            if (ink.MoveMask == ink.MoveLabelMask) return;
+            ink.MoveLabelMask = ink.MoveMask; ink.Label = ink.Prefix;
+            for (int i = 1; i < 32; i++)
+                if ((ink.MoveMask & (1 << i)) != 0)
+                    ink.Label += (ink.Label.Length == ink.Prefix.Length ? "" : " ") + "#"
+                        + (i < Numbers.Length ? Numbers[i] : i.ToString());
         }
 
         static Ink NewInk(MercOrder o)
@@ -776,6 +800,19 @@ namespace NextDayRevival
             Ink ink = new Ink();
             ink.Loop = new List<Vector3>();
             ink.Tint = InkGreen;
+            if (o.MoveNear)
+            {
+                ink.Move = true;
+                float r = MercMovePlan.Radius;
+                for (int i = 0; i < 32; i++)
+                {
+                    float angle = i * Mathf.PI * 2f / 32f;
+                    ink.Loop.Add(o.Centre + new Vector3(Mathf.Sin(angle), 0f, Mathf.Cos(angle)) * r);
+                }
+                ink.Closed = true; ink.LabelAt = o.Centre;
+                ink.Tint = MoveBlue; ink.Prefix = Loc.T("ДВИЖЕНИЕ ", "MOVE ");
+                return ink;
+            }
             if (o.Mode == MercOrder.Attack)
             {
                 // merc-attack-orders: one dashed stroke in the target red - the
@@ -894,7 +931,7 @@ namespace NextDayRevival
             Box(new Rect(r.x - 3f, r.y, r.width + 6f, r.height), new Color(0f, 0f, 0f, 0.6f));
             Color old = GUI.color;
             GUI.color = c;
-            GUI.Label(r, t, _mapLabel);
+            VanillaUi.Label(r, t, _mapLabel);
             GUI.color = old;
         }
 
@@ -940,13 +977,13 @@ namespace NextDayRevival
             if (!view.Contains(new Vector2(r.xMax, r.yMax))) return;
             Color old = GUI.color;
             GUI.color = c;
-            GUI.Label(r, Bold(text), _mapLabel);
+            VanillaUi.Label(r, Bold(text), _mapLabel);
             GUI.color = old;
         }
 
         // ============================================================ drawing
         static Texture2D _white;
-        static GUIStyle _label, _small, _bold, _title, _button, _chip, _center;
+        static GUIStyle _label, _small, _bold, _title, _button, _chip, _center, _stripName;
         static readonly GUIContent _measure = new GUIContent();
         static readonly Color Panel = new Color(0.07f, 0.08f, 0.07f, 0.94f);
         static readonly Color CardBg = new Color(0.13f, 0.14f, 0.12f, 1f);
@@ -965,6 +1002,7 @@ namespace NextDayRevival
             _label.wordWrap = false; _label.richText = true;
             _small = new GUIStyle(_label); _small.fontSize = 11; _small.normal.textColor = Muted;
             _bold = new GUIStyle(_label); _bold.fontSize = 15;
+            _stripName = new GUIStyle(_label); _stripName.fontSize = 23;
             _title = new GUIStyle(_label); _title.fontSize = 18; _title.normal.textColor = Gold;
             _button = new GUIStyle(GUI.skin.button); _button.fontSize = 13; _button.richText = true;
             _chip = new GUIStyle(_small); _chip.normal.textColor = Gold;
@@ -975,7 +1013,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(r, _white);
+            VanillaUi.Texture(r, _white);
             GUI.color = old;
         }
 
@@ -994,7 +1032,7 @@ namespace NextDayRevival
         static void Centered(Rect r, string text, GUIStyle style)
         {
             Vector2 size = Measure(style, text);
-            GUI.Label(new Rect(r.x + (r.width - size.x) * 0.5f, r.y + (r.height - size.y) * 0.5f,
+            VanillaUi.Label(new Rect(r.x + (r.width - size.x) * 0.5f, r.y + (r.height - size.y) * 0.5f,
                 size.x + 2f, size.y), text, style);
         }
 
@@ -1003,7 +1041,7 @@ namespace NextDayRevival
             Box(r, enabled ? c : Grey);
             Color old = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, 0.01f);
-            bool hit = GUI.Button(r, "", _button) && enabled;
+            bool hit = VanillaUi.Button(r, "", _button) && enabled;
             if (hit) Reply();
             GUI.color = old;
             Centered(r, "<b>" + text + "</b>", _label);
@@ -1014,11 +1052,16 @@ namespace NextDayRevival
         {
             Styles();
             bool window = GameUi.WindowOpen;
-            // W-UI2: the new trader window draws the Mercenaries page itself.
-            if (window && !TraderUi.Owns) DrawTradeTab();
-            else if (_tabActive) CloseTab();
+            // a-u2: only the merc tab is custom; safe/market are always native.
+            if (window)
+            {
+                FrameProf.S(FrameProf.S_MercTabD); DrawTradeTab(); FrameProf.E(FrameProf.S_MercTabD);
+            }
+            else if (_tabVisible || _tabActive) CloseTab();
             if (_wheelOpen && !window) DrawWheel();
             bool repaint = Event.current.type == EventType.Repaint;
+            if (repaint && !window && !_listOpen && !_wheelOpen && GameplayCursor.CanCommand)
+                DrawMedicineInteraction();
             if (repaint && _placing && !window && !_listOpen) DrawPlacing();
             if (GameUi.State == 8 && MapWanted()) DrawMap();
             else HideMap();
@@ -1027,6 +1070,21 @@ namespace NextDayRevival
             if (repaint && !window) DrawLocate();
             DrawCommandPing();
             if (repaint) DrawToasts();
+        }
+
+        static void DrawMedicineInteraction()
+        {
+            Mercs.Record r = Mercs.MedicineTarget;
+            if (r == null || r.Unit == null || r.Unit.Ai == null) return;
+            float x = Screen.width * 0.5f - 180f, y = Screen.height * 0.5f + 44f;
+            VanillaUi.Panel(new Rect(x - 8f, y - 6f, 376f, 74f), "InteractItem");
+            VanillaUi.Label(new Rect(x, y, 360f, 20f), r.Name, _label);
+            VanillaUi.Label(new Rect(x, y + 20f, 360f, 20f), Mercs.MedkitStockLabel(r), _small);
+            string action = r.Down.Down ? Loc.T("Shift+E: оживить аптечкой", "Shift+E: revive with medkit")
+                : Loc.T("Shift+E: дать аптечку из рюкзака", "Shift+E: give inventory medkit");
+            VanillaUi.Label(new Rect(x, y + 40f, 360f, 20f), Mercs.CanGiveMedkit(r) ? action
+                : Loc.T("Передача недоступна (запас полон или ожидается сервер)",
+                    "Unavailable (stock full or awaiting server)"), _small);
         }
 
         static void DrawToasts()
@@ -1041,9 +1099,8 @@ namespace NextDayRevival
                 Vector2 size = Measure(_label, t);
                 float w = Mathf.Min(size.x + 20f, 620f);
                 Rect r = new Rect(Screen.width - w - 20f, y, w, 26f);
-                Box(r, new Color(0f, 0f, 0f, 0.7f));
-                Box(new Rect(r.x, r.y, 3f, r.height), _toasts[i].Warn ? Red : Gold);
-                GUI.Label(new Rect(r.x + 10f, r.y + 4f, w - 12f, 20f), t, _label);
+                VanillaUi.Panel(r, _toasts[i].Warn ? "Warning_Msg" : "Group_Msg");
+                VanillaUi.Label(new Rect(r.x + 10f, r.y + 4f, w - 12f, 20f), t, _label);
                 y += 30f;
             }
         }
@@ -1119,25 +1176,27 @@ namespace NextDayRevival
         static void DrawStrip()
         {
             if (_stripCount == 0) return;
-            float h = 20f + 16f * _stripCount;
-            Rect r = new Rect(12f, Screen.height - h - 150f, 190f, h);
-            Box(r, new Color(0f, 0f, 0f, 0.55f));
-            GUI.Label(new Rect(r.x + 6f, r.y + 2f, 180f, 16f), _stripTitle, _chip);
+            float height = 24f + 35f * _stripCount;
+            Rect frame = new Rect(12f, Screen.height - height - 150f, 290f, height);
+            VanillaUi.Panel(frame, "MarkerInfo");
+            VanillaUi.Label(new Rect(frame.x + 8f, frame.y + 2f, 274f, 20f), _stripTitle, _chip);
             for (int i = 0; i < _stripCount; i++)
             {
                 StripRow row = _strip[i];
                 Mercs.Record m = row.Record;
-                float y = r.y + 18f + 16f * i;
-                GUI.Label(new Rect(r.x + 6f, y, 70f, 16f), row.Name, _small);
-                Bar(new Rect(r.x + 78f, y + 5f, 40f, 6f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
-                GUI.Label(new Rect(r.x + 122f, y, 60f, 16f), row.Order, _small);
-                if (m.Unpaid) GUI.Label(new Rect(r.x + 170f, y, 20f, 16f), "<color=#ff5040><b>$!</b></color>", _small);
+                float y = frame.y + 24f + 35f * i;
+                Rect r = new Rect(frame.x + 4f, y, 282f, 33f);
+                VanillaUi.Panel(r, "groupPlayerWhite", new Color(0.329f, 0.329f, 0.329f, 1f));
+                VanillaUi.Instrument(new Rect(r.x + 6f, y, 110f, 27f), row.Name, _stripName);
+                Bar(new Rect(r.x + 116f, y + 13f, 48f, 5f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
+                VanillaUi.Label(new Rect(r.x + 170f, y, 90f, 27f), row.Order, _small);
+                if (m.Unpaid) VanillaUi.Label(new Rect(r.x + 262f, y, 20f, 27f), "$!", _small);
             }
         }
 
         static Color HpColor(float hp)
         {
-            return hp > 0.6f ? new Color(0.45f, 0.75f, 0.35f, 1f) : hp > 0.3f ? Gold : Red;
+            return hp > 0.6f ? VanillaUi.Green : hp > 0.3f ? VanillaUi.Gold : VanillaUi.Red;
         }
 
         static string Short(string s, int n) { return s.Length <= n ? s : s.Substring(0, n); }
@@ -1146,6 +1205,7 @@ namespace NextDayRevival
         {
             if (m.Down.Down) return Loc.T("НУЖНА ПОМОЩЬ", "DOWNED / SOS");
             MercOrder order = m.Order;
+            if (order.MoveNear) return Loc.T("К УКРЫТИЮ", "MOVE / HOLD");
             if (order.Survive) return Loc.T("В УКРЫТИИ", "TAKING COVER");
             if (m.Unit != null && m.Unit.Rally) return Loc.T("СБОР", "RALLY");
             string o;
@@ -1267,10 +1327,11 @@ namespace NextDayRevival
             { _wheelWhoKey = who; _wheelWho = Mercs.Addressed(sel); }
             _wheelPeaceful = sel.Count > 0 && sel[0].Peaceful;
             _wheelPoint = null;
-            if (_wheelPick == 6 || _wheelPick == 7)
+            if (_wheelPick == 6)
             {
-                _wheelPoint = Loc.T("ближайшее свободное место; Shift + отпустить = список, или L > Пушки/радар",
-                    "nearest free seat; Shift + release = list, or L > Guns/radar");
+                _wheelPoint = Mercs.AirDefenceActive
+                    ? Loc.T("ещё раз - освободить ПВО", "click again to release air defence")
+                    : Loc.T("весь отряд: 52-К, радар, ЗУ-23; остальные за вами", "whole squad: 52-K, radar, ZU-23; others follow");
                 return;
             }
             if ((_wheelPick < 1 || _wheelPick > 3) && _wheelPick != AttackSector) return;
@@ -1301,12 +1362,18 @@ namespace NextDayRevival
         static Component _traderAi;        // W: the storekeeper of the open trader window
         static Rect _tabRect, _safeRect, _tradeRect, _panelRect;
         static int _objectId;
-        static Vector2 _cardScroll;
-        static string _confirmId;
-        static float _confirmUntil;
         static Component _nguiCamera;
         static FieldInfo _fUseMouse;
-        static bool _mouseOff;
+        static bool _mouseOff, _savedMouse;
+        static FieldInfo _fUseKeyboard, _fUseController, _fUseTouch;
+        static bool _keysOff, _savedKeyboard, _savedController, _savedTouch;
+        static object _tabUi;
+        static GameObject _marketRoot;
+        static Transform _marketButton, _storageButton;
+        static Camera _tradeCamera;
+        static float _nextTradeRead;
+        static int _tradeWidth, _tradeHeight;
+        static MethodInfo _closeNativeTrade;
 
         static bool UiLook()
         {
@@ -1320,6 +1387,7 @@ namespace NextDayRevival
             _fSwitch = AccessTools.Field(_uiType, "SwitchUIMarketStorageMarketplace");
             _fMarketUi = AccessTools.Field(_uiType, "HUD_MarketplaceUI");
             _fStorageUi = AccessTools.Field(_uiType, "StorageUI");
+            _closeNativeTrade = AccessTools.Method(_uiType, "SwitchMarketStorgeUI", null, null);
             _fCam = AccessTools.Field(_uiType, "UICam");
             Type sw = RevivalPlugin.TypeByName("SwitchUIMarketStorage");
             if (sw != null)
@@ -1332,69 +1400,57 @@ namespace NextDayRevival
             return _fSwitchState != null && _fCurrentObject != null;
         }
 
-        /// <summary>Once per frame: is a trader window open, whose trader,
-        /// where are its tabs and body on screen.</summary>
+        /// <summary>2 Hz while a native trader window is open. Ref fields
+        /// do not box; enum reads and input writes use FastField delegates.</summary>
         static void ReadTrade()
         {
             if (_readFrame == Time.frameCount) return;
             _readFrame = Time.frameCount;
+            float now = Time.unscaledTime;
+            bool resized = _tradeWidth != Screen.width || _tradeHeight != Screen.height;
+            if (now < _nextTradeRead && !resized) return;
+            _nextTradeRead = now + 0.5f;
             _tabVisible = false;
             if (!UiLook()) return;
-            object ui = _pUi == null ? null : _pUi.GetValue(null, null);
+            UnityEngine.Object live = _tabUi as UnityEngine.Object;
+            if (_tabUi == null || live == null) _tabUi = _pUi == null ? null : _pUi.GetValue(null, null);
+            object ui = _tabUi;
             if (ui == null) return;
-            int state = Convert.ToInt32(_fSwitchState.GetValue(ui));
+            int state = FastField.GetInt(_fSwitchState, ui);
             if (state != 0 && state != 1) return;
             Component obj = _fCurrentObject.GetValue(ui) as Component;
             if (obj == null) return;
             if (obj.GetInstanceID() != _objectId)
             {
+                CloseTab();
                 _objectId = obj.GetInstanceID();
                 _tabSettlement = TraderSettlement(obj, out _tabFaction);
-                _tabActive = false;
             }
             if (_tabSettlement == null) return;
-            Camera cam = _fCam == null ? null : _fCam.GetValue(ui) as Camera;
+            _tradeCamera = _fCam == null ? null : _fCam.GetValue(ui) as Camera;
             object sw = _fSwitch == null ? null : _fSwitch.GetValue(ui);
-            _safeRect = _tradeRect = new Rect();
-            if (cam != null && sw != null)
+            GameObject market = sw == null || _fMarketBtn == null ? null : _fMarketBtn.GetValue(sw) as GameObject;
+            GameObject storage = sw == null || _fStorageBtn == null ? null : _fStorageBtn.GetValue(sw) as GameObject;
+            _marketButton = market == null ? null : market.transform;
+            _storageButton = storage == null ? null : storage.transform;
+            object m = _fMarketUi == null ? null : _fMarketUi.GetValue(ui);
+            _marketRoot = m as GameObject;
+            Component mc = m as Component;
+            if (_marketRoot == null && mc != null) _marketRoot = mc.gameObject;
+            VanillaSkin.Ui = ui;
+            VanillaSkin.Resolve(_marketRoot);
+            if (!VanillaSkin.FormRect(_tradeCamera, out _panelRect))
             {
-                GameObject market = _fMarketBtn == null ? null : _fMarketBtn.GetValue(sw) as GameObject;
-                GameObject storage = _fStorageBtn == null ? null : _fStorageBtn.GetValue(sw) as GameObject;
-                if (market != null) MapTools.MapScreenRect(market.transform, cam, out _tradeRect);
-                if (storage != null) MapTools.MapScreenRect(storage.transform, cam, out _safeRect);
+                float k = Mathf.Min(Screen.width / 1280f, Screen.height / 720f);
+                _panelRect = new Rect((Screen.width - 922f * k) * 0.5f, (Screen.height - 510f * k) * 0.5f, 922f * k, 510f * k);
             }
-            Rect anchor = _tradeRect.width > 1f ? _tradeRect : _safeRect;
-            if (anchor.width > 1f)
-            {
-                float right = Mathf.Max(_tradeRect.xMax, _safeRect.xMax);
-                _tabRect = new Rect(right + 4f, anchor.y, Mathf.Max(anchor.width, 130f), anchor.height);
-            }
-            else _tabRect = new Rect(Screen.width * 0.5f + 180f, 40f, 150f, 34f);
-            _panelRect = new Rect();
-            GameObject body = null;
-            if (cam != null)
-            {
-                object m = _fMarketUi == null ? null : _fMarketUi.GetValue(ui);
-                body = state == 1 ? (m as GameObject) : null;
-                if (body == null) { Component mc = m as Component; if (mc != null && state == 1) body = mc.gameObject; }
-                if (body == null && _fStorageUi != null)
-                {
-                    object s = _fStorageUi.GetValue(ui);
-                    body = s as GameObject;
-                    if (body == null) { Component sc = s as Component; if (sc != null) body = sc.gameObject; }
-                }
-                if (body != null) MapTools.MapScreenRect(body.transform, cam, out _panelRect);
-            }
-            if (_panelRect.width < 400f || _panelRect.height < 250f)
-                _panelRect = new Rect(Screen.width * 0.5f - 470f, _tabRect.yMax + 6f, 940f, Mathf.Min(560f, Screen.height - _tabRect.yMax - 40f));
-            // Never under the tabs, and big enough for two rows of cards.
-            if (_panelRect.y < _tabRect.yMax + 4f)
-            {
-                float cut = _tabRect.yMax + 4f - _panelRect.y;
-                _panelRect.y += cut; _panelRect.height -= cut;
-            }
-            _panelRect.width = Mathf.Max(_panelRect.width, 700f);
-            _panelRect.height = Mathf.Max(_panelRect.height, 330f);
+            VanillaSkin.Begin(_panelRect);
+            if (!VanillaSkin.WidgetRect(_marketButton, _tradeCamera, 160f, 40f, out _tradeRect))
+                _tradeRect = VanillaSkin.Px(464f, -100f, 160f, 40f);
+            if (!VanillaSkin.WidgetRect(_storageButton, _tradeCamera, 160f, 40f, out _safeRect))
+                _safeRect = VanillaSkin.Px(298f, -100f, 160f, 40f);
+            _tabRect = new Rect(_tradeRect.xMax + 4f * VanillaSkin.K, _tradeRect.y, _tradeRect.width, _tradeRect.height);
+            _tradeWidth = Screen.width; _tradeHeight = Screen.height;
             _tabVisible = true;
         }
 
@@ -1428,7 +1484,7 @@ namespace NextDayRevival
         internal static bool TraderPoint(out Vector3 point)
         {
             point = Vector3.zero;
-            if ((!_tabVisible && !TraderUi.Owns) || _tabSettlement == null || _traderAi == null) return false;
+            if (!_tabVisible || _tabSettlement == null || _traderAi == null) return false;
             point = _traderAi.transform.position;
             return true;
         }
@@ -1436,51 +1492,88 @@ namespace NextDayRevival
         static void CloseTab()
         {
             _tabActive = false;
+            _tabVisible = false;
+            _nextTradeRead = 0f;
+            MercPage.Close();
             NguiMouse(true);
+            NguiKeys(true);
         }
 
-        /// <summary>NGUI's UICamera.useMouse off while the pointer is over the
-        /// hire cards, so a click never reaches the trade list underneath.</summary>
+        // Only input is gated while the pointer is on the merc form.
+        // The native camera, safe/market widgets and trade logic are untouched.
+        static bool NguiCamera()
+        {
+            if (_nguiCamera != null) return true;
+            Type t = RevivalPlugin.TypeByName("UICamera");
+            _nguiCamera = _tradeCamera == null || t == null ? null : _tradeCamera.GetComponent(t);
+            if (_nguiCamera == null) return false;
+            _fUseMouse = AccessTools.Field(t, "useMouse");
+            _fUseKeyboard = AccessTools.Field(t, "useKeyboard");
+            _fUseController = AccessTools.Field(t, "useController");
+            _fUseTouch = AccessTools.Field(t, "useTouch");
+            return true;
+        }
+
         static void NguiMouse(bool on)
         {
             if (on == !_mouseOff) return;
-            try
+            if (!NguiCamera() || _fUseMouse == null) return;
+            if (!on) _savedMouse = FastField.GetBool(_fUseMouse, _nguiCamera);
+            FastField.SetBool(_fUseMouse, _nguiCamera, on ? _savedMouse : false);
+            _mouseOff = !on;
+        }
+
+        static void NguiKeys(bool on)
+        {
+            if (on == !_keysOff) return;
+            if (!NguiCamera()) return;
+            if (!on)
             {
-                if (_nguiCamera == null)
-                {
-                    object ui = _pUi == null ? null : _pUi.GetValue(null, null);
-                    Camera cam = ui == null || _fCam == null ? null : _fCam.GetValue(ui) as Camera;
-                    Type t = RevivalPlugin.TypeByName("UICamera");
-                    _nguiCamera = cam == null || t == null ? null : cam.GetComponent(t);
-                    _fUseMouse = t == null ? null : AccessTools.Field(t, "useMouse");
-                }
-                if (_nguiCamera == null || _fUseMouse == null) return;
-                _fUseMouse.SetValue(_nguiCamera, on);
-                _mouseOff = !on;
+                if (_fUseKeyboard != null) _savedKeyboard = FastField.GetBool(_fUseKeyboard, _nguiCamera);
+                if (_fUseController != null) _savedController = FastField.GetBool(_fUseController, _nguiCamera);
+                if (_fUseTouch != null) _savedTouch = FastField.GetBool(_fUseTouch, _nguiCamera);
             }
-            catch { }
+            if (_fUseKeyboard != null) FastField.SetBool(_fUseKeyboard, _nguiCamera, on ? _savedKeyboard : false);
+            if (_fUseController != null) FastField.SetBool(_fUseController, _nguiCamera, on ? _savedController : false);
+            if (_fUseTouch != null) FastField.SetBool(_fUseTouch, _nguiCamera, on ? _savedTouch : false);
+            _keysOff = !on;
         }
 
         static void DrawTradeTab()
         {
-            ReadTrade();
+            FrameProf.S(FrameProf.S_MercTabT); ReadTrade(); FrameProf.E(FrameProf.S_MercTabT);
             if (!_tabVisible) { if (_tabActive) CloseTab(); return; }
             _tabFrame = Time.frameCount;
+            // The original roster window retains whitelist/station controls.
+            // Its input must not reach the native trader or the merc page.
+            if (_listOpen) { NguiMouse(false); NguiKeys(false); return; }
             Event e = Event.current;
-            if (_tabActive && e.type == EventType.MouseDown
+            if (_tabActive && !VanillaSkin.Asking && e.type == EventType.MouseDown
                 && (_safeRect.Contains(e.mousePosition) || _tradeRect.Contains(e.mousePosition)))
                 CloseTab();
-            string label = Loc.T("Наёмники", "Mercenaries");
-            if (ButtonColored(_tabRect, label, _tabActive ? new Color(0.55f, 0.42f, 0.10f, 1f) : new Color(0.18f, 0.18f, 0.16f, 0.95f), true))
+            VanillaSkin.Begin(_panelRect);
+            if (!VanillaSkin.Asking && VanillaSkin.TabButton(_tabRect, Loc.T("Наёмники", "Mercenaries"), _tabActive))
             {
-                _tabActive = !_tabActive;
-                if (_tabActive) Mercs.RequestRoster(0f);
-                else NguiMouse(true);
+                if (_tabActive) CloseTab();
+                else
+                {
+                    _tabActive = true;
+                    MercPage.Open();
+                    Mercs.RequestRoster(0f);
+                    NguiKeys(false);
+                    VanillaSkin.Sound("OpenWindow");
+                }
             }
-            if (!_tabActive) return;
-            Vector2 mouse = e.mousePosition;
-            NguiMouse(!_panelRect.Contains(mouse));
-            DrawHire(_panelRect);
+            if (!_tabActive) { NguiMouse(true); NguiKeys(true); return; }
+            NguiMouse(!VanillaSkin.Asking && !_panelRect.Contains(e.mousePosition));
+            FrameProf.S(FrameProf.S_MercPageT); MercPage.Tick(Time.unscaledTime); FrameProf.E(FrameProf.S_MercPageT);
+            FrameProf.S(FrameProf.S_MercPageD); bool close = MercPage.Draw(_panelRect); FrameProf.E(FrameProf.S_MercPageD);
+            if (close)
+            {
+                CloseTab();
+                if (_tabUi != null && _closeNativeTrade != null)
+                    _closeNativeTrade.Invoke(_tabUi, new object[] { 2, null, true, true, false });
+            }
         }
 
         /// <summary>W-UI2: the trader window (TraderUi) opened this trader:
@@ -1499,112 +1592,10 @@ namespace NextDayRevival
         /// (civilian, looter, traitor), null for none.</summary>
         internal static string EmbeddedSettlement { get { return _tabSettlement; } }
 
-        static void DrawHire(Rect r)
+        internal static void OpenTraderRoster()
         {
-            Box(r, Panel);
-            GUI.BeginGroup(r);
-            float w = r.width;
-            GUI.Label(new Rect(14f, 8f, 360f, 26f), "<b>" + Loc.T("НАЁМНИКИ", "HIRE MERCENARIES") + "</b>", _title);
-            string where = _tabSettlement == "civilian" ? Loc.T("мирное поселение", "civilian settlement")
-                : _tabSettlement == "looter" ? Loc.T("поселение мародёров", "looter settlement")
-                : Loc.T("лагерь предателей + военный городок", "traitor camp + military town");
-            GUI.Label(new Rect(14f, 32f, 520f, 18f), where + "  -  " + Loc.T("ваша сторона: ", "your side: ")
-                + Mercs.FactionLabel(Mercs.FactionOf(Mercs.OwnerObject)), _small);
-            int money = Mercs.Money;
-            GUI.Label(new Rect(w - 300f, 8f, 290f, 22f), Loc.T("Деньги  ", "Money  ") + "<b>"
-                + (money < 0 ? "?" : Mercs.Money0(money)) + "</b>", _bold);
-            GUI.Label(new Rect(w - 300f, 30f, 290f, 18f), Loc.T("Наёмники ", "Mercs ") + Mercs.AliveCount + " / " + Mercs.Cap, _small);
-
-            List<Mercs.Profile> cards = Mercs.ProfilesFor(_tabSettlement);
-            float cardW = Mathf.Floor((w - 28f - 3f * 10f) / 4f), cardH = 222f;
-            int rows = (cards.Count + 3) / 4;
-            float footer = 58f;
-            Rect view = new Rect(0f, 56f, w, r.height - 56f - footer);
-            Rect content = new Rect(0f, 0f, w - 20f, Mathf.Max(view.height - 2f, rows * (cardH + 10f)));
-            _cardScroll = GUI.BeginScrollView(view, _cardScroll, content);
-            if (cards.Count == 0)
-                GUI.Label(new Rect(14f, 10f, w - 30f, 20f), Loc.T("Этот торговец не предлагает наёмников.", "This trader offers no mercenaries."), _label);
-            for (int i = 0; i < cards.Count; i++)
-            {
-                Rect c = new Rect(14f + (i % 4) * (cardW + 10f), (i / 4) * (cardH + 10f), cardW, cardH);
-                DrawCard(c, cards[i], i + 1);
-            }
-            GUI.EndScrollView();
-
-            float fy = r.height - footer + 6f;
-            GUI.Label(new Rect(14f, fy, w - 330f, 18f), Loc.T("Содержание - за каждые 24 игровых часа службы. Без оплаты: ",
-                "Upkeep every 24 in-game h while deployed. Unpaid: ") + Mercs.GraceHours
-                + Loc.T(" ч отсрочки, потом уходит.", " h grace, then desertion."), _small);
-            string note = Mercs.LinkText();
-            GUI.Label(new Rect(14f, fy + 18f, w - 330f, 18f), note + "  " + Loc.T("Профили: ", "Profiles: ") + Mercs.ProfileSource, _small);
-            int due = 0;
-            for (int i = 0; i < Mercs.Roster.Count; i++) if (Mercs.Roster[i].Unpaid) due++;
-            if (due > 0 && ButtonColored(new Rect(w - 310f, fy, 140f, 30f), Loc.T("Оплатить долги (", "Pay debts (") + due + ")", Red, true))
-                Mercs.PayAllDue();
-            if (ButtonColored(new Rect(w - 160f, fy, 146f, 30f), Loc.T("Мои наёмники (", "My mercs (") + _listKeyText + ")",
-                new Color(0.2f, 0.2f, 0.18f, 1f), true)) { _listOpen = true; _listTab = 0; }
-            GUI.EndGroup();
-
-            // 1-9 hire by number while the pointer is over the cards.
-            Event e = Event.current;
-            if (e.type == EventType.KeyDown && r.Contains(e.mousePosition))
-            {
-                int n = e.keyCode >= KeyCode.Alpha1 && e.keyCode <= KeyCode.Alpha9 ? e.keyCode - KeyCode.Alpha0 : 0;
-                if (n > 0 && n <= cards.Count) { Click(cards[n - 1]); e.Use(); }
-            }
-        }
-
-        static void DrawCard(Rect c, Mercs.Profile p, int number)
-        {
-            bool flash = _flashProfile == p.Id && Time.time < _flashUntil;
-            Box(c, flash ? new Color(0.35f, 0.30f, 0.12f, 1f) : CardBg);
-            // A silhouette plate in place of a portrait.
-            Rect face = new Rect(c.x + 8f, c.y + 8f, 44f, 48f);
-            Box(face, new Color(0.25f, 0.26f, 0.22f, 1f));
-            Centered(face, "<b>" + p.Name.Substring(0, 1) + "</b>", _title);
-            GUI.Label(new Rect(c.x + 60f, c.y + 6f, c.width - 64f, 22f), "<b>" + p.Name + "</b>", _bold);
-            GUI.Label(new Rect(c.x + 60f, c.y + 26f, c.width - 64f, 20f), "<color=#f5b833><b>" + Mercs.Money0(p.Price) + "</b></color>", _label);
-            GUI.Label(new Rect(c.x + 60f, c.y + 42f, c.width - 64f, 16f), Loc.T("найм", "hire") + (p.Settlement == "mtown" ? Loc.T("  (военный городок)", "  (military town)") : ""), _small);
-            float y = c.y + 62f;
-            GUI.Label(new Rect(c.x + 8f, y, 80f, 16f), Loc.T("Содержание", "Upkeep"), _small);
-            GUI.Label(new Rect(c.x + 84f, y, c.width - 90f, 16f), "<b>" + Mercs.Money0(p.Upkeep) + Loc.T(" / сутки", " / day") + "</b>", _small);
-            y += 18f;
-            GUI.Label(new Rect(c.x + 8f, y, c.width - 16f, 16f), Loc.T("Оружие", "Weapon"), _small);
-            GUI.Label(new Rect(c.x + 8f, y + 14f, c.width - 16f, 18f), Short(p.WeaponLabel, 34), _label);
-            y += 34f;
-            GUI.Label(new Rect(c.x + 8f, y, c.width - 16f, 16f), Loc.T("Броня", "Armour"), _small);
-            GUI.Label(new Rect(c.x + 8f, y + 14f, c.width - 16f, 18f), Short(p.ArmourLabel, 40), _small);
-            Bar(new Rect(c.x + 8f, y + 32f, c.width - 16f, 5f), p.Protection, new Color(0.45f, 0.62f, 0.85f, 1f));
-            y += 42f;
-            string chips = "";
-            if (p.Precise > 0) chips += Loc.T("точный +", "precise +") + p.Precise + "%  ";
-            if (p.Fast > 0) chips += Loc.T("быстрый +", "fast +") + p.Fast + "%  ";
-            if (p.AAGunner > 0) chips += Loc.T("зенитчик ", "Flak gunner ") + p.AAGunner + "/50  ";
-            if (p.Tanky > 0) chips += Loc.T("живучий +", "tanky +") + p.Tanky + "%";
-            GUI.Label(new Rect(c.x + 8f, y, c.width - 16f, 18f), chips.Length == 0 ? Loc.T("без особенностей", "no traits") : chips,
-                chips.Length == 0 ? _small : _chip);
-            string block = Mercs.HireBlock(p);
-            bool confirm = _confirmId == p.Id && Time.time < _confirmUntil;
-            string text = block != null ? block
-                : confirm ? Loc.T("ПОДТВЕРДИТЬ ", "CONFIRM ") + Mercs.Money0(p.Price)
-                : Loc.T("НАНЯТЬ", "HIRE") + "  (" + number + ")";
-            if (ButtonColored(new Rect(c.x + 8f, c.yMax - 38f, c.width - 16f, 30f), text,
-                confirm ? new Color(0.62f, 0.45f, 0.10f, 1f) : Green, block == null))
-                Click(p);
-        }
-
-        /// <summary>Hiring costs a fortune: the first click (or number key)
-        /// arms the card for 4 s, the second hires.</summary>
-        static void Click(Mercs.Profile p)
-        {
-            if (Mercs.HireBlock(p) != null) { Toast(Mercs.HireBlock(p), true); return; }
-            if (_confirmId == p.Id && Time.time < _confirmUntil)
-            {
-                _confirmId = null;
-                Mercs.Hire(p);
-                return;
-            }
-            _confirmId = p.Id; _confirmUntil = Time.time + 4f;
+            _listOpen = true;
+            _listTab = 0;
         }
 
         // ============================================================== list
@@ -1636,17 +1627,15 @@ namespace NextDayRevival
         {
             Rect r = new Rect(0f, 0f, _listRect.width, _listRect.height);
             Box(r, Panel);
-            GUI.Label(new Rect(14f, 8f, 260f, 26f), "<b>" + Loc.T("МОИ НАЁМНИКИ", "MY MERCENARIES") + "</b>", _title);
+            VanillaUi.Label(new Rect(14f, 8f, 260f, 26f), "<b>" + Loc.T("МОИ НАЁМНИКИ", "MY MERCENARIES") + "</b>", _title);
             if (ButtonColored(new Rect(240f, 10f, 110f, 24f), Loc.T("Наёмники ", "Mercs ") + Mercs.AliveCount + "/" + Mercs.Cap,
                 _listTab == 0 ? new Color(0.55f, 0.42f, 0.10f, 1f) : Grey, true)) _listTab = 0;
             if (ButtonColored(new Rect(356f, 10f, 110f, 24f), Loc.T("Белый список ", "Whitelist ") + Mercs.Whitelist.Count,
                 _listTab == 1 ? new Color(0.55f, 0.42f, 0.10f, 1f) : Grey, true)) _listTab = 1;
             int money = Mercs.Money;
-            GUI.Label(new Rect(r.width - 250f, 10f, 200f, 20f), Loc.T("Деньги ", "Money ") + (money < 0 ? "?" : Mercs.Money0(money)), _label);
+            VanillaUi.Label(new Rect(r.width - 250f, 10f, 200f, 20f), Loc.T("Деньги ", "Money ") + (money < 0 ? "?" : Mercs.Money0(money)), _label);
             if (ButtonColored(new Rect(r.width - 40f, 8f, 30f, 24f), "X", Red, true)) { _listOpen = false; RestoreCursor(); }
-            if (ButtonColored(new Rect(472f, 10f, 100f, 24f), Loc.T("?????/?????", "Guns/radar"),
-                _listTab == 2 ? Green : Grey, true) && _listTab != 2) OpenStations(false);
-            if (_listTab == 0) MercRows(r); else if (_listTab == 2) StationRows(r); else WhitelistTab(r);
+            if (_listTab == 0) MercRows(r); else WhitelistTab(r);
             GUI.DragWindow(new Rect(0f, 0f, r.width, 36f));
         }
 
@@ -1670,7 +1659,7 @@ namespace NextDayRevival
             }
             string[] heads = _mercHeads;
             float[] cols = MercCols;
-            for (int i = 1; i < heads.Length; i++) GUI.Label(new Rect(x0 + cols[i], y0, 140f, 18f), heads[i], _small);
+            for (int i = 1; i < heads.Length; i++) VanillaUi.Label(new Rect(x0 + cols[i], y0, 140f, 18f), heads[i], _small);
             List<Mercs.Record> roster = Mercs.Roster;
             Rect view = new Rect(0f, y0 + 20f, r.width, r.height - y0 - 20f - 160f);
             Rect content = new Rect(0f, 0f, r.width - 20f, Mathf.Max(view.height - 2f, roster.Count * 40f));
@@ -1684,32 +1673,32 @@ namespace NextDayRevival
                 bool sel = GUI.Toggle(new Rect(x0 + cols[0], y + 9f, 20f, 20f), m.Selected, "");
                 if (sel != m.Selected) m.Selected = sel;
                 Mercs.Profile p = Mercs.ProfileById(m.ProfileId);
-                GUI.Label(new Rect(x0 + cols[1], y + 2f, 160f, 18f), "<b>" + m.Name + "</b>", _label);
-                GUI.Label(new Rect(x0 + cols[1], y + 18f, 160f, 16f), (p == null ? m.ProfileId : p.Name) + (m.Session ? " (test)" : ""), _small);
+                VanillaUi.Label(new Rect(x0 + cols[1], y + 2f, 160f, 18f), "<b>" + m.Name + "</b>", _label);
+                VanillaUi.Label(new Rect(x0 + cols[1], y + 18f, 160f, 16f), (p == null ? m.ProfileId : p.Name) + (m.Session ? " (test)" : ""), _small);
                 Bar(new Rect(x0 + cols[2], y + 12f, 90f, 8f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
-                GUI.Label(new Rect(x0 + cols[2], y + 22f, 90f, 14f), Mercs.MedkitCount(m), _small);
-                GUI.Label(new Rect(x0 + cols[2] + 94f, y + 7f, 50f, 18f), Mathf.RoundToInt(m.Hp * 100f).ToString(), _small);
-                GUI.Label(new Rect(x0 + cols[3], y + 9f, 120f, 18f), m.Dead ? "-" : OrderText(m), _label);
-                string state = m.Dead ? "<color=#ff5040>" + Loc.T("убит", "dead") + "</color>"
-                    : m.Unit != null && m.Unit.Deserting ? "<color=#ff5040>" + Loc.T("уходит", "deserting") + "</color>"
+                VanillaUi.Label(new Rect(x0 + cols[2], y + 22f, 90f, 14f), Mercs.MedkitCount(m), _small);
+                VanillaUi.Label(new Rect(x0 + cols[2] + 94f, y + 7f, 50f, 18f), Mathf.RoundToInt(m.Hp * 100f).ToString(), _small);
+                VanillaUi.Label(new Rect(x0 + cols[3], y + 9f, 120f, 18f), m.Dead ? "-" : OrderText(m), _label);
+                string state = m.Dead ? "<color=#fd4848>" + Loc.T("убит", "dead") + "</color>"
+                    : m.Unit != null && m.Unit.Deserting ? "<color=#fd4848>" + Loc.T("уходит", "deserting") + "</color>"
                     : m.Unit == null ? Loc.T("прибывает", "arriving")
                     : m.Combat ? "<color=#ff8060>" + Loc.T("в бою", "in combat") + "</color>"
                     : MercRide.StateText(m.Unit) != null ? MercRide.StateText(m.Unit)
                     : Loc.T("в строю", "idle");
-                GUI.Label(new Rect(x0 + cols[4], y + 9f, 110f, 18f), state, _label);
+                VanillaUi.Label(new Rect(x0 + cols[4], y + 9f, 110f, 18f), state, _label);
                 string due;
                 if (m.Dead) due = "-";
                 else if (m.Unpaid)
-                    due = "<color=#ff5040><b>" + Loc.T("НЕ ОПЛАЧЕН - уйдёт через ", "UNPAID - deserts in ")
+                    due = "<color=#fd4848><b>" + Loc.T("НЕ ОПЛАЧЕН - уйдёт через ", "UNPAID - deserts in ")
                         + Math.Max(0.0, Mercs.GraceHours - (m.Deployed - m.PaidUntil)).ToString("0.0", CultureInfo.InvariantCulture) + " h</b></color>";
                 else due = Loc.T("через ", "in ") + (m.PaidUntil - m.Deployed).ToString("0.0", CultureInfo.InvariantCulture) + " h";
-                GUI.Label(new Rect(x0 + cols[5], y + 9f, 170f, 18f), due, _small);
+                VanillaUi.Label(new Rect(x0 + cols[5], y + 9f, 170f, 18f), due, _small);
                 string dist = m.Unit == null || m.Unit.Ai == null ? "-"
                     : (Vector3.Distance(me, m.Unit.Ai.transform.position) / 2.8f).ToString("0") + " m";
-                GUI.Label(new Rect(x0 + cols[6], y + 9f, 60f, 18f), dist, _small);
+                VanillaUi.Label(new Rect(x0 + cols[6], y + 9f, 60f, 18f), dist, _small);
             }
             if (roster.Count == 0)
-                GUI.Label(new Rect(x0, 10f, r.width - 40f, 40f), Mercs.Support != 1 ? Mercs.LinkText()
+                VanillaUi.Label(new Rect(x0, 10f, r.width - 40f, 40f), Mercs.Support != 1 ? Mercs.LinkText()
                     : Loc.T("Наёмников нет. Нанять: у торговца поселения, вкладка \"Наёмники\".",
                     "No mercenaries. Hire them at a settlement trader, tab \"Mercenaries\"."), _label);
             GUI.EndScrollView();
@@ -1788,7 +1777,7 @@ namespace NextDayRevival
                 Loc.T("Сопровождение: 2 последних выбранных", "Escort: last 2 selected"));
             if (ButtonColored(new Rect(x0 + 558f, by3 + 66f, 266f, 28f), Loc.T("Забрать воздушный груз", "Fetch airdrop"),
                 dark, selection.Count > 0)) MercFetch.Start();
-            GUI.Label(new Rect(x0, by3 + 100f, 548f, 36f),
+            VanillaUi.Label(new Rect(x0, by3 + 100f, 548f, 36f),
                 Loc.T("Галочки = кому приказ (Ctrl+1..5, Ctrl+0 все). ", "Checked rows are who the orders address (Ctrl+1..5, Ctrl+0 = all). ")
                 + _wheelKeyText + Loc.T(" удерж. - меню приказов, двойное нажатие - за мной (в машине - за моей техникой). Увольнение без возврата денег.",
                     " held = order wheel, double tap = follow me (in a vehicle: follow my vehicle). Dismiss asks twice, no refund."), _small);
@@ -1796,11 +1785,11 @@ namespace NextDayRevival
 
         static void WhitelistTab(Rect r)
         {
-            GUI.Label(new Rect(14f, 42f, r.width - 30f, 18f), Loc.T("Игроков из списка ваши наёмники никогда не атакуют. Хранится на мастер-сервере вместе с наёмниками.",
+            VanillaUi.Label(new Rect(14f, 42f, r.width - 30f, 18f), Loc.T("Игроков из списка ваши наёмники никогда не атакуют. Хранится на мастер-сервере вместе с наёмниками.",
                 "Players on this list are never attacked by your mercs, whatever their faction. Stored on the master server with your roster.")
                 + (Mercs.Support == 1 ? "" : Loc.T(" (Сейчас только на эту сессию.)", " (This session only for now.)")), _small);
             float half = (r.width - 42f) * 0.5f;
-            GUI.Label(new Rect(14f, 64f, half, 20f), "<b>" + Loc.T("БЕЛЫЙ СПИСОК", "WHITELIST") + "</b>", _label);
+            VanillaUi.Label(new Rect(14f, 64f, half, 20f), "<b>" + Loc.T("БЕЛЫЙ СПИСОК", "WHITELIST") + "</b>", _label);
             Rect left = new Rect(14f, 88f, half, r.height - 150f);
             List<Mercs.WlEntry> wl = Mercs.Whitelist;
             _wlScroll = GUI.BeginScrollView(left, _wlScroll, new Rect(0f, 0f, half - 20f, Mathf.Max(left.height - 2f, wl.Count * 30f)));
@@ -1809,11 +1798,11 @@ namespace NextDayRevival
             {
                 float y = i * 30f;
                 Box(new Rect(0f, y, half - 22f, 26f), CardBg);
-                GUI.Label(new Rect(6f, y + 4f, 150f, 20f), "<b>" + wl[i].Name + "</b>", _label);
+                VanillaUi.Label(new Rect(6f, y + 4f, 150f, 20f), "<b>" + wl[i].Name + "</b>", _label);
                 GameObject online = null;
                 for (int k = 0; k < players.Count; k++)
                     if (players[k] != null && Mercs.SteamOf(players[k]) == wl[i].Steam) { online = players[k]; break; }
-                GUI.Label(new Rect(160f, y + 5f, 150f, 20f), online == null ? Loc.T("не в сети", "offline")
+                VanillaUi.Label(new Rect(160f, y + 5f, 150f, 20f), online == null ? Loc.T("не в сети", "offline")
                     : "<color=#80d060>" + Loc.T("в сети, ", "online, ") + (Vector3.Distance(Mercs.OwnerPosition, online.transform.position) / 2.8f).ToString("0") + " m</color>", _small);
                 if (ButtonColored(new Rect(half - 96f, y + 2f, 70f, 22f), Loc.T("убрать", "remove"), Red, true))
                 { Mercs.WhitelistRemove(wl[i].Steam); break; }
@@ -1821,7 +1810,7 @@ namespace NextDayRevival
             GUI.EndScrollView();
 
             float rx = 28f + half;
-            GUI.Label(new Rect(rx, 64f, 180f, 20f), "<b>" + Loc.T("ИГРОКИ В МИРЕ", "PLAYERS IN THIS WORLD") + "</b>", _label);
+            VanillaUi.Label(new Rect(rx, 64f, 180f, 20f), "<b>" + Loc.T("ИГРОКИ В МИРЕ", "PLAYERS IN THIS WORLD") + "</b>", _label);
             _filter = GUI.TextField(new Rect(rx + 190f, 64f, half - 190f, 20f), _filter ?? "", 24);
             Rect right = new Rect(rx, 88f, half, r.height - 150f);
             int myFaction = Mercs.FactionOf(Mercs.OwnerObject);
@@ -1842,19 +1831,19 @@ namespace NextDayRevival
                 string name = Mercs.NameOf(go);
                 int f = Mercs.FactionOf(go);
                 string steam = Mercs.SteamOf(go);
-                GUI.Label(new Rect(6f, y + 4f, 120f, 20f), "<b>" + Short(name, 14) + "</b>", _label);
-                GUI.Label(new Rect(126f, y + 5f, 70f, 20f), Mercs.FactionLabel(f), _small);
-                GUI.Label(new Rect(196f, y + 5f, 60f, 20f), (Vector3.Distance(Mercs.OwnerPosition, go.transform.position) / 2.8f).ToString("0") + " m", _small);
+                VanillaUi.Label(new Rect(6f, y + 4f, 120f, 20f), "<b>" + Short(name, 14) + "</b>", _label);
+                VanillaUi.Label(new Rect(126f, y + 5f, 70f, 20f), Mercs.FactionLabel(f), _small);
+                VanillaUi.Label(new Rect(196f, y + 5f, 60f, 20f), (Vector3.Distance(Mercs.OwnerPosition, go.transform.position) / 2.8f).ToString("0") + " m", _small);
                 bool listed = steam != null && Mercs.Whitelisted(steam);
                 string rel = listed ? "<color=#f5b833>" + Loc.T("в списке", "listed") + "</color>"
                     : f == myFaction ? "<color=#80d060>" + Loc.T("свой", "friendly") + "</color>"
                     : "<color=#ff6050>" + Loc.T("враг", "hostile") + "</color>";
-                GUI.Label(new Rect(258f, y + 5f, 70f, 20f), rel, _small);
+                VanillaUi.Label(new Rect(258f, y + 5f, 70f, 20f), rel, _small);
                 if (!listed && steam != null && ButtonColored(new Rect(half - 96f, y + 2f, 70f, 22f), "+ " + Loc.T("добавить", "add"), Green, true))
                     Mercs.WhitelistAdd(steam, name);
             }
             GUI.EndScrollView();
-            GUI.Label(new Rect(14f, r.height - 56f, r.width - 30f, 40f),
+            VanillaUi.Label(new Rect(14f, r.height - 56f, r.width - 30f, 40f),
                 Loc.T("\"Свой\" - ваша фракция, её наёмники не трогают и так. Быстро: навести на игрока и Ctrl+",
                       "'friendly' = your faction: mercs never shoot them anyway. Quick add: aim at a player and press Ctrl+")
                 + _listKeyText + ".", _small);

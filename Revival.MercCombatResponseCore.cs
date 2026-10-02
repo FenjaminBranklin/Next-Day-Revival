@@ -8,10 +8,9 @@
 //             hold, and why. The friendly check (the owner and every other
 //             merc near the line, MercFriendInLine) is asked for right
 //             before, every frame; NpcWar.Shoot asks again for every round.
-//   REACH     MercWeaponReach: how far a merc looks for a target, by the
-//             weapon in his hands (the default profiles' item ids; unknown
-//             ids count as a rifle). Never shorter than the squad's
-//             AssaultRange the adapter passes in.
+//   REACH     MercWeaponReach: one effective engagement table, by weapon.
+//             Acquisition may look further; every round obeys Allows unless
+//             he is returning incoming fire. Unknown ids count as a rifle.
 //   THREAT    MercThreat.SightUnits: a threat further than this does not
 //             count as seeing him (M1 exposure) unless it hits him - a
 //             distant enemy with a geometric line to him is no reason to
@@ -32,8 +31,8 @@ namespace NextDayRevival
     internal static class MercFireGate
     {
         internal const byte Shoot = 1, Suppress = 2, HoldNoTarget = 3, HoldUnseen = 4, HoldBrain = 5,
-            HoldSurvive = 6, HoldFriend = 7;
-        static readonly string[] Names = { "-", "SHOOT", "SUPPRESS", "NO TARGET", "UNSEEN", "BRAIN", "SURVIVE", "FRIEND" };
+            HoldSurvive = 6, HoldFriend = 7, HoldRange = 8;
+        static readonly string[] Names = { "-", "SHOOT", "SUPPRESS", "NO TARGET", "UNSEEN", "BRAIN", "SURVIVE", "FRIEND", "RANGE" };
 
         internal static string Name(byte g) { return g < Names.Length ? Names[g] : "?"; }
 
@@ -63,12 +62,14 @@ namespace NextDayRevival
         }
     }
 
-    /// <summary>How far a merc looks for a target, by his weapon.</summary>
+    /// <summary>Effective engagement range; sight alone never extends it.</summary>
     internal static class MercWeaponReach
     {
         internal const float Metre = 2.8f;
-        internal const byte Pistol = 1, Shotgun = 2, Rifle = 3, MachineGun = 4, Marksman = 5;
-        static readonly string[] Names = { "-", "pistol", "shotgun", "rifle", "machine gun", "marksman" };
+        internal const byte Pistol = 1, Shotgun = 2, Rifle = 3, MachineGun = 4, Marksman = 5, Smg = 6;
+        static readonly string[] Names = { "-", "pistol", "shotgun", "rifle", "machine gun", "marksman", "SMG" };
+        // Metres, indexed by kind. Index zero and unknown kinds use Rifle.
+        static readonly float[] EngagementMetres = { 180f, 45f, 35f, 180f, 220f, 350f, 75f };
 
         internal static string Name(byte kind) { return kind < Names.Length ? Names[kind] : "?"; }
 
@@ -82,30 +83,35 @@ namespace NextDayRevival
             if (item >= 1151 && item <= 1154) return Shotgun;
             switch (item)
             {
+                case 1003: return Smg; // PP 1901 (catalogue)
+                case 1008: case 1013: case 1021: return Shotgun; // Vepr/Saiga/USAS-12
                 case 1009: case 1010: case 1015: case 1025: case 1027: case 1161: return Marksman;
                 case 1016: case 1018: case 1023: case 1160: return MachineGun;
             }
             return Rifle;
         }
 
-        /// <summary>Metres a merc of this kind looks for a target.</summary>
+        /// <summary>Metres in the single effective-range table.</summary>
         internal static float Metres(byte kind)
         {
-            switch (kind)
-            {
-                case Pistol: return 45f;
-                case Shotgun: return 35f;
-                case MachineGun: return 180f;
-                case Marksman: return 250f;
-                default: return 160f;
-            }
+            return EngagementMetres[kind > 0 && kind < EngagementMetres.Length ? kind : Rifle];
         }
 
-        /// <summary>Game units for an item, never below floor (the squad's
-        /// AssaultRange: a merc never looks less far than before).</summary>
+        internal static float EffectiveUnits(int item) { return Metres(Kind(item)) * Metre; }
+
+        /// <summary>Three-dimensional target-body distance, before aim scatter.
+        /// Return fire keeps all other sight/muzzle/friend/ammo gates.</summary>
+        internal static bool Allows(int item, Vector3 me, Vector3 target, bool defending)
+        {
+            float range = EffectiveUnits(item);
+            return defending || (target - me).sqrMagnitude <= range * range;
+        }
+
+        /// <summary>Acquisition only: look at least as far as the squad. This
+        /// floor is deliberately never applied to the effective fire range.</summary>
         internal static float Units(int item, float floor)
         {
-            return Mathf.Max(floor, Metres(Kind(item)) * Metre);
+            return Mathf.Max(floor, EffectiveUnits(item));
         }
     }
 

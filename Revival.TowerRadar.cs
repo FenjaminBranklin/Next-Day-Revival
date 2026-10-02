@@ -1345,7 +1345,7 @@ namespace NextDayRevival
 
         // ----------------------------------------------------- the console
 
-        /// <summary>The radar console against the cab's south wall: cabinet,
+        /// <summary>The radar console on the tower roof: cabinet,
         /// sloped desk, the round PPI screen facing north, knobs, a telephone,
         /// the operator's chair. Frame: +z = the screen's facing (north).</summary>
         internal static Transform Console(Scene scene)
@@ -1355,7 +1355,7 @@ namespace NextDayRevival
                 GameObject root = new GameObject("NDR radar console");
                 SceneManager.MoveGameObjectToScene(root, scene);
                 Vector3 p = TowerRadar.TowerPoint(TowerRadar.ConsoleLocalM);
-                p.y = TowerRadar.CabFloorY;
+                p.y = TowerRadar.TowerBase.y + TowerRadar.RoofM * TowerRadar.K;
                 root.transform.position = p;
                 root.transform.rotation = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
 
@@ -1793,7 +1793,7 @@ namespace NextDayRevival
                 RadarShadow.Scan(_air, eye);
                 SampleAt = now;
                 Guns();
-                if (InView) MapArtwork(); // Texture load only on entry/language change.
+                if (InView) MapArtwork(); // Raster rebuild only on entry/language/size change.
             }
             if (InView)
             {
@@ -2087,7 +2087,7 @@ namespace NextDayRevival
         // comes from a cached table or a memo rebuilt at the 4 Hz collect
         // (Rows); the draw pass itself builds no string and asks no system.
 
-        static Texture2D _white, _mapArtwork;
+        static Texture2D _white, _mapArtwork, _mapSource;
         static int _mapLanguage = -1;
         static readonly Color Foe = new Color(1f, 0.3f, 0.25f, 1f);
         static Rect _scopeArea, _mapRect;
@@ -2294,7 +2294,10 @@ namespace NextDayRevival
                 own = true;
                 if (g.Id.StartsWith("MT-", StringComparison.Ordinal) && !NoFly.TownContains(row.B.Pos)) continue;
                 Vector3 d = row.B.Pos - g.Position;
-                if (!RadarClarityCore.Reach(d.x, d.y, d.z, g.Range,
+                // A L2: an airfield 52-K fires on anything inside the airfield zone.
+                float reach = g.AirfieldReach > 0f && FlakEngageCore.InZone(row.B.Pos.x, row.B.Pos.z, Flak.ZoneMetres, K)
+                    ? Mathf.Max(g.Range, g.AirfieldReach) : g.Range;
+                if (!RadarClarityCore.Reach(d.x, d.y, d.z, reach,
                     g.ShortRange ? ShortRangeCore.CeilingM * K : Flak.CeilingU,
                     g.ShortRange ? -10f : TowerRadar.F(Flak.CfgPitchMin, -3f),
                     g.ShortRange ? 90f : TowerRadar.F(Flak.CfgPitchMax, 82f))) continue;
@@ -2325,6 +2328,7 @@ namespace NextDayRevival
             try
             {
                 if (!InView && !_near && (_hint == null || Time.time > _hintUntil)) return;
+                if (Event.current.type != EventType.Repaint) return;
                 Ensure();
                 // Without the kit (its font failed to build) the scope still
                 // draws, so the console never goes blind; G / Esc leave it.
@@ -2343,14 +2347,14 @@ namespace NextDayRevival
                     return;
                 }
                 GUI.color = new Color(0.02f, 0.025f, 0.03f, 0.94f);
-                GUI.DrawTexture(new Rect(0f, 0f, w, h), _white);
+                VanillaUi.Texture(new Rect(0f, 0f, w, h), _white);
                 Layout(w, h);
                 Scope();
                 if (kit) Panel(w, h);
                 // the cursor
                 GUI.color = Color.white;
-                GUI.DrawTexture(new Rect(_cursor.x - 9f, _cursor.y - 1f, 18f, 2f), _white);
-                GUI.DrawTexture(new Rect(_cursor.x - 1f, _cursor.y - 9f, 2f, 18f), _white);
+                VanillaUi.Texture(new Rect(_cursor.x - 9f, _cursor.y - 1f, 18f, 2f), _white);
+                VanillaUi.Texture(new Rect(_cursor.x - 1f, _cursor.y - 9f, 2f, 18f), _white);
                 if (kit && _hint != null && Time.time <= _hintUntil) Prompt(h - UiKit.S(72f), _hint, UiKit.Warn);
                 GUI.color = Color.white;
             }
@@ -2360,12 +2364,7 @@ namespace NextDayRevival
         /// <summary>A kit pill across the screen's middle: the console prompt and hints.</summary>
         static void Prompt(float y, string text, Color c)
         {
-            float pw = UiKit.S(560f), ph = UiKit.S(34f);
-            Rect r = new Rect((UnityEngine.Screen.width - pw) * 0.5f, y, pw, ph);
-            UiKit.Fill(new Rect(r.x, r.y + UiKit.S(3f), r.width, r.height), UiKit.Shadow, 1);
-            UiKit.Fill(r, UiKit.Header, 1);
-            UiKit.Fill(new Rect(r.x, r.y + UiKit.S(8f), UiKit.S(3f), ph - UiKit.S(16f)), c, 0);
-            UiKit.Label(r, text, UiFont.Body, UiFont.Center, UiKit.Text);
+            VanillaUi.Prompt(text, y);
         }
 
         static Vector2 ToScreen(Vector3 world)
@@ -2380,9 +2379,27 @@ namespace NextDayRevival
         static void MapArtwork()
         {
             int language = Loc.Lang();
-            if (_mapLanguage == language) return;
+            Layout(UnityEngine.Screen.width, UnityEngine.Screen.height);
+            int width = (int)_mapRect.width, height = (int)_mapRect.height;
+            if (_mapLanguage == language && _mapArtwork != null
+                && _mapArtwork.width == width && _mapArtwork.height == height) return;
+            if (_mapLanguage != language || _mapSource == null)
+                _mapSource = Assets.Texture(language == 0 ? "east_map_ru.png" : "east_map_en.png", false, false);
+            if (_mapSource == null) return;
+            // Always read the ORIGINAL mip 0, never a previous small viewport.
+            // Own the destination: Assets' filename-only cache is shared with M.
+            Color32[] pixels = EastMapPanel.Resample(_mapSource.GetPixels32(),
+                _mapSource.width, _mapSource.height, width, height);
+            Texture2D map = new Texture2D(width, height, TextureFormat.RGB24, false);
+            map.name = "NDR radar map";
+            map.wrapMode = TextureWrapMode.Clamp;
+            map.filterMode = FilterMode.Point;
+            map.anisoLevel = 0;
+            map.SetPixels32(pixels);
+            map.Apply(false, true);
+            if (_mapArtwork != null) UnityEngine.Object.Destroy(_mapArtwork);
+            _mapArtwork = map;
             _mapLanguage = language;
-            _mapArtwork = Assets.Texture(language == 0 ? "east_map_ru.png" : "east_map_en.png", false, false);
         }
 
         static void Layout(float w, float h)
@@ -2414,7 +2431,8 @@ namespace NextDayRevival
             UiKit.Section(new Rect(_scopeArea.x, UiKit.S(12f), _scopeArea.width, UiKit.S(28f)),
                 RadarScopeText.Title);
             GUI.color = Color.white;
-            if (_mapArtwork != null) GUI.DrawTexture(_mapRect, _mapArtwork);
+            if (_mapArtwork != null && _mapArtwork.width == (int)_mapRect.width
+                && _mapArtwork.height == (int)_mapRect.height) VanillaUi.Texture(_mapRect, _mapArtwork);
             else UiKit.Fill(_mapRect, UiKit.Field, 0);
             // One clipped map group: vectors/range rings never cover the order panel.
             GUI.BeginGroup(_mapRect);
@@ -2443,14 +2461,22 @@ namespace NextDayRevival
                     RadarScopeText.NoArtwork,
                     UiFont.Small, UiFont.Left, UiKit.Warn);
             float scale = _mapRect.width / EastWorld.Extended.width;
-            // the guns and their reach (the 4 Hz snapshot)
+            // the guns and their reach (the 4 Hz snapshot), and the A L2 airfield zone
+            bool zone = false;
+            for (int i = 0; i < _guns.Count && !zone; i++) zone = _guns[i].AirfieldReach > 0f;
+            if (zone)
+            {
+                Vector2 c = ToMap(new Vector3(FlakEngageCore.CentreX, 0f, FlakEngageCore.CentreZ));
+                GUI.color = new Color(1f, 0.55f, 0.2f, 0.45f);
+                Ring(c.x, c.y, Flak.ZoneMetres * K * scale, 48);
+            }
             for (int i = 0; i < _guns.Count; i++)
             {
                 Vector2 g = ToMap(_guns[i].Position);
                 GUI.color = new Color(0.3f, 0.8f, 1f, 0.35f);
                 Ring(g.x, g.y, _guns[i].Range * scale, 24);
                 GUI.color = new Color(0.3f, 0.8f, 1f, 0.95f);
-                GUI.DrawTexture(new Rect(g.x - 3f, g.y - 3f, 6f, 6f), _white);
+                VanillaUi.Texture(new Rect(g.x - 3f, g.y - 3f, 6f, 6f), _white);
                 SmallLabel(g.x + 5f, g.y - 7f, _guns[i].Id, GUI.color);
             }
             Vector2 radar = ToMap(TowerRadar.RadarPos);
@@ -2474,16 +2500,20 @@ namespace NextDayRevival
             {
                 Blip b = _blips[i];
                 float age = Time.time - b.PaintedAt;
-                float alpha = fade ? Mathf.Clamp01(1f - age / (sweep * 1.05f)) * 0.9f + 0.1f : 1f;
+                float alpha = fade ? Mathf.Lerp(0.55f, 1f, Mathf.Clamp01(1f - age / (sweep * 1.05f))) : 1f;
                 if (!Shown(b)) continue;
                 Vector2 p = ToMap(b.Pos);
                 if (!view.Contains(p)) continue;
                 Color c = IffColor(b.Iff);
                 c.a = alpha;
                 GUI.color = c;
-                float s = 20f;
-                GUI.DrawTexture(new Rect(p.x - s * 0.5f, p.y - s * 0.5f, s, s), AirPicture.Icon(b.Type));
-                if (b.Iff > 0) Bracket(p.x, p.y, 12f, c);
+                float s = Mathf.Round(UiKit.S(28f));
+                // Rotate the nose with the painted velocity; north is zero.
+                Matrix4x4 keep = GUI.matrix;
+                if (b.Vel.x * b.Vel.x + b.Vel.z * b.Vel.z > 1f)
+                    GUIUtility.RotateAroundPivot(RadarScopeCore.Heading(b.Vel.x, b.Vel.z), p);
+                VanillaUi.Texture(new Rect(p.x - s * 0.5f, p.y - s * 0.5f, s, s), AirPicture.Icon(b.Type));
+                GUI.matrix = keep;
                 AirRow own = RowOf(b);
                 if (own != null && own.Own)
                     UiKit.Icon(new Rect(p.x - 7f, p.y - 24f, 14f, 14f), UiIcon.User, UiKit.Accent);
@@ -2493,14 +2523,28 @@ namespace NextDayRevival
                 if (v.sqrMagnitude > 1f)
                 {
                     Vector2 q = ToMap(b.Pos + v * 20f);
-                    Line(p.x, p.y, q.x, q.y, 1.2f);
+                    // A dark underlay keeps the direction readable over pale roads.
+                    GUI.color = new Color(0.04f, 0.04f, 0.03f, 0.95f);
+                    Line(p.x, p.y, q.x, q.y, 3f);
+                    GUI.color = c;
+                    Line(p.x, p.y, q.x, q.y, 1.5f);
+                    Vector2 d = (q - p).normalized;
+                    Vector2 wing = new Vector2(-d.y, d.x) * 4f;
+                    Vector2 tail = q - d * 8f;
+                    Line(q.x, q.y, tail.x + wing.x, tail.y + wing.y, 1.5f);
+                    Line(q.x, q.y, tail.x - wing.x, tail.y - wing.y, 1.5f);
                 }
-                SmallLabel(p.x + 13f, p.y + 2f, Id2(b.Id), c);
-                if (b == _selected) Bracket(p.x, p.y, 11f, new Color(1f, 1f, 1f, 0.95f));
+                SmallLabel(p.x + s * 0.5f + 5f, p.y - 8f, Id2(b.Id), c);
+                if (b == _selected)
+                {
+                    float extent = s * 0.5f + 5f;
+                    Bracket(p.x, p.y, extent, Color.black);
+                    Bracket(p.x, p.y, extent - 1f, Color.white);
+                }
                 if (TowerRadar.AssignedKind >= 0 && b.Kind == TowerRadar.AssignedKind
                     && (b.Pos - TowerRadar.AssignedPos).sqrMagnitude < 150f * 150f)
                 {
-                    Bracket(p.x, p.y, 15f, Foe);
+                    Bracket(p.x, p.y, s * 0.5f + 9f, Foe);
                     SmallLabel(p.x + 6f, p.y - 16f, "ENGAGE", Foe);
                 }
             }
@@ -2516,8 +2560,8 @@ namespace NextDayRevival
             Vector2 p = ToMap(row.B.Pos);
             if (!view.Contains(p)) return;
             float width = Mathf.Min(view.width, UiKit.S(228f)), height = UiKit.S(44f);
-            Rect r = new Rect(Mathf.Clamp(p.x + 16f, 0f, view.width - width),
-                Mathf.Clamp(p.y + 10f, 0f, Mathf.Max(0f, view.height - height)), width, height);
+            Rect r = new Rect(Mathf.Clamp(p.x + UiKit.S(30f), 0f, view.width - width),
+                Mathf.Clamp(p.y + UiKit.S(22f), 0f, Mathf.Max(0f, view.height - height)), width, height);
             UiKit.Fill(r, UiKit.Header, 1);
             UiKit.Label(new Rect(r.x + 4f, r.y, 28f, height * 0.5f), Id2(row.B.Id),
                 UiFont.Small, UiFont.Left, IffColor(row.B.Iff));
@@ -2647,7 +2691,7 @@ namespace NextDayRevival
                 if (sel || hot || i % 2 == 0)
                     UiKit.Fill(r, sel ? UiKit.Fade(UiKit.Accent, 0.25f) : hot ? UiKit.CardHover : UiKit.Fade(Color.white, 0.03f), 2);
                 GUI.color = IffColor(a.B.Iff);
-                GUI.DrawTexture(new Rect(r.x + UiKit.S(4f), r.y + UiKit.S(3f), UiKit.S(20f), UiKit.S(20f)), AirPicture.Icon(a.B.Type));
+                VanillaUi.Texture(new Rect(r.x + UiKit.S(4f), r.y + UiKit.S(3f), UiKit.S(20f), UiKit.S(20f)), AirPicture.Icon(a.B.Type));
                 GUI.color = Color.white;
                 UiKit.Label(new Rect(r.x + UiKit.S(28f), r.y, UiKit.S(30f), small), Id2(a.B.Id), UiFont.Body, UiFont.Left, UiKit.Text);
                 UiKit.Chip(new Rect(r.x + UiKit.S(60f), r.y + UiKit.S(3f), UiKit.S(74f), small - UiKit.S(6f)), IffName(a.B.Iff), IffTone(a.B.Iff));
@@ -2776,25 +2820,22 @@ namespace NextDayRevival
             return null;
         }
 
-        /// <summary>A kit button under the virtual cursor (the console has no IMGUI mouse).</summary>
+        /// <summary>Vanilla-style rectangular orders under the virtual cursor.</summary>
         static void ConsoleButton(Rect r, string text, int look, bool enabled, bool active)
         {
             bool hot = enabled && r.Contains(_cursor);
             bool down = hot && Input.GetMouseButton(0);
-            Color bg, fg = UiKit.Text;
-            if (look == UiButton.Primary)
-            {
-                bg = down ? UiKit.AccentPress : hot ? UiKit.AccentHover : UiKit.Accent;
-                fg = UiKit.TextOnAccent;
-            }
-            else if (look == UiButton.Ghost)
-                bg = UiKit.Fade(Color.white, down ? 0.10f : hot ? 0.06f : 0f);
-            else
-                bg = active ? UiKit.Fade(UiKit.Accent, hot ? 0.45f : 0.32f) : down ? UiKit.Header : hot ? UiKit.CardHover : UiKit.CardFill;
-            if (!enabled) { bg = UiKit.Fade(bg, 0.35f); fg = UiKit.Fade(fg, 0.45f); }
-            UiKit.Fill(r, bg, 1);
-            if (look == UiButton.Secondary || look == UiButton.Ghost) UiKit.Outline(r, active ? UiKit.Accent : UiKit.Line);
-            UiKit.Label(r, text, look == UiButton.Primary ? UiFont.Heading : UiFont.Body, UiFont.Center, fg);
+            bool fire = look == UiButton.Primary;
+            Color edge = fire ? new Color(0.76f, 0.68f, 0.46f, 1f) : new Color(0.48f, 0.48f, 0.44f, 1f);
+            Color bg = new Color(down ? 0.08f : hot ? 0.22f : 0.12f,
+                down ? 0.08f : hot ? 0.22f : 0.12f, down ? 0.07f : hot ? 0.18f : 0.10f, 1f);
+            if (active) edge = new Color(0.9f, 0.8f, 0.52f, 1f);
+            Color fg = new Color(0.94f, 0.93f, 0.86f, 1f);
+            if (!enabled) { edge.a = 0.28f; fg.a = 0.35f; }
+            UiKit.Fill(r, bg, 0);
+            UiKit.Outline(r, edge);
+            if (fire) UiKit.Fill(new Rect(r.x + 1f, r.y + 1f, 3f, r.height - 2f), edge, 0);
+            UiKit.Label(r, text, fire ? UiFont.Heading : UiFont.Body, UiFont.Center, fg);
         }
 
         static void OrderLayout(float x, float y, float width, float row, float gap)
@@ -2851,7 +2892,7 @@ namespace NextDayRevival
             float ang = Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg;
             Matrix4x4 keep = GUI.matrix;
             GUIUtility.RotateAroundPivot(ang, a);
-            GUI.DrawTexture(new Rect(a.x, a.y - width * 0.5f, len, width), _white);
+            VanillaUi.Texture(new Rect(a.x, a.y - width * 0.5f, len, width), _white);
             GUI.matrix = keep;
         }
 
@@ -2860,7 +2901,7 @@ namespace NextDayRevival
             for (int i = 0; i < n; i++)
             {
                 float a = i * Mathf.PI * 2f / n;
-                GUI.DrawTexture(new Rect(cx + Mathf.Cos(a) * r - 1f, cy + Mathf.Sin(a) * r - 1f, 2f, 2f), _white);
+                VanillaUi.Texture(new Rect(cx + Mathf.Cos(a) * r - 1f, cy + Mathf.Sin(a) * r - 1f, 2f, 2f), _white);
             }
         }
 
@@ -2877,14 +2918,14 @@ namespace NextDayRevival
         {
             GUI.color = c;
             float l = s * 0.5f;
-            GUI.DrawTexture(new Rect(x - s, y - s, l, 1.5f), _white);
-            GUI.DrawTexture(new Rect(x - s, y - s, 1.5f, l), _white);
-            GUI.DrawTexture(new Rect(x + s - l, y - s, l, 1.5f), _white);
-            GUI.DrawTexture(new Rect(x + s, y - s, 1.5f, l), _white);
-            GUI.DrawTexture(new Rect(x - s, y + s, l, 1.5f), _white);
-            GUI.DrawTexture(new Rect(x - s, y + s - l, 1.5f, l), _white);
-            GUI.DrawTexture(new Rect(x + s - l, y + s, l, 1.5f), _white);
-            GUI.DrawTexture(new Rect(x + s, y + s - l, 1.5f, l), _white);
+            VanillaUi.Texture(new Rect(x - s, y - s, l, 1.5f), _white);
+            VanillaUi.Texture(new Rect(x - s, y - s, 1.5f, l), _white);
+            VanillaUi.Texture(new Rect(x + s - l, y - s, l, 1.5f), _white);
+            VanillaUi.Texture(new Rect(x + s, y - s, 1.5f, l), _white);
+            VanillaUi.Texture(new Rect(x - s, y + s, l, 1.5f), _white);
+            VanillaUi.Texture(new Rect(x - s, y + s - l, 1.5f, l), _white);
+            VanillaUi.Texture(new Rect(x + s - l, y + s, l, 1.5f), _white);
+            VanillaUi.Texture(new Rect(x + s, y + s - l, 1.5f, l), _white);
         }
     }
 

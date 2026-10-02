@@ -1,4 +1,4 @@
-// K3a: continuous M1/M2 peeks and short cover bounds on the K0 legacy rig.
+// Moving fire in the existing M1/M2 peeks, strafes and short combat bounds.
 // No new path search. Native shots retain profile accuracy, ammo and friends.
 using BepInEx.Configuration;
 using UnityEngine;
@@ -13,7 +13,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgEnabled = cfg.Bind("Mercs", "MoveShoot", true,
-                "Walking fire at NPC targets during cover peeks and short calm cover advances. "
+                "Walking fire during combat peeks, strafes and short advances, at NPCs or players. "
                 + "Disable to restore planted fire. All clients need the same build for walking poses.");
         }
     }
@@ -71,6 +71,10 @@ namespace NextDayRevival
                         f.Suppression, u.Sense.Count, brain.Mode != MercBrain.Normal);
                 bool advance = brain != null && ft.State == MercBrain.AttackFire && ft.In.Attack
                     && act.Act == FightAct.Step && ft.In.MoveShoot;
+                bool travel = brain != null && f.Sees && MercMoveShootPolicy.Travel(
+                    act.Act == FightAct.Step,
+                    act.Act == FightAct.Run && (ft.State == MercBrain.Dash || ft.State == MercBrain.Evade),
+                    Flat(act.Dest - f.Tr.position), brain.Mode != MercBrain.Normal);
                 // ATTACK keeps its selected goal. A calm opening burst can
                 // advance to the already confirmed nearby M1 cover en route.
                 if (act.Act == FightAct.Fire && !act.NoShot && !act.Suppress && brain != null
@@ -84,8 +88,8 @@ namespace NextDayRevival
                     { moving.Act = FightAct.Run; moving.Dest = pick.Point.Pos; bound = true; }
                 }
                 bool eligible = MercMoveShootPolicy.Eligible(MercMoveShoot.Enabled,
-                    moving.Act == FightAct.Step || moving.Act == FightAct.Run, peek || advance || (bound && f.Sees),
-                    f.Armed, f.Target != null && f.Target && !f.TargetIsPlayer,
+                    moving.Act == FightAct.Step || moving.Act == FightAct.Run, travel || peek || advance || (bound && f.Sees),
+                    f.Armed, f.Target != null && f.Target,
                     Reloading(f), u.Medicine != null && u.Medicine.Active != 0,
                     ft.In.Danger, ft.In.Survive || (brain != null && brain.Mode != MercBrain.Normal), ft.Health);
                 if (!eligible) { if (ft.MovePose != null) ft.MovePose.Stop(); return false; }
@@ -111,6 +115,8 @@ namespace NextDayRevival
             // still belong to M2. No Idle/AddFire: that would ResetPath.
             Face(f);
             bool target = f.Target != null && f.Target;
+            if (target && !MercMayFireAt(f, f.Target.position, now))
+            { ft.Gate = MercFireGate.HoldRange; return; }
             bool friend = target && MercFriendInLine(f, f.Tr.position, AimWorld(f));
             ft.Gate = MercFireGate.Decide(target, f.Sees, act.NoShot, ft.In.Survive,
                 ft.Brain.SurvivalFire, friend, false);
@@ -130,7 +136,7 @@ namespace NextDayRevival
                 ft.React.Held(MercReaction.Muzzle); return;
             }
             ft.React.Decided(now);
-            if (Shoot(f))
+            if (MercWalkingShot(f, weapon, now))
             {
                 f.NextShot = now + Mathf.Max(0.2f, ShotDelay(f));
                 ft.MovingShots++;
@@ -143,6 +149,25 @@ namespace NextDayRevival
             else f.NextShot = Mathf.Max(f.NextShot, now + 0.2f);
             }
             finally { FrameProf.E(FrameProf.S_MercMoveShoot_Fire); }
+        }
+
+        static bool MercWalkingShot(Fighter f, Component weapon, float now)
+        {
+            if (!f.TargetIsPlayer) return Shoot(f);
+            // K1b's installed native bridge retains player hit-region/damage
+            // and Photon effects. ShootingActions itself requires Idle.
+            if (weapon == null || _mercPositionShot == null || _mHasBullets == null || _fRofDelay == null)
+                return false;
+            if (!FastCall.Bool(_mHasBullets, weapon)) { StartReload(f); return false; }
+            float before = FastField.GetFloat(_fRofDelay, weapon);
+            if (before >= now || (_mercLineShotTimer != null && FastField.GetFloat(_mercLineShotTimer, f.Ai) > 0f))
+                return false;
+            _mercPositionShot(f.Ai, f.Target);
+            // A geometry veto is not a round, even if the NPC's attempt timer
+            // advanced. Match VanillaShot's ammo/rate proof, then count recoil.
+            if (FastField.GetFloat(_fRofDelay, weapon) == before) return false;
+            if (f.Squad != null) f.Squad.Shots++;
+            return true;
         }
     }
 }

@@ -256,6 +256,7 @@ namespace NextDayRevival
             if (u == null) return;
             if (_field != null) _field.Release(u.Id);
             if (u.Fight.Brain != null) u.Fight.Brain.Leave(null);
+            if (_field != null) u.Move.Reset(_field, u.Id);
             MercTeam.Drop(u);
             u.Sense.Listed = false;
             u.Sense.Reset();
@@ -411,7 +412,7 @@ namespace NextDayRevival
         {
             Vector3 s = cam.WorldToScreenPoint(world);
             if (s.z <= 0f || s.z > 90f) return;
-            GUI.Label(new Rect(s.x - 20f, Screen.height - s.y - 9f, 60f, 18f), text, _style);
+            VanillaUi.Label(new Rect(s.x - 20f, Screen.height - s.y - 9f, 60f, 18f), text, _style);
         }
     }
 
@@ -432,6 +433,7 @@ namespace NextDayRevival
             MercSense s = u.Sense;
             Vector3 me = f.Tr.position;
             MercCoverService.Near(u, me, now);
+            MercMovePrepare(f, u, now);
             // merc-combat-response: a target in sight while he knows no
             // threat is sensed at once, not at the next 0.35..0.5 s tick - the
             // brain can only answer a contact its sense lists.
@@ -567,12 +569,19 @@ namespace NextDayRevival
                 case MercOrder.Perimeter:
                     centre = o.Centre; radius = o.RadiusUnits + 40f; return;
                 case MercOrder.Stay:
+                    if (o.MoveNear)
+                    {
+                        bool near = Flat(f.Tr.position - o.Centre) <= MercMovePlan.Radius;
+                        centre = near ? o.Centre : f.Tr.position;
+                        radius = MercMovePlan.Radius; return;
+                    }
                     centre = o.Centre; radius = MercStayLeash; return;
                 case MercOrder.Attack:
                     // merc-attack-orders: the corridor near him, or his hold circle.
                     MercAttackLeash(f, u, out centre, out radius); return;
                 case MercOrder.Follow:
                 case MercOrder.Vehicle:
+                    if (MercFollowLeash(f, u, out centre, out radius)) return;
                     if (u.Owner != null)
                     {
                         bool marksman = u.Fight.Overwatch.Role == MercRole.Marksman;

@@ -70,6 +70,9 @@ namespace NextDayRevival
                     if (s.Merc == null || s.Men.Count == 0) continue;
                     Fighter f = s.Men[0];
                     if (WeaponOf(f) != __instance) continue;
+                    // Shared by NPC, native player, walking and covering fire.
+                    // Use the intended body before the native aim spread.
+                    if (!MercMayFireAt(f, f.Target != null ? f.Target.position : __0, Time.time)) return false;
                     return MercMuzzleClear(f, s.Merc.Fight.Line, __instance, __0, Time.time);
                 }
                 return true;

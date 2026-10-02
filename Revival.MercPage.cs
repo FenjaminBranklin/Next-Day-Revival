@@ -1,44 +1,18 @@
 // Next Day: Survival - Revival Toolkit
 //
-// MercPage - the trader window's Mercenaries page rebuilt on the UI kit
-// (task W-UI3). TraderUi (Revival.TraderUi.cs) draws it as its third page at
-// every civilian, looter and traitor trader:
+// MercPage - trader mercenaries with the native HUD_Marketplace form,
+// fonts, textured list rows, buy button and Yes/No confirmation (a-u2).
+// MercUi hosts this page beside the untouched native safe/market tabs.
+// All hire/pay/order/medkit/medic/dismiss operations remain Mercs calls;
+// the master server remains authoritative for money, inventory and roster.
+// Tick reads positions, faction and money at 2 Hz only while this page shows.
+// Cards, contract text and GUI styles are cached. C# 3.0, UTF-8 without BOM.
 //
-//   LEFT   hire cards: a portrait plate in the tier colour, name, tier chip
-//          (MercGrade from the traits and level, the same grade the M3 fight
-//          loop plays), price, traits as percent buffs (aim / speed /
-//          toughness chips with a tooltip each), upkeep per 24 in-game hours,
-//          weapon, armour with its protection bar. Hiring asks twice (the
-//          first click arms the card for 4 s); 1-9 over the cards picks a card.
-//          A hire on the wire shows a spinner on its card, a refused hire an
-//          error line with the reason ("money refunded") and Retry.
-//   RIGHT  my mercs: name, profile, tier, one status chip from his own fight
-//          loop (in cover, falling back, retreating at low health, patching
-//          up ...), health, current order, where he is (metres + compass
-//          point from you), upkeep due (or the grace left while unpaid) and
-//          the payment state - queued, in flight (spinner, the master server
-//          has not answered), failed (why, money refunded). Buttons: Locate
-//          (a gold square on the map and a screen marker for 30 s), Order
-//          (follow / stay here / vehicle / patrol here / perimeter here /
-//          peaceful, for this merc or for all), Pay, Dismiss (asks twice).
-//          The notification filter (all / important / deaths only) is the
-//          [Mercs] Notifications setting; MercUi.Toast applies it.
-//
-// Everything that moves money or changes an order is Mercs' own (Hire, Pay,
-// PayAllDue, Order*, Dismiss) - the master server stays authoritative for
-// money and the roster, exactly as with the B3 hire tab this page replaces.
-//
-// Performance: runs only while the trader window shows this page (TraderUi
-// calls Tick and Draw; FrameProf slots MercPage.Tick / MercPage.Draw). The
-// positions are read at 2 Hz, every text is built when its key changes
-// (UiMemo, cards per settlement and language), the balance is TraderUi's
-// 2 Hz value. No allocation while the page sits open.
-//
-// C# 3.0 (csc from .NET 3.5): no optional arguments, no expression bodies.
-// UTF-8 (no BOM), compiled with /codepage:65001 like the rest.
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -109,7 +83,7 @@ namespace NextDayRevival
         };
 
         static int Lang() { return Loc.Lang() == 0 ? 0 : 1; }
-        static float S(float v) { return UiKit.S(v); }
+        static float S(float v) { return v * VanillaSkin.K; }
 
         // ------------------------------------------------------------ cards (hire)
 
@@ -121,6 +95,7 @@ namespace NextDayRevival
         {
             internal Mercs.Profile P;
             internal string Name, Price, Upkeep, Weapon, Armour, Tier, Number, HireText, ConfirmText, Where;
+            internal string Initial, Description, DetailTip, Question;
             internal int TierN;
             internal readonly string[] Chips = new string[4];
             internal readonly string[] ChipTips = new string[4];
@@ -131,9 +106,11 @@ namespace NextDayRevival
         static string _cardsFor;
         static List<Mercs.Profile> _cardsFrom;
         static int _cardsLang = -1;
-        static readonly UiScroll _cardScroll = new UiScroll();
-        static string _armedId;
-        static float _armedUntil;
+        static float _hireOffset, _contractOffset;
+        static int _pickedHire;
+        static int _pickedMerc = NoRow;
+        static bool _contracts;
+        static Card _pendingHire;
 
         /// <summary>The cards of this settlement, built when the settlement,
         /// the profile table or the language changes.</summary>
@@ -143,6 +120,10 @@ namespace NextDayRevival
             if (settlement == _cardsFor && ReferenceEquals(all, _cardsFrom) && lang == _cardsLang) return;
             _cardsFor = settlement; _cardsFrom = all; _cardsLang = lang;
             _cards.Clear();
+            _pickedHire = 0;
+            _hireOffset = 0f;
+            _pendingHire = null;
+            VanillaSkin.CancelAsk();
             if (settlement == null) return;
             List<Mercs.Profile> list = Mercs.ProfilesFor(settlement);
             for (int i = 0; i < list.Count; i++)
@@ -173,6 +154,15 @@ namespace NextDayRevival
                 if (p.AAGunner > 0) AddChip(k, Loc.T("Зенитчик ", "Flak gunner ") + p.AAGunner + "/50",
                     Loc.T("Точнее наводит 52-К, быстрее корректирует огонь и точнее ставит взрыватель. 25 - стандартный специалист. Исправный радар с оператором усиливает всю батарею.",
                         "Steadier 52-K aim, faster bracketing and tighter fuze timing. 25 is the standard specialist. A working, manned radar improves the whole battery."));
+                k.Initial = string.IsNullOrEmpty(k.Name) ? "?" : k.Name.Substring(0, 1);
+                k.Description = k.Upkeep + "\n" + k.Weapon + "\n" + k.Armour;
+                k.DetailTip = k.Description;
+                for (int c = 0; c < k.ChipCount; c++)
+                {
+                    k.Description += (c == 0 ? "\n" : "  ") + k.Chips[c];
+                    k.DetailTip += "\n" + k.ChipTips[c];
+                }
+                k.Question = Loc.T("Нанять ", "Hire ") + k.Name + Loc.T(" за ", " for ") + k.Price + "?\n" + k.Upkeep;
                 _cards.Add(k);
             }
         }
@@ -190,7 +180,7 @@ namespace NextDayRevival
 
         static Color TierColor(int tier)
         {
-            return tier >= 3 ? UiKit.Warn : tier == 2 ? UiKit.Good : tier == 1 ? UiKit.Accent : UiKit.TextDim;
+            return tier >= 3 ? VanillaSkin.Gold : tier >= 1 ? VanillaSkin.White : VanillaSkin.Grey;
         }
 
         static int TierTone(int tier)
@@ -214,7 +204,6 @@ namespace NextDayRevival
         }
 
         static readonly Dictionary<int, Row> _rows = new Dictionary<int, Row>();
-        static readonly UiScroll _rowScroll = new UiScroll();
         static readonly bool[] _keep = new bool[64];
         const int NoRow = int.MinValue;
         static int _orderFor = NoRow;       // the row whose order strip is open
@@ -246,11 +235,41 @@ namespace NextDayRevival
         static double _nextRead;
         static int _faction = -1;
 
-        /// <summary>From TraderUi while this page shows: positions at 2 Hz.</summary>
+        static Component _moneyStats;
+        static MethodInfo _getMoney;
+        static int _moneyNow = -1;
+        static double _nextStats;
+        static readonly UiMemo _moneyText = new UiMemo();
+        static readonly UiMemo _countText = new UiMemo();
+
+        internal static void Open()
+        {
+            _nextRead = 0.0;
+            _pickedHire = 0; _pickedMerc = NoRow;
+            _hireOffset = _contractOffset = 0f;
+            _contracts = false; _orderAll = false; _orderFor = NoRow;
+            Close();
+        }
+
+        internal static void Close()
+        {
+            VanillaSkin.CancelAsk();
+            _pendingHire = null;
+            _dismissId = NoRow;
+        }
+
+        /// <summary>From the active MercUi tab: positions, faction and balance at 2 Hz.</summary>
         internal static void Tick(double now)
         {
             if (now < _nextRead) return;
             _nextRead = now + 0.5;
+            if (_moneyStats == null && now >= _nextStats)
+            {
+                _nextStats = now + 2.0;
+                _moneyStats = Admin.LocalStats();
+                _getMoney = _moneyStats == null ? null : AccessTools.Method(_moneyStats.GetType(), "GetPlayerMoney", Type.EmptyTypes, null);
+            }
+            _moneyNow = _moneyStats == null || _getMoney == null ? -1 : FastCall.Int(_getMoney, _moneyStats);
             GameObject owner = Mercs.OwnerObject;
             _faction = Mercs.FactionOf(owner);
             Vector3 me = owner == null ? Vector3.zero : owner.transform.position;
@@ -266,174 +285,120 @@ namespace NextDayRevival
                 row.WhereKey = MercWhere.Key(at.x - me.x, at.z - me.z);
             }
             if (_rows.Count > roster.Count + 16) _rows.Clear();   // ended contracts: rebuilt on sight
-            if (_armedId != null && Time.time >= _armedUntil) _armedId = null;
             if (_dismissId != NoRow && Time.time >= _dismissUntil) _dismissId = NoRow;
         }
 
-        /// <summary>From TraderUi.Content: the page into the body rect.</summary>
-        internal static void Draw(Rect b)
-        {
-            int lang = Lang();
-            float gap = S(UiKit.Gap), row = S(UiKit.RowH);
-            float now = Time.time;
-            float leftW = Mathf.Floor((b.width - gap * 2f) * 0.56f);
-            Rect left = new Rect(b.x, b.y, leftW, b.height);
-            Rect right = new Rect(left.xMax + gap * 2f, b.y, b.width - leftW - gap * 2f, b.height);
-            HireColumn(left, row, gap, lang, now);
-            MercColumn(right, gap, lang, now);
-        }
-
-        // ------------------------------------------------------------ left: hire
-
-        static readonly UiMemo _hireHead = new UiMemo();
-        static readonly UiMemo _upkeepNote = new UiMemo();
         static readonly UiMemo _fullText = new UiMemo();
         static readonly UiMemo _hireFail = new UiMemo();
+        static readonly UiMemo _payAll = new UiMemo();
 
-        static void HireColumn(Rect c, float row, float gap, int lang, float now)
+        /// <summary>The native form rect, never a custom safe/trade replacement.</summary>
+        internal static bool Draw(Rect form)
         {
-            string settlement = MercUi.EmbeddedSettlement;
-            Cards(settlement, lang);
-            float h = S(22f);
-            int sk = settlement == "civilian" ? 1 : settlement == "looter" ? 2 : settlement == "traitor" ? 3 : 0;
-            int hk = ((sk * 16) + (_faction + 1)) * 2 + lang;
-            string head = _hireHead.Stale(hk) ? _hireHead.Set(hk, HireHead(sk)) : _hireHead.Text;
-            UiKit.Section(new Rect(c.x, c.y, c.width, h), head);
-            int grace = Mercs.GraceHours;
-            int uk = grace * 2 + lang;
-            string note = _upkeepNote.Stale(uk) ? _upkeepNote.Set(uk,
-                Loc.T("Содержание списывается за каждые 24 игровых часа службы. Без оплаты: ",
-                      "Upkeep is billed per 24 in-game hours while he is deployed. Unpaid: ")
-                + grace + Loc.T(" ч отсрочки, потом он уходит.", " h grace, then he deserts.")) : _upkeepNote.Text;
-            UiKit.Label(new Rect(c.x, c.y + h + S(2f), c.width, S(18f)), note, UiFont.Small, UiFont.Left, UiKit.TextDim);
-
-            float top = c.y + h + S(26f);
-            Rect foot = new Rect(c.x, c.yMax - row, c.width, row);
-            Rect view = new Rect(c.x, top, c.width, foot.y - gap - top);
-            float ch = S(CardH);
-            int rows = (_cards.Count + 1) / 2;
-            float contentH = Mathf.Max(0f, rows * (ch + gap) - gap);
-            int money = TraderUi.MoneyNow;
-            int support = Mercs.Support, alive = Mercs.AliveCount, cap = Mercs.Cap;
-            bool hiring = Mercs.HirePending, busy = Mercs.MoneyBusy;
-            if (_cards.Count == 0)
-                UiKit.Paragraph(view, Loc.T("Этот торговец не предлагает наёмников.", "This trader offers no mercenaries."), UiKit.TextDim);
-            else
+            int lang = Lang();
+            float now = Time.time;
+            Cards(MercUi.EmbeddedSettlement, lang);
+            VanillaSkin.Begin(form);
+            MercPageLook.BeginTips();
+            bool enabled = GUI.enabled;
+            bool asking = VanillaSkin.Asking;
+            GUI.enabled = enabled && !asking;
+            if (Event.current.type == EventType.Repaint) VanillaSkin.Frame(form);
+            bool close = VanillaSkin.Close(VanillaSkin.Px(881f, 9f, 20f, 20f));
+            if (VanillaSkin.TextTab(VanillaSkin.Px(447f, 7f, 195f, 28f), Loc.T("Найм", "Hire"), !_contracts, true))
+                _contracts = false;
+            if (VanillaSkin.TextTab(VanillaSkin.Px(642f, 7f, 195f, 28f), Loc.T("Мои наёмники", "My mercenaries"), _contracts, true))
+                _contracts = true;
+            if (_contracts) Contracts(lang, now);
+            else HireList(lang, now);
+            string money = _moneyText.Stale(_moneyNow) ? _moneyText.Set(_moneyNow, _moneyNow < 0 ? "?" : Mercs.Money0(_moneyNow)) : _moneyText.Text;
+            VanillaSkin.Text(VanillaSkin.Px(684f, 461f, 152f, 23f), money, VanillaSkin.Regular, 26f, VanillaSkin.Right, VanillaSkin.White);
+            int ck = (Mercs.AliveCount * 64 + Mercs.Cap) * 2 + lang;
+            string count = _countText.Stale(ck) ? _countText.Set(ck, Loc.T("Наёмники ", "Mercs ") + Mercs.AliveCount + " / " + Mercs.Cap) : _countText.Text;
+            VanillaSkin.Text(VanillaSkin.Px(447f, 489f, 184f, 17f), count, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
+            VanillaSkin.Text(VanillaSkin.Px(632f, 489f, 236f, 17f), Mercs.LinkText(), VanillaSkin.Regular, 12f, VanillaSkin.Right, VanillaSkin.Grey);
+            MercPageLook.Tip(VanillaSkin.Px(447f, 489f, 421f, 17f), Mercs.ProfileSource);
+            GUI.enabled = enabled;
+            int answer = VanillaSkin.DrawDialog();
+            if (answer == 1 && _pendingHire != null)
             {
-                Rect content = UiKit.BeginScroll(view, _cardScroll, contentH);
-                float cw = Mathf.Floor((content.width - gap) * 0.5f);
-                for (int i = 0; i < _cards.Count; i++)
-                {
-                    Card k = _cards[i];
-                    Rect r = new Rect((i % 2) * (cw + gap), (i / 2) * (ch + gap), cw, ch);
-                    if (r.yMax < _cardScroll.Offset || r.y > _cardScroll.Offset + view.height) continue;
-                    int block = MercHire.Block(support, alive, cap, hiring, busy, money, k.P.Price);
-                    DrawCard(r, k, block, alive, cap, lang, now);
-                }
-                UiKit.EndScroll();
+                Card hire = _pendingHire;
+                _pendingHire = null;
+                MercUi.Reply();
+                // Mercs.Hire checks live money/cap/link again, then the master decides.
+                Mercs.Hire(hire.P);
             }
-            LinkLine(foot);
+            if (!VanillaSkin.Asking) { _pendingHire = null; MercPageLook.DrawTips(); }
+            return close;
+        }
 
-            // 1-9 over the cards picks a card (arms it; again = hire).
-            Event e = Event.current;
-            if (e.type == EventType.KeyDown && UiKit.Hover(c) && e.keyCode >= KeyCode.Alpha1 && e.keyCode <= KeyCode.Alpha9)
+        static int HireBlock(Card k)
+        {
+            return MercHire.Block(Mercs.Support, Mercs.AliveCount, Mercs.Cap, Mercs.HirePending, Mercs.MoneyBusy, _moneyNow, k.P.Price);
+        }
+
+        static void HireList(int lang, float now)
+        {
+            Rect view = VanillaSkin.Px(447f, 45f, 421f, 411f);
+            _hireOffset = VanillaSkin.BeginList(view, VanillaSkin.Px(886f, 40f, 10f, 416f), _hireOffset, S(_cards.Count * 58f));
+            for (int i = 0; i < _cards.Count; i++)
             {
-                int n = e.keyCode - KeyCode.Alpha0;
-                if (n <= _cards.Count)
+                Rect r = new Rect(0f, S(i * 58f) - _hireOffset, view.width, S(58f));
+                if (r.yMax < 0f || r.y > view.height) continue;
+                Card k = _cards[i];
+                if (VanillaSkin.Row(r, i == _pickedHire)) _pickedHire = i;
+                VanillaSkin.Plate(new Rect(r.x + S(8f), r.y + S(5f), S(48f), S(48f)), k.Initial, TierColor(k.TierN), 26f);
+                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(4f), S(244f), S(24f)), k.Name, VanillaSkin.Regular, 18f, VanillaSkin.Left, VanillaSkin.White);
+                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(30f), S(240f), S(20f)), k.Tier, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
+                VanillaSkin.Text(new Rect(r.x + S(310f), r.y + S(17f), S(100f), S(24f)), k.Price, VanillaSkin.Regular, 18f, VanillaSkin.Right, VanillaSkin.White);
+            }
+            VanillaSkin.EndList();
+            if (_cards.Count == 0)
+            {
+                VanillaSkin.Paragraph(VanillaSkin.Px(40f, 351f, 366f, 84f), Loc.T("Этот торговец не предлагает наёмников.", "This trader offers no mercenaries."), 16f, VanillaSkin.Grey);
+                return;
+            }
+            _pickedHire = Mathf.Clamp(_pickedHire, 0, _cards.Count - 1);
+            Card picked = _cards[_pickedHire];
+            HireDetail(picked, HireBlock(picked), lang, now);
+            Event e = Event.current;
+            if (GUI.enabled && e.type == EventType.KeyDown && !VanillaSkin.Asking)
+            {
+                int n = e.keyCode >= KeyCode.Alpha1 && e.keyCode <= KeyCode.Alpha9 ? e.keyCode - KeyCode.Alpha0 : 0;
+                if (n > 0 && n <= _cards.Count)
                 {
-                    Card k = _cards[n - 1];
-                    Click(k, MercHire.Block(support, alive, cap, hiring, busy, money, k.P.Price), alive, cap, lang);
+                    _pickedHire = n - 1;
+                    Card k = _cards[_pickedHire];
+                    Click(k, HireBlock(k), Mercs.AliveCount, Mercs.Cap, lang);
                     e.Use();
                 }
             }
         }
 
-        static string HireHead(int sk)
-        {
-            string where = sk == 1 ? Loc.T("НАЁМ - МИРНОЕ ПОСЕЛЕНИЕ", "HIRE - CIVILIAN SETTLEMENT")
-                : sk == 2 ? Loc.T("НАЁМ - ПОСЕЛЕНИЕ МАРОДЁРОВ", "HIRE - LOOTER SETTLEMENT")
-                : sk == 3 ? Loc.T("НАЁМ - ПРЕДАТЕЛИ + ВОЕННЫЙ ГОРОДОК", "HIRE - TRAITOR CAMP + MILITARY TOWN")
-                : Loc.T("НАЁМ", "HIRE");
-            return where + Loc.T("   ВАША СТОРОНА: ", "   YOUR SIDE: ") + Mercs.FactionLabel(_faction).ToUpperInvariant();
-        }
-
-        static void DrawCard(Rect r, Card k, int block, int alive, int cap, int lang, float now)
+        static void HireDetail(Card k, int block, int lang, float now)
         {
             Mercs.Profile p = k.P;
-            UiKit.Card(r);
-            bool armed = _armedId == p.Id && now < _armedUntil;
-            if (MercUi.Flashing(p.Id)) UiKit.Outline(r, UiKit.Good);
-            else if (armed) UiKit.Outline(r, UiKit.Accent);
-            float pad = S(10f);
-            float x = r.x + pad, y = r.y + pad, w = r.width - pad * 2f;
-
-            // Portrait plate in the tier colour, the hotkey number under it.
-            Color tc = TierColor(k.TierN);
-            Rect face = new Rect(x, y, S(52f), S(62f));
-            UiKit.Fill(face, UiKit.Fade(tc, 0.16f), 1);
-            float icon = face.width - S(16f);
-            UiKit.Icon(new Rect(face.x + S(8f), face.y + S(4f), icon, icon), UiIcon.User, tc);
-            UiKit.Label(new Rect(face.x, face.yMax - S(16f), face.width, S(14f)), k.Number, UiFont.Small, UiFont.Center, UiKit.TextDim);
-            float tx = face.xMax + S(10f), tw = r.xMax - pad - tx;
-            UiKit.Label(new Rect(tx, y, tw, S(20f)), k.Name, UiFont.Heading, UiFont.Left, UiKit.Text);
-            Rect tier = new Rect(tx, y + S(22f), S(92f), S(18f));
-            UiKit.Chip(tier, k.Tier, TierTone(k.TierN));
-            UiKit.Tip(tier, Loc.T("Класс по навыкам: чем выше, тем умнее он держит укрытие и отходит",
-                "Grade from his traits: higher = sharper cover use, earlier fall-back"));
-            if (k.Where != null)
-                UiKit.Label(new Rect(tier.xMax + S(6f), tier.y, tw - tier.width - S(6f), tier.height), k.Where, UiFont.Small, UiFont.Left, UiKit.TextDim);
-            UiKit.Label(new Rect(tx, y + S(42f), tw, S(20f)), k.Price, UiFont.Heading, UiFont.Left, UiKit.Warn);
-            y += S(68f);
-
-            // Percentage buffs and the Flak gunner's calibration strength.
-            Rect chips = new Rect(x, y, w, S(18f));
-            if (k.ChipCount == 0) UiKit.Chip(UiKit.Col(chips, 0, 3), Loc.T("без навыков", "no traits"), UiTone.Info);
-            int columns = k.ChipCount > 3 ? 2 : 3;
-            for (int i = 0; i < k.ChipCount; i++)
-            {
-                Rect cr = UiKit.Col(chips, i % columns, columns);
-                cr.y += S(22f) * (i / columns);
-                UiKit.Chip(cr, k.Chips[i], UiTone.Success);
-                UiKit.Tip(cr, k.ChipTips[i]);
-            }
-            y += S(k.ChipCount > 3 ? 46f : 24f);
-            UiKit.Label(new Rect(x, y, w, S(18f)), k.Upkeep, UiFont.Small, UiFont.Left, UiKit.TextDim);
-            y += S(18f);
-            UiKit.Label(new Rect(x, y, w, S(18f)), k.Weapon, UiFont.Body, UiFont.Left, UiKit.Text);
-            y += S(19f);
-            Rect armour = new Rect(x, y, w, S(16f));
-            UiKit.Label(armour, k.Armour, UiFont.Small, UiFont.Left, UiKit.TextDim);
-            UiKit.Tip(armour, k.Armour);
-            y += S(18f);
-            UiKit.Progress(new Rect(x, y, w, S(4f)), p.Protection, UiKit.Accent);
-
-            // Bottom: hire in flight / refused / the button.
-            Rect btn = new Rect(x, r.yMax - pad - S(30f), w, S(30f));
-            if (Mercs.HireProfile == p.Id)
-            {
-                UiKit.Status(btn, UiTone.Loading, Loc.T("Найм - ждём мастер-сервер...", "Hiring - waiting for the master server..."));
-                return;
-            }
-            float errAt = Mercs.HireErrorAt;
-            if (Mercs.HireErrorProfile == p.Id && Mercs.HireError != null && now >= errAt && now - errAt < MercPay.FailShow)
+            VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), k.Name, VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
+            VanillaSkin.Plate(VanillaSkin.Px(71f, 29f, 300f, 300f), k.Initial, TierColor(k.TierN), 76f);
+            VanillaSkin.Text(VanillaSkin.Px(85f, 39f, 272f, 26f), k.Tier, VanillaSkin.Bebas, 22f, VanillaSkin.Center, VanillaSkin.White);
+            VanillaSkin.Bar(VanillaSkin.Px(85f, 282f, 272f, 6f), p.Protection, VanillaSkin.Green);
+            VanillaSkin.Paragraph(VanillaSkin.Px(40f, 351f, 366f, 84f), k.Description, 14f, VanillaSkin.Grey);
+            MercPageLook.Tip(VanillaSkin.Px(40f, 351f, 366f, 84f), k.DetailTip);
+            if (k.Where != null) VanillaSkin.Text(VanillaSkin.Px(85f, 298f, 272f, 20f), k.Where, VanillaSkin.Regular, 14f, VanillaSkin.Center, VanillaSkin.White);
+            VanillaSkin.Text(VanillaSkin.Px(39f, 471f, 152f, 26f), k.Price, VanillaSkin.Regular, 26f, VanillaSkin.Right, VanillaSkin.White);
+            string status = block == MercHire.Ok ? null : BlockText(block, Mercs.AliveCount, Mercs.Cap, lang);
+            if (Mercs.HireProfile == p.Id) status = Loc.T("Найм - ждём мастер-сервер...", "Hiring - waiting for the master server...");
+            else if (Mercs.HireErrorProfile == p.Id && Mercs.HireError != null && now >= Mercs.HireErrorAt && now - Mercs.HireErrorAt < MercPay.FailShow)
             {
                 int rk = MercPay.Reason(Mercs.HireError) * 2 + lang;
-                string fail = _hireFail.Stale(rk) ? _hireFail.Set(rk, Loc.T("Найм отклонён: ", "Hire refused: ")
+                status = _hireFail.Stale(rk) ? _hireFail.Set(rk, Loc.T("Найм отклонён: ", "Hire refused: ")
                     + (lang == 0 ? ReasonRu : ReasonEn)[MercPay.Reason(Mercs.HireError)]
                     + Loc.T(" - деньги возвращены", " - money refunded")) : _hireFail.Text;
-                Rect st = new Rect(btn.x, btn.y, btn.width - S(78f), btn.height);
-                UiKit.Status(st, UiTone.Error, fail);
-                UiKit.Tip(st, fail);
-                if (UiKit.Button(new Rect(st.xMax + S(6f), btn.y, S(72f), btn.height), Loc.T("Ещё раз", "Retry"),
-                    UiButton.Secondary, block == MercHire.Ok, null))
-                    Click(k, block, alive, cap, lang);
-                return;
             }
-            string text = block != MercHire.Ok ? BlockText(block, alive, cap, lang) : armed ? k.ConfirmText : k.HireText;
-            if (UiKit.Button(btn, text, armed ? UiButton.Primary : UiButton.Secondary, block == MercHire.Ok,
-                block != MercHire.Ok ? null : armed ? Loc.T("Второй щелчок нанимает", "Second click hires")
-                : Loc.T("Щелчок - выбрать, второй - нанять (деньги сразу)", "Click to pick, again to hire (paid at once)")))
-                Click(k, block, alive, cap, lang);
+            VanillaSkin.Text(VanillaSkin.Px(40f, 331f, 366f, 18f), status, VanillaSkin.Regular, 13f, VanillaSkin.Left, VanillaSkin.Red);
+            MercPageLook.Tip(VanillaSkin.Px(40f, 331f, 366f, 18f), status);
+            if (VanillaSkin.BuyButton(VanillaSkin.Px(265f, 463f, 160f, 40f), Loc.T("Нанять", "Hire"), block == MercHire.Ok))
+                Click(k, block, Mercs.AliveCount, Mercs.Cap, lang);
         }
 
         static string BlockText(int block, int alive, int cap, int lang)
@@ -447,110 +412,64 @@ namespace NextDayRevival
             return (lang == 0 ? BlockRu : BlockEn)[Mathf.Clamp(block, 0, BlockEn.Length - 1)];
         }
 
-        /// <summary>Hiring costs a fortune: the first click arms the card for
-        /// 4 s, the second hires (Mercs.Hire checks everything again).</summary>
+        // The native-style Yes/No dialog replaces the timed two-click arm.
         static void Click(Card k, int block, int alive, int cap, int lang)
         {
             MercUi.Reply();
             if (block != MercHire.Ok) { UiKit.Toast(BlockText(block, alive, cap, lang), UiTone.Warning); return; }
-            float now = Time.time;
-            if (_armedId == k.P.Id && now < _armedUntil)
-            {
-                _armedId = null;
-                Mercs.Hire(k.P);
-                return;
-            }
-            _armedId = k.P.Id; _armedUntil = now + 4f;
+            _pendingHire = k;
+            VanillaSkin.Ask(k.Question, 1);
         }
 
-        static void LinkLine(Rect r)
+        static void Contracts(int lang, float now)
         {
-            int phase = Mercs.LinkPhase;
-            int tone = phase == MercLink.PhaseLive ? UiTone.Success : phase == MercLink.PhaseNoModule ? UiTone.Error
-                : phase == MercLink.PhaseSilent ? UiTone.Warning : UiTone.Loading;
-            string t = Mercs.LinkText();
-            UiKit.Status(r, tone, t);
-            UiKit.Tip(r, t);
-        }
-
-        // ------------------------------------------------------------ right: my mercs
-
-        static readonly UiMemo _mineHead = new UiMemo();
-        static readonly UiMemo _payAll = new UiMemo();
-
-        static void MercColumn(Rect c, float gap, int lang, float now)
-        {
+            string[] notes = lang == 0 ? NotesRu : NotesEn;
+            for (int i = 0; i < notes.Length; i++)
+                if (VanillaSkin.TextTab(VanillaSkin.Px(447f + i * 140f, 43f, 140f, 27f), notes[i], NoteMode == i, true) && _cfgNotes != null)
+                    _cfgNotes.Value = MercPageNote.Name(i);
             List<Mercs.Record> roster = Mercs.Roster;
-            int alive = Mercs.AliveCount, cap = Mercs.Cap;
-            float h = S(22f);
-            int hk = (alive * 64 + cap) * 2 + lang;
-            string head = _mineHead.Stale(hk) ? _mineHead.Set(hk, Loc.T("МОИ НАЁМНИКИ   ", "MY MERCENARIES   ") + alive + " / " + cap) : _mineHead.Text;
-            UiKit.Section(new Rect(c.x, c.y, c.width, h), head);
-
-            // Notification filter.
-            float y = c.y + h + gap;
-            float lw = S(92f);
-            UiKit.Label(new Rect(c.x, y, lw, S(28f)), Loc.T("Сообщения", "Messages"), UiFont.Small, UiFont.Left, UiKit.TextDim);
-            Rect tabs = new Rect(c.x + lw, y, c.width - lw, S(28f));
-            int mode = NoteMode;
-            int picked = UiKit.Tabs(tabs, mode, lang == 0 ? NotesRu : NotesEn);
-            if (picked != mode && _cfgNotes != null) _cfgNotes.Value = MercPageNote.Name(picked);
-            UiKit.Tip(tabs, Loc.T("Какие сообщения наёмников показывать справа вверху. Ответы на ваши действия видны всегда.",
-                "Which merc messages show top right. Answers to your own clicks and keys always show."));
-            y += S(28f) + gap;
-
-            // All mercs: order strip, pay everything due.
-            int due = 0;
-            for (int i = 0; i < roster.Count; i++) if (roster[i].Unpaid && !roster[i].PayPending) due++;
-            Rect act = new Rect(c.x, y, c.width, S(30f));
-            bool any = alive > 0;
-            if (UiKit.Button(UiKit.Col(act, 0, 2), _orderAll ? Loc.T("Скрыть приказы", "Hide orders") : Loc.T("Приказ всем...", "Order all..."),
-                UiButton.Secondary, any, null))
-            { _orderAll = !_orderAll; _orderFor = NoRow; MercUi.Reply(); }
-            int pk = due * 2 + lang;
-            string payAll = _payAll.Stale(pk) ? _payAll.Set(pk, due == 0 ? Loc.T("Долгов нет", "Nothing due")
-                : Loc.T("Оплатить долги (", "Pay all due (") + due + ")") : _payAll.Text;
-            if (UiKit.Button(UiKit.Col(act, 1, 2), payAll, due > 0 ? UiButton.Primary : UiButton.Secondary, due > 0, null))
-            { MercUi.Reply(); Mercs.PayAllDue(); }
-            y = act.yMax + gap;
-            if (_orderAll && any)
-            {
-                OrderStrip(new Rect(c.x, y, c.width, S(StripH)), null, lang);
-                y += S(StripH) + gap;
-            }
-
-            Rect view = new Rect(c.x, y, c.width, c.yMax - y);
-            if (roster.Count == 0)
-            {
-                int phase = Mercs.LinkPhase;
-                Rect st = new Rect(view.x, view.y, view.width, S(UiKit.RowH));
-                if (phase == MercLink.PhaseAsking || phase == MercLink.PhaseSilent)
-                    UiKit.Status(st, UiTone.Loading, Loc.T("Загружаем ваши контракты...", "Loading your contracts..."));
-                else if (phase == MercLink.PhaseNoModule)
-                    UiKit.Status(st, UiTone.Error, Mercs.LinkText());
-                else
-                    UiKit.Paragraph(view, Loc.T("Наёмников пока нет. Наймите слева - он выйдет рядом с этим торговцем и пойдёт за вами.",
-                        "No mercenaries yet. Hire one on the left - he steps out beside this trader and follows you."), UiKit.TextDim);
-                return;
-            }
-
-            float rowH = S(RowH), strip = S(StripH) + gap;
-            float contentH = 0f;
-            for (int i = 0; i < roster.Count; i++) contentH += rowH + gap + (roster[i].Id == _orderFor && !roster[i].Dead ? strip : 0f);
-            Rect content = UiKit.BeginScroll(view, _rowScroll, Mathf.Max(0f, contentH - gap));
-            float ry = 0f;
-            int number = 0;
+            Rect view = VanillaSkin.Px(447f, 77f, 421f, 379f);
+            _contractOffset = VanillaSkin.BeginList(view, VanillaSkin.Px(886f, 77f, 10f, 379f), _contractOffset, S(roster.Count * 58f));
+            Mercs.Record picked = null;
             for (int i = 0; i < roster.Count; i++)
             {
                 Mercs.Record m = roster[i];
-                if (!m.Dead) number++;
-                float hh = rowH + (m.Id == _orderFor && !m.Dead ? strip : 0f);
-                Rect r = new Rect(0f, ry, content.width, hh);
-                ry += hh + gap;
-                if (r.yMax < _rowScroll.Offset || r.y > _rowScroll.Offset + view.height) continue;
-                if (DrawRow(r, m, lang, now)) break;   // the roster changed (dismissed)
+                if (m.Id == _pickedMerc) picked = m;
+                Rect r = new Rect(0f, S(i * 58f) - _contractOffset, view.width, S(58f));
+                if (r.yMax < 0f || r.y > view.height) continue;
+                if (VanillaSkin.Row(r, m.Id == _pickedMerc)) { _pickedMerc = m.Id; picked = m; _orderAll = false; }
+                Row row = RowOf(m, lang);
+                VanillaSkin.Text(new Rect(r.x + S(12f), r.y + S(4f), S(285f), S(24f)), row.Title, VanillaSkin.Regular, 18f, VanillaSkin.Left, m.Dead ? VanillaSkin.Grey : VanillaSkin.White);
+                VanillaSkin.Text(new Rect(r.x + S(12f), r.y + S(31f), S(285f), S(20f)), (lang == 0 ? StatusRu : StatusEn)[StatusOf(m)], VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
+                VanillaSkin.Bar(new Rect(r.x + S(308f), r.y + S(26f), S(100f), S(6f)), m.Hp, VanillaSkin.Green);
             }
-            UiKit.EndScroll();
+            VanillaSkin.EndList();
+            if (picked == null && roster.Count > 0) { picked = roster[0]; _pickedMerc = picked.Id; }
+            int due = 0;
+            for (int i = 0; i < roster.Count; i++) if (roster[i].Unpaid && !roster[i].PayPending && !roster[i].Dead) due++;
+            int pk = due * 2 + lang;
+            string payAll = _payAll.Stale(pk) ? _payAll.Set(pk, Loc.T("Оплатить долги (", "Pay all due (") + due + ")") : _payAll.Text;
+            if (VanillaSkin.Button(VanillaSkin.Px(447f, 463f, 111f, 32f), Loc.T("Оплатить все", "Pay all"), 16f, due > 0))
+            { MercUi.Reply(); Mercs.PayAllDue(); }
+            MercPageLook.Tip(VanillaSkin.Px(447f, 463f, 111f, 32f), payAll);
+            if (VanillaSkin.Button(VanillaSkin.Px(563f, 463f, 111f, 32f), Loc.T("Приказ всем", "Order all"), 16f, Mercs.AliveCount > 0))
+            { _orderAll = !_orderAll; _orderFor = NoRow; MercUi.Reply(); }
+            if (VanillaSkin.Button(VanillaSkin.Px(265f, 463f, 160f, 40f), Loc.T("Полный список", "Full roster"), 18f, true))
+                MercUi.OpenTraderRoster();
+            if (_orderAll)
+            {
+                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), Loc.T("Приказ всем наёмникам", "Orders for all mercenaries"), VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
+                OrderStrip(VanillaSkin.Px(40f, 150f, 366f, 96f), null, lang);
+            }
+            else if (picked != null)
+            {
+                Row row = RowOf(picked, lang);
+                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), row.Title, VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
+                VanillaSkin.Text(VanillaSkin.Px(71f, 65f, 300f, 60f), row.Sub, VanillaSkin.Bebas, 24f, VanillaSkin.Center, VanillaSkin.Gold);
+                if (DrawRow(VanillaSkin.Px(40f, 151f, 366f, 284f), picked, lang, now)) _pickedMerc = NoRow;
+            }
+            else VanillaSkin.Paragraph(VanillaSkin.Px(40f, 351f, 366f, 84f),
+                Loc.T("Наёмников пока нет. Выберите Найм, чтобы нанять бойца.", "No mercenaries yet. Select Hire to recruit one."), 16f, VanillaSkin.Grey);
         }
 
         /// <summary>One merc. True when the roster changed under the loop.</summary>
@@ -558,28 +477,25 @@ namespace NextDayRevival
         {
             Row row = RowOf(m, lang);
             bool dead = m.Dead;
-            if (dead) UiKit.Fill(r, UiKit.Fade(UiKit.CardFill, 0.5f), 1);
-            else UiKit.Card(r);
-            if (MercUi.Located(m.Id)) UiKit.Outline(r, UiKit.Warn);
             float pad = S(10f);
             float x = r.x + pad, y = r.y + pad, w = r.width - pad * 2f;
-            Color text = dead ? UiKit.TextDim : UiKit.Text;
+            Color text = dead ? MercPageLook.TextDim : MercPageLook.Text;
 
             // Line 1: name, profile + tier, status chip.
             int status = StatusOf(m);
             float chipW = S(150f);
-            UiKit.Label(new Rect(x, y, w - chipW - S(6f), S(20f)), row.Title, UiFont.Heading, UiFont.Left, text);
+            MercPageLook.Label(new Rect(x, y, w - chipW - S(6f), S(20f)), row.Title, UiFont.Heading, UiFont.Left, text);
             Rect chip = new Rect(r.xMax - pad - chipW, y + S(1f), chipW, S(18f));
-            UiKit.Chip(chip, (lang == 0 ? StatusRu : StatusEn)[status], MercStatus.Tone(status));
+            MercPageLook.Chip(chip, (lang == 0 ? StatusRu : StatusEn)[status], MercStatus.Tone(status));
             y += S(20f);
-            UiKit.Label(new Rect(x, y, w, S(16f)), row.Sub, UiFont.Small, UiFont.Left, UiKit.TextDim);
+            MercPageLook.Label(new Rect(x, y, w, S(16f)), row.Sub, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
             y += S(20f);
 
             // Line 2: health, order, where.
             int pct = Mathf.Clamp(Mathf.RoundToInt(m.Hp * 100f), 0, 100);
-            UiKit.Progress(new Rect(x, y + S(6f), S(70f), S(6f)), m.Hp, dead ? UiKit.TextDim : pct > 60 ? UiKit.Good : pct > 30 ? UiKit.Warn : UiKit.Bad);
+            MercPageLook.Progress(new Rect(x, y + S(6f), S(70f), S(6f)), m.Hp, dead ? MercPageLook.TextDim : pct > 60 ? MercPageLook.Good : pct > 30 ? MercPageLook.Warn : MercPageLook.Bad);
             string hp = row.Hp.Stale(pct) ? row.Hp.Set(pct, UiNum.Of(pct) + " %") : row.Hp.Text;
-            UiKit.Label(new Rect(x + S(76f), y, S(44f), S(18f)), hp, UiFont.Small, UiFont.Left, UiKit.TextDim);
+            MercPageLook.Label(new Rect(x + S(76f), y, S(44f), S(18f)), hp, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
             float ox = x + S(122f), whereW = S(104f);
             if (!dead)
             {
@@ -587,47 +503,50 @@ namespace NextDayRevival
                 int ok = ((((o.Mode * 8 + Mathf.Min(o.Points.Length, 7)) * 128 + Mathf.Clamp((int)o.RadiusM, 0, 127)) * 2
                     + (m.Peaceful ? 1 : 0)) * 2 + lang) * 1200 + AttackKey(m);
                 string order = row.Order.Stale(ok) ? row.Order.Set(ok, OrderText(m)) : row.Order.Text;
-                UiKit.Label(new Rect(ox, y, r.xMax - pad - whereW - ox, S(18f)), order, UiFont.Body, UiFont.Left, text);
+                MercPageLook.Label(new Rect(ox, y, r.xMax - pad - whereW - ox, S(18f)), order, UiFont.Body, UiFont.Left, text);
                 int wk = row.WhereKey * 2 + lang;
                 string where = row.Where.Stale(wk) ? row.Where.Set(wk, WhereText(row.WhereKey, lang)) : row.Where.Text;
-                UiKit.Label(new Rect(r.xMax - pad - whereW, y, whereW, S(18f)), where, UiFont.Small, UiFont.Right, UiKit.TextDim);
+                MercPageLook.Label(new Rect(r.xMax - pad - whereW, y, whereW, S(18f)), where, UiFont.Small, UiFont.Right, MercPageLook.TextDim);
             }
             y += S(22f);
 
             // Line 3: upkeep due / payment state.
-            Rect line = new Rect(x, y, w, S(20f));
+            Rect line = new Rect(x, y, w - S(116f), S(20f));
+            MercPageLook.Label(new Rect(r.xMax - pad - S(112f), y, S(112f), S(20f)),
+                Mercs.MedkitStockLabel(m), UiFont.Small, UiFont.Right, MercPageLook.TextDim);
             bool deserting = m.Unit != null && m.Unit.Deserting;
             int pay = MercPay.State(dead, m.Unpaid, m.PayPending, m.PayWanted, m.PayError != null, m.PayErrorAt, now);
             int reason = pay == MercPay.Failed ? MercPay.Reason(m.PayError) : 0;
             int tenths = MercDue.Tenths(m.Deployed, m.PaidUntil, Mercs.GraceHours, m.Unpaid);
             int dk = (((Math.Min(tenths, 20000) * 6 + pay) * MercPay.Reasons + reason) * 4 + (dead ? 1 : deserting ? 2 : 0)) * 2 + lang;
             string dueText = row.Due.Stale(dk) ? row.Due.Set(dk, DueText(m, row, pay, reason, tenths, deserting)) : row.Due.Text;
-            if (dead) UiKit.Label(line, dueText, UiFont.Small, UiFont.Left, UiKit.TextDim);
-            else if (deserting) UiKit.Status(line, UiTone.Error, dueText);
-            else if (pay == MercPay.InFlight) UiKit.Status(line, UiTone.Loading, dueText);
-            else if (pay == MercPay.Queued) UiKit.Status(line, UiTone.Warning, dueText);
-            else if (pay == MercPay.Failed || pay == MercPay.Due) UiKit.Status(line, UiTone.Error, dueText);
-            else UiKit.Label(line, dueText, UiFont.Small, UiFont.Left, UiKit.TextDim);
-            UiKit.Tip(line, dueText);
+            if (dead) MercPageLook.Label(line, dueText, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
+            else if (deserting) MercPageLook.Status(line, UiTone.Error, dueText);
+            else if (pay == MercPay.InFlight) MercPageLook.Status(line, UiTone.Loading, dueText);
+            else if (pay == MercPay.Queued) MercPageLook.Status(line, UiTone.Warning, dueText);
+            else if (pay == MercPay.Failed || pay == MercPay.Due) MercPageLook.Status(line, UiTone.Error, dueText);
+            else MercPageLook.Label(line, dueText, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
+            MercPageLook.Tip(line, dueText);
             y += S(26f);
             if (dead) return false;
 
             // Line 4: Locate, Order, Pay, Dismiss, native medkit gift.
             Rect btns = new Rect(x, y, w, S(26f));
             bool spawned = m.Unit != null && m.Unit.Ai != null;
-            if (UiKit.Button(UiKit.Col(btns, 0, 6), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
+            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 3), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
                 Loc.T("Отметить на карте и на экране на 30 с", "Mark him on the map and on screen for 30 s")))
                 Locate(m, row, lang);
             bool open = _orderFor == m.Id;
-            if (UiKit.Button(UiKit.Col(btns, 1, 6), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 3), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
                 UiButton.Secondary, !deserting, null))
             { _orderFor = open ? NoRow : m.Id; _orderAll = false; MercUi.Reply(); }
             bool canPay = m.Unpaid && !m.PayPending && !m.PayWanted && !deserting;
-            if (UiKit.Button(UiKit.Col(btns, 2, 6), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 2, 3), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
                 canPay ? UiButton.Primary : UiButton.Secondary, canPay, null))
             { MercUi.Reply(); Mercs.Pay(m, true); }
+            btns.y += S(32f);
             bool armed = _dismissId == m.Id && now < _dismissUntil;
-            if (UiKit.Button(UiKit.Col(btns, 3, 6), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 3), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
                 UiButton.Danger, true, Loc.T("Без возврата денег; второй щелчок увольняет", "No refund; a second click dismisses")))
             {
                 MercUi.Reply();
@@ -641,17 +560,18 @@ namespace NextDayRevival
                     return true;
                 }
             }
-            if (UiKit.Button(UiKit.Col(btns, 4, 6), Mercs.MedkitLabel(m),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 3), m.Down.Down ? Mercs.MedkitLabel(m)
+                : Loc.T("Дать аптечку", "Give medkit"),
                 UiButton.Secondary, Mercs.CanGiveMedkit(m),
                 m.Down.Down ? Loc.T("Оживить аптечкой из рюкзака (3 м); оставайтесь рядом", "Revive with an inventory medkit within 3 m; stay nearby")
                 : Loc.T("Дать аптечку из рюкзака (10 м); оплата пополняет запас",
                     "Give one native medkit within 10 m; upkeep refills supplies"))) Mercs.GiveMedkit(m);
-            if (UiKit.Button(UiKit.Col(btns, 5, 6), Mercs.MedicLabel(m), UiButton.Secondary, Mercs.CanMedic(m),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 2, 3), Mercs.MedicLabel(m), UiButton.Secondary, Mercs.CanMedic(m),
                 Loc.T("Дополнительная роль: сражается, спасает раненых, расходует аптечки", "Extra duty: fights, rescues and treats allies using finite medkits")))
                 Mercs.SetMedic(m, !m.Medic);
             if (open)
             {
-                y += S(26f) + S(UiKit.Gap);
+                y = btns.yMax + S(6f);
                 OrderStrip(new Rect(x, y, w, S(StripH)), m, lang);
             }
             return false;
@@ -771,20 +691,20 @@ namespace NextDayRevival
             Rect r1 = new Rect(r.x, r.y, r.width, bh), r2 = new Rect(r.x, r.y + bh + g, r.width, bh);
             int act = -1;
             Rect r3 = new Rect(r.x, r.y + (bh + g) * 2f, r.width, bh);
-            if (UiKit.Button(UiKit.Col(r3, 0, 3), Loc.T("В укрытие", "Take cover"), UiButton.Secondary, true, null)) act = 6;
-            if (UiKit.Button(UiKit.Col(r3, 1, 3), Loc.T("К пушкам", "Man guns"), UiButton.Secondary, true, null)) act = 7;
-            if (UiKit.Button(UiKit.Col(r3, 2, 3), Loc.T("К радару", "Man radar"), UiButton.Secondary, true, null)) act = 8;
-            if (UiKit.Button(UiKit.Col(r1, 0, 3), Loc.T("За мной", "Follow me"), UiButton.Secondary, true, null)) act = 0;
-            if (UiKit.Button(UiKit.Col(r1, 1, 3), Loc.T("Стоять здесь", "Stay here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r3, 0, 2), Loc.T("В укрытие", "Take cover"), UiButton.Secondary, true, null)) act = 6;
+            if (MercPageLook.Button(MercPageLook.Col(r3, 1, 2), Loc.T("Занять ПВО", "Man air defence"),
+                UiButton.Secondary, true, Loc.T("Весь отряд; ещё раз - освободить", "Whole squad; click again to release"))) act = 7;
+            if (MercPageLook.Button(MercPageLook.Col(r1, 0, 3), Loc.T("За мной", "Follow me"), UiButton.Secondary, true, null)) act = 0;
+            if (MercPageLook.Button(MercPageLook.Col(r1, 1, 3), Loc.T("Стоять здесь", "Stay here"), UiButton.Secondary, true,
                 Loc.T("Держать ваше текущее место", "Hold your current spot"))) act = 1;
-            if (UiKit.Button(UiKit.Col(r1, 2, 3), Loc.T("За техникой", "Follow vehicle"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r1, 2, 3), Loc.T("За техникой", "Follow vehicle"), UiButton.Secondary, true,
                 Loc.T("Сесть в вашу машину (или в следующую)", "Board your vehicle (or the next one you take)"))) act = 2;
-            if (UiKit.Button(UiKit.Col(r2, 0, 3), Loc.T("Патруль здесь", "Patrol here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r2, 0, 3), Loc.T("Патруль здесь", "Patrol here"), UiButton.Secondary, true,
                 Loc.T("Круг 30 м вокруг вашего места; маршрут по карте - клавиша L", "30 m loop around your spot; a map route: L list"))) act = 3;
-            if (UiKit.Button(UiKit.Col(r2, 1, 3), Loc.T("Периметр здесь", "Perimeter here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r2, 1, 3), Loc.T("Периметр здесь", "Perimeter here"), UiButton.Secondary, true,
                 Loc.T("Охранять круг вокруг вашего места", "Guard a circle around your spot"))) act = 4;
             bool peaceful = target != null ? target.Peaceful : FirstPeaceful();
-            if (UiKit.Button(UiKit.Col(r2, 2, 3), peaceful ? Loc.T("Мирный: ВКЛ", "Peaceful: ON") : Loc.T("Мирный: ВЫКЛ", "Peaceful: OFF"),
+            if (MercPageLook.Button(MercPageLook.Col(r2, 2, 3), peaceful ? Loc.T("Мирный: ВКЛ", "Peaceful: ON") : Loc.T("Мирный: ВЫКЛ", "Peaceful: OFF"),
                 UiButton.Secondary, true, Loc.T("Не начинает бой, отвечает на огонь", "Starts no fight, returns fire"))) act = 5;
             if (act >= 0) Order(target, act);
         }
@@ -816,8 +736,7 @@ namespace NextDayRevival
                     case 4: if (o != null) Mercs.OrderPerimeter(o.transform.position, o.transform.forward); break;
                     case 5: Mercs.TogglePeaceful(); break;
                     case 6: Mercs.OrderRaidCover(); break;
-                    case 7: Mercs.OrderRaidGuns(); break;
-                    case 8: Mercs.OrderAAPost(true, Mercs.OwnerPosition); break;
+                    case 7: Mercs.ToggleAirDefence(); break;
                 }
             }
             finally

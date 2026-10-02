@@ -1018,18 +1018,7 @@ namespace NextDayRevival
 
         internal static void Label(string text, float cx, float y, Color colour, int size)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = size;
-            style.normal.textColor = colour;
-            GUIContent content = new GUIContent(text);
-            Vector2 measured = style.CalcSize(content);
-            Color keep = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(cx - measured.x * 0.5f - 6f, y - 2f, measured.x + 12f, measured.y + 4f),
-                            Texture2D.whiteTexture);
-            GUI.color = keep;
-            GUI.Label(new Rect(cx - measured.x * 0.5f, y, measured.x, measured.y), content, style);
+            VanillaUi.Readout(text, cx, y, colour, size);
         }
 
         internal static float EllipseSemiLength { get { return SemiLength; } }
@@ -1598,7 +1587,7 @@ namespace NextDayRevival
             GUIUtility.RotateAroundPivot(angle, a);
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(new Rect(a.x, a.y - width * 0.5f, len, width), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(a.x, a.y - width * 0.5f, len, width), Texture2D.whiteTexture);
             GUI.color = old;
             GUI.matrix = keep;
         }
@@ -1607,7 +1596,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(new Rect(g.x - r * 0.5f, g.y - r * 0.5f, r, r), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(g.x - r * 0.5f, g.y - r * 0.5f, r, r), Texture2D.whiteTexture);
             GUI.color = old;
         }
 

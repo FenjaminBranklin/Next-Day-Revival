@@ -45,7 +45,7 @@ namespace NextDayRevival {
  static class TowerRadar {public static bool On=true,Built=true,SirenOn;public static Vector3 At;public static Vector3 TowerPoint(Vector3 p){return At+p;}}
  sealed class MercOrder {
   public const int Follow=0,Stay=1,Patrol=2,Perimeter=3,Vehicle=4,ManGun=5,ManRadar=6,Attack=7;
-  public int Mode,K,N;public bool Survive;public string Scene;public float IssuedAt;
+  public int Mode,K,N;public bool Survive,MoveNear;public string Scene;public float IssuedAt;
   public Vector3 Facing;public Vector3[] Points=new Vector3[0];
   public Vector3 Centre{get{return Points.Length==0?Vector3.zero:Points[0];}}
   FOR_SOURCE
@@ -64,7 +64,10 @@ namespace NextDayRevival {
   public Component Ai=new Component();public MercOrder Order,GoalFor;
   public Sense Sense=new Sense();public AttackState Attack=new AttackState();
   public Ride Ride=new Ride();public Fight Fight=new Fight();public CoverPick RaidRoof;
+  public MoveRun Move=new MoveRun();
  }
+ // A S4 move order (composed in 6.67): Give resets the cover reservation.
+ sealed class MoveRun {public void Reset(CoverField f,int id){}}
  static class MercCoverService {public static CoverField Field;public static ICoverWorld World;}
  static class MercUi {public static int Replies;public static string Last;public static void OrderReply(string s,bool error){Replies++;Last=s;}}
  static class NpcWar {public static int Wakes;public static void MercStationWake(MercUnit u){if(u!=null)Wakes++;}}
@@ -307,11 +310,11 @@ def main():
     assert 'RaidReceived(r);' in method(orders, 'static void OrderReceived(')
     assert 'Mercs.RaidWarning(at, siren);' in read('Revival.AirEvents.cs')
     assert 'TowerSupport.FromMaster(sender)' in read('Revival.AirEvents.cs')
-    assert 'case 11: Mercs.OrderRaidCover();' in read('Revival.MercsUi.cs')  # sector 11 after M5b/medic joined the wheel
+    assert 'case 7: Mercs.OrderRaidCover();' in read('Revival.MercsUi.cs')  # A S6 replaces separate radar sector with cover.
     assert 'u.RaidCover = r.Raid.Cover == order;' in mercs
     assert 'n == 10 ? KeyCode.Alpha0' in read('Revival.MercQuickOrders.cs')
     assert 'case 6: Mercs.OrderRaidCover();' in read('Revival.MercPage.cs')
-    assert 'case 7: Mercs.OrderRaidGuns();' in read('Revival.MercPage.cs')
+    assert 'case 7: Mercs.ToggleAirDefence();' in read('Revival.MercPage.cs')
     assert 'MercRaidCover.Sheltered(u, me, now)' in read('Revival.MercCover.cs')
     assert 'AirKills.Sheltered(at, at + Vector3.right * 280f)' in read('Revival.MercCover.cs')
     raid = read('Revival.MercRaid.cs')

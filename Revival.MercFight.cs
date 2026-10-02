@@ -70,6 +70,7 @@ namespace NextDayRevival
     /// what the adapter needs between two Thinks. Made once per merc.</summary>
     internal sealed class MercFight
     {
+        internal readonly MercCatchUp Follow = new MercCatchUp();
         internal MercBrain Brain;
         internal FightOut Out;
         internal FightIn In;
@@ -82,6 +83,8 @@ namespace NextDayRevival
         internal byte MoveState;
         internal int MovingShots;
         internal float LastShotAt = -1000f;
+        internal Transform RangeAttacker;
+        internal float RangeDefendUntil;
         internal float Health = 1f, NextHealth;
         internal Component Weapon;
         internal float NextWeapon;
@@ -297,9 +300,9 @@ namespace NextDayRevival
             MercPositionIn(f, u, ft, now);
             if (think)
             {
-                // K4a can begin walking fire without first finding a peek.
-                // Keep K3's cold rig setup to one body per frame for the squad.
-                if (u.Order.Mode == MercOrder.Attack && MercMoveShoot.Enabled && !ft.MovePoseTried
+                // Prepare capability before the first moving decision, for
+                // every order. Cold rig setup stays at one body per frame.
+                if (MercMoveShoot.Enabled && !ft.MovePoseTried
                     && f.Armed && f.Target != null && f.Sees && MercMoveShootPose.MaySetup())
                 {
                     ft.MovePoseTried = true;
@@ -332,7 +335,10 @@ namespace NextDayRevival
                 MercNotice(f, u, ft, now);           // W: the owner's toasts (Revival.MercNotify.cs)
             }
             FightOut act = ft.Out;
-            bool walking = MercWalkingPose(f, u, ft, ref act, now);
+            bool walking;
+            if (act.CatchUp)
+            { if (ft.MovePose != null) ft.MovePose.Stop(); walking = false; }
+            else walking = MercWalkingPose(f, u, ft, ref act, now);
             // Unsupported/late rigs and target changes answer the visible
             // contact planted. They must never turn a fire-bound into a sprint.
             if (!walking && b.State == MercBrain.AttackFire && act.Act == FightAct.Step) act.Act = FightAct.Fire;
@@ -354,6 +360,7 @@ namespace NextDayRevival
                     f.InCover = false;
                     if (!walking) f.MuzzleBlockedSince = 0f;
                     MercRun(f, u, ft, act.Dest, act.Act == FightAct.Run, walking, now);
+                    if (act.CatchUp) MercFollowSpeed(f, u, true);
                     if (walking) MercWalkingFire(f, u, ft, act, now);
                     else if (act.FireOnMove) MercPositionFire(f, ft, now);
                     break;
@@ -368,12 +375,13 @@ namespace NextDayRevival
                         if (u.Order.Mode == MercOrder.Attack) f.NextState = 0f;
                     }
                     bool target = f.Target != null && f.Target;
+                    bool range = MercMayFireAt(f, target ? f.Target.position : act.Face, now);
                     // M3: never through the owner or a mate - the brain's
                     // view (NoShot) and the live bodies, every frame.
-                    bool friend = MercFireGate.NeedFriendCheck(target, act.NoShot, ft.In.Survive, b.SurvivalFire)
+                    bool friend = range && MercFireGate.NeedFriendCheck(target, act.NoShot, ft.In.Survive, b.SurvivalFire)
                         && MercFriendInLine(f, me, f.Target.position);
-                    byte gate = MercFireGate.Decide(target, f.Sees, act.NoShot, ft.In.Survive, b.SurvivalFire, friend,
-                        !ft.In.Survive && act.Suppress);
+                    byte gate = range ? MercFireGate.Decide(target, f.Sees, act.NoShot, ft.In.Survive, b.SurvivalFire, friend,
+                        !ft.In.Survive && act.Suppress) : MercFireGate.HoldRange;
                     ft.Gate = gate;
                     if (gate == MercFireGate.Shoot)
                     {
@@ -449,7 +457,7 @@ namespace NextDayRevival
             ft.In.Suppression = f.Suppression;
             ft.In.Danger = MercDanger.Near(ft.In.Me, MercBrain.DangerRadius, now, out ft.In.DangerAt);
             ft.In.MoveShoot = MercMoveShoot.Enabled && ft.MovePose != null && ft.MovePose.Supports(f.WeaponId)
-                && f.Armed && !f.TargetIsPlayer && ft.Health >= 0.35f && !ft.In.Reloading && !ft.In.Danger
+                && f.Armed && ft.Health >= 0.35f && !ft.In.Reloading && !ft.In.Danger
                 && ft.Brain.Mode == MercBrain.Normal
                 && (u.Medicine == null || u.Medicine.Active == 0);
             ft.In.Survive = !u.Deserting && (u.Order.Survive || u.Rally
@@ -458,6 +466,8 @@ namespace NextDayRevival
             ft.In.Watch = u.Approach;
             ft.In.MayFight = MercMayEngage(u, now) && MercMayStand(f, u);
             if (MercRoleReposition(f, u, now)) ft.In.MayFight = false;
+            MercFollowFight(f, u, ft, now);
+            MercRangeFightIn(f, u, ft, now);
             if (ft.In.Survive) ft.In.MayFight = true;
             // A perimeter guard gives up the cover sooner: his B3b pursuit
             // takes over a target that went out of sight.
@@ -473,8 +483,8 @@ namespace NextDayRevival
             ft.In.HasOwner = owner != null && owner;
             ft.In.Owner = ft.In.HasOwner ? owner.position : Vector3.zero;
             ft.In.Regroup = !ft.In.Survive && ft.In.HasOwner && (u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle)
-                && (u.Fight.Overwatch.Role == MercRole.Marksman
-                    ? MercRole.InBand(ft.In.Me, ft.In.Owner) : Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits);
+                && (ft.In.Follow || (u.Fight.Overwatch.Role == MercRole.Marksman
+                    ? MercRole.InBand(ft.In.Me, ft.In.Owner) : Flat(ft.In.Owner - ft.In.Me) < MercBreakOffUnits));
             // merc-combat-response: lanes - the owner's held aim, and whether
             // he may step out of a line (not a deserter, a boarder, a gun or
             // radar crewman).
@@ -484,6 +494,7 @@ namespace NextDayRevival
             ft.In.AimFrom = ft.In.OwnerAims ? aimFrom : ft.In.Me;
             ft.In.AimTo = ft.In.OwnerAims ? aimTo : ft.In.Me;
             MercAttackFight(f, u, ft, now);
+            MercMoveFight(f, u, ft);
             // What he fights, for his mates.
             ft.Target = target ? f.Target : null;
             ft.TargetIsPlayer = f.TargetIsPlayer;
@@ -572,21 +583,25 @@ namespace NextDayRevival
             // K3b: an outward/return turn must replace the old destination in
             // this frame, even inside the normal quarter-second move throttle.
             bool phase = ft.WalkingFire != walking || (walking && ft.MoveState != ft.State);
+            // Catch-up hops replace an evasion/peek route immediately.
+            // It must not travel backward during the old move cache window.
+            if (ft.In.Follow && Flat(ft.MoveTo - goal) > 1f) phase = true;
             if (phase) { ft.NextMove = 0f; ft.NextSpeed = 0f; }
             ft.WalkingFire = walking;
             ft.MoveState = ft.State;
             bool reorder = phase || !f.HasOrder || f.WantMain != moveState || now >= f.MoveDeadline
                 || Flat(ft.MoveTo - goal) > 1f;
-            if (reorder && now >= ft.NextMove)
+            if (reorder && now >= ft.NextMove && (!ft.In.Follow || MercFollowRouteTurn()))
             {
-                ft.NextMove = now + 0.25f;
+                ft.NextMove = now + (ft.In.Follow ? 0.5f : 0.25f);
                 ft.MoveTo = goal;
                 Vector3 dest = goal;
                 // Cover and peek spots are NavMesh spots already; a strafe or
                 // a flight point is put on the mesh here.
                 NavMeshHit hit;
                 if (sprint && NavMesh.SamplePosition(goal, out hit, 6f, NavMesh.AllAreas)) dest = MercCrewPhases.Bound(u, hit.position);
-                Go(f, dest, moveState, PoseStand, now, Stance.Reposition);
+                if (ft.In.Follow) MercFollowOrder(f, dest, moveState, now, Stance.Reposition);
+                else Go(f, dest, moveState, PoseStand, now, Stance.Reposition);
                 ft.Sprinting = sprint && !walking;
                 ft.NextSpeed = 0f;
             }
@@ -631,10 +646,13 @@ namespace NextDayRevival
         /// <summary>M3: covering fire - the NPC's own round at the threat's
         /// last spot while it is out of sight (standing, planted, at his rate
         /// of fire). An NpcWar fighter there feels it as suppression; nobody
-        /// is hurt by it unless the round finds him (the game's own shot).
+        /// is hurt by it unless the round finds him. B S2a: the native NPC
+        /// shot has no NPC damage branch, so that is NpcWar's own ray
+        /// (CoverRound), exactly as for an aimed round.
         /// False: not now (not planted, no weapon) - he aims instead.</summary>
         static bool MercSuppress(Fighter f, Vector3 at, float now)
         {
+            if (!MercMayFireAt(f, at, now)) return false;
             f.Stance = Stance.Fire;
             f.HasOrder = false;
             if (!Planted(f, now))
@@ -653,11 +671,17 @@ namespace NextDayRevival
             int fired = VanillaShot(f, weapon, aim);
             if (fired < 0) return false;
             f.NextShot = now + (fired > 0 ? ShotDelay(f) : 0.05f);
-            if (fired > 0 && f.Target != null && f.Target && CfgSuppression.Value && _npcType != null)
+            if (fired > 0) CoverRound(f, weapon, aim);
+            if (fired > 0 && f.Target != null && f.Target && _npcType != null)
             {
                 Component c = f.Target.GetComponent(_npcType);
                 Fighter v = c == null ? null : FighterOf(c);
-                if (v != null) v.Suppression = Mathf.Min(1f, v.Suppression + 0.2f / Mathf.Max(0.4f, v.Nerve));
+                if (v != null)
+                {
+                    MercIncoming(v, f.Tr, now);
+                    if (CfgSuppression.Value)
+                        v.Suppression = Mathf.Min(1f, v.Suppression + 0.2f / Mathf.Max(0.4f, v.Nerve));
+                }
             }
             return true;
         }

@@ -265,69 +265,16 @@ namespace NextDayRevival
         internal static int PingSlots { get { return MaxPings; } }
 
         // ============================================================ sound
-        static AudioSource _src;
-        static AudioClip _click;
-        static bool _audioFailed;
         static int _orderClickFrame = -1;
 
         internal static void OrderClick(bool loud)
         {
             if (_orderClickFrame == Time.frameCount) return;
             _orderClickFrame = Time.frameCount;
-            if (CfgClick == null || CfgClick.Value) Click(loud);
+            if (CfgClick == null || CfgClick.Value) VanillaUi.Sound("Click");
         }
 
-        static void Click(bool loud)
-        {
-            if (_audioFailed) return;
-            try
-            {
-                if (_src == null)
-                {
-                    GameObject go = new GameObject("NDR merc radio");
-                    UnityEngine.Object.DontDestroyOnLoad(go);
-                    _src = go.AddComponent<AudioSource>();
-                    _src.playOnAwake = false;
-                    _src.spatialBlend = 0f;
-                }
-                if (_click == null) _click = MakeClick();
-                _src.PlayOneShot(_click, loud ? 0.5f : 0.35f);
-            }
-            catch (Exception ex)
-            {
-                _audioFailed = true;
-                RevivalPlugin.L.LogWarning("MercNotify click: " + ex.Message);
-            }
-        }
-
-        /// <summary>A handset key-up: a hard click, a short squelch of band
-        /// noise and a second, softer click (~0.12 s). Made once.</summary>
-        static AudioClip MakeClick()
-        {
-            const int rate = 22050;
-            int n = (int)(0.12f * rate);
-            float[] s = new float[n];
-            System.Random rnd = new System.Random(7);
-            float lp = 0f, hp = 0f, prev = 0f;
-            for (int i = 0; i < n; i++)
-            {
-                float t = (float)i / rate;
-                float noise = (float)(rnd.NextDouble() * 2.0 - 1.0);
-                // A crude radio band: low-pass then high-pass.
-                lp += (noise - lp) * 0.35f;
-                hp = 0.9f * (hp + lp - prev);
-                prev = lp;
-                float squelch = t < 0.095f ? 0.45f * Mathf.Min(1f, t / 0.01f) * (1f - t / 0.095f * 0.4f) : 0f;
-                float v = hp * squelch;
-                if (t < 0.004f) v += 0.9f * (1f - t / 0.004f) * Mathf.Sin(2f * Mathf.PI * 1800f * t);
-                float t2 = t - 0.098f;
-                if (t2 >= 0f && t2 < 0.006f) v += 0.5f * (1f - t2 / 0.006f) * Mathf.Sin(2f * Mathf.PI * 1400f * t2);
-                s[i] = Mathf.Clamp(v, -1f, 1f);
-            }
-            AudioClip clip = AudioClip.Create("NDR merc radio click", n, 1, rate, false);
-            clip.SetData(s, 0);
-            return clip;
-        }
+        static void Click(bool loud) { VanillaUi.Sound("Click"); }
 
         internal static string Status()
         {

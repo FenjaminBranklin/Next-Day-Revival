@@ -610,7 +610,7 @@ namespace NextDayRevival
                 GUILayout.Space(6f);
                 GUILayout.Label(Loc.T("Всё сохраняется в BepInEx/config/nextday.revival.toolkit.cfg.",
                                       "Saved at once to BepInEx/config/nextday.revival.toolkit.cfg."));
-                if (GUILayout.Button(Loc.T("закрыть", "close"))) Close();
+                if (VanillaUi.LayoutButton(Loc.T("закрыть", "close"))) Close();
             }
             catch (Exception ex) { Warn("window: " + ex.Message); }
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));

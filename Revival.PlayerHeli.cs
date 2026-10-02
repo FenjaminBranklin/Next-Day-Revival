@@ -2784,15 +2784,7 @@ namespace NextDayRevival
         /// reference - the same reason the technical measures its own.</summary>
         static void Line(string text, float cx, float y, Color colour, int size)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = size;
-            style.normal.textColor = colour;
-            GUIContent content = new GUIContent(text);
-            Vector2 measured = style.CalcSize(content);
-            GUI.Label(new Rect(cx - measured.x * 0.5f,
-                               y + (26f - measured.y) * 0.5f,
-                               measured.x, measured.y), content, style);
+            VanillaUi.Readout(text, cx, y, colour, size);
         }
 
         // ============================================================ install

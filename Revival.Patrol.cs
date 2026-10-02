@@ -7945,7 +7945,7 @@ namespace NextDayRevival
                 if (f4 > 0f && ShowPatrolMap)
                 {
                     GUI.color = new Color(1f, 0.65f, 0.22f, 0.95f * f4);
-                    GUI.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
+                    VanillaUi.Label(new Rect(18f, Screen.height - 48f, 310f, 25f),
                               Loc.T("F4: изменить или удалить маршруты патрулей",
                                     "F4: edit or delete patrol routes"));
                 }
@@ -8688,7 +8688,7 @@ namespace NextDayRevival
 
             Matrix4x4 m = GUI.matrix;
             GUIUtility.RotateAroundPivot(angle, mid);
-            GUI.DrawTexture(new Rect(mid.x - len * 0.5f, mid.y - RouteStroke * 0.5f,
+            VanillaUi.Texture(new Rect(mid.x - len * 0.5f, mid.y - RouteStroke * 0.5f,
                                      len, RouteStroke), Bar());
             GUI.matrix = m;
         }
@@ -8744,18 +8744,25 @@ namespace NextDayRevival
             return false;
         }
 
-        /// <summary>The hover note beside the cursor: a dark panel with a
-        /// faction-coloured hairline border and word-wrapped text, clamped so it
+        static GUIStyle _hoverBody;
+        static readonly GUIContent _hoverText = new GUIContent();
+
+        /// <summary>The native-style hover note beside the cursor, clamped so it
         /// stays on the screen. Drawn in ABSOLUTE GUI coordinates, after the map
         /// clip is closed, so it may sit over the map's edge.</summary>
         static void DrawHoverNote(string text, Vector2 at, Color accent)
         {
             const float w = 260f;
-            GUIStyle body = new GUIStyle(GUI.skin.label);
-            body.wordWrap = true;
-            body.padding = new RectOffset(9, 9, 8, 8);
-            body.normal.textColor = new Color(0.96f, 0.96f, 0.96f);
-            float h = body.CalcHeight(new GUIContent(text), w);
+            if (_hoverBody == null)
+            {
+                _hoverBody = new GUIStyle(GUI.skin.label);
+                _hoverBody.wordWrap = true;
+                _hoverBody.padding = new RectOffset(9, 9, 8, 8);
+            }
+            GUIStyle body = _hoverBody;
+            body.font = VanillaUi.Font(false);
+            _hoverText.text = text;
+            float h = body.CalcHeight(_hoverText, w);
 
             float x = at.x + 16f;
             float y = at.y + 16f;
@@ -8765,17 +8772,7 @@ namespace NextDayRevival
             if (y < 2f) y = 2f;
             Rect box = new Rect(x, y, w, h);
 
-            GUI.color = new Color(0.05f, 0.05f, 0.06f, 0.9f);
-            GUI.DrawTexture(box, Texture2D.whiteTexture);
-            Color border = accent; border.a = 0.95f;
-            GUI.color = border;
-            GUI.DrawTexture(new Rect(box.x, box.y, box.width, 1f), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(box.x, box.yMax - 1f, box.width, 1f), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(box.x, box.y, 1f, box.height), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(box.xMax - 1f, box.y, 1f, box.height), Texture2D.whiteTexture);
-
-            GUI.color = Color.white;
-            GUI.Label(box, text, body);
+            VanillaUi.InfoLabel(box, text, body);
         }
 
         /// <summary>The point at arc length <paramref name="d"/> along the
@@ -8961,7 +8958,7 @@ namespace NextDayRevival
                             "Not recording. Drive the road you want patrolled, then stop."));
 
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button(_recording ? Loc.T("стоп запись", "stop recording")
+                if (VanillaUi.LayoutButton(_recording ? Loc.T("стоп запись", "stop recording")
                                                 : Loc.T("запись", "record"),
                                      GUILayout.Width(130f)))
                 {
@@ -8969,18 +8966,18 @@ namespace NextDayRevival
                     Melde(_recording ? Loc.T("запись ", "recording ") + RevivalPlugin.CfgPatrolRoute.Value
                                      : Loc.T("запись остановлена", "recording stopped"));
                 }
-                if (GUILayout.Button(Loc.T("точка здесь", "waypoint here"), GUILayout.Width(120f)))
+                if (VanillaUi.LayoutButton(Loc.T("точка здесь", "waypoint here"), GUILayout.Width(120f)))
                 {
                     RecordHere(true);
                     Melde(Loc.T("точка добавлена в ", "waypoint added to ") + RevivalPlugin.CfgPatrolRoute.Value);
                 }
-                if (GUILayout.Button(Loc.T("отменить последнюю", "undo last"), GUILayout.Width(90f))) Zurueck();
+                if (VanillaUi.LayoutButton(Loc.T("отменить последнюю", "undo last"), GUILayout.Width(90f))) Zurueck();
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
                 GUILayout.Label(Loc.T("Новый маршрут:", "New route:"), GUILayout.Width(70f));
                 _neu = GUILayout.TextField(_neu, 24, GUILayout.Width(140f));
-                if (GUILayout.Button(Loc.T("создать и записать", "create and record"), GUILayout.Width(150f))) Anlegen();
+                if (VanillaUi.LayoutButton(Loc.T("создать и записать", "create and record"), GUILayout.Width(150f))) Anlegen();
                 GUILayout.EndHorizontal();
 
                 GUILayout.Space(6f);
@@ -9013,24 +9010,24 @@ namespace NextDayRevival
                     + Loc.T(" (patrol capacity). Автоматика: ", " (patrol capacity). Automatic: ")
                     + (_auto ? Loc.T("вкл", "on") : Loc.T("ВЫКЛ", "OFF")));
                 GUILayout.BeginHorizontal();
-                if (GUILayout.Button(_auto ? Loc.T("автоматика выкл", "automatic off")
+                if (VanillaUi.LayoutButton(_auto ? Loc.T("автоматика выкл", "automatic off")
                                            : Loc.T("автоматика вкл", "automatic on"),
                                      GUILayout.Width(130f)))
                 {
                     if (_auto) { StopAll(); Melde(Loc.T("все патрули убраны с дороги", "all patrols off the road")); }
                     else { Toggle(); Melde(Loc.T("автоматика включена", "automatic on")); }
                 }
-                if (GUILayout.Button(Loc.T("убрать с дороги", "clear the road"), GUILayout.Width(120f)))
+                if (VanillaUi.LayoutButton(Loc.T("убрать с дороги", "clear the road"), GUILayout.Width(120f)))
                 {
                     StopAll();
                     Melde(Loc.T("все патрули убраны с дороги", "all patrols off the road"));
                 }
-                if (GUILayout.Button(Loc.T("сохранить файл", "save file"), GUILayout.Width(90f)))
+                if (VanillaUi.LayoutButton(Loc.T("сохранить файл", "save file"), GUILayout.Width(90f)))
                 {
                     Save();
                     Melde(Loc.T("записано в ", "written to ") + RevivalPlugin.CfgPatrolFile.Value);
                 }
-                if (GUILayout.Button(Loc.T("перезагрузить", "reload"), GUILayout.Width(70f)))
+                if (VanillaUi.LayoutButton(Loc.T("перезагрузить", "reload"), GUILayout.Width(70f)))
                 {
                     Load(true);
                     Melde(Loc.T("прочитано из ", "read back from ") + RevivalPlugin.CfgPatrolFile.Value);
@@ -9045,7 +9042,7 @@ namespace NextDayRevival
                     + "everyone but looters. traitor attacks EVERYONE. neutral "
                     + "attacks traitors only."));
 
-                if (GUILayout.Button(Loc.T("закрыть", "close"))) { _offen = false; CursorZurueck(); }
+                if (VanillaUi.LayoutButton(Loc.T("закрыть", "close"))) { _offen = false; CursorZurueck(); }
                 GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
             }
 
@@ -9078,14 +9075,14 @@ namespace NextDayRevival
                                          : Loc.T(" выключен - автоматика его не трогает",
                                                  " is off - the automatic leaves it alone")));
                 }
-                if (GUILayout.Button("-", GUILayout.Width(24f)) && r.Count > 0)
+                if (VanillaUi.LayoutButton("-", GUILayout.Width(24f)) && r.Count > 0)
                 {
                     r.Count--;
                     Sichern(r.Name + Loc.T(" несёт патрулей: ", " carries ") + r.Count
                             + Loc.T("", " patrol(s)"));
                 }
                 GUILayout.Label(r.Count.ToString(), GUILayout.Width(20f));
-                if (GUILayout.Button("+", GUILayout.Width(24f)) && r.Count < 16)
+                if (VanillaUi.LayoutButton("+", GUILayout.Width(24f)) && r.Count < 16)
                 {
                     r.Count++;
                     Sichern(r.Name + Loc.T(" несёт патрулей: ", " carries ") + r.Count
@@ -9118,13 +9115,13 @@ namespace NextDayRevival
                 Wagenknopf(r, "btr");
                 Wagenknopf(r, "tank");
                 Wagenknopf(r, "mixed");
-                if (GUILayout.Button(Loc.T("писать сюда", "record into"), GUILayout.Width(90f)))
+                if (VanillaUi.LayoutButton(Loc.T("писать сюда", "record into"), GUILayout.Width(90f)))
                 {
                     RevivalPlugin.CfgPatrolRoute.Value = r.Name;
                     if (!_recording) ToggleRecording();
                     Melde(Loc.T("запись в ", "recording into ") + r.Name);
                 }
-                if (GUILayout.Button(Loc.T("патруль сейчас", "patrol now"), GUILayout.Width(85f))) Jetzt(r);
+                if (VanillaUi.LayoutButton(Loc.T("патруль сейчас", "patrol now"), GUILayout.Width(85f))) Jetzt(r);
                 GUILayout.EndHorizontal();
 
                 // NDR convoy: mark this route as a convoy route (a column of
@@ -9141,7 +9138,7 @@ namespace NextDayRevival
                                          " is a convoy route (tank-APC-APC-tank)")
                         : r.Name + Loc.T(" - обычный патруль", " is an ordinary patrol"));
                 }
-                if (r.IsConvoy && GUILayout.Button(Loc.T("конвой сейчас", "convoy now"),
+                if (r.IsConvoy && VanillaUi.LayoutButton(Loc.T("конвой сейчас", "convoy now"),
                                                    GUILayout.Width(110f)))
                     Melde(RevivalConvoy.SpawnOn(r.Name)
                         ? Loc.T("конвой выехал на ", "convoy sent out on ") + r.Name
@@ -9155,12 +9152,12 @@ namespace NextDayRevival
                     GUILayout.Label(Loc.T("Удалить ", "Delete ") + r.Name
                         + Loc.T(" и его точек: ", " and its ") + r.P.Count
                         + Loc.T("?", " waypoints?"), GUILayout.Width(250f));
-                    if (GUILayout.Button(Loc.T("да, удалить", "yes, delete"), GUILayout.Width(90f))) Loeschen(r);
-                    if (GUILayout.Button(Loc.T("нет", "no"), GUILayout.Width(40f))) _loeschFrage = "";
+                    if (VanillaUi.LayoutButton(Loc.T("да, удалить", "yes, delete"), GUILayout.Width(90f))) Loeschen(r);
+                    if (VanillaUi.LayoutButton(Loc.T("нет", "no"), GUILayout.Width(40f))) _loeschFrage = "";
                 }
                 else
                 {
-                    if (GUILayout.Button(Loc.T("удалить маршрут", "delete route"), GUILayout.Width(100f)))
+                    if (VanillaUi.LayoutButton(Loc.T("удалить маршрут", "delete route"), GUILayout.Width(100f)))
                         _loeschFrage = r.Name;
                 }
                 GUILayout.EndHorizontal();

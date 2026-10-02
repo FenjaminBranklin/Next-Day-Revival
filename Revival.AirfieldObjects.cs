@@ -33,12 +33,6 @@ namespace NextDayRevival
                     root.AddComponent<AirfieldObjectsJob>().Begin(scene.name);
         }
 
-        internal static bool Container(string scene, string name)
-        {
-            return name == scene + "Root" || name == "Apron" || name == "Runway" || name == "Compound"
-                || name == "Depot" || name == "Plant";
-        }
-
         internal static void Seat(Transform node, float x, float z)
         {
             Vector3 old = node.position, next = new Vector3(x, old.y, z);
@@ -56,6 +50,16 @@ namespace NextDayRevival
             node.localScale = new Vector3(90f, node.localScale.y, 86f);
             node.name = node.name.StartsWith("D1|", StringComparison.Ordinal)
                 ? "D1|Field fuel depot" : "L3|Loot: field fuel";
+        }
+
+        // The floor leaves the switched-off shelters fallback for the base
+        // Slabs group, keeping its world transform, drape collider and look.
+        internal static void KeepFloor(Transform root, Transform floor)
+        {
+            Transform slabs = root.Find("Slabs");
+            if (slabs == null || floor.parent == slabs) return;
+            floor.SetParent(slabs, true);
+            floor.gameObject.SetActive(true);
         }
 
         internal static void CompactRadar(Transform root, Transform head)
@@ -109,7 +113,7 @@ namespace NextDayRevival
                 do
                 {
                     Transform node = pending.Pop();
-                    bool model = selective && !AirfieldObjects.Container(scene, node.name);
+                    bool model = selective && !AirfieldObjectsCore.Container(scene, node.name);
                     if ((scene == "EastAirfield" && AirfieldObjectsCore.RemoveBase(node.name))
                         || AirfieldObjectsCore.RemoveModel(scene, node.name, model))
                     { node.gameObject.SetActive(false); hidden++; continue; }
@@ -117,6 +121,8 @@ namespace NextDayRevival
                     if (AirfieldObjectsCore.Move(node.name, out x, out z))
                     { AirfieldObjects.Seat(node, x, z); moved++; }
                     if (scene == "EastAirfield") AirfieldObjects.Marker(node);
+                    if (scene == "EastAirfield" && node.name == AirfieldObjectsCore.KeptFloor)
+                        AirfieldObjects.KeepFloor(transform, node);
                     if (model) continue; // preserve all descendants of retained models
                     for (int i = 0; i < node.childCount; i++) pending.Push(node.GetChild(i));
                 }

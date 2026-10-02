@@ -601,18 +601,18 @@ namespace NextDayRevival
                             angle = Mathf.Atan2(d.x, -d.y) * Mathf.Rad2Deg;
                             GUI.color = new Color(c.r, c.g, c.b, c.a * 0.8f);
                             GUIUtility.RotateAroundPivot(angle, g);
-                            GUI.DrawTexture(new Rect(g.x - 0.75f, g.y - len, 1.5f, len), Px());
+                            VanillaUi.Texture(new Rect(g.x - 0.75f, g.y - len, 1.5f, len), Px());
                             GUI.matrix = matrix;
                         }
                     }
                     float size = t.Type == 2 ? 26f : t.Type >= 3 ? 16f : 20f;
                     GUI.color = c;
                     if (moving) GUIUtility.RotateAroundPivot(angle, g);
-                    GUI.DrawTexture(new Rect(g.x - size * 0.5f, g.y - size * 0.5f, size, size), Icon(t.Type));
+                    VanillaUi.Texture(new Rect(g.x - size * 0.5f, g.y - size * 0.5f, size, size), Icon(t.Type));
                     GUI.matrix = matrix;
                     // A label is the dearest IMGUI call: type names up to
                     // LabelLimit tracks, beyond that the hover text only.
-                    if (labels) GUI.Label(new Rect(g.x + size * 0.5f + 2f, g.y - 7f, 90f, 16f), AirPicturePolicy.TypeName(t.Type), _small);
+                    if (labels) VanillaUi.Label(new Rect(g.x + size * 0.5f + 2f, g.y - 7f, 90f, 16f), AirPicturePolicy.TypeName(t.Type), _small);
                     if ((mouse - g).sqrMagnitude <= 14f * 14f) { hover = t; hoverAt = g; }
                 }
                 if (hover != null && hover.Detail != null)
@@ -621,15 +621,15 @@ namespace NextDayRevival
                     if (r.xMax > clip.width) r.x = hoverAt.x - 14f - r.width;
                     if (r.yMax > clip.height) r.y = hoverAt.y - 10f - r.height;
                     GUI.color = new Color(0f, 0f, 0f, 0.7f);
-                    GUI.DrawTexture(r, Px());
+                    VanillaUi.Texture(r, Px());
                     GUI.color = hover.Iff < 0 ? FoeColor : hover.Iff > 0 ? FriendColor : UnknownColor;
-                    GUI.Label(new Rect(r.x + 5f, r.y + 2f, r.width - 8f, r.height - 2f), hover.Detail, _small);
+                    VanillaUi.Label(new Rect(r.x + 5f, r.y + 2f, r.width - 8f, r.height - 2f), hover.Detail, _small);
                 }
                 // caption, top left of the picture
                 GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(6f, 6f, 250f, 18f), Px());
+                VanillaUi.Texture(new Rect(6f, 6f, 250f, 18f), Px());
                 GUI.color = FriendColor;
-                GUI.Label(new Rect(10f, 7f, 246f, 18f), Caption(_live), _small);
+                VanillaUi.Label(new Rect(10f, 7f, 246f, 18f), Caption(_live), _small);
             }
             finally
             {
@@ -667,34 +667,7 @@ namespace NextDayRevival
                 col.a = Mathf.Clamp01(_holdNoteUntil - Time.time);
             }
             else return;
-            Styles();
-            if (!_warnSized || !ReferenceEquals(_content.text, head))
-            {
-                _content.text = head;
-                _headW = _banner.CalcSize(_content).x;
-                _lineW = 0f;
-                if (line != null)
-                {
-                    _content.text = line;
-                    _lineW = _bannerSmall.CalcSize(_content).x;
-                }
-                _content.text = head;
-                _warnSized = true;
-            }
-            Color old = GUI.color;
-            try
-            {
-                float w = Mathf.Max(560f, Mathf.Max(_headW, _lineW) + 40f);
-                float h = line == null ? 32f : 58f;
-                float x = (Screen.width - w) * 0.5f, y = Screen.height * 0.16f + 72f;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f * col.a);
-                GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
-                GUI.color = col;
-                GUI.Label(new Rect(x + (w - _headW) * 0.5f, y + 4f, _headW + 4f, 26f), head, _banner);
-                if (line != null)
-                    GUI.Label(new Rect(x + (w - _lineW) * 0.5f, y + 31f, _lineW + 4f, 22f), line, _bannerSmall);
-            }
-            finally { GUI.color = old; }
+            VanillaUi.Banner(head, line, Screen.height * 0.16f + 72f, false);
         }
 
         static void Styles()
@@ -728,7 +701,7 @@ namespace NextDayRevival
         {
             if (type < 0 || type >= _icons.Length) type = 5;
             if (_icons[type] != null) return _icons[type];
-            const int size = 40;
+            const int size = 64;
             Color[] pixels = new Color[size * size];
             Color ink = new Color(1f, 1f, 1f, 1f);
             Color outline = new Color(0.08f, 0.08f, 0.08f, 0.9f);
@@ -736,7 +709,8 @@ namespace NextDayRevival
                 for (int x = 0; x < size; x++)
                 {
                     // texture rows run bottom up: +dy is the nose (screen up)
-                    float dx = x - (size - 1) * 0.5f, dy = y - (size - 1) * 0.5f;
+                    float dx = (x - (size - 1) * 0.5f) * 40f / size;
+                    float dy = (y - (size - 1) * 0.5f) * 40f / size;
                     if (Ink(type, dx, dy)) pixels[y * size + x] = ink;
                     else
                         for (int oy = -2; oy <= 2 && pixels[y * size + x].a == 0f; oy++)
@@ -748,44 +722,12 @@ namespace NextDayRevival
             tex.wrapMode = TextureWrapMode.Clamp;
             tex.filterMode = FilterMode.Bilinear;
             tex.SetPixels(pixels);
-            tex.Apply();
+            tex.Apply(false, true);
             _icons[type] = tex;
             return tex;
         }
 
         static bool Ink(int type, float x, float y)
-        {
-            float ax = Mathf.Abs(x);
-            switch (type)
-            {
-                case 0:   // Mi-8: rotor ring, cabin, tail boom
-                {
-                    float r2 = x * x + (y - 3f) * (y - 3f);
-                    return (r2 >= 12f * 12f && r2 <= 14.5f * 14.5f)
-                        || (ax <= 4f && y >= -4f && y <= 12f)
-                        || (ax <= 1.6f && y >= -17f && y <= -4f)
-                        || (ax <= 4.5f && y >= -17f && y <= -15f);
-                }
-                case 1:   // An-2: straight wings, long fuselage
-                    return (ax <= 2.5f && y >= -15f && y <= 16f)
-                        || (ax <= 17f && y >= 3f && y <= 8f)
-                        || (ax <= 7f && y >= -15f && y <= -11f);
-                case 2:   // Tu-95: swept wings
-                    return (ax <= 2.5f && y >= -17f && y <= 18f)
-                        || (y <= 6f - ax * 0.55f && y >= 0f - ax * 0.55f && ax <= 18f)
-                        || (y <= -10f - ax * 0.4f && y >= -14f - ax * 0.4f && ax <= 8f);
-                case 3:
-                case 4:   // drones: quadcopter
-                {
-                    float ay = Mathf.Abs(y);
-                    float rotor = (ax - 10f) * (ax - 10f) + (ay - 10f) * (ay - 10f);
-                    return (ax <= 3f && ay <= 5f)
-                        || (Mathf.Abs(ax - ay) <= 1.6f && ax <= 10f)
-                        || (rotor >= 16f && rotor <= 36f);
-                }
-                default:  // unknown: diamond
-                    return ax + Mathf.Abs(y) <= 12f && ax + Mathf.Abs(y) >= 8f;
-            }
-        }
+        { return RadarScopeCore.Ink(type, x, y); }
     }
 }

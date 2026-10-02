@@ -71,7 +71,7 @@ using UnityEngine.Rendering;
 
 namespace NextDayRevival
 {
-    internal static class FarForest
+    internal static partial class FarForest
     {
         /// <summary>World units per real metre (PlayerAn2.K).</summary>
         const float K = 2.8f;
@@ -330,6 +330,7 @@ namespace NextDayRevival
             }
             if (!_look && _bench == 0 && _shot == 0 && (_grounds.Count > 0 || _chunks.Count > 0)) SetLook(true);
             CheckLods();
+            EdgeStep();
         }
 
         // X perf-fix: an admin/editor helipad site that clears ~1500 trees moved
@@ -496,6 +497,8 @@ namespace NextDayRevival
             root.SetActive(false);
             e = BuildCards(masks, level, root, made);
             while (e.MoveNext()) yield return null;
+            e = EdgeMeasureArea(masks, made);
+            while (e.MoveNext()) yield return null;
 
             // 4. Swap in one step.
             ClearCards();
@@ -554,6 +557,7 @@ namespace NextDayRevival
 
         static void ClearCards()
         {
+            EdgeDrop(); // also cancels a pending strip before its pool/root are replaced
             for (int i = 0; i < _chunks.Count; i++)
             {
                 Chunk ch = _chunks[i];
@@ -1650,6 +1654,7 @@ namespace NextDayRevival
         static IEnumerator BuildCards(List<NpcDistance.Mask> masks, int level, GameObject root, List<Chunk> made)
         {
             if (_cardMat == null || _atlas == null) yield break;
+            EdgeMeasureStart();
             int every = InteriorEvery[Mathf.Clamp(level, 0, InteriorEvery.Length - 1)];
             float edge = EdgeM * K, ring = RidgeRingM * K, rise = RidgeRiseM * K;
             List<TerrainData> seen = new List<TerrainData>();
@@ -1678,6 +1683,7 @@ namespace NextDayRevival
                     if (ti.prototypeIndex < 0 || ti.prototypeIndex >= map.Length || map[ti.prototypeIndex] == null) continue;
                     float x = org.x + ti.position.x * size.x, z = org.z + ti.position.z * size.z;
                     if (!ForestAt(masks, x, z)) continue;
+                    EdgeSample(map[ti.prototypeIndex].Card, ti.widthScale, ti.heightScale);
                     uint h = (uint)(i * 2654435761u);
                     bool take = !ForestAt(masks, x + edge, z) || !ForestAt(masks, x - edge, z)
                         || !ForestAt(masks, x, z + edge) || !ForestAt(masks, x, z - edge);
@@ -1720,6 +1726,42 @@ namespace NextDayRevival
         static readonly List<Vector2> _uv = new List<Vector2>();
         static readonly List<int> _t = new List<int>();
 
+        /// <summary>One crossed, double-sided card into _v/_n/_uv/_t or the given
+        /// lists (8 vertices,
+        /// 8 triangles), relative to origin. Shared by the forest chunks and
+        /// the edge strip (Revival.EdgeForest.cs).</summary>
+        static void AddCard(Card c, Vector3 origin)
+        {
+            AddCard(c, origin, _v, _n, _uv, _t);
+        }
+
+        static void AddCard(Card c, Vector3 origin, List<Vector3> vs, List<Vector3> ns, List<Vector2> uvs, List<int> ts)
+        {
+            const float aw = SlotW * AtlasCols, ah = SlotH * AtlasRows;
+            Slot s = c.S;
+            int col = s.Index % AtlasCols, row = s.Index / AtlasCols;
+            float u0 = (col * SlotW + 1.5f) / aw, u1 = ((col + 1) * SlotW - 1.5f) / aw;
+            float v0 = (row * SlotH + 1.5f) / ah, v1 = ((row + 1) * SlotH - 1.5f) / ah;
+            float hw = s.X1 * c.Ws;
+            Vector3 p = c.P - origin;
+            float y0 = p.y + s.Y0 * c.Hs, y1 = p.y + s.Y1 * c.Hs;
+            for (int pl = 0; pl < 2; pl++)
+            {
+                float a = c.Yaw + pl * 1.5708f;
+                Vector3 dir = new Vector3(Mathf.Cos(a) * hw, 0f, Mathf.Sin(a) * hw);
+                int b = vs.Count;
+                vs.Add(new Vector3(p.x - dir.x, y0, p.z - dir.z));
+                vs.Add(new Vector3(p.x - dir.x, y1, p.z - dir.z));
+                vs.Add(new Vector3(p.x + dir.x, y1, p.z + dir.z));
+                vs.Add(new Vector3(p.x + dir.x, y0, p.z + dir.z));
+                for (int k = 0; k < 4; k++) ns.Add(Vector3.up);   // lit like the ground and the canopy
+                uvs.Add(new Vector2(u0, v0)); uvs.Add(new Vector2(u0, v1));
+                uvs.Add(new Vector2(u1, v1)); uvs.Add(new Vector2(u1, v0));
+                ts.Add(b); ts.Add(b + 1); ts.Add(b + 2); ts.Add(b); ts.Add(b + 2); ts.Add(b + 3);
+                ts.Add(b); ts.Add(b + 2); ts.Add(b + 1); ts.Add(b); ts.Add(b + 3); ts.Add(b + 2);
+            }
+        }
+
         static Chunk MakeChunk(Terrain tr, List<Card> cards, GameObject root, float chunk)
         {
             if (cards.Count == 0) return null;
@@ -1733,33 +1775,7 @@ namespace NextDayRevival
             }
             Vector3 origin = new Vector3(Mathf.Floor(lo.x / chunk) * chunk, lo.y, Mathf.Floor(lo.z / chunk) * chunk);
             _v.Clear(); _n.Clear(); _uv.Clear(); _t.Clear();
-            float aw = SlotW * AtlasCols, ah = SlotH * AtlasRows;
-            for (int i = 0; i < max; i++)
-            {
-                Card c = cards[i];
-                Slot s = c.S;
-                int col = s.Index % AtlasCols, row = s.Index / AtlasCols;
-                float u0 = (col * SlotW + 1.5f) / aw, u1 = ((col + 1) * SlotW - 1.5f) / aw;
-                float v0 = (row * SlotH + 1.5f) / ah, v1 = ((row + 1) * SlotH - 1.5f) / ah;
-                float hw = s.X1 * c.Ws;
-                Vector3 p = c.P - origin;
-                float y0 = p.y + s.Y0 * c.Hs, y1 = p.y + s.Y1 * c.Hs;
-                for (int pl = 0; pl < 2; pl++)
-                {
-                    float a = c.Yaw + pl * 1.5708f;
-                    Vector3 dir = new Vector3(Mathf.Cos(a) * hw, 0f, Mathf.Sin(a) * hw);
-                    int b = _v.Count;
-                    _v.Add(new Vector3(p.x - dir.x, y0, p.z - dir.z));
-                    _v.Add(new Vector3(p.x - dir.x, y1, p.z - dir.z));
-                    _v.Add(new Vector3(p.x + dir.x, y1, p.z + dir.z));
-                    _v.Add(new Vector3(p.x + dir.x, y0, p.z + dir.z));
-                    for (int k = 0; k < 4; k++) _n.Add(Vector3.up);   // lit like the ground and the canopy
-                    _uv.Add(new Vector2(u0, v0)); _uv.Add(new Vector2(u0, v1));
-                    _uv.Add(new Vector2(u1, v1)); _uv.Add(new Vector2(u1, v0));
-                    _t.Add(b); _t.Add(b + 1); _t.Add(b + 2); _t.Add(b); _t.Add(b + 2); _t.Add(b + 3);
-                    _t.Add(b); _t.Add(b + 2); _t.Add(b + 1); _t.Add(b); _t.Add(b + 3); _t.Add(b + 2);
-                }
-            }
+            for (int i = 0; i < max; i++) AddCard(cards[i], origin);
             Chunk ch = new Chunk();
             ch.T = tr;
             ch.Cards = max;
@@ -1970,7 +1986,7 @@ namespace NextDayRevival
             return "far forest " + Names[level] + ": " + _grounds.Count + " ground layer(s), " + _sCards + " cards in "
                 + _chunks.Count + " chunks (" + (_sTris / 1000) + "k tris), " + _sRendered + "/" + _sSlots
                 + " impostors rendered, trees to " + (td / K).ToString("0", CultureInfo.InvariantCulture) + " m, "
-                + F3(_tickMs) + " ms" + (_kept.Length > 0 ? "; " + _kept : "");
+                + F3(_tickMs) + " ms" + (_kept.Length > 0 ? "; " + _kept : "") + "; " + EdgeStatus();
         }
     }
 

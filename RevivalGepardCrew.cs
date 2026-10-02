@@ -242,8 +242,8 @@ namespace NextDayRevival
         /// <summary>
         /// The An-2 (Revival.PlayerAn2.cs, another branch at the time of
         /// writing) is bound by reflection when the class is in this assembly:
-        /// its airframe list `_all`, `Burning(GameObject)` and the private
-        /// `Crash(GameObject, Vector3)` that burns it on every client. Once,
+        /// its airframe list `_all` and the networked ShotDown/Crash call.
+        /// Down-state collection uses the typed PlayerAn2.Down delegate. Once,
         /// and never again if the shape is not there.
         /// </summary>
         static void Probe()
@@ -255,8 +255,6 @@ namespace NextDayRevival
                 Type t = typeof(GepardAir).Assembly.GetType("NextDayRevival.PlayerAn2");
                 if (t == null) return;
                 FieldInfo all = AccessTools.Field(t, "_all");
-                MethodInfo burning = AccessTools.Method(t, "Burning", new Type[] { typeof(GameObject) }, null);
-                MethodInfo gliding = AccessTools.Method(t, "Gliding", new Type[] { typeof(GameObject) }, null);
                 // ShotDown: an aeroplane hit in the air falls under its smoke
                 // with the crew aboard; Crash (older builds) burns it in place.
                 MethodInfo crash = AccessTools.Method(t, "ShotDown",
@@ -272,17 +270,14 @@ namespace NextDayRevival
                     return;
                 }
                 Register("An-2",
-                    delegate(List<GameObject> into) { into.AddRange(list); },
-                    delegate(GameObject go, Vector3 at) { crash.Invoke(null, new object[] { go, at }); },
-                    burning == null ? null : (Func<GameObject, bool>)delegate(GameObject go)
+                    delegate(List<GameObject> into)
                     {
-                        // Down = burning, or already falling after a kill: the
-                        // guns leave a falling aeroplane alone.
-                        object v = burning.Invoke(null, new object[] { go });
-                        if (v is bool && (bool)v) return true;
-                        object g = gliding == null ? null : gliding.Invoke(null, new object[] { go });
-                        return g is bool && (bool)g;
+                        // NPC carriers have their own explicit source on every client.
+                        for (int i = 0; i < list.Count; i++)
+                            if (list[i] != null && !NpcAircraft.Is(list[i])) into.Add(list[i]);
                     },
+                    delegate(GameObject go, Vector3 at) { crash.Invoke(null, new object[] { go, at }); },
+                    PlayerAn2.Down,
                     0);
             }
             catch (Exception ex)

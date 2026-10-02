@@ -328,7 +328,13 @@ namespace NextDayRevival
                 RequestNext[sender] = Time.time + 0.5f;
             }
             if (kind == SnapshotAsk)
-            { if (Close(sender, At, 12f*K)) Broadcast(); return; }
+            {
+                // Fetchers order from the tower; posted crew may be far from
+                // D2a. A read-only snapshot must reach holders before they travel.
+                if (actor == sender && (Close(sender, At, 12f*K)
+                    || (OwnerMayUnload(sender) && Crocodile.PlayerUp(Crocodile.PlayerByActor(sender))))) Broadcast();
+                return;
+            }
             if (kind == Ask)
             {
                 if (actor != sender || gun != -1 || f[3] <= 0f) return;
@@ -419,15 +425,16 @@ namespace NextDayRevival
             if (!_near || !Store.Known || RadarScope.InView) return;
             if (_label == null) { _label = new GUIStyle(GUI.skin.label); _label.alignment = TextAnchor.MiddleCenter; }
             float y = Screen.height * 0.65f;
-            GUI.Label(new Rect(0f, y, Screen.width, 25f), _stock, _label);
             float width = 180f, left = (Screen.width - 4f*width)*0.5f;
-            for (int i = 0; i < 4; i++) GUI.Label(new Rect(left+i*width, y+25f, width, 25f), StockLabels[i], _label);
+            VanillaUi.Panel(new Rect(left - 16f, y - 8f, width * 4f + 32f, 140f), "warning_02_empty");
+            VanillaUi.Label(new Rect(0f, y, Screen.width, 25f), _stock, _label);
+            for (int i = 0; i < 4; i++) VanillaUi.Label(new Rect(left+i*width, y+25f, width, 25f), StockLabels[i], _label);
             if (_cargo != null)
             {
-                GUI.Label(new Rect(0f, y+50f, Screen.width, 25f), _cargo, _label);
-                for (int i = 0; i < 4; i++) GUI.Label(new Rect(left+i*width, y+75f, width, 25f), CargoLabels[i], _label);
+                VanillaUi.Label(new Rect(0f, y+50f, Screen.width, 25f), _cargo, _label);
+                for (int i = 0; i < 4; i++) VanillaUi.Label(new Rect(left+i*width, y+75f, width, 25f), CargoLabels[i], _label);
             }
-            GUI.Label(new Rect(0f, y+100f, Screen.width, 25f), _prompt, _label);
+            VanillaUi.Label(new Rect(0f, y+100f, Screen.width, 25f), _prompt, _label);
         }
     }
 }

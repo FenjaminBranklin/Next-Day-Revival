@@ -9,7 +9,9 @@ namespace NextDayRevival
 {
     internal sealed class ParkedTu95 : MonoBehaviour
     {
-        internal const float K = 2.8f, X = 4525f, Z = -700f;
+        // A1: on the V1 hardstand at the end of its T3 branch, nose east toward
+        // the taxiway; clear of the restored runway, T1, spine and gun pits.
+        internal const float K = 2.8f, X = 4290f, Z = 600f, Yaw = 90f;
         internal static Transform Root;
         internal static bool Ready;
         readonly List<NavMeshLinkInstance> links = new List<NavMeshLinkInstance>();
@@ -28,6 +30,7 @@ namespace NextDayRevival
             GameObject plane = new GameObject("NDR_ParkedTu95");
             plane.transform.SetParent(transform, false);
             plane.transform.position = new Vector3(X, y, Z);
+            plane.transform.rotation = Quaternion.Euler(0f, Yaw, 0f);
             plane.transform.localScale = Vector3.one * K;
             Root = plane.transform;
             // Trees on the wing/access corridor must not grow through the model.

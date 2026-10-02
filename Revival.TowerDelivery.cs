@@ -27,6 +27,7 @@ namespace NextDayRevival
         static Type _containerType, _dropType, _viewType;
         static FieldInfo _animationState;
         static MethodInfo _instantiate, _destroy, _add, _animation;
+        static object _parachuteState;
         static readonly Dictionary<int, int> Requests = new Dictionary<int, int>();
         sealed class Cargo
         { internal Component Drop; internal Rigidbody Body; internal int Controller; internal float Next; }
@@ -71,11 +72,14 @@ namespace NextDayRevival
             Type photon = RevivalPlugin.TypeByName("PhotonNetwork");
             if (_containerType == null || _dropType == null || _viewType == null || photon == null) return;
             _instantiate = AccessTools.Method(photon, "InstantiateSceneObject",
-                new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion), typeof(int), typeof(object[]) }, null);
+                new Type[] { typeof(string), typeof(Vector3), typeof(Quaternion), typeof(byte), typeof(object[]) }, null);
             _destroy = AccessTools.Method(photon, "Destroy", new Type[] { typeof(GameObject) }, null);
             _add = AccessTools.Method(_containerType, "AddNewContainerItemFromResources", new Type[] { typeof(int) }, null);
             _animationState = AccessTools.Field(_dropType, "animationState");
-            _animation = AccessTools.Method(_dropType, "SetAnimationState", new Type[] { typeof(int) }, null);
+            // Native AnimationState is an enum, not an Int32 method parameter.
+            _animation = _animationState == null ? null : AccessTools.Method(_dropType,
+                "SetAnimationState", new Type[] { _animationState.FieldType }, null);
+            _parachuteState = _animationState == null ? null : Enum.ToObject(_animationState.FieldType, 2);
             MethodInfo start = AccessTools.Method(_containerType, "Start", Type.EmptyTypes, null);
             if (start != null) harmony.Patch(start, new HarmonyMethod(typeof(TowerDelivery).GetMethod("ContainerStartPrefix")), null, null, null, null);
             harmony.Patch(AccessTools.Method(_dropType, "Update", Type.EmptyTypes, null),
@@ -261,7 +265,7 @@ namespace NextDayRevival
             if (_lang != lang)
             {
                 _lang = lang;
-                _labels[0] = Loc.T("52-К: 24 снаряда - 24 000", "52-K: 24 shells - 24,000");
+                _labels[0] = Loc.T("52-К: 28 снарядов - 24 000", "52-K: 28 shells - 24,000");
                 _labels[1] = Loc.T("ЗУ-23: 6 лент (100) - 18 000", "ZU-23: 6 belts (100) - 18,000");
                 _labels[2] = Loc.T("6 аптечек - 12 000", "6 medkits - 12,000");
                 _labels[3] = Loc.T("2 набора инструментов - 10 000", "2 toolkits - 10,000");
@@ -283,7 +287,7 @@ namespace NextDayRevival
         {
             if (!_near) return;
             if (_text == null) { _text = new GUIStyle(GUI.skin.label); _text.wordWrap = true; }
-            if (!Selecting) { if (_canOrder) GUI.Label(new Rect(Screen.width / 2f - 200f, Screen.height - 150f, 400f, 30f), _prompt, _text); return; }
+            if (!Selecting) { if (_canOrder) VanillaUi.Prompt(_prompt, Screen.height - 150f); return; }
             Rect r = new Rect(Screen.width / 2f - 230f, Screen.height / 2f - 205f, 460f, 410f);
             GUI.Box(r, _title);
             for (int i = 0; i < 4; i++)
@@ -292,14 +296,14 @@ namespace NextDayRevival
                 bool chosen = GUI.Toggle(new Rect(r.x + 20f, r.y + 45f + 34f * i, 420f, 30f), old, _labels[i]);
                 if (chosen != old) { _mask ^= 1 << i; Labels(); }
             }
-            GUI.Label(new Rect(r.x + 20f, r.y + 185f, 420f, 70f), _help, _text);
+            VanillaUi.Label(new Rect(r.x + 20f, r.y + 185f, 420f, 70f), _help, _text);
             bool enabled = GUI.enabled;
             GUI.enabled = _canOrder && _mask > 0 && _ready <= RadarClock.Now && !Mercs.MoneyBusy
                 && !TowerSupportPayments.Busy && !TowerSupportPayments.WalletBusy && !_planning && !_filling;
-            if (GUI.Button(new Rect(r.x + 20f, r.y + 265f, 420f, 32f), _order)) Request();
+            if (VanillaUi.Button(new Rect(r.x + 20f, r.y + 265f, 420f, 32f), _order)) Request();
             GUI.enabled = enabled;
-            GUI.Label(new Rect(r.x + 20f, r.y + 302f, 420f, 62f), _status, _text);
-            if (GUI.Button(new Rect(r.x + 20f, r.y + 370f, 420f, 28f), _close)) Close();
+            VanillaUi.Label(new Rect(r.x + 20f, r.y + 302f, 420f, 62f), _status, _text);
+            if (VanillaUi.Button(new Rect(r.x + 20f, r.y + 370f, 420f, 28f), _close)) Close();
         }
         static void Request()
         {
@@ -414,7 +418,7 @@ namespace NextDayRevival
             try
             {
                 _crate = _instantiate.Invoke(null, new object[] { Prefab, target + Vector3.up * 336f,
-                    Quaternion.identity, 0, new object[] { Tag, TowerDeliveryCore.Mask(service), Crocodile.LocalActor() } }) as GameObject;
+                    Quaternion.identity, (byte)0, new object[] { Tag, TowerDeliveryCore.Mask(service), Crocodile.LocalActor() } }) as GameObject;
                 if (_crate == null) return false;
                 _container = _crate.GetComponent(_containerType); _drop = _crate.GetComponent(_dropType) as Behaviour;
                 _body = _crate.GetComponent<Rigidbody>();
@@ -450,7 +454,7 @@ namespace NextDayRevival
             if (!_filling || !_awaitCommit || _crate == null || _drop == null || _body == null) return false;
             try
             {
-                _animation.Invoke(_drop, new object[] { 2 });
+                _animation.Invoke(_drop, new object[] { _parachuteState });
                 _body.isKinematic = false;
                 _ready = RadarClock.Now + TowerDeliveryCore.Cooldown;
                 RevivalPlugin.L.LogInfo("TowerDelivery: basket " + _planMask + " delivered for actor " + _planActor + " at " + _landing);

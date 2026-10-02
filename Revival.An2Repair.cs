@@ -701,7 +701,7 @@ namespace NextDayRevival
             float h = 26f + 4 * 38f + 30f;
             Color keep = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x - 8f, y - 6f, w + 16f, h), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(x - 8f, y - 6f, w + 16f, h), Texture2D.whiteTexture);
             GUI.color = keep;
 
             Label(x, y, ready ? Loc.T("Ан-2 - готов к полёту", "An-2 - airworthy")
@@ -747,20 +747,12 @@ namespace NextDayRevival
             GUIStyle style = new GUIStyle(GUI.skin.label);
             style.fontSize = size;
             style.normal.textColor = colour;
-            GUI.Label(new Rect(x, y, 360f, 24f), text, style);
+            VanillaUi.Label(new Rect(x, y, 360f, 24f), text, style);
         }
 
         static void Prompt(string text)
         {
-            Vector2 size = GUI.skin.label.CalcSize(new GUIContent(text));
-            float w = size.x + 24f, h = Mathf.Max(24f, size.y + 8f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.62f;
-            Color keep = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
-            GUI.color = keep;
-            GUI.Label(new Rect(x + 12f, y + (h - size.y) * 0.5f, size.x + 4f, size.y), text);
+            VanillaUi.Prompt(text, Screen.height * 0.62f);
         }
 
         // ------------------------------------------------------ persistence

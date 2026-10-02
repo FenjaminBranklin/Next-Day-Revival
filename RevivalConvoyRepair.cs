@@ -510,20 +510,7 @@ namespace NextDayRevival
 
         static void DrawPrompt(string text)
         {
-            // Roughly centre the text without TextAnchor (which would pull in
-            // UnityEngine.TextRenderingModule, unreferenced by this build): size
-            // the plate to the label and place the label with a little padding.
-            Vector2 size = GUI.skin.label.CalcSize(new GUIContent(text));
-            float w = size.x + 24f, h = Mathf.Max(24f, size.y + 8f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.62f;
-
-            Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.45f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Px());
-            GUI.color = Color.white;
-            GUI.Label(new Rect(x + 12f, y + 4f, size.x + 4f, size.y + 2f), text);
-            GUI.color = old;
+            VanillaUi.Prompt(text, Screen.height * 0.62f);
         }
 
         static Texture2D _px;

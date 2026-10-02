@@ -144,7 +144,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(r, Px());
+            VanillaUi.Texture(r, Px());
             GUI.color = old;
         }
 
@@ -177,7 +177,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(r, Disc());
+            VanillaUi.Texture(r, Disc());
             GUI.color = old;
         }
 
@@ -211,7 +211,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(r, HotDisc());
+            VanillaUi.Texture(r, HotDisc());
             GUI.color = old;
         }
 
@@ -262,7 +262,7 @@ namespace NextDayRevival
         {
             Color old = GUI.color;
             GUI.color = c;
-            GUI.DrawTexture(full, Vig());
+            VanillaUi.Texture(full, Vig());
             GUI.color = old;
         }
 
@@ -462,12 +462,12 @@ namespace NextDayRevival
                 GUI.color = thermal ? new Color(1f, 0.90f, 0.18f, 1f) : new Color(0.75f, 1f, 0.55f, 1f);
                 float edge = Mathf.Clamp((float)Screen.width / _mask.width, 1f, 2f);
                 Rect full = new Rect(0, 0, Screen.width, Screen.height);
-                GUI.DrawTexture(new Rect(-edge, 0, full.width, full.height), _mask);
-                GUI.DrawTexture(new Rect(edge, 0, full.width, full.height), _mask);
-                GUI.DrawTexture(new Rect(0, -edge, full.width, full.height), _mask);
-                GUI.DrawTexture(new Rect(0, edge, full.width, full.height), _mask);
+                VanillaUi.Texture(new Rect(-edge, 0, full.width, full.height), _mask);
+                VanillaUi.Texture(new Rect(edge, 0, full.width, full.height), _mask);
+                VanillaUi.Texture(new Rect(0, -edge, full.width, full.height), _mask);
+                VanillaUi.Texture(new Rect(0, edge, full.width, full.height), _mask);
                 GUI.color = thermal ? new Color(1f, 0.22f, 0.04f, 1f) : new Color(0.25f, 0.85f, 0.20f, 1f);
-                GUI.DrawTexture(full, _mask);
+                VanillaUi.Texture(full, _mask);
             }
             finally { GUI.color = old; }
         }
@@ -944,14 +944,14 @@ namespace NextDayRevival
             Color oldc = GUI.contentColor;
             GUI.contentColor = EdgeColor(mode);
             GUI.contentColor = new Color(GUI.contentColor.r, GUI.contentColor.g, GUI.contentColor.b, 0.95f);
-            GUI.Label(new Rect(mx + 8f, my - 22f, w * 0.6f, 20f),
+            VanillaUi.Instrument(new Rect(mx + 8f, my - 22f, w * 0.6f, 20f),
                       Loc.T("ОПТИКА: ", "OPTICS: ") + modeTxt
                       + Loc.T("   МОДУЛИ:", "   MODULES:") + mods);
 
             float keys = Hints.Alpha("optics.keys", "sight");   // NDR P9: [Hints]
             GUI.contentColor = new Color(0.82f, 0.86f, 0.82f, 0.72f * keys);
             if (keys > 0f)
-                GUI.Label(new Rect(mx + 8f, h - my + 3f, w - 2f * mx - 16f, 20f),
+                VanillaUi.Instrument(new Rect(mx + 8f, h - my + 3f, w - 2f * mx - 16f, 20f),
                           Loc.T("N: режим   I: установить модуль   Shift+I: снять модуль",
                                 "N: mode   I: install module   Shift+I: remove module"));
             GUI.contentColor = oldc;

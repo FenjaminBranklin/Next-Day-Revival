@@ -210,8 +210,8 @@ def main():
     ui = (ROOT / 'Revival.MercsUi.cs').read_text(encoding='utf-8')
     issue = block(ui, 'static void Issue(')
     gun_sector = issue[issue.index('case 6:'):issue.index('case AttackSector:')]
-    assert 'CrosshairPoint' not in gun_sector and 'OwnerPosition' in gun_sector and 'OpenStations' in gun_sector
-    assert 'StationRows(r)' in ui and 'MAN NEAREST GUN' in ui
+    assert 'CrosshairPoint' not in gun_sector and 'ToggleAirDefence()' in gun_sector
+    assert 'OpenStations' not in ui and 'StationRows(r)' not in ui and 'Man air defence' in ui
     combat = (ROOT / 'Revival.NpcCombat.cs').read_text(encoding='utf-8')
     assert combat.index('MercStationDuty(f, s.Merc, now)') < combat.index('else if (MercFight(f, s.Merc, now))')
     stations = (ROOT / 'Revival.MercStations.cs').read_text(encoding='utf-8')

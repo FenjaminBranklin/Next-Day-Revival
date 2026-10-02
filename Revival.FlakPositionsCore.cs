@@ -11,8 +11,10 @@ namespace NextDayRevival
         internal const int Segments = 24;
         // Preserve gun/repair/merc wire IDs. Radar lease is 4; town is 2/3.
         internal static readonly int[] GunIndex = { 0, 6, 1, 5 };
-        internal static readonly float[] X = { 4030f, 4375f, 4370f, 4100f };
-        internal static readonly float[] Z = { 1615f, 1580f, 915f, 1000f };
+        // A1: AA-NW sits off the restored P1t track and the forest edge, AA-S
+        // south of the restored A1 apron (AirfieldGroundCore clears its trees).
+        internal static readonly float[] X = { 4045f, 4375f, 4370f, 4100f };
+        internal static readonly float[] Z = { 1608f, 1580f, 860f, 1000f };
         internal static readonly string[] Name = { "AA-NW", "AA-NE", "AA-S", "ZU-W" };
 
         internal static int Position(int gun)

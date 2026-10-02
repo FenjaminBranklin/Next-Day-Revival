@@ -164,7 +164,7 @@ namespace NextDayRevival
         internal static ConfigEntry<bool> CfgGameplay, CfgDepotHit, CfgSightView, CfgModel;
         internal static ConfigEntry<string> CfgSightKey, CfgReleaseKey, CfgLoadKey, CfgLoad;
         internal static ConfigEntry<int> CfgEventCode, CfgControls;
-        internal static ConfigEntry<float> CfgRadius, CfgNpcDamage, CfgVehicleDamage,
+        internal static ConfigEntry<float> CfgRadius, CfgNpcDamage, CfgVehicleDamage, CfgLethalCore,
             CfgPlayerDamage, CfgDrag, CfgScatter, CfgScatterPerHeight, CfgScatterPerBank,
             CfgArmSeconds, CfgInterval, CfgSightFov, CfgDepotReach, CfgAimSensitivity;
 
@@ -202,6 +202,10 @@ namespace NextDayRevival
                 "Metres, for a FAB-50 (a FAB-100 x1.26). Damage falls off linearly to zero here. "
                 + "A vehicle needs a burst within a few metres to be hurt badly.");
             CfgNpcDamage = cfg.Bind(S, "NpcDamage", 500f, "Damage to an NPC at the burst point of a FAB-50 (a FAB-100 x1.26).");
+            CfgLethalCore = cfg.Bind(S, "LethalCore", 0.5f,
+                "Part of BlastRadius (0-0.9) in which an NPC takes the full NpcDamage; beyond it the damage "
+                + "falls off linearly to zero at the radius. Inside half of this core a burst kills every NPC "
+                + "that can be hurt, bosses included. 0 = the old linear falloff from the burst point.");
             CfgVehicleDamage = cfg.Bind(S, "VehicleDamage", 1200f,
                 "Damage to a vehicle at the burst point of a FAB-50, a FAB-100 x1.26 (explosion part, "
                 + "so the vehicle armour rules apply).");
@@ -320,6 +324,8 @@ namespace NextDayRevival
         /// <summary>Damage / radius of a bomb of this mass from the FAB-50 numbers.</summary>
         static float RadiusU(int kg) { return Mathf.Max(1f, F(CfgRadius, 25f)) * K * An2BombLoad.Scale(kg); }
         static float Peak(ConfigEntry<float> e, float fallback, int kg) { return Mathf.Max(0f, F(e, fallback)) * An2BombLoad.Scale(kg); }
+        static float LethalCore { get { return Mathf.Clamp(F(CfgLethalCore, 0.5f), 0f, 0.9f); } }
+        static string Label(int kg) { return An2BombLoad.Known(kg) == An2BombLoad.HeavyKg ? "An-2 FAB-100" : "An-2 FAB-50"; }
 
         // ============================================================== items
 
@@ -920,7 +926,8 @@ namespace NextDayRevival
             {
                 RevivalPlugin.L.LogWarning("An2Bombs: no visible explosion at " + point.ToString("0") + " - " + ex.Message);
             }
-            QueueBlast(point, radius, kg);
+            RememberOwn(id);
+            QueueBlast(point, radius, kg, id);
             OrdnanceBlast.EnqueuePlayers(point, radius, Peak(CfgPlayerDamage, 300f, kg));
             Depot(point, kg);
             RevivalPlugin.L.LogInfo("An2Bombs: " + kg + " kg bomb " + id + " burst at " + point.ToString("0")
@@ -929,19 +936,56 @@ namespace NextDayRevival
 
         /// <summary>The master's side of somebody else's bomb: one NPC/vehicle
         /// pass at the transmitted collision point. Shooter handles players.</summary>
-        static void RemoteBurst(Vector3 point, int kg)
+        static void RemoteBurst(Vector3 point, int kg, int id)
         {
             float radius = RadiusU(kg);
-            QueueBlast(point, radius, kg);
+            QueueBlast(point, radius, kg, id);
             Depot(point, kg);
             RevivalPlugin.L.LogInfo("An2Bombs: a player's " + kg + " kg bomb at " + point.ToString("0")
                 + " - damage queued on master.");
         }
 
-        static void QueueBlast(Vector3 point, float radius, int kg)
+        // A-L1: full NPC damage in the core and a certain kill at its centre
+        // (OrdnanceBlast.Enqueue lethalCore). The master reports the burst and
+        // returns the outcome to the dropper by bomb id (BlastResult).
+        static void QueueBlast(Vector3 point, float radius, int kg, int id)
         {
             OrdnanceBlast.Enqueue(point, radius, Peak(CfgNpcDamage, 500f, kg),
-                Peak(CfgVehicleDamage, 1200f, kg), 0f);
+                Peak(CfgVehicleDamage, 1200f, kg), 0f, LethalCore, Label(kg), id);
+        }
+
+        // Ids of this client's own recent bursts: their results become a hint.
+        static readonly int[] _ownIds = new int[16];
+        static int _ownNext;
+        static int _tallyKilled, _tallyHit, _tallyBursts;
+        static float _tallyUntil;
+
+        static void RememberOwn(int id) { _ownIds[_ownNext] = id; _ownNext = (_ownNext + 1) % _ownIds.Length; }
+
+        static bool IsOwn(int id)
+        {
+            if (id == 0) return false;
+            for (int i = 0; i < _ownIds.Length; i++) if (_ownIds[i] == id) return true;
+            return false;
+        }
+
+        /// <summary>Master, after a bomb's NPC pass: the dropper sees it at
+        /// once, a remote dropper by event kind 3. hit = hurt plus NPCs whose
+        /// damage went to another Photon owner.</summary>
+        internal static void BlastResult(int id, int killed, int hit, int reached)
+        {
+            if (IsOwn(id)) ShowResult(killed, hit);
+            else Net.Send(new float[] { 3f, id, killed, hit, reached }, true);
+        }
+
+        static void ShowResult(int killed, int hit)
+        {
+            if (Time.time > _tallyUntil) { _tallyKilled = 0; _tallyHit = 0; _tallyBursts = 0; }
+            _tallyUntil = Time.time + 20f;
+            _tallyKilled += killed; _tallyHit += hit; _tallyBursts++;
+            Hint(Loc.T("Бомбы: убито " + _tallyKilled + ", ранено " + _tallyHit + " (взрывов: " + _tallyBursts + ")",
+                "Bombs: " + _tallyKilled + " killed, " + _tallyHit + " hit (" + _tallyBursts + " burst"
+                + (_tallyBursts == 1 ? ")" : "s)")), 6f);
         }
 
         static void Depot(Vector3 point, int kg)
@@ -1164,7 +1208,14 @@ namespace NextDayRevival
                             _bombs.RemoveAt(i);
                         }
                         if (f[5] < 0.5f && RevivalTroopInsertion.MasterClient())
-                            RemoteBurst(new Vector3(f[2], f[3], f[4]), An2BombLoad.KgAt(f, 6));
+                            RemoteBurst(new Vector3(f[2], f[3], f[4]), An2BombLoad.KgAt(f, 6), id);
+                        return;
+                    }
+                    if (kind == 3 && f.Length >= 5)
+                    {
+                        // A-L1: the master's result of a bomb; only its dropper shows it.
+                        if (IsOwn(Mathf.RoundToInt(f[1])))
+                            ShowResult(Mathf.RoundToInt(f[2]), Mathf.RoundToInt(f[3]));
                         return;
                     }
                     if (kind == 2 && f.Length >= 3)
@@ -1357,9 +1408,9 @@ namespace NextDayRevival
             }
             _labelStyle.fontSize = 14;
             _labelStyle.normal.textColor = amber;
-            GUI.Label(new Rect(cx - 88f, cy + 158f, 70f, 24f), _bombCaption, _labelStyle);
+            VanillaUi.Label(new Rect(cx - 88f, cy + 158f, 70f, 24f), _bombCaption, _labelStyle);
             Number(_displayCount, cx - 10f, cy + 158f);
-            GUI.Label(new Rect(cx + 24f, cy + 158f, 65f, 24f), _altCaption, _labelStyle);
+            VanillaUi.Label(new Rect(cx + 24f, cy + 158f, 65f, 24f), _altCaption, _labelStyle);
             Number(Mathf.RoundToInt(_agl), cx + 94f, cy + 158f);
         }
 
@@ -1370,7 +1421,7 @@ namespace NextDayRevival
             while (value / divisor >= 10) divisor *= 10;
             do
             {
-                GUI.Label(new Rect(x, y, 12f, 24f), _digits[(value / divisor) % 10], _labelStyle);
+                VanillaUi.Label(new Rect(x, y, 12f, 24f), _digits[(value / divisor) % 10], _labelStyle);
                 x += 10f;
                 divisor /= 10;
             } while (divisor > 0);
@@ -1438,12 +1489,7 @@ namespace NextDayRevival
 
         static void Label(string text, float cx, float y, Color colour, int size)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            _labelStyle.fontSize = size;
-            _labelStyle.normal.textColor = colour;
-            _labelContent.text = text;
-            Vector2 measured = _labelStyle.CalcSize(_labelContent);
-            GUI.Label(new Rect(cx - measured.x * 0.5f, y, measured.x, measured.y), _labelContent, _labelStyle);
+            VanillaUi.Readout(text, cx, y, colour, size);
         }
     }
 }

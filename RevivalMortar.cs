@@ -2919,14 +2919,14 @@ namespace NextDayRevival
                 // The reach: a soft fill with a bright rim. One draw call, and
                 // it is the "highlighted area" rather than a bare outline.
                 GUI.color = new Color(0.30f, 0.85f, 0.45f, 0.95f);
-                GUI.DrawTexture(new Rect(c.x - hw, c.y - hh, hw * 2f, hh * 2f), Disc());
+                VanillaUi.Texture(new Rect(c.x - hw, c.y - hh, hw * 2f, hh * 2f), Disc());
 
                 // The dead zone under the gun. Hiding it produces "I clicked
                 // and nothing happened".
                 if (inner > 0.02f)
                 {
                     GUI.color = new Color(0.95f, 0.35f, 0.25f, 0.95f);
-                    GUI.DrawTexture(new Rect(c.x - hw * inner, c.y - hh * inner,
+                    VanillaUi.Texture(new Rect(c.x - hw * inner, c.y - hh * inner,
                                              hw * inner * 2f, hh * inner * 2f), Ring());
                 }
 
@@ -2934,13 +2934,13 @@ namespace NextDayRevival
                 // muzzle's own bearing, so a player can see the turret swing
                 // round on the map while he waits for it.
                 GUI.color = new Color(1f, 0.85f, 0.25f, 1f);
-                GUI.DrawTexture(new Rect(c.x - 5f, c.y - 1f, 10f, 2f), Px());
-                GUI.DrawTexture(new Rect(c.x - 1f, c.y - 5f, 2f, 10f), Px());
+                VanillaUi.Texture(new Rect(c.x - 5f, c.y - 1f, 10f, 2f), Px());
+                VanillaUi.Texture(new Rect(c.x - 1f, c.y - 5f, 2f, 10f), Px());
                 float lay = _aiming.Yaw * Mathf.Deg2Rad;
                 for (int i = 1; i <= 8; i++)
                 {
                     float f = i / 8f * 0.16f;
-                    GUI.DrawTexture(new Rect(c.x + Mathf.Sin(lay) * hw * f - 1f,
+                    VanillaUi.Texture(new Rect(c.x + Mathf.Sin(lay) * hw * f - 1f,
                                              c.y - Mathf.Cos(lay) * hh * f - 1f,
                                              2f, 2f), Px());
                 }
@@ -2967,7 +2967,7 @@ namespace NextDayRevival
                     {
                         Vector2 w = wp - clip.position;
                         GUI.color = new Color(0.85f, 0.95f, 0.85f, 0.35f);
-                        GUI.DrawTexture(new Rect(w.x - 2f, w.y - 2f, 4f, 4f), Px());
+                        VanillaUi.Texture(new Rect(w.x - 2f, w.y - 2f, 4f, 4f), Px());
                     }
                 }
 
@@ -2985,8 +2985,8 @@ namespace NextDayRevival
                     if (MapTools.WorldToGui(_fireTarget, texture, cam, world, map, out fp))
                     {
                         Vector2 f = fp - clip.position;
-                        GUI.DrawTexture(new Rect(f.x - 6f, f.y - 1f, 13f, 2f), Px());
-                        GUI.DrawTexture(new Rect(f.x - 1f, f.y - 6f, 2f, 13f), Px());
+                        VanillaUi.Texture(new Rect(f.x - 6f, f.y - 1f, 13f, 2f), Px());
+                        VanillaUi.Texture(new Rect(f.x - 1f, f.y - 6f, 2f, 13f), Px());
                     }
                     GUI.color = new Color(1f, 0.90f, 0.35f, 0.95f);
                     for (int i = 0; i < _inFlight.Count; i++)
@@ -2995,7 +2995,7 @@ namespace NextDayRevival
                         if (!MapTools.WorldToGui(_inFlight[i].Point, texture, cam,
                                                  world, map, out sp)) continue;
                         Vector2 s = sp - clip.position;
-                        GUI.DrawTexture(new Rect(s.x - 2f, s.y - 2f, 4f, 4f), Px());
+                        VanillaUi.Texture(new Rect(s.x - 2f, s.y - 2f, 4f, 4f), Px());
                     }
                 }
             }
@@ -3028,7 +3028,7 @@ namespace NextDayRevival
             float rx = Mathf.Max(2f, radius);
             float ry = Mathf.Max(2f, radius * squash);
             Vector2 p = gui - clip.position;
-            GUI.DrawTexture(new Rect(p.x - rx, p.y - ry, rx * 2f, ry * 2f), art);
+            VanillaUi.Texture(new Rect(p.x - rx, p.y - ry, rx * 2f, ry * 2f), art);
         }
 
         /// <summary>The crosshair that replaced the mouse pointer, plus one line
@@ -3051,11 +3051,11 @@ namespace NextDayRevival
                                  : new Color(1f, 0.45f, 0.35f, 0.95f);
                 // A cross with a gap in the middle, so the pixel being aimed at
                 // is never covered by the crosshair itself.
-                GUI.DrawTexture(new Rect(m.x - 13f, m.y - 1f, 9f, 2f), Px());
-                GUI.DrawTexture(new Rect(m.x + 4f, m.y - 1f, 9f, 2f), Px());
-                GUI.DrawTexture(new Rect(m.x - 1f, m.y - 13f, 2f, 9f), Px());
-                GUI.DrawTexture(new Rect(m.x - 1f, m.y + 4f, 2f, 9f), Px());
-                GUI.DrawTexture(new Rect(m.x - 1f, m.y - 1f, 2f, 2f), Px());
+                VanillaUi.Texture(new Rect(m.x - 13f, m.y - 1f, 9f, 2f), Px());
+                VanillaUi.Texture(new Rect(m.x + 4f, m.y - 1f, 9f, 2f), Px());
+                VanillaUi.Texture(new Rect(m.x - 1f, m.y - 13f, 2f, 9f), Px());
+                VanillaUi.Texture(new Rect(m.x - 1f, m.y + 4f, 2f, 9f), Px());
+                VanillaUi.Texture(new Rect(m.x - 1f, m.y - 1f, 2f, 2f), Px());
                 GUI.color = old;
             }
 
@@ -3076,19 +3076,7 @@ namespace NextDayRevival
 
         static void DrawPlate(string text, float screenY)
         {
-            // No TextAnchor anywhere: it would pull in
-            // UnityEngine.TextRenderingModule, which this build does not
-            // reference. The plate is sized to the label instead.
-            Vector2 size = GUI.skin.label.CalcSize(new GUIContent(text));
-            float w = size.x + 24f, h = Mathf.Max(24f, size.y + 8f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * screenY;
-            Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Px());
-            GUI.color = Color.white;
-            GUI.Label(new Rect(x + 12f, y + 4f, size.x + 4f, size.y + 2f), text);
-            GUI.color = old;
+            VanillaUi.Prompt(text, Screen.height * screenY);
         }
 
         static Rect Intersect(Rect a, Rect b)

@@ -247,7 +247,10 @@ def main():
     cover = read('Revival.MercCover.cs')
     assert 'quietLeash, quietRadius' in cover and 'radius = MercCrewPhase.PostRadius' in cover
     assert 'MercCrewPhases.Ground(u)' in read('Revival.MercCombatResponse.cs')
-    assert 'MercCrewPhases.OverrideSelected(MercCrewPhase.' in read('Revival.MercStations.cs')
+    # A S6 removed the assignment picker; new station orders retain AUTO and
+    # reset prior manual phases at the production crew-order boundary.
+    assert 'ft.Crew.Reset();' in read('Revival.MercCrewPhases.cs')
+    assert 'Mercs.ToggleAirDefence();' in read('Revival.MercsUi.cs')
     radar = read('Revival.TowerRadar.cs')
     assert radar.index('RadarShadow.Scan(_air, eye)') < radar.index('SampleAt = now')
     prof = read('RevivalFrameProfiler.cs')

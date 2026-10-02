@@ -1349,22 +1349,23 @@ namespace NextDayRevival
                                 Vector2 measured = _nameStyle.CalcSize(new GUIContent(text));
                                 float cx = screen.x - measured.x * 0.5f;
                                 float cy = Screen.height - screen.y - measured.y * 0.5f;
-                                GUI.Label(new Rect(cx + 2f, cy + 2f, measured.x, measured.y),
+                                VanillaUi.Label(new Rect(cx + 2f, cy + 2f, measured.x, measured.y),
                                           text, _shadowStyle);
-                                GUI.Label(new Rect(cx, cy, measured.x, measured.y),
+                                VanillaUi.Label(new Rect(cx, cy, measured.x, measured.y),
                                           text, _nameStyle);
                             }
                         }
                     }
                 }
             }
-            if (Time.time < _noticeUntil && _notice.Length > 0)
+            if (Time.time < _noticeUntil && _notice.Length > 0
+                && !VanillaNotice.Banner("crocodile", _notice, null, NativeMessage.Kill, _noticeUntil))
             {
                 Vector2 measured = _warningStyle.CalcSize(new GUIContent(_notice));
-                GUI.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f + 2f, 104f,
+                VanillaUi.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f + 2f, 104f,
                                    measured.x, measured.y),
                           _notice, _shadowStyle);
-                GUI.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f, 102f,
+                VanillaUi.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f, 102f,
                                    measured.x, measured.y),
                           _notice, _warningStyle);
             }
@@ -1374,8 +1375,8 @@ namespace NextDayRevival
         {
             if (_nameStyle != null) return;
             _nameStyle = new GUIStyle(GUI.skin.label);
-            _nameStyle.fontSize = 18;
-            _nameStyle.normal.textColor = new Color(0.35f, 1f, 0.18f, 1f);
+            _nameStyle.fontSize = 16;
+            _nameStyle.normal.textColor = Color.white;
             _shadowStyle = new GUIStyle(_nameStyle);
             _shadowStyle.fontSize = 22;
             _shadowStyle.normal.textColor = Color.black;

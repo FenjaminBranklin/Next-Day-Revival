@@ -63,6 +63,60 @@ namespace NextDayRevival
             return MercWeaponReach.Units(f.WeaponId, RangeOf(f));
         }
 
+        static bool MercDefending(Fighter f, float now)
+        {
+            MercUnit u = f.Squad == null ? null : f.Squad.Merc;
+            return u != null && (now < u.DefendUntil || now < u.Fight.RangeDefendUntil
+                || f.Suppression > 0.01f);
+        }
+
+        // Called only after an actual NpcWar round. A geometric sighting is
+        // never incoming fire; remember the real shooter without a world scan.
+        static void MercIncoming(Fighter victim, Transform shooter, float now)
+        {
+            MercUnit u = victim.Squad == null ? null : victim.Squad.Merc;
+            if (u == null) return;
+            u.Fight.RangeAttacker = shooter;
+            u.Fight.RangeDefendUntil = now + MercDefendSeconds;
+            u.DefendUntil = Mathf.Max(u.DefendUntil, u.Fight.RangeDefendUntil);
+            victim.NextScan = now;
+        }
+
+        static bool MercMayFireAt(Fighter f, Vector3 at, float now)
+        {
+            if (f.Squad == null || f.Squad.Merc == null) return true;
+            return MercWeaponReach.Allows(f.WeaponId, f.Tr.position, at, MercDefending(f, now));
+        }
+
+        static void MercRangeFightIn(Fighter f, MercUnit u, MercFight ft, float now)
+        {
+            // Resume ATTACK's existing M1 advance or the other order's post.
+            // Maintenance and urgent protection remain in the M2 fight loop.
+            if (f.Target != null && !MercMayFireAt(f, f.Target.position, now) && !ft.In.Danger
+                && !ft.In.Reloading && ft.Health >= MercBrain.RetreatUntil
+                && ft.Brain.Mode == MercBrain.Normal && !Mercs.MedicineWanted(u, now))
+                ft.In.MayFight = false;
+        }
+
+        // Retaliation is not limited by the acquisition radius. Runs inside
+        // the existing serialized 6.7..8 Hz target scan, with one sight test.
+        static bool MercRetaliateTarget(Fighter f, float now)
+        {
+            MercUnit u = f.Squad.Merc;
+            Transform at = u.Fight.RangeAttacker;
+            if (at == null || now >= u.Fight.RangeDefendUntil) return false;
+            Component ai = at.GetComponent(_npcType);
+            if (ai == null || !Alive(ai) || !Hostile(f.Hated, FactionOf(ai)) || !MercNpcTargetable(f, ai)) return false;
+            float height;
+            f.Target = at; f.TargetIsPlayer = false;
+            f.Sees = AimPoint(f, at, out height); f.AimHeight = height;
+            if (f.Sees) f.LastSeen = now;
+            f.NextLos = now + MercAssault.LosGap(UnityEngine.Random.value);
+            u.Sense.Note(at, false, now);
+            SetMercKillTarget(f, u, null);
+            return true;
+        }
+
         /// <summary>A threat sees him where he is - only within MercThreat.SightUnits
         /// (a threat further out is no reason to leave a firing position; a
         /// round from it still counts as a hit). No ray past that distance.</summary>

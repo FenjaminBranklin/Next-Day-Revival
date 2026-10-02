@@ -120,6 +120,7 @@ namespace NextDayRevival
         internal readonly MercFight Fight = new MercFight();
         // merc-attack-orders: his progress through an ATTACK (Revival.MercAttackCore.cs).
         internal readonly MercAttackRun Attack = new MercAttackRun();
+        internal readonly MercMovePlan Move = new MercMovePlan();
         // x-merc-competence: his halt cover under FOLLOW (Revival.MercsWar.cs MercHaltCover).
         internal readonly MercHalt Halt = new MercHalt();
         // x-merc-competence: the last hit as it landed (the death report), the
@@ -170,6 +171,8 @@ namespace NextDayRevival
 
         internal int Mode;
         internal bool Survive;           // STAY extension, accepted by existing server
+        internal bool MoveNear;          // STAY ~move: independent cover near the marker
+        internal string MoveInkScene, MoveInkKey; // Order-local map caches, not serialized.
         internal Vector3[] Points = new Vector3[0];
         internal Vector3 Facing;
         internal float RadiusM = 25f;
@@ -240,6 +243,7 @@ namespace NextDayRevival
             }
             sb.Append('~').Append(F(Facing.x)).Append(',').Append(F(Facing.z));
             if (Survive) sb.Append("~survive");
+            else if (MoveNear) sb.Append("~move");
             return sb.ToString();
         }
 
@@ -284,6 +288,12 @@ namespace NextDayRevival
                     float.TryParse(fc[1], NumberStyles.Float, CultureInfo.InvariantCulture, out fz);
                 }
                 o.Survive = mode == Stay && c.Length > 7 && c[7] == "survive";
+                o.MoveNear = mode == Stay && c.Length == 8 && c[7] == "move";
+                if (o.MoveNear)
+                {
+                    if (pts.Count != 1 || !Finite(pts[0].x) || !Finite(pts[0].y) || !Finite(pts[0].z)
+                        || !Finite(fx) || !Finite(fz)) return new MercOrder();
+                }
                 if (mode == ManGun || mode == ManRadar)
                 {
                     if (pts.Count != 1 || float.IsNaN(fx) || float.IsInfinity(fx)
@@ -1635,6 +1645,7 @@ namespace NextDayRevival
             MedicTick(now);
             DownTick(now, owner);
             Units(now);
+            AirDefenceTick(now);
             RaidTick(now);
             OrderReceipts(now);
             SurvivalOwner(owner, now);
@@ -2802,6 +2813,7 @@ namespace NextDayRevival
                 if (r.Unit != null)
                 {
                     MercAA.Release(r.Unit);
+                    if (r.Unit.Order.MoveNear) r.Unit.Move.Reset(MercCoverService.Field, r.Unit.Id);
                     r.Unit.Rally = sheltered && (order.Mode == MercOrder.Follow || order.Mode == MercOrder.Vehicle);
                     // Keep the current M1 cover/M2-M3 retreat while the new
                     // objective and leash are picked up on the next AI Think.
@@ -2813,7 +2825,7 @@ namespace NextDayRevival
                     // attack is on foot - a pending boarding ends now (a seated
                     // rider gets out when the vehicle stands, MercRide).
                     r.Unit.Attack.Reset();
-                    if (order.Mode == MercOrder.Attack) r.Unit.Ride.Boarding = null;
+                    if (order.Mode == MercOrder.Attack || order.MoveNear) r.Unit.Ride.Boarding = null;
                 }
                 Vector3 objective = order.Mode == MercOrder.Follow || order.Mode == MercOrder.Vehicle
                     ? OwnerPosition : r.Order.Centre;

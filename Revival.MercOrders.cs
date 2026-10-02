@@ -26,6 +26,7 @@ namespace NextDayRevival
 
         static string OrderAction(MercOrder o)
         {
+            if (o.MoveNear) return Loc.T("иду в укрытие у отметки", "moving to cover near the mark");
             if (o.Survive) return Loc.T("иду в укрытие", "taking cover");
             switch (o.Mode)
             {
@@ -115,6 +116,7 @@ namespace NextDayRevival
                 MercAAPost post = MercAA.Held(MercAA.PostOf(u));
                 return post != null && post.Ai == u.Ai;
             }
+            if (o.MoveNear) return u.Move.For == o && !u.Move.Travelling(me);
             if (o.Mode == MercOrder.Attack) return u.Attack.Phase == MercAttackRun.Holding;
             if (u.GoalFor != o) return false;
             return o.Mode == MercOrder.Perimeter ? Flat(me - u.Post) <= 5.6f

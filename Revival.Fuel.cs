@@ -1216,9 +1216,9 @@ namespace NextDayRevival
             float y = Screen.height * at;
             Color keep = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(x, y, w, h), Texture2D.whiteTexture);
             GUI.color = keep;
-            GUI.Label(new Rect(x + 12f, y + (h - size.y) * 0.5f, size.x + 4f, size.y), text);
+            VanillaUi.Label(new Rect(x + 12f, y + (h - size.y) * 0.5f, size.x + 4f, size.y), text);
         }
 
         // ---------------------------------------------------------- install

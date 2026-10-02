@@ -185,9 +185,9 @@ namespace NextDayRevival
             if (_st == null) { _st = new GUIStyle(GUI.skin.label); _st.fontSize = 14; }
             GUIStyle st = _st;
             st.normal.textColor = new Color(0f, 0f, 0f, fade);
-            GUI.Label(new Rect(11f, 61f, 900f, 24f), _label, st);
+            VanillaUi.Label(new Rect(11f, 61f, 900f, 24f), _label, st);
             st.normal.textColor = new Color(1f, 0.92f, 0.55f, fade);
-            GUI.Label(new Rect(10f, 60f, 900f, 24f), _label, st);
+            VanillaUi.Label(new Rect(10f, 60f, 900f, 24f), _label, st);
         }
 
         static void Log(string s) { RevivalPlugin.L.LogInfo("EastZones: " + s); }

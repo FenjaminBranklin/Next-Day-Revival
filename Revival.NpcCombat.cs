@@ -2548,7 +2548,7 @@ namespace NextDayRevival
             {
                 try
                 {
-                    float cached = (float)_fShotDelayCached.GetValue(f.Ai);
+                    float cached = FastField.GetFloat(_fShotDelayCached, f.Ai);
                     if (cached > 0.01f && cached < 2f) return cached;
                 }
                 catch { }
@@ -2764,7 +2764,7 @@ namespace NextDayRevival
                 return;
             }
             if (now < f.NextLos) return;
-            if (merc && !MercParaInReach(f))
+            if (merc && !MercParaInReach(f) && !MercDefending(f, now))
             {
                 f.Target = null; f.TargetIsPlayer = false; f.Sees = false;
                 f.NextScan = now;
@@ -2791,6 +2791,7 @@ namespace NextDayRevival
         static bool PickTargetForMan(Fighter f, float now)
         {
             float range = f.Squad != null && f.Squad.Merc != null ? MercSeekRange(f) : RangeOf(f);
+            if (f.Squad != null && f.Squad.Merc != null && MercRetaliateTarget(f, now)) return true;
             if (f.Squad != null && f.Squad.Merc != null && MercQuickFocus(f, range, now)) return true;
             Component player = f.Squad != null && f.Squad.Merc != null
                 ? MercPlayerTarget(f, range, now) : KillTarget(f);
@@ -2820,7 +2821,8 @@ namespace NextDayRevival
             if (player != null)
             {
                 float d = (player.transform.position - p).sqrMagnitude;
-                if (d < rangeSqr) Insert(ref n, player.transform, true, d);
+                if (d < rangeSqr || (f.Squad.Merc != null && MercDefending(f, now)))
+                    Insert(ref n, player.transform, true, d);
             }
             for (int i = 0; i < _scene.Count; i++)
             {
@@ -3131,6 +3133,7 @@ namespace NextDayRevival
                 return true;
             }
             // Being shot at is felt whether or not the round connects.
+            if (victim != null) MercIncoming(victim, f.Tr, Time.time);
             if (victim != null && CfgSuppression.Value)
                 victim.Suppression = Mathf.Min(1f,
                     victim.Suppression + 0.34f / Mathf.Max(0.4f, victim.Nerve));
@@ -3141,19 +3144,28 @@ namespace NextDayRevival
 
             float range = Mathf.Max(dist + 5f, RangeOf(f) + 20f);
             Vector3 impact;
-            // Past the shooter's own 0.75 unit capsule.
-            GameObject struck = Turret.RaycastObject(from + dir * 1.0f, dir, range, out impact);
+            // Past the shooter's own 0.75 unit capsule. B S2a: the game's own
+            // bullet mask, and the intended man's body where the physics
+            // cannot see it here (Revival.NpcHit.cs).
+            GameObject struck = LandRound(targetAi, from + dir * 1.0f, dir, range, out impact);
+            if (struck != null) RoundHits(f, struck, impact, dist);
+            return true;
+        }
 
-            if (struck == null) return true;
+        /// <summary>What one round that struck something does: damage to a
+        /// hostile NPC that may be shot (B S2a: shared by aimed rounds and M3
+        /// covering fire), nothing to anything else.</summary>
+        static void RoundHits(Fighter f, GameObject struck, Vector3 impact, float dist)
+        {
             Component hitAi = struck.GetComponentInParent(_npcType);
-            if (hitAi == null || !Alive(hitAi)) return true;
+            if (hitAi == null || !Alive(hitAi)) return;
             Fighter hurt = FighterOf(hitAi);
-            if (hurt != null && hurt.Squad != null && hurt.Squad == f.Squad) return true;
+            if (hurt != null && hurt.Squad != null && hurt.Squad == f.Squad) return;
             bool enemy = OtherFaction(f.Faction, FactionOf(hitAi)) && (f.Squad == null
                 ? hurt != null && hurt.Squad != null
                 : Hostile(f.Hated, FactionOf(hitAi))
                   && ((hurt != null && hurt.Squad != null) || MercNpcTargetable(f, hitAi)));
-            if (!enemy) return true;
+            if (!enemy) return;
             if (hurt == null && f.Squad != null && IsMine(hitAi) && ParaPose.RunPrefix(hitAi)) Enlist(hitAi);
 
             float damage = CfgDamage.Value;
@@ -3193,7 +3205,6 @@ namespace NextDayRevival
                         + (dead ? "dead" : "alive") + ") - " + ex);
                 }
             }
-            return true;
         }
 
         /// <summary>Would this round pass within a man's width of a living
@@ -3383,6 +3394,13 @@ namespace NextDayRevival
         static bool AimPoint(Fighter f, Transform target, out float height)
         {
             Vector3 eye = f.Tr.position + Vector3.up * (f.Crouched ? CrouchEye : EyeHeight);
+            // B S2a: a man down in the wounded state lies at his feet; every
+            // round held on the standing chest passed over him (NpcHitCore).
+            if (Lying(target))
+            {
+                height = NpcHitCore.LyingAim;
+                return Clear(eye, target.position + Vector3.up * height, target);
+            }
             height = ChestHeight;
             if (Clear(eye, target.position + Vector3.up * ChestHeight, target)) return true;
             if (Clear(eye, target.position + Vector3.up * HeadHeight, target))
@@ -5305,7 +5323,7 @@ namespace NextDayRevival
         public static void Draw()
         {
             if (CfgDebug == null || !CfgDebug.Value || _status.Length == 0) return;
-            GUI.Label(new Rect(8f, 8f, 720f, 22f), _status);
+            VanillaUi.Label(new Rect(8f, 8f, 720f, 22f), _status);
         }
     }
 }

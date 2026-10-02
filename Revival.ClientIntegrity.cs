@@ -196,9 +196,9 @@ namespace NextDayRevival
             GUILayout.Label(_error);
             if (_routeFailed)
             {
-                if (GUILayout.Button("Retry connection")) BeforeAuth(_backend);
+                if (VanillaUi.LayoutButton("Retry connection")) BeforeAuth(_backend);
             }
-            else if (!_checking && GUILayout.Button("Open current GitHub download")) Application.OpenURL(Download);
+            else if (!_checking && VanillaUi.LayoutButton("Open current GitHub download")) Application.OpenURL(Download);
             GUILayout.EndArea();
         }
     }

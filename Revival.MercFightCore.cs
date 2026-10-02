@@ -112,6 +112,15 @@ namespace NextDayRevival
         public bool Attack, AttackMove; // K4a: calm fire and movement toward the explicit order
         public bool AttackRear;         // marksman regains rear overwatch while facing the enemy
         public Vector3 AttackDest;
+        public bool AttackBound;        // forward progress deadline, independent of moving fire
+        public Vector3 AttackDir;
+        public float AttackFloor;       // attained forward line; ordinary cover moves cannot undo it
+        public object AttackOrder;      // identity only; a new order invalidates the previous bound
+        public bool Move, MoveTravel;  // Independent point order, with self defence en route.
+        public Vector3 MoveDest;
+        public bool Follow, FollowBound; // owner catch-up uses the same M3 bound
+        public Vector3 FollowDest;
+        public object FollowOrder;
         public float Health;            // 0..1
         public bool HasMedkit;
         public float MedkitSeconds;
@@ -142,6 +151,7 @@ namespace NextDayRevival
     {
         public byte Act;                // FightAct
         public Vector3 Dest;            // Run / Step: where to
+        public bool CatchUp;            // sprint bound; mates provide planted covering fire
         public bool Low;                // Hold: crouched
         public Vector3 Face;            // Hold / Fire: toward this point
         public bool Kick;               // Reload: start the reload now (once)
@@ -349,6 +359,12 @@ namespace NextDayRevival
             _call = false;
             if (i.Survive) DecideSurvival(ref i, field, ref o);
             else Decide(ref i, field, ref o);
+            if (i.Attack && !i.AttackRear && Mode == Normal && !i.Danger && State != Flee
+                && (o.Act == FightAct.Run || o.Act == FightAct.Step))
+            {
+                float behind = i.AttackFloor - 1f - Vector3.Dot(o.Dest, i.AttackDir);
+                if (behind > 0f) o.Dest += i.AttackDir * behind;
+            }
             // The anchor the sense searches cover from (a new one: search now).
             o.AnchorOn = _anchorOn && State != Off;
             o.Anchor = _anchor;
@@ -377,6 +393,10 @@ namespace NextDayRevival
         internal bool SurvivalFire;
         float _defendUntil = -100f, _nextBound, _retreatUntil;
         bool _survivalStarted;
+        bool _attackBoundActive;
+        bool _moveOrderActive;
+        object _attackOrder;
+        Vector3 _attackDest;
 
         /// <summary>Shelter persists through respawn. M2 steps supply the poses,
         /// peeks and quiet maintenance; M1 supplies every bound's destination.</summary>
@@ -498,6 +518,13 @@ namespace NextDayRevival
         void Decide(ref FightIn i, CoverField field, ref FightOut o)
         {
             float now = i.Now;
+            object boundOrder = i.Follow ? i.FollowOrder : i.AttackOrder;
+            if (_attackBoundActive && (!(i.Attack || i.Follow) || _attackOrder != boundOrder))
+            {
+                bool running = State == Dash && !Cover.Found;
+                _attackBoundActive = false; _callSince = 0f;
+                if (running) Leave(field);
+            }
             _dt = _lastThink > 0f ? Mathf.Min(now - _lastThink, 0.5f) : 0f;
             _lastThink = now;
             _moved = Flat(i.Me - _prevMe);
@@ -529,6 +556,25 @@ namespace NextDayRevival
             // fire, in a fight or not (a grenade comes first).
             if (i.Lanes && !danger && Lanes(ref i, field, ref o, fight)) return;
             if (!fight) return;
+            if (i.Attack && !i.AttackRear && Mode == Normal && !danger
+                && i.Health >= RetreatUntil && State != Healing && State != Reloading
+                && Cover.Found && Vector3.Dot(Cover.Point.Pos, i.AttackDir) < i.AttackFloor - 1f)
+            {
+                field.Release(_id); Cover = new CoverPick();
+                Choose(ref i, ref o); o.Repick = true;
+            }
+            if (i.Move && MoveOrder(ref i, field, ref o, danger)) return;
+            if (_moveOrderActive)
+            {
+                // The direct dash has no combat cover. Arrival, replacement
+                // orders and maintenance must not reuse its empty cover or
+                // a deadline left by the fight that preceded this order.
+                Leave(field);
+                o.Repick = true;
+                if (i.Move && !i.MoveTravel && !danger && Usable(ref i))
+                { Choose(ref i, ref o); return; }
+            }
+            if ((i.Attack || i.Follow) && AdvanceBound(ref i, field, ref o, danger)) return;
             // Orders keep their direction. Sight/exposure alone is not incoming
             // fire; pressure, wounds, empty weapons and danger invoke M1/M2.
             if (i.Attack && Attack(ref i, field, ref o, danger)) return;
@@ -604,6 +650,33 @@ namespace NextDayRevival
 
         /// <summary>K4a: fire continuously while the situation permits a bound.
         /// Coverers fire from their lane; runners keep the K3 walking aim.</summary>
+        // Keep the explicit destination under pressure. M2 still owns blast
+        // escape, injury, reload and healing. Moving rounds use the existing
+        // walking pose/native weapon adapter, including its live friend guard.
+        bool MoveOrder(ref FightIn i, CoverField field, ref FightOut o, bool danger)
+        {
+            if (!i.MoveTravel || danger || i.Health < RetreatUntil || i.Reloading
+                || NeedReload(ref i) || State == Healing || State == Reloading
+                || State == Flee || Mode == Retreating || Mode == Falling) return false;
+            if (State == Off)
+            { _fightStart = i.Now; _coverSince = i.Now; _blindPeeks = 0; _selfSteps = 0; }
+            if (Mode == Flanking) EndMode(i.Now);
+            if (field != null) field.Release(_id);
+            Cover = new CoverPick(); _anchorOn = false; _plan = PlanNone; _suppress = false;
+            _attackBoundActive = false; _callSince = 0f;
+            _moveOrderActive = true;
+            Enter(Dash, i.Now); Dest = i.MoveDest;
+            o.Face = Primary(ref i); o.Dest = Dest;
+            o.NoShot = FriendInLine(ref i, i.Me, o.Face);
+            _call = true;
+            o.Act = FightAct.Run;
+            // Unsupported/heavy weapons answer while planted for a bounded
+            // interval, then continue. Healthy rifles never stop to engage.
+            if (i.Target && i.Sees && !i.MoveShoot && !o.NoShot
+                && ((i.Now - _fightStart) % 1.5f) < 0.45f) o.Act = FightAct.Fire;
+            return true;
+        }
+
         bool Attack(ref FightIn i, CoverField field, ref FightOut o, bool danger)
         {
             if (danger || UnderFire(ref i) || Mode != Normal || i.Health < RetreatUntil
@@ -654,12 +727,89 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>The order's bounded dwell expires even while M2 peeks or
+        /// feels suppression. Use its normal sprint/dash and covering board;
+        /// firing during this movement remains the existing weapon policy.</summary>
+        bool AdvanceBound(ref FightIn i, CoverField field, ref FightOut o, bool danger)
+        {
+            object order = i.Follow ? i.FollowOrder : i.AttackOrder;
+            if (_attackOrder != order)
+            { _attackOrder = order; _attackBoundActive = false; _callSince = 0f; }
+            bool requested = i.Follow ? i.FollowBound : i.AttackBound;
+            if ((!_attackBoundActive && !requested) || (!i.Follow && i.AttackRear)) return false;
+            if (danger || i.Health < RetreatUntil || i.Reloading || NeedReload(ref i)
+                || State == Healing || State == Reloading || State == Flee
+                || Mode == Retreating || Mode == Falling) return false;
+            if (!_attackBoundActive)
+            {
+                Vector3 move = (i.Follow ? i.FollowDest : i.AttackDest) - i.Me; move.y = 0f;
+                float distance = Flat(move);
+                if (distance <= ArriveCover || (!i.Follow && Vector3.Dot(move, i.AttackDir) <= 1f)) return false;
+                // Answer a live enemy before passing him, just as K4a does.
+                if (i.Target && i.Sees && i.Count > 0
+                    && (!i.Follow || Vector3.Dot(Primary(ref i) - i.Me, move) > 0f))
+                {
+                    float ahead = Vector3.Dot(Primary(ref i) - i.Me, move / distance) - 7f;
+                    if (ahead <= ArriveCover) return false;
+                    if (ahead < distance) move *= ahead / distance;
+                }
+                Vector3 goal = i.Me + move;
+                if (LaneBad(ref i, goal)) return false;
+                if (WaitForCover(ref i, ref o)) return true;
+                _callSince = 0f;
+                if (Mode == Flanking) EndMode(i.Now);
+                if (field != null) field.Release(_id);
+                Cover = new CoverPick(); _anchorOn = false; _plan = PlanNone;
+                _attackDest = goal; Dest = goal; _attackBoundActive = true;
+                _until = i.Now + 2.5f + Flat(goal - i.Me) / 6f;
+                _lastMoveAt = i.Now; _stuckSince = 0f;
+                Enter(Dash, i.Now); Dashes++; PlannedMoves++;
+                if (Squad != null && Squad.MateUp(_id, i.Now)) CoveredMoves++;
+            }
+            // Contact may change during the bound. Recheck the current enemy,
+            // rather than retaining permission to cross his old position.
+            Vector3 remaining = _attackDest - i.Me; remaining.y = 0f;
+            float left = Flat(remaining);
+            if (i.Target && i.Sees && i.Count > 0 && left > ArriveCover
+                && (!i.Follow || Vector3.Dot(Primary(ref i) - i.Me, remaining) > 0f))
+            {
+                float ahead = Vector3.Dot(Primary(ref i) - i.Me, remaining / left) - 7f;
+                if (ahead <= ArriveCover)
+                {
+                    _attackBoundActive = false;
+                    if (SnapOk(ref i)) StartSnap(ref i, ref o);
+                    else Choose(ref i, ref o);
+                    return true;
+                }
+                if (ahead < left) _attackDest = i.Me + remaining * (ahead / left);
+            }
+            if (Flat(_attackDest - i.Me) <= ArriveCover)
+            {
+                // Drop the previous cover before sensing the new ground. No
+                // peek-back or stale pick can return him to the departed cover.
+                Leave(field); i.PickFresh = false; o.Repick = true;
+                return true;
+            }
+            if (i.Now >= _until || Stuck(ref i))
+            {
+                _attackBoundActive = false;
+                Relocate(ref i, field, ref o);
+                return true;
+            }
+            _call = true;
+            o.Act = FightAct.Run; o.Dest = _attackDest; o.Face = Primary(ref i); o.CatchUp = i.Follow;
+            return true;
+        }
+
         /// <summary>The fight is over (or he left it for his order): his claim
         /// goes, the order runs again.</summary>
         internal void Leave(CoverField field)
         {
             if (field != null) field.Release(_id);
             State = Off;
+            _attackBoundActive = false;
+            _moveOrderActive = false;
+            _attackOrder = null;
             _survivalStarted = false; SurvivalFire = false; _defendUntil = -100f;
             Cover = new CoverPick();
             _evadeUp = false;
@@ -855,6 +1005,7 @@ namespace NextDayRevival
             // A flank only where this cover is stalled: his peeks find nobody,
             // or he has not seen a target for a while. From a cover he can
             // fire from, he fires.
+            if (i.Move) return; // A held point can relocate locally, not pursue a flank.
             bool stalled = _blindPeeks > 0 || now - i.LastSeen > 3f;
             if (Squad == null || Mode != Normal || Grade < FlankGrade || i.Health < 0.6f || i.Count == 0 || !stalled
                 || now - _coverSince < FlankAfter || now - _fightStart < 5f || now < _nextFlankTry
@@ -986,6 +1137,9 @@ namespace NextDayRevival
         {
             if (!i.Pick.Found || !i.Pick.Confirmed || !i.PickFresh) return false;
             Vector3 p = i.Pick.Point.Pos;
+            if (i.Attack && Mode == Normal && !i.AttackRear
+                && (Vector3.Dot(p - i.Me, i.AttackDir) < -2f
+                    || Vector3.Dot(p, i.AttackDir) < i.AttackFloor - 1f)) return false;
             if (Bad(p, i.Now)) return false;
             if (i.Survive && _anchorOn && !i.Rally && i.Count > 0 &&
                 Flat(p - i.Threats[0]) < Flat(i.Me - i.Threats[0]) + 4f) return false;

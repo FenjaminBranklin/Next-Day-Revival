@@ -167,18 +167,26 @@ namespace NextDayRevival
                 "Engine power reaching the air, watts per kilogram of aeroplane "
                 + "(the ASh-62's 745 kW at 80 % propeller efficiency over 5.25 t "
                 + "is 113). Above Power/Thrust m/s the thrust is Power/speed.");
-            CfgTopSpeed = cfg.Bind(S, "TopSpeed", 250f,
-                "km/h in level flight at full throttle. Sets the drag.");
+            CfgTopSpeed = cfg.Bind(S, "TopSpeed", 200f,
+                "km/h in level flight at full throttle. Sets the drag. "
+                + "Use space to add throttle, ctrl/C to reduce it for tighter turns.");
             CfgPitchRate = cfg.Bind(S, "PitchRate", 40f, "Deg/s at full elevator and full authority.");
-            CfgRollRate = cfg.Bind(S, "RollRate", 75f, "Deg/s at full aileron.");
-            CfgYawRate = cfg.Bind(S, "YawRate", 20f, "Deg/s at full rudder in the air.");
+            CfgRollRate = cfg.Bind(S, "RollRate", 100f, "Deg/s at full aileron.");
+            CfgYawRate = cfg.Bind(S, "YawRate", 30f, "Deg/s at full rudder in the air.");
             CfgAssist = cfg.Bind(S, "FlightAssist", true,
                 "WASD flying: A/D bank the aeroplane into a turn and the turn "
                 + "flies itself (rudder and back pressure are added), let go and "
                 + "the wings come level; with W/S released it holds its height. "
                 + "Off: A/D are bare ailerons and W/S bare elevator.");
-            CfgMaxBank = cfg.Bind(S, "MaxBank", 40f,
-                "Degrees of bank that A/D ask for with FlightAssist on.");
+            CfgMaxBank = cfg.Bind(S, "MaxBank", 55f,
+                "Degrees of bank that A/D ask for with FlightAssist on. "
+                + "55 at 200 km/h gives about 220 m turn radius (441 m diameter).");
+            // A L6: existing installs need the tighter-turn defaults too.
+            // Only former defaults migrate; other player tuning is retained.
+            if (Mathf.Abs(CfgTopSpeed.Value - 250f) < 0.001f) CfgTopSpeed.Value = 200f;
+            if (Mathf.Abs(CfgRollRate.Value - 75f) < 0.001f) CfgRollRate.Value = 100f;
+            if (Mathf.Abs(CfgYawRate.Value - 20f) < 0.001f) CfgYawRate.Value = 30f;
+            if (Mathf.Abs(CfgMaxBank.Value - 40f) < 0.001f) CfgMaxBank.Value = 55f;
             CfgInvertPitch = cfg.Bind(S, "InvertPitch", false,
                 "Off: W pushes the nose down, S pulls it up (the stick). On: W nose up.");
             CfgGroundSteer = cfg.Bind(S, "GroundSteer", 35f,
@@ -552,7 +560,7 @@ namespace NextDayRevival
         /// cancel at full throttle.</summary>
         static float Cd0()
         {
-            float vt = Mathf.Max(20f, F(CfgTopSpeed, 250f) / 3.6f);
+            float vt = Mathf.Max(20f, F(CfgTopSpeed, 200f) / 3.6f);
             float c = (Vs() / vt) * (Vs() / vt);
             float t = ThrustAt(vt) - Induced * G * c;
             return Mathf.Max(0.00001f, t / (vt * vt));
@@ -646,7 +654,7 @@ namespace NextDayRevival
                 {
                     if (edgeK > 0f)
                     {
-                        float maxBank = Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+                        float maxBank = Mathf.Clamp(F(CfgMaxBank, 55f), 10f, 70f);
                         float back = Mathf.Clamp(edgeTurn * 1.5f, -AirBoundary.TurnBank, AirBoundary.TurnBank);
                         steer = Mathf.Lerp(_rIn * maxBank, back, edgeK) + _rIn * 15f * edgeK;
                         autopilot = true;
@@ -654,7 +662,7 @@ namespace NextDayRevival
                     }
                     else if (_edgeClimb && !autopilot)
                     {
-                        steer = _rIn * Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+                        steer = _rIn * Mathf.Clamp(F(CfgMaxBank, 55f), 10f, 70f);
                         autopilot = true;
                     }
                 }
@@ -665,8 +673,8 @@ namespace NextDayRevival
                 else
                 {
                     pRate = _pIn * F(CfgPitchRate, 40f) * auth;
-                    rRate = _rIn * F(CfgRollRate, 75f) * ailAuth;
-                    yRate = _yIn * F(CfgYawRate, 20f) * auth;
+                    rRate = _rIn * F(CfgRollRate, 100f) * ailAuth;
+                    yRate = _yIn * F(CfgYawRate, 30f) * auth;
                     float bank = Bank(right);
                     if (Mathf.Abs(_rIn) < 0.05f && Mathf.Abs(bank) < 60f) rRate -= bank * 0.3f;
                 }
@@ -787,16 +795,16 @@ namespace NextDayRevival
             Vector3 right = _rot * Vector3.right, up = _rot * Vector3.up;
             // Full circle, unlike Bank(): upside down must read as upside down.
             float bank = Mathf.Atan2(-right.y, up.y) * Mathf.Rad2Deg;
-            float maxBank = Mathf.Clamp(F(CfgMaxBank, 40f), 10f, 70f);
+            float maxBank = Mathf.Clamp(F(CfgMaxBank, 55f), 10f, 70f);
             float cap = _edgeTurn ? Mathf.Max(maxBank, AirBoundary.TurnBank) : maxBank;
             float want = autopilot ? Mathf.Clamp(steer, -cap, cap) : _rIn * maxBank;
-            float rollMax = F(CfgRollRate, 75f);
+            float rollMax = F(CfgRollRate, 100f);
             rRate = Mathf.Clamp((want - bank) * 2.5f, -rollMax, rollMax) * ailAuth;
 
             float phi = Mathf.Clamp(bank, -70f, 70f) * Mathf.Deg2Rad;
             float omega = speed > 8f ? G * Mathf.Tan(phi) / speed * Mathf.Rad2Deg : 0f;
             pRate = omega * Mathf.Sin(phi) * aero;
-            yRate = omega * Mathf.Cos(phi) * aero + _yIn * F(CfgYawRate, 20f) * auth;
+            yRate = omega * Mathf.Cos(phi) * aero + _yIn * F(CfgYawRate, 30f) * auth;
 
             float gamma = _pIn * (_pIn > 0f ? 15f : 25f);
             // B6 climb-out: the assist rotated the aeroplane off the runway
@@ -841,7 +849,7 @@ namespace NextDayRevival
             float steerFade = Mathf.Clamp01(1f - speed / 28f);
             // WASD: with the assist A/D steer the tail wheel too.
             float steer = Assisted() ? Mathf.Clamp(_yIn + _rIn, -1f, 1f) : _yIn;
-            float yRate = steer * (F(CfgGroundSteer, 35f) * steerFade + F(CfgYawRate, 20f) * auth);
+            float yRate = steer * (F(CfgGroundSteer, 35f) * steerFade + F(CfgYawRate, 30f) * auth);
             _gHeading += yRate * dt;
             float parked = An2Model.Parked;
             float able = Mathf.Clamp01((speed - 8f) / 14f);
@@ -2282,11 +2290,11 @@ namespace NextDayRevival
             Rect back = new Rect(cx - w * 0.5f, y, w, h);
             Color keep = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(back.x - 2f, back.y - 2f, back.width + 4f, back.height + 4f), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(back.x - 2f, back.y - 2f, back.width + 4f, back.height + 4f), Texture2D.whiteTexture);
             GUI.color = frac < 0.1f ? new Color(0.95f, 0.25f, 0.2f, 0.95f)
                       : frac < 0.25f ? new Color(0.95f, 0.7f, 0.2f, 0.95f)
                       : new Color(0.55f, 0.8f, 0.45f, 0.95f);
-            GUI.DrawTexture(new Rect(back.x, back.y, back.width * frac, back.height), Texture2D.whiteTexture);
+            VanillaUi.Texture(new Rect(back.x, back.y, back.width * frac, back.height), Texture2D.whiteTexture);
             GUI.color = keep;
             Line(Text.Fuel(Mathf.RoundToInt(fuel), Mathf.RoundToInt(frac * 100f)), cx, y + 8f,
                  new Color(0.85f, 0.85f, 0.80f, 1f), 12);
@@ -2294,14 +2302,7 @@ namespace NextDayRevival
 
         static void Line(string text, float cx, float y, Color colour, int size)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            GUIStyle style = new GUIStyle(GUI.skin.label);
-            style.fontSize = size;
-            style.normal.textColor = colour;
-            GUIContent content = new GUIContent(text);
-            Vector2 measured = style.CalcSize(content);
-            GUI.Label(new Rect(cx - measured.x * 0.5f, y + (26f - measured.y) * 0.5f,
-                               measured.x, measured.y), content, style);
+            VanillaUi.Readout(text, cx, y, colour, size);
         }
 
         // ============================================================ install

@@ -18,7 +18,7 @@ namespace NextDayRevival
                 + ((mask & 8) != 0 ? 10000 : 0);
         }
         internal static int Quantity(int kind)
-        { return kind == 0 ? 24 : kind == 1 || kind == 2 ? 6 : kind == 3 ? 2 : 0; }
+        { return kind == 0 ? 28 : kind == 1 || kind == 2 ? 6 : kind == 3 ? 2 : 0; }
         internal static int Item(int kind)
         { return kind == 0 ? ShellId : kind == 1 ? BeltId : kind == 2 ? 7013 : kind == 3 ? 10005 : 0; }
         internal static int ItemAt(int mask, int slot)

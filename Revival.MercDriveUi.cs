@@ -44,7 +44,7 @@ namespace NextDayRevival
             if (ButtonColored(new Rect(r.x, r.y, 230f, r.height), Loc.T("На машине по карте...", "Drive vehicle on map..."), color, selected))
             { _listOpen = false; RestoreCursor(); StartDriveMap(); }
             if (ButtonColored(new Rect(r.x + 236f, r.y, 190f, r.height), Loc.T("Вернуть машину", "Return vehicle"), color, MercDrive.Active)) MercDrive.Return();
-            GUI.Label(new Rect(r.x + 432f, r.y + 4f, r.width - 432f, 22f), Loc.T("Исправная машина в 60 м", "Ready free vehicle within 60 m"), _small);
+            VanillaUi.Label(new Rect(r.x + 432f, r.y + 4f, r.width - 432f, 22f), Loc.T("Исправная машина в 60 м", "Ready free vehicle within 60 m"), _small);
         }
     }
 }

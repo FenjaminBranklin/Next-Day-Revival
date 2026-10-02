@@ -50,11 +50,12 @@ namespace NextDayRevival
         {
             if (!master || !byPlayers || Seeded || !Known) return false;
             Seeded = true; Revision++;
-            // One room's garrison remainder: ~half the assumed 72-shell /
-            // 1200-ZU-round standard raid. Recapture does not mint a second lot.
+            // One room's garrison remainder: half the measured p90 standard raid
+            // (Z K6b: 135 shells from three crewed 52-Ks) plus 600 ZU rounds.
+            // Recapture does not mint a second lot.
             if (Hp <= 0f) return true;
             // Condition 0 is the native spawn default (research/items.tsv).
-            for (int i = 0; i < 36; i++) Add(new DepotGood(2076, 1, 0, 0f, 0f));
+            for (int i = 0; i < 68; i++) Add(new DepotGood(2076, 1, 0, 0f, 0f));
             for (int i = 0; i < 6; i++) Add(new DepotGood(2077, 100, 0, 0f, 0f));
             for (int i = 0; i < 6; i++) Add(new DepotGood(7013, 0, 0, 0f, 0f));
             for (int i = 0; i < 2; i++) Add(new DepotGood(10005, 0, 0, 0f, 0f));

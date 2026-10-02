@@ -76,6 +76,7 @@ namespace NextDayRevival
         }
 
         static MercCarrier _carrier;
+        static int _shape;
         static Cell[] _cells;
         static float _next;
         static GUIStyle _style;
@@ -112,9 +113,9 @@ namespace NextDayRevival
                 _cells = null;
             }
             int count = c.Seats + (c.Air ? 1 : 0);
-            if (_carrier != c || _cells == null || _cells.Length != count)
+            if (_carrier != c || _shape != c.Shape || _cells == null || _cells.Length != count)
             {
-                _carrier = c;
+                _carrier = c; _shape = c.Shape;
                 _cells = new Cell[count];
                 for (int i = 0; i < count; i++)
                 {
@@ -279,24 +280,24 @@ namespace NextDayRevival
             float height = Mathf.Min(30f, (Screen.height - 110f) / Mathf.Max(1, rows));
             float x = Screen.width - width - 12f, y = 82f;
             Color old = GUI.color;
-            Box(new Rect(x - 4f, y - 4f, width + 8f, 26f + rows * height), new Color(0.04f, 0.06f, 0.08f, 0.88f));
+            VanillaUi.Panel(new Rect(x - 4f, y - 4f, width + 8f, 26f + rows * height), "MarkerInfo");
             GUI.color = Color.white;
-            GUI.Label(new Rect(x, y, width, 20f), Heading, _style);
+            VanillaUi.Label(new Rect(x, y, width, 20f), Heading, _style);
             y += 22f;
             for (int i = 0; i < _cells.Length; i++)
             {
                 Cell cell = _cells[i];
                 float w = width / columns - 4f;
                 Rect r = new Rect(x + (i % columns) * width / columns, y + (i / columns) * height, w, height - 3f);
-                Box(r, cell.Card.Kind == VehicleSeatCard.Free ? new Color(0.12f, 0.15f, 0.18f, 0.85f) : new Color(0.18f, 0.25f, 0.30f, 0.95f));
+                VanillaUi.Panel(r, "groupPlayerWhite", new Color(0.329f, 0.329f, 0.329f, 1f));
                 GUI.color = Color.white;
-                GUI.Label(new Rect(r.x + 3f, r.y, r.width - 6f, r.height - 5f), cell.Text, _style);
+                VanillaUi.Label(new Rect(r.x + 3f, r.y, r.width - 6f, r.height - 5f), cell.Text, _style);
                 if (cell.Card.Kind == VehicleSeatCard.Free) continue;
                 Rect bar = new Rect(r.x + 3f, r.yMax - 5f, r.width - 6f, 3f);
                 Box(bar, new Color(0.35f, 0.35f, 0.35f, 1f));
                 if (cell.Card.Health < 0f) continue; // grey = unavailable, never fake full HP
                 bar.width *= cell.Card.Health;
-                Box(bar, cell.Card.Health > 0.35f ? new Color(0.25f, 0.8f, 0.4f, 1f) : new Color(0.95f, 0.3f, 0.2f, 1f));
+                Box(bar, cell.Card.Health > 0.35f ? VanillaUi.Green : VanillaUi.Red);
             }
             GUI.color = old;
         }
@@ -304,7 +305,7 @@ namespace NextDayRevival
         static void Box(Rect rect, Color color)
         {
             GUI.color = color;
-            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            VanillaUi.Texture(rect, Texture2D.whiteTexture);
         }
     }
 }

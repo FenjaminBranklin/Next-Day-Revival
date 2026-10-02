@@ -507,7 +507,7 @@ namespace NextDayRevival
             // The escort are An-2 too: the warning counts them with the transports.
             int escorts = r.NoBombs ? 0 : e.Escorts;
             transports += escorts;
-            float from = Mathf.Repeat(r.Heading + 180f, 360f);
+            float from = bombers > 0 ? 270f : Mathf.Repeat(r.Heading + 180f, 360f);
             float siren = lead + firstEta + 45f;
             Vector3 alarm = bombers > 0 || escorts > 0 ? r.Target : r.Drop;
             float[] warnMsg = new float[] { 0f, alarm.x, alarm.z, siren, from, bombers, transports, lead + firstEta };
@@ -561,7 +561,8 @@ namespace NextDayRevival
         static float Eta(Vector3 over, float heading, Wave wave, float lineLength, float factor)
         {
             Vector2 from, to;
-            FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
+            if (wave.Bomber) BomberAcrossMap(over, out from, out to);
+            else FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
             float speed = NpcAircraft.Speed((wave.Bomber ? BomberKmh : wave.Escort ? EscortKmh : TransportKmh) / 3.6f * K, factor);
             float run = (new Vector2(over.x, over.z) - from).magnitude;
             float strip = wave.Bomber ? lineLength : wave.Escort ? EscortStick : JumpSpread;
@@ -575,7 +576,8 @@ namespace NextDayRevival
             Vector3 over = Over(r, w, k);
             float heading = w.OwnDrop ? w.Direction : r.Heading;
             Vector2 from, to;
-            FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
+            if (w.Bomber) BomberAcrossMap(over, out from, out to);
+            else FlightPath.AcrossMap(over, Mathf.Repeat(heading + 180f, 360f), out from, out to);
             float run = (new Vector2(over.x, over.z) - from).magnitude;
             float speed = NpcAircraft.Speed((w.Escort ? EscortKmh : w.Bomber ? BomberKmh : TransportKmh) / 3.6f * K, r.SpeedFactor);
             if (w.Bomber) run = Mathf.Max(run, MercAACore.ApproachUnits(r.E.Length, K));
@@ -636,12 +638,25 @@ namespace NextDayRevival
             return FlightPath.Straight(from, to, altitudeM * K, NpcAircraft.Speed(kmh / 3.6f * K, factor));
         }
 
+        // Tu-95s cross the long west/east axis regardless of the event edge.
+        // Use absolute edges: AcrossMap's capped run can start inside a wide map.
+        // Keep the selected target and wingman lane, including near-edge targets.
+        static void BomberAcrossMap(Vector3 over, out Vector2 from, out Vector2 to)
+        {
+            Rect map = FlightPath.MapRect(over);
+            from = new Vector2(Mathf.Min(map.xMin, over.x - 900f), over.z);
+            to = new Vector2(Mathf.Max(map.xMax, over.x + 900f), over.z);
+        }
+
         static GameObject LaunchBomber(Raid r, Sortie s)
         {
-            Vector2 d = Dir(r.Heading);
+            Vector2 d = new Vector2(1f, 0f);
             Vector3 fwd = new Vector3(d.x, 0f, d.y), right = new Vector3(d.y, 0f, -d.x);
             Vector3 centre = r.Target + right * Offset(s.Index, s.W.Count, r.E.Width);
-            FlightPath path = PathOver(centre, r.Heading, BomberAltitude(r.E), BomberKmh, r.SpeedFactor);
+            Vector2 from, to;
+            BomberAcrossMap(centre, out from, out to);
+            FlightPath path = FlightPath.Straight(from, to, BomberAltitude(r.E) * K,
+                NpcAircraft.Speed(BomberKmh / 3.6f * K, r.SpeedFactor));
             // A map-edge spawn was too close for even the best radar crew.
             // Keep the chosen target, heading and bomb line; extend inbound only.
             path.ExtendApproach(path.Project(centre), MercAACore.ApproachUnits(r.E.Length, K));
@@ -1507,22 +1522,8 @@ namespace NextDayRevival
         {
             if (Time.time > _bannerUntil || _banner.Length == 0) return;
             if (CfgBanner != null && !CfgBanner.Value) return;
-            try
-            {
-                string text = "<b>" + _banner + "</b>";
-                GUIStyle st = new GUIStyle(GUI.skin.label);
-                st.fontSize = 20;
-                st.richText = true;
-                Vector2 size = st.CalcSize(new GUIContent(text));
-                float x = (Screen.width - size.x) * 0.5f, y = Screen.height * 0.12f;
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(x - 12f, y - 6f, size.x + 24f, size.y + 12f), Texture2D.whiteTexture);
-                GUI.color = (Time.time * 2f) % 2f < 1.4f ? new Color(1f, 0.35f, 0.25f) : new Color(1f, 0.85f, 0.4f);
-                GUI.Label(new Rect(x, y, size.x + 4f, size.y), text, st);
-                GUI.color = old;
-            }
-            catch { }
+            if (!VanillaNotice.Banner("air.events", _banner, null, NativeMessage.AirDrop, _bannerUntil))
+                VanillaUi.Notice(_banner, NativeMessage.AirDrop);
         }
 
         // ============================================================== frame

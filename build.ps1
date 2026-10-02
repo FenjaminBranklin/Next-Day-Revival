@@ -106,10 +106,23 @@ $refs = @(
 $cscArgs = @("/target:library", "/optimize+", "/nologo", "/warn:2",
              "/codepage:65001", "/out:$staged")
 foreach ($r in $refs) { $cscArgs += "/reference:$r" }
-foreach ($s in $src) { $cscArgs += $s }
+# The sources go to csc in a response file. 255 absolute paths in a queue
+# worktree (.agent-local\worktrees\<task>) passed the 32767 character
+# command-line limit ("Dateiname oder Erweiterung ist zu lang"); the file
+# list itself is unchanged. BOM-less, one quoted path per line.
+$rsp = Join-Path $stage "sources.rsp"
+[System.IO.File]::WriteAllLines($rsp, [string[]]($src | ForEach-Object { '"' + $_ + '"' }))
+$cscArgs += "@$rsp"
 
 Write-Host ("uebersetze {0} Datei(en) -> {1}" -f $src.Count, $staged)
-& $csc $cscArgs
+# 255+ absolute paths in a queue worktree (.agent-local\worktrees\<task>)
+# passed Windows' 32767 character command-line limit ("Dateiname oder
+# Erweiterung ist zu lang"). The same arguments go to csc in a BOM-less
+# response file, each complete argument quoted so paths with spaces stay one.
+$responsePath = Join-Path $stage "compile.rsp"
+$responseLines = [string[]]($cscArgs | ForEach-Object { '"' + $_ + '"' })
+[System.IO.File]::WriteAllLines($responsePath, $responseLines, (New-Object System.Text.UTF8Encoding($false)))
+& $csc "@$responsePath"
 if ($LASTEXITCODE -ne 0) { throw "compile failed with exit code $LASTEXITCODE" }
 Write-Host ("OK  {0} bytes" -f (Get-Item $staged).Length)
 

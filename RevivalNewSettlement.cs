@@ -697,7 +697,7 @@ namespace NextDayRevival
                     try
                     {
                         GUI.color = RingColor;
-                        GUI.Label(new Rect(mouse.x + 12f, mouse.y - 11f, 240f, 22f),
+                        VanillaUi.Label(new Rect(mouse.x + 12f, mouse.y - 11f, 240f, 22f),
                             Loc.T("\u041b\u0438\u0442\u0432\u0438\u043d\u043e\u0432\u043a\u0430 - \u043f\u0440\u0435\u0434\u0430\u0442\u0435\u043b\u0438",
                                   "Litvinovka - traitors"));
                     }

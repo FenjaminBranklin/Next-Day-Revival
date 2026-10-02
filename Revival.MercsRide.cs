@@ -94,6 +94,8 @@ namespace NextDayRevival
         internal Transform Root;
         internal Transform SeatPoints, GetOut;
         internal int Seats;
+        internal Array Pass;                  // Ground: the native Passengers array Seats was read from
+        internal int SeatChildren = -1, Shape; // SeatPoints.childCount then; Shape counts the re-reads
         internal int GunKind, GunSeat = -1;
         internal bool Closed, Air;
         internal float Radius = 8f;
@@ -268,6 +270,7 @@ namespace NextDayRevival
                 if (vgs == null) return;
                 MercCarrier c;
                 if (!_carriers.TryGetValue(vgs.gameObject.GetInstanceID(), out c)) return;
+                Current(c);
                 if (Claimant(c, __result, null) == null) return;
                 Array pass = Passengers(vgs);
                 if (pass == null) return;
@@ -298,9 +301,33 @@ namespace NextDayRevival
             if (go == null) return null;
             int id = go.GetInstanceID();
             MercCarrier c;
-            if (_carriers.TryGetValue(id, out c) && c.Go != null) return c;
+            if (_carriers.TryGetValue(id, out c) && c.Go != null) return Current(c);
             c = Build(kind, go, vgs);
             if (c != null) _carriers[id] = c;
+            return c;
+        }
+
+        /// <summary>A-S1: the seat layout is not fixed at the first look.
+        /// The seat roster (Z K9b) looks at a vehicle the moment it is spawned,
+        /// before the turret hook and InitCar size its Passengers array - the
+        /// MTW was cached with 0 seats and every merc said "no free seat"
+        /// (6.66.0 log). A ground vehicle whose Passengers array or SeatPoints
+        /// changed since is read again, in place, so riders keep the carrier.</summary>
+        static MercCarrier Current(MercCarrier c)
+        {
+            if (c == null || c.Kind != MercCarrier.Ground) return c;
+            Array pass = Passengers(c.Vgs);
+            if (pass == null) return c;
+            Transform points = c.SeatPoints;
+            if (ReferenceEquals(pass, c.Pass) && points != null && points.childCount == c.SeatChildren) return c;
+            int was = c.Seats, gunWas = c.GunSeat;
+            if (!ReadSeats(c)) return c;
+            if (c.View <= 0) c.View = ViewOf(c.Go);
+            c.Cols = c.Go.GetComponentsInChildren<Collider>(true);
+            c.Radius = RadiusOf(c);
+            if (c.Seats != was || c.GunSeat != gunWas)
+                RevivalPlugin.L.LogInfo("Mercs: " + c.En + " (view " + c.View + ") seats read again - " + was + " -> "
+                    + c.Seats + ", gun " + c.GunKind + " at seat " + c.GunSeat + ".");
             return c;
         }
 
@@ -325,51 +352,7 @@ namespace NextDayRevival
             {
                 if (vgs == null) return null;
                 c.View = ViewOf(go);
-                Transform root = c.Root;
-                Component found;
-                bool gepard = Gepard.IstGepard(root);
-                c.SeatPoints = gepard ? Gepard.FindSeatPoints(go, out found) : Technical.FindSeatPoints(go, out found);
-                Array pass = Passengers(vgs);
-                if (c.SeatPoints == null || pass == null) return null;
-                c.Seats = Mathf.Min(pass.Length, c.SeatPoints.childCount);
-                c.GetOut = _fGetOut == null ? null : _fGetOut.GetValue(vgs) as Transform;
-                c.Closed = GunnerAI.Armoured(vgs);
-                if (gepard)
-                {
-                    c.Ru = "Гепард"; c.En = "Gepard";
-                    c.Rig = Gepard.Rig(root);
-                    if (c.Rig != null && Gepard.GunnerSeat < c.Seats)
-                    { c.GunKind = MercCarrier.GunGepard; c.GunSeat = Gepard.GunnerSeat; }
-                }
-                else if (Technical.IstTechnical(root))
-                {
-                    c.Ru = "техничка"; c.En = "technical";
-                    c.Mount = Technical.MountOf(root);
-                    c.Gun = Technical.GunOf(root);
-                    if (c.Mount != null && c.Mount.parent != null && Technical.GunnerSeat < c.Seats)
-                    { c.GunKind = MercCarrier.GunTechnical; c.GunSeat = Technical.GunnerSeat; }
-                }
-                else
-                {
-                    bool tank = Tank.IstPanzer(root);
-                    if (tank) { c.Ru = "Т-72"; c.En = "T-72"; }
-                    else if (root.name.IndexOf("btr", StringComparison.OrdinalIgnoreCase) >= 0) { c.Ru = "БТР"; c.En = "MTW"; }
-                    else if (UralTruck.IstUral(root)) { c.Ru = "Урал"; c.En = "Ural"; }
-                    int g = -1;
-                    for (int i = 0; i < c.SeatPoints.childCount; i++)
-                        if (c.SeatPoints.GetChild(i).name == Turret.SeatName) { g = i; break; }
-                    if (g >= 0 && g < c.Seats)
-                    {
-                        c.Turrets = Turret.FindTurrets(root);
-                        if (c.Turrets.Length > 0 && c.Turrets[0].parent != null)
-                        {
-                            c.GunKind = tank ? MercCarrier.GunTank : MercCarrier.GunBtr;
-                            c.GunSeat = g;
-                            for (int i = 0; i < c.Turrets.Length && c.TurretRenderer == null; i++)
-                                c.TurretRenderer = c.Turrets[i].GetComponent<Renderer>();
-                        }
-                    }
-                }
+                if (!ReadSeats(c)) return null;
             }
             c.Cols = go.GetComponentsInChildren<Collider>(true);
             c.Radius = RadiusOf(c);
@@ -377,6 +360,62 @@ namespace NextDayRevival
                 + c.GunKind + " at seat " + c.GunSeat + (c.Closed ? ", closed hull" : "") + (c.Air ? ", aircraft" : "")
                 + ", radius " + c.Radius.ToString("0.0") + ".");
             return c;
+        }
+
+        /// <summary>Everything of a ground vehicle that follows from its seats:
+        /// the count (native Passengers against SeatPoints), the gun and its
+        /// seat, the name. False while either is not there yet.</summary>
+        static bool ReadSeats(MercCarrier c)
+        {
+            Transform root = c.Root;
+            Component found;
+            bool gepard = Gepard.IstGepard(root);
+            Transform points = gepard ? Gepard.FindSeatPoints(c.Go, out found) : Technical.FindSeatPoints(c.Go, out found);
+            Array pass = Passengers(c.Vgs);
+            if (points == null || pass == null) return false;
+            c.SeatPoints = points; c.Pass = pass; c.SeatChildren = points.childCount;
+            c.Seats = Mathf.Min(pass.Length, points.childCount);
+            c.GetOut = _fGetOut == null ? null : _fGetOut.GetValue(c.Vgs) as Transform;
+            c.Closed = GunnerAI.Armoured(c.Vgs);
+            c.GunKind = MercCarrier.GunNone; c.GunSeat = -1;
+            c.Rig = null; c.Mount = null; c.Gun = null; c.Turrets = null; c.TurretRenderer = null;
+            c.Shape++;
+            if (gepard)
+            {
+                c.Ru = "Гепард"; c.En = "Gepard";
+                c.Rig = Gepard.Rig(root);
+                if (c.Rig != null && Gepard.GunnerSeat < c.Seats)
+                { c.GunKind = MercCarrier.GunGepard; c.GunSeat = Gepard.GunnerSeat; }
+                return true;
+            }
+            if (Technical.IstTechnical(root))
+            {
+                c.Ru = "техничка"; c.En = "technical";
+                c.Mount = Technical.MountOf(root);
+                c.Gun = Technical.GunOf(root);
+                if (c.Mount != null && c.Mount.parent != null && Technical.GunnerSeat < c.Seats)
+                { c.GunKind = MercCarrier.GunTechnical; c.GunSeat = Technical.GunnerSeat; }
+                return true;
+            }
+            bool tank = Tank.IstPanzer(root);
+            if (tank) { c.Ru = "Т-72"; c.En = "T-72"; }
+            else if (root.name.IndexOf("btr", StringComparison.OrdinalIgnoreCase) >= 0) { c.Ru = "БТР"; c.En = "MTW"; }
+            else if (UralTruck.IstUral(root)) { c.Ru = "Урал"; c.En = "Ural"; }
+            int g = -1;
+            for (int i = 0; i < points.childCount; i++)
+                if (points.GetChild(i).name == Turret.SeatName) { g = i; break; }
+            if (g >= 0 && g < c.Seats)
+            {
+                c.Turrets = Turret.FindTurrets(root);
+                if (c.Turrets.Length > 0 && c.Turrets[0].parent != null)
+                {
+                    c.GunKind = tank ? MercCarrier.GunTank : MercCarrier.GunBtr;
+                    c.GunSeat = g;
+                    for (int i = 0; i < c.Turrets.Length && c.TurretRenderer == null; i++)
+                        c.TurretRenderer = c.Turrets[i].GetComponent<Renderer>();
+                }
+            }
+            return true;
         }
 
         /// <summary>Half the hull's footprint from its solid colliders.</summary>
@@ -621,18 +660,7 @@ namespace NextDayRevival
         {
             EnsureHooked();
             _outSpots.Clear();
-            _riders.Clear();
-            List<Mercs.Record> roster = Mercs.Roster;
-            for (int i = 0; i < roster.Count; i++)
-            {
-                MercUnit u = roster[i].Unit;
-                if (u == null || roster[i].Down.Down) continue;
-                UnityEngine.Object live = u.Ai;
-                if (live == null) continue;
-                u.Ride.Ai = u.Ai;
-                u.Ride.Actor = Mercs.LocalActor;
-                _riders.Add(u);
-            }
+            CollectRiders();
             MercCarrier oc = null;
             try { oc = owner == null ? null : OwnerCarrier(owner); }
             catch (Exception ex) { Warn("owner vehicle", ex); }
@@ -649,6 +677,24 @@ namespace NextDayRevival
             StepRemote(now);
             Publish(now);
             if (now >= _nextPurge) Purge(now);
+        }
+
+        /// <summary>Seat claims are rebuilt from the living every step: a merc
+        /// who died, went down, despawned or was dismissed claims nothing.</summary>
+        static void CollectRiders()
+        {
+            _riders.Clear();
+            List<Mercs.Record> roster = Mercs.Roster;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                MercUnit u = roster[i].Unit;
+                if (u == null || roster[i].Down.Down) continue;
+                UnityEngine.Object live = u.Ai;
+                if (live == null) continue;
+                u.Ride.Ai = u.Ai;
+                u.Ride.Actor = Mercs.LocalActor;
+                _riders.Add(u);
+            }
         }
 
         static void StepUnit(MercUnit u, MercSeat st, MercCarrier oc, float now, int k)
@@ -1692,6 +1738,9 @@ namespace NextDayRevival
             Vector3 impact;
             float at;
             GameObject struck = Ray(c, muzzle, dir, range, out impact, out at);
+            // B S2a: a target the vanilla distance shutdown left without
+            // colliders here is hit where his body is (Revival.NpcHit.cs).
+            struck = NpcWar.MercGunBody(st.Target, muzzle, dir, range, struck, struck == null ? -1f : at, ref impact);
             Vector3 end = struck == null ? muzzle + dir * range : impact;
             switch (c.GunKind)
             {
@@ -1809,7 +1858,7 @@ namespace NextDayRevival
         {
             if (view <= 0) return null;
             foreach (MercCarrier c in _carriers.Values)
-                if (c.View == view && c.Kind == kind && c.Go != null) return c;
+                if (c.View == view && c.Kind == kind && c.Go != null) return Current(c);
             try
             {
                 if (kind == MercCarrier.Heli) return CarrierOf(kind, PlayerHeli.MachineByView(view), null);
@@ -1979,7 +2028,7 @@ namespace NextDayRevival
             {
                 MercSeat st = pair.Value;
                 UnityEngine.Object live = st.Ai;
-                if (now - st.Heard > HeardSeconds || ((object)st.Ai != null && live == null))
+                if (RemoteGone(st, now))
                 {
                     ReleaseRemote(st);
                     if (drop == null) drop = new List<string>();
@@ -2001,6 +2050,14 @@ namespace NextDayRevival
             }
             if (drop != null) for (int i = 0; i < drop.Count; i++) _remote.Remove(drop[i]);
             if (missing && now >= _nextKeyScan) { _nextKeyScan = now + 1f; FindBodies(); }
+        }
+
+        /// <summary>Another owner's rider whose owner stopped sending (left,
+        /// disconnected) or whose body was destroyed: his seat is free again.</summary>
+        static bool RemoteGone(MercSeat st, float now)
+        {
+            UnityEngine.Object live = st.Ai;
+            return now - st.Heard > HeardSeconds || ((object)st.Ai != null && live == null);
         }
 
         static readonly Dictionary<int, string> _keyOf = new Dictionary<int, string>();

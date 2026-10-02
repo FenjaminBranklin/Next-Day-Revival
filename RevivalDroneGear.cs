@@ -357,16 +357,16 @@ namespace NextDayRevival
 
                 Color old = GUI.color;
                 GUI.color = new Color(0f, 0f, 0f, 0.55f * fade);
-                GUI.DrawTexture(new Rect(x - 4f, y - 4f, w + 8f, h + 8f), GuidePx());
+                VanillaUi.Texture(new Rect(x - 4f, y - 4f, w + 8f, h + 8f), GuidePx());
 
                 GUI.color = new Color(0.75f, 0.85f, 1f, 0.97f * fade);
-                GUI.Label(new Rect(x + pad, y + pad, w - pad * 2f, lh),
+                VanillaUi.Label(new Rect(x + pad, y + pad, w - pad * 2f, lh),
                           Loc.T("ДРОН - как запустить", "DRONE - how to launch"));
 
                 for (int i = 0; i < lines.Count; i++)
                 {
                     GUI.color = Hints.Tint(tints[i], fade);
-                    GUI.Label(new Rect(x + pad, y + pad + lh * (i + 1), w - pad * 2f, lh),
+                    VanillaUi.Label(new Rect(x + pad, y + pad + lh * (i + 1), w - pad * 2f, lh),
                               lines[i]);
                 }
                 GUI.color = old;
@@ -2246,7 +2246,7 @@ namespace NextDayRevival
                 seed = seed * 1103515245 + 12345;
                 float hh = 1f + (((seed >> 16) & 0x7fff) / 32767f) * 9f;
                 GUI.color = new Color(0.75f, 0.85f, 0.8f, 0.05f + staerke * 0.16f);
-                GUI.DrawTexture(new Rect(0f, y, w, hh), Px());
+                VanillaUi.Texture(new Rect(0f, y, w, hh), Px());
             }
         }
 
@@ -2263,10 +2263,10 @@ namespace NextDayRevival
             for (int i = 0; i < 2; i++)
                 for (int k = 0; k < 2; k++)
                 {
-                    GUI.DrawTexture(new Rect(xs[i], ys[k], l, t), Px());
+                    VanillaUi.Texture(new Rect(xs[i], ys[k], l, t), Px());
                     float yv = k == 0 ? m : h - m - l;
                     float xv = i == 0 ? m : w - m - t;
-                    GUI.DrawTexture(new Rect(xv, yv, t, l), Px());
+                    VanillaUi.Texture(new Rect(xv, yv, t, l), Px());
                 }
         }
 
@@ -2304,7 +2304,7 @@ namespace NextDayRevival
                 float x = cx + off * 3.0f;
                 float tick = off % 20 == 0 ? 9f : 5f;
                 GUI.color = ink;
-                GUI.DrawTexture(new Rect(x - 0.75f, tapeY, 1.5f, tick), Px());
+                VanillaUi.Texture(new Rect(x - 0.75f, tapeY, 1.5f, tick), Px());
                 if (off % 20 == 0)
                 {
                     int heading = Mathf.RoundToInt(_yaw + off);
@@ -2315,7 +2315,7 @@ namespace NextDayRevival
                 }
             }
             GUI.color = new Color(1f, 0.42f, 0.24f, 0.95f);
-            GUI.DrawTexture(new Rect(cx - 4f, tapeY - 4f, 8f, 3f), Px());
+            VanillaUi.Texture(new Rect(cx - 4f, tapeY - 4f, 8f, 3f), Px());
 
             float baseY = h * 0.5f + _pitch * h / 85f;
             for (int pitch = -20; pitch <= 20; pitch += 10)
@@ -2324,11 +2324,11 @@ namespace NextDayRevival
                 if (y < h * 0.25f || y > h * 0.75f) continue;
                 float arm = pitch == 0 ? 58f : 34f;
                 GUI.color = new Color(0f, 0f, 0f, 0.45f);
-                GUI.DrawTexture(new Rect(cx - arm - 23f + 1f, y + 1f, arm, 1.5f), Px());
-                GUI.DrawTexture(new Rect(cx + 23f + 1f, y + 1f, arm, 1.5f), Px());
+                VanillaUi.Texture(new Rect(cx - arm - 23f + 1f, y + 1f, arm, 1.5f), Px());
+                VanillaUi.Texture(new Rect(cx + 23f + 1f, y + 1f, arm, 1.5f), Px());
                 GUI.color = ink;
-                GUI.DrawTexture(new Rect(cx - arm - 23f, y, arm, 1.5f), Px());
-                GUI.DrawTexture(new Rect(cx + 23f, y, arm, 1.5f), Px());
+                VanillaUi.Texture(new Rect(cx - arm - 23f, y, arm, 1.5f), Px());
+                VanillaUi.Texture(new Rect(cx + 23f, y, arm, 1.5f), Px());
                 if (pitch != 0)
                 {
                     OsdLabel(new Rect(cx - arm - 50f, y - 9f, 26f, 18f),
@@ -2342,9 +2342,9 @@ namespace NextDayRevival
         static void OsdLabel(Rect rect, string text, Color ink)
         {
             GUI.color = new Color(0f, 0f, 0f, 0.86f);
-            GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), text);
+            VanillaUi.Instrument(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), text);
             GUI.color = ink;
-            GUI.Label(rect, text);
+            VanillaUi.Instrument(rect, text);
         }
 
         static void Fadenkreuz(float w, float h)
@@ -2357,15 +2357,15 @@ namespace NextDayRevival
             GUI.color = new Color(0.7f, 1f, 0.75f, 0.9f);
             Kreuz(cx, cy, gap, arm);
             GUI.color = new Color(1f, 0.4f, 0.25f, 0.9f);
-            GUI.DrawTexture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), Px());
+            VanillaUi.Texture(new Rect(cx - 1.5f, cy - 1.5f, 3f, 3f), Px());
         }
 
         static void Kreuz(float cx, float cy, float gap, float arm)
         {
-            GUI.DrawTexture(new Rect(cx - gap - arm, cy - 1f, arm, 2f), Px());
-            GUI.DrawTexture(new Rect(cx + gap, cy - 1f, arm, 2f), Px());
-            GUI.DrawTexture(new Rect(cx - 1f, cy - gap - arm, 2f, arm), Px());
-            GUI.DrawTexture(new Rect(cx - 1f, cy + gap, 2f, arm), Px());
+            VanillaUi.Texture(new Rect(cx - gap - arm, cy - 1f, arm, 2f), Px());
+            VanillaUi.Texture(new Rect(cx + gap, cy - 1f, arm, 2f), Px());
+            VanillaUi.Texture(new Rect(cx - 1f, cy - gap - arm, 2f, arm), Px());
+            VanillaUi.Texture(new Rect(cx - 1f, cy + gap, 2f, arm), Px());
         }
 
         static void Zahlen(float w, float h, float sig)
@@ -2377,11 +2377,11 @@ namespace NextDayRevival
             float bx = m + 4f, by = h - m - bh - 24f;
 
             GUI.color = new Color(0f, 0f, 0f, 0.45f);
-            GUI.DrawTexture(new Rect(bx - 1f, by - 1f, bw + 2f, bh + 2f), Px());
+            VanillaUi.Texture(new Rect(bx - 1f, by - 1f, bw + 2f, bh + 2f), Px());
             GUI.color = akku > 0.2f
                 ? new Color(0.55f, 1f, 0.6f, 0.85f)
                 : new Color(1f, 0.35f, 0.25f, 0.9f);
-            GUI.DrawTexture(new Rect(bx, by, bw * akku, bh), Px());
+            VanillaUi.Texture(new Rect(bx, by, bw * akku, bh), Px());
 
             float d = _pilotRoot != null ? Vector3.Distance(_pos, HomePlanar()) : 0f;
             float hoehe = Hoehe();
@@ -2393,11 +2393,11 @@ namespace NextDayRevival
             else if (sig < 0.35f) zeile = Loc.T("СЛАБЫЙ СИГНАЛ", "WEAK SIGNAL") + "   " + zeile;
 
             GUI.color = new Color(0f, 0f, 0f, 0.85f);
-            GUI.Label(new Rect(bx + 1f, by + bh + 5f, w, 22f), zeile);
+            VanillaUi.Label(new Rect(bx + 1f, by + bh + 5f, w, 22f), zeile);
             GUI.color = sig > 0.35f && !Motorless()
                 ? new Color(0.75f, 1f, 0.8f, 0.95f)
                 : new Color(1f, 0.45f, 0.3f, 0.95f);
-            GUI.Label(new Rect(bx, by + bh + 4f, w, 22f), zeile);
+            VanillaUi.Label(new Rect(bx, by + bh + 4f, w, 22f), zeile);
         }
 
         /// <summary>The always-on "left-click to mark" hint - with the optic key
@@ -2419,10 +2419,10 @@ namespace NextDayRevival
             if (Time.time < _markFlash)
             {
                 GUI.color = new Color(1f, 0.9f, 0.3f, 0.95f);
-                GUI.DrawTexture(new Rect(cx - 22f, cy - 22f, 44f, 2f), Px());
-                GUI.DrawTexture(new Rect(cx - 22f, cy + 20f, 44f, 2f), Px());
-                GUI.DrawTexture(new Rect(cx - 22f, cy - 22f, 2f, 44f), Px());
-                GUI.DrawTexture(new Rect(cx + 20f, cy - 22f, 2f, 44f), Px());
+                VanillaUi.Texture(new Rect(cx - 22f, cy - 22f, 44f, 2f), Px());
+                VanillaUi.Texture(new Rect(cx - 22f, cy + 20f, 44f, 2f), Px());
+                VanillaUi.Texture(new Rect(cx - 22f, cy - 22f, 2f, 44f), Px());
+                VanillaUi.Texture(new Rect(cx + 20f, cy - 22f, 2f, 44f), Px());
                 OsdLabel(new Rect(cx - 90f, cy + 28f, 180f, 20f),
                     Loc.T("ОТМЕЧЕНО", "MARKED"),
                     new Color(1f, 0.9f, 0.3f, 0.95f));
@@ -2431,19 +2431,7 @@ namespace NextDayRevival
 
         static void Prompt(string text)
         {
-            try
-            {
-                Color old = GUI.color;
-                float w = 360f, h = 26f;
-                float x = (Screen.width - w) * 0.5f;
-                float y = Screen.height * 0.72f;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f);
-                GUI.DrawTexture(new Rect(x - 4f, y - 4f, w + 8f, h + 8f), Px());
-                GUI.color = Color.white;
-                GUI.Label(new Rect(x, y, w, h), text);
-                GUI.color = old;
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogError("SurvDrone prompt: " + ex); }
+            VanillaUi.Prompt(text, Screen.height * 0.72f);
         }
 
         static Texture2D Px()

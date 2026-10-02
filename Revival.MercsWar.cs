@@ -164,6 +164,7 @@ namespace NextDayRevival
         static bool MercMayStand(Fighter f, MercUnit u)
         {
             if (u.Deserting) return false;
+            if (u.Order.MoveNear) return true; // Return fire throughout the trip.
             if (u.Order.Survive || u.Rally || u.Supply.Active) return true;
             MercOrder o = u.Order;
             switch (o.Mode)
@@ -261,6 +262,7 @@ namespace NextDayRevival
                 MercMove(f, u, away, false, now);
                 return;
             }
+            if (u.Order.MoveNear) { MercMoveStep(f, u, now); return; }
             switch (u.Order.Mode)
             {
                 case MercOrder.Follow: MercFollow(f, u, now); return;
@@ -285,7 +287,9 @@ namespace NextDayRevival
             bool marksman = u.Fight.Overwatch.Role == MercRole.Marksman;
             bool medic = Mercs.IsMedic(u);
             if (medic) marksman = false;
-            Vector3 goal = TowerRoof.GoalUp(owner.position) ? owner.position : marksman ? MercOverwatchGoal(f, u, fwd, now)
+            MercFollowState(f, u, now);
+            bool catching = u.Fight.Follow.Active;
+            Vector3 goal = catching ? u.Fight.Follow.Goal : TowerRoof.GoalUp(owner.position) ? owner.position : marksman ? MercOverwatchGoal(f, u, fwd, now)
                 : MercRole.Slot(MercRole.Assault, owner.position, fwd, u.Slot, 0);
             if (medic) goal = owner.position - fwd * 16.8f + new Vector3(fwd.z, 0f, -fwd.x) * ((u.Slot & 1) == 0 ? -8.4f : 8.4f);
             // merc-combat-response: never a slot inside the owner's held aim.
@@ -302,14 +306,14 @@ namespace NextDayRevival
             // and a man below him is not beside him (Revival.TowerRoof.cs).
             bool roof = TowerRoof.GoalUp(owner.position) || TowerRoof.Split(f.Tr.position, goal);
             // x-merc-competence: the owner halted - cover near the slot, low.
-            if (!marksman && dist < 60f && !roof && MercHaltCover(f, u, owner.position, fwd, goal, now)) return;
+            if (!catching && !marksman && dist < 60f && !roof && MercHaltCover(f, u, owner.position, fwd, goal, now)) return;
             // Close to the owner and near his slot: stand, watch his front.
             if (Flat(goal - f.Tr.position) < (marksman ? 2f : 7f) && !roof)
             {
                 if (marksman) MercCrouch(f, now); else Hold(f, null, now);
                 FaceDir(f, fwd); return;
             }
-            MercMove(f, u, goal, marksman || dist > MercRunUnits, now);
+            MercMove(f, u, goal, catching || marksman || dist > MercRunUnits, now);
         }
 
         static readonly Vector3[] _haltWatch = new Vector3[1];
@@ -575,19 +579,22 @@ namespace NextDayRevival
             if (roof == TowerRoof.LegHold) { MercCrouch(f, now); FaceDir(f, leg); return; }
             if (roof == TowerRoof.LegWalk) goal = leg;
             int state = run ? MainRun : MainWalk;
-            float precision = u.Order.Mode == MercOrder.Attack || u.Supply.Active ? 1f : 6f;
+            float precision = u.Order.Mode == MercOrder.Attack || u.Order.MoveNear || u.Supply.Active ? 1f : 6f;
             bool reorder = !f.HasOrder || now >= f.MoveDeadline || Flat(f.Ordered - goal) > precision
                 || f.WantMain != state;
-            if (reorder && now >= u.NextOrder)
+            bool following = u.Order.Mode == MercOrder.Follow || u.Order.Mode == MercOrder.Vehicle;
+            if (reorder && now >= u.NextOrder && (!following || MercFollowRouteTurn()))
             {
-                u.NextOrder = now + 0.8f;
+                u.NextOrder = now + (following ? 0.5f : 0.8f);
                 Vector3 dest;
                 if (roof == TowerRoof.LegWalk) dest = goal;    // a NavMesh spot already, maybe on the roof
                 else if (!RevivalGroundEnemies.TryGround(goal, 8f, out dest)) dest = goal;
-                Go(f, dest, state, PoseStand, now, Stance.Advance);
+                if (following) MercFollowOrder(f, dest, state, now, Stance.Advance);
+                else Go(f, dest, state, PoseStand, now, Stance.Advance);
             }
             else if (f.HasOrder) Drive(f, state, AddNone, PoseStand, now, false);
             if (now >= u.NextSpeed) { u.NextSpeed = now + 1f; MercSpeed(f, u); }
+            MercFollowSpeed(f, u, run);
         }
 
         // Roof orders take the established traversal hook before the fight
@@ -696,12 +703,12 @@ namespace NextDayRevival
                     GameObject go = players[i];
                     if (go == null || go == u.OwnerGo) continue;
                     float d = (go.transform.position - p).sqrMagnitude;
-                    if (d >= bestSqr) continue;
                     int actor = Mercs.ActorOf(go);
                     if (actor == Mercs.LocalActor) continue;
                     // B3d (D10): whoever just shot him is answered, whatever
                     // his faction - a merc is no free kill for a friendly side.
                     bool attacker = actor == u.LastAttacker && now < u.AttackerUntil;
+                    if (!attacker && d >= bestSqr) continue;
                     if (defendOnly && !attacker) continue;
                     if (Mercs.PlayerDead(go)) continue;
                     string steam = Mercs.SteamOf(go);
@@ -709,6 +716,7 @@ namespace NextDayRevival
                     int faction = Mercs.FactionOf(go);
                     if (!attacker && (faction < 0 || !HatedValue(f.Hated, faction))) continue;
                     bestSqr = d; best = go.transform;
+                    if (attacker) break; // a confirmed attacker, at any range
                 }
             }
             u.PlayerTarget = best;

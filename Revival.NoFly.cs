@@ -567,23 +567,7 @@ namespace NextDayRevival
                 col = new Color(0.7f, 0.95f, 0.7f, 1f - (now - _leftAt) / 3f);
             }
             if (head == null) return;
-            if (_bannerStyle == null)
-            {
-                _bannerStyle = new GUIStyle(GUI.skin.label);
-                _bannerStyle.richText = true;
-                _bannerStyle.fontSize = 20;
-            }
-            Color old = GUI.color;
-            try
-            {
-                float w = 720f, x = (Screen.width - w) * 0.5f, y = Screen.height * 0.16f;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f * col.a);
-                GUI.DrawTexture(new Rect(x, y, w, 64f), Texture2D.whiteTexture);
-                GUI.color = col;
-                Centred("<b>" + head + "</b>", 20, x + w * 0.5f, y + 4f);
-                Centred(line, 16, x + w * 0.5f, y + 34f);
-            }
-            finally { GUI.color = old; }
+            VanillaUi.Banner(head, line, Screen.height * 0.16f, false, _local.Count > 0 ? VanillaUi.Red : Color.white);
         }
 
         /// <summary>One line of the banner, centred on <paramref name="cx"/>.</summary>
@@ -591,7 +575,7 @@ namespace NextDayRevival
         {
             _bannerStyle.fontSize = size;
             Vector2 sz = _bannerStyle.CalcSize(new GUIContent(text));
-            GUI.Label(new Rect(cx - sz.x * 0.5f, y, sz.x, sz.y), text, _bannerStyle);
+            VanillaUi.Label(new Rect(cx - sz.x * 0.5f, y, sz.x, sz.y), text, _bannerStyle);
         }
 
         // ------------------------------------------------------------ the map
@@ -674,9 +658,9 @@ namespace NextDayRevival
             try
             {
                 GUI.color = new Color(0f, 0f, 0f, 0.7f);
-                GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _labelStyle);
+                VanillaUi.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _labelStyle);
                 GUI.color = InkColor;
-                GUI.Label(r, text, _labelStyle);
+                VanillaUi.Label(r, text, _labelStyle);
             }
             finally { GUI.color = old; }
         }

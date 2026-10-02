@@ -1385,6 +1385,14 @@ namespace NextDayRevival
 
         internal static void Measure(Contact c)
         {
+            if (NpcAircraft.Is(c.Go))
+            {
+                // The Tu-95 far visual is a camera-relative scaled proxy. Its
+                // renderer bounds are not the aircraft's position or hit volume.
+                c.LocalCentre = Vector3.zero;
+                c.Radius = 9f; // Same upper bound as the ordinary airframe measure.
+                return;
+            }
             Renderer[] rs = c.Go.GetComponentsInChildren<Renderer>();
             bool found = false;
             Bounds b = new Bounds(c.Go.transform.position, Vector3.zero);
@@ -2074,7 +2082,7 @@ namespace NextDayRevival
             Matrix4x4 m = GUI.matrix;
             GUI.color = c;
             GUIUtility.RotateAroundPivot(Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg, a);
-            GUI.DrawTexture(new Rect(a.x, a.y - w * 0.5f, len, w), _white);
+            VanillaUi.Texture(new Rect(a.x, a.y - w * 0.5f, len, w), _white);
             GUI.matrix = m;
             GUI.color = Color.white;
         }
@@ -2118,10 +2126,10 @@ namespace NextDayRevival
             float y = align == Right ? r.y + r.height - size.y : r.y;
             Rect at = new Rect(x, y, size.x + 2f, size.y);
             GUI.color = new Color(0f, 0f, 0f, 0.8f * alpha);
-            GUI.Label(new Rect(at.x + 1, at.y + 1, at.width, at.height), content, st);
+            VanillaUi.Instrument(new Rect(at.x + 1, at.y + 1, at.width, at.height), content, st);
             c.a *= alpha;
             GUI.color = c;
-            GUI.Label(at, content, st);
+            VanillaUi.Instrument(at, content, st);
             GUI.color = Color.white;
         }
 
@@ -2164,7 +2172,7 @@ namespace NextDayRevival
             float r = Mathf.Clamp(Screen.height * 0.13f, 70f, 180f);
             float cx = 24f + r, cy = Screen.height - 24f - r;
             GUI.color = new Color(0f, 0.08f, 0.02f, 0.72f);
-            GUI.DrawTexture(new Rect(cx - r, cy - r, r * 2f, r * 2f), _white);
+            VanillaUi.Texture(new Rect(cx - r, cy - r, r * 2f, r * 2f), _white);
             GUI.color = Color.white;
             Ring(cx, cy, r, Dim);
             Ring(cx, cy, r * 0.5f, new Color(Dim.r, Dim.g, Dim.b, 0.25f));
@@ -2198,7 +2206,7 @@ namespace NextDayRevival
                 else
                 {
                     GUI.color = col;
-                    GUI.DrawTexture(new Rect(at.x - s, at.y - s, s * 2f, s * 2f), _white);
+                    VanillaUi.Texture(new Rect(at.x - s, at.y - s, s * 2f, s * 2f), _white);
                     GUI.color = Color.white;
                 }
                 if (locked) Box(at.x, at.y, 7f, Red);

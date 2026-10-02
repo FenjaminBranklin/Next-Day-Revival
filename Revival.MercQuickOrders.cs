@@ -21,7 +21,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             _commandCfg = cfg.Bind("Mercs", "QuickOrderKey", "Mouse2",
-                "With your owned merc roster: tap = immediate attack at release, double tap = rally, "
+                "With your owned merc roster: tap = immediate attack at release, double tap = move to cover near the mark, "
                 + "hold = all nine orders. None disables this binding; OrderKey remains available.");
             _cameraCfg = cfg.Bind("Mercs", "CameraAimKey", "BackQuote",
                 "Camera aim alignment toggle moved from middle mouse while your owned merc roster uses Mouse2. "
@@ -162,6 +162,7 @@ namespace NextDayRevival
         static bool _quickHit, _quickActor;
         static Vector3 _commandPing;
         static float _commandPingUntil;
+        static bool _commandPingMove;
         static Camera _pingCamera;
         static float _pingCameraAt;
         static int _inputFrame = -1;
@@ -255,12 +256,7 @@ namespace NextDayRevival
             int action = _quickGesture.Step(Time.unscaledTime, Input.GetKeyDown(key), held, Input.GetKeyUp(key));
             if ((action & MercQuickGesture.Capture) != 0) CaptureQuickAim();
             if ((action & MercQuickGesture.Attack) != 0) QuickAttack();
-            if ((action & MercQuickGesture.Rally) != 0)
-            {
-                Reply();
-                if (MercRide.OwnerInVehicle) Mercs.OrderVehicle(); else Mercs.OrderFollow();
-                CommandPing(Mercs.OwnerPosition);
-            }
+            if ((action & MercQuickGesture.Move) != 0) QuickMove();
             if ((action & MercQuickGesture.Open) != 0)
             {
                 _quickWheel = true; _wheelOpen = true; _wheelArmed = false;
@@ -350,8 +346,22 @@ namespace NextDayRevival
             _quickNpc = null; _quickPlayer = null;
         }
 
+        static void QuickMove()
+        {
+            Reply();
+            if (!_quickHit)
+            {
+                Toast(Loc.T("Наведите прицел на место для движения.", "Aim at a point to move there."), true);
+                return;
+            }
+            Vector3 direction = _quickPoint - Mercs.OwnerPosition; direction.y = 0f;
+            if (Mercs.OrderMove(_quickPoint, direction.normalized))
+            { CommandPing(_quickPoint); _commandPingMove = true; }
+            _quickNpc = null; _quickPlayer = null;
+        }
+
         static void CommandPing(Vector3 point)
-        { _commandPing = point; _commandPingUntil = Time.time + 3f; }
+        { _commandPing = point; _commandPingUntil = Time.time + 3f; _commandPingMove = false; }
 
         static void DrawCommandPing()
         {
@@ -366,7 +376,14 @@ namespace NextDayRevival
                 if (sp.z > 0f)
                 {
                     float x = sp.x, y = Screen.height - sp.y;
-                    Color tint = new Color(1f, 0.72f, 0.15f, Mathf.Min(1f, _commandPingUntil - Time.time));
+                    Color tint = _commandPingMove ? MoveBlue : AttackRed;
+                    tint.a = Mathf.Min(1f, _commandPingUntil - Time.time);
+                    if (_commandPingMove)
+                    {
+                        // Destination cross, in the native waypoint HUD style.
+                        Box(new Rect(x - 4f, y - 1f, 8f, 2f), tint);
+                        Box(new Rect(x - 1f, y - 4f, 2f, 8f), tint);
+                    }
                     Box(new Rect(x - 10f, y - 10f, 20f, 2f), tint);
                     Box(new Rect(x - 10f, y + 8f, 20f, 2f), tint);
                     Box(new Rect(x - 10f, y - 8f, 2f, 16f), tint);

@@ -120,21 +120,21 @@ namespace NextDayRevival
     public static class UiKit
     {
         // ---- palette (docs/UI_KIT.md "Colour").
-        public static readonly Color Panel = new Color(0.071f, 0.078f, 0.094f, 0.90f);
-        public static readonly Color Header = new Color(0.098f, 0.106f, 0.125f, 0.96f);
-        public static readonly Color CardFill = new Color(0.125f, 0.137f, 0.161f, 0.92f);
-        public static readonly Color CardHover = new Color(0.157f, 0.169f, 0.196f, 0.95f);
+        public static readonly Color Panel = new Color(0.259f, 0.259f, 0.259f, 0.90f);
+        public static readonly Color Header = Color.white;
+        public static readonly Color CardFill = new Color(0.329f, 0.329f, 0.329f, 1f);
+        public static readonly Color CardHover = VanillaUi.Hover;
         public static readonly Color Line = new Color(1f, 1f, 1f, 0.08f);
-        public static readonly Color Field = new Color(0.047f, 0.051f, 0.063f, 0.92f);
-        public static readonly Color Accent = new Color(0.306f, 0.631f, 1f, 1f);
-        public static readonly Color AccentHover = new Color(0.439f, 0.710f, 1f, 1f);
-        public static readonly Color AccentPress = new Color(0.231f, 0.525f, 0.882f, 1f);
-        public static readonly Color Text = new Color(0.910f, 0.918f, 0.929f, 1f);
-        public static readonly Color TextDim = new Color(0.604f, 0.627f, 0.651f, 1f);
-        public static readonly Color TextOnAccent = new Color(0.035f, 0.063f, 0.110f, 1f);
-        public static readonly Color Good = new Color(0.239f, 0.863f, 0.518f, 1f);
-        public static readonly Color Warn = new Color(1f, 0.690f, 0.125f, 1f);
-        public static readonly Color Bad = new Color(1f, 0.353f, 0.373f, 1f);
+        public static readonly Color Field = new Color(0.259f, 0.259f, 0.259f, 1f);
+        public static readonly Color Accent = VanillaUi.Gold;
+        public static readonly Color AccentHover = VanillaUi.Hover;
+        public static readonly Color AccentPress = VanillaUi.Pressed;
+        public static readonly Color Text = VanillaUi.White;
+        public static readonly Color TextDim = VanillaUi.Grey;
+        public static readonly Color TextOnAccent = VanillaUi.White;
+        public static readonly Color Good = VanillaUi.Green;
+        public static readonly Color Warn = VanillaUi.Gold;
+        public static readonly Color Bad = VanillaUi.Red;
         public static readonly Color Shadow = new Color(0f, 0f, 0f, 0.35f);
 
         // ---- spacing at scale 1.0 (a 4 px grid).
@@ -199,38 +199,18 @@ namespace NextDayRevival
             if (_open > 0) FreeCursor();
             if (_toasts.Count == 0 || !Ensure()) return;
             if (Event.current.type != EventType.Repaint) return;
-            GUI.backgroundColor = Color.white;
-            GUI.contentColor = Color.white;
-            float now = Time.realtimeSinceStartup;
-            float y = S(Pad);
-            float maxW = S(420f);
-            GUIStyle st = _text[UiFont.Body * 3];
-            for (int i = _toasts.Count - 1; i >= 0; i--)
-            {
-                UiToast t = _toasts.At(i);
-                float a = _toasts.Alpha(i, now);
-                if (a <= 0f) continue;
-                _gc.text = t.Text;
-                float tw = st.CalcSize(_gc).x;
-                float w = Mathf.Min(maxW, tw + S(56f));
-                float h = S(40f);
-                Rect r = new Rect(Screen.width - S(Pad) - w, y, w, h);
-                Color tone = ToneColor(t.Kind);
-                Fill(Shift(r, 0f, S(3f)), Fade(Shadow, a), 1);
-                Fill(r, Fade(Header, a), 1);
-                Fill(new Rect(r.x, r.y + S(8f), S(3f), h - S(16f)), Fade(tone, a), 0);
-                Rect ir = new Rect(r.x + S(14f), r.y + (h - S(18f)) * 0.5f, S(18f), S(18f));
-                if (t.Kind == UiTone.Loading) Spinner(ir, Fade(tone, a)); else Icon(ir, ToneIcon(t.Kind), Fade(tone, a));
-                Label(new Rect(r.x + S(42f), r.y, w - S(52f), h), t.Text, UiFont.Body, UiFont.Left, Fade(Text, a));
-                y += h + S(Gap);
-            }
-            GUI.color = Color.white;
+            UiToast toast = _toasts.At(_toasts.Count - 1);
+            VanillaUi.Notice(toast.Text, toast.Kind == UiTone.Error || toast.Kind == UiTone.Warning
+                ? NativeMessage.Warning : NativeMessage.Inventory);
         }
 
         /// <summary>Shows a toast for 4 s (errors 6 s). The same text again
         /// refreshes the one already shown.</summary>
         public static void Toast(string text, int tone)
         {
+            int type = tone == UiTone.Error || tone == UiTone.Warning ? NativeMessage.Warning
+                : tone == UiTone.Success ? NativeMessage.Stats : NativeMessage.Inventory;
+            if (NativeMessage.Show(text, type)) return;
             _toasts.Push(text, tone, Time.realtimeSinceStartup, tone == UiTone.Error ? 6f : 4f);
         }
 
@@ -243,6 +223,7 @@ namespace NextDayRevival
             w.Nav.Clear();
             w.ShowFocus = false;
             _open++;
+            VanillaUi.Sound("OpenWindow");
         }
 
         public static void Close(UiWindow w)
@@ -311,18 +292,16 @@ namespace NextDayRevival
             GUI.color = Color.white;
             GUI.backgroundColor = Color.white;
             GUI.contentColor = Color.white;
-            Fill(new Rect(r.x - S(2f), r.y + S(4f), W + S(4f), H + S(4f)), Shadow, 1);
-            Fill(r, Panel, 1);
+            VanillaUi.Panel(r, "warning_02_empty");
             // The title bar: rounded on top only - the lower corners are
             // clipped off by a group instead of overdrawn (no alpha band).
             // The group runs in every pass: it takes a control id.
             GUI.BeginGroup(new Rect(r.x, r.y, W, hh));
-            Fill(new Rect(0f, 0f, W, hh + S(16f)), Header, 1);
+            // The textured form supplies the title backing.
             GUI.EndGroup();
             if (e.type == EventType.Repaint)
             {
                 Fill(new Rect(r.x, r.y + hh, W, Mathf.Max(1f, S(1f))), Line, 0);
-                Fill(new Rect(r.x + S(Pad), r.y + S(14f), S(3f), hh - S(28f)), Accent, 0);
                 Label(new Rect(r.x + S(Pad + 12f), r.y, W - S(Pad + 60f), hh),
                       Loc.T(w.TitleRu, w.TitleEn), UiFont.Title, UiFont.Left, Text);
             }
@@ -420,6 +399,8 @@ namespace NextDayRevival
         public static void Fill(Rect r, Color c, int round)
         {
             if (Event.current.type != EventType.Repaint || !_ready) return;
+            if (round != 0 && r.width >= S(100f) && r.height >= S(24f))
+            { VanillaUi.Panel(r, r.height < S(80f) ? "groupPlayerWhite" : "MarkerInfo"); return; }
             GUI.color = c;
             if (round == 0) GUI.DrawTexture(r, _texWhite);
             else if (round == 1) _shapeM.Draw(r, false, false, false, false);
@@ -449,7 +430,8 @@ namespace NextDayRevival
         {
             if (Event.current.type != EventType.Repaint || !_ready || icon < 0 || icon >= UiIcon.Count) return;
             GUI.color = c;
-            GUI.DrawTexture(r, _icons[icon]);
+            Texture2D native = icon == UiIcon.Check ? VanillaUi.Asset("galka_enable") : null;
+            GUI.DrawTexture(r, native != null ? native : _icons[icon]);
             GUI.color = Color.white;
         }
 
@@ -457,9 +439,12 @@ namespace NextDayRevival
         public static void Label(Rect r, string s, int font, int align, Color c)
         {
             if (s == null || Event.current.type != EventType.Repaint || !_ready) return;
-            GUI.color = c;
+            GUI.color = VanillaUi.TextColour(c);
             _gc.text = s;
-            _text[font * 3 + align].Draw(r, _gc, false, false, false, false);
+            GUIStyle label = _text[font * 3 + align];
+            Font face = VanillaUi.Font(font <= UiFont.Heading);
+            if (face != null && label.font != face) label.font = face;
+            label.Draw(r, _gc, false, false, false, false);
             GUI.color = Color.white;
         }
 
@@ -603,11 +588,15 @@ namespace NextDayRevival
                         break;
                 }
                 if (!enabled) { bg = Fade(bg, 0.35f); fg = Fade(fg, 0.45f); }
-                Fill(r, bg, 1);
-                if (look == UiButton.Secondary) Outline(r, Line);
+                Color saved = GUI.color;
+                GUI.color = !enabled ? Color.grey : down ? AccentPress : hot ? AccentHover : Color.white;
+                Texture2D button = VanillaUi.Asset(hot ? "btn_hover" : "btn");
+                if (button != null) GUI.DrawTexture(r, button); else Fill(r, bg, 1);
+                GUI.color = saved;
                 FocusRing(r, nav);
-                Label(r, text, UiFont.Body, UiFont.Center, fg);
+                Label(r, text, UiFont.Body, UiFont.Center, enabled ? Text : TextDim);
             }
+            if (click) VanillaUi.Sound("Click");
             return click;
         }
 
@@ -625,8 +614,16 @@ namespace NextDayRevival
                 if (hot) Fill(r, Fade(Color.white, GUIUtility.hotControl == id ? 0.14f : 0.08f), 1);
                 FocusRing(r, nav);
                 float pad = r.width * 0.25f;
-                Icon(new Rect(r.x + pad, r.y + pad, r.width - 2f * pad, r.height - 2f * pad), icon, hot ? Text : TextDim);
+                Texture2D close = icon == UiIcon.Close ? VanillaUi.Asset("close_btn") : null;
+                if (close != null)
+                {
+                    GUI.color = hot ? AccentHover : Color.white;
+                    GUI.DrawTexture(new Rect(r.x + pad, r.y + pad, r.width - 2f * pad, r.height - 2f * pad), close);
+                    GUI.color = Color.white;
+                }
+                else Icon(new Rect(r.x + pad, r.y + pad, r.width - 2f * pad, r.height - 2f * pad), icon, hot ? Text : TextDim);
             }
+            if (click) VanillaUi.Sound("Click");
             return click;
         }
 
@@ -645,14 +642,19 @@ namespace NextDayRevival
                 bool hot = Hover(r);
                 if (hot) Fill(r, Fade(Color.white, 0.04f), 1);
                 FocusRing(r, nav);
-                float th = S(18f), tw = S(34f);
+                float th = S(16f), tw = S(16f);
                 Rect track = new Rect(r.xMax - tw - S(8f), r.y + (r.height - th) * 0.5f, tw, th);
-                Fill(track, on ? Accent : Fade(Color.white, 0.18f), 3);
-                float k = th - S(4f);
-                Circle(new Rect(on ? track.xMax - k - S(2f) : track.x + S(2f), track.y + S(2f), k, k),
-                       on ? TextOnAccent : Text);
+                Texture2D check = VanillaUi.Asset(on ? "galka_enable" : "galka_disable");
+                if (check != null)
+                {
+                    GUI.color = hot ? AccentHover : Color.white;
+                    GUI.DrawTexture(track, check);
+                    GUI.color = Color.white;
+                }
+                else Outline(track, TextDim);
                 Label(new Rect(r.x + S(8f), r.y, r.width - tw - S(24f), r.height), label, UiFont.Body, UiFont.Left, Text);
             }
+            if (flip) VanillaUi.Sound("Click");
             return on;
         }
 
@@ -975,11 +977,7 @@ namespace NextDayRevival
         static void Build(float s)
         {
             _s = s;
-            if (_font == null)
-            {
-                try { _font = Font.CreateDynamicFontFromOSFont(new string[] { "Segoe UI", "Arial" }, 14); }
-                catch (Exception ex) { Log("OS font: " + ex.Message); }
-            }
+            _font = VanillaUi.Font(false);
             if (_texWhite == null)
             {
                 _texWhite = Tex(2, 2, false);
@@ -1037,7 +1035,7 @@ namespace NextDayRevival
         static GUIStyle TextStyle(int size, bool bold)
         {
             GUIStyle st = new GUIStyle();
-            if (_font != null) st.font = _font;
+            st.font = bold ? VanillaUi.Font(true) : _font;
             st.fontSize = size;
             st.fontStyle = bold ? FontStyle.Bold : FontStyle.Normal;
             st.normal.textColor = Color.white;

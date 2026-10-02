@@ -178,7 +178,9 @@ namespace NextDayRevival
         }
         internal bool Ready(float now)
         { return _active && Walking() && now - _started >= MercMoveShootPolicy.Fade && _ikWeight >= 0.6f; }
-        internal bool Supports(int weapon) { return _weapon == weapon && _shot != null; }
+        // Capability is queried before the brain chooses its first moving
+        // action. Waiting for Touch here made AttackFire depend on itself.
+        internal bool Supports(int weapon) { return Prepare(weapon); }
         internal void Recoil(float now) { _shotAt = now; _shots++; }
 
         void ClearStates()

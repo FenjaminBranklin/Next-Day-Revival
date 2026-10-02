@@ -58,6 +58,11 @@ namespace UnityEngine.SceneManagement {
  public static class SceneManager {public static int sceneCount=1;public static Scene GetActiveScene(){Scene s=new Scene();s.buildIndex=1;return s;}}
 }
 namespace NextDayRevival {
+ static class NpcAircraft {
+  internal class Flight {internal Path Path;}
+  internal class Path {internal float Agl;}
+  internal static Flight Find(UnityEngine.GameObject go){return null;}
+ }
  static class FrameProf {internal const int S_RadarShadowT=0,S_Mi8FlaresT=1;internal static void S(int s){} internal static void E(int s){} }
  static class GepardGun {internal class Contact {internal GameObject Go;internal Vector3 Pos;}}
  static class PlayerAn2 {internal static int View(GameObject go){return go.View;}}

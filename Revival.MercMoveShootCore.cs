@@ -24,6 +24,14 @@ namespace NextDayRevival
                 && pressure < 0.3f && threats <= 2 && !retreat;
         }
 
+        // The existing brain already chose this combat move. An attack bound
+        // releases its old cover; a strafe has none. Neither pressure nor a
+        // crowd is a reason to leave a healthy moving rifle silent.
+        internal static bool Travel(bool step, bool combatRun, float distance, bool retreat)
+        {
+            return !retreat && (step || (combatRun && distance > 1f && distance <= 24f));
+        }
+
         // Player directional clips: forward, back, left, right relative to aim.
         internal static int Direction(float right, float forward)
         {

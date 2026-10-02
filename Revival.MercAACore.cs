@@ -12,6 +12,15 @@ namespace NextDayRevival
     internal static class MercAACore
     {
         internal const float RadarMetres = 7000f;
+        // Z K6b: radar urgency (RadarClarityCore.Threat) drops this much per other
+        // 52-K already laying on the contact: one payload class, or 25 s of ETA.
+        // A clearly more urgent bomber still draws two guns; at similar urgency
+        // the battery spreads over the escorts instead of piling onto one target.
+        internal const int CoverThreat = 100;
+        internal static int CoveredThreat(int threat, int coveringGuns)
+        {
+            return threat - Math.Max(0, coveringGuns) * CoverThreat;
+        }
         // A single hired specialist lays and loads at the complete crew rate.
         // Keep the native garrison's two-seat cadence; eye control takes longer.
         internal static float CadenceScale(bool merc, bool radar)

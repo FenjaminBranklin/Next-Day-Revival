@@ -741,15 +741,7 @@ namespace NextDayRevival
         {
             if (string.IsNullOrEmpty(_prompt) || !Hints.Prompts || GameUi.WindowOpen) return;
             if (Event.current != null && Event.current.type != EventType.Repaint) return;
-            Vector2 size = GUI.skin.label.CalcSize(new GUIContent(_prompt));
-            float w = size.x + 24f, h = Mathf.Max(24f, size.y + 8f);
-            float x = (Screen.width - w) * 0.5f;
-            float y = Screen.height * 0.62f;
-            Color keep = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
-            GUI.color = keep;
-            GUI.Label(new Rect(x + 12f, y + (h - size.y) * 0.5f, size.x + 4f, size.y), _prompt);
+            VanillaUi.Prompt(_prompt, Screen.height * 0.62f);
         }
     }
 }

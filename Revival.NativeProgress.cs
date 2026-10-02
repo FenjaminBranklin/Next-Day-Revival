@@ -754,7 +754,12 @@ namespace NextDayRevival
         // MessageType as the enum's own constants read in Assembly-CSharp:
         // Inventory 0, Warning 1, Weapon 2, AirDrop 3, Skill 4, Group 5,
         // Kill 6, Stats 7, Quest 8, QuestDone 9, QuestFailed 10.
+        public const int Inventory = 0;
         public const int Warning = 1;
+        public const int AirDrop = 3;
+        public const int Group = 5;
+        public const int Kill = 6;
+        public const int Stats = 7;
 
         static MethodInfo _instance;
         static MethodInfo _show;

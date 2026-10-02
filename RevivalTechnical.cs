@@ -3823,10 +3823,10 @@ namespace NextDayRevival
                 Color old = GUI.color;
                 GUI.color = new Color(1f, 1f, 1f, 0.85f);
                 // Four strokes with a gap in the middle, like the game's own.
-                GUI.DrawTexture(new Rect(cx - 14f, cy - 1f, 9f, 2f), _dot);
-                GUI.DrawTexture(new Rect(cx + 5f, cy - 1f, 9f, 2f), _dot);
-                GUI.DrawTexture(new Rect(cx - 1f, cy - 14f, 2f, 9f), _dot);
-                GUI.DrawTexture(new Rect(cx - 1f, cy + 5f, 2f, 9f), _dot);
+                VanillaUi.Texture(new Rect(cx - 14f, cy - 1f, 9f, 2f), _dot);
+                VanillaUi.Texture(new Rect(cx + 5f, cy - 1f, 9f, 2f), _dot);
+                VanillaUi.Texture(new Rect(cx - 1f, cy - 14f, 2f, 9f), _dot);
+                VanillaUi.Texture(new Rect(cx - 1f, cy + 5f, 2f, 9f), _dot);
                 GUI.color = old;
             }
 
@@ -3862,7 +3862,7 @@ namespace NextDayRevival
             style.normal.textColor = colour;
             GUIContent content = new GUIContent(text);
             Vector2 measured = style.CalcSize(content);
-            GUI.Label(new Rect(cx - measured.x * 0.5f,
+            VanillaUi.Instrument(new Rect(cx - measured.x * 0.5f,
                                y + (26f - measured.y) * 0.5f,
                                measured.x, measured.y), content, style);
         }

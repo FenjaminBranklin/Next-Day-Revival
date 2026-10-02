@@ -4,6 +4,10 @@
 // player health on the victim. Body/explosion avoids the head x3 multiplier
 // and incorrect firearm parameters. Native player safety/group/armour rules
 // still apply. No physics query or idle allocation.
+// A-L1: labelled An-2 jobs use a full-damage core and a certain-kill centre
+// (lethalCore), count every NPC outcome and report once per explosion through
+// the partial methods implemented in Revival.BlastKill.cs. Offline harnesses
+// that compile this file alone drop those calls with their arguments.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -13,7 +17,7 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
-    internal static class OrdnanceBlast
+    internal static partial class OrdnanceBlast
     {
         internal const float UnitsPerMetre = 2.8f;
         internal const float ReferenceRadiusM = 32f;
@@ -44,7 +48,17 @@ namespace NextDayRevival
             internal Transform ExcludeHull;
             internal Vector3[] CrewPositions;
             internal int ReadyFrame;
+            // A-L1 report: label/id of an An-2 job, certain-kill radius and outcomes.
+            internal float NpcLethal;
+            internal string Label;
+            internal int ReportId, Serial;
+            internal int Seen, Killed, Hurt, Remote, Refused, Corpses;
         }
+
+        // NPC outcomes of one damage visit (A-L1 report).
+        internal const int OutDead = 1, OutShielded = 2, OutNoView = 3, OutNoOwner = 4,
+            OutRemote = 5, OutHurt = 6, OutKilled = 7, OutUnchanged = 8, OutError = 9;
+        static int _serial;
 
         static readonly Queue<Blast> Pending = new Queue<Blast>(64);
         static readonly Stack<Blast> Free = new Stack<Blast>(64);
@@ -102,10 +116,29 @@ namespace NextDayRevival
 
         internal static void Enqueue(Vector3 point, float radiusU, float npcPeak, float vehiclePeak, float playerPeak)
         {
+            Enqueue(point, radiusU, npcPeak, vehiclePeak, playerPeak, 0f, null, 0);
+        }
+
+        /// <summary>A-L1 bomb profile. lethalCore (0..0.9 of the radius) gets
+        /// the full NPC peak, linear to zero at the radius; inside half of that
+        /// core every hurtable NPC dies (bosses too). 0 keeps the plain linear
+        /// falloff. A label reports the explosion once; reportId returns the
+        /// outcome to the dropper (An-2 bomb id).</summary>
+        internal static void Enqueue(Vector3 point, float radiusU, float npcPeak, float vehiclePeak, float playerPeak,
+            float lethalCore, string label, int reportId)
+        {
             if (!_ready || !_master()) return;
             // W AA7: mod bombs and rockets also damage fixed AA (as Mortar.Sweep does).
             AirDefenceDamage.ReportBlast(point, radiusU, Mathf.Clamp(vehiclePeak / 700f, 0f, 2f));
-            Queue(point, radiusU, npcPeak, vehiclePeak, playerPeak, false);
+            Blast b = Queue(point, radiusU, npcPeak, vehiclePeak, playerPeak, false);
+            float core = Mathf.Clamp(lethalCore, 0f, 0.9f);
+            if (core > 0f)
+            {
+                b.NpcRadius = b.Radius;
+                b.NpcCore = b.Radius * core;
+                b.NpcLethal = b.NpcCore * 0.5f;
+            }
+            b.Label = label; b.ReportId = reportId;
         }
 
         internal static void EnqueuePlayers(Vector3 point, float radiusU, float playerPeak)
@@ -171,6 +204,8 @@ namespace NextDayRevival
             b.OwnPlayer = false;
             b.NpcRadius = 0f; b.NpcCore = 0f; b.FiringSide = null; b.ExcludeHull = null;
             b.CrewPositions = null; b.ReadyFrame = 0;
+            b.NpcLethal = 0f; b.Label = null; b.ReportId = 0; b.Serial = ++_serial;
+            b.Seen = 0; b.Killed = 0; b.Hurt = 0; b.Remote = 0; b.Refused = 0; b.Corpses = 0;
             b.Stage = playersOnly ? 2 : 0; b.Index = 0;
             // Shared hook-fed arrays: no FindObjects/OverlapSphere at impact.
             b.Npcs = playersOnly || npcPeak <= 0f ? null : NpcScan.BlastTargets();
@@ -217,11 +252,13 @@ namespace NextDayRevival
                     if (Time.frameCount < _current.ReadyFrame) break;
                     // Keep shooter-only player jobs when authority changes; discard
                     // a former master's NPC/vehicle jobs to prevent duplicate hits.
-                    if ((!master && !_current.PlayersOnly && !_current.OwnerPeople) || !Visit(_current))
+                    bool drop = !master && !_current.PlayersOnly && !_current.OwnerPeople;
+                    if (drop || !Visit(_current))
                     {
+                        if (!drop && _current.Label != null) BlastDone(_current);
                         _current.Npcs = null; _current.Vehicles = null; _current.Players = null;
                         _current.FiringSide = null; _current.ExcludeHull = null;
-                        _current.CrewPositions = null;
+                        _current.CrewPositions = null; _current.Label = null;
                         Free.Push(_current); _current = null;
                     }
                     visits++;
@@ -253,7 +290,12 @@ namespace NextDayRevival
                 if (b.Stage == 0 && b.NpcRadius > 0f)
                     damage = distance <= b.NpcCore ? peak
                         : Damage(distance - b.NpcCore, b.NpcRadius - b.NpcCore, peak);
-                if (damage < 1f) return true;
+                if (damage < 1f)
+                {
+                    if (b.Stage == 0 && b.Label != null) NoteMiss(b, target, distance);
+                    return true;
+                }
+                if (b.Stage == 0 && b.NpcLethal > 0f && distance <= b.NpcLethal) LethalFloor(target, ref damage);
                 if (b.FiringSide != null)
                 {
                     if (b.ExcludeHull != null && go.transform.IsChildOf(b.ExcludeHull)) return true;
@@ -273,8 +315,11 @@ namespace NextDayRevival
                     }
                     if (b.Stage == 0)
                     {
-                        if (!(bool)_alive.Invoke(target, null) || !Mortar.Hurtable(target)) return true;
-                        NpcDamage(target, damage, b.Point);
+                        bool track = b.Label != null;
+                        int outcome = !(bool)_alive.Invoke(target, null) ? OutDead
+                            : !Mortar.Hurtable(target) ? OutShielded
+                            : NpcDamage(target, damage, b.Point, track);
+                        if (track) Count(b, target, distance, damage, outcome);
                     }
                     else if (b.Stage == 1)
                     {
@@ -287,6 +332,7 @@ namespace NextDayRevival
                 catch (Exception ex)
                 {
                     if (_errors++ < 3) RevivalPlugin.L.LogWarning("OrdnanceBlast damage: " + ex.Message);
+                    if (b.Stage == 0 && b.Label != null) Count(b, target, distance, damage, OutError);
                 }
                 return true;
             }
@@ -302,23 +348,50 @@ namespace NextDayRevival
             return 0.5f + 0.5f * Mathf.Cos((distance - radius) * Mathf.PI / radius);
         }
 
-        static void NpcDamage(Component ai, float damage, Vector3 point)
+        // Returns the outcome. Health is read around a local call only for a
+        // reported job; a remote owner's result is not known here.
+        static int NpcDamage(Component ai, float damage, Vector3 point, bool track)
         {
             object view = _getView.Invoke(null, new object[] { ai.gameObject });
-            if (view == null) return;
+            if (view == null) return OutNoView;
             Vector3 direction = ai.transform.position - point;
             if ((bool)_mine.GetValue(view, null))
             {
+                float before = -1f, after = -1f;
+                if (track) ReadHealth(ai, ref before);
                 _applyNpc.Invoke(ai, new object[] { damage, Body, Explosion, 0, direction, _messageInfo });
+                if (!track) return OutHurt;
+                if (!(bool)_alive.Invoke(ai, null)) return OutKilled;
+                ReadHealth(ai, ref after);
+                return before >= 0f && after >= before ? OutUnchanged : OutHurt;
             }
+            object owner = _owner.GetValue(view, null);
+            if (owner == null) return OutNoOwner;
+            _rpc.Invoke(view, new object[] { "ApplyDamage", owner,
+                new object[] { damage, Body, Explosion, 0, direction } });
+            return OutRemote;
+        }
+
+        static void Count(Blast b, Component ai, float distance, float damage, int outcome)
+        {
+            if (outcome == OutDead) b.Corpses++;
             else
             {
-                object owner = _owner.GetValue(view, null);
-                if (owner == null) return;
-                _rpc.Invoke(view, new object[] { "ApplyDamage", owner,
-                    new object[] { damage, Body, Explosion, 0, direction } });
+                b.Seen++;
+                if (outcome == OutKilled) b.Killed++;
+                else if (outcome == OutHurt) b.Hurt++;
+                else if (outcome == OutRemote) b.Remote++;
+                else b.Refused++;
             }
+            NoteNpc(b, ai, distance, damage, outcome);
         }
+
+        // Implemented in Revival.BlastKill.cs (live game only).
+        static partial void LethalFloor(Component ai, ref float damage);
+        static partial void ReadHealth(Component ai, ref float health);
+        static partial void NoteNpc(Blast b, Component ai, float distance, float damage, int outcome);
+        static partial void NoteMiss(Blast b, Component ai, float distance);
+        static partial void BlastDone(Blast b);
 
         static void PlayerDamage(GameObject go, float damage, Vector3 point)
         {

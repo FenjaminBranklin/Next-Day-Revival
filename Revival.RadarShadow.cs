@@ -7,21 +7,22 @@ namespace NextDayRevival
     internal static class RadarShadow
     {
         const int Capacity = 64;
-        static readonly GameObject[] Targets = new GameObject[Capacity];
-        static readonly bool[] Seen = new bool[Capacity];
-        static readonly float[] Heights = new float[Capacity];
-        static readonly float[] CheckedAt = new float[Capacity];
+        static GameObject[] Targets = new GameObject[Capacity];
+        static bool[] Seen = new bool[Capacity];
+        static float[] Heights = new float[Capacity];
+        static float[] CheckedAt = new float[Capacity];
         static Terrain[] _terrain;
         static TerrainCollider[] _colliders;
         static int _count;
         static int _cursor;
         static int _scene = -1;
         static int _scenes = -1;
+        static float _maxAge = 1f;
 
         internal static bool Visible(GameObject go)
         {
             for (int i = 0; i < _count; i++)
-                if (object.ReferenceEquals(Targets[i], go)) return Seen[i] && Time.time - CheckedAt[i] <= 1f;
+                if (object.ReferenceEquals(Targets[i], go)) return Seen[i] && Time.time - CheckedAt[i] <= _maxAge;
             return false; // Unscanned targets never receive a radar solution.
         }
 
@@ -51,7 +52,20 @@ namespace NextDayRevival
                         if (_terrain[i] != null)
                             _colliders[i] = _terrain[i].GetComponent<TerrainCollider>();
                 }
-                _count = Mathf.Min(Capacity, contacts.Count);
+                // Grow only when a spawn exceeds the previous high-water mark.
+                // No hard contact cutoff and no steady-state allocation.
+                if (contacts.Count > Targets.Length)
+                {
+                    int size = contacts.Count > Targets.Length * 2 ? contacts.Count : Targets.Length * 2;
+                    System.Array.Resize(ref Targets, size);
+                    System.Array.Resize(ref Seen, size);
+                    System.Array.Resize(ref Heights, size);
+                    System.Array.Resize(ref CheckedAt, size);
+                }
+                _count = contacts.Count;
+                // Eight LOS checks per 4 Hz slice; a large formation must not
+                // expire before its next scheduled visit. Still reject stale data.
+                _maxAge = Mathf.Max(1f, ((_count + 7) / 8 + 1) * 0.25f);
                 for (int i = 0; i < _count; i++)
                 {
                     if (object.ReferenceEquals(Targets[i], contacts[i].Go)) continue;
@@ -83,9 +97,14 @@ namespace NextDayRevival
                         RaycastHit hit;
                         if (_colliders[k] != null && _colliders[k].Raycast(ray, out hit, length)) blocked = true;
                     }
-                    // Unknown terrain fails closed, rather than seeing through hills.
-                    Heights[i] = known ? c.Pos.y - ground : 0f;
-                    Seen[i] = known && AirDefenceCore.RadarVisible(Heights[i], blocked);
+                    // Raid approaches intentionally extend beyond the map edge.
+                    // Their synchronized path carries AGL even where no terrain
+                    // exists. Still raycast every loaded terrain: a ridge between
+                    // the antenna and the off-map aircraft must mask it.
+                    NpcAircraft.Flight flight = known ? null : NpcAircraft.Find(c.Go);
+                    bool approach = !known && _terrain.Length > 0 && flight != null && flight.Path != null;
+                    Heights[i] = known ? c.Pos.y - ground : approach ? flight.Path.Agl : 0f;
+                    Seen[i] = (known || approach) && AirDefenceCore.RadarVisible(Heights[i], blocked);
                 }
             }
             finally { FrameProf.E(FrameProf.S_RadarShadowT); }

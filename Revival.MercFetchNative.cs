@@ -33,8 +33,8 @@ namespace NextDayRevival
         static readonly Collider[] ParkingHits = new Collider[32];
         static readonly float[] ParkingRanges = { 22.4f, 30.8f, 42f };
         static Type _containerType, _dropType, _viewType, _npcType;
-        static MethodInfo _find, _owner, _busy;
-        static FieldInfo _animation;
+        static MethodInfo _find, _busy;
+        static FieldInfo _animation, _owner;
         static PropertyInfo _spawn;
         static Func<object, object> _data;
         static Func<object, Array>[] _arrays;
@@ -53,7 +53,7 @@ namespace NextDayRevival
                 _viewType = RevivalPlugin.TypeByName("PhotonView"); _npcType = RevivalPlugin.TypeByName("NPC_AI2");
                 if (_containerType == null || _dropType == null || _viewType == null || _npcType == null) return;
                 _find = AccessTools.Method(_viewType, "Find", new Type[] { typeof(int) }, null);
-                _owner = AccessTools.PropertyGetter(_viewType, "ownerId");
+                _owner = AccessTools.Field(_viewType, "ownerId");
                 _spawn = AccessTools.Property(_viewType, "instantiationData");
                 _busy = AccessTools.PropertyGetter(_containerType, "IsInteracting");
                 _animation = AccessTools.Field(_dropType, "animationState");
@@ -128,7 +128,9 @@ namespace NextDayRevival
         {
             at = Vector3.zero;
             if (c == null || c.Root == null || c.Body == null || c.Locked || FastCall.Bool(_busy, c.Container)
-                || FastField.GetInt(_animation, c.Drop) < 2 || c.Body.isKinematic || c.Body.velocity.sqrMagnitude >= 1f) return false;
+                || FastField.GetInt(_animation, c.Drop) != 4 || c.Body.velocity.sqrMagnitude >= 1f) return false;
+            // Native landed state 4 becomes kinematic on sleep. Remote peers
+            // are always kinematic; landing state plus ground/velocity is the gate.
             // All layers, including slabs/props/fences. Saturation refuses selection.
             int n = Physics.RaycastNonAlloc(c.Root.position + Vector3.up * 2.8f, Vector3.down, Hits, 11.2f, ~0, QueryTriggerInteraction.Ignore);
             if (n == Hits.Length) return false;
@@ -201,9 +203,9 @@ namespace NextDayRevival
             if (c != null && c.Car != null && (c.Car.Root == null || !NpcWar.PatrolVehicleAlive(c.Car.Vgs))) return MercFetchJob.VehicleLost;
             if (c == null || c.Root == null || c.Container == null) return MercFetchJob.Missing;
             if (c.Car == null || c.Car.Root == null || c.Car.Air || !NpcWar.PatrolVehicleAlive(c.Car.Vgs)) return MercFetchJob.VehicleLost;
-            if (c.Driver == null || c.DriverView == null || !NpcWar.MercAlive(c.Driver) || FastCall.Int(_owner, c.DriverView) != j.Actor) return MercFetchJob.DriverLost;
+            if (c.Driver == null || c.DriverView == null || !NpcWar.MercAlive(c.Driver) || FastField.GetInt(_owner, c.DriverView) != j.Actor) return MercFetchJob.DriverLost;
             if (c.DriverKey == null || !c.DriverKey.StartsWith(c.ExpectedKey, StringComparison.Ordinal)) return MercFetchJob.DriverLost;
-            if (c.VehicleView == null || FastCall.Int(_owner, c.VehicleView) != j.Actor) return MercFetchJob.Taken;
+            if (c.VehicleView == null || FastField.GetInt(_owner, c.VehicleView) != j.Actor) return MercFetchJob.Taken;
             if ((c.Driver.transform.position - c.Car.Root.position).sqrMagnitude > (c.Car.Radius + 12f) * (c.Car.Radius + 12f)) return MercFetchJob.DriverLost;
             if (!MercFetchBridge.DepotReady) return MercFetchJob.DepotLost;
             if (!AirfieldHold.State.ByPlayers || AirfieldHold.State.Holder < 0

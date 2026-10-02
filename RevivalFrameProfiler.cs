@@ -204,8 +204,8 @@ namespace NextDayRevival
         public const int S_UiKitT = 140;
         public const int S_UiKitD = 141;
         public const int S_MercNotifyT = 142;
-        public const int S_TraderT = 143;
-        public const int S_TraderD = 144;
+        public const int S_MercTabT = 143;
+        public const int S_MercTabD = 144;
         public const int S_MercPageT = 145;
         public const int S_MercPageD = 146;
         public const int S_MercAAT = 147;
@@ -291,7 +291,12 @@ namespace NextDayRevival
         public const int S_MercCrewPhase = 224;
         public const int S_ZuGround = 225;
         public const int S_RepairTapT = 226;
-        public const int Count = 227;
+        public const int S_MercCatchUp = 227;
+        public const int S_MercMoveOrder = 228;
+        public const int S_MercMedicineInteraction = 229;
+        public const int S_VanillaUi = 230;
+        public const int S_MercAirfieldT = 231;
+        public const int Count = 232;
 
         static readonly string[] Names = new string[]
         {
@@ -416,8 +421,8 @@ namespace NextDayRevival
             "UiKit.Tick",
             "UiKit.Draw",
             "MercNotify.Tick",
-            "TraderUi.Tick",
-            "TraderUi.Draw",
+            "MercTab.Read",
+            "MercTab.Draw",
             "MercPage.Tick",
             "MercPage.Draw",
             "MercAA.Tick",
@@ -500,6 +505,11 @@ namespace NextDayRevival
             "  MercCrewPhase.Think.Sub",
             "  ZuGround.Control.Sub",
             "RepairTap.Tick",
+            "  MercCatchUp.Sub",
+            "  MercMoveOrder.Sub",
+            "  MercMedicine.Interaction.Sub",
+            "VanillaUi.Draw",
+            "  MercAirfield.Orders.Sub",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested

@@ -118,14 +118,14 @@ public sealed class ItemsContainer : UnityEngine.Component
     public void Start() {} public void OnDestroy() {} public void NetworkInteractingContainerRequest(bool open) {}
     public void NeedClearContainerSlot(int slot) { _containerData.ItemID[slot]=0;Clears++; }
 }
-public sealed class AirDropObject : UnityEngine.Component { public int animationState=2;public void Update() {} }
+public sealed class AirDropObject : UnityEngine.Component { public enum AnimationState { Free=0, Parachute=2, Landing=3, Landed=4 } public AnimationState animationState=AnimationState.Landed;public void Update() {} }
 public sealed class NPC_AI2 : UnityEngine.Component { public bool Alive=true;public string Key; }
 public sealed class VehicleGameSystem : UnityEngine.Component { public bool Alive=true, Ready=true; }
 public sealed class PhotonView : UnityEngine.Component
 {
     public static readonly Dictionary<int,PhotonView> Views=new Dictionary<int,PhotonView>();
-    public int Id, Owner;public object[] Spawn;
-    public int ownerId { get { return Owner; } } public object[] instantiationData { get { return Spawn; } }
+    public int Id, ownerId;public int Owner {get{return ownerId;}set{ownerId=value;}} public object[] Spawn;
+    public object[] instantiationData { get { return Spawn; } }
     public static PhotonView Find(int id) { PhotonView p;Views.TryGetValue(id,out p);return p; }
 }
 namespace NextDayRevival

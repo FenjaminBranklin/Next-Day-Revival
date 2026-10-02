@@ -3126,7 +3126,7 @@ namespace NextDayRevival
             if (MapTools.WorldToGui(m.Source.DroneAt, texture, cam, world, map, out dot))
             {
                 GUI.color = Color.white;
-                GUI.DrawTexture(DroneIconRect(dot - clip.position), DroneIcon());
+                VanillaUi.Texture(DroneIconRect(dot - clip.position), DroneIcon());
             }
 
             // Where the drone last had this player. A cross inside a ring, so it
@@ -3136,9 +3136,9 @@ namespace NextDayRevival
             if (!MapTools.WorldToGui(m.SpotPoint, texture, cam, world, map, out s)) return;
             Vector2 q = s - clip.position;
             GUI.color = new Color(1f, 0.55f, 0.20f, 0.90f);
-            GUI.DrawTexture(new Rect(q.x - 9f, q.y - 9f, 18f, 18f), Ring());
-            GUI.DrawTexture(new Rect(q.x - 6f, q.y - 1f, 13f, 2f), Px());
-            GUI.DrawTexture(new Rect(q.x - 1f, q.y - 6f, 2f, 13f), Px());
+            VanillaUi.Texture(new Rect(q.x - 9f, q.y - 9f, 18f, 18f), Ring());
+            VanillaUi.Texture(new Rect(q.x - 6f, q.y - 1f, 13f, 2f), Px());
+            VanillaUi.Texture(new Rect(q.x - 1f, q.y - 6f, 2f, 13f), Px());
         }
 
         static Rect DroneIconRect(Vector2 centre)

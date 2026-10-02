@@ -869,7 +869,7 @@ namespace NextDayRevival
                 // The result of the last click stays readable after the popup
                 // closed (the flyover's ETA; a teleport's failure).
                 if (!string.IsNullOrEmpty(_status) && Time.time < _statusUntil)
-                    GUI.Label(new Rect(Screen.width * 0.5f - 210f, Screen.height - 90f, 420f, 44f), _status);
+                    VanillaUi.Label(new Rect(Screen.width * 0.5f - 210f, Screen.height - 90f, 420f, 44f), _status);
                 return;
             }
             // Confirm the map is still open before painting over it.
@@ -888,7 +888,7 @@ namespace NextDayRevival
             float my = Screen.height - _clickScreen.y;
 
             // A small marker where the click landed.
-            GUI.Label(new Rect(mx - 5f, my - 12f, 16f, 20f), "x");
+            VanillaUi.Label(new Rect(mx - 5f, my - 12f, 16f, 20f), "x");
 
             // Button just off the cursor, flipped back onto the screen if it
             // would run off an edge.
@@ -899,7 +899,7 @@ namespace NextDayRevival
             if (x < 0f) x = 0f;
             if (y < 0f) y = 0f;
 
-            if (GUI.Button(new Rect(x, y, w, h), Loc.T("Телепорт", "Teleport")))
+            if (VanillaUi.Button(new Rect(x, y, w, h), Loc.T("Телепорт", "Teleport")))
             {
                 string message;
                 MapTools.TeleportLocal(_target, out message);
@@ -910,7 +910,7 @@ namespace NextDayRevival
             }
 
             // N3: the admin's test flyover over this point (Revival.NpcAircraft.cs).
-            if (GUI.Button(new Rect(x, y + h + 2f, w, h), Loc.T("Пролёт", "Flyover")))
+            if (VanillaUi.Button(new Rect(x, y + h + 2f, w, h), Loc.T("Пролёт", "Flyover")))
             {
                 string message = Flyover.Ask(_target);
                 _pending = false;
@@ -920,7 +920,7 @@ namespace NextDayRevival
             }
 
             // N11: an air strike (the panel's event) with its target on this point.
-            if (GUI.Button(new Rect(x, y + 2f * (h + 2f), w, h), Loc.T("Авиаудар", "Air strike")))
+            if (VanillaUi.Button(new Rect(x, y + 2f * (h + 2f), w, h), Loc.T("Авиаудар", "Air strike")))
             {
                 string message = AirEvents.Ask(_target);
                 _pending = false;
@@ -930,7 +930,7 @@ namespace NextDayRevival
             }
 
             if (!string.IsNullOrEmpty(_status) && Time.time < _statusUntil)
-                GUI.Label(new Rect(x, y + 3f * (h + 2f), 420f, 44f), _status);
+                VanillaUi.Label(new Rect(x, y + 3f * (h + 2f), 420f, 44f), _status);
         }
     }
 

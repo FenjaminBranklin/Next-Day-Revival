@@ -111,6 +111,9 @@ namespace NextDayRevival
 
         static bool On { get { return _cfgEnabled == null || _cfgEnabled.Value; } }
         static float Buffer { get { return Mathf.Max(500f, _cfgBuffer == null ? 2000f : _cfgBuffer.Value); } }
+        /// <summary>The turn-around buffer past the play rectangle, u (the edge
+        /// forest fills it, Revival.EdgeForest.cs).</summary>
+        internal static float BufferU { get { return Buffer; } }
         static float WarnSeconds { get { return Mathf.Max(0f, _cfgWarn == null ? 5f : _cfgWarn.Value); } }
 
         /// <summary>The playable rectangle in world x/z.</summary>
@@ -199,7 +202,8 @@ namespace NextDayRevival
                 strength = Mathf.Clamp01(0.6f + 0.4f * depth / Buffer);
 
             float ground;
-            if (Height(pos.x, pos.z, out ground) && pos.y < ground + ClearU) climb = true;
+            // Over the edge forest the clearance counts from its tree tops.
+            if (Height(pos.x, pos.z, out ground) && pos.y < ground + ClearU + FarForest.EdgeCanopyU(depth)) climb = true;
             return true;
         }
 
@@ -268,9 +272,9 @@ namespace NextDayRevival
             Rect at = new Rect(cx - sz.x * 0.5f, y, sz.x, sz.y);
             Color was = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.8f);
-            GUI.Label(new Rect(at.x + 1.5f, at.y + 1.5f, at.width, at.height), text, _style);
+            VanillaUi.Label(new Rect(at.x + 1.5f, at.y + 1.5f, at.width, at.height), text, _style);
             GUI.color = colour;
-            GUI.Label(at, text, _style);
+            VanillaUi.Label(at, text, _style);
             GUI.color = was;
         }
 
@@ -285,6 +289,9 @@ namespace NextDayRevival
         /// <summary>Last opaque queue: drawn after every world object, so
         /// covered skirt pixels fail the depth test before shading.</summary>
         const int SkirtQueue = 2490;
+        /// <summary>Edge forest ground: canopy colour share and the distance
+        /// from the edge (mirrored, u) over which it fades in.</summary>
+        const float CanopyShare = 0.85f, CanopyFadeU = 120f;
         static readonly float[] Rings = {
             -Tuck, 0f, 40f, 100f, 200f, 350f, 550f, 800f, 1150f, 1600f, 2200f,
             3000f, 4000f, 5300f, 7000f, 9200f, 12000f };
@@ -363,6 +370,8 @@ namespace NextDayRevival
         /// <summary>X perf-bisect: the built skirt's root (null before), which
         /// the admin Perf tab hides and shows again.</summary>
         internal static GameObject SkirtRoot { get { return _skirt; } }
+        /// <summary>The play rectangle the built skirt was made for.</summary>
+        internal static Rect SkirtRect { get { return _skirtRect; } }
         static float _nextTry, _mean;
         static bool _warned;
         static IEnumerator _build;
@@ -489,29 +498,33 @@ namespace NextDayRevival
         internal static bool Height(float x, float z, out float y)
         {
             FrameProf.S(FrameProf.S_AirBoundaryH);
-            try
-            {
-                y = 0f;
-                if (_skirt == null || _sources == null || _skirtRect != Play) return false;
-                float depth = Depth(_skirtRect, x, z);
-                if (depth <= 0f) return false;
-                bool corner = (x < _skirtRect.xMin || x > _skirtRect.xMax)
-                    && (z < _skirtRect.yMin || z > _skirtRect.yMax);
-                Vector2 nearest = new Vector2(Mathf.Clamp(x, _skirtRect.xMin, _skirtRect.xMax),
-                    Mathf.Clamp(z, _skirtRect.yMin, _skirtRect.yMax));
-                for (int i = 0; i < _patches.Length; i++)
-                {
-                    Patch p = _patches[i];
-                    if (p.Corner != corner) continue;
-                    if (corner) { if ((p.A - nearest).sqrMagnitude > 0.01f) continue; }
-                    else if ((x - p.A.x) * p.NA.x + (z - p.A.y) * p.NA.y <= 0f) continue;
-                    if (p.Height(x, z, depth, out y)) return true;
-                }
-                // Only past the mesh's 12000 u rim (4.3 km) (far beyond the soft boundary).
-                y = Skirt(_skirtRect, _sources, _mean, x, z);
-                return true;
-            }
+            try { return SkirtHeight(x, z, out y); }
             finally { FrameProf.E(FrameProf.S_AirBoundaryH); }
+        }
+
+        /// <summary>Height without the F6 slot: the edge forest build asks it
+        /// once per tree (sliced), which must not read as pilot lookups.</summary>
+        internal static bool SkirtHeight(float x, float z, out float y)
+        {
+            y = 0f;
+            if (_skirt == null || _sources == null || _skirtRect != Play) return false;
+            float depth = Depth(_skirtRect, x, z);
+            if (depth <= 0f) return false;
+            bool corner = (x < _skirtRect.xMin || x > _skirtRect.xMax)
+                && (z < _skirtRect.yMin || z > _skirtRect.yMax);
+            Vector2 nearest = new Vector2(Mathf.Clamp(x, _skirtRect.xMin, _skirtRect.xMax),
+                Mathf.Clamp(z, _skirtRect.yMin, _skirtRect.yMax));
+            for (int i = 0; i < _patches.Length; i++)
+            {
+                Patch p = _patches[i];
+                if (p.Corner != corner) continue;
+                if (corner) { if ((p.A - nearest).sqrMagnitude > 0.01f) continue; }
+                else if ((x - p.A.x) * p.NA.x + (z - p.A.y) * p.NA.y <= 0f) continue;
+                if (p.Height(x, z, depth, out y)) return true;
+            }
+            // Only past the mesh's 12000 u rim (4.3 km) (far beyond the soft boundary).
+            y = Skirt(_skirtRect, _sources, _mean, x, z);
+            return true;
         }
 
         static int Band(float depth)
@@ -817,6 +830,7 @@ namespace NextDayRevival
             Color32[] px = new Color32[w * h];
             Color32 fallback = new Color32(84, 92, 60, 255);
             for (int i = 0; i < px.Length; i++) px[i] = fallback;
+            Color canopySum = Color.clear; int canopyN = 0;
             for (int s = 0; s < sources.Length; s++)
             {
                 Source src = sources[s];
@@ -829,9 +843,11 @@ namespace NextDayRevival
                 if (sw <= 0 || sh <= 0) continue;
                 SplatPrototype[] sp = src.D.splatPrototypes;
                 Color[] layer = new Color[sp.Length];
+                int canopy = FarForest.CanopyLayer(src.D);
                 for (int l = 0; l < sp.Length; l++)
                 {
                     layer[l] = Mean(sp[l] == null ? null : sp[l].texture, fallback);
+                    if (l == canopy) { canopySum += layer[l]; canopyN++; }
                     yield return null; // one small GPU readback per frame
                 }
                 float[] acc = new float[sw * sh * 3];
@@ -868,6 +884,31 @@ namespace NextDayRevival
                             (byte)(Mathf.Clamp01(acc[i * 3 + 1]) * 255f), (byte)(Mathf.Clamp01(acc[i * 3 + 2]) * 255f), 255);
                     }
                 yield return null;
+            }
+            // Edge forest ground: the skirt's UVs mirror at most Inset's 900 u
+            // into the rectangle, and only the skirt samples this texture, so
+            // texels by their distance from the edge are the strip's ground.
+            // From the edge seam (unchanged) over CanopyFadeU they turn to the
+            // P3 canopy colour the far forest floor shows (a little of the
+            // mirrored ground stays as variation under the trees).
+            if (canopyN > 0 && FarForest.EdgeWanted)
+            {
+                Color cc = canopySum / canopyN;
+                for (int z = 0; z < h; z++)
+                {
+                    if (OverBudget()) yield return null;
+                    float ez = Mathf.Min(z + 0.5f, h - z - 0.5f) * r.height / h;
+                    for (int x = 0; x < w; x++)
+                    {
+                        float e = Mathf.Min(ez, Mathf.Min(x + 0.5f, w - x - 0.5f) * r.width / w);
+                        float f = CanopyShare * Smooth(e / CanopyFadeU);
+                        if (f <= 0f) continue;
+                        int i = z * w + x;
+                        Color32 o = px[i];
+                        px[i] = new Color32((byte)Mathf.Lerp(o.r, cc.r * 255f, f), (byte)Mathf.Lerp(o.g, cc.g * 255f, f),
+                            (byte)Mathf.Lerp(o.b, cc.b * 255f, f), 255);
+                    }
+                }
             }
             Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, true);
             tex.name = "NDR_EdgeColour";

@@ -123,6 +123,7 @@ namespace NextDayRevival {
  public class NPC_AI2:Component {
   public Animation Anim=new Animation(); public Transform _mainCharSpine,LookAtIKTarget=new Transform();
   public IK _aimIk;public Vector3 _aimingPoint; public int MainState=1,PoseState,AdditionalState;
+  public float RateDelay,ShotTimer;
  }
  public class PhotonView:Component {
   public int ownerId=2,id;public int viewID{get{return id;}}
@@ -142,11 +143,13 @@ namespace NextDayRevival {
    NPC_AI2 a=(NPC_AI2)o;return f.Name=="MainState"?a.MainState:f.Name=="PoseState"?a.PoseState:a.AdditionalState;
   }
   public static void SetFloat(FieldInfo f,object o,float v){((Solver)o).IKPositionWeight=v;}
+  public static float GetFloat(FieldInfo f,object o){NPC_AI2 a=(NPC_AI2)o;return f.Name=="RateDelay"?a.RateDelay:a.ShotTimer;}
   public static void SetVector3(FieldInfo f,object o,Vector3 v){((NPC_AI2)o)._aimingPoint=v;}
  }
+ public static class FastCall { public static bool Bool(MethodInfo m,object o){return NpcWar.AmmoReady;} }
  internal struct CoverPoint{internal Vector3 Pos;}
  internal struct CoverPick{internal bool Found,Confirmed;internal CoverPoint Point;}
- internal class MercBrain{internal const byte Normal=0,Dash=1,PeekOut=3,PeekBack=5,Snap=10,AttackFire=11;internal byte Mode;internal CoverPick Cover=new CoverPick{Found=true,Confirmed=true};internal bool SurvivalFire;}
+ internal class MercBrain{internal const byte Normal=0,Dash=1,PeekOut=3,PeekBack=5,Snap=10,AttackFire=11,Evade=8;internal byte Mode;internal CoverPick Cover=new CoverPick{Found=true,Confirmed=true};internal bool SurvivalFire;}
  internal class Medicine{internal int Active;}
  internal class MercSense{internal int Count=1;internal CoverPick Pick;}
  internal class MercOrder{internal const byte Attack=5;internal byte Mode;internal Vector3 Centre;}
@@ -161,10 +164,19 @@ namespace NextDayRevival {
   internal FightIn In;internal bool MovePoseTried;internal int MovingShots;internal float LastShotAt;internal MercMoveShootPose MovePose;internal Reaction React=new Reaction();
  }
  public static partial class NpcWar {
-  class Fighter{public Component Ai;public Transform Tr,Target;public bool Armed=true,TargetIsPlayer,Sees=true;public int WeaponId=1007;public float ReactUntil,NextShot,Suppression,MuzzleBlockedSince;}
+  class Squad{public int Shots;}
+  class Fighter{public Component Ai;public Transform Tr,Target;public bool Armed=true,TargetIsPlayer,Sees=true;public int WeaponId=1007;public float ReactUntil,NextShot,Suppression,MuzzleBlockedSince;public Squad Squad=new Squad();}
   static BepInEx.Configuration.ConfigEntry<bool> CfgDebug=new BepInEx.Configuration.ConfigEntry<bool>();
   static bool Reload,Friend,MuzzleOpen=true;static int Ammo=30,Shots;static UnityEngine.AI.NavMeshAgent AgentValue;
   static bool Reloading(Fighter f){return Reload;}
+  static bool MercMayFireAt(Fighter f,Vector3 at,float now){return Flat(at-f.Tr.position)<=500f;}
+  static MethodInfo _mHasBullets=typeof(NpcWar).GetMethod("HasBullets",BindingFlags.Static|BindingFlags.NonPublic);
+  static FieldInfo _fRofDelay=typeof(NPC_AI2).GetField("RateDelay"),_mercLineShotTimer=typeof(NPC_AI2).GetField("ShotTimer");
+  static Action<object,Transform> _mercPositionShot=PlayerShot;
+  static bool HasBullets(Component w){return Ammo>0;}
+  static void PlayerShot(object ai,Transform target){if(!MuzzleOpen||Ammo==0)return;Ammo--;Shots++;((NPC_AI2)ai).RateDelay=Time.time+.25f;}
+  static void StartReload(Fighter f){Reload=true;}
+  public static bool AmmoReady{get{return Ammo>0;}}
   static UnityEngine.AI.NavMeshAgent Agent(Fighter f){return AgentValue;}
   static Vector3 AimWorld(Fighter f){return f.Target.position;}
   static Component WeaponOf(Fighter f){return f.Ai;}
@@ -184,15 +196,16 @@ namespace NextDayRevival {
    MuzzleOpen=false;MercWalkingFire(f,u,ft,act,Time.time);Test.Ok(Shots==shots&&f.NextShot>=Time.time+.19f,"blocked muzzle holds and throttles retry");MuzzleOpen=true;
    f.NextShot=0;f.Sees=false;MercWalkingFire(f,u,ft,act,Time.time);Test.Ok(Shots==shots,"unseen target receives no moving suppression");f.Sees=true;
    act.NoShot=true;MercWalkingFire(f,u,ft,act,Time.time);Test.Ok(Shots==shots,"brain NoShot veto remains authoritative");act.NoShot=false;
-   f.TargetIsPlayer=true;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time)&&agent.updateRotation,"player targets retain K0 planted fallback and restore rotation");f.TargetIsPlayer=false;
+    f.TargetIsPlayer=true;Test.Ok(MercWalkingPose(f,u,ft,ref act,Time.time)&&!agent.updateRotation,"player targets use the installed K1b native bridge while walking");
+    Time.frameCount++;f.NextShot=0;MercWalkingFire(f,u,ft,act,Time.time);Test.Ok(Shots>shots,"native player-target round fires without planting");shots=Shots;f.TargetIsPlayer=false;
    Reload=true;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"reload is never overridden");Reload=false;
    ft.In.Danger=true;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"blast danger keeps existing escape loop");ft.In.Danger=false;
    ft.Health=.3f;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"wounded merc keeps survival movement");ft.Health=1;
    u.Medicine.Active=7013;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"medkit pose cannot share walking-fire layers");u.Medicine.Active=0;
-   ft.Brain.Cover.Confirmed=false;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"unproven cover is excluded");ft.Brain.Cover.Confirmed=true;
+    ft.Brain.Cover.Confirmed=false;Test.Ok(MercWalkingPose(f,u,ft,ref act,Time.time),"existing combat step needs a clear muzzle, not a confirmed cover flag");ft.Brain.Cover.Confirmed=true;
    act.Act=FightAct.Run;act.Dest=new Vector3(0,0,12);ft.State=MercBrain.Dash;
    Test.Ok(MercWalkingPose(f,u,ft,ref act,Time.time),"short calm M1 cover bound retains aim and walking fire");
-   f.Suppression=.4f;Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"pressured bound retains fast sprint");f.Suppression=0;
+    f.Suppression=.4f;Test.Ok(MercWalkingPose(f,u,ft,ref act,Time.time),"incoming pressure does not silence an existing short bound");f.Suppression=0;
    act.Dest=new Vector3(0,0,30);Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"long bound retains fast sprint");
    ft.Brain.Mode=2;act.Dest=new Vector3(0,0,12);Test.Ok(!MercWalkingPose(f,u,ft,ref act,Time.time),"team fallback cannot be slowed by moving fire");ft.Brain.Mode=0;
    u.Order.Mode=MercOrder.Attack;u.Order.Centre=new Vector3(0,0,100);ft.State=MercBrain.Snap;act.Act=FightAct.Fire;ft.In.PickFresh=true;

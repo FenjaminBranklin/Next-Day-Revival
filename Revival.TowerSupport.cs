@@ -212,24 +212,24 @@ namespace NextDayRevival
             _panel = new Rect((Screen.width - width) * 0.5f, 8f, width, 126f);
             Color keep = GUI.color;
             GUI.color = new Color(0.05f, 0.09f, 0.08f, 0.96f);
-            GUI.DrawTexture(_panel, Texture2D.whiteTexture);
+            VanillaUi.Texture(_panel, Texture2D.whiteTexture);
             GUI.color = Color.white;
-            GUI.Label(new Rect(_panel.x, 12f, width, 28f), _help, _style);
+            VanillaUi.Label(new Rect(_panel.x, 12f, width, 28f), _help, _style);
             bool oldEnabled = GUI.enabled;
             GUI.enabled = _targetSet && _canOrder;
             float buttonW = (width - 16f) / 3f;
             for (int i = 0; i < 3; i++)
-                if (GUI.Button(new Rect(_panel.x + 4f + i * buttonW, 42f, buttonW - 4f, 32f), _labels[i])) Request(i);
+                if (VanillaUi.Button(new Rect(_panel.x + 4f + i * buttonW, 42f, buttonW - 4f, 32f), _labels[i])) Request(i);
             GUI.enabled = oldEnabled;
-            GUI.Label(new Rect(_panel.x, 76f, width, 24f), _status, _style);
-            if (GUI.Button(new Rect(_panel.x + width * 0.5f - 95f, 102f, 190f, 26f), _back)) Close();
+            VanillaUi.Label(new Rect(_panel.x, 76f, width, 24f), _status, _style);
+            if (VanillaUi.Button(new Rect(_panel.x + width * 0.5f - 95f, 102f, 190f, 26f), _back)) Close();
             Vector2 at;
             if (_targetSet && _texture != null && _camera != null
                 && MapTools.WorldToGui(_target, _texture, _camera, _world, _map, out at) && _clip.Contains(at))
             {
                 GUI.color = Color.yellow;
-                GUI.DrawTexture(new Rect(at.x - 10f, at.y - 1f, 20f, 2f), Texture2D.whiteTexture);
-                GUI.DrawTexture(new Rect(at.x - 1f, at.y - 10f, 2f, 20f), Texture2D.whiteTexture);
+                VanillaUi.Texture(new Rect(at.x - 10f, at.y - 1f, 20f, 2f), Texture2D.whiteTexture);
+                VanillaUi.Texture(new Rect(at.x - 1f, at.y - 10f, 2f, 20f), Texture2D.whiteTexture);
             }
             GUI.color = keep;
         }

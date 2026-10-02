@@ -441,14 +441,14 @@ namespace NextDayRevival
             string holder = Name(State.Holder);
             if (ev == AirfieldHoldPolicy.Captured)
             {
-                _head.text = "<b>" + Loc.T(holder.ToUpperInvariant() + " удерживают аэродром", holder + " hold the airfield") + "</b>";
+                _head.text = Loc.T(holder.ToUpperInvariant() + " удерживают аэродром", holder + " hold the airfield");
                 _line.text = before >= 0 && before != State.Holder
                     ? Loc.T("Отбит у: " + Name(before), "Taken from " + Name(before))
                     : Loc.T("Перешёл от гарнизона к игрокам", "Taken over from the garrison by players");
             }
             else
             {
-                _head.text = "<b>" + Loc.T("Гарнизон (" + holder + ") вернул аэродром", "The garrison (" + holder + ") retook the airfield") + "</b>";
+                _head.text = Loc.T("Гарнизон (" + holder + ") вернул аэродром", "The garrison (" + holder + ") retook the airfield");
                 _line.text = before >= 0 ? Loc.T("Потеряли: " + Name(before), Name(before) + " lost it") : "";
             }
             if (LocalSide >= 0 && LocalSide == State.Holder)
@@ -463,7 +463,7 @@ namespace NextDayRevival
 
         static string MapLabel()
         {
-            return "<b>" + Loc.T("Аэродром - держат " + Name(State.Holder, true), "Airfield - held by " + Name(State.Holder, false)) + "</b>";
+            return "<b>" + Loc.T("Аэродром - держат " + Name(State.Holder, true), "Airfield - held by " + Name(State.Holder, false));
         }
 
         /// <summary>The line a player inside the zone sees, rebuilt only when
@@ -496,57 +496,15 @@ namespace NextDayRevival
 
         internal static void Draw()
         {
-            if (!Enabled) return;
-            Event e = Event.current;
-            if (e == null || e.type != EventType.Repaint) return;
+            if (!Enabled || Event.current == null || Event.current.type != EventType.Repaint) return;
             DrawMap();
-            bool banner = Time.time < _bannerUntil;
-            if (!banner && _zoneText == null) return;
-            if (GameUi.State != 0) return;          // the game's windows are open
-            if (_style == null)
+            if (GameUi.State != 0) return;
+            if (Time.time < _bannerUntil)
             {
-                _style = new GUIStyle(GUI.skin.label);
-                _style.richText = true;
-                _measure = true;
+                if (!VanillaNotice.Banner("airfield.capture", _head.text, _line.text, NativeMessage.Warning, _bannerUntil))
+                    VanillaUi.Banner(_head.text, _line.text, Screen.height * 0.12f, false);
             }
-            if (_measure)
-            {
-                _measure = false;
-                _style.fontSize = 20;
-                _headSize = _style.CalcSize(_head);
-                _style.fontSize = 15;
-                _lineSize = _style.CalcSize(_line);
-                _zoneSize = _style.CalcSize(_zone);
-            }
-            Color old = GUI.color;
-            try
-            {
-                float cx = Screen.width * 0.5f, y = Screen.height * 0.12f;
-                if (banner)
-                {
-                    float a = Mathf.Clamp01(_bannerUntil - Time.time);
-                    float w = Mathf.Max(_headSize.x, _lineSize.x) + 40f;
-                    GUI.color = new Color(0f, 0f, 0f, 0.6f * a);
-                    GUI.DrawTexture(new Rect(cx - w * 0.5f, y, w, 62f), Texture2D.whiteTexture);
-                    GUI.color = new Color(_bannerColour.r, _bannerColour.g, _bannerColour.b, a);
-                    _style.fontSize = 20;
-                    GUI.Label(new Rect(cx - _headSize.x * 0.5f, y + 5f, _headSize.x, _headSize.y), _head, _style);
-                    _style.fontSize = 15;
-                    GUI.color = new Color(1f, 1f, 1f, 0.9f * a);
-                    GUI.Label(new Rect(cx - _lineSize.x * 0.5f, y + 34f, _lineSize.x, _lineSize.y), _line, _style);
-                    y += 68f;
-                }
-                if (_zoneText != null)
-                {
-                    _style.fontSize = 15;
-                    float w = _zoneSize.x + 24f;
-                    GUI.color = new Color(0f, 0f, 0f, 0.5f);
-                    GUI.DrawTexture(new Rect(cx - w * 0.5f, y, w, _zoneSize.y + 6f), Texture2D.whiteTexture);
-                    GUI.color = State.Capturer >= 0 ? SideColour(State.Capturer) : SideColour(State.Holder);
-                    GUI.Label(new Rect(cx - _zoneSize.x * 0.5f, y + 3f, _zoneSize.x, _zoneSize.y), _zone, _style);
-                }
-            }
-            finally { GUI.color = old; }
+            if (_zoneText != null) VanillaUi.Prompt(_zoneText, Screen.height * 0.12f);
         }
 
         static bool _mapBuilt;
@@ -622,7 +580,7 @@ namespace NextDayRevival
             _style.fontSize = 15;
             Color old = GUI.color;
             GUI.color = SideColour(State.Holder);
-            GUI.Label(new Rect(mouse.x + 14f, mouse.y - 11f, 360f, 24f), _mapLabel, _style);
+            VanillaUi.InfoLabel(new Rect(mouse.x + 14f, mouse.y - 11f, 360f, 24f), _mapLabel, _style);
             GUI.color = old;
         }
     }

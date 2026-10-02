@@ -385,16 +385,16 @@ namespace NextDayRevival
             if (_badgeStyle == null)
             {
                 _badgeStyle = new GUIStyle(GUI.skin.label);
-                _badgeStyle.fontSize = 11;
+                _badgeStyle.fontSize = 16;
             }
             string text = "Revival " + RevivalPlugin.VERSION;
             Rect r = new Rect(6f, 3f, 260f, 18f);
             // Drawn twice so it reads on any background: a black shadow, then
             // the label a pixel up-left. No box, so it stays out of the way.
             _badgeStyle.normal.textColor = new Color(0f, 0f, 0f, 0.7f);
-            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _badgeStyle);
+            VanillaUi.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _badgeStyle);
             _badgeStyle.normal.textColor = new Color(0.85f, 0.9f, 0.85f, 0.9f);
-            GUI.Label(r, text, _badgeStyle);
+            VanillaUi.Instrument(r, text, _badgeStyle);
         }
 
         static void DrawBanner()
@@ -457,7 +457,7 @@ namespace NextDayRevival
             float h = 30f + lineH * (_mismatch.Count + 2) + 12f;
             float y = 34f;
 
-            GUI.DrawTexture(new Rect(x, y, w, h), _bg);
+            VanillaUi.Panel(new Rect(x, y, w, h), "warning_01_form");
 
             float cy = y + 8f;
             Centered(title, _titleStyle, x, cy, w, 22f);
@@ -472,7 +472,7 @@ namespace NextDayRevival
             cy += 4f;
             // The hint may wrap on a narrow screen, so it keeps a left margin
             // instead of being centre-measured as one line.
-            GUI.Label(new Rect(x + 12f, cy, w - 24f, lineH * 2f), hint, _lineStyle);
+            VanillaUi.Label(new Rect(x + 12f, cy, w - 24f, lineH * 2f), hint, _lineStyle);
         }
 
         /// <summary>Draws one line horizontally centred in the given band,
@@ -483,7 +483,7 @@ namespace NextDayRevival
         {
             Vector2 size = style.CalcSize(new GUIContent(text));
             float tx = x + Mathf.Max(0f, (w - size.x) * 0.5f);
-            GUI.Label(new Rect(tx, y, Mathf.Min(size.x, w), lineH), text, style);
+            VanillaUi.Label(new Rect(tx, y, Mathf.Min(size.x, w), lineH), text, style);
         }
     }
 }

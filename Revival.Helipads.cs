@@ -1463,7 +1463,7 @@ namespace NextDayRevival
                         try
                         {
                             GUI.color = RingColor;
-                            GUI.Label(new Rect(mouse.x + 12f, mouse.y - 11f, 260f, 22f),
+                            VanillaUi.InfoLabel(new Rect(mouse.x + 12f, mouse.y - 11f, 260f, 22f),
                                 Loc.T("Вертолётная "
                                       + "площадка " + p.Name,
                                       "Helipad " + p.Name));

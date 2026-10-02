@@ -161,6 +161,7 @@ namespace NextDayRevival
         public int ManActor = -1;         // the player at the sight (actor number), -1 none
         public int OwnerSide = -1;        // persistent faction, independent of crew presence
         public float Range;               // engagement range, world units
+        public float AirfieldReach;       // A L2: reach on an aircraft in the airfield zone (0: not an airfield 52-K)
         public Vector3 ZoneCentre;        // ZoneDefence: the zone (horizontal circle, ceiling above ground)
         public float ZoneRadius, ZoneCeiling;
         public bool ZoneStrict;
@@ -187,7 +188,8 @@ namespace NextDayRevival
             CfgRpm, CfgDispersion, CfgFuze, CfgSplash, CfgTurn, CfgElev, CfgAccel, CfgPitchMin,
             CfgPitchMax, CfgInitialError, CfgWalk, CfgRadarWalk, CfgFloor, CfgEvade, CfgLag, CfgReaction,
             CfgReload, CfgRespawn, CfgSeatDrop, CfgReach, CfgSensitivity, CfgMinHeight,
-            CfgManualRpm, CfgManualReload, CfgCrewRpm, CfgProximity, CfgImpactDamage, CfgImpactRadius;
+            CfgManualRpm, CfgManualReload, CfgCrewRpm, CfgProximity, CfgImpactDamage, CfgImpactRadius,
+            CfgAirfieldZone;
         internal static ConfigEntry<int> CfgHeliHits, CfgRoundsPerLoad, CfgEventCode;
 
         public static void BindConfig(ConfigFile cfg)
@@ -246,6 +248,10 @@ namespace NextDayRevival
                 "Slant range in metres with the tower radar manned (radar-directed).");
             CfgSelfDestruct = cfg.Bind(G, "MaxFuzeRange", 8000f,
                 "The longest fuze setting: a shell that meets nothing bursts after this many metres at the latest.");
+            CfgAirfieldZone = cfg.Bind(G, "AirfieldZone", FlakEngageCore.ZoneMetres,
+                "Radius in metres of the east airfield's engagement zone around the C1 tower: "
+                + "a manned airfield 52-K opens fire on any hostile aircraft inside it, by eye "
+                + "too (the radar adds range beyond it and accuracy). Smallest 1800.");
             CfgCeiling = cfg.Bind(G, "Ceiling", 3000f,
                 "Highest target altitude above the gun in metres engaged.");
             CfgMinHeight = cfg.Bind(G, "MinTargetHeight", 3f,
@@ -363,6 +369,16 @@ namespace NextDayRevival
             get { return Mathf.Max(Mathf.Max(F(CfgRange, 1800f), Mathf.Max(MercAACore.RadarMetres, F(CfgRadarRange, 7000f))), F(CfgSelfDestruct, 8000f)) * K; }
         }
         internal static float CeilingU { get { return Mathf.Max(50f, F(CfgCeiling, 3000f)) * K; } }
+        internal static float ZoneMetres { get { return Mathf.Max(1800f, F(CfgAirfieldZone, FlakEngageCore.ZoneMetres)); } }
+
+        /// <summary>A L2: engagement range in world units for this gun and this
+        /// aircraft - the crew's calibration, or the airfield zone's reach when
+        /// a heavy airfield gun sees it inside the zone.</summary>
+        internal static float ReachU(Gun g, Vector3 p, float calibrationMetres)
+        {
+            bool zone = !g.ShortRange && !g.Town && FlakEngageCore.InZone(p.x, p.z, ZoneMetres, K);
+            return FlakEngageCore.Reach(calibrationMetres, zone, ZoneMetres, MaxFuze / K) * K;
+        }
         static int RoundsFull { get { return Mathf.Max(1, CfgRoundsPerLoad == null ? 20 : CfgRoundsPerLoad.Value); } }
         internal static int RoundsPerLoad { get { return RoundsFull; } }
         /// <summary>The walk factor now: fast bracketing radar-directed, slow by eye.</summary>
@@ -382,7 +398,7 @@ namespace NextDayRevival
         static readonly string[] Ids = { "AA-N", "AA-S", "MT-AA2a", "MT-AA2b", "ZU-N", "AA-NE" };
         static readonly string[] Names = { "AA position north", "AA position S2-S3",
             "Town battery west", "Town battery east", "Airfield ZU west", "Airfield AA northeast" };
-        static readonly Vector2[] Spots = { new Vector2(4030f, 1615f), new Vector2(4370f, 915f),
+        static readonly Vector2[] Spots = { new Vector2(4045f, 1608f), new Vector2(4370f, 860f),
             new Vector2(5598f, 642f), new Vector2(5612f, 686f),
             new Vector2(4100f, 1000f), new Vector2(4375f, 1580f) };
         static readonly float[] SpotYaws = { 90f, 90f, 270f, 270f, 90f, 90f };
@@ -442,6 +458,7 @@ namespace NextDayRevival
             public readonly List<GepardGun.Contact> Air = new List<GepardGun.Contact>();
             public readonly List<GepardGun.Contact> Hostile = new List<GepardGun.Contact>();
             public GepardGun.Contact Target;
+            public GameObject LostGo;           // A L2: the aircraft lost a moment ago
             public bool Laying, Firing, Engaged, Reloading;
             public float Held, NextLook, NextShot, LastContact, LastShot = -100f, NextPublish, ReloadUntil;
             public float ScanFrom = -1f;        // B2: when the idle crew started watching the sky
@@ -535,6 +552,7 @@ namespace NextDayRevival
             f.PlayerManned = PlayerAt(g);
             f.ManActor = g == _manned ? Crocodile.LocalActor() : Time.time < g.ClaimedUntil ? g.ClaimActor : -1;
             f.Range = GunRange(g);
+            f.AirfieldReach = g.ShortRange || g.Town ? 0f : ReachU(g, new Vector3(FlakEngageCore.CentreX, 0f, FlakEngageCore.CentreZ), 0f);
             f.ZoneCentre = g.ZoneCentre;
             f.ZoneRadius = g.ZoneRadius;
             f.ZoneCeiling = g.ZoneCeiling;
@@ -597,8 +615,8 @@ namespace NextDayRevival
                 FlakFire.Allegiance(target, OwnerFaction(g), out hostile, out friendly);
                 Vector3 d = target.Pos - Mid(g);
                 MercAAPost man = MercAA.Gun(g.Index);
-                float range = (g.ShortRange ? ShortRangeCore.RangeM : MercAACore.Calibrate(man != null,
-                    MercAA.DirectionAvailable(g) && RadarShadow.Visible(target.Go), man == null ? 0 : man.Trait).Range) * K;
+                float range = g.ShortRange ? ShortRangeCore.RangeM * K : ReachU(g, target.Pos, MercAACore.Calibrate(man != null,
+                    MercAA.DirectionAvailable(g) && RadarShadow.Visible(target.Go), man == null ? 0 : man.Trait).Range);
                 bool reach = RadarClarityCore.Reach(d.x, d.y, d.z, range,
                     g.ShortRange ? ShortRangeCore.CeilingM * K : CeilingU,
                     g.ShortRange ? -10f : F(CfgPitchMin, -3f), g.ShortRange ? 90f : F(CfgPitchMax, 82f));
@@ -2151,7 +2169,7 @@ namespace NextDayRevival
             if (t == null || t.Go == null)
             {
                 g.Firing = false;
-                if (g.Engaged && Time.time - g.LastContact > 4f)
+                if (g.Engaged && Time.time - g.LastContact > FlakEngageCore.ResumeSeconds)
                 {
                     g.Engaged = false;
                     Flak.Log(g.Id + ": target lost - " + g.Fired + " round(s) fired.");
@@ -2318,7 +2336,9 @@ namespace NextDayRevival
             bool direction = MercAA.DirectionAvailable(g);
             MercAAPost man = MercAA.Gun(g.Index);
             float range = (g.ShortRange ? ShortRangeCore.RangeM : MercAACore.Calibrate(man != null, direction, man == null ? 0 : man.Trait).Range) * Flak.K;
-            Collect(g.Air, eye, range);
+            // A L2: a heavy airfield gun also gathers what flies in the airfield zone.
+            Collect(g.Air, eye, FlakEngageCore.CollectMetres(range / Flak.K, !g.ShortRange && !g.Town,
+                Flak.ZoneMetres, Flak.MaxFuze / Flak.K) * Flak.K);
 
             string side = Flak.OwnerFaction(g);
             g.Hostile.Clear();
@@ -2342,14 +2362,15 @@ namespace NextDayRevival
                 else if (!Airborne(c)) continue;
                 g.Hostile.Add(c);
                 float d = Vector3.Distance(eye, c.Pos);
-                float targetRange = g.ShortRange ? range : MercAACore.Calibrate(man != null,
-                    direction && RadarShadow.Visible(c.Go), man == null ? 0 : man.Trait).Range * Flak.K;
+                float targetRange = g.ShortRange ? range : Flak.ReachU(g, c.Pos, MercAACore.Calibrate(man != null,
+                    direction && RadarShadow.Visible(c.Go), man == null ? 0 : man.Trait).Range);
                 if (d > targetRange || c.Pos.y - eye.y > (g.ShortRange ? ShortRangeCore.CeilingM * Flak.K : Flak_Ceiling())) continue;
+                int cover = !g.ShortRange && direction ? Flak.TargetCover(g, c.Go) : 0;
                 float score = !g.ShortRange && direction && RadarShadow.Visible(c.Go)
-                    ? MercAACore.TargetScore(d / Flak.K, Flak.TargetCover(g, c.Go)) : d / Flak.K;
+                    ? MercAACore.TargetScore(d / Flak.K, cover) : d / Flak.K;
                 // The contact list still holds every valid target for shell hits.
                 // Only a target that can beat the current choice needs a LOS ray.
-                int threat = direction ? Threat(c) : 0;
+                int threat = direction ? MercAACore.CoveredThreat(Threat(c), cover) : 0;
                 if (c.Go != g.Assigned && (threat < bestThreat || (threat == bestThreat && score >= bestD))) continue;
                 if (!Sight(g, eye, c)) continue;
                 if (c.Go == g.Assigned) assigned = c;
@@ -2357,16 +2378,28 @@ namespace NextDayRevival
                 { best = c; bestD = score; bestThreat = threat; }
             }
             if (assigned != null) best = assigned;
-            // Stay on the target being walked in unless the assigned one appears.
+            // Stay on the target being walked in unless the assigned one appears
+            // or the radar shows a clearly more urgent one (A L2: a drifting ETA
+            // score no longer swaps similar aircraft and restarts the bracketing).
             if (!g.ShortRange && g.Target != null && g.Target.Go != null && best != null && best != g.Target && assigned == null
-                && g.Hostile.Contains(g.Target) && Vector3.Distance(eye, g.Target.Pos) <= MercAA.Calibration(g).Range * Flak.K
-                && (!direction || Threat(g.Target) >= bestThreat)
+                && g.Hostile.Contains(g.Target)
+                && Vector3.Distance(eye, g.Target.Pos) <= Flak.ReachU(g, g.Target.Pos, MercAA.Calibration(g).Range)
+                && FlakEngageCore.Keep(direction ? MercAACore.CoveredThreat(Threat(g.Target), Flak.TargetCover(g, g.Target.Go)) : 0,
+                    bestThreat, direction)
                 && Sight(g, eye, g.Target))
                 best = g.Target;
             if (best != g.Target)
             {
-                g.Held = 0f;
-                g.Engaged = false;
+                // A L2: a target gone for one scan keeps the solution (Control
+                // ends the engagement after ResumeSeconds); found again, the
+                // crew fires on without a new reaction or first-shot offset.
+                if (best == null) g.LostGo = g.Target.Go;
+                else if (!FlakEngageCore.Resume(g.Engaged,
+                    g.Target == null && object.ReferenceEquals(best.Go, g.LostGo), Time.time - g.LastContact))
+                {
+                    g.Held = 0f;
+                    g.Engaged = false;
+                }
             }
             g.Target = best;
         }
@@ -2949,10 +2982,10 @@ namespace NextDayRevival
                                 GUI.color = inside ? Color.cyan : Amber;
                                 // Four corners distinguish the lead cue from
                                 // the bore ring. Put the green bore in this box.
-                                GUI.DrawTexture(new Rect(x - 10f, y - 10f, 6f, 2f), _white);
-                                GUI.DrawTexture(new Rect(x + 4f, y - 10f, 6f, 2f), _white);
-                                GUI.DrawTexture(new Rect(x - 10f, y + 8f, 6f, 2f), _white);
-                                GUI.DrawTexture(new Rect(x + 4f, y + 8f, 6f, 2f), _white);
+                                VanillaUi.Texture(new Rect(x - 10f, y - 10f, 6f, 2f), _white);
+                                VanillaUi.Texture(new Rect(x + 4f, y - 10f, 6f, 2f), _white);
+                                VanillaUi.Texture(new Rect(x - 10f, y + 8f, 6f, 2f), _white);
+                                VanillaUi.Texture(new Rect(x + 4f, y + 8f, 6f, 2f), _white);
                                 Label(new Rect(x - 30f, y + 12f, 60f, 22f), "LEAD", GUI.color);
                                 GUI.color = Color.white;
                             }
@@ -2968,7 +3001,7 @@ namespace NextDayRevival
                     Label(new Rect(0f, h - 40f, w, 24f), _controls, Amber);
                     float wait = g.Reloading ? g.ReloadUntil - Time.time : g.NextShot - Time.time;
                     GUI.color = wait > 0f ? Amber : Color.green;
-                    GUI.DrawTexture(new Rect(w * 0.5f - 60f, h - 82f, 120f * (1f - Mathf.Clamp01(wait /
+                    VanillaUi.Texture(new Rect(w * 0.5f - 60f, h - 82f, 120f * (1f - Mathf.Clamp01(wait /
                         (g.Reloading ? ManualReload(g) : g.ShortRange ? ShortRangeCore.ShotSeconds : Flak.ManualInterval()))), 3f), _white);
                     GUI.color = Color.white;
                     if (!string.IsNullOrEmpty(_order)) Label(new Rect(0f, h - 108f, w, 26f), _order, Color.white);
@@ -2976,10 +3009,10 @@ namespace NextDayRevival
                 else if (_near != null)
                 {
                     string s = _nearWhy ?? (_near.ShortRange ? _promptZu : _prompt);
-                    Label(new Rect(0f, h * 0.62f, w, 26f), s, Color.white);
+                    VanillaUi.Prompt(s, h * 0.62f);
                 }
                 if (_hint != null && Time.time <= _hintUntil)
-                    Label(new Rect(0f, h * 0.66f, w, 26f), _hint, Amber);
+                    VanillaUi.Prompt(_hint, h * 0.62f - 75f);
             }
             catch { }
         }
@@ -2992,9 +3025,9 @@ namespace NextDayRevival
             float tw = _text.CalcSize(_label).x;
             r = new Rect(r.x + (r.width - tw) * 0.5f, r.y, tw + 4f, r.height);
             GUI.color = new Color(0f, 0f, 0f, 0.8f);
-            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), _label, _text);
+            VanillaUi.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), _label, _text);
             GUI.color = c;
-            GUI.Label(r, _label, _text);
+            VanillaUi.Label(r, _label, _text);
             GUI.color = Color.white;
         }
 
@@ -3015,8 +3048,8 @@ namespace NextDayRevival
         static void Reticle(float cx, float cy, float r)
         {
             GUI.color = Amber;
-            GUI.DrawTexture(new Rect(cx - 12f, cy - 1f, 24f, 2f), _white);
-            GUI.DrawTexture(new Rect(cx - 1f, cy - 12f, 2f, 24f), _white);
+            VanillaUi.Texture(new Rect(cx - 12f, cy - 1f, 24f, 2f), _white);
+            VanillaUi.Texture(new Rect(cx - 1f, cy - 12f, 2f, 24f), _white);
             Ring(cx, cy, r * 0.5f);
             Ring(cx, cy, r);
             GUI.color = Color.white;
@@ -3027,7 +3060,7 @@ namespace NextDayRevival
             for (int i = 0; i < RingPoints.Length; i++)
             {
                 Vector2 p = RingPoints[i];
-                GUI.DrawTexture(new Rect(cx + p.x * r - 1f, cy + p.y * r - 1f, 2f, 2f), _white);
+                VanillaUi.Texture(new Rect(cx + p.x * r - 1f, cy + p.y * r - 1f, 2f, 2f), _white);
             }
         }
     }

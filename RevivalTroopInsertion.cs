@@ -266,24 +266,9 @@ namespace NextDayRevival
 
         internal static void Draw()
         {
-            if (_banner == null || _banner.Length == 0 || Time.time > _bannerUntil) return;
-            try
-            {
-                float w = 460f, h = 56f, x = 22f;
-                float y = Screen.height - h - 156f;   // above the convoy banner slot
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.72f);
-                GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
-                GUI.color = new Color(0.9f, 0.3f, 0.2f, 0.95f);
-                GUI.DrawTexture(new Rect(x, y, 5f, h), Texture2D.whiteTexture);
-                GUI.color = old;
-                GUIStyle st = new GUIStyle(GUI.skin.label);
-                st.fontSize = 15;
-                st.wordWrap = true;
-                st.normal.textColor = new Color(1f, 0.85f, 0.75f);
-                GUI.Label(new Rect(x + 16f, y + 7f, w - 26f, h - 12f), _banner, st);
-            }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("Troops banner: " + ex.Message); }
+            if (string.IsNullOrEmpty(_banner) || Time.time > _bannerUntil) return;
+            if (!VanillaNotice.Banner("troop", _banner, null, NativeMessage.AirDrop, _bannerUntil))
+                VanillaUi.Notice(_banner, NativeMessage.AirDrop);
         }
 
         // ========================================================== triggering

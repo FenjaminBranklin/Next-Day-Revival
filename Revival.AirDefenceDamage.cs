@@ -338,7 +338,7 @@ namespace NextDayRevival
         internal static void Draw()
         {
             if (_prompt == null || _job >= 0 || _near < 0) return;
-            GUI.Label(new Rect(Screen.width * 0.5f - 230f, Screen.height * 0.68f, 460f, 28f), _prompt);
+            VanillaUi.Prompt(_prompt, Screen.height * 0.68f);
         }
 
         // Inventory containers are discovered only on an interaction. Keep

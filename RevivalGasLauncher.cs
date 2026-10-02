@@ -1119,36 +1119,28 @@ namespace NextDayRevival
             }
         }
 
-        static GUIStyle _style;
+        static string _gasHud;
+        static float _nextGasHud;
+        static int _gasTox = -1, _gasProtection = -1, _gasLanguage = -1;
 
         public static void Draw()
         {
             if (!Enabled || Time.time >= _insideUntil) return;
-            try
+            if (Time.time >= _nextGasHud)
             {
-                if (_style == null)
+                _nextGasHud = Time.time + 0.5f;
+                int tox = Mathf.RoundToInt(Toxicity());
+                int protection = Mathf.RoundToInt((1f - _insideProtection) * 100f);
+                int language = Loc.Lang();
+                if (_gasHud == null || tox != _gasTox || protection != _gasProtection || language != _gasLanguage)
                 {
-                    // No TextAnchor/FontStyle: both live in the unreferenced
-                    // TextRenderingModule (see PeerCheck.DrawBadge), so the
-                    // label is centred by hand below.
-                    _style = new GUIStyle(GUI.skin.label);
-                    _style.fontSize = 16;
+                    _gasTox = tox; _gasProtection = protection; _gasLanguage = language;
+                    string seal = _insideProtection <= 0f ? Loc.T("?????? ??????", "sealed")
+                        : Loc.T("?????? " + protection + "%", "protection " + protection + "%");
+                    _gasHud = Loc.T("???????? ???", "TOXIC GAS") + "   " + tox + "/100   " + seal;
                 }
-                float tox = Toxicity();
-                string protection = _insideProtection <= 0f
-                    ? Loc.T("защита держит", "sealed")
-                    : Loc.T("защита " + Mathf.RoundToInt((1f - _insideProtection) * 100f) + "%",
-                            "protection " + Mathf.RoundToInt((1f - _insideProtection) * 100f) + "%");
-                _style.normal.textColor = _insideProtection <= 0f
-                    ? new Color(0.65f, 0.95f, 0.55f, 0.95f)
-                    : new Color(0.80f, 1.00f, 0.25f, 0.95f);
-                string text = Loc.T("ЯДОВИТЫЙ ГАЗ", "TOXIC GAS")
-                    + "   " + Mathf.RoundToInt(tox) + "/100   " + protection;
-                float w = _style.CalcSize(new GUIContent(text)).x;
-                GUI.Label(new Rect(Screen.width * 0.5f - w * 0.5f, Screen.height * 0.16f,
-                                   w + 4f, 26f), text, _style);
             }
-            catch { }
+            VanillaUi.Banner(_gasHud, null, Screen.height * 0.16f, true);
         }
     }
 

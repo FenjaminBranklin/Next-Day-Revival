@@ -100,7 +100,7 @@ namespace NextDayRevival
         internal static void GiveMedkit(Record r)
         {
             if (r != null && r.Down.Down) { PlayerRevive(r); return; }
-            if (!CanGiveMedkit(r)) return;
+            if (!CanGiveMedkit(r) || PlayerDead(OwnerObject)) return;
             int item = 0;
             for (int i = 7013; i <= 7016 && item == 0; i++)
                 if (Turret.TakeItem(i, "Merc medkit gift")) item = i;
@@ -108,13 +108,14 @@ namespace NextDayRevival
                 if (Turret.TakeItem(i, "Merc medkit gift")) item = i;
             if (item == 0)
             { MercUi.Toast(Loc.T("В рюкзаке нет аптечки.", "No medkit in your inventory."), true); return; }
-            if (r.Session) { r.Medicine.Give(item); return; }
+            if (r.Session) { r.Medicine.Give(item); GiftReply(r); return; }
             r.Medicine.GiftPending = true;
             // Native inventory is owner-authored, like native HP. Ownership
             // and capacity are checked by the authenticated master roster.
             Enqueue("med-give", "id=" + N(r.Id) + "\nitem=" + N(item) + "\n", delegate(string result)
             {
                 r.Medicine.GiftPending = false;
+                if (result == "ok") GiftReply(r);
                 if (result != "ok")
                 {
                     RequestRoster(0f);
@@ -124,9 +125,82 @@ namespace NextDayRevival
             }, 0f);
         }
 
+        static void GiftReply(Record r)
+        {
+            MercUi.OrderReply(r.Name + Loc.T(": аптечка передана.", ": medkit given."), false);
+        }
+
+        static Record _medicineTarget;
+        static float _medicineAimAt;
+        static readonly RaycastHit[] MedicineHits = new RaycastHit[16];
+        internal static Record MedicineTarget { get { return _medicineTarget; } }
+
+        // Living and downed bodies share the existing authenticated gift/revive
+        // path. Shift+E leaves the native E dialogue binding available.
+        internal static void MedicineInteractionTick()
+        {
+            FrameProf.S(FrameProf.S_MercMedicineInteraction);
+            try
+            {
+                if (!GameplayCursor.CanCommand || MercUi.ListOpen || MercRide.OwnerInVehicle
+                    || OwnerObject == null || _roster.Count == 0)
+                { _medicineTarget = null; return; }
+                bool press = Input.GetKeyDown(KeyCode.E)
+                    && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift));
+                float now = Time.time;
+                if (now < _medicineAimAt && !press) return;
+                _medicineAimAt = now + 0.2f;
+                _medicineTarget = MedicineAim();
+                if (press && _medicineTarget != null) GiveMedkit(_medicineTarget);
+            }
+            finally { FrameProf.E(FrameProf.S_MercMedicineInteraction); }
+        }
+
+        static Record MedicineAim()
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return null;
+            Ray ray = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            Record best = null;
+            Vector3 point = Vector3.zero;
+            float nearest = float.MaxValue;
+            for (int i = 0; i < _roster.Count; i++)
+            {
+                Record r = _roster[i];
+                if (r.Dead || r.Deserted || r.Unit == null || r.Unit.Ai == null || r.Unit.Deserting) continue;
+                Vector3 feet = r.Unit.Ai.transform.position;
+                if ((OwnerObject.transform.position - feet).sqrMagnitude > 8.4f * 8.4f) continue;
+                // Closest point on the body axis supports aiming at head, chest
+                // or legs; downed bodies use their lowered torso height.
+                Vector3 chest = feet + Vector3.up * (r.Down.Down ? 0.8f : 2.8f);
+                Vector3 delta = chest - ray.origin;
+                float along = Vector3.Dot(delta, ray.direction);
+                if (along <= 0f || along >= nearest) continue;
+                Vector3 onRay = ray.origin + ray.direction * along;
+                float height = Mathf.Clamp(onRay.y - feet.y, r.Down.Down ? 0.3f : 0.5f,
+                    r.Down.Down ? 1.4f : 4.8f);
+                Vector3 body = feet + Vector3.up * height;
+                if ((onRay - body).sqrMagnitude > 1.8f * 1.8f) continue;
+                nearest = along; best = r; point = body;
+            }
+            if (best == null) return null;
+            Vector3 sight = point - ray.origin;
+            int n = Physics.RaycastNonAlloc(ray.origin, sight.normalized, MedicineHits, sight.magnitude,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            if (n == MedicineHits.Length) return null; // saturated: fail closed
+            Transform own = OwnerObject.transform, merc = best.Unit.Ai.transform;
+            for (int i = 0; i < n; i++)
+            {
+                Transform hit = MedicineHits[i].collider.transform;
+                if (hit == own || hit.IsChildOf(own) || hit == merc || hit.IsChildOf(merc)) continue;
+                return null;
+            }
+            return best;
+        }
+
         static readonly string[] KitCounts = { "0/5", "1/5", "2/5", "3/5", "4/5", "5/5" };
-        static readonly string[] KitLabelsRu = KitLabels("Аптечка ");
-        static readonly string[] KitLabelsEn = KitLabels("Medkit ");
+        static readonly string[] KitLabelsRu = KitLabels("Аптечки ");
+        static readonly string[] KitLabelsEn = KitLabels("Medkits ");
         static string[] KitLabels(string prefix)
         {
             string[] labels = new string[7];
@@ -137,6 +211,10 @@ namespace NextDayRevival
         internal static string MedkitLabel(Record r)
         {
             if (r != null && r.Down.Down) return Loc.T("Оживить", "Revive");
+            return Loc.T("Дать апт.", "Give kit");
+        }
+        internal static string MedkitStockLabel(Record r)
+        {
             int n = r != null && r.Medicine.Known ? Mathf.Clamp(r.Medicine.Count, 0, 5) : 6;
             return Loc.T(KitLabelsRu[n], KitLabelsEn[n]);
         }

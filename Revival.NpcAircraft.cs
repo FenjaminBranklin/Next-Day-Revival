@@ -77,6 +77,7 @@ namespace NextDayRevival
         float[] _y;
         bool[] _profileKnown;
         int _profileIndex;
+        int _profileLead;                   // off-map approach samples, never sampled
         float _profileHighest;
         bool _profileAny;
         internal bool ProfileReady { get { return _profileKnown == null; } }
@@ -110,11 +111,14 @@ namespace NextDayRevival
                 _profileAny = true;
             }
             if (_profileIndex < _y.Length) return false;
-            for (int i = 0; i < _y.Length; i++)
+            for (int i = _profileLead; i < _y.Length; i++)
                 _y[i] = (_profileKnown[i] ? _y[i] : _profileHighest) + Agl;
             float drop = MaxSlope * Step;
-            for (int i = 1; i < _y.Length; i++) _y[i] = Mathf.Max(_y[i], _y[i - 1] - drop);
-            for (int i = _y.Length - 2; i >= 0; i--) _y[i] = Mathf.Max(_y[i], _y[i + 1] - drop);
+            for (int i = _profileLead + 1; i < _y.Length; i++) _y[i] = Mathf.Max(_y[i], _y[i - 1] - drop);
+            for (int i = _y.Length - 2; i >= _profileLead; i--) _y[i] = Mathf.Max(_y[i], _y[i + 1] - drop);
+            // The extended approach repeats the smoothed edge height, exactly
+            // as ExtendApproach does on a finished profile.
+            for (int i = 0; i < _profileLead; i++) _y[i] = _y[_profileLead];
             _profileKnown = null;
             return true;
         }
@@ -131,6 +135,19 @@ namespace NextDayRevival
             for (int i = 0; i < extra; i++) heights[i] = _y[0];
             Array.Copy(_y, 0, heights, extra, _y.Length);
             _y = heights;
+            if (_profileKnown != null)
+            {
+                // A6.67: BeginStraight's profile is still being sampled (the
+                // paradrop transports). Its sample flags and cursor move with
+                // the heights; growing only _y sent ProfileStep past the end of
+                // _profileKnown and cancelled every prepared transport with
+                // "Index was outside the bounds of the array".
+                bool[] known = new bool[_y.Length];
+                Array.Copy(_profileKnown, 0, known, extra, _profileKnown.Length);
+                _profileKnown = known;
+                _profileIndex += extra;
+                _profileLead += extra;
+            }
             From -= Dir * run;
             Length += run;
         }
@@ -388,6 +405,23 @@ namespace NextDayRevival
             return go != null && _flights.TryGetValue(go, out f) ? f : null;
         }
 
+        static bool _airRegistered;
+
+        // Each client registers from the same Photon instantiation data, including
+        // late joiners. Radar/AA discovery must not depend on the player An-2 probe.
+        static void RegisterAir()
+        {
+            if (_airRegistered) return;
+            GepardAir.Register("NPC aircraft", ListAir, PlayerAn2.ShotDown, PlayerAn2.Down, 0);
+            _airRegistered = true;
+        }
+
+        static void ListAir(List<GameObject> into)
+        {
+            foreach (KeyValuePair<GameObject, Flight> e in _flights)
+                if (e.Key != null) into.Add(e.Key);
+        }
+
         // ------------------------------------------------------------ launch
 
         /// <summary>
@@ -447,6 +481,7 @@ namespace NextDayRevival
                 f.Label = data.Length > 10 ? data[10] as string : null;
                 f.Born = Time.time;
                 _flights[go] = f;
+                RegisterAir();
                 An2Visual vis = go.GetComponent<An2Visual>();
                 if (vis != null)
                 {
