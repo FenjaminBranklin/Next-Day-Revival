@@ -82,46 +82,9 @@ namespace NextDayRevival
             Collider(p,n+" cover",x,.40f,z,east?.40f:1.95f,.80f,east?.60f:.40f);
         }
 
-        // C W3: the radar console stands on the MAIN roof (TowerRoofCore.
-        // ConsoleX/ConsoleZ, its desk collider is the console's own); its
-        // post is a sandbag horseshoe W/S/E, open north to the stair, and a
-        // field cable from a junction box behind the desk to the cab.
-        internal const float RoofConsoleX = 1.5f, RoofConsoleZ = 4.2f;
-
-        static void Wall(List<Piece> p, string n, float x, float z, float len, bool alongX)
-        {
-            // Three courses of rounded bags, the middle one staggered by half
-            // a bag; one physical box for the whole wall.
-            int count=(int)(len/.46f+.5f);
-            float bag=len/count;
-            for (int row=0;row<3;row++) {
-                int k=row==1?count-1:count;
-                for (int i=0;i<k;i++) {
-                    float d=(i-(k-1)*.5f)*bag;
-                    p.Add(new Piece(n,alongX?x+d:x,.15f+row*.3f,alongX?z:z+d,
-                        alongX?bag*.98f:.45f,.3f,alongX?.45f:bag*.98f,Canvas,false,true));
-                }
-            }
-            Collider(p,n+" cover",x,.45f,z,alongX?len:.45f,.9f,alongX?.45f:len);
-        }
-
-        /// <summary>The console's post on the main roof, tower metres, y up
-        /// from the roof (TowerRoofCore.ConsoleBox holds the same walls).</summary>
-        internal static List<Piece> RoofPieces()
-        {
-            List<Piece> p=new List<Piece>(64);
-            float x=RoofConsoleX, z=RoofConsoleZ;
-            Wall(p,"console south bags",x,z-.95f,3.0f,true);
-            Wall(p,"console west bags",x-1.275f,z+.225f,1.85f,false);
-            Wall(p,"console east bags",x+1.275f,z+.225f,1.85f,false);
-            // junction box behind the desk, a cable flat on the roof under the
-            // east wall to the cab's north-west corner
-            Box(p,"junction box",x+.85f,.16f,z-.56f,.26f,.32f,.2f,Olive);
-            Box(p,"junction lid",x+.85f,.335f,z-.56f,.28f,.03f,.22f,Steel);
-            Box(p,"field cable",(x+.98f+4.75f)*.5f,.012f,z-.56f,4.75f-x-.98f+.035f,.024f,.035f,Black);
-            Box(p,"field cable",4.75f,.012f,(z-.56f+3.3f)*.5f,.035f,.024f,z-.56f-3.3f,Black);
-            return p;
-        }
+        // E W1: the radar console (TowerRadar, its own desk collider) stands
+        // in this room against the south window at TowerRoofCore.ConsoleX/Z,
+        // between the supply order console and the south window bags.
 
         internal static List<Piece> Pieces()
         {

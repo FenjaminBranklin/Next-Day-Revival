@@ -2,9 +2,10 @@
 //
 // C W3: the main roof (design 9 m, 8.79 m on the shipped C1_LOD0 collider)
 // is THE roof. The existing north outside stairs (three flights and a short
-// threshold over the parapet's collider face) reach it; the radar console and
-// the five sandbag posts stand on it; the cab (command room) is reached over
-// the roof's own inner flight. No stair leads above the cab any more.
+// threshold over the parapet's collider face) reach it; the five sandbag
+// posts stand on it; the cab (the glazed command room) is reached over the
+// roof's own inner flight. E W1: the radar console stands INSIDE the cab, by
+// its south window. No stair leads above the cab any more.
 // Coordinates are metres in TowerRadar's C1 frame (world units = m * 2.8),
 // heights measured on the shipped collider. Walks across the roof follow a
 // visibility graph over authored, capsule-inflated obstacle rectangles, so
@@ -30,7 +31,7 @@ namespace NextDayRevival
         internal const float StepSpeed = 2.4f;        // brisk stair walk; ~10 s up the stairs
         internal const float StuckSeconds = 2f, MaxSeconds = 40f;   // approach, stairs and the walk round the cab
         internal const float FootArrive = 0.35f, TopArrive = 0.35f, PostArrive = 1.0f;
-        internal const float SeatZone = 2.0f, DoorArrive = 0.8f;
+        internal const float DoorArrive = 0.8f;
         internal const int PathMax = 32;
         internal const float CapsuleRadius = 0.27f, CapsuleHeight = 1.8f;
         // Feet clear a ramp tangent by r * (sec(36.87 degrees) - 1), plus margin.
@@ -62,19 +63,15 @@ namespace NextDayRevival
         internal const float GoalBelow = 1.5f, GoalAbove = 4.0f;
         internal const float GoalReach = 10.0f;       // FOLLOW slots lie up to 10 m behind the owner
 
-        // THE CONSOLE: the radar console on the main roof, its screen north,
-        // the operator's chair north of it; a sandbag horseshoe W/S/E, open
-        // to the north where the stair arrives.
-        internal const float ConsoleX = 1.5f, ConsoleZ = 4.2f, SeatZ = ConsoleZ + 0.85f;
+        // THE CONSOLE (E W1): inside the cab on its floor, the desk against
+        // the south window under the antenna mast (x 7.9), its screen north;
+        // the operator's chair north of it, so he faces the screen and the
+        // window. The south sill's inner face is z -3.368 (C1_LOD0); the desk
+        // collider (1.3 x 0.7, centre 5 cm north of the root) keeps 3 cm off it.
+        // The baked, carved cab NavMesh takes him from the door to the chair.
+        internal const float ConsoleX = 7.9f, ConsoleZ = -2.95f, SeatZ = ConsoleZ + 0.85f;
         internal const float SeatReach = 1.5f;        // a goal this close to the seat means the seat
-        internal static Vector3 Seat() { return new Vector3(ConsoleX, RoofY, SeatZ); }
-        // console desk + walls: centre x, z and size x, z (metres), 0.9 m bags
-        internal static readonly float[] ConsoleBox = {
-            ConsoleX, ConsoleZ - 0.05f, 1.3f, 0.7f,           // the desk's own collider
-            ConsoleX, ConsoleZ - 0.95f, 3.0f, 0.45f,          // south wall behind the desk
-            ConsoleX - 1.275f, ConsoleZ + 0.225f, 0.45f, 1.85f, // west wall
-            ConsoleX + 1.275f, ConsoleZ + 0.225f, 0.45f, 1.85f  // east wall
-        };
+        internal static Vector3 Seat() { return new Vector3(ConsoleX, CabFloorY, SeatZ); }
 
         // THE POSTS: five places behind a sandbag wall along the parapet, one
         // per merc slot, looking out over the wall (face). Sandbags 0.9 m high.
@@ -170,19 +167,18 @@ namespace NextDayRevival
         /// <summary>The console seat (or a goal right at it).</summary>
         internal static bool AtSeat(Vector3 l)
         {
-            return Flat(l, Seat()) <= SeatReach && Mathf.Abs(l.y - RoofY) < 1.5f;
+            return Flat(l, Seat()) <= SeatReach && Mathf.Abs(l.y - CabFloorY) < 1.5f;
         }
 
-        /// <summary>A goal walked to exactly (the cab, the console seat);
+        /// <summary>A goal walked to exactly (the cab with the console seat);
         /// every other roof goal means his post.</summary>
         internal static bool Exact(Vector3 l) { return InCab(l) || AtSeat(l); }
 
         /// <summary>Where a roof goal ends his direct walk: inside the cab's
-        /// door, the console seat or his post.</summary>
+        /// door (the cab, the console seat) or his post.</summary>
         internal static Vector3 Target(Vector3 goal, int slot)
         {
-            if (InCab(goal)) return Inner[0];
-            if (AtSeat(goal)) return Seat();
+            if (InCab(goal) || AtSeat(goal)) return Inner[0];
             return Post(slot);
         }
 
@@ -208,7 +204,7 @@ namespace NextDayRevival
             if (manUp && InCab(man))
             {
                 // Furniture: the baked, carved cab NavMesh takes him to the door.
-                if (goalUp && InCab(goal)) return LegNav;
+                if (goalUp && Exact(goal)) return LegNav;
                 leg = Inner[0];
                 if (Flat(man, leg) > DoorArrive) return LegNav;
                 leg = goalUp ? Target(goal, slot) : exit;
@@ -217,13 +213,7 @@ namespace NextDayRevival
             if (manUp && goalUp)
             {
                 leg = Target(goal, slot);
-                if (InCab(goal)) return LegWalk;
-                if (AtSeat(goal))
-                {
-                    // by the console: the NavMesh's last steps to the exact pose
-                    if (Flat(man, leg) <= SeatZone && Mathf.Abs(man.y - leg.y) < 1f) { leg = goal; return LegNav; }
-                    return LegWalk;
-                }
+                if (Exact(goal)) return LegWalk;
                 if (Flat(man, leg) <= PostArrive) { leg = Face(slot); return LegHold; }
                 return LegWalk;
             }
@@ -313,13 +303,12 @@ namespace NextDayRevival
         internal static void Init()
         {
             if (_ob != null) return;
-            int count = Blocks.Length / 4 + BagX.Length + ConsoleBox.Length / 4;
+            int count = Blocks.Length / 4 + BagX.Length;
             float[] ob = new float[count * 4];
             _ob = ob;
             int k = 0;
             for (int i = 0; i < Blocks.Length; i++) ob[k++] = Blocks[i];
             for (int i = 0; i < BagX.Length; i++) Add(ref k, BagX[i], BagZ[i], BagSX[i], BagSZ[i]);
-            for (int i = 0; i < ConsoleBox.Length; i += 4) Add(ref k, ConsoleBox[i], ConsoleBox[i + 1], ConsoleBox[i + 2], ConsoleBox[i + 3]);
             _obN = count;
             int max = count * 4 + 2;
             _nx = new float[max]; _nz = new float[max]; _dist = new float[max];

@@ -1,10 +1,10 @@
-"""C W3 tower rebuild: offline proof that the radar console stands ON the main
-roof, the command room is back INSIDE the cab, and nothing the mod builds on
-or in the tower floats or cuts into anything.
+"""C W3 tower rebuild + E W1: offline proof that the command room is INSIDE
+the cab, the radar console stands in it ON the measured cab floor (E W1; C W3
+had it on the main roof), and nothing the mod builds on or in the tower
+floats or cuts into anything.
 
 Every box the mod adds there (stair threshold, five sandbag posts, the radar
-console's own primitives and its sandbag horseshoe, cable and junction box,
-the Z TC1 command room's props and colliders, the Z M4 supply order console,
+console's own primitives and collider in the cab, the Z TC1 command room's props and colliders, the Z M4 supply order console,
 and the antenna's support on the cab roof)
 is tested against ALL shipped collider triangles within 50 m (exact
 box/triangle separating-axis test) and against each other, and must rest on
@@ -102,26 +102,24 @@ def antenna_support():
 
 def all_boxes(roof, floor):
     import tower_command_room_check as room
-    from tower_stairs_check import core_array
+    from tower_stairs_check import core_array, supply_spot
     boxes = threshold_boxes()
     bag = core_const("BagH")
     for n, (x, z, sx, sz) in enumerate(zip(core_array("BagX"), core_array("BagZ"),
                                            core_array("BagSX"), core_array("BagSZ"))):
         boxes.append(box("post sandbags %d" % n, (x, roof + bag / 2, z), (sx, bag, sz), group="post%d" % n))
-    parts, collider = console_boxes(roof)
+    parts, collider = console_boxes(floor)        # E W1: in the cab, on its floor
     boxes.extend(parts)
     cab, station = room.recipe()
-    for p in room.ROOF:
-        boxes.append(box("roof " + p["name"], p["center"] + [0, roof, 0], p["size"],
-                         group="horseshoe" if p["bag"] or p["solid"] else "roofprop"))
     for p in cab:
         boxes.append(box("cab " + p["name"], p["center"] + [0, floor, 0], p["size"],
                          group="cab-solid" if p["solid"] else "cab"))
-    boxes.append(box("supply order console", (7.4, floor + .4, -2.8), (.55, .8, .3), group="supply"))
+    sx, sz = supply_spot()
+    boxes.append(box("supply order console", (sx, floor + .4, sz), (.55, .8, .3), group="supply"))
     # CompactRadar's FieldSupport is a physical/rendered box, not part of the
     # imported head. Its base must touch the measured cab roof as well.
     boxes.append(antenna_support())
-    return boxes, collider, room.ROOF_CONSOLE, station
+    return boxes, collider, station
 
 
 def shipped_triangles():
@@ -237,34 +235,39 @@ def floating(flat, tri):
 def props():
     tri, labels, count = shipped_triangles()
     failures = []
-    # 1. the shipped roof under the console, its chair and its horseshoe IS the roof
+    # 1. E W1: the shipped cab floor under the console's desk and chair is
+    # flat at the floor TowerRadar.Place measures (x 7.4, from 13.5 m down),
+    # with the cab's own ceiling/roof (not open sky) above it
     import east_crossing_check as cc
     x0, z0 = core_const("ConsoleX"), core_const("ConsoleZ")
-    roof = core_const("RoofY")
-    ys = []
-    for x in np.linspace(x0 - 1.5, x0 + 1.5, 13):
-        for z in np.linspace(z0 - 1.2, z0 + 1.2, 11):
-            sel = np.where((tri[:, :, 0].min(1) <= x) & (tri[:, :, 0].max(1) >= x)
-                           & (tri[:, :, 2].min(1) <= z) & (tri[:, :, 2].max(1) >= z))[0]
-            h = [cc.height_on_tris(t[None], np.array([x]), np.array([z]))[0] for t in tri[sel]]
-            h = [y for y in h if np.isfinite(y) and y < roof + 3]
-            ys.append(max(h) if h else np.nan)
-    ys = np.array(ys)
-    if not (np.all(np.isfinite(ys)) and np.all(np.abs(ys - roof) < 0.005)):
-        failures.append("main roof under the console is not flat at RoofY: %s..%s" % (np.nanmin(ys), np.nanmax(ys)))
-    # TowerRadar.Place: the console stands at the roof its ray measures, the
-    # command room at the cab floor its ray measures (x 7.4, from 13.5 m down)
-    roof = float(np.nanmax(ys))
+    # the posts and the threshold stand on the main roof as measured on the
+    # open roof west of the inner flight (8.7915 m on C1_LOD0)
+    roof = surface_under(-6.0, 0.0, core_const("RoofY") + .5, tri, [], None)
+    if abs(roof - core_const("RoofY")) > 0.005:
+        failures.append("main roof %.4f is not RoofY" % roof)
     floor = surface_under(7.4, 0.0, 13.5, tri, [], None)
     if abs(floor - core_const("CabFloorY")) > 0.01:
         failures.append("cab floor %.3f is not CabFloorY" % floor)
-    boxes, collider, roof_console, station = all_boxes(roof, floor)
-    # one console spot in both recipes
-    assert roof_console == [core_const("ConsoleX"), core_const("ConsoleZ")], \
-        "TowerCommandRoomCore.RoofConsole* differs from TowerRoofCore.Console*"
-    # the console sits ON it: its collider's bottom is the roof
-    if abs(collider["c"][1] - collider["h"][1] - roof) > 1e-4:
-        failures.append("console collider bottom is not the roof")
+    ys, ceil = [], []
+    for x in np.linspace(x0 - .65, x0 + .65, 9):
+        for z in np.linspace(z0 - .4, z0 + 1.07, 9):
+            sel = np.where((tri[:, :, 0].min(1) <= x) & (tri[:, :, 0].max(1) >= x)
+                           & (tri[:, :, 2].min(1) <= z) & (tri[:, :, 2].max(1) >= z))[0]
+            h = [cc.height_on_tris(t[None], np.array([x]), np.array([z]))[0] for t in tri[sel]]
+            h = [y for y in h if np.isfinite(y)]
+            ys.append(max([y for y in h if y < floor + 1] or [np.nan]))
+            ceil.append(min([y for y in h if y > floor + 1] or [np.nan]))
+    ys, ceil = np.array(ys), np.array(ceil)
+    if not (np.all(np.isfinite(ys)) and np.all(np.abs(ys - floor) < 0.005)):
+        failures.append("cab floor under the console is not flat: %s..%s" % (np.nanmin(ys), np.nanmax(ys)))
+    if not (np.all(np.isfinite(ceil)) and np.all(ceil < core_const("CabRoofY") + .01)):
+        failures.append("the console is not under the cab's roof: ceiling %s..%s" % (np.nanmin(ceil), np.nanmax(ceil)))
+    if not (core_const("CabMinX") < x0 < core_const("CabMaxX") and core_const("CabMinZ") < z0 < core_const("CabMaxZ")):
+        failures.append("the console is not inside the cab rectangle")
+    boxes, collider, station = all_boxes(roof, floor)
+    # the console sits ON the cab floor: its collider's bottom is the floor
+    if abs(collider["c"][1] - collider["h"][1] - floor) > 1e-4:
+        failures.append("console collider bottom is not the cab floor")
     # 2. nothing cuts into the shipped tower (all colliders within 50 m)
     floor_tri = np.all(np.abs(tri[:, :, 1] - roof) < 3e-3, 1)       # horizontal main-roof/landing faces
     for b in boxes + [collider]:
@@ -274,15 +277,13 @@ def props():
     # 3. nothing cuts into anything else the mod builds
     for i, a in enumerate(boxes):
         for b in boxes[i + 1:]:
-            if a["group"] == b["group"] and a["group"] in ("threshold", "console", "cab", "horseshoe", "roofprop"):
+            if a["group"] == b["group"] and a["group"] in ("threshold", "console", "cab"):
                 continue                    # one prop's own parts touch by design
             if a["group"].startswith("cab") and b["group"].startswith("cab"):
                 continue                    # Z TC1 visuals sit inside their own collider boxes
-            if {a["group"], b["group"]} <= {"horseshoe", "roofprop"}:
-                continue                    # the cable runs under the east wall
             if overlap(a, b):
                 failures.append("%s overlaps %s" % (a["name"], b["name"]))
-    # the console collider and the horseshoe / roof props / posts stay apart
+    # the console collider and the cab furniture / supply console stay apart
     for b in boxes:
         if b["group"] != "console" and overlap(collider, b):
             failures.append("radar console overlaps %s" % b["name"])
@@ -298,6 +299,9 @@ def props():
     assert len(cuts(wall, tri, floor_tri)), "intersection negative control failed"
     old = box("6.67 console", (7.4, 15.35 + .8, -2.95), (1.3, 1.6, .7))
     assert floating([old], tri) == ["6.67 console"], "the 6.67 cab-roof console should float"
+    # E W1: the console pushed 3 cm into the south window sill must cut it
+    sill = box("negative console in the sill", (x0, floor + .8, -3.368 - .03 + .35), (1.3, 1.6, .7))
+    assert len(cuts(sill, tri, floor_tri)), "south sill negative control failed"
     old_support = box("6.67 antenna support", (7.9, 15.35 + 1.5, 0), (.24, 3, .24))
     assert floating([old_support], tri) == ["6.67 antenna support"], \
         "the 6.67 antenna support should float"
@@ -311,15 +315,15 @@ def props():
         if abs(b["R"][1, 0]) > 0.1 and abs(low - roof) > 0.005:   # ramps; the plateau clears the face (SAT above)
             failures.append("%s does not start at the roof/landing" % b["name"])
     summary = dict(shipped_colliders_50m=count, shipped_triangles=int(len(tri)), mod_boxes=len(boxes) + 1,
-                   console_roof_y=float(np.nanmean(ys)), console=[x0, z0], cab_floor=floor,
+                   console_floor_y=float(np.nanmean(ys)), console=[x0, z0], cab_floor=floor,
                    failures=failures)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "props.json").write_text(json.dumps(summary, indent=1), encoding="ascii")
     assert not failures, "\n".join(failures)
-    print("PASS C W3 props: radar console on the main roof (%.2f m, flat under desk/chair/horseshoe); "
-          "%d mod boxes vs %d shipped triangles (%d colliders, 50 m) and each other: 0 intersecting, 0 floating; "
-          "negative controls (floating crate, crate in the parapet, 6.67 console/antenna support) caught"
-          % (roof, len(boxes) + 1, len(tri), count))
+    print("PASS E W1 props: radar console in the cab on its floor (%.2f m, flat under desk/chair, ceiling "
+          "%.2f m above); %d mod boxes vs %d shipped triangles (%d colliders, 50 m) and each other: 0 intersecting, "
+          "0 floating; negative controls (floating crate, crate in the parapet, console in the south sill, "
+          "6.67 console/antenna support) caught" % (floor, float(np.nanmax(ceil)), len(boxes) + 1, len(tri), count))
 
 
 def main():

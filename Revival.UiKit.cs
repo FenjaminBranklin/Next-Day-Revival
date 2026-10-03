@@ -200,9 +200,11 @@ namespace NextDayRevival
             if (_open > 0) FreeCursor();
             if (_toasts.Count == 0 || !Ensure()) return;
             if (Event.current.type != EventType.Repaint) return;
-            UiToast toast = _toasts.At(_toasts.Count - 1);
+            // The newest toast as the game's HUD line (bottom-left), fading out.
+            int last = _toasts.Count - 1;
+            UiToast toast = _toasts.At(last);
             VanillaUi.Notice(toast.Text, toast.Kind == UiTone.Error || toast.Kind == UiTone.Warning
-                ? NativeMessage.Warning : NativeMessage.Inventory);
+                ? NativeMessage.Warning : NativeMessage.Inventory, _toasts.Alpha(last, Time.realtimeSinceStartup));
         }
 
         /// <summary>Shows a toast for 4 s (errors 6 s). The same text again

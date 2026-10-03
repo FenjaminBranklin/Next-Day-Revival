@@ -267,8 +267,7 @@ namespace NextDayRevival
         internal static void Draw()
         {
             if (string.IsNullOrEmpty(_banner) || Time.time > _bannerUntil) return;
-            if (!VanillaNotice.Banner("troop", _banner, null, NativeMessage.AirDrop, _bannerUntil))
-                VanillaUi.Notice(_banner, NativeMessage.AirDrop);
+            VanillaNotice.Banner("troop", _banner, null, NativeMessage.AirDrop, _bannerUntil);
         }
 
         // ========================================================== triggering
@@ -415,7 +414,7 @@ namespace NextDayRevival
             string cell = GridCell(lz);
             Banner(0, cell);
             _banner += Loc.T("; через ~", "; ETA ~") + Mathf.CeilToInt(eta).ToString(CultureInfo.InvariantCulture) + " s";
-            AirPicture.WarnAt(lz, RadarClarityText.Landing, eta, _banner);
+            AirPicture.WarnAt(lz, RadarClarityText.Landing, eta);
             RadarScope.Note("Mi-8 landing inbound, " + cell + ", ETA ~" + Mathf.CeilToInt(eta).ToString(CultureInfo.InvariantCulture) + " s");
         }
 

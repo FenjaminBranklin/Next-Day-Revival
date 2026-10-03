@@ -32,13 +32,37 @@ namespace NextDayRevival
         sealed class Cargo
         { internal Component Drop; internal Rigidbody Body; internal int Controller; internal float Next; }
         static readonly Dictionary<int, Cargo> Cargoes = new Dictionary<int, Cargo>();
-        // C W3: the command room furnishes the cab again; the radar console's
-        // old place by the south wall is the free spot, the rest are fallbacks.
+        // C W3: the command room furnishes the cab again. E W1: the radar
+        // console is back by the south window (x 7.25..8.55); the free spot
+        // is between it and the radio bench, the rest are fallbacks.
         static readonly Vector3[] Candidates = {
-            new Vector3(7.4f, 0f, -2.8f), new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
+            new Vector3(6.65f, 0f, -2.8f), new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
             new Vector3(5.7f, 0f, 2.8f), new Vector3(9.7f, 0f, 2.8f) };
         static readonly string[] _labels = new string[4];
-        static string _title, _prompt, _order, _close, _help, _status = "";
+        static string _title, _prompt, _order, _close, _help, _status = "", _useText, _lockedText, _key = "F";
+        // F T1: the terminal is used like every vanilla object - look at it, F.
+        // IL (PlayerInteractingManager.SearchGameplayItems): MainCamera ray of
+        // 11 u against ~98847764, then a 0.7 u sphere; MyInputManager
+        // .ButtonDown(ButtonAction 17) is the use key; UIController
+        // .ShowInteractingMessage(bool, string, FormType 0 "$Interact") is the prompt.
+        const int UseAction = 17, UseMask = ~98847764, MapItem = 8006;
+        const float UseRange = 11f, UseRadius = 0.7f;
+        delegate bool ActionDown(int action);
+        delegate string ActionKey(int action);
+        delegate bool Refuse();
+        delegate void UseMessage(bool show, string text, int form);
+        static ActionDown _useDown;
+        static ActionKey _useKey;
+        static MethodInfo _cantUse, _showUse, _findItem;
+        static FieldInfo _uiField, _eyeField, _inventoryField;
+        static Component _manager;
+        static object _ui;
+        static Refuse _refuse;
+        static UseMessage _message;
+        static Collider _desk;
+        static bool _hooked, _aimed, _shown, _ownCursor, _mapSeen, _useWarned;
+        static float _aimNext;
+        static int _toggleFrame = -1;
         static int _lang = -1, _shownMask = -1, _shownWait = -1, _generation = -1, _placement = -1;
         static GUIStyle _text;
         static bool Enabled { get { return _enabled == null || _enabled.Value; } }
@@ -68,6 +92,7 @@ namespace NextDayRevival
 
         internal static void Install(Harmony harmony)
         {
+            HookUse(harmony);
             _containerType = RevivalPlugin.TypeByName("ItemsContainer");
             _dropType = RevivalPlugin.TypeByName("AirDropObject");
             _viewType = RevivalPlugin.TypeByName("PhotonView");
@@ -92,6 +117,32 @@ namespace NextDayRevival
                 new HarmonyMethod(typeof(TowerDelivery).GetMethod("InteractingPrefix")), null, null, null, null);
             harmony.Patch(AccessTools.Method(_containerType, "OnInteractingWithContainer", null, null),
                 new HarmonyMethod(typeof(TowerDelivery).GetMethod("InteractingPrefix")), null, null, null, null);
+        }
+        static void HookUse(Harmony harmony)
+        {
+            try
+            {
+                Type input = RevivalPlugin.TypeByName("MyInputManager");
+                Type manager = RevivalPlugin.TypeByName("PlayerInteractingManager");
+                Type ui = RevivalPlugin.TypeByName("UIController");
+                if (input == null || manager == null || ui == null) return;
+                // Enum parameters bind to Int32 delegates as in RepairTap.
+                _useDown = (ActionDown)Delegate.CreateDelegate(typeof(ActionDown), AccessTools.Method(input, "ButtonDown", null, null));
+                MethodInfo key = AccessTools.Method(input, "GetKeyByAction", null, null);
+                if (key != null) _useKey = (ActionKey)Delegate.CreateDelegate(typeof(ActionKey), key);
+                _uiField = AccessTools.Field(manager, "_uiController");
+                _eyeField = AccessTools.Field(manager, "MainCamera");
+                _cantUse = AccessTools.Method(manager, "CantInteractWithItem", Type.EmptyTypes, null);
+                _showUse = AccessTools.Method(ui, "ShowInteractingMessage", null, null);
+                _inventoryField = AccessTools.Field(ui, "_plrInventoryManager");
+                _findItem = _inventoryField == null ? null : AccessTools.Method(_inventoryField.FieldType, "FindInventoryItem",
+                    new Type[] { typeof(int), typeof(string) }, null);
+                MethodInfo search = AccessTools.Method(manager, "SearchGameplayItems", Type.EmptyTypes, null);
+                if (_uiField == null || _eyeField == null || _showUse == null || search == null) return;
+                harmony.Patch(search, null, new HarmonyMethod(typeof(TowerDelivery).GetMethod("SearchPostfix")), null, null, null);
+                _hooked = true;
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery: native F use unavailable, own prompt: " + ex.Message); }
         }
         static object Get(object o, string name)
         { FieldInfo f = o == null ? null : AccessTools.Field(o.GetType(), name); return f == null ? null : f.GetValue(o); }
@@ -193,7 +244,8 @@ namespace NextDayRevival
             {
                 if (_console != null) UnityEngine.Object.Destroy(_console.gameObject);
                 if (_material != null) UnityEngine.Object.Destroy(_material);
-                _console = null; _material = null; _tower = TowerRadar.Tower; _candidate = 0; _placement = -1;
+                _console = null; _material = null; _desk = null; _aimed = false;
+                _tower = TowerRadar.Tower; _candidate = 0; _placement = -1;
                 if (Selecting) Close();
                 _near = _canOrder = false;
             }
@@ -220,12 +272,123 @@ namespace NextDayRevival
                 if (Selecting && !_canOrder) Close();
                 if (Selecting || (_near && _lang < 0)) Labels();
             }
-            if (!Selecting)
-            { if (_canOrder && !GameUi.WindowOpen && Input.GetKeyDown(KeyCode.J)) { Labels(); _mapOpened = Mortar.ShowMap(true); Selecting = _mapOpened; } }
-            else if (Input.GetKeyDown(KeyCode.J) || Input.GetKeyDown(KeyCode.Escape)) Close();
+            if (Selecting)
+            {
+                if (Time.frameCount == _toggleFrame) return;
+                if (_mapOpened)
+                {
+                    // The game closes its own map (Esc, M): follow it, never reopen.
+                    int state = GameUi.State;
+                    if (state == 8) _mapSeen = true;
+                    else if (_mapSeen) { _mapOpened = false; Close(); return; }
+                    else if (Time.frameCount > _toggleFrame + 2) { _mapOpened = false; _ownCursor = true; }
+                }
+                if (UseDown() || (_ownCursor && Input.GetKeyDown(KeyCode.Escape))) Close();
+            }
+            else if (!_hooked)
+            {
+                Camera camera = _near ? CameraOwner.ViewCamera() : null;
+                Use(camera == null ? null : camera.transform, !GameUi.WindowOpen);
+            }
+        }
+
+        // Runs right after the game's own interaction search, so the native
+        // ray has already picked at most one target and its prompt is final.
+        public static void SearchPostfix(Component __instance)
+        {
+            if (!_near && !_shown) return;
+            FrameProf.S(FrameProf.S_TowerDeliveryT);
+            try
+            {
+                if (__instance != _manager)
+                {
+                    GameObject me = MapTools.LocalPlayer();
+                    if (me == null || __instance.transform.root != me.transform.root) return;
+                    _manager = __instance;
+                    _refuse = _cantUse == null ? null : (Refuse)Delegate.CreateDelegate(typeof(Refuse), __instance, _cantUse);
+                }
+                object ui = _uiField.GetValue(__instance);
+                if (ui != _ui)
+                { _ui = ui; _message = ui == null ? null : (UseMessage)Delegate.CreateDelegate(typeof(UseMessage), ui, _showUse); }
+                Use(_eyeField.GetValue(__instance) as Transform, _refuse == null || !_refuse());
+            }
+            catch (Exception ex)
+            { if (!_useWarned) { _useWarned = true; RevivalPlugin.L.LogWarning("TowerDelivery F use: " + ex.Message); } }
+            finally { FrameProf.E(FrameProf.S_TowerDeliveryT); }
+        }
+        static bool UseDown()
+        { return _useDown != null ? _useDown(UseAction) : Input.GetKeyDown(KeyCode.F); }
+        static void Use(Transform eye, bool allowed)
+        {
+            bool aim = false;
+            if (allowed && _near && !Selecting && eye != null && _desk != null && !RadarScope.InView && !TowerSupport.Selecting)
+            {
+                if (Time.time >= _aimNext) { _aimNext = Time.time + 0.1f; _aimed = Aimed(eye); }
+                aim = _aimed;
+            }
+            else _aimed = false;
+            if (_message != null)
+            {
+                if (aim) { _message(true, _canOrder ? _useText : _lockedText, 0); _shown = true; }
+                else if (_shown) { _message(false, string.Empty, 0); _shown = false; }
+            }
+            if (!aim || Time.frameCount == _toggleFrame || !UseDown()) return;
+            if (_canOrder) Open();
+            else UiKit.Toast(_lockedText, UiTone.Warning);   // Update: one native HUD line, not an OnGUI draw
+        }
+        // The game's ray and sphere, 10 Hz and only within reach of the desk:
+        // whatever the game would use instead is hit first and wins.
+        static bool Aimed(Transform eye)
+        {
+            RaycastHit hit;
+            Vector3 from = eye.position, along = eye.forward;
+            if (!Physics.Raycast(from, along, out hit, UseRange, UseMask)
+                && !Physics.SphereCast(from, UseRadius, along, out hit, UseRange, UseMask)) return false;
+            return hit.collider == _desk;
+        }
+        static void Open()
+        {
+            _toggleFrame = Time.frameCount;
+            Labels();
+            if (_shown) { _message(false, string.Empty, 0); _shown = false; }
+            _aimed = _mapSeen = false;
+            // UIController.ShowMap(true) silently does nothing without a map
+            // item (IL), which left the 6.68 menu without a cursor. Then the
+            // menu frees the cursor itself, as the merc list does.
+            _mapOpened = HasMap() && Mortar.ShowMap(true);
+            _ownCursor = !_mapOpened;
+            Selecting = true;
         }
         static void Close()
-        { Selecting = false; if (_mapOpened) Mortar.ShowMap(false); _mapOpened = false; }
+        {
+            Selecting = false; _toggleFrame = Time.frameCount;
+            if (_mapOpened) Mortar.ShowMap(false);
+            _mapOpened = false;
+            if (_ownCursor)
+            {
+                _ownCursor = false;
+                if (!CursorTracker.SawCall) return;
+                CursorTracker.Restoring = true;
+                try { Cursor.lockState = CursorTracker.DesiredLock; Cursor.visible = CursorTracker.DesiredVisible; }
+                finally { CursorTracker.Restoring = false; }
+            }
+        }
+        static bool HasMap()
+        {
+            try
+            {
+                if (_ui == null || _inventoryField == null || _findItem == null) return true;
+                object inventory = _inventoryField.GetValue(_ui);
+                object found = inventory == null ? null : _findItem.Invoke(inventory, new object[] { MapItem, string.Empty });
+                return found is bool ? (bool)found : found != null;
+            }
+            catch { return true; }
+        }
+        static string KeyName()
+        {
+            try { string key = _useKey == null ? null : _useKey(UseAction); return string.IsNullOrEmpty(key) ? "F" : key; }
+            catch { return "F"; }
+        }
 
         static bool ClearBox(Vector3 center, Vector3 half, Quaternion rotation)
         {
@@ -252,13 +415,14 @@ namespace NextDayRevival
             _console.position = at + Vector3.up * (body.y / 2f);   // on the floor; the clearance box above stays lifted
             _console.rotation = rotation;
             desk.transform.SetParent(_console, false); desk.transform.localScale = body;
+            _desk = desk.GetComponent<Collider>();
             _material = new Material(Shader.Find("Standard")); _material.color = new Color(0.22f, 0.3f, 0.24f);
             desk.GetComponent<Renderer>().sharedMaterial = _material;
             UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(root, TowerRadar.ConsoleRoot.gameObject.scene);
             GameObject plate = new GameObject("Supply order sign"); plate.transform.SetParent(_console, false);
             plate.transform.localPosition = new Vector3(0f, 0.65f * body.y, 0f);
             plate.AddComponent<SupplySignBillboard>();
-            TextMesh text = plate.AddComponent<TextMesh>(); text.text = Loc.T("СНАБЖЕНИЕ АЭРОДРОМА [J]", "AIRFIELD SUPPLIES [J]");
+            TextMesh text = plate.AddComponent<TextMesh>(); text.text = Loc.T("СНАБЖЕНИЕ АЭРОДРОМА [", "AIRFIELD SUPPLIES [") + KeyName() + "]";
             text.characterSize = 0.14f; text.fontSize = 36; text.anchor = TextAnchor.MiddleCenter;
             _placement = index;
             if (master) RadarNet.Send(new float[] { 22f, index });
@@ -276,8 +440,11 @@ namespace NextDayRevival
                 _labels[2] = Loc.T("6 аптечек - 12 000", "6 medkits - 12,000");
                 _labels[3] = Loc.T("2 набора инструментов - 10 000", "2 toolkits - 10,000");
                 _title = Loc.T("ЛУФТПОСТ: СНАБЖЕНИЕ АЭРОДРОМА", "AIRFIELD SUPPLY AIRDROP");
-                _prompt = Loc.T("[J] Заказать снабжение (платно)", "[J] Order supplies (paid)");
-                _close = Loc.T("Закрыть [J / Esc]", "Close [J / Esc]");
+                _key = KeyName();
+                _useText = Loc.T("Снабжение аэродрома", "Airfield supplies");
+                _lockedText = Loc.T("Снабжение аэродрома: сначала удержите аэродром", "Airfield supplies: hold the airfield first");
+                _prompt = "[" + _key + "] " + _useText;
+                _close = Loc.T("Закрыть [", "Close [") + _key + " / Esc]";
                 _help = Loc.T("Доставка: 10 000. Перерыв: 10 минут. Ящик упадёт в 65-145 м от башни. Враги могут его забрать.",
                     "Delivery: 10,000. Cooldown: 10 minutes. Crate lands 65-145 m from the tower. Enemies can take it.");
                 _shownMask = -1;
@@ -293,7 +460,14 @@ namespace NextDayRevival
         {
             if (!_near) return;
             if (_text == null) { _text = new GUIStyle(GUI.skin.label); _text.wordWrap = true; }
-            if (!Selecting) { if (_canOrder) VanillaUi.Prompt(_prompt, Screen.height - 150f); return; }
+            // Without the native prompt (hook or HUD missing) the plugin plate stands in.
+            if (!Selecting) { if (_aimed && !_shown) VanillaUi.Prompt(_canOrder ? _prompt : _lockedText, Screen.height - 150f); return; }
+            if (_ownCursor && Event.current.type == EventType.Repaint)
+            {
+                CursorTracker.Restoring = true;
+                try { Cursor.visible = true; Cursor.lockState = CursorLockMode.None; }
+                finally { CursorTracker.Restoring = false; }
+            }
             Rect r = new Rect(Screen.width / 2f - 230f, Screen.height / 2f - 205f, 460f, 410f);
             GUI.Box(r, _title);
             for (int i = 0; i < 4; i++)

@@ -138,6 +138,31 @@ namespace NextDayRevival
         }
     }
 
+    /// <summary>e-m1: where an advance on a known enemy stops and the merc
+    /// fights from cover - his weapon's effective but safe range. Always
+    /// inside his c-m2 fire range (FireShare of it), so he can fire from
+    /// there; a short server AssaultRange shortens it with the fire range.</summary>
+    internal static class MercStandoff
+    {
+        // Metres by MercWeaponReach kind (zero and unknown: Rifle):
+        // -, pistol, shotgun, rifle, machine gun, marksman, SMG.
+        static readonly float[] Metres = { 60f, 30f, 22f, 60f, 62f, 150f, 40f };
+        internal const float FireShare = 0.95f;
+        internal const float Floor = 28f;         // 10 m: never on top of him
+        internal static bool Enabled = true;      // e-m1 tactics on by default (0 standoff: the old fight)
+
+        internal static float Table(byte kind) { return Metres[kind > 0 && kind < Metres.Length ? kind : MercWeaponReach.Rifle]; }
+
+        /// <summary>Units for a weapon kind against the given NPC reply range.</summary>
+        internal static float Units(byte kind, float reply)
+        {
+            float fire = MercWeaponReach.FireUnits(kind, reply);
+            return Mathf.Max(Floor, Mathf.Min(Table(kind) * MercWeaponReach.Metre, fire * FireShare));
+        }
+
+        internal static float ForItem(int item) { return Units(MercWeaponReach.Kind(item), MercWeaponReach.ReplyUnits); }
+    }
+
     /// <summary>How far a threat is taken to see him (M1 exposure).</summary>
     internal static class MercThreat
     {

@@ -242,6 +242,8 @@ namespace NextDayRevival
             _bannerUntil = 0f;
             _inZone = false;
             _zoneText = null;
+            _zoneKey = -99;
+            _zoneUntil = 0f;
             _mapLabel.text = "";
             MapInkLayer.Hide(Layer);
         }
@@ -251,7 +253,7 @@ namespace NextDayRevival
             GameObject me = MapTools.LocalPlayer();
             LocalSide = SideOf(me);
             bool inZone = me != null && InZone(me.transform.position);
-            if (inZone != _inZone) { _inZone = inZone; _zoneKey = -99; }
+            _inZone = inZone;
             ZoneText();
         }
 
@@ -435,6 +437,8 @@ namespace NextDayRevival
         static Vector2 _headSize, _lineSize, _zoneSize;
         static string _zoneText;
         static int _zoneKey = -99;
+        static float _zoneUntil;
+        static bool _zoneCapture;
 
         static void Announce(int ev, int before, bool beforeBy)
         {
@@ -466,17 +470,22 @@ namespace NextDayRevival
             return "<b>" + Loc.T("Аэродром - держат " + Name(State.Holder, true), "Airfield - held by " + Name(State.Holder, false));
         }
 
-        /// <summary>The line a player inside the zone sees, rebuilt only when
-        /// what it says changes (once a second at most).</summary>
+        /// <summary>The notice a player inside the zone gets, once per state:
+        /// garrison / held by / capture start and each quarter of a capture.
+        /// Leaving and re-entering in the same state posts nothing; a holder
+        /// change already has its announcement, so it is not repeated here.</summary>
         static void ZoneText()
         {
-            if (!_inZone || State.Holder < 0) { _zoneText = null; _zoneKey = -99; return; }
+            if (!_inZone || State.Holder < 0) return;
             int key;
             if (TowerRadar.NpcOperatorUp && !(State.ByPlayers && State.Holder == TowerRadar.HomeSide())) key = -2;
-            else if (State.Capturer >= 0) key = State.Capturer * 1000 + Mathf.RoundToInt(State.Progress * 100f);
+            else if (State.Capturer >= 0) key = State.Capturer * 1000 + Mathf.Min(3, Mathf.FloorToInt(State.Progress * 4f));
             else key = -3 - State.Holder * 2 - (State.ByPlayers ? 1 : 0);
             if (key == _zoneKey) return;
             _zoneKey = key;
+            _zoneCapture = key >= 0;
+            if (key < -2 && Time.time < _bannerUntil) { _zoneText = null; return; }
+            _zoneUntil = Time.time + VanillaNotice.Seconds;
             if (key == -2)
                 _zoneText = Loc.T("Аэродром держит гарнизон: выведите из строя оператора КДП, чтобы захватить",
                     "The garrison holds the airfield: take out the HQ operator in the tower to capture it");
@@ -498,14 +507,13 @@ namespace NextDayRevival
         {
             if (!Enabled || Event.current == null || Event.current.type != EventType.Repaint) return;
             DrawMap();
-            if (GameUi.State != 0) return;
-            float zoneY = Screen.height * 0.12f;
+            // One short native notice per state change (the HUD line, bottom
+            // left, 3 s); nothing stays on screen while the state holds.
             if (Time.time < _bannerUntil)
-            {
-                if (!VanillaNotice.Banner("airfield.capture", _head.text, _line.text, NativeMessage.Warning, _bannerUntil))
-                    zoneY += VanillaUi.Banner(_head.text, _line.text, zoneY, false) + 8f;
-            }
-            if (_zoneText != null) VanillaUi.Prompt(_zoneText, zoneY);
+                VanillaNotice.Banner("airfield.capture", _head.text, _line.text, NativeMessage.Warning, _bannerUntil);
+            else if (_zoneText != null && Time.time < _zoneUntil)
+                VanillaNotice.Banner("airfield.zone", _zoneText, null,
+                    _zoneCapture ? NativeMessage.Warning : NativeMessage.Inventory, _zoneUntil);
         }
 
         static bool _mapBuilt;

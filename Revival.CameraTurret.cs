@@ -755,7 +755,7 @@ namespace NextDayRevival
         static string _ammoFrom;             // zuletzt benutzte Munitionsquelle
         static float _nextTry;               // Wiederholsperre nach Fehlschuss
         static string _hinweis;              // Einblendung ueber dem Fadenkreuz
-        static float _hinweisBis;
+        static float _hinweisBis, _hinweisAb;
         static float _leerGemeldet;          // Log-Bremse fuer "keine Munition"
         static Texture2D _tankScope;         // Panzerzielfernrohr
         static bool _tankScopeTried;
@@ -1658,8 +1658,10 @@ namespace NextDayRevival
         internal static void Hinweis(string text, float sekunden, int type)
         {
             if (NativeMessage.Show(text, type)) { _hinweis = null; return; }
+            // Fallback: the HUD line plate for at most the game's few seconds.
             _hinweis = text;
-            _hinweisBis = Time.time + sekunden;
+            _hinweisAb = Time.time;
+            _hinweisBis = Time.time + Mathf.Min(sekunden, VanillaNotice.Seconds);
         }
 
         // Farben der Leuchtspur. Weissglut im Kern, Orange aussen und am Ende -
@@ -2890,7 +2892,8 @@ namespace NextDayRevival
         static void DrawHinweis()
         {
             if (_hinweis == null || Time.time > _hinweisBis) return;
-            VanillaUi.Notice(_hinweis, NativeMessage.Inventory);
+            VanillaUi.Notice(_hinweis, NativeMessage.Inventory,
+                VanillaNotice.Fade(Time.time - _hinweisAb, _hinweisBis - _hinweisAb));
         }
 
         /// <summary>

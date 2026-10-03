@@ -55,5 +55,34 @@ namespace NextDayRevival
         {
             return engaged && sameAircraft && lostSeconds >= 0f && lostSeconds <= ResumeSeconds;
         }
+
+        /// <summary>E L1: an engaged aircraft still hostile and in reach whose
+        /// line of sight failed for a moment (a tree, a ridge sample, the
+        /// tower) stays the crew's target - laid and fired on its track - for
+        /// ResumeSeconds after the last clear ray. One failed ray no longer
+        /// drops it, stops the fire and restarts the reaction.</summary>
+        internal static bool Hold(bool engaged, bool inReach, float sinceSight)
+        {
+            return engaged && inReach && sinceSight >= 0f && sinceSight <= ResumeSeconds;
+        }
+
+        // E L1: with the radar manned for its side a gun with nothing in reach
+        // lays on the nearest hostile contact out to this slant range, so it
+        // is on bearing (and its crew past its reaction) when the target
+        // enters range. Laying only: a cue never fires.
+        internal const float CueMetres = 12000f;
+
+        /// <summary>Collection radius in metres for a gun that may be cued.</summary>
+        internal static float CueCollectMetres(float collectMetres, bool direction)
+        {
+            return direction ? Math.Max(collectMetres, CueMetres) : collectMetres;
+        }
+
+        /// <summary>Reaction already spent when a target enters reach: the
+        /// seconds the crew laid on it as a radar cue (same aircraft only).</summary>
+        internal static float CueHeld(bool sameAircraft, float cueSeconds)
+        {
+            return sameAircraft ? Math.Max(0f, cueSeconds) : 0f;
+        }
     }
 }

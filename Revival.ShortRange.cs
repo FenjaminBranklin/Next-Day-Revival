@@ -79,7 +79,8 @@ namespace NextDayRevival
                 g.Engaged = false;
                 g.Firing = false;
                 g.ShortBurst = new ShortBurst();
-                g.WantPitch = 20f;
+                // E L1: on the radar's cue, else the ready lay.
+                if (!FlakFire.Cue(g, dt)) g.WantPitch = 20f;
                 Flak.Publish(g, false, false);
                 return;
             }
@@ -89,12 +90,16 @@ namespace NextDayRevival
             if (!g.Engaged)
             {
                 g.Engaged = true;
-                g.Held = 0f;
+                g.Held = FlakEngageCore.CueHeld(object.ReferenceEquals(t.Go, g.CueGo), g.CueHeld);
+                g.CueGo = null;
+                g.CueHeld = 0f;
+                g.DrySaid = false;
                 g.ShortBurst = new ShortBurst();
                 g.Err = FlakFire.Offset(t, mid, ShortRangeCore.Initial(dist, drone));
                 g.LastVel = t.Vel;
                 Flak.RaiseEngaging(g, t.Go);
             }
+            FlakFire.Dry(g);
             float tof;
             Vector3 aim = Intercept(mid, t.Pos, t.Vel, out tof) + g.Err;
             float yaw, pitch;

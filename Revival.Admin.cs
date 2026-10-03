@@ -924,8 +924,10 @@ namespace NextDayRevival
             {
                 string message = AirEvents.Ask(_target);
                 _pending = false;
-                _status = message;
-                _statusUntil = Time.time + 8f;
+                // A raid that started here already has its one warning notice;
+                // the status line only reports refusals and requests.
+                _status = AirEvents.WarnedAt == Time.time ? null : message;
+                _statusUntil = Time.time + VanillaNotice.Seconds;
                 RevivalPlugin.L.LogInfo("Map air strike: " + message);
             }
 

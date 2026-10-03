@@ -11,7 +11,8 @@ namespace NextDayRevival
 
     internal static class ShortRangeCore
     {
-        internal const float RangeM = 1400f, CeilingM = 600f, SpeedM = 970f;
+        // E L1: the ZU-23's effective slant range against aircraft is ~2 km.
+        internal const float RangeM = 2000f, CeilingM = 600f, SpeedM = 970f;
         internal const float BurstSeconds = 0.6f, PauseSeconds = 1.0f;
         internal const float ShotSeconds = 0.05f, ReloadSeconds = 10f;
         internal const int Magazine = 100, HeliHits = 16;

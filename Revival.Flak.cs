@@ -459,6 +459,11 @@ namespace NextDayRevival
             public readonly List<GepardGun.Contact> Hostile = new List<GepardGun.Contact>();
             public GepardGun.Contact Target;
             public GameObject LostGo;           // A L2: the aircraft lost a moment ago
+            public float LastSight = -100f;     // E L1: the last clear ray to Target
+            public GepardGun.Contact Cue;       // E L1: radar cue beyond reach (laying only)
+            public GameObject CueGo;
+            public float CueHeld;               // E L1: seconds laid on CueGo
+            public bool DrySaid;                // E L1: the empty-stock line of this engagement
             public bool Laying, Firing, Engaged, Reloading;
             public float Held, NextLook, NextShot, LastContact, LastShot = -100f, NextPublish, ReloadUntil;
             public float ScanFrom = -1f;        // B2: when the idle crew started watching the sky
@@ -478,6 +483,8 @@ namespace NextDayRevival
             public int AmmoSent = -1, AmmoSender = -1, AmmoTextCount = int.MinValue;
             public float AmmoHeartbeat, AmmoNextShot, AmmoNextSearch, AmmoNextReload;
             public string AmmoText, AmmoPrompt;
+            public int AmmoLevel;               // B3: 0 fine, 1 low, 2 empty (the last warned level)
+            public string AmmoLowText, AmmoDryText;
         }
 
         static readonly List<Gun> _guns = new List<Gun>();
@@ -2174,8 +2181,10 @@ namespace NextDayRevival
                     g.Engaged = false;
                     Flak.Log(g.Id + ": target lost - " + g.Fired + " round(s) fired.");
                 }
+                // E L1: the radar's cue lays the gun on the coming aircraft.
+                if (Cue(g, dt)) g.ScanFrom = -1f;
                 // Three quiet seconds: the crew watches the sky (B2).
-                if (Time.time - g.LastContact > 3f) Watch(g);
+                else if (Time.time - g.LastContact > 3f) Watch(g);
                 else g.ScanFrom = -1f;
                 g.FuzeRange = Flak.MaxFuze;
                 Flak.Publish(g, false, false);
@@ -2188,7 +2197,12 @@ namespace NextDayRevival
             {
                 g.Engaged = true;
                 g.Fired = 0;
-                g.Held = 0f;
+                // E L1: a crew laid on this aircraft by the radar cue has its
+                // reaction behind it; the first burst is still laid off.
+                g.Held = FlakEngageCore.CueHeld(object.ReferenceEquals(t.Go, g.CueGo), g.CueHeld);
+                g.CueGo = null;
+                g.CueHeld = 0f;
+                g.DrySaid = false;
                 // The first shot is laid on a rough range and lead: far off.
                 g.Err = Offset(t, mid, dist * MercAA.Calibration(g).InitialMil * 0.001f);
                 g.LastVel = t.Vel;
@@ -2197,6 +2211,7 @@ namespace NextDayRevival
                     + (Flak.RadarDirected ? "radar-directed" : "by eye") + ").");
                 Flak.RaiseEngaging(g, t.Go);
             }
+            Dry(g);
 
             float tof;
             Vector3 aim = Flak.Intercept(mid, t.Pos, t.Vel, out tof) + g.Err;
@@ -2220,6 +2235,38 @@ namespace NextDayRevival
             Flak.Publish(g, false, false);
         }
 
+        /// <summary>E L1: no target in reach, but the manned radar shows a
+        /// hostile beyond it (Search's Cue): the layers put the gun on that
+        /// aircraft's track - lead included, no fire - and the seconds spent on
+        /// it count against the crew's reaction once it enters reach.</summary>
+        internal static bool Cue(Flak.Gun g, float dt)
+        {
+            GepardGun.Contact c = g.Cue;
+            if (c == null || c.Go == null) { g.CueGo = null; g.CueHeld = 0f; return false; }
+            if (!object.ReferenceEquals(c.Go, g.CueGo)) { g.CueGo = c.Go; g.CueHeld = 0f; }
+            g.CueHeld += dt;
+            Vector3 mid = Flak.Mid(g);
+            float tof, yaw, pitch;
+            Vector3 aim = g.ShortRange ? ShortRange.Intercept(mid, c.Pos, c.Vel, out tof) : Flak.Intercept(mid, c.Pos, c.Vel, out tof);
+            Flak.Angles(g, aim - mid, out yaw, out pitch);
+            float min = g.ShortRange ? ZuGroundCore.MinPitch : Flak.CfgPitchMin == null ? -3f : Flak.CfgPitchMin.Value;
+            float max = g.ShortRange ? 90f : Flak.CfgPitchMax == null ? 82f : Flak.CfgPitchMax.Value;
+            g.WantYaw = yaw;
+            g.WantPitch = Mathf.Clamp(pitch, min, max);
+            return true;
+        }
+
+        /// <summary>E L1: an engaged crew without a round in the gun's stock
+        /// says so once (6.68.0 crews laid on raids with an empty stock and the
+        /// log only showed "0 round(s) fired").</summary>
+        internal static void Dry(Flak.Gun g)
+        {
+            if (g.DrySaid || FlakAmmo.Ready(g) || !g.Ammo.Known) return;
+            g.DrySaid = true;
+            Flak.Log(g.Id + ": engaged with an empty gun stock - no rounds to fire (bring "
+                + (g.ShortRange ? "ZU belt boxes" : "52-K shells") + ", L at the gun).");
+        }
+
         /// <summary>
         /// B2: a crew with nothing to shoot at does not park the gun - the
         /// layers crank it slowly round the sector ahead of the emplacement
@@ -2241,6 +2288,9 @@ namespace NextDayRevival
             g.Laying = false;
             g.Firing = false;
             g.Target = null;
+            g.Cue = null;
+            g.CueGo = null;
+            g.CueHeld = 0f;
             g.Engaged = false;
             g.Held = 0f;
             Flak.Publish(g, false, true);
@@ -2336,14 +2386,17 @@ namespace NextDayRevival
             bool direction = MercAA.DirectionAvailable(g);
             MercAAPost man = MercAA.Gun(g.Index);
             float range = (g.ShortRange ? ShortRangeCore.RangeM : MercAACore.Calibrate(man != null, direction, man == null ? 0 : man.Trait).Range) * Flak.K;
-            // A L2: a heavy airfield gun also gathers what flies in the airfield zone.
-            Collect(g.Air, eye, FlakEngageCore.CollectMetres(range / Flak.K, !g.ShortRange && !g.Town,
-                Flak.ZoneMetres, Flak.MaxFuze / Flak.K) * Flak.K);
+            // A L2: a heavy airfield gun also gathers what flies in the airfield zone;
+            // E L1: a radar-cued gun what the radar shows out to CueMetres.
+            Collect(g.Air, eye, FlakEngageCore.CueCollectMetres(FlakEngageCore.CollectMetres(range / Flak.K,
+                !g.ShortRange && !g.Town, Flak.ZoneMetres, Flak.MaxFuze / Flak.K), direction) * Flak.K);
 
             string side = Flak.OwnerFaction(g);
             g.Hostile.Clear();
-            GepardGun.Contact best = null, assigned = null;
-            float bestD = float.MaxValue;
+            GepardGun.Contact best = null, assigned = null, cue = null;
+            GepardGun.Contact current = g.Target != null && g.Target.Go != null ? g.Target : null;
+            bool currentReach = false, currentRayed = false, currentSeen = false;
+            float bestD = float.MaxValue, cueD = float.MaxValue;
             int bestThreat = int.MinValue;
             for (int i = 0; i < g.Air.Count; i++)
             {
@@ -2364,7 +2417,14 @@ namespace NextDayRevival
                 float d = Vector3.Distance(eye, c.Pos);
                 float targetRange = g.ShortRange ? range : Flak.ReachU(g, c.Pos, MercAACore.Calibrate(man != null,
                     direction && RadarShadow.Visible(c.Go), man == null ? 0 : man.Trait).Range);
-                if (d > targetRange || c.Pos.y - eye.y > (g.ShortRange ? ShortRangeCore.CeilingM * Flak.K : Flak_Ceiling())) continue;
+                if (d > targetRange || c.Pos.y - eye.y > (g.ShortRange ? ShortRangeCore.CeilingM * Flak.K : Flak_Ceiling()))
+                {
+                    // E L1: the radar's nearest hostile beyond reach is the cue.
+                    if (direction && d < cueD && d <= FlakEngageCore.CueMetres * Flak.K && RadarShadow.Visible(c.Go))
+                    { cue = c; cueD = d; }
+                    continue;
+                }
+                if (c == current) currentReach = true;
                 int cover = !g.ShortRange && direction ? Flak.TargetCover(g, c.Go) : 0;
                 float score = !g.ShortRange && direction && RadarShadow.Visible(c.Go)
                     ? MercAACore.TargetScore(d / Flak.K, cover) : d / Flak.K;
@@ -2372,7 +2432,9 @@ namespace NextDayRevival
                 // Only a target that can beat the current choice needs a LOS ray.
                 int threat = direction ? MercAACore.CoveredThreat(Threat(c), cover) : 0;
                 if (c.Go != g.Assigned && (threat < bestThreat || (threat == bestThreat && score >= bestD))) continue;
-                if (!Sight(g, eye, c)) continue;
+                bool seen = Sight(g, eye, c);
+                if (c == current) { currentRayed = true; currentSeen = seen; }
+                if (!seen) continue;
                 if (c.Go == g.Assigned) assigned = c;
                 if (threat > bestThreat || (threat == bestThreat && score < bestD))
                 { best = c; bestD = score; bestThreat = threat; }
@@ -2381,13 +2443,21 @@ namespace NextDayRevival
             // Stay on the target being walked in unless the assigned one appears
             // or the radar shows a clearly more urgent one (A L2: a drifting ETA
             // score no longer swaps similar aircraft and restarts the bracketing).
-            if (!g.ShortRange && g.Target != null && g.Target.Go != null && best != null && best != g.Target && assigned == null
-                && g.Hostile.Contains(g.Target)
-                && Vector3.Distance(eye, g.Target.Pos) <= Flak.ReachU(g, g.Target.Pos, MercAA.Calibration(g).Range)
-                && FlakEngageCore.Keep(direction ? MercAACore.CoveredThreat(Threat(g.Target), Flak.TargetCover(g, g.Target.Go)) : 0,
-                    bestThreat, direction)
-                && Sight(g, eye, g.Target))
-                best = g.Target;
+            // E L1: nor does a brief loss of sight drop it (FlakEngageCore.Hold).
+            if (current != null && best != current && assigned == null && currentReach)
+            {
+                if (!currentRayed) { currentRayed = true; currentSeen = Sight(g, eye, current); }
+                if (best == null)
+                {
+                    if (FlakEngageCore.Hold(g.Engaged, true, Time.time - (currentSeen ? Time.time : g.LastSight)))
+                        best = current;
+                }
+                else if (!g.ShortRange && currentSeen
+                    && FlakEngageCore.Keep(direction ? MercAACore.CoveredThreat(Threat(current), Flak.TargetCover(g, current.Go)) : 0,
+                        bestThreat, direction))
+                    best = current;
+            }
+            if (best != null && (best != current || !currentRayed || currentSeen)) g.LastSight = Time.time;
             if (best != g.Target)
             {
                 // A L2: a target gone for one scan keeps the solution (Control
@@ -2402,6 +2472,7 @@ namespace NextDayRevival
                 }
             }
             g.Target = best;
+            g.Cue = best == null ? cue : null;
         }
 
         static float Flak_Ceiling() { return Flak.CeilingU; }

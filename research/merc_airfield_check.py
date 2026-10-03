@@ -62,9 +62,10 @@ def main():
     assert 'if (Mercs.AirDefenceManaged(u)) return false;' in block(stations, 'internal static bool Replace(')
     radar = (ROOT / 'Revival.TowerRadar.cs').read_text(encoding='utf-8')
     console = block(radar, 'internal static Transform Console(')
-    # C W3: on the measured main roof the outside stairs reach, not the cab roof or cab.
-    assert 'p.y = TowerRadar.MainRoofY;' in console and 'RoofM' not in console
-    assert 'CabFloorY' not in console
+    # E W1: inside the cab (the glazed command room) on its measured floor,
+    # not the main roof (C W3) or the cab roof (6.67).
+    assert 'p.y = TowerRadar.CabFloorY;' in console and 'RoofM' not in console
+    assert 'MainRoofY' not in console
     # Both native and merc operator poses continue to use this one console.
     assert 'c.TransformPoint(new Vector3(0f, 0.02f, 0.85f)' in radar
     aa = (ROOT / 'Revival.MercAA.cs').read_text(encoding='utf-8')
@@ -78,7 +79,7 @@ def main():
     profile = (ROOT / 'RevivalFrameProfiler.cs').read_text(encoding='utf-8')
     assert 'public const int S_MercAirfieldT = ' in profile and 'MercAirfield.Orders.Sub' in profile
     assert 'MercStationApproach(f, u, at, now)' in aa and 'MercStationPlan.Retreat' in aa
-    print('PASS: shared K/MMB toggle/page, removed picker, roof console, 2 Hz/F6, existing master leases and M1/M2/M3 wiring')
+    print('PASS: shared K/MMB toggle/page, removed picker, cab console, 2 Hz/F6, existing master leases and M1/M2/M3 wiring')
     return 0
 
 

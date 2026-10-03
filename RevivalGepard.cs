@@ -1083,7 +1083,8 @@ namespace NextDayRevival
         internal static void Hint(string text, float seconds)
         {
             _hint = text;
-            _hintUntil = Time.time + seconds;
+            // A hint is a few-second line, never a standing notice (vanilla 3-6 s).
+            _hintUntil = Time.time + Mathf.Min(seconds, 6f);
         }
 
         static void Keys()

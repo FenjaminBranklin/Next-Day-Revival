@@ -66,6 +66,8 @@ namespace NextDayRevival
             MercSense sense = u.Sense;
             i.Known = sense.Count > 0;
             i.KnownAt = i.Known ? sense.At[0] : i.Me;
+            // e-m1: his weapon's standoff (MercFightIn, last Think).
+            i.Standoff = ft.In.Standoff;
             i.Danger = ft.In.Danger;
             i.Maintenance = ft.Health < MercBrain.RetreatUntil || Reloading(f)
                 || (u.Medicine != null && u.Medicine.Active != 0)
@@ -95,6 +97,7 @@ namespace NextDayRevival
             ft.In.AttackMove = false;
             ft.In.AttackRear = false;
             ft.In.AttackBound = false;
+            ft.In.AttackCovered = false;
             ft.In.AttackOrder = u.Order;
             ft.In.AttackDir = MercAttackGeo.Dir(u.Order);
             ft.In.AttackDest = ft.In.Me;
@@ -141,6 +144,8 @@ namespace NextDayRevival
             ft.In.AttackMove = ft.In.AttackBound || team == null || team.ReadyCount(now) <= 1
                 || !team.Contact(now) || now - team.LastSight > 2f || team.Runner(u.Order.K, now);
             if (ft.In.AttackMove) ft.In.AttackDest = MercAttackWaypoint(f, u, act.Dest, now);
+            ft.In.AttackCovered = ft.In.AttackMove && run.HaveMove && run.MoveCovered
+                && Flat(ft.In.AttackDest - run.MoveAt) < 1f;
         }
 
         static void MercAttackGround(MercAttackRun run)

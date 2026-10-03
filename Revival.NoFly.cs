@@ -524,51 +524,53 @@ namespace NextDayRevival
         static string _leftName;
         static GUIStyle _bannerStyle, _labelStyle;
 
-        /// <summary>The HUD banner (OnGUI): top centre, amber while warned,
-        /// red and pulsing once the zone's defence fires.</summary>
+        /// <summary>The zone's map ink and its HUD notices (OnGUI): one native
+        /// HUD line per phase, bottom-left like the game's own messages.</summary>
         internal static void Draw()
         {
             if (!On) { MapInkLayer.Hide("nofly"); return; }
             DrawMap();
             if (!B(CfgHud) || Event.current == null || Event.current.type != EventType.Repaint) return;
+            // One short notice per phase - entered (warned / undefended), under
+            // fire, left - never a banner held for the countdown; the beep
+            // keeps sounding while the zone holds the aircraft.
             float now = Time.time;
-            string head = null, line = null;
-            Color col = Color.white;
+            Zone zone = null;
+            int phase = 0;
             if (_local.Count > 0)
             {
                 Local l = _local[0];
-                float left = Seconds() - (now - l.Since);
-                string where = l.Zone.Name + " - " + l.Zone.Faction + " airspace";
-                if (!Defended(l.Zone))
-                {
-                    head = "NO FLY ZONE: " + where;
-                    line = "Leave the zone now - no air defence answers";
-                    col = new Color(1f, 0.78f, 0.25f, 1f);
-                }
-                else if (left > 0f)
-                {
-                    head = "NO FLY ZONE: " + where;
-                    line = "Leave the zone now - defensive fire in "
-                        + Mathf.CeilToInt(left).ToString(CultureInfo.InvariantCulture) + " s";
-                    col = new Color(1f, 0.78f, 0.25f, 1f);
-                }
-                else
-                {
-                    head = "NO FLY ZONE: " + where;
-                    line = "You are under defensive fire - leave the zone";
-                    float pulse = 0.65f + 0.35f * Mathf.Abs(Mathf.Sin(now * 5f));
-                    col = new Color(1f, 0.25f, 0.2f, pulse);
-                }
+                zone = l.Zone;
+                phase = !Defended(zone) ? 1 : Seconds() - (now - l.Since) > 0f ? 2 : 3;
             }
-            else if (now - _leftAt < 3f)
+            else if (now - _leftAt < 3f) phase = 4;
+            if (phase != _hudPhase || (zone != null && zone != _hudZone))
             {
-                head = "Left the no-fly zone";
-                line = _leftName;
-                col = new Color(0.7f, 0.95f, 0.7f, 1f - (now - _leftAt) / 3f);
+                _hudPhase = phase;
+                if (zone != null) _hudZone = zone;
+                if (phase != 0)
+                {
+                    _hudUntil = now + VanillaNotice.Seconds;
+                    string where = phase == 4 ? null : zone.Name + " - " + zone.Faction + " airspace";
+                    if (phase == 1) { _hudHead = "NO FLY ZONE: " + where; _hudLine = "Leave the zone now - no air defence answers"; }
+                    else if (phase == 2)
+                    {
+                        _hudHead = "NO FLY ZONE: " + where;
+                        _hudLine = "Leave the zone now - defensive fire in "
+                            + Mathf.CeilToInt(Seconds()).ToString(CultureInfo.InvariantCulture) + " s";
+                    }
+                    else if (phase == 3) { _hudHead = "NO FLY ZONE: " + where; _hudLine = "You are under defensive fire - leave the zone"; }
+                    else { _hudHead = "Left the no-fly zone"; _hudLine = _leftName; }
+                }
             }
-            if (head == null) return;
-            VanillaUi.Banner(head, line, Screen.height * 0.16f, false, _local.Count > 0 ? VanillaUi.Red : Color.white);
+            if (_hudHead != null && now < _hudUntil)
+                VanillaNotice.Banner("nofly", _hudHead, _hudLine, _hudPhase == 4 ? NativeMessage.Inventory : NativeMessage.Warning, _hudUntil);
         }
+
+        static Zone _hudZone;
+        static int _hudPhase;
+        static float _hudUntil;
+        static string _hudHead, _hudLine;
 
         /// <summary>One line of the banner, centred on <paramref name="cx"/>.</summary>
         static void Centred(string text, int size, float cx, float y)

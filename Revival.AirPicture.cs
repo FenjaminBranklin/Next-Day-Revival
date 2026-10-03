@@ -81,9 +81,12 @@ namespace NextDayRevival
 
         // the warning, rebuilt once a second while it stands
         static string _warnHead, _warnLine;
-        static int _warnKey = int.MinValue, _warnLevel;   // 2 to you, 1 airfield / raid
+        static int _warnKey = int.MinValue;
         static int _threatId = -1;
-        static bool _warnSized;
+        // the threat last noticed (RaidThreat: an announced raid) and its milestone
+        const int RaidThreat = -2;
+        static int _warnThreat = int.MinValue, _warnStage;
+        static float _warnUntil;
         static string _holdNote;
         static float _holdNoteUntil;
 
@@ -290,6 +293,8 @@ namespace NextDayRevival
             _live = 0;
             _warnHead = _warnLine = null;
             _warnKey = int.MinValue;
+            _warnThreat = int.MinValue;
+            _warnUntil = 0f;
             _threatId = -1;
         }
 
@@ -305,6 +310,11 @@ namespace NextDayRevival
             _raidArrive = Time.time + Mathf.Max(0f, eta);
             _raidSpeed = speedU;
             _raidWhat = what;
+            // AirEvents posts this raid's one notice; the countdown is re-shown
+            // only at the next milestone (60 / 30 s).
+            _warnThreat = RaidThreat;
+            _warnStage = VanillaNotice.Milestone(eta);
+            _warnKey = int.MinValue;
             _nextSlow = 0f;   // tell the holder at once, not up to a second later
         }
 
@@ -326,7 +336,7 @@ namespace NextDayRevival
                 : seconds + Loc.T(" с", " s");
             string text = Loc.T("РЛС: налет через ", "RADAR: Raid inbound, ") + wait
                 + Loc.T(", с направления ", ", from ") + AirPicturePolicy.Compass(from);
-            WarnAt(at, text, eta, text);
+            WarnAt(at, text, eta);
             return true;
         }
 
@@ -356,64 +366,84 @@ namespace NextDayRevival
                          && eta < bestAfEta) { bestAfEta = eta; bestAf = t; }
             }
 
-            int level = 0, key;
+            // One short notice per threat, then again only at the 60 / 30 s
+            // milestones - a countdown never keeps a banner on screen. The key
+            // changes at most at those steps, so the text is rebuilt that rarely.
+            int key;
             Track t0 = best ?? bestAf;
             if (t0 != null)
             {
-                level = best != null ? 2 : 1;
+                int level = best != null ? 2 : 1;
                 float eta = best != null ? bestEta : bestAfEta;
-                float dx = t0.Pos.x - p.x, dz = t0.Pos.z - p.z;
-                float brg = AirPicturePolicy.Bearing(dx, dz);
-                float km = Mathf.Sqrt(dx * dx + dz * dz) / K / 1000f;
-                int ieta = Mathf.RoundToInt(eta), ibrg = Mathf.RoundToInt(brg) % 360, ikm = Mathf.RoundToInt(km * 10f);
-                key = ((t0.Id * 3 + level) * 601 + Mathf.Min(ieta, 600)) * 360 * 64 + ibrg * 64 + Mathf.Min(ikm, 63);
+                int threat = t0.Id * 3 + level, stage = VanillaNotice.Milestone(eta);
+                key = threat * 4 + stage;
                 if (key != _warnKey)
                 {
                     _warnKey = key;
-                    string what = AirPicturePolicy.TypeName(t0.Type);
-                    string where = "bearing " + ibrg.ToString("000", CultureInfo.InvariantCulture) + " ("
-                        + AirPicturePolicy.Compass(brg) + "), " + (ikm / 10f).ToString("0.0", CultureInfo.InvariantCulture) + " km";
-                    _warnHead = level == 2 ? "C1 RADAR - AIR THREAT TO YOU" : "C1 RADAR - AIRFIELD UNDER AIR THREAT";
-                    if (ieta <= 0)
-                        _warnLine = "FOE " + what + (level == 2 ? " over you - " : " over the airfield - ") + where;
-                    else
-                        _warnLine = "FOE " + what + (level == 2 ? " inbound to you - " : " inbound to the airfield - ")
-                            + where + (level == 2 ? "" : " from you") + ", ETA " + ieta.ToString(CultureInfo.InvariantCulture) + " s";
-                    _warnSized = false;
+                    // A raid's aircraft reaching the picture are the announced
+                    // raid, whose one notice AirEvents already posted.
+                    bool fresh = threat != _warnThreat && !(t0.Raid && _warnThreat == RaidThreat);
+                    bool post = fresh || stage > _warnStage;
+                    _warnThreat = threat;
+                    _warnStage = fresh ? stage : Mathf.Max(_warnStage, stage);
+                    if (post)
+                    {
+                        float dx = t0.Pos.x - p.x, dz = t0.Pos.z - p.z;
+                        float brg = AirPicturePolicy.Bearing(dx, dz);
+                        float km = Mathf.Sqrt(dx * dx + dz * dz) / K / 1000f;
+                        int ieta = Mathf.RoundToInt(eta), ibrg = Mathf.RoundToInt(brg) % 360;
+                        string where = ibrg.ToString("000", CultureInfo.InvariantCulture) + " ("
+                            + AirPicturePolicy.Compass(brg) + "), " + km.ToString("0.0", CultureInfo.InvariantCulture) + Loc.T(" км", " km");
+                        string what = AirPicturePolicy.TypeName(t0.Type);
+                        _warnHead = level == 2 ? Loc.T("РЛС: ВОЗДУШНАЯ УГРОЗА ВАМ", "RADAR: AIR THREAT TO YOU")
+                            : Loc.T("РЛС: УГРОЗА АЭРОДРОМУ С ВОЗДУХА", "RADAR: AIRFIELD UNDER AIR THREAT");
+                        _warnLine = Loc.T("Противник ", "FOE ") + what
+                            + (ieta <= 0 ? Loc.T(" над целью - ", " overhead - ")
+                                : Loc.T(" через ", " in ") + ieta.ToString(CultureInfo.InvariantCulture) + Loc.T(" с - ", " s - "))
+                            + where;
+                        _warnUntil = now + VanillaNotice.Seconds;
+                    }
                 }
                 if (level == 2 && t0.Id != _threatId && B(CfgSound)) NoFlyBeep.Play(false);
                 _threatId = level == 2 ? t0.Id : -1;
-                _warnLevel = level;
                 return;
             }
             _threatId = -1;
 
-            // An announced raid, until its aircraft show on the picture.
+            // An announced raid, until its aircraft show on the picture: its
+            // notice came from AirEvents; here only the countdown milestones.
             if (_raidArrive >= 0f && !raidTracked && now < _raidArrive + 30f && _raidSpeed > 0f)
             {
-                float miss, brg;
-                float eta = AirPicturePolicy.RaidEta(_raidAt.x, _raidAt.z, _raidFrom.x, _raidFrom.y,
-                    _raidArrive - now, _raidSpeed, p.x, p.z, out miss, out brg);
-                int ieta = Mathf.Max(0, Mathf.RoundToInt(eta)), ibrg = Mathf.RoundToInt(brg) % 360;
-                int imiss = Mathf.RoundToInt(miss / K / 100f);
-                key = -(((ieta * 360 + ibrg) * 101) + Mathf.Min(imiss, 100)) - 1;
+                float left = Mathf.Max(0f, _raidArrive - now);
+                int stage = VanillaNotice.Milestone(left);
+                key = -1 - stage;
                 if (key != _warnKey)
                 {
                     _warnKey = key;
-                    _warnHead = "C1 RADAR - RAID INBOUND";
-                    _warnLine = (_raidWhat ?? "Raid") + " - bearing " + ibrg.ToString("000", CultureInfo.InvariantCulture)
-                        + " (" + AirPicturePolicy.Compass(brg) + ") from you, passes "
-                        + (imiss / 10f).ToString("0.0", CultureInfo.InvariantCulture) + " km from you in ~"
-                        + ieta.ToString(CultureInfo.InvariantCulture) + " s";
-                    _warnSized = false;
+                    if (_warnThreat == RaidThreat && stage > _warnStage)
+                    {
+                        _warnStage = stage;
+                        float dx = _raidAt.x - p.x, dz = _raidAt.z - p.z;
+                        float dist = Mathf.Sqrt(dx * dx + dz * dz);
+                        string secs = Mathf.CeilToInt(left).ToString(CultureInfo.InvariantCulture);
+                        string from = AirPicturePolicy.Compass(AirPicturePolicy.Bearing(_raidFrom.x, _raidFrom.y));
+                        _warnHead = Loc.T("РЛС: НАЛЁТ ЧЕРЕЗ ", "RADAR: RAID IN ") + secs + Loc.T(" С", " S");
+                        // The player at the target: no distance clause. Elsewhere:
+                        // how far and which way the target square is from them.
+                        _warnLine = dist <= radius
+                            ? (_raidWhat ?? "Raid") + Loc.T(" на вас, с направления ", " on you, from ") + from
+                            : (_raidWhat ?? "Raid") + Loc.T(" - цель в ", " - target ")
+                                + (dist / K / 1000f).ToString("0.0", CultureInfo.InvariantCulture) + Loc.T(" км, азимут ", " km away, bearing ")
+                                + (Mathf.RoundToInt(AirPicturePolicy.Bearing(dx, dz)) % 360).ToString("000", CultureInfo.InvariantCulture);
+                        _warnUntil = now + VanillaNotice.Seconds;
+                    }
                 }
-                _warnLevel = imiss * 100f * K <= radius ? 2 : 1;
                 return;
             }
             if (_raidArrive >= 0f && now >= _raidArrive + 30f) _raidArrive = -1f;
             _warnHead = null;
             _warnKey = int.MinValue;
-            _warnLevel = 0;
+            _warnThreat = int.MinValue;
         }
 
         // ------------------------------------------------------------- draw
@@ -424,9 +454,8 @@ namespace NextDayRevival
         const int LabelLimit = 12;
         static readonly Texture2D[] _icons = new Texture2D[6];
         static Texture2D _px;
-        static GUIStyle _small, _banner, _bannerSmall;
+        static GUIStyle _small;
         static readonly GUIContent _content = new GUIContent();
-        static float _headW, _lineW;
         static readonly string[] _captions = new string[MaxTracks + 1];
 
         // the map window: refreshed at 2 Hz, projected every frame
@@ -468,7 +497,9 @@ namespace NextDayRevival
         static float _pingUntil;
         static int _pingNext;
 
-        internal static void WarnAt(Vector3 at, string label, float eta, string toast)
+        /// <summary>The map ping of a warned event. No notice of its own: the
+        /// event's owner posts the one notice (one event = one notice).</summary>
+        internal static void WarnAt(Vector3 at, string label, float eta)
         {
             int i = _pingNext;
             _pingNext = (_pingNext + 1) % PingCount;
@@ -477,8 +508,6 @@ namespace NextDayRevival
             _pingArrive[i] = Time.time + Mathf.Clamp(eta, 0f, 600f);
             _pingEnd[i] = _pingArrive[i] + 30f;
             _pingUntil = Mathf.Max(_pingUntil, _pingEnd[i]);
-            // Toasts and their backing strings are event allocations, never ticks.
-            UiKit.Toast(toast, UiTone.Warning);
         }
 
         static void DrawWarningMap()
@@ -649,25 +678,16 @@ namespace NextDayRevival
             return _captions[n];
         }
 
+        /// <summary>The warning as the game's own HUD line: posted once per
+        /// threat or milestone (Warn), shown 3 s bottom-left, never held for the
+        /// countdown. The tower note likewise once per change of hands.</summary>
         static void DrawBanner()
         {
-            string head = null, line = null;
-            Color col;
-            if (_held && _warnHead != null)
-            {
-                head = _warnHead;
-                line = _warnLine;
-                col = _warnLevel >= 2 ? new Color(1f, 0.3f, 0.25f, 0.65f + 0.35f * Mathf.Abs(Mathf.Sin(Time.time * 5f)))
-                    : new Color(1f, 0.78f, 0.25f, 1f);
-            }
-            else if (Time.time < _holdNoteUntil && _holdNote != null)
-            {
-                head = _holdNote;
-                col = _held ? FriendColor : new Color(0.8f, 0.8f, 0.8f, 1f);
-                col.a = Mathf.Clamp01(_holdNoteUntil - Time.time);
-            }
-            else return;
-            VanillaUi.Banner(head, line, Screen.height * 0.16f + 72f, false);
+            float now = Time.time;
+            if (_held && _warnHead != null && now < _warnUntil)
+                VanillaNotice.Banner("air.picture", _warnHead, _warnLine, NativeMessage.Warning, _warnUntil);
+            else if (now < _holdNoteUntil && _holdNote != null)
+                VanillaNotice.Banner("air.picture.hold", _holdNote, null, NativeMessage.Inventory, _holdNoteUntil);
         }
 
         static void Styles()
@@ -678,13 +698,6 @@ namespace NextDayRevival
             _small.wordWrap = false;
             _small.richText = false;
             _small.normal.textColor = Color.white;
-            _banner = new GUIStyle(GUI.skin.label);
-            _banner.fontSize = 18;
-            _banner.wordWrap = false;
-            _banner.richText = true;
-            _banner.normal.textColor = Color.white;
-            _bannerSmall = new GUIStyle(_banner);
-            _bannerSmall.fontSize = 15;
         }
 
         static Texture2D Px()

@@ -198,13 +198,12 @@ namespace NextDayRevival
         internal static readonly Vector2 MastSpot = new Vector2(4272.12f, 1335f);
         internal const string RadarName = "C1 radar";
         /// <summary>The console in the tower's frame, metres (x east, z north):
-        /// C W3 - on the MAIN roof (reached by the outside stairs), north of
-        /// the inner flight, inside its sandbag horseshoe, its screen facing
-        /// north (TowerRoofCore). The cab (x 4.3..11.5, z -3.6..3.6) keeps
-        /// the command room; the cab's own roof (RoofM) carries the antenna.</summary>
+        /// E W1 - INSIDE the cab (the glazed command room, x 4.3..11.5,
+        /// z -3.6..3.6) on its measured floor, against the south window
+        /// under the antenna mast, its screen facing north into the room
+        /// (TowerRoofCore). The cab's own roof (RoofM) carries the antenna.</summary>
         internal static readonly Vector3 ConsoleLocalM = new Vector3(TowerRoofCore.ConsoleX, 0f, TowerRoofCore.ConsoleZ);
         internal const float CabFloorM = 12f;
-        internal const float MainRoofM = TowerRoofCore.RoofY;
         internal const float RoofM = TowerRoofCore.CabRoofY;
 
         // ------------------------------------------------------------- state
@@ -212,7 +211,7 @@ namespace NextDayRevival
         internal static Transform Tower;          // the C1 model (null: its spot)
         internal static float TowerYaw;
         internal static Vector3 TowerBase;        // ground under the tower's origin
-        internal static float CabFloorY, MainRoofY;
+        internal static float CabFloorY;
         internal static Transform RadarRoot, Head, ConsoleRoot;
         internal static Renderer Screen;
         internal static readonly List<Renderer> Elements = new List<Renderer>();
@@ -484,8 +483,7 @@ namespace NextDayRevival
             Built = RadarRoot != null && ConsoleRoot != null;
             Log(Built ? "HQ built: tower " + (tower != null ? "\"" + tower.name + "\"" : "(spot)") + " base y "
                 + TowerBase.y.ToString("0.0", CultureInfo.InvariantCulture) + ", cab floor y "
-                + CabFloorY.ToString("0.0", CultureInfo.InvariantCulture) + ", main roof y "
-                + MainRoofY.ToString("0.0", CultureInfo.InvariantCulture) + ", console at " + ConsoleRoot.position + "."
+                + CabFloorY.ToString("0.0", CultureInfo.InvariantCulture) + ", console in the cab at " + ConsoleRoot.position + "."
                 : "HQ could not be built.");
         }
 
@@ -527,12 +525,6 @@ namespace NextDayRevival
             if (Physics.Raycast(probe, Vector3.down, out hit, 3f * K, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
                 && hit.point.y > TowerBase.y + 10.5f * K)
                 CabFloorY = hit.point.y;
-            // the main roof under the console (C1_LOD0: 8.79 m), its design height where there is no collider
-            MainRoofY = TowerBase.y + MainRoofM * K;
-            probe = TowerPoint(new Vector3(ConsoleLocalM.x, MainRoofM + 1.2f, ConsoleLocalM.z));
-            if (Physics.Raycast(probe, Vector3.down, out hit, 2.4f * K, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
-                && Mathf.Abs(hit.point.y - MainRoofY) < 0.6f * K)
-                MainRoofY = hit.point.y;
         }
 
         /// <summary>A point of the tower's frame (metres, x east, z north,
@@ -1354,9 +1346,10 @@ namespace NextDayRevival
 
         // ----------------------------------------------------- the console
 
-        /// <summary>The radar console on the tower's main roof: cabinet,
-        /// sloped desk, the round PPI screen facing north, knobs, a telephone,
-        /// the operator's chair. Frame: +z = the screen's facing (north).</summary>
+        /// <summary>The radar console in the tower's cab: cabinet, sloped
+        /// desk, the round PPI screen facing north, knobs, a telephone, the
+        /// operator's chair (he faces the screen and the south window).
+        /// Frame: +z = the screen's facing (north).</summary>
         internal static Transform Console(Scene scene)
         {
             try
@@ -1364,7 +1357,7 @@ namespace NextDayRevival
                 GameObject root = new GameObject("NDR radar console");
                 SceneManager.MoveGameObjectToScene(root, scene);
                 Vector3 p = TowerRadar.TowerPoint(TowerRadar.ConsoleLocalM);
-                p.y = TowerRadar.MainRoofY;
+                p.y = TowerRadar.CabFloorY;
                 root.transform.position = p;
                 root.transform.rotation = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
 
@@ -1401,6 +1394,14 @@ namespace NextDayRevival
                 BoxCollider bc = root.AddComponent<BoxCollider>();
                 bc.center = new Vector3(0f, 0.8f, -0.05f) * K;
                 bc.size = new Vector3(1.3f, 1.6f, 0.7f) * K;
+                // E W1: the cab's baked NavMesh walks the operator to the
+                // chair; the desk carves it like the room's furniture.
+                NavMeshObstacle carve = root.AddComponent<NavMeshObstacle>();
+                carve.shape = NavMeshObstacleShape.Box;
+                carve.center = bc.center;
+                carve.size = bc.size;
+                carve.carving = true;
+                carve.carveOnlyStationary = true;
                 TowerCommandRoom.Attach(root.transform);
                 return root.transform;
             }
@@ -1749,6 +1750,7 @@ namespace NextDayRevival
         static readonly List<Blip> _blips = new List<Blip>();
         static readonly List<string> _log = new List<string>();
         static readonly Dictionary<string, FlakState> _gunState = new Dictionary<string, FlakState>();
+        static readonly Dictionary<string, int> _gunAmmo = new Dictionary<string, int>();   // B3: FlakAmmoStock.Level
         static int _nextId = 1;
         static float _nextCollect, _lastFollow, _lastSweep = -1f;
         static string _mine;
@@ -1910,8 +1912,16 @@ namespace NextDayRevival
                     else if (g.State == FlakState.Reloading) Note(g.Id + " reloading");
                 }
                 _gunState[g.Id] = g.State;
+                // B3: a gun that runs low or dry is logged once per change.
+                int level, ammo = Ammo(g);
+                if (_gunAmmo.TryGetValue(g.Id, out level) && ammo > level && g.Health > 0f)
+                    Note(g.Id + (ammo == 2 ? " OUT OF AMMO - cannot fire" : " AMMO LOW"));
+                _gunAmmo[g.Id] = ammo;
             }
         }
+
+        /// <summary>B3: 0 fine or garrison/unknown, 1 low, 2 empty.</summary>
+        static int Ammo(FlakGunInfo g) { return FlakAmmoStock.Level(g.Rounds, g.ShortRange); }
 
         // ---------------------------------------------------- friend / foe
 
@@ -2110,7 +2120,7 @@ namespace NextDayRevival
         sealed class GunRow
         {
             public string Id, Owner, Rounds;
-            public int State, Crew, OwnerKey = int.MinValue;
+            public int State, Crew, Ammo, OwnerKey = int.MinValue;
             public bool Follows;
         }
 
@@ -2223,6 +2233,7 @@ namespace NextDayRevival
                 row.State = Mathf.Clamp((int)g.State, 0, StateNames.Length - 1);
                 row.Crew = Mathf.Clamp(g.CrewAlive, 0, 2);
                 row.Rounds = g.Rounds == -1 ? "UNL" : g.Rounds == -2 ? "?" : UiNum.Of(g.Rounds);
+                row.Ammo = Ammo(g);
                 row.Follows = TowerRadar.Follows(g, _who);
                 int manSide = g.PlayerManned && g.ManActor >= 0 ? TowerRadar.PlayerSide(g.ManActor) : -1;
                 int key = (g.PlayerManned ? 1 : 0) + (g.CrewAlive > 0 ? 2 : 0) + (row.Follows ? 4 : 0)
@@ -2484,9 +2495,12 @@ namespace NextDayRevival
                 Vector2 g = ToMap(_guns[i].Position);
                 GUI.color = new Color(0.3f, 0.8f, 1f, 0.35f);
                 Ring(g.x, g.y, _guns[i].Range * scale, 24);
-                GUI.color = new Color(0.3f, 0.8f, 1f, 0.95f);
+                // B3: the gun's mark turns gold when low, red with DRY when empty.
+                int ammo = Ammo(_guns[i]);
+                GUI.color = ammo == 2 ? UiKit.Bad : ammo == 1 ? UiKit.Warn : new Color(0.3f, 0.8f, 1f, 0.95f);
                 VanillaUi.Texture(new Rect(g.x - 3f, g.y - 3f, 6f, 6f), _white);
                 SmallLabel(g.x + 5f, g.y - 7f, _guns[i].Id, GUI.color);
+                if (ammo > 0) SmallLabel(g.x + 5f, g.y + 5f, ammo == 2 ? "DRY" : "LOW", GUI.color);
             }
             Vector2 radar = ToMap(TowerRadar.RadarPos);
             GUI.color = UiKit.Accent;
@@ -2740,8 +2754,11 @@ namespace NextDayRevival
                 UiKit.Chip(new Rect(cx, r.y + UiKit.S(3f), UiKit.S(86f), small - UiKit.S(6f)), StateNames[g.State], StateTone(g.State));
                 UiKit.Chip(new Rect(cx + UiKit.S(92f), r.y + UiKit.S(3f), UiKit.S(66f), small - UiKit.S(6f)), CrewNames[g.Crew],
                     g.Crew > 0 ? UiTone.Success : UiTone.Error);
-                UiKit.Label(new Rect(cx + UiKit.S(164f), r.y, UiKit.S(36f), small), g.Rounds, UiFont.Small, UiFont.Right, UiKit.TextDim);
-                UiKit.Label(new Rect(cx + UiKit.S(204f), r.y, UiKit.S(26f), small), "rds", UiFont.Small, UiFont.Left, UiKit.TextDim);
+                // B3: a dry gun reads DRY in red, a low one LOW in gold.
+                Color ammo = g.Ammo == 2 ? UiKit.Bad : g.Ammo == 1 ? UiKit.Warn : UiKit.TextDim;
+                UiKit.Label(new Rect(cx + UiKit.S(164f), r.y, UiKit.S(36f), small), g.Rounds, UiFont.Small, UiFont.Right, ammo);
+                UiKit.Label(new Rect(cx + UiKit.S(204f), r.y, UiKit.S(26f), small), g.Ammo == 2 ? "DRY" : g.Ammo == 1 ? "LOW" : "rds",
+                    UiFont.Small, UiFont.Left, ammo);
                 UiKit.Label(new Rect(cx + UiKit.S(234f), r.y, r.xMax - cx - UiKit.S(240f), small), g.Owner, UiFont.Small, UiFont.Left,
                     g.Follows ? UiKit.Good : UiKit.Bad);
                 y += small;

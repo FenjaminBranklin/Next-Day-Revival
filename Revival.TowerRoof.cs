@@ -1,7 +1,8 @@
 // Next Day: Survival - Revival Toolkit
 //
 // Z T1a: the tower's north outside staircase replaces the unusable B1 ladder.
-// C W3: it ends on the main roof again (radar console, sandbag posts); the
+// C W3: it ends on the main roof again (sandbag posts, the cab's inner
+// flight; E W1: the radar console stands inside the cab); the
 // only runtime stair part is the threshold over the parapet's collider face.
 // Deterministic collision + merged visual geometry on every client; merc
 // authority/Photon position replication use existing hooks.
@@ -70,7 +71,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgOn = cfg.Bind("TowerRadar", "RoofLadder", true,
-                "Outside staircase access to the C1 main roof: radar console, five sandbag posts, the cab's inner flight. "
+                "Outside staircase access to the C1 main roof: five sandbag posts, the cab's inner flight to the radar console. "
                 + "Legacy RoofLadder key retained; no ladder is built. Enabled by default.");
         }
 
@@ -267,7 +268,7 @@ namespace NextDayRevival
                 c.Pts[0] = start;
                 c.N = 1;
             } else c.N = TowerRoofCore.Path(up, start, TowerRoofCore.Foot(_footY), TowerRoofCore.Exit(), c.Pts);
-            // up: around the roof's obstacles to the seat, the cab or his post
+            // up: around the roof's obstacles to the cab (the console seat) or his post
             if (up) c.N = TowerRoofCore.Route(c.Pts, c.N, _legMan == man ? _legEnd : TowerRoofCore.Post(slot));
             _legMan = null;
             c.EndPoint = World(c.Pts[c.N - 1]);
@@ -460,7 +461,7 @@ namespace NextDayRevival
                 float midX = (TowerRoofCore.RoofMinX + TowerRoofCore.RoofMaxX) * 0.5f, midZ = (TowerRoofCore.RoofMinZ + TowerRoofCore.RoofMaxZ) * 0.5f;
                 src.Add(BoxSource(new Vector3(midX, TowerRoofCore.RoofY - 0.175f, midZ),
                     new Vector3(TowerRoofCore.RoofMaxX - TowerRoofCore.RoofMinX + 0.6f, 0.35f, TowerRoofCore.RoofMaxZ - TowerRoofCore.RoofMinZ + 0.6f)));
-                // every obstacle of the roof walk (cab, vents, bags, console) as a 3 m block
+                // every obstacle of the roof walk (cab, vents, bags) as a 3 m block
                 for (int i = 0; i < TowerRoofCore.ObstacleCount; i++) {
                     float x0, z0, x1, z1;
                     TowerRoofCore.Obstacle(i, out x0, out z0, out x1, out z1);

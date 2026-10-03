@@ -298,8 +298,7 @@ namespace NextDayRevival
         internal static void Draw()
         {
             if (string.IsNullOrEmpty(_banner) || Time.time > _bannerUntil) return;
-            if (!VanillaNotice.Banner("convoy", _banner, null, NativeMessage.AirDrop, _bannerUntil))
-                VanillaUi.Notice(_banner, NativeMessage.AirDrop);
+            VanillaNotice.Banner("convoy", _banner, null, NativeMessage.AirDrop, _bannerUntil);
         }
 
         // ============================================================ spawning

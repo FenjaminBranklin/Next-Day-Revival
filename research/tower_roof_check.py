@@ -187,15 +187,16 @@ static class Sim {
   Vector3 m3=TowerRoofCore.Exit();
   List<int> q3=Run(ref m3,roofGoal,3,foot,out t,true,"roofwalk");
   Ok(S(q3)=="ClimbUp,Hold","on the roof to a roof goal: walk round to the post, no stair");
-  // 6. C W3: the radar merc reaches the console seat on the main roof
+  // 6. E W1: the radar merc reaches the console seat INSIDE the cab
   Vector3 m4=new Vector3(40f,0f,-20f);
   List<int> q4=Run(ref m4,seat,2,foot,out t,true,"seat");
   Console.WriteLine("SEQ seat "+S(q4)+" in "+F(t)+" s");
-  Ok(S(q4)=="Walk,ClimbUp,Nav,Step","radar merc: foot, stair, roof walk to the seat, NavMesh last step");
-  Ok(Flat(m4,seat)<1e-3f,"radar merc ends at the console seat");
-  Ok(TowerRoofCore.AtSeat(seat) && TowerRoofCore.Exact(seat),"the console pose is an exact goal");
+  Ok(S(q4)=="Walk,ClimbUp,Nav,Step","radar merc: foot, stair, roof, inner flight, cab door, NavMesh to the seat");
+  Ok(Flat(m4,seat)<1e-3f && Math.Abs(m4.y-seat.y)<1e-3f,"radar merc ends at the console seat");
+  Ok(TowerRoofCore.InCab(seat) && TowerRoofCore.AtSeat(seat) && TowerRoofCore.Exact(seat),"the console pose is an exact goal inside the cab");
+  Ok(Math.Abs(TowerRoofCore.Seat().y-TowerRoofCore.CabFloorY)<1e-4f,"the seat stands on the cab floor");
   Vector3 at;
-  Ok(TowerRoofCore.Leg(TowerRoofCore.Post(0),seat,0,Fo,E,out at)==TowerRoofCore.LegWalk && Flat(at,TowerRoofCore.Seat())<1e-4f,"from a post the seat leg is the seat, not the post");
+  Ok(TowerRoofCore.Leg(TowerRoofCore.Post(0),seat,0,Fo,E,out at)==TowerRoofCore.LegWalk && Flat(at,TowerRoofCore.Inner[0])<1e-4f,"from a post the seat leg is the cab door, not the post");
   // 7. into the cab (command room) and out again
   Vector3 m5=new Vector3(40f,0f,-20f);
   List<int> q5=Run(ref m5,cabGoal,1,foot,out t,true,"cab");
@@ -205,7 +206,7 @@ static class Sim {
   Vector3 m6=new Vector3(8f,TowerRoofCore.CabFloorY,-0.8f);
   List<int> q6=Run(ref m6,seat,0,foot,out t,true,"cabseat");
   Console.WriteLine("SEQ cabseat "+S(q6)+" in "+F(t)+" s");
-  Ok(S(q6)=="Nav,Step,ClimbUp,Nav,Step","cab to the console: NavMesh to the door, inner flight, roof, seat");
+  Ok(S(q6)=="Nav,Step" && Flat(m6,seat)<1e-3f,"cab to the console: the cab's NavMesh straight to the seat, no roof walk");
   Vector3 m7=new Vector3(8f,TowerRoofCore.CabFloorY,-0.8f);
   List<int> q7=Run(ref m7,ground,0,foot,out t,true,"cabdown");
   Console.WriteLine("SEQ cabdown "+S(q7)+" in "+F(t)+" s");
@@ -322,16 +323,17 @@ def geometry(paths):
     from tower_stairs_check import geometry as stair_geometry
     stair_geometry(paths)
     ok(True, "ALL area colliders and full stair sweep checked")
-    # C W3: the radar console's route reaches its seat on the main roof; the
-    # cab route reaches the command room; every added box rests, none cuts in
-    seat = [float(v) for v in re.search(r"ConsoleX = ([-\d.]+)f, ConsoleZ = ([-\d.]+)f", CORE).groups()]
+    # E W1: the radar merc's checked walk ends inside the cab door (the cab's
+    # NavMesh takes him to the seat: tower_command_room_check proves that
+    # leg); the cab route reaches the command room; every added box rests
+    inner = [float(v) for v in re.search(r"Inner = \{\s*new Vector3\(([-\d.]+)f, CabFloorY, ([-\d.]+)f\)", CORE).groups()]
     last = paths.get("seat", [(0, 0, 0)])[-1]
-    ok(abs(last[0] - seat[0]) < 0.01 and abs(last[2] - seat[1] - 0.85) < 0.01 and abs(last[1] - const("RoofY")) < 0.01,
-       "the radar merc's checked walk ends at the console seat on the main roof")
+    ok(abs(last[0] - inner[0]) < 0.01 and abs(last[2] - inner[1]) < 0.01 and abs(last[1] - const("CabFloorY")) < 0.01,
+       "the radar merc's checked walk ends inside the cab door, on the cab floor")
     ok("cab" in paths and abs(paths["cab"][-1][1] - const("CabFloorY")) < 0.01, "the checked cab walk ends inside the cab")
     import c_w3_tower_check
     c_w3_tower_check.props()
-    ok(True, "C W3 console/command room/posts: on their surfaces, nothing floating or intersecting")
+    ok(True, "E W1 console in the cab / command room / posts: on their surfaces, nothing floating or intersecting")
 
 
 def wiring():
@@ -359,8 +361,13 @@ def wiring():
        "C W3: roof walks route round the obstacles; cab inside and last steps use the NavMesh")
     radar = (ROOT / "Revival.TowerRadar.cs").read_text(encoding="utf-8")
     room = (ROOT / "Revival.TowerCommandRoom.cs").read_text(encoding="utf-8")
-    ok("p.y = TowerRadar.MainRoofY;" in radar and "TowerRadar.RoofM * TowerRadar.K;" not in radar,
-       "C W3: the radar console stands on the measured main roof, not the cab roof")
+    console = radar[radar.index("internal static Transform Console(Scene scene)"):]
+    console = console[:console.index("TowerCommandRoom.Attach(root.transform);")]
+    ok("p.y = TowerRadar.CabFloorY;" in console and "TowerRadar.RoofM * TowerRadar.K;" not in radar
+       and "MainRoofY" not in radar, "E W1: the radar console stands on the measured cab floor, not a roof")
+    ok("carve.carving = true;" in console and "carve.size = bc.size;" in console,
+       "E W1: the console's desk carves the cab NavMesh")
+    ok("RoofPieces" not in room and "roof console post" not in room, "E W1: no console post / sandbag horseshoe on the main roof")
     ok('Frame("NDR C1 command room", TowerRadar.CabFloorY)' in room and "-TowerRadar.ConsoleLocalM" not in room,
        "C W3: the command room is built at the cab floor, not relative to the console")
     ok("GameLadder(" not in RUNTIME and "LadderMesh(" not in RUNTIME

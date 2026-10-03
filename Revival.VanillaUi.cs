@@ -366,64 +366,104 @@ namespace NextDayRevival
             GUI.color = old; style.normal.textColor = c;
         }
 
+        // Vanilla geometry, read from level7 (research/vanilla_ui_style.py and
+        // the transform chain): UIRoot is 720 units high, so one unit is
+        // Screen.height / 720 pixels at any resolution.
+        //   HUD_MessageUI/Msg_HUD (scale 0.8): Msg_Form 385 x 70 -> 308 x 56,
+        //     anchored bottom-left, centre 169.7 / 34 units from that corner;
+        //     Label_Msg 288 x 52 -> 230 x 42, 29 units right of centre, ROBOTO-
+        //     LIGHT 18 -> 14.4. HUD_MessageUI shows each line 3 s.
+        //   HUD_TopMessage/ElementsUI (scale 0.61): Form 499 x 100 -> 304 x 61,
+        //     top centre, centre 62.4 units below the top; MessageLabel 379 x 68
+        //     at +39.8, Bebas 44; AdditionalMessageLabel 22 on a 461 x 30
+        //     Empty_Msg strip 68.5 below the form's centre.
+        static float Unit() { return Screen.height / 720f; }
+
+        /// <summary>Top of a vanilla top-message plate (the toxicity/raid form).</summary>
+        internal static float TopMessageY { get { return (62.4f - 30.5f) * Unit(); } }
+
+        // Shrink-to-fit like NGUI's ShrinkContent, cached by the caller's
+        // (cached) string so CalcSize/CalcHeight run only when the text changes.
+        static readonly string[] FitText = new string[6];
+        static readonly int[] FitBase = new int[6], FitSize = new int[6];
+        static readonly float[] FitWidth = new float[6];
+        static int _fitNext, _fitGeneration = -1;
+
+        static int Fit(GUIStyle s, string text, int size, float w, float h, bool wrap)
+        {
+            if (_fitGeneration != _generation) { _fitGeneration = _generation; for (int i = 0; i < FitText.Length; i++) FitText[i] = null; }
+            for (int i = 0; i < FitText.Length; i++)
+                if (ReferenceEquals(FitText[i], text) && FitBase[i] == size && FitWidth[i] == w) return FitSize[i];
+            Content.text = text;
+            bool oldWrap = s.wordWrap;
+            s.wordWrap = wrap;
+            int min = Mathf.RoundToInt(size * 0.6f), fit = size;
+            if (min < 8) min = 8;
+            for (; fit > min; fit--)
+            {
+                s.fontSize = fit;
+                if (wrap ? s.CalcHeight(Content, w) <= h : s.CalcSize(Content).x <= w) break;
+            }
+            s.wordWrap = oldWrap;
+            int slot = _fitNext; _fitNext = (_fitNext + 1) % FitText.Length;
+            FitText[slot] = text; FitBase[slot] = size; FitWidth[slot] = w; FitSize[slot] = fit;
+            return fit;
+        }
+
         /// <summary>A native-looking notice: type icon left, text right of it.</summary>
         internal static void Notice(string text, int type)
+        { Notice(text, type, 1f); }
+
+        /// <summary>The HUD message line where and how big the game draws it:
+        /// bottom-left, 308 x 56 units, ROBOTO-LIGHT 14.4 units, shrunk to fit.
+        /// alpha fades it in and out (the caller owns the 3-5 s lifetime).</summary>
+        internal static void Notice(string text, int type, float alpha)
         {
-            if (_notice == null || string.IsNullOrEmpty(text)) return;
-            float k = Scale();
-            float w = Mathf.Min(Screen.width - 24f, 520f * k);
-            _notice.fontSize = Mathf.RoundToInt(18f * k);
-            _notice.alignment = TextAnchor.MiddleLeft;
+            if (_notice == null || string.IsNullOrEmpty(text) || alpha <= 0f) return;
+            float u = Unit();
+            Rect r = new Rect(15.7f * u, Screen.height - 62f * u, 308f * u, 56f * u);
             Style(_notice);
-            Content.text = text;
-            // Two passes: the icon square grows with the plate's height.
-            float h = 76f * k;
-            for (int pass = 0; pass < 2; pass++)
-                h = Mathf.Clamp(_notice.CalcHeight(Content, w - h - 26f * k) + 24f * k, 76f * k, 124f * k);
-            Rect r = new Rect((Screen.width - w) * 0.5f, Screen.height * 0.12f, w, h);
-            Panel(r, type == NativeMessage.Kill ? "Weapon2_Msg" : type == NativeMessage.Group ? "Group_Msg"
-                : type == NativeMessage.Inventory ? "Iventory_Msg" : "Warning_Msg");
-            float x = r.x + IconInset(r) + 4f * k;
-            Label(new Rect(x, r.y + 8f * k, r.xMax - x - 22f * k, r.height - 16f * k), text, _notice);
             _notice.alignment = TextAnchor.MiddleCenter;
+            Rect t = new Rect(r.x + 62f * u, r.y + 7f * u, 230.4f * u, 41.6f * u);
+            _notice.fontSize = Fit(_notice, text, Mathf.RoundToInt(14.4f * u), t.width, t.height, true);
+            Color old = GUI.color;
+            Panel(r, type == NativeMessage.Kill ? "Weapon2_Msg" : type == NativeMessage.Group ? "Group_Msg"
+                : type == NativeMessage.Inventory ? "Iventory_Msg" : "Warning_Msg", new Color(1f, 1f, 1f, alpha));
+            GUI.color = new Color(old.r, old.g, old.b, old.a * alpha);
+            Label(t, text, _notice);
+            GUI.color = old;
         }
 
         internal static float Banner(string head, string line, float y, bool toxic)
         { return Banner(head, line, y, toxic, Color.white); }
 
-        /// <summary>Heading (+ optional line) on a warning/toxic plate, text right
-        /// of the icon. Returns the plate height so callers can stack below it.</summary>
+        /// <summary>The game's top message (HUD_TopMessage): a 304 x 61 unit
+        /// warning/toxic form, top centre, Bebas heading right of the icon and
+        /// the optional second line on a thin strip under it. y is the form's
+        /// top (TopMessageY for the vanilla place). Returns the total height.</summary>
         internal static float Banner(string head, string line, float y, bool toxic, Color tint)
         {
-            if (_notice == null) return 0f;
-            float k = Scale();
-            float w = Mathf.Min(Screen.width - 24f, 640f * k);
-            bool two = !string.IsNullOrEmpty(line);
-            _noticeTitle.fontSize = Mathf.RoundToInt(26f * k);
-            _noticeTitle.alignment = TextAnchor.MiddleLeft;
-            _notice.fontSize = Mathf.RoundToInt(17f * k);
-            _notice.alignment = TextAnchor.UpperLeft;
-            Style(_notice); Style(_noticeTitle);
-            float h = (two ? 104f : 84f) * k, headH = 0f, lineH = 0f;
-            for (int pass = 0; pass < 2; pass++)
-            {
-                float tw = w - h - 26f * k;
-                Content.text = head; headH = _noticeTitle.CalcHeight(Content, tw);
-                lineH = 0f;
-                if (two) { Content.text = line; lineH = _notice.CalcHeight(Content, tw); }
-                h = Mathf.Clamp(headH + lineH + (two ? 30f : 24f) * k, (two ? 96f : 76f) * k, 150f * k);
-            }
-            Rect r = new Rect((Screen.width - w) * 0.5f, y, w, h);
+            if (_notice == null || string.IsNullOrEmpty(head)) return 0f;
+            float u = Unit();
+            Rect r = new Rect((Screen.width - 304.4f * u) * 0.5f, y, 304.4f * u, 61f * u);
             Panel(r, toxic ? "Toxic_Msg" : "Warning_Msg", tint);
-            float x = r.x + IconInset(r) + 4f * k, tw2 = r.xMax - x - 22f * k;
-            float top = r.y + Mathf.Max(8f * k, (h - headH - lineH - (two ? 6f * k : 0f)) * 0.5f);
-            Label(new Rect(x, top, tw2, headH), head, _noticeTitle);
-            if (two) Label(new Rect(x, top + headH + 6f * k, tw2, Mathf.Max(0f, Mathf.Min(lineH, r.yMax - 6f * k - top - headH - 6f * k))), line, _notice);
-            _notice.alignment = TextAnchor.MiddleCenter;
+            Style(_noticeTitle);
             _noticeTitle.alignment = TextAnchor.MiddleCenter;
-            return h;
+            float cx = r.x + r.width * 0.5f, cy = r.y + r.height * 0.5f;
+            Rect t = new Rect(cx + 24.3f * u - 115.6f * u, r.y + 9.8f * u, 231.2f * u, 41.5f * u);
+            _noticeTitle.fontSize = Fit(_noticeTitle, head, Mathf.RoundToInt(26.8f * u), t.width, t.height, false);
+            Label(t, head, _noticeTitle);
+            _noticeTitle.alignment = TextAnchor.MiddleCenter;
+            if (string.IsNullOrEmpty(line)) return r.height;
+            Rect strip = new Rect(cx - 140.6f * u, cy + 41.8f * u - 9.15f * u, 281.2f * u, 18.3f * u);
+            Panel(strip, Plate, new Color(1f, 1f, 1f, tint.a));
+            Style(_notice);
+            _notice.alignment = TextAnchor.MiddleCenter;
+            Rect lt = new Rect(strip.x + 12.8f * u, strip.y, 255.6f * u, strip.height);
+            _notice.fontSize = Fit(_notice, line, Mathf.RoundToInt(13.4f * u), lt.width, lt.height, false);
+            Label(lt, line, _notice);
+            return strip.yMax - y;
         }
-
         internal static bool LayoutButton(string text, params GUILayoutOption[] options)
         {
             bool hit = GUILayout.Button(text, options);
@@ -452,29 +492,64 @@ namespace NextDayRevival
         }
     }
 
+    /// <summary>One event = one short notice. The game's own HUD message line
+    /// shows it (bottom-left, 3 s, then the next queued line); without it the
+    /// same plate is drawn here for Seconds with a fade. A countdown never
+    /// keeps a notice up: callers re-post only at Milestone changes.</summary>
     internal static class VanillaNotice
     {
-        sealed class Slot { internal string Text, Line, Combined; internal float Until; internal bool Sent; internal int Type; }
+        /// <summary>Lifetime of the fallback plate and of one posting window.</summary>
+        internal const float Seconds = 5f;
+        const float FadeIn = 0.15f, FadeOut = 0.6f;
+
+        sealed class Slot { internal string Text, Line, Combined; internal float Until, Since; internal bool Sent, Native; internal int Type; }
         static readonly Dictionary<string, Slot> Slots = new Dictionary<string, Slot>();
 
-        // Called by an existing feature Draw, at its existing profiler slot.
-        // No re-posting each repaint, no concatenation of unchanged lines.
-        internal static bool Banner(string owner, string text, string line, int type, float until)
+        /// <summary>Countdown stage: 0 above 60 s, 1 from 60 s, 2 from 30 s.
+        /// Re-post a countdown notice only when this grows.</summary>
+        internal static int Milestone(float secondsLeft)
         {
+            return secondsLeft > 60f ? 0 : secondsLeft > 30f ? 1 : 2;
+        }
+
+        /// <summary>0..1 opacity of a fallback plate shown age seconds ago.</summary>
+        internal static float Fade(float age) { return Fade(age, Seconds); }
+
+        /// <summary>The same for a plate with its own (shorter) lifetime.</summary>
+        internal static float Fade(float age, float life)
+        {
+            if (age < 0f || age >= life) return 0f;
+            return Mathf.Min(1f, Mathf.Min(age / FadeIn, (life - age) / FadeOut));
+        }
+
+        // Called by an existing feature Draw, at its existing profiler slot,
+        // while its own deadline runs. Posts once per text; no re-posting each
+        // repaint, no concatenation of unchanged lines.
+        internal static void Banner(string owner, string text, string line, int type, float until)
+        {
+            if (string.IsNullOrEmpty(text)) return;
             Slot s;
             if (!Slots.TryGetValue(owner, out s)) { s = new Slot(); Slots.Add(owner, s); }
             if (s.Text != text || s.Line != line || s.Type != type || Time.time > s.Until)
             {
                 s.Text = text; s.Line = line; s.Type = type;
                 s.Combined = string.IsNullOrEmpty(line) ? text : text + "\n" + line;
-                s.Sent = false;
+                s.Sent = false; s.Native = false;
             }
             s.Until = until;
             // Native suppresses notices during these full-screen states. Retain
             // the feature's deadline and try on return to play, without flooding.
-            if (GameUi.State == 2 || GameUi.State == 3) return true;
-            if (!s.Sent) s.Sent = NativeMessage.Show(s.Combined, type);
-            return s.Sent;
+            if (GameUi.State == 2 || GameUi.State == 3) return;
+            if (!s.Sent)
+            {
+                s.Sent = true;
+                s.Since = Time.time;
+                s.Native = NativeMessage.Show(s.Combined, type);
+            }
+            if (s.Native) return;
+            Event e = Event.current;
+            if (e == null || e.type != EventType.Repaint) return;
+            VanillaUi.Notice(s.Combined, type, Fade(Time.time - s.Since));
         }
     }
 }

@@ -13,6 +13,14 @@
 //              without a line of fire leaves the fight to that cover and runs
 //              on to a position he can fire from. A single merc fights, then
 //              advances.
+//   STANDOFF   e-m1: no advance past his weapon's standoff (MercStandoff:
+//              rifle ~57 m, MG ~61, SMG 40, pistol 30, shotgun 22, marksman
+//              150) from a hostile his scan knows of or a mate saw in the
+//              last 3 s: he stops at that circle, low, facing it, and the
+//              fight (cover first) takes over once he can fire. A forced
+//              bound (NeedsBound, 6 s without progress) still takes him on.
+//              In contact the bounding pair runs while the others cover
+//              (two run, never more; with two men one each).
 //   FIGHT      the M2/M3 brain (with the merc-combat-response opening burst
 //              and lane clearance) takes over for any visible enemy, even
 //              outside the corridor. An unseen, safe new order starts moving
@@ -96,6 +104,36 @@ namespace NextDayRevival
         }
 
         internal static Vector3 Side(Vector3 dir) { return new Vector3(dir.z, 0f, -dir.x); }
+
+        /// <summary>e-m1: the move me -> dest kept outside the standoff
+        /// circle round foe (flat): the first point of the move on that
+        /// circle, or me when he is inside it and the move goes closer.
+        /// False: the move does not enter it (or leads out).</summary>
+        internal static bool Standoff(Vector3 me, Vector3 dest, Vector3 foe, float standoff, out Vector3 held)
+        {
+            held = dest;
+            float s2 = standoff * standoff;
+            float dx = dest.x - foe.x, dz = dest.z - foe.z;
+            float d2 = dx * dx + dz * dz;
+            if (d2 >= s2) return false;
+            float mx = me.x - foe.x, mz = me.z - foe.z;
+            float m2 = mx * mx + mz * mz;
+            if (m2 <= s2)
+            {
+                if (d2 >= m2 - 1f) return false;
+                held = me;
+                return true;
+            }
+            float vx = dest.x - me.x, vz = dest.z - me.z;
+            float a = vx * vx + vz * vz;
+            if (a < 0.0001f) return false;
+            float b = mx * vx + mz * vz;
+            float disc = b * b - a * (m2 - s2);
+            float t = (-b - (float)Math.Sqrt(Math.Max(0f, disc))) / a;
+            t = Math.Max(0f, Math.Min(1f, t));
+            held = new Vector3(me.x + vx * t, me.y + (dest.y - me.y) * t, me.z + vz * t);
+            return true;
+        }
 
         internal static float Length(MercOrder o) { return Flat(o.Centre - o.Origin); }
 
@@ -189,6 +227,7 @@ namespace NextDayRevival
         public bool Maintenance;        // actual injury/reload/medicine; pressure still permits bounds
         public bool Known;              // c-m1: a hostile his scan weighed (M1 sense), seen or not
         public Vector3 KnownAt;
+        public float Standoff;          // e-m1: his weapon's standoff, units (0: off)
     }
 
     /// <summary>What he does out of a fight until the next step.</summary>
@@ -214,6 +253,7 @@ namespace NextDayRevival
         internal const float ContactKeep = 15f;
         internal const float ClearSeconds = 10f;
         internal const float StuckSeconds = 10f;    // no progress this long: he no longer holds the line back
+        internal const int Pair = 2;                // e-m1: men running one bound together
 
         internal readonly int Size;
         readonly float[] _along = new float[Max];
@@ -304,8 +344,9 @@ namespace NextDayRevival
             if (!ready) _coverAt[k] = -1000f;
         }
 
-        // Two cover, the others advance. A pair uses one coverer; an isolated
-        // fighter supplies his own walking fire. Rear marksmen keep overwatch.
+        // e-m1: a pair advances, the others cover (was: two cover, the others
+        // advance). Two men: one each; an isolated fighter supplies his own
+        // walking fire. Rear marksmen keep overwatch.
         internal bool Coverer(int k, float now)
         {
             if (k < 0 || k >= Size || !_ready[k] || now - _seen[k] > FireActive) return false;
@@ -313,7 +354,7 @@ namespace NextDayRevival
             int active = 0, marksmen = 0;
             for (int n = 0; n < Size; n++)
                 if (_ready[n] && now - _seen[n] <= FireActive) { active++; if (_marksman[n]) marksmen++; }
-            int seats = Math.Min(2, active - 1) - marksmen;
+            int seats = active <= 1 ? 0 : active - Math.Min(Pair, active - 1) - marksmen;
             for (int pass = 0; pass < 2 && seats > 0; pass++)
                 for (int n = 0; n < Size; n++)
                 {
@@ -337,7 +378,15 @@ namespace NextDayRevival
             int firing = 0;
             for (int i = 0; i < Size; i++)
                 if (i != k && Coverer(i, now) && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) firing++;
-            return firing > 0 && firing >= Math.Min(2, ReadyCount(now) - 1);
+            return firing > 0 && firing >= Need(now);
+        }
+
+        /// <summary>Covering men firing before a bound may run: two, or
+        /// every covering seat when fewer (e-m1: three men - one covers the pair).</summary>
+        internal int Need(float now)
+        {
+            int ready = ReadyCount(now);
+            return Math.Min(2, ready - Math.Min(Pair, ready - 1));
         }
 
         internal int ReadyCount(float now)
@@ -361,7 +410,7 @@ namespace NextDayRevival
             int firing = 0;
             for (int i = 0; i < Size; i++)
                 if (Coverer(i, now) && now - _seen[i] < Active && now - _coverAt[i] < 0.6f) firing++;
-            return firing > 0 && firing >= Math.Min(2, ReadyCount(now) - 1);
+            return firing > 0 && firing >= Need(now);
         }
 
         /// <summary>Is k outside the covering pair under contact, not at
@@ -433,6 +482,7 @@ namespace NextDayRevival
         // Counters (F8, the offline check).
         internal int Fights, DryFights, Pushes, Searches, Stalls, Steps, Bounds;
         internal int Retries, Clears, Blind;      // c-m1: stall re-plans, clearing pushes, sightless fights left
+        internal int Standoffs;                   // e-m1: steps held at his standoff from a known hostile
 
         float _best, _bestAt, _lastStep, _stepTime, _budget;
         int _stalls, _detour;
@@ -764,9 +814,44 @@ namespace NextDayRevival
             if (_detour != 0)
                 a.Dest += MercAttackGeo.Side(dir) * (DetourOffset(o)
                     * Math.Min(1f, MercAttackGeo.Flat(HoldAt - me) / (2f * MercAttackGeo.Bound)));
+            // e-m1: never past his standoff from a known hostile (his scan's
+            // or a mate's fresh sighting): he stops on that circle, low and
+            // facing it; seen, the fight takes it from cover. A forced bound
+            // still takes him on, cover to cover.
+            Vector3 foe;
+            if (i.Standoff > 0f && !mustMove && Foe(team, ref i, out foe))
+            {
+                Vector3 held;
+                if (MercAttackGeo.Standoff(me, a.Dest, foe, i.Standoff, out held))
+                {
+                    if (MercAttackGeo.Flat(held - me) <= MercAttackGeo.Arrive)
+                    {
+                        Standoffs++;
+                        if (team != null) team.Arrived(o.K);
+                        Vector3 face = foe - me; face.y = 0f;
+                        Hold(ref a, face, true, 30f);
+                        Progress(me, now, true);
+                        return;
+                    }
+                    a.Dest = held;
+                }
+            }
             a.Run = run;
             Progress(me, now, false);
             if (Phase == Stalled) Hold(ref a, dir, true, 45f);
+        }
+
+        /// <summary>e-m1: the nearest hostile he knows of - his scan's
+        /// primary, or a mate's sighting of the last CallOut seconds.</summary>
+        bool Foe(MercAttackTeam team, ref MercAttackIn i, out Vector3 foe)
+        {
+            foe = i.Me;
+            bool any = false;
+            float best = float.MaxValue;
+            if (i.Known) { foe = i.KnownAt; best = MercAttackGeo.Flat(i.KnownAt - i.Me); any = true; }
+            if (team != null && i.Now - team.LastSight < CallOut && MercAttackGeo.Flat(team.SightAt - i.Me) < best)
+            { foe = team.SightAt; any = true; }
+            return any;
         }
 
         /// <summary>At his hold spot - or, c-m1, on a long attack past it on

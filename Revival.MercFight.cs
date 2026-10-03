@@ -495,6 +495,9 @@ namespace NextDayRevival
             ft.In.OwnerAims = ft.In.Lanes && ft.In.HasOwner && !ft.In.Survive && MercOwnerAim(now, out aimFrom, out aimTo);
             ft.In.AimFrom = ft.In.OwnerAims ? aimFrom : ft.In.Me;
             ft.In.AimTo = ft.In.OwnerAims ? aimTo : ft.In.Me;
+            // e-m1: his weapon's standoff - advances stop there, he fights
+            // from cover and falls back on the cover he held before.
+            ft.In.Standoff = MercStandoff.Enabled && !ft.In.Survive ? MercStandoff.ForItem(f.WeaponId) : 0f;
             MercAttackFight(f, u, ft, now);
             MercMoveFight(f, u, ft);
             // What he fights, for his mates.

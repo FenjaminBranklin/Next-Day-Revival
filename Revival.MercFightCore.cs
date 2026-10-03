@@ -83,6 +83,21 @@
 //             stops the step twice: the veto stays, LaneStuck counts it, no
 //             new step for LaneQuiet seconds (no oscillation).
 //
+// e-m1 cover tactics (docs/ai/tasks/e-m1-merc-cover-tactics.md), on while
+// FightIn.Standoff > 0 (the adapter's weapon standoff; 0 keeps the above):
+//   STANDOFF  the ATTACK advance fire and a forced bound stop at his
+//             weapon's standoff from the enemy (was 7 units), not on him.
+//   COVER 1ST out of a bound (a coverer, or at his standoff) he does not
+//             stand firing in the open while a usable cover within
+//             CoverFirstReach is free: the M2 dash/peek fights from it. A
+//             fight that opens in the open takes that cover before a Snap.
+//             Under fire, a forced bound to an open spot does not leave the
+//             cover he holds.
+//   FALL BACK heavy fire (pressure >= HeavyPressure) or low health: the
+//             cover he held before (the one he left, or in a new cover the
+//             one before it) if it lies further from the threat - Retreating
+//             mode, down until the fire calms (BackSeconds at least).
+//
 // Units: game units (~2.8 per metre), seconds. C# 3.0, ASCII only.
 using System;
 using UnityEngine;
@@ -144,6 +159,10 @@ namespace NextDayRevival
         // Z K1b: a short validated move to a lane; fire at its first opening.
         public bool PositionMove, PositionFire;
         public Vector3 PositionDest;
+        // e-m1: his weapon's standoff (units; 0: off) and whether the
+        // order's AttackDest is a confirmed M1 cover hop.
+        public float Standoff;
+        public bool AttackCovered;
     }
 
     /// <summary>What he does until the next Think.</summary>
@@ -246,6 +265,14 @@ namespace NextDayRevival
         internal const float HealAfterHit = 4f;                    // nor this soon after a hit
         internal const float CloseIn = 56f;                        // a threat this near (20 m): look sooner
         internal const float RetreatHop = 24f;                     // a retreat / fall-back bound: this far at most (8.5 m)
+        // e-m1 cover tactics.
+        internal const float CoverFirstReach = 34f;                // a free cover this near (12 m) comes before firing in the open
+        internal const float StandoffSlack = 0.12f;                // in cover: advance again only past standoff x (1 + this)
+        internal const float HeavyPressure = 0.8f;                 // two hits in quick succession, or heavy suppression
+        internal const float BackSeconds = 4f, BackHold = 6f;      // a fall-back stays down this long, at most this much longer under fire
+        internal const float BackMemory = 90f;                     // a held cover is remembered this long
+        internal const float BackApart = 8f;                       // two covers this far apart are two
+        internal const float BackGap = 8f;                         // no new heavy-fire fall-back this soon after one
 
         readonly int _id;
         uint _rng;
@@ -300,6 +327,11 @@ namespace NextDayRevival
 
         // Counters for the F8 status line and the offline check.
         internal int Peeks, Bursts, Dashes, Relocations, Flanks, Reloads, Heals, Flees, Strafes, Blind;
+        internal int CoverFirsts, StandoffStops, Backs, OpenBoundsHeld; // e-m1
+        // e-m1: the cover he holds or last held, and the one before it.
+        CoverPick _held, _prev, _backPick;
+        bool _hasHeld, _hasPrev, _backNow;
+        float _heldAt, _prevAt, _backUntil, _nextBack;
         internal float FightTime, SeenStill;   // seconds in fights; seconds a threat saw him holding still outside a peek
 
         internal MercBrain(int id)
@@ -581,7 +613,7 @@ namespace NextDayRevival
             if (State == AttackFire)
             {
                 if (danger) StartFlee(ref i, field, ref o);
-                else { Team(ref i, ref o); Choose(ref i, ref o); }
+                else { Team(ref i, ref o); if (!FallBack(ref i, ref o)) Choose(ref i, ref o); }
                 return;
             }
             if (State == Off)
@@ -618,6 +650,7 @@ namespace NextDayRevival
                 field.Claim(_id, Cover.Point.Pos, now + 5f, now);
             }
             Team(ref i, ref o);
+            if (FallBack(ref i, ref o)) return;
 
             // Friends, commands, danger and team retreat have already run.
             // A blocked building face must not trap him in repeated blind peeks.
@@ -682,6 +715,14 @@ namespace NextDayRevival
             if (danger || UnderFire(ref i) || Mode != Normal || i.Health < RetreatUntil
                 || i.Reloading || NeedReload(ref i) || State == Healing || State == Reloading
                 || State == Flee || !i.Target || !i.Sees || i.Count == 0) return false;
+            // e-m1: out of a bound (a coverer, or at his standoff) he fights
+            // from cover - the one he holds or a free one within reach - not
+            // standing in the open. M2's dash and peeks take over.
+            if (i.Standoff > 0f && AttackRoom(ref i) <= 0f && CoverFirst(ref i))
+            {
+                if (State == AttackFire) CoverFirsts++;
+                return false;
+            }
             if (State == AttackFire && Order.Act == FightAct.Step && Stuck(ref i))
             {
                 o.Repick = true;
@@ -716,14 +757,110 @@ namespace NextDayRevival
             Vector3 move = i.AttackDest - i.Me; move.y = 0f;
             float distance = Flat(move);
             if (!i.AttackMove || !i.MoveShoot || o.NoShot || distance <= 0.3f) return true;
-            Vector3 enemy = o.Face - i.Me; enemy.y = 0f;
-            float ahead = Vector3.Dot(enemy, move / distance) - 7f;
-            if (i.AttackRear && ahead < -7f) ahead = distance;
-            if (ahead <= 0.3f) return true;
+            float ahead = Ahead(ref i, o.Face, move / distance, distance, true);
+            if (ahead <= 0.3f) { if (i.Standoff > 0f) StandoffStops++; return true; }
             Vector3 dest = i.Me + move * (Mathf.Min(distance, ahead) / distance);
             if (LaneBad(ref i, dest)) return true;
             o.Act = FightAct.Step; o.Dest = dest; Dest = dest;
             _call = true;
+            return true;
+        }
+
+        /// <summary>How far he may walk along dir toward the foe: never past
+        /// him (7 units short), e-m1 never into his weapon's standoff circle
+        /// round him (an ATTACK, not a catch-up to the owner).</summary>
+        float Ahead(ref FightIn i, Vector3 foe, Vector3 dir, float distance, bool rear)
+        {
+            Vector3 enemy = foe - i.Me; enemy.y = 0f;
+            float ahead = Vector3.Dot(enemy, dir) - 7f;
+            if (rear && i.AttackRear && ahead < -7f) ahead = distance;
+            if (i.Standoff > 0f && !i.Follow) ahead = Mathf.Min(ahead, Approach(i.Me, dir, foe, i.Standoff));
+            return ahead;
+        }
+
+        /// <summary>e-m1: the walk along dir (flat, unit) from me until it
+        /// enters the circle of radius stop round foe (MaxValue: never;
+        /// 0: inside and heading closer).</summary>
+        internal static float Approach(Vector3 me, Vector3 dir, Vector3 foe, float stop)
+        {
+            float mx = me.x - foe.x, mz = me.z - foe.z;
+            float b = mx * dir.x + mz * dir.z;
+            float c = mx * mx + mz * mz - stop * stop;
+            if (c <= 0f) return b < 0f ? 0f : float.MaxValue;
+            float disc = b * b - c;
+            if (b >= 0f || disc <= 0f) return float.MaxValue;
+            return -b - Mathf.Sqrt(disc);
+        }
+
+        /// <summary>e-m1: how far the ATTACK still takes him toward the
+        /// enemy he sees (0: a coverer, at his standoff, or holding a cover
+        /// that a short gain would not be worth leaving).</summary>
+        float AttackRoom(ref FightIn i)
+        {
+            if (!i.AttackMove || !i.MoveShoot) return 0f;
+            Vector3 move = i.AttackDest - i.Me; move.y = 0f;
+            float distance = Flat(move);
+            if (distance <= 0.3f) return 0f;
+            float room = Mathf.Min(distance, Ahead(ref i, Primary(ref i), move / distance, distance, true));
+            if (Cover.Found && State != AttackFire && room < i.Standoff * StandoffSlack) return 0f;
+            return room > 0.3f ? room : 0f;
+        }
+
+        /// <summary>e-m1: a cover to fight from - the one he holds or runs
+        /// to, or a usable pick within CoverFirstReach.</summary>
+        bool CoverFirst(ref FightIn i)
+        {
+            if (Cover.Found && State != AttackFire && State != Evade && State != Snap) return true;
+            return Usable(ref i) && Flat(i.Pick.Point.Pos - i.Me) <= CoverFirstReach;
+        }
+
+        /// <summary>e-m1: the cover to fall back to - out of the cover he
+        /// holds, the one he left, else (or in it) the one before. Remembered for
+        /// BackMemory, within AnchorReach, further from the threat than he
+        /// is, not marked bad, not beside a blast.</summary>
+        bool BackCover(ref FightIn i, out CoverPick pick)
+        {
+            pick = new CoverPick();
+            if (!_hasHeld) return false;
+            bool inHeld = Cover.Found && Flat(Cover.Point.Pos - _held.Point.Pos) < 3f
+                && Flat(i.Me - _held.Point.Pos) < BackApart;
+            if (!inHeld && BackOk(ref i, _held, _heldAt)) { pick = _held; return true; }
+            if (_hasPrev && BackOk(ref i, _prev, _prevAt)) { pick = _prev; return true; }
+            return false;
+        }
+
+        bool BackOk(ref FightIn i, CoverPick c, float at)
+        {
+            Vector3 p = c.Point.Pos;
+            float d = Flat(p - i.Me);
+            if (i.Now - at > BackMemory || d > AnchorReach || d < ArriveCover || Bad(p, i.Now)) return false;
+            if (i.Count > 0 && Flat(p - i.Threats[0]) < Flat(i.Me - i.Threats[0]) + 3f) return false;
+            if (i.Danger && Flat(p - i.DangerAt) < DangerRadius) return false;
+            return !LaneBad(ref i, p);
+        }
+
+        /// <summary>e-m1: heavy fire - Retreating on the remembered cover;
+        /// FallBack dashes there.</summary>
+        void StartBack(ref FightIn i, ref FightOut o, CoverPick back)
+        {
+            if (Mode == Flanking && Squad != null) Squad.EndFlank(_id, i.Now);
+            StartMode(Retreating, back.Point.Pos, i.Now);
+            _backUntil = i.Now + BackSeconds;
+            _nextBack = _backUntil + BackGap;
+            _backPick = back; _backNow = true;
+            Backs++;
+            o.Repick = true;
+        }
+
+        /// <summary>e-m1: Team() chose a fall-back to a remembered cover:
+        /// the dash there, this Think.</summary>
+        bool FallBack(ref FightIn i, ref FightOut o)
+        {
+            if (!_backNow) return false;
+            _backNow = false;
+            if (State == Flee || State == Healing) return false;
+            _attackBoundActive = false;
+            DashTo(ref i, ref o, _backPick);
             return true;
         }
 
@@ -740,6 +877,13 @@ namespace NextDayRevival
             if (danger || i.Health < RetreatUntil || i.Reloading || NeedReload(ref i)
                 || State == Healing || State == Reloading || State == Flee
                 || Mode == Retreating || Mode == Falling) return false;
+            // e-m1: heavy fire on the way - not on, back to the cover he left.
+            if (_attackBoundActive && !i.Follow && i.Standoff > 0f && Mode == Normal
+                && _pressure >= HeavyPressure && i.Now >= _nextBack)
+            {
+                CoverPick back;
+                if (BackCover(ref i, out back)) { StartBack(ref i, ref o, back); return FallBack(ref i, ref o); }
+            }
             if (!_attackBoundActive)
             {
                 Vector3 move = (i.Follow ? i.FollowDest : i.AttackDest) - i.Me; move.y = 0f;
@@ -749,12 +893,16 @@ namespace NextDayRevival
                 if (i.Target && i.Sees && i.Count > 0
                     && (!i.Follow || Vector3.Dot(Primary(ref i) - i.Me, move) > 0f))
                 {
-                    float ahead = Vector3.Dot(Primary(ref i) - i.Me, move / distance) - 7f;
+                    float ahead = Ahead(ref i, Primary(ref i), move / distance, distance, false);
                     if (ahead <= ArriveCover) return false;
                     if (ahead < distance) move *= ahead / distance;
                 }
                 Vector3 goal = i.Me + move;
                 if (LaneBad(ref i, goal)) return false;
+                // e-m1: under fire, a bound to open ground does not leave
+                // the cover he holds; the dwell clock runs on.
+                if (i.Standoff > 0f && !i.Follow && !i.AttackCovered && Down && Cover.Found && UnderFire(ref i))
+                { OpenBoundsHeld++; return false; }
                 if (WaitForCover(ref i, ref o)) return true;
                 _callSince = 0f;
                 if (Mode == Flanking) EndMode(i.Now);
@@ -773,7 +921,7 @@ namespace NextDayRevival
             if (i.Target && i.Sees && i.Count > 0 && left > ArriveCover
                 && (!i.Follow || Vector3.Dot(Primary(ref i) - i.Me, remaining) > 0f))
             {
-                float ahead = Vector3.Dot(Primary(ref i) - i.Me, remaining / left) - 7f;
+                float ahead = Ahead(ref i, Primary(ref i), remaining / left, left, false);
                 if (ahead <= ArriveCover)
                 {
                     _attackBoundActive = false;
@@ -818,6 +966,7 @@ namespace NextDayRevival
             Mode = Normal;
             _plan = PlanNone;
             _anchorOn = false;
+            _backUntil = 0f; _backNow = false;
             _call = false;
             _suppress = false;
             _regrouped = false;
@@ -846,7 +995,7 @@ namespace NextDayRevival
             // x-merc-competence: a team falls back; a lone merc retreats (his own
             // health is the whole "team" - the long run to the owner cost him).
             bool losing = i.Regroup && Squad != null && Squad.Losing(now) && Squad.Mates(_id, now) > 0;
-            if (Mode == Retreating && i.Health >= RetreatUntil) EndMode(now);
+            if (Mode == Retreating && i.Health >= RetreatUntil && Backed(ref i)) EndMode(now);
             if (Mode == Falling)
             {
                 if (!i.Regroup) EndMode(now);
@@ -856,10 +1005,22 @@ namespace NextDayRevival
             if (Mode != Retreating && i.Health > 0f && i.Health < RetreatBelow)
             {
                 if (Mode == Flanking && Squad != null) Squad.EndFlank(_id, now);
-                StartMode(Retreating, RetreatPoint(ref i), now);
+                // e-m1: hurt, back to the cover he held before when there is one.
+                CoverPick back = new CoverPick();
+                bool held = i.Standoff > 0f && BackCover(ref i, out back);
+                StartMode(Retreating, held ? back.Point.Pos : RetreatPoint(ref i), now);
+                if (held) { _backPick = back; _backNow = true; Backs++; }
                 Retreats++;
                 o.Repick = true;
                 return;
+            }
+            // e-m1: heavy fire - not another step forward: back to the cover
+            // he held before, down until the fire calms.
+            if (Mode == Normal && i.Standoff > 0f && _pressure >= HeavyPressure && now >= _nextBack
+                && !i.Survive && State != Flee && State != Healing)
+            {
+                CoverPick back;
+                if (BackCover(ref i, out back)) { StartBack(ref i, ref o, back); return; }
             }
             if (Mode == Normal && losing && Flat(i.Me - i.Owner) > FallNear)
             {
@@ -881,6 +1042,16 @@ namespace NextDayRevival
                     _regrouped = false;
                 }
             }
+        }
+
+        /// <summary>e-m1: a heavy-fire fall-back is over (none running, or
+        /// BackSeconds passed and the fire calmed, BackHold at most).</summary>
+        bool Backed(ref FightIn i)
+        {
+            if (_backUntil <= 0f) return true;
+            if (i.Now < _backUntil || (_pressure >= CalmPressure && i.Now < _backUntil + BackHold)) return false;
+            _backUntil = 0f;
+            return true;
         }
 
         void StartMode(byte mode, Vector3 anchor, float now)
@@ -1163,9 +1334,11 @@ namespace NextDayRevival
             StartEvade(ref i, ref o);
         }
 
-        void StartDash(ref FightIn i, ref FightOut o)
+        void StartDash(ref FightIn i, ref FightOut o) { DashTo(ref i, ref o, i.Pick); }
+
+        void DashTo(ref FightIn i, ref FightOut o, CoverPick pick)
         {
-            Cover = i.Pick;
+            Cover = pick;
             Dest = Cover.Point.Pos;
             _until = i.Now + 2.5f + Flat(Dest - i.Me) / 6f;
             _evadeUp = false;
@@ -1194,6 +1367,13 @@ namespace NextDayRevival
         void Arrived(ref FightIn i)
         {
             _coverSince = i.Now;
+            // e-m1: the covers he held, newest first, for a fall-back.
+            if (Cover.Found)
+            {
+                if (_hasHeld && Flat(_held.Point.Pos - Cover.Point.Pos) > BackApart)
+                { _prev = _held; _prevAt = _heldAt; _hasPrev = true; }
+                _held = Cover; _heldAt = i.Now; _hasHeld = true;
+            }
             if (i.Survive) _anchorOn = false;
             if (Mode == Flanking) EndMode(i.Now);
             if (Mode == Falling && i.Regroup && Flat(i.Me - i.Owner) < FallNear + 12f) _regrouped = true;
@@ -1757,6 +1937,11 @@ namespace NextDayRevival
             if (UnderFire(ref i) || i.Reloading || NeedReload(ref i)) return false;
             // x-merc-competence: never stand up in the open to a group that sees him.
             if (Crowded(ref i)) return false;
+            // e-m1: cover first - a free cover within reach is taken before
+            // he stands up to fire in the open.
+            if (i.Standoff > 0f && !Cover.Found && Usable(ref i)
+                && Flat(i.Pick.Point.Pos - i.Me) > ArriveCover
+                && Flat(i.Pick.Point.Pos - i.Me) <= CoverFirstReach) { CoverFirsts++; return false; }
             return true;
         }
 

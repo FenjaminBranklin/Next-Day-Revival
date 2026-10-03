@@ -135,7 +135,6 @@ namespace NextDayRevival
 
         static GUIStyle _nameStyle;
         static GUIStyle _shadowStyle;
-        static GUIStyle _warningStyle;
         static string _notice = "";
         static float _noticeUntil;
         static bool _noticeSticky;
@@ -1358,17 +1357,8 @@ namespace NextDayRevival
                     }
                 }
             }
-            if (Time.time < _noticeUntil && _notice.Length > 0
-                && !VanillaNotice.Banner("crocodile", _notice, null, NativeMessage.Kill, _noticeUntil))
-            {
-                Vector2 measured = _warningStyle.CalcSize(new GUIContent(_notice));
-                VanillaUi.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f + 2f, 104f,
-                                   measured.x, measured.y),
-                          _notice, _shadowStyle);
-                VanillaUi.Label(new Rect(Screen.width * 0.5f - measured.x * 0.5f, 102f,
-                                   measured.x, measured.y),
-                          _notice, _warningStyle);
-            }
+            if (Time.time < _noticeUntil && _notice.Length > 0)
+                VanillaNotice.Banner("crocodile", _notice, null, NativeMessage.Kill, _noticeUntil);
         }
 
         static void EnsureStyles()
@@ -1380,9 +1370,6 @@ namespace NextDayRevival
             _shadowStyle = new GUIStyle(_nameStyle);
             _shadowStyle.fontSize = 22;
             _shadowStyle.normal.textColor = Color.black;
-            _warningStyle = new GUIStyle(_nameStyle);
-            _warningStyle.fontSize = 22;
-            _warningStyle.normal.textColor = new Color(0.55f, 1f, 0.08f, 1f);
         }
 
         static bool Enabled() { return _enabled == null || _enabled.Value; }

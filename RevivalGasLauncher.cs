@@ -176,7 +176,7 @@ namespace NextDayRevival
         // HUD state: the cloud reports in, Draw paints while the report is fresh.
         static float _insideUntil;
         static float _insideProtection;
-        static float _nextHint;
+        static int _hintKind;
 
         static readonly List<GasCloud> _clouds = new List<GasCloud>();
 
@@ -1105,15 +1105,18 @@ namespace NextDayRevival
         /// <summary>A standing cloud reports the local player's exposure.</summary>
         internal static void ReportInside(float dose, float protection)
         {
+            if (Time.time >= _insideUntil) _hintKind = 0;   // a new visit to a cloud
             _insideUntil = Time.time + 1.2f;
             _insideProtection = protection;
 
             // Do not nag at the fringe of a thinning cloud - only where the
-            // gas is actually thick enough to matter.
-            if (protection > 0f && dose > 0.15f && Time.time >= _nextHint)
+            // gas is actually thick enough to matter - and only once per visit
+            // and kind; the top meter carries the live state meanwhile.
+            int kind = protection > 0f && dose > 0.15f ? protection >= 0.9f ? 1 : 2 : 0;
+            if (kind != 0 && kind != _hintKind)
             {
-                _nextHint = Time.time + 8f;
-                Turret.Hinweis(protection >= 0.9f
+                _hintKind = kind;
+                Turret.Hinweis(kind == 1
                     ? Loc.T("ГАЗ! Наденьте противогаз", "GAS! Put on a mask")
                     : Loc.T("Газ проникает через защиту", "Gas is getting through"), 3f);
             }
@@ -1140,7 +1143,9 @@ namespace NextDayRevival
                     _gasHud = Loc.T("???????? ???", "TOXIC GAS") + "   " + tox + "/100   " + seal;
                 }
             }
-            VanillaUi.Banner(_gasHud, null, Screen.height * 0.16f, true);
+            // A live meter while inside, like the game's own toxicity top
+            // message (HUD_TopMessage, Toxic_Msg form): its size and place.
+            VanillaUi.Banner(_gasHud, null, VanillaUi.TopMessageY, true);
         }
     }
 

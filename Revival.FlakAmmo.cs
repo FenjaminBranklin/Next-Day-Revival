@@ -57,10 +57,21 @@ namespace NextDayRevival
             if (!Crocodile.IsMaster()) return;
             bool limited = Flak.PlayerAt(g) || MercAA.Gun(g.Index) != null
                 || MercAA.Held(g.Index + 7) != null || (!Flak.Up(g.Gunner) && !Flak.Up(g.Loader));
-            if (!g.Ammo.Mode(limited, true)) return;
+            bool changed = g.Ammo.Mode(limited, true);
+            // E L1: the first finite crew finds the emplacement's ready-use lot.
+            bool issued = limited && g.Ammo.Issue(g.ShortRange, true);
+            if (!changed && !issued) return;
+            if (issued) Issued(g);
             // Never carry an unlimited garrison rack into player ownership.
             g.Rounds = g.Ammo.Rack(g.ShortRange ? ShortRangeCore.Magazine : Flak.RoundsPerLoad);
             g.Reloading = false;
+        }
+
+        // Once per gun and room (FlakAmmoStock.Issue).
+        static void Issued(Flak.Gun g)
+        {
+            Flak.Log(g.Id + ": ready-use ammunition at the emplacement - " + g.Ammo.Stock
+                + (g.ShortRange ? " rounds." : " shells."));
         }
 
         internal static bool Ready(Flak.Gun g) { return g.Ammo.CanShoot; }
@@ -156,6 +167,8 @@ namespace NextDayRevival
                         if (master)
                         {
                             Observe(g);
+                            // B3: the garrison tops the ready-use lot up between raids.
+                            g.Ammo.Replenish(Time.time, g.ShortRange, true);
                             // Changed stocks plus a slow snapshot while awake:
                             // late join and migration use the same master state.
                             if (g.AmmoSent != g.Ammo.Revision || (g.Awake && Time.time >= g.AmmoHeartbeat)) SendState(g);
@@ -165,12 +178,13 @@ namespace NextDayRevival
                             && (me.transform.position - seat.position).sqrMagnitude <= 100f) _near = g;
                         // An idle distant gun does not broadcast forever.
                         // A late joiner asks only when near a gun or using radar.
-                        if (!master && !g.Ammo.Known && (_near == g || g == Flak._manned || RadarScope.InView))
+                        if (!master && !g.Ammo.Known && (_near == g || g == Flak._manned || RadarScope.InView || Crew(g)))
                         {
                             Fill(SnapshotAsk, g.Index, 0f, 0f, 0f, 0f, owner);
                             FlakNet.SendPacket(Packet, true);
                         }
                         CacheText(g);
+                        Warn(g);
                     }
                 }
                 Flak.Gun near = Flak._manned != null ? Flak._manned : _near;
@@ -184,6 +198,37 @@ namespace NextDayRevival
                 }
             }
             finally { FrameProf.E(FrameProf.S_FlakAmmoT); }
+        }
+
+        /// <summary>B3: the local player's merc crew holds this gun.</summary>
+        static bool Crew(Flak.Gun g)
+        {
+            MercAAPost merc = MercAA.Gun(g.Index);
+            return merc != null && merc.Actor >= 0 && merc.Actor == Crocodile.LocalActor();
+        }
+
+        /// <summary>B3: a finite gun that runs low or dry says so once - one
+        /// short native notice to whoever mans it, stands at it, holds it with
+        /// a merc crew or watches the radar - never a silent laying without
+        /// a shot. Restocking re-arms the line. Texts are built once per gun.</summary>
+        static void Warn(Flak.Gun g)
+        {
+            int level = g.Ammo.Known && g.Ammo.Limited ? FlakAmmoStock.Level(g.Ammo.Stock, g.ShortRange) : 0;
+            if (level == g.AmmoLevel) return;
+            bool worse = level > g.AmmoLevel;
+            g.AmmoLevel = level;
+            if (!worse || !AirDefenceDamage.Alive(g.Index)
+                || !(g == Flak._manned || g == _near || RadarScope.InView || Crew(g))) return;
+            if (g.AmmoDryText == null)
+            {
+                g.AmmoDryText = g.ShortRange
+                    ? Loc.T(g.Id + ": нет лент - ЗУ-23 не стреляет", g.Id + ": out of belts - the ZU-23 cannot fire")
+                    : Loc.T(g.Id + ": нет снарядов - 52-К не стреляет", g.Id + ": out of shells - the 52-K cannot fire");
+                g.AmmoLowText = g.ShortRange
+                    ? Loc.T(g.Id + ": мало лент - подвезите со склада", g.Id + ": belts low - bring more from the depot")
+                    : Loc.T(g.Id + ": мало снарядов - подвезите со склада", g.Id + ": shells low - bring more from the depot");
+            }
+            UiKit.Toast(level == 2 ? g.AmmoDryText : g.AmmoLowText, UiTone.Warning);
         }
 
         static void CacheText(Flak.Gun g)
@@ -239,6 +284,7 @@ namespace NextDayRevival
             if (g.AmmoSender == sender && revision < g.Ammo.Revision) return false;
             g.AmmoSender = sender; g.Ammo.Known = true; g.Ammo.Stock = (int)stock;
             g.Ammo.Revision = (int)revision; g.Ammo.Limited = limited != 0f;
+            if (g.Ammo.Limited) g.Ammo.Issued = true;   // the old master issued the lot
             g.Rounds = (int)rounds; g.Reloading = reload > 0f; g.ReloadUntil = Time.time + reload;
             CacheText(g); return true;
         }

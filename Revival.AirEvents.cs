@@ -1402,7 +1402,10 @@ namespace NextDayRevival
         static float _bannerUntil;
         static SirenVoice _siren;
         static AudioSource _drone;
-        static float _sirenUntil, _droneUntil, _warnAt;
+        static float _sirenUntil, _droneUntil, _warnAt = -1f;
+
+        /// <summary>Time.time of the last raid warning here (its one notice).</summary>
+        internal static float WarnedAt { get { return _warnAt; } }
         static Vector3 _droneFrom, _droneTo;
 
         // Helicopter-only retakes have no AirEvents aircraft to announce them.
@@ -1464,9 +1467,12 @@ namespace NextDayRevival
                 + Loc.T("ВОЗДУШНАЯ ТРЕВОГА! ", "AIR RAID WARNING! ") + what
                 + Loc.T(" с направления ", " inbound from ") + CompassOf(from)
                 + Loc.T(" на квадрат ", " to square ") + cell + Loc.T(", через ~", ", ETA ~") + eta + " s";
+            // One raid = one notice: this line (posted once; the window only lets
+            // it wait out an open inventory). The radar holder's map ping and the
+            // air picture's 60 s / 30 s milestones carry the countdown.
             _bannerUntil = Time.time + 14f;
             if (!AirPicture.HolderRaidWarning(at, from, f[7]))
-                AirPicture.WarnAt(at, RadarClarityText.Raid, f[7], _banner);
+                AirPicture.WarnAt(at, RadarClarityText.Raid, f[7]);
             RevivalPlugin.L.LogInfo("AirEvents: warning - " + what + " from " + CompassOf(from) + " to " + cell
                 + ", siren " + Mathf.RoundToInt(siren) + " s" + (radar ? ", radar reports it." : "."));
         }
@@ -1522,8 +1528,7 @@ namespace NextDayRevival
         {
             if (Time.time > _bannerUntil || _banner.Length == 0) return;
             if (CfgBanner != null && !CfgBanner.Value) return;
-            if (!VanillaNotice.Banner("air.events", _banner, null, NativeMessage.AirDrop, _bannerUntil))
-                VanillaUi.Notice(_banner, NativeMessage.AirDrop);
+            VanillaNotice.Banner("air.events", _banner, null, NativeMessage.AirDrop, _bannerUntil);
         }
 
         // ============================================================== frame
