@@ -121,7 +121,8 @@ namespace NextDayRevival
     {
         // ---- palette (docs/UI_KIT.md "Colour").
         public static readonly Color Panel = new Color(0.259f, 0.259f, 0.259f, 0.90f);
-        public static readonly Color Header = Color.white;
+        // Title/hub/label backing under white text: the vanilla plate's dark (c-u1).
+        public static readonly Color Header = new Color(0.07f, 0.07f, 0.07f, 0.94f);
         public static readonly Color CardFill = new Color(0.329f, 0.329f, 0.329f, 1f);
         public static readonly Color CardHover = VanillaUi.Hover;
         public static readonly Color Line = new Color(1f, 1f, 1f, 0.08f);
@@ -292,7 +293,8 @@ namespace NextDayRevival
             GUI.color = Color.white;
             GUI.backgroundColor = Color.white;
             GUI.contentColor = Color.white;
-            VanillaUi.Panel(r, "warning_02_empty");
+            if (AdminPaint.Active) AdminPaint.Window(r);
+            else VanillaUi.Panel(r, "warning_02_empty");
             // The title bar: rounded on top only - the lower corners are
             // clipped off by a group instead of overdrawn (no alpha band).
             // The group runs in every pass: it takes a control id.
@@ -399,14 +401,34 @@ namespace NextDayRevival
         public static void Fill(Rect r, Color c, int round)
         {
             if (Event.current.type != EventType.Repaint || !_ready) return;
-            if (round != 0 && r.width >= S(100f) && r.height >= S(24f))
-            { VanillaUi.Panel(r, r.height < S(80f) ? "groupPlayerWhite" : "MarkerInfo"); return; }
+            if (round != 0 && r.width >= S(100f) && r.height >= S(24f)) { Plate(r, c); return; }
             GUI.color = c;
             if (round == 0) GUI.DrawTexture(r, _texWhite);
             else if (round == 1) _shapeM.Draw(r, false, false, false, false);
             else if (round == 2) _shapeS.Draw(r, false, false, false, false);
             else _shapePill.Draw(r, false, false, false, false);
             GUI.color = Color.white;
+        }
+
+        // Rounded fills become vanilla brush plates by the colour's role (c-u1).
+        // The plate keeps the requested contrast: translucent washes stay
+        // translucent, bright accent/hover/selection uses the native red
+        // btn_hover stroke, light grey (disabled pick) the grey btn stroke,
+        // everything else the icon-free dark plate. White
+        // text therefore never lands on the white groupPlayerWhite stroke.
+        static void Plate(Rect r, Color c)
+        {
+            if (c.a < 0.5f) VanillaUi.Panel(r, "groupPlayerWhite", c);
+            else if (Bright(c)) VanillaUi.Panel(r, "btn_hover", c.a < 1f ? new Color(1f, 1f, 1f, c.a) : Color.white);
+            else if (Mathf.Max(c.r, Mathf.Max(c.g, c.b)) > 0.55f) VanillaUi.Panel(r, "btn", new Color(1f, 1f, 1f, Mathf.Max(c.a, 0.85f)));
+            else VanillaUi.Panel(r, r.height < S(80f) ? VanillaUi.Plate : "MarkerInfo", new Color(1f, 1f, 1f, Mathf.Max(c.a, 0.85f)));
+        }
+
+        /// <summary>A light, saturated colour (gold accent, hover beige): a selection fill.</summary>
+        internal static bool Bright(Color c)
+        {
+            float max = Mathf.Max(c.r, Mathf.Max(c.g, c.b)), min = Mathf.Min(c.r, Mathf.Min(c.g, c.b));
+            return max > 0.55f && max - min > 0.2f;
         }
 
         /// <summary>A 1 px rounded outline (medium radius).</summary>
@@ -439,6 +461,7 @@ namespace NextDayRevival
         public static void Label(Rect r, string s, int font, int align, Color c)
         {
             if (s == null || Event.current.type != EventType.Repaint || !_ready) return;
+            if (AdminPaint.Active) { AdminPaint.Label(r, s, font, align, VanillaUi.TextColour(c), false); return; }
             GUI.color = VanillaUi.TextColour(c);
             _gc.text = s;
             GUIStyle label = _text[font * 3 + align];
@@ -489,6 +512,7 @@ namespace NextDayRevival
         /// <summary>A small rounded tag ("ONLINE", "3/5").</summary>
         public static void Chip(Rect r, string text, int tone)
         {
+            if (AdminPaint.Active) { AdminPaint.Chip(r, text, tone); return; }
             Color c = ToneColor(tone);
             Fill(r, Fade(c, 0.18f), 3);
             Label(r, text, UiFont.Small, UiFont.Center, c);
@@ -522,6 +546,7 @@ namespace NextDayRevival
         /// otherwise, the text in the tone's colour on a tinted strip.</summary>
         public static void Status(Rect r, int tone, string text)
         {
+            if (AdminPaint.Active) { AdminPaint.Status(r, tone, text); return; }
             Color c = ToneColor(tone);
             Fill(r, Fade(c, 0.12f), 2);
             Fill(new Rect(r.x, r.y, S(3f), r.height), c, 0);
@@ -567,6 +592,13 @@ namespace NextDayRevival
             {
                 bool hot = enabled && Hover(r);
                 bool down = enabled && GUIUtility.hotControl == id;
+                if (AdminPaint.Active)
+                {
+                    AdminPaint.Button(r, text, look, enabled, hot, down);
+                    FocusRing(r, nav);
+                }
+                else
+                {
                 Color bg, fg;
                 switch (look)
                 {
@@ -595,6 +627,7 @@ namespace NextDayRevival
                 GUI.color = saved;
                 FocusRing(r, nav);
                 Label(r, text, UiFont.Body, UiFont.Center, enabled ? Text : TextDim);
+                }
             }
             if (click) VanillaUi.Sound("Click");
             return click;
@@ -666,7 +699,7 @@ namespace NextDayRevival
             int nav = NavIndex();
             int adj = TakeAdjust(nav);
             if (adj != 0) selected = Mathf.Clamp(selected + adj, 0, n - 1);
-            Fill(r, Field, 1);
+            if (!AdminPaint.Active) Fill(r, Field, 1);
             FocusRing(r, nav);
             float seg = r.width / n;
             for (int i = 0; i < n; i++)
@@ -676,9 +709,13 @@ namespace NextDayRevival
                 if (Click(sr, id, true)) { selected = i; FocusFrom(nav); }
                 if (Event.current.type != EventType.Repaint) continue;
                 bool on = i == selected;
+                if (AdminPaint.Active) AdminPaint.Button(sr, labels[i], on ? UiButton.Primary : UiButton.Secondary, true, Hover(sr), GUIUtility.hotControl == id);
+                else
+                {
                 if (on) Fill(sr, Accent, 1);
                 else if (Hover(sr)) Fill(sr, Fade(Color.white, 0.06f), 1);
                 Label(sr, labels[i], UiFont.Body, UiFont.Center, on ? TextOnAccent : TextDim);
+                }
             }
             return selected;
         }
@@ -740,7 +777,13 @@ namespace NextDayRevival
         public static string TextField(Rect r, string s, int maxLength)
         {
             if (!Ensure()) return s;
-            Fill(r, Field, 1);
+            if (AdminPaint.Active)
+            {
+                AdminPaint.Plate(r, false, false, false, true);
+                Font font = VanillaUi.Font(false);
+                if (font != null && _field.font != font) _field.font = font;
+            }
+            else Fill(r, Field, 1);
             Outline(r, Hover(r) ? Fade(Accent, 0.6f) : Line);
             GUI.color = Text;
             string n = GUI.TextField(r, s ?? "", maxLength, _field);

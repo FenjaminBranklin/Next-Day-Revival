@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace NextDayRevival
 {
-    internal static class MercPage
+    internal static partial class MercPage
     {
         // ------------------------------------------------------------ settings
 
@@ -89,7 +89,7 @@ namespace NextDayRevival
 
         const float CardH = 236f;
         const float RowH = 136f;
-        const float StripH = 96f;
+        const float StripH = 154f;
 
         sealed class Card
         {
@@ -312,7 +312,7 @@ namespace NextDayRevival
             if (_contracts) Contracts(lang, now);
             else HireList(lang, now);
             string money = _moneyText.Stale(_moneyNow) ? _moneyText.Set(_moneyNow, _moneyNow < 0 ? "?" : Mercs.Money0(_moneyNow)) : _moneyText.Text;
-            VanillaSkin.Text(VanillaSkin.Px(684f, 461f, 152f, 23f), money, VanillaSkin.Regular, 26f, VanillaSkin.Right, VanillaSkin.White);
+            VanillaSkin.Text(VanillaSkin.Px(_contracts ? 728f : 684f, _contracts ? 453f : 461f, _contracts ? 108f : 152f, 26f), money, VanillaSkin.Regular, 24f, VanillaSkin.Right, VanillaSkin.White);
             int ck = (Mercs.AliveCount * 64 + Mercs.Cap) * 2 + lang;
             string count = _countText.Stale(ck) ? _countText.Set(ck, Loc.T("Наёмники ", "Mercs ") + Mercs.AliveCount + " / " + Mercs.Cap) : _countText.Text;
             VanillaSkin.Text(VanillaSkin.Px(447f, 489f, 184f, 17f), count, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
@@ -348,9 +348,10 @@ namespace NextDayRevival
                 Card k = _cards[i];
                 if (VanillaSkin.Row(r, i == _pickedHire)) _pickedHire = i;
                 VanillaSkin.Plate(new Rect(r.x + S(8f), r.y + S(5f), S(48f), S(48f)), k.Initial, TierColor(k.TierN), 26f);
-                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(4f), S(244f), S(24f)), k.Name, VanillaSkin.Regular, 18f, VanillaSkin.Left, VanillaSkin.White);
-                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(30f), S(240f), S(20f)), k.Tier, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
-                VanillaSkin.Text(new Rect(r.x + S(310f), r.y + S(17f), S(100f), S(24f)), k.Price, VanillaSkin.Regular, 18f, VanillaSkin.Right, VanillaSkin.White);
+                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(4f), S(200f), S(24f)), k.Name, VanillaSkin.Regular, 18f, VanillaSkin.Left, VanillaSkin.White);
+                VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(30f), S(200f), S(20f)), k.Tier, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
+                // The row art's ruble mark starts at 379: the price ends before it.
+                VanillaSkin.Text(new Rect(r.x + S(268f), r.y + S(17f), S(104f), S(24f)), k.Price, VanillaSkin.Regular, 18f, VanillaSkin.Right, VanillaSkin.White);
             }
             VanillaSkin.EndList();
             if (_cards.Count == 0)
@@ -423,13 +424,17 @@ namespace NextDayRevival
 
         static void Contracts(int lang, float now)
         {
+            // MarketplaceFormUI contains pale scratches in the detail area.
+            // Keep its texture, but cap the brightest pixel under status text.
+            if (Event.current.type == EventType.Repaint)
+                VanillaSkin.Fill(VanillaSkin.Px(39f, 40f, 386f, 401f), new Color(0.035f, 0.035f, 0.035f, 0.92f));
             string[] notes = lang == 0 ? NotesRu : NotesEn;
             for (int i = 0; i < notes.Length; i++)
                 if (VanillaSkin.TextTab(VanillaSkin.Px(447f + i * 140f, 43f, 140f, 27f), notes[i], NoteMode == i, true) && _cfgNotes != null)
                     _cfgNotes.Value = MercPageNote.Name(i);
             List<Mercs.Record> roster = Mercs.Roster;
-            Rect view = VanillaSkin.Px(447f, 77f, 421f, 379f);
-            _contractOffset = VanillaSkin.BeginList(view, VanillaSkin.Px(886f, 77f, 10f, 379f), _contractOffset, S(roster.Count * 58f));
+            Rect view = VanillaSkin.Px(447f, 77f, 421f, 367f);
+            _contractOffset = VanillaSkin.BeginList(view, VanillaSkin.Px(886f, 77f, 10f, 367f), _contractOffset, S(roster.Count * 58f));
             Mercs.Record picked = null;
             for (int i = 0; i < roster.Count; i++)
             {
@@ -437,10 +442,10 @@ namespace NextDayRevival
                 if (m.Id == _pickedMerc) picked = m;
                 Rect r = new Rect(0f, S(i * 58f) - _contractOffset, view.width, S(58f));
                 if (r.yMax < 0f || r.y > view.height) continue;
-                if (VanillaSkin.Row(r, m.Id == _pickedMerc)) { _pickedMerc = m.Id; picked = m; _orderAll = false; }
+                if (VanillaSkin.Row(r, m.Id == _pickedMerc, false)) { _pickedMerc = m.Id; picked = m; _orderAll = false; }
                 Row row = RowOf(m, lang);
                 VanillaSkin.Text(new Rect(r.x + S(12f), r.y + S(4f), S(285f), S(24f)), row.Title, VanillaSkin.Regular, 18f, VanillaSkin.Left, m.Dead ? VanillaSkin.Grey : VanillaSkin.White);
-                VanillaSkin.Text(new Rect(r.x + S(12f), r.y + S(31f), S(285f), S(20f)), (lang == 0 ? StatusRu : StatusEn)[StatusOf(m)], VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
+                VanillaSkin.Text(new Rect(r.x + S(12f), r.y + S(31f), S(285f), S(20f)), StatusText(m, lang), VanillaSkin.Regular, 14f, VanillaSkin.Left, m.Down.Down ? VanillaSkin.White : VanillaSkin.Grey);
                 VanillaSkin.Bar(new Rect(r.x + S(308f), r.y + S(26f), S(100f), S(6f)), m.Hp, VanillaSkin.Green);
             }
             VanillaSkin.EndList();
@@ -449,24 +454,30 @@ namespace NextDayRevival
             for (int i = 0; i < roster.Count; i++) if (roster[i].Unpaid && !roster[i].PayPending && !roster[i].Dead) due++;
             int pk = due * 2 + lang;
             string payAll = _payAll.Stale(pk) ? _payAll.Set(pk, Loc.T("Оплатить долги (", "Pay all due (") + due + ")") : _payAll.Text;
-            if (VanillaSkin.Button(VanillaSkin.Px(447f, 463f, 111f, 32f), Loc.T("Оплатить все", "Pay all"), 16f, due > 0))
+            if (VanillaSkin.Button(VanillaSkin.Px(447f, 453f, 132f, 34f), Loc.T("Оплатить все", "Pay all"), 16f, due > 0))
             { MercUi.Reply(); Mercs.PayAllDue(); }
-            MercPageLook.Tip(VanillaSkin.Px(447f, 463f, 111f, 32f), payAll);
-            if (VanillaSkin.Button(VanillaSkin.Px(563f, 463f, 111f, 32f), Loc.T("Приказ всем", "Order all"), 16f, Mercs.AliveCount > 0))
+            MercPageLook.Tip(VanillaSkin.Px(447f, 453f, 132f, 34f), payAll);
+            if (VanillaSkin.Button(VanillaSkin.Px(585f, 453f, 132f, 34f), Loc.T("Приказ всем", "Order all"), 16f, Mercs.AliveCount > 0))
             { _orderAll = !_orderAll; _orderFor = NoRow; MercUi.Reply(); }
-            if (VanillaSkin.Button(VanillaSkin.Px(265f, 463f, 160f, 40f), Loc.T("Полный список", "Full roster"), 18f, true))
+            // The native form bakes a price/ruble slot into this footer. A
+            // contract has no purchase price: cover that slot before painting.
+            if (Event.current.type == EventType.Repaint)
+                VanillaSkin.Fill(VanillaSkin.Px(39f, 451f, 386f, 54f), new Color(0.035f, 0.035f, 0.035f, 1f));
+            if (VanillaSkin.Button(VanillaSkin.Px(40f, 453f, 366f, 34f), Loc.T("Полный список", "Full roster"), 16f, true))
                 MercUi.OpenTraderRoster();
             if (_orderAll)
             {
-                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), Loc.T("Приказ всем наёмникам", "Orders for all mercenaries"), VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
-                OrderStrip(VanillaSkin.Px(40f, 150f, 366f, 96f), null, lang);
+                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 366f, 24f), Loc.T("ПРИКАЗ ВСЕМ", "SQUAD ORDERS"), VanillaSkin.Regular, 18f, VanillaSkin.Center, VanillaSkin.White);
+                VanillaSkin.Paragraph(VanillaSkin.Px(40f, 49f, 366f, 52f),
+                    Loc.T("Приказ всем наёмникам. Точка приказа - ваше текущее место.", "Orders for all mercenaries. Point orders use your current position."), 16f, VanillaSkin.Grey);
+                OrderStrip(VanillaSkin.Px(40f, 122f, 366f, StripH), null, lang);
+                if (VanillaSkin.Button(VanillaSkin.Px(40f, 296f, 366f, 34f), Loc.T("Назад к контракту", "Back to contract"), 16f, true))
+                    _orderAll = false;
             }
             else if (picked != null)
             {
-                Row row = RowOf(picked, lang);
-                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), row.Title, VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
-                VanillaSkin.Text(VanillaSkin.Px(71f, 65f, 300f, 60f), row.Sub, VanillaSkin.Bebas, 24f, VanillaSkin.Center, VanillaSkin.Gold);
-                if (DrawRow(VanillaSkin.Px(40f, 151f, 366f, 284f), picked, lang, now)) _pickedMerc = NoRow;
+                VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 366f, 24f), Loc.T("КОНТРАКТ", "CONTRACT"), VanillaSkin.Regular, 18f, VanillaSkin.Center, VanillaSkin.White);
+                if (DrawRow(VanillaSkin.Px(40f, 45f, 366f, 396f), picked, lang, now)) _pickedMerc = NoRow;
             }
             else VanillaSkin.Paragraph(VanillaSkin.Px(40f, 351f, 366f, 84f),
                 Loc.T("Наёмников пока нет. Выберите Найм, чтобы нанять бойца.", "No mercenaries yet. Select Hire to recruit one."), 16f, VanillaSkin.Grey);
@@ -477,76 +488,78 @@ namespace NextDayRevival
         {
             Row row = RowOf(m, lang);
             bool dead = m.Dead;
-            float pad = S(10f);
-            float x = r.x + pad, y = r.y + pad, w = r.width - pad * 2f;
+            float x = r.x, y = r.y, w = r.width;
             Color text = dead ? MercPageLook.TextDim : MercPageLook.Text;
 
-            // Line 1: name, profile + tier, status chip.
+            // One full-width name/profile header; no duplicated narrow cell.
             int status = StatusOf(m);
-            float chipW = S(150f);
-            MercPageLook.Label(new Rect(x, y, w - chipW - S(6f), S(20f)), row.Title, UiFont.Heading, UiFont.Left, text);
-            Rect chip = new Rect(r.xMax - pad - chipW, y + S(1f), chipW, S(18f));
-            MercPageLook.Chip(chip, (lang == 0 ? StatusRu : StatusEn)[status], MercStatus.Tone(status));
-            y += S(20f);
-            MercPageLook.Label(new Rect(x, y, w, S(16f)), row.Sub, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
-            y += S(20f);
+            VanillaSkin.Paragraph(new Rect(x, y, w, S(48f)), row.Title, 20f, text);
+            MercPageLook.Label(new Rect(x, y + S(50f), w, S(22f)), row.Sub, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
+            y += S(78f);
+            MercPageLook.Chip(new Rect(x, y, S(230f), S(22f)), StatusText(m, lang), m.Down.Down ? UiTone.Error : MercStatus.Tone(status));
 
-            // Line 2: health, order, where.
+            // Health shares only the status line. Order and location each have
+            // their own full-width line, including long attack/peaceful states.
             int pct = Mathf.Clamp(Mathf.RoundToInt(m.Hp * 100f), 0, 100);
-            MercPageLook.Progress(new Rect(x, y + S(6f), S(70f), S(6f)), m.Hp, dead ? MercPageLook.TextDim : pct > 60 ? MercPageLook.Good : pct > 30 ? MercPageLook.Warn : MercPageLook.Bad);
+            MercPageLook.Progress(new Rect(r.xMax - S(126f), y + S(8f), S(70f), S(6f)), m.Hp, dead ? MercPageLook.TextDim : pct > 60 ? MercPageLook.Good : pct > 30 ? MercPageLook.Warn : MercPageLook.Bad);
             string hp = row.Hp.Stale(pct) ? row.Hp.Set(pct, UiNum.Of(pct) + " %") : row.Hp.Text;
-            MercPageLook.Label(new Rect(x + S(76f), y, S(44f), S(18f)), hp, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
-            float ox = x + S(122f), whereW = S(104f);
+            MercPageLook.Label(new Rect(r.xMax - S(50f), y, S(50f), S(22f)), hp, UiFont.Small, UiFont.Right, MercPageLook.TextDim);
+            y += S(28f);
             if (!dead)
             {
                 MercOrder o = m.Order;
                 int ok = ((((o.Mode * 8 + Mathf.Min(o.Points.Length, 7)) * 128 + Mathf.Clamp((int)o.RadiusM, 0, 127)) * 2
                     + (m.Peaceful ? 1 : 0)) * 2 + lang) * 1200 + AttackKey(m);
                 string order = row.Order.Stale(ok) ? row.Order.Set(ok, OrderText(m)) : row.Order.Text;
-                MercPageLook.Label(new Rect(ox, y, r.xMax - pad - whereW - ox, S(18f)), order, UiFont.Body, UiFont.Left, text);
+                VanillaSkin.Paragraph(new Rect(x, y, w, S(40f)), order, 16f, text);
                 int wk = row.WhereKey * 2 + lang;
                 string where = row.Where.Stale(wk) ? row.Where.Set(wk, WhereText(row.WhereKey, lang)) : row.Where.Text;
-                MercPageLook.Label(new Rect(r.xMax - pad - whereW, y, whereW, S(18f)), where, UiFont.Small, UiFont.Right, MercPageLook.TextDim);
+                MercPageLook.Label(new Rect(x, y + S(42f), w, S(22f)), where, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
             }
-            y += S(22f);
+            y += S(70f);
+
+            bool open = _orderFor == m.Id && !dead;
+            if (open)
+            {
+                OrderStrip(new Rect(x, y, w, S(StripH)), m, lang);
+                if (VanillaSkin.Button(new Rect(x, y + S(StripH + 8f), w, S(34f)), Loc.T("Скрыть", "Close"), 16f, true))
+                    _orderFor = NoRow;
+                return false;
+            }
 
             // Line 3: upkeep due / payment state.
-            Rect line = new Rect(x, y, w - S(116f), S(20f));
-            MercPageLook.Label(new Rect(r.xMax - pad - S(112f), y, S(112f), S(20f)),
-                Mercs.MedkitStockLabel(m), UiFont.Small, UiFont.Right, MercPageLook.TextDim);
+            Rect line = new Rect(x, y, w, S(44f));
+            MercPageLook.Label(new Rect(x, y + S(46f), w, S(22f)),
+                Mercs.MedkitStockLabel(m), UiFont.Small, UiFont.Left, MercPageLook.TextDim);
             bool deserting = m.Unit != null && m.Unit.Deserting;
             int pay = MercPay.State(dead, m.Unpaid, m.PayPending, m.PayWanted, m.PayError != null, m.PayErrorAt, now);
             int reason = pay == MercPay.Failed ? MercPay.Reason(m.PayError) : 0;
             int tenths = MercDue.Tenths(m.Deployed, m.PaidUntil, Mercs.GraceHours, m.Unpaid);
             int dk = (((Math.Min(tenths, 20000) * 6 + pay) * MercPay.Reasons + reason) * 4 + (dead ? 1 : deserting ? 2 : 0)) * 2 + lang;
             string dueText = row.Due.Stale(dk) ? row.Due.Set(dk, DueText(m, row, pay, reason, tenths, deserting)) : row.Due.Text;
-            if (dead) MercPageLook.Label(line, dueText, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
-            else if (deserting) MercPageLook.Status(line, UiTone.Error, dueText);
-            else if (pay == MercPay.InFlight) MercPageLook.Status(line, UiTone.Loading, dueText);
-            else if (pay == MercPay.Queued) MercPageLook.Status(line, UiTone.Warning, dueText);
-            else if (pay == MercPay.Failed || pay == MercPay.Due) MercPageLook.Status(line, UiTone.Error, dueText);
-            else MercPageLook.Label(line, dueText, UiFont.Small, UiFont.Left, MercPageLook.TextDim);
+            Color dueColor = deserting || pay == MercPay.Failed || pay == MercPay.Due ? MercPageLook.Bad
+                : pay == MercPay.Queued ? MercPageLook.Warn : MercPageLook.TextDim;
+            VanillaSkin.Paragraph(line, dueText, 14f, dead ? MercPageLook.TextDim : dueColor);
             MercPageLook.Tip(line, dueText);
-            y += S(26f);
+            y += S(78f);
             if (dead) return false;
 
             // Line 4: Locate, Order, Pay, Dismiss, native medkit gift.
-            Rect btns = new Rect(x, y, w, S(26f));
+            Rect btns = new Rect(x, y, w, S(34f));
             bool spawned = m.Unit != null && m.Unit.Ai != null;
-            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 3), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
+            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 2), Loc.T("Найти", "Locate"), UiButton.Secondary, spawned,
                 Loc.T("Отметить на карте и на экране на 30 с", "Mark him on the map and on screen for 30 s")))
                 Locate(m, row, lang);
-            bool open = _orderFor == m.Id;
-            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 3), open ? Loc.T("Скрыть", "Close") : Loc.T("Приказ...", "Order..."),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 2), Loc.T("Приказ...", "Order..."),
                 UiButton.Secondary, !deserting, null))
             { _orderFor = open ? NoRow : m.Id; _orderAll = false; MercUi.Reply(); }
+            btns.y += S(40f);
             bool canPay = m.Unpaid && !m.PayPending && !m.PayWanted && !deserting;
-            if (MercPageLook.Button(MercPageLook.Col(btns, 2, 3), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 2), canPay ? row.PayText : Loc.T("Оплачен", "Paid up"),
                 canPay ? UiButton.Primary : UiButton.Secondary, canPay, null))
             { MercUi.Reply(); Mercs.Pay(m, true); }
-            btns.y += S(32f);
             bool armed = _dismissId == m.Id && now < _dismissUntil;
-            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 3), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 2), armed ? Loc.T("Точно?", "Really?") : Loc.T("Уволить", "Dismiss"),
                 UiButton.Danger, true, Loc.T("Без возврата денег; второй щелчок увольняет", "No refund; a second click dismisses")))
             {
                 MercUi.Reply();
@@ -560,20 +573,16 @@ namespace NextDayRevival
                     return true;
                 }
             }
-            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 3), m.Down.Down ? Mercs.MedkitLabel(m)
+            btns.y += S(40f);
+            if (MercPageLook.Button(MercPageLook.Col(btns, 0, 2), m.Down.Down ? Mercs.MedkitLabel(m)
                 : Loc.T("Дать аптечку", "Give medkit"),
                 UiButton.Secondary, Mercs.CanGiveMedkit(m),
                 m.Down.Down ? Loc.T("Оживить аптечкой из рюкзака (3 м); оставайтесь рядом", "Revive with an inventory medkit within 3 m; stay nearby")
                 : Loc.T("Дать аптечку из рюкзака (10 м); оплата пополняет запас",
                     "Give one native medkit within 10 m; upkeep refills supplies"))) Mercs.GiveMedkit(m);
-            if (MercPageLook.Button(MercPageLook.Col(btns, 2, 3), Mercs.MedicLabel(m), UiButton.Secondary, Mercs.CanMedic(m),
+            if (MercPageLook.Button(MercPageLook.Col(btns, 1, 2), Mercs.MedicLabel(m), UiButton.Secondary, Mercs.CanMedic(m),
                 Loc.T("Дополнительная роль: сражается, спасает раненых, расходует аптечки", "Extra duty: fights, rescues and treats allies using finite medkits")))
                 Mercs.SetMedic(m, !m.Medic);
-            if (open)
-            {
-                y = btns.yMax + S(6f);
-                OrderStrip(new Rect(x, y, w, S(StripH)), m, lang);
-            }
             return false;
         }
 
@@ -592,6 +601,12 @@ namespace NextDayRevival
                 if (brain != null) { state = brain.State; mode = brain.Mode; }
             }
             return MercStatus.Of(m.Dead, u != null && u.Deserting, spawned, seat, m.Combat, state, mode);
+        }
+
+        static string StatusText(Mercs.Record m, int lang)
+        {
+            if (!m.Dead && m.Down.Down) return Loc.T("РАНЕН - НУЖНА ПОМОЩЬ", "DOWN - NEEDS REVIVE");
+            return (lang == 0 ? StatusRu : StatusEn)[StatusOf(m)];
         }
 
         static string OrderText(Mercs.Record m)
@@ -683,28 +698,29 @@ namespace NextDayRevival
 
         // ------------------------------------------------------------ orders
 
-        /// <summary>Six order buttons for one merc (target) or for all (null).
+        /// <summary>Eight equal order buttons for one merc (target) or all (null).
         /// Point orders take the player's own spot - the player chose it.</summary>
         static void OrderStrip(Rect r, Mercs.Record target, int lang)
         {
-            float bh = S(28f), g = S(6f);
+            float bh = S(34f), g = S(6f);
             Rect r1 = new Rect(r.x, r.y, r.width, bh), r2 = new Rect(r.x, r.y + bh + g, r.width, bh);
             int act = -1;
             Rect r3 = new Rect(r.x, r.y + (bh + g) * 2f, r.width, bh);
+            Rect r4 = new Rect(r.x, r.y + (bh + g) * 3f, r.width, bh);
             if (MercPageLook.Button(MercPageLook.Col(r3, 0, 2), Loc.T("В укрытие", "Take cover"), UiButton.Secondary, true, null)) act = 6;
             if (MercPageLook.Button(MercPageLook.Col(r3, 1, 2), Loc.T("Занять ПВО", "Man air defence"),
                 UiButton.Secondary, true, Loc.T("Весь отряд; ещё раз - освободить", "Whole squad; click again to release"))) act = 7;
-            if (MercPageLook.Button(MercPageLook.Col(r1, 0, 3), Loc.T("За мной", "Follow me"), UiButton.Secondary, true, null)) act = 0;
-            if (MercPageLook.Button(MercPageLook.Col(r1, 1, 3), Loc.T("Стоять здесь", "Stay here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r1, 0, 2), Loc.T("За мной", "Follow me"), UiButton.Secondary, true, null)) act = 0;
+            if (MercPageLook.Button(MercPageLook.Col(r1, 1, 2), Loc.T("Стоять здесь", "Stay here"), UiButton.Secondary, true,
                 Loc.T("Держать ваше текущее место", "Hold your current spot"))) act = 1;
-            if (MercPageLook.Button(MercPageLook.Col(r1, 2, 3), Loc.T("За техникой", "Follow vehicle"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r2, 0, 2), Loc.T("За техникой", "Follow vehicle"), UiButton.Secondary, true,
                 Loc.T("Сесть в вашу машину (или в следующую)", "Board your vehicle (or the next one you take)"))) act = 2;
-            if (MercPageLook.Button(MercPageLook.Col(r2, 0, 3), Loc.T("Патруль здесь", "Patrol here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r2, 1, 2), Loc.T("Патруль здесь", "Patrol here"), UiButton.Secondary, true,
                 Loc.T("Круг 30 м вокруг вашего места; маршрут по карте - клавиша L", "30 m loop around your spot; a map route: L list"))) act = 3;
-            if (MercPageLook.Button(MercPageLook.Col(r2, 1, 3), Loc.T("Периметр здесь", "Perimeter here"), UiButton.Secondary, true,
+            if (MercPageLook.Button(MercPageLook.Col(r4, 0, 2), Loc.T("Периметр здесь", "Perimeter here"), UiButton.Secondary, true,
                 Loc.T("Охранять круг вокруг вашего места", "Guard a circle around your spot"))) act = 4;
             bool peaceful = target != null ? target.Peaceful : FirstPeaceful();
-            if (MercPageLook.Button(MercPageLook.Col(r2, 2, 3), peaceful ? Loc.T("Мирный: ВКЛ", "Peaceful: ON") : Loc.T("Мирный: ВЫКЛ", "Peaceful: OFF"),
+            if (MercPageLook.Button(MercPageLook.Col(r4, 1, 2), peaceful ? Loc.T("Мирный: ВКЛ", "Peaceful: ON") : Loc.T("Мирный: ВЫКЛ", "Peaceful: OFF"),
                 UiButton.Secondary, true, Loc.T("Не начинает бой, отвечает на огонь", "Starts no fight, returns fire"))) act = 5;
             if (act >= 0) Order(target, act);
         }

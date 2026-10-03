@@ -1,9 +1,14 @@
 // Next Day: Survival - Revival Toolkit
 //
-// Z T1a: regular north outside stairs are the sole route to the roof.
-// Coordinates are metres in TowerRadar's C1 frame (world units = m * 2.8).
-// Existing three flights reach the main roof at 9 m. A runtime upper flight
-// and guarded crossover above the cab's north rail reach the 15.35 m posts.
+// C W3: the main roof (design 9 m, 8.79 m on the shipped C1_LOD0 collider)
+// is THE roof. The existing north outside stairs (three flights and a short
+// threshold over the parapet's collider face) reach it; the radar console and
+// the five sandbag posts stand on it; the cab (command room) is reached over
+// the roof's own inner flight. No stair leads above the cab any more.
+// Coordinates are metres in TowerRadar's C1 frame (world units = m * 2.8),
+// heights measured on the shipped collider. Walks across the roof follow a
+// visibility graph over authored, capsule-inflated obstacle rectangles, so
+// every leg is a straight line the offline check can prove.
 // C# 3.0, ASCII. Pure layout/routing is compiled by tower_roof_check.py.
 using UnityEngine;
 
@@ -13,47 +18,88 @@ namespace NextDayRevival
     {
         // ------------------------------------------------------------ layout
 
-        internal const float RoofY = 15.35f;          // top of the cab roof (C1_COL_487)
-        internal const float RailTop = 16.35f;        // top of its rail (C1_COL_488..491)
-        internal const float RoofMinX = 4.30f, RoofMaxX = 11.95f;     // inside the rail
-        internal const float RoofMinZ = -4.05f, RoofMaxZ = 4.05f;
+        internal const float RoofY = 8.79f;           // top of the main roof (C1_LOD0)
+        internal const float CabFloorY = 11.79f;      // cab floor and the inner flight's landing
+        internal const float CabRoofY = 15.142f;     // measured cab roof (C1_LOD0): the antenna only
+        // capsule centres inside the parapet (all-collider free map)
+        internal const float RoofMinX = -11.3f, RoofMaxX = 11.35f;
+        internal const float RoofMinZ = -8.45f, RoofMaxZ = 8.35f;
+        internal const float CabMinX = 4.3f, CabMaxX = 11.6f;
+        internal const float CabMinZ = -3.6f, CabMaxZ = 3.6f;
 
-        internal const float StepSpeed = 2.4f;        // brisk stair walk; ~20 s end to end
-        internal const float StuckSeconds = 2f, MaxSeconds = 24f;
+        internal const float StepSpeed = 2.4f;        // brisk stair walk; ~10 s up the stairs
+        internal const float StuckSeconds = 2f, MaxSeconds = 40f;   // approach, stairs and the walk round the cab
         internal const float FootArrive = 0.35f, TopArrive = 0.35f, PostArrive = 1.0f;
-        internal const int PathMax = 24;
+        internal const float SeatZone = 2.0f, DoorArrive = 0.8f;
+        internal const int PathMax = 32;
         internal const float CapsuleRadius = 0.27f, CapsuleHeight = 1.8f;
         // Feet clear a ramp tangent by r * (sec(36.87 degrees) - 1), plus margin.
         internal const float FootLift = 0.12f;
+        // The existing three flights: a line 5 cm over the measured nosings
+        // (0.25 m treads, 0.1875 m risers), landings at their own height;
+        // then the threshold over the collider face at z 8.99 (top 9.22) in
+        // the parapet's gap.
         internal static readonly Vector3[] Stair = {
-            new Vector3(-10.9f, 0f, 9.65f), new Vector3(-10.5f, 0f, 9.65f),
-            new Vector3(-6.5f, 3f, 9.65f), new Vector3(-5.1f, 3f, 9.65f),
-            new Vector3(-1.1f, 6f, 9.65f), new Vector3(0.3f, 6f, 9.65f),
-            new Vector3(4.3f, 9f, 9.65f), new Vector3(5f, 9f, 9.65f),
-            new Vector3(5f, 9.4f, 9.05f), new Vector3(5f, 9.4f, 8.35f),
-            new Vector3(5f, 9f, 7.7f), new Vector3(5f, 9f, 7.3f),
-            new Vector3(-2.6f, 9f, 7.3f), new Vector3(-2.6f, 9f, 5.7f),
-            new Vector3(-2f, 9f, 5.7f), new Vector3(7.35f, 16.5f, 5.7f), new Vector3(8f, 16.5f, 5.7f),
-            new Vector3(8f, 16.5f, 3.7f), new Vector3(8f, 15.35f, 2.15f)
+            new Vector3(-10.9f, 0f, 9.65f), new Vector3(-10.56f, -0.02f, 9.65f),
+            new Vector3(-6.81f, 2.79f, 9.65f), new Vector3(-5.41f, 2.79f, 9.65f),
+            new Vector3(-1.41f, 5.79f, 9.65f), new Vector3(-0.01f, 5.79f, 9.65f),
+            new Vector3(3.99f, 8.79f, 9.75f), new Vector3(5f, 8.79f, 9.75f),
+            new Vector3(5f, 9.36f, 9.1f), new Vector3(5f, 9.36f, 8.88f),
+            new Vector3(5f, 8.79f, 8.2f), new Vector3(5f, 8.79f, 7.6f)
         };
-        // Runtime geometry: slope, top landing, crossover, short descent.
-        internal const int UpperFirst = 14;
-        // who is "up": on the roof, or heading for a point on / beside it
+        // Runtime geometry: the threshold segments Stair[ThresholdFirst-1 .. ThresholdLast].
+        internal const int ThresholdFirst = 8, ThresholdLast = 10;
+        internal const float ThresholdWidth = 1.1f, ThresholdThick = 0.12f;
+        // The cab's way out: inside the door, the door, the inner flight's
+        // landing and foot (5 cm over its nosings), the roof west of it.
+        internal static readonly Vector3[] Inner = {
+            new Vector3(5.4f, CabFloorY, 0f), new Vector3(4.6f, CabFloorY, 0f),
+            new Vector3(2.58f, CabFloorY, 0f), new Vector3(-1.42f, RoofY, 0f),
+            new Vector3(-1.6f, RoofY, 0f)
+        };
+        // who is "up": on the roof (cab and inner flight included), or heading for a point on / beside it
         internal const float UpBelow = 1.3f;          // the roof counts from RoofY - this
-        internal const float GoalBelow = 1.5f, GoalAbove = 3.0f;
+        internal const float GoalBelow = 1.5f, GoalAbove = 4.0f;
         internal const float GoalReach = 10.0f;       // FOLLOW slots lie up to 10 m behind the owner
 
-        // THE POSTS: five places behind a sandbag wall, one per merc slot,
-        // looking out over the wall (face). Sandbags 0.9 m high, 0.5 m thick.
+        // THE CONSOLE: the radar console on the main roof, its screen north,
+        // the operator's chair north of it; a sandbag horseshoe W/S/E, open
+        // to the north where the stair arrives.
+        internal const float ConsoleX = 1.5f, ConsoleZ = 4.2f, SeatZ = ConsoleZ + 0.85f;
+        internal const float SeatReach = 1.5f;        // a goal this close to the seat means the seat
+        internal static Vector3 Seat() { return new Vector3(ConsoleX, RoofY, SeatZ); }
+        // console desk + walls: centre x, z and size x, z (metres), 0.9 m bags
+        internal static readonly float[] ConsoleBox = {
+            ConsoleX, ConsoleZ - 0.05f, 1.3f, 0.7f,           // the desk's own collider
+            ConsoleX, ConsoleZ - 0.95f, 3.0f, 0.45f,          // south wall behind the desk
+            ConsoleX - 1.275f, ConsoleZ + 0.225f, 0.45f, 1.85f, // west wall
+            ConsoleX + 1.275f, ConsoleZ + 0.225f, 0.45f, 1.85f  // east wall
+        };
+
+        // THE POSTS: five places behind a sandbag wall along the parapet, one
+        // per merc slot, looking out over the wall (face). Sandbags 0.9 m high.
         internal const float BagH = 0.9f;
-        internal static readonly float[] PostX = { 9.6f, 6.2f, 10.5f, 8.0f, 5.75f };
-        internal static readonly float[] PostZ = { 2.6f, 2.6f, 1.0f, -2.6f, 0.0f };
-        internal static readonly float[] FaceX = { 0f, 0f, 1f, 0f, -1f };
-        internal static readonly float[] FaceZ = { 1f, 1f, 0f, -1f, 0f };
-        internal static readonly float[] BagX = { 9.6f, 6.2f, 11.45f, 8.0f, 4.8f };
-        internal static readonly float[] BagZ = { 3.55f, 3.55f, 1.0f, -3.55f, 0.0f };
-        internal static readonly float[] BagSX = { 2.2f, 2.2f, 0.5f, 2.2f, 0.5f };
-        internal static readonly float[] BagSZ = { 0.5f, 0.5f, 2.2f, 0.5f, 2.0f };
+        internal static readonly float[] PostX = { -2.5f, 10.45f, -10.45f, -4.0f, 10.45f };
+        internal static readonly float[] PostZ = { 7.55f, 6.6f, 2.0f, -7.6f, -6.4f };
+        internal static readonly float[] FaceX = { 0f, 1f, -1f, 0f, 1f };
+        internal static readonly float[] FaceZ = { 1f, 0f, 0f, -1f, 0f };
+        internal static readonly float[] BagX = { -2.5f, 11.27f, -11.27f, -4.0f, 11.27f };
+        internal static readonly float[] BagZ = { 8.33f, 6.6f, 2.0f, -8.38f, -6.4f };
+        internal static readonly float[] BagSX = { 2.2f, 0.45f, 0.45f, 2.2f, 0.45f };
+        internal static readonly float[] BagSZ = { 0.45f, 2.2f, 2.2f, 0.45f, 2.2f };
+
+        // The shipped roof's own obstacles, min x, min z, max x, max z,
+        // ALREADY inflated by the capsule (all-collider free map at 8.79 m).
+        internal static readonly float[] Blocks = {
+            -1.4f, -1.1f, 4.8f, 1.0f,         // inner flight and its pillars
+            4.65f, -3.5f, 11.8f, 3.5f,        // the cab block
+            5.1f, 4.25f, 9.8f, 6.25f,         // air conditioning units
+            6.6f, 3.4f, 7.55f, 4.35f,         // their duct to the cab
+            -4.6f, 4.75f, -3.2f, 6.1f,        // north vent
+            0.85f, -6.8f, 2.35f, -5.3f,       // south vent
+            -11.8f, -6.05f, -9.35f, -4.1f     // south-west box
+        };
+        internal const float Inflate = 0.3f;          // runtime boxes grow by this
 
         internal static int Posts { get { return PostX.Length; } }
 
@@ -84,26 +130,60 @@ namespace NextDayRevival
         // -------------------------------------------------------------- legs
 
         internal const int LegNone = 0;       // not the roof's business
-        internal const int LegWalk = 1;       // walk to leg (exactly there, a NavMesh spot)
+        internal const int LegWalk = 1;       // walk to leg (the bounded direct walk)
         internal const int LegHold = 2;       // at his post: hold, leg = the direction he looks
         internal const int LegClimbUp = 3;    // at the foot: climb up
         internal const int LegClimbDown = 4;  // at the top: climb down
+        internal const int LegNav = 5;        // plain NavMesh move to leg (cab inside, last steps to an exact spot)
 
-        /// <summary>Standing on the roof (inside the rail, at roof height).</summary>
+        /// <summary>Up there: on the main roof, the inner flight or in the cab.</summary>
         internal static bool OnRoof(Vector3 l)
         {
             return l.y > RoofY - UpBelow && l.y < RoofY + GoalAbove
                 && l.x > RoofMinX - 0.3f && l.x < RoofMaxX + 0.3f && l.z > RoofMinZ - 0.3f && l.z < RoofMaxZ + 0.3f;
         }
 
+        /// <summary>Inside the cab (the command room), at its floor.</summary>
+        internal static bool InCab(Vector3 l)
+        {
+            return l.y > RoofY + 2f && l.y < CabFloorY + 2.5f
+                && l.x > CabMinX && l.x < CabMaxX && l.z > CabMinZ && l.z < CabMaxZ;
+        }
+
+        /// <summary>On the inner flight or its landing (above the roof, west of the cab).</summary>
+        internal static bool OnFlight(Vector3 l)
+        {
+            return l.y > RoofY + 0.15f && l.y < CabFloorY + 1.5f
+                && l.x > -1.4f && l.x <= CabMinX && l.z > -0.9f && l.z < 0.9f;
+        }
+
         /// <summary>A goal meant for the roof: at roof height over it or
-        /// beside it (a FOLLOW slot behind an owner standing up there).</summary>
+        /// beside it (a FOLLOW slot behind an owner standing up there), or in the cab.</summary>
         internal static bool GoalUp(Vector3 l)
         {
             if (l.y < RoofY - GoalBelow || l.y > RoofY + GoalAbove) return false;
             float dx = l.x < RoofMinX ? RoofMinX - l.x : (l.x > RoofMaxX ? l.x - RoofMaxX : 0f);
             float dz = l.z < RoofMinZ ? RoofMinZ - l.z : (l.z > RoofMaxZ ? l.z - RoofMaxZ : 0f);
             return dx * dx + dz * dz <= GoalReach * GoalReach;
+        }
+
+        /// <summary>The console seat (or a goal right at it).</summary>
+        internal static bool AtSeat(Vector3 l)
+        {
+            return Flat(l, Seat()) <= SeatReach && Mathf.Abs(l.y - RoofY) < 1.5f;
+        }
+
+        /// <summary>A goal walked to exactly (the cab, the console seat);
+        /// every other roof goal means his post.</summary>
+        internal static bool Exact(Vector3 l) { return InCab(l) || AtSeat(l); }
+
+        /// <summary>Where a roof goal ends his direct walk: inside the cab's
+        /// door, the console seat or his post.</summary>
+        internal static Vector3 Target(Vector3 goal, int slot)
+        {
+            if (InCab(goal)) return Inner[0];
+            if (AtSeat(goal)) return Seat();
+            return Post(slot);
         }
 
         /// <summary>Man and goal on different sides of the stair: a flat
@@ -125,9 +205,25 @@ namespace NextDayRevival
             leg = goal;
             bool manUp = OnRoof(man), goalUp = GoalUp(goal);
             if (!manUp && !goalUp) return LegNone;
+            if (manUp && InCab(man))
+            {
+                // Furniture: the baked, carved cab NavMesh takes him to the door.
+                if (goalUp && InCab(goal)) return LegNav;
+                leg = Inner[0];
+                if (Flat(man, leg) > DoorArrive) return LegNav;
+                leg = goalUp ? Target(goal, slot) : exit;
+                return LegWalk;
+            }
             if (manUp && goalUp)
             {
-                leg = Post(slot);
+                leg = Target(goal, slot);
+                if (InCab(goal)) return LegWalk;
+                if (AtSeat(goal))
+                {
+                    // by the console: the NavMesh's last steps to the exact pose
+                    if (Flat(man, leg) <= SeatZone && Mathf.Abs(man.y - leg.y) < 1f) { leg = goal; return LegNav; }
+                    return LegWalk;
+                }
                 if (Flat(man, leg) <= PostArrive) { leg = Face(slot); return LegHold; }
                 return LegWalk;
             }
@@ -138,16 +234,17 @@ namespace NextDayRevival
                 return LegWalk;
             }
             leg = exit;
-            if (Flat(man, leg) <= TopArrive) return LegClimbDown;
+            if (Flat(man, leg) <= TopArrive && Mathf.Abs(man.y - leg.y) < 1f) return LegClimbDown;
             return LegWalk;
         }
 
         // -------------------------------------------------------------- climb
 
         /// <summary>The stair walk as a polyline from where he stands: up = foot,
-        /// the stair, over the rail, down onto the roof; down the same way
-        /// back (foot and exit as in Leg). Returns the point count (at most
-        /// PathMax).</summary>
+        /// the stair, over the threshold onto the roof; down = across the
+        /// roof (out of the cab first) to the stair and down to the foot
+        /// (foot and exit as in Leg). Returns the point count (at most
+        /// PathMax). Route() then adds the roof walk to his end point.</summary>
         internal static int Path(bool up, Vector3 start, Vector3 foot, Vector3 exit, Vector3[] pts)
         {
             int n = 0;
@@ -157,10 +254,172 @@ namespace NextDayRevival
                 for (int i = 1; i < Stair.Length; i++) pts[n++] = Stair[i];
                 pts[n++] = exit;
             } else {
-                pts[n++] = exit;
+                n = Leave(pts, n);
+                n = Graph(pts, n, exit, PathMax - Stair.Length - 1);
                 for (int i = Stair.Length - 1; i > 0; i--) pts[n++] = Stair[i];
                 pts[n++] = foot;
             }
+            return n;
+        }
+
+        /// <summary>Appends the roof walk from pts[n-1] to end: out of the
+        /// cab or off the inner flight, around every obstacle, into the cab
+        /// when end is inside its door. Returns the new count.</summary>
+        internal static int Route(Vector3[] pts, int n, Vector3 end)
+        {
+            n = Leave(pts, n);
+            bool cab = InCab(end);
+            n = Graph(pts, n, cab ? Inner[Inner.Length - 1] : end, PathMax - (cab ? Inner.Length : 0));
+            if (cab) for (int i = Inner.Length - 2; i >= 0; i--) pts[n++] = Inner[i];
+            return n;
+        }
+
+        // Down the inner flight to the roof beside it.
+        static int Leave(Vector3[] pts, int n)
+        {
+            Vector3 s = pts[n - 1];
+            int from;
+            if (InCab(s)) from = 1;
+            else if (OnFlight(s)) from = s.x > Inner[2].x ? 2 : 3;
+            else return n;
+            for (int i = from; i < Inner.Length; i++) pts[n++] = Inner[i];
+            return n;
+        }
+
+        // ------------------------------------------------- roof walk graph
+
+        static float[] _ob;                   // obstacles: min x, min z, max x, max z
+        static int _obN, _nodes;
+        static float[] _nx, _nz, _dist;
+        static int[] _prev, _chain;
+        static bool[] _vis, _done;
+
+        internal static int ObstacleCount { get { Init(); return _obN; } }
+
+        internal static void Obstacle(int i, out float minX, out float minZ, out float maxX, out float maxZ)
+        {
+            Init();
+            minX = _ob[i * 4]; minZ = _ob[i * 4 + 1]; maxX = _ob[i * 4 + 2]; maxZ = _ob[i * 4 + 3];
+        }
+
+        static void Add(ref int k, float cx, float cz, float sx, float sz)
+        {
+            _ob[k++] = cx - sx * 0.5f - Inflate; _ob[k++] = cz - sz * 0.5f - Inflate;
+            _ob[k++] = cx + sx * 0.5f + Inflate; _ob[k++] = cz + sz * 0.5f + Inflate;
+        }
+
+        /// <summary>Builds the obstacle list and the corner graph once (all
+        /// static; the first climb or the roof's build pays it).</summary>
+        internal static void Init()
+        {
+            if (_ob != null) return;
+            int count = Blocks.Length / 4 + BagX.Length + ConsoleBox.Length / 4;
+            float[] ob = new float[count * 4];
+            _ob = ob;
+            int k = 0;
+            for (int i = 0; i < Blocks.Length; i++) ob[k++] = Blocks[i];
+            for (int i = 0; i < BagX.Length; i++) Add(ref k, BagX[i], BagZ[i], BagSX[i], BagSZ[i]);
+            for (int i = 0; i < ConsoleBox.Length; i += 4) Add(ref k, ConsoleBox[i], ConsoleBox[i + 1], ConsoleBox[i + 2], ConsoleBox[i + 3]);
+            _obN = count;
+            int max = count * 4 + 2;
+            _nx = new float[max]; _nz = new float[max]; _dist = new float[max];
+            _prev = new int[max]; _chain = new int[max]; _done = new bool[max];
+            int nodes = 0;
+            for (int i = 0; i < count; i++)
+                for (int c = 0; c < 4; c++)
+                {
+                    float x = (c & 1) == 0 ? ob[i * 4] - 0.05f : ob[i * 4 + 2] + 0.05f;
+                    float z = (c & 2) == 0 ? ob[i * 4 + 1] - 0.05f : ob[i * 4 + 3] + 0.05f;
+                    if (x < RoofMinX || x > RoofMaxX || z < RoofMinZ || z > RoofMaxZ || Inside(x, z) >= 0) continue;
+                    _nx[nodes] = x; _nz[nodes] = z; nodes++;
+                }
+            _nodes = nodes;
+            _vis = new bool[nodes * nodes];
+            for (int a = 0; a < nodes; a++)
+                for (int b = a + 1; b < nodes; b++)
+                    _vis[a * nodes + b] = _vis[b * nodes + a] = Clear(_nx[a], _nz[a], _nx[b], _nz[b]);
+        }
+
+        // The first obstacle that holds the point, -1 none.
+        static int Inside(float x, float z)
+        {
+            for (int i = 0; i < _obN; i++)
+                if (x > _ob[i * 4] && x < _ob[i * 4 + 2] && z > _ob[i * 4 + 1] && z < _ob[i * 4 + 3]) return i;
+            return -1;
+        }
+
+        /// <summary>Does the flat segment a-b miss every obstacle? Obstacles
+        /// holding either end are ignored (he walks out of them).</summary>
+        internal static bool Clear(float ax, float az, float bx, float bz)
+        {
+            Init();
+            for (int i = 0; i < _obN; i++)
+            {
+                float x0 = _ob[i * 4], z0 = _ob[i * 4 + 1], x1 = _ob[i * 4 + 2], z1 = _ob[i * 4 + 3];
+                if ((ax > x0 && ax < x1 && az > z0 && az < z1) || (bx > x0 && bx < x1 && bz > z0 && bz < z1)) continue;
+                if (Crosses(ax, az, bx, bz, x0, z0, x1, z1)) return false;
+            }
+            return true;
+        }
+
+        // Liang-Barsky against the open rectangle.
+        static bool Crosses(float ax, float az, float bx, float bz, float x0, float z0, float x1, float z1)
+        {
+            float t0 = 0f, t1 = 1f, dx = bx - ax, dz = bz - az;
+            if (!Clip(-dx, ax - x0, ref t0, ref t1) || !Clip(dx, x1 - ax, ref t0, ref t1)
+                || !Clip(-dz, az - z0, ref t0, ref t1) || !Clip(dz, z1 - az, ref t0, ref t1)) return false;
+            return t1 - t0 > 1e-4f;
+        }
+
+        static bool Clip(float p, float q, ref float t0, ref float t1)
+        {
+            if (p > -1e-7f && p < 1e-7f) return q > 0f;
+            float r = q / p;
+            if (p < 0f) { if (r > t1) return false; if (r > t0) t0 = r; }
+            else { if (r < t0) return false; if (r < t1) t1 = r; }
+            return true;
+        }
+
+        static bool Sees(int a, int b)
+        {
+            if (a < _nodes && b < _nodes) return _vis[a * _nodes + b];
+            return Clear(_nx[a], _nz[a], _nx[b], _nz[b]);
+        }
+
+        /// <summary>Shortest obstacle-free walk on the roof from pts[n-1] to
+        /// end (end included, at roof height between), at most up to the
+        /// point count limit. No allocation.</summary>
+        static int Graph(Vector3[] pts, int n, Vector3 end, int limit)
+        {
+            Init();
+            Vector3 s = pts[n - 1];
+            int S = _nodes, E = _nodes + 1, total = _nodes + 2;
+            _nx[S] = s.x; _nz[S] = s.z; _nx[E] = end.x; _nz[E] = end.z;
+            for (int i = 0; i < total; i++) { _dist[i] = float.MaxValue; _prev[i] = -1; _done[i] = false; }
+            _dist[S] = 0f;
+            while (true)
+            {
+                int u = -1;
+                float best = float.MaxValue;
+                for (int i = 0; i < total; i++)
+                    if (!_done[i] && _dist[i] < best) { best = _dist[i]; u = i; }
+                if (u < 0 || u == E) break;
+                _done[u] = true;
+                for (int v = 0; v < total; v++)
+                {
+                    if (_done[v] || v == u || !Sees(u, v)) continue;
+                    float dx = _nx[v] - _nx[u], dz = _nz[v] - _nz[u];
+                    float d = best + Mathf.Sqrt(dx * dx + dz * dz);
+                    if (d < _dist[v]) { _dist[v] = d; _prev[v] = u; }
+                }
+            }
+            int c = 0;
+            if (_prev[E] >= 0)
+                for (int v = _prev[E]; v != S && v >= 0; v = _prev[v]) _chain[c++] = v;
+            // corners from the start side; drop any beyond the point limit
+            for (int i = c - 1; i >= 0 && n < limit - 1; i--)
+                pts[n++] = new Vector3(_nx[_chain[i]], RoofY, _nz[_chain[i]]);
+            pts[n++] = end;
             return n;
         }
 

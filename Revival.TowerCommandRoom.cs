@@ -24,20 +24,35 @@ namespace NextDayRevival
             if (TowerRadar.Tower != null) console.gameObject.AddComponent<TowerCommandRoom>();
         }
 
+        Transform Frame(string name, float y)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(transform, false);
+            Vector3 origin = TowerRadar.TowerPoint(Vector3.zero);
+            origin.y = y;
+            go.transform.position = origin;
+            go.transform.rotation = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
+            return go.transform;
+        }
+
         IEnumerator Start()
         {
             // Return before any work; the existing console load frame stays small.
             yield return null;
-            Transform frame;
+            Transform[] frames = new Transform[2];
             List<TowerCommandRoomCore.Piece> pieces;
+            int split;
             FrameProf.S(FrameProf.S_TowerCommandRoomLoad);
             try {
-                GameObject room = new GameObject("NDR C1 command room");
-                room.transform.SetParent(transform, false);
-                room.transform.localPosition = -TowerRadar.ConsoleLocalM * K;
-                // The radar console y is the measured cab floor, not an estimate.
-                frame = room.transform;
+                // C W3: the command room stays INSIDE the cab at its measured
+                // floor, wherever the radar console stands (the main roof);
+                // the console's own sandbag post is the roof frame. Both share
+                // the console's lifetime, not its position.
+                frames[0] = Frame("NDR C1 command room", TowerRadar.CabFloorY);
+                frames[1] = Frame("NDR C1 roof console post", TowerRadar.MainRoofY);
                 pieces = TowerCommandRoomCore.Pieces();
+                split = pieces.Count;
+                pieces.AddRange(TowerCommandRoomCore.RoofPieces());
             } finally { FrameProf.E(FrameProf.S_TowerCommandRoomLoad); }
             yield return null;
             Material[] mats=new Material[8];
@@ -55,7 +70,7 @@ namespace NextDayRevival
                 FrameProf.S(FrameProf.S_TowerCommandRoomLoad);
                 try {
                     GameObject go=new GameObject(p.Name);
-                    go.transform.SetParent(frame,false);
+                    go.transform.SetParent(frames[i<split?0:1],false);
                     go.transform.localPosition=new Vector3(p.X,p.Y,p.Z)*K;
                     go.isStatic=true;
                     Vector3 size=new Vector3(p.SX,p.SY,p.SZ)*K;
@@ -69,11 +84,13 @@ namespace NextDayRevival
                 yield return null;
             }
             // Small mesh chunks spread construction across frames. Rendering
-            // ends with at most one mesh per material, zero primitive objects.
+            // ends with at most one mesh per material and frame, zero primitive objects.
+            for (int f=0;f<frames.Length;f++)
             for (int material=0;material<mats.Length;material++) {
                 _vertices.Clear(); _uv.Clear(); _indices.Clear();
                 int n=0;
-                for (int i=0;i<pieces.Count;i++) {
+                int first=f==0?0:split, end=f==0?split:pieces.Count;
+                for (int i=first;i<end;i++) {
                     TowerCommandRoomCore.Piece p=pieces[i];
                     if (p.Solid || p.Material!=material) continue;
                     FrameProf.S(FrameProf.S_TowerCommandRoomLoad);
@@ -84,12 +101,12 @@ namespace NextDayRevival
                 FrameProf.S(FrameProf.S_TowerCommandRoomLoad);
                 try {
                     if (_vertices.Count>0) {
-                        Mesh mesh=new Mesh(); mesh.name="C1 command room batch "+material;
+                        Mesh mesh=new Mesh(); mesh.name="C1 "+(f==0?"command room":"roof post")+" batch "+material;
                         _owned.Add(mesh);
                         mesh.SetVertices(_vertices); mesh.SetUVs(0,_uv);
                         mesh.SetTriangles(_indices,0); mesh.RecalculateNormals(); mesh.RecalculateBounds();
                         GameObject go=new GameObject(mesh.name);
-                        go.transform.SetParent(frame,false); go.isStatic=true;
+                        go.transform.SetParent(frames[f],false); go.isStatic=true;
                         go.AddComponent<MeshFilter>().sharedMesh=mesh;
                         MeshRenderer renderer=go.AddComponent<MeshRenderer>();
                         renderer.sharedMaterial=mats[material];
@@ -99,7 +116,7 @@ namespace NextDayRevival
                 yield return null;
             }
             _vertices.Clear(); _uv.Clear(); _indices.Clear();
-            RevivalPlugin.L.LogInfo("TowerCommandRoom: static command post ready; radar access retained, east desk reserved for Z M4.");
+            RevivalPlugin.L.LogInfo("TowerCommandRoom: static command post ready in the cab, radar console post on the main roof; east desk reserved for Z M4.");
         }
 
         Material Own(string name, Color color, Material donor)

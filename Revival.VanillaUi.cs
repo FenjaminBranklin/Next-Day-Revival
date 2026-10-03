@@ -19,7 +19,9 @@ namespace NextDayRevival
         internal static readonly Color Red = new Color(0.992f, 0.282f, 0.282f, 1f);
         internal static readonly Color Green = new Color(0.443f, 0.671f, 0.310f, 1f);
 
-        static readonly string[] Names = { "InteractItem", "MarkerInfo", "warning_02_empty",
+        // InteractItem is not listed: it is the pickup tutorial art with the F
+        // key, arrow and gift baked into the texture (c-u1).
+        static readonly string[] Names = { "MarkerInfo", "warning_02_empty",
             "Warning_Msg", "Toxic_Msg", "Iventory_Msg", "Group_Msg", "Weapon2_Msg",
             "btn", "btn_hover", "warning_01_form", "close_btn", "progressbar",
             "groupPlayerWhite", "galka_disable", "galka_enable", "scroll_bg", "scroll_thumb" };
@@ -132,7 +134,7 @@ namespace NextDayRevival
             _skin.window.font = Font(true); _skin.window.fontSize = 23;
             Surface(_skin.window, Asset("warning_02_empty"));
             _skin.textField.font = _body; _skin.textArea.font = _body;
-            Surface(_skin.textField, Asset("InteractItem"));
+            Surface(_skin.textField, Asset("MarkerInfo"));
             Surface(_skin.textArea, Asset("MarkerInfo"));
             _skin.toggle.font = _body; _skin.toggle.fontSize = 16;
             Surface(_skin.toggle, Asset("galka_disable"));
@@ -244,18 +246,43 @@ namespace NextDayRevival
             return clicked;
         }
 
+        // An icon-free dark brush plate: the clean slices of Group_Msg (c-u1).
+        internal const string Plate = "Plate";
+
         internal static void Panel(Rect r, string asset)
         { Panel(r, asset, Color.white); }
 
         internal static void Panel(Rect r, string asset, Color tint)
         {
-            Texture2D t = Asset(asset);
+            bool plate = asset == Plate;
+            Texture2D t = Asset(plate ? "Group_Msg" : asset);
             Color old = GUI.color;
             GUI.color = tint;
-            if (t != null) GUI.DrawTexture(r, t);
-            else { GUI.color = new Color(0.259f, 0.259f, 0.259f, 0.75f); GUI.DrawTexture(r, Texture2D.whiteTexture); }
+            if (t == null) { GUI.color = new Color(0.259f, 0.259f, 0.259f, 0.75f * tint.a); GUI.DrawTexture(r, Texture2D.whiteTexture); }
+            else if (plate || asset.EndsWith("_Msg", StringComparison.Ordinal)) Message(r, t, !plate);
+            else GUI.DrawTexture(r, t);
             GUI.color = old;
         }
+
+        // The 500 x 100 *_Msg notice plates carry their icon in columns 13-89.
+        // Clean slices: edge 0-10, body 100-470, ragged right edge 470-500.
+        // The icon square keeps its aspect and only the body stretches, so text
+        // laid out from IconInset never lands on the icon.
+        const float EdgeU = 10f / 500f, BodyU = 100f / 500f, RightU = 470f / 500f;
+        static void Message(Rect r, Texture t, bool icon)
+        {
+            float right = Mathf.Min(r.height * 0.3f, r.width * 0.15f);
+            float left = icon ? IconInset(r) : Mathf.Min(r.height * 0.1f, r.width * 0.1f);
+            GUI.DrawTextureWithTexCoords(new Rect(r.x, r.y, left, r.height), t, new Rect(0f, 0f, icon ? BodyU : EdgeU, 1f));
+            GUI.DrawTextureWithTexCoords(new Rect(r.x + left, r.y, r.width - left - right, r.height), t,
+                new Rect(BodyU, 0f, RightU - BodyU, 1f));
+            GUI.DrawTextureWithTexCoords(new Rect(r.xMax - right, r.y, right, r.height), t, new Rect(RightU, 0f, 1f - RightU, 1f));
+        }
+
+        /// <summary>Width of the icon square on a *_Msg plate drawn into r.</summary>
+        internal static float IconInset(Rect r) { return Mathf.Min(r.height, r.width * 0.4f); }
+
+        static float Scale() { return Mathf.Clamp(Screen.height / 720f, 0.65f, 1.5f); }
 
         // Only chrome-sized dark plates change. Reticles, map ink, radar/video
         // feeds, gauges and fullscreen optic masks keep their functional art.
@@ -271,17 +298,54 @@ namespace NextDayRevival
             if (t != null && t.width <= 2 && t.height <= 2 && r.width >= 120f && r.height >= 18f
                 && r.width < Screen.width * 0.9f && r.height <= Screen.height * 0.45f
                 && c.r < 0.28f && c.g < 0.28f && c.b < 0.28f)
-                Panel(r, r.height < 45f ? "InteractItem" : r.height < 120f ? "MarkerInfo" : "warning_02_empty");
+                Panel(r, r.height < 45f ? Plate : r.height < 120f ? "MarkerInfo" : "warning_02_empty");
             else GUI.DrawTexture(r, t, scale, alpha, aspect);
         }
 
-        internal static void Prompt(string text, float y)
+        // Measured prompt plates, keyed by the caller's (cached) string and
+        // the font size: CalcSize/CalcHeight run only when the text changes.
+        static readonly string[] PromptText = new string[4];
+        static readonly Vector2[] PromptSize = new Vector2[4];
+        static readonly int[] PromptFont = new int[4];
+        static int _promptNext, _promptGeneration = -1;
+
+        static Vector2 PromptMeasure(string text, float k)
         {
-            float k = Mathf.Clamp(Screen.height / 720f, 0.65f, 1.5f);
-            Rect r = new Rect((Screen.width - 385f * k) * 0.5f, y, 385f * k, 70f * k);
-            Panel(r, "InteractItem");
+            Style(_notice);
+            if (_promptGeneration != _generation) { _promptGeneration = _generation; for (int i = 0; i < PromptText.Length; i++) PromptText[i] = null; }
+            int font = _notice.fontSize;
+            for (int i = 0; i < PromptText.Length; i++)
+                if (ReferenceEquals(PromptText[i], text) && PromptFont[i] == font) return PromptSize[i];
+            float pad = 22f * k, max = Mathf.Min(Screen.width - 24f, 620f * k);
+            Content.text = text;
+            _notice.wordWrap = false;
+            float w = Mathf.Clamp(_notice.CalcSize(Content).x + 2f * pad + 4f, 260f * k, max);
+            _notice.wordWrap = true;
+            float h = Mathf.Max(44f * k, _notice.CalcHeight(Content, w - 2f * pad) + 24f * k);
+            int slot = _promptNext; _promptNext = (_promptNext + 1) % PromptText.Length;
+            PromptText[slot] = text; PromptFont[slot] = font; PromptSize[slot] = new Vector2(w, h);
+            return PromptSize[slot];
+        }
+
+        /// <summary>An interaction/hint plate centred at the top y. Returns its height.</summary>
+        internal static float Prompt(string text, float y)
+        { return PromptAt(text, y, false); }
+
+        /// <summary>The same plate ending at bottom (for a hint stacked above another prompt).</summary>
+        internal static float PromptAbove(string text, float bottom)
+        { return PromptAt(text, bottom, true); }
+
+        static float PromptAt(string text, float y, bool above)
+        {
+            if (_notice == null || string.IsNullOrEmpty(text)) return 0f;
+            float k = Scale();
             _notice.fontSize = Mathf.RoundToInt(16f * k);
-            Label(new Rect(r.x + 20f * k, r.y + 10f * k, r.width - 40f * k, r.height - 20f * k), text, _notice);
+            Vector2 size = PromptMeasure(text, k);
+            Rect r = new Rect((Screen.width - size.x) * 0.5f, above ? y - size.y : y, size.x, size.y);
+            Panel(r, Plate);
+            _notice.alignment = TextAnchor.MiddleCenter;
+            Label(new Rect(r.x + 22f * k, r.y + 7f * k, r.width - 44f * k, r.height - 14f * k), text, _notice);
+            return size.y;
         }
 
         internal static void InfoLabel(Rect r, string text)
@@ -302,34 +366,62 @@ namespace NextDayRevival
             GUI.color = old; style.normal.textColor = c;
         }
 
+        /// <summary>A native-looking notice: type icon left, text right of it.</summary>
         internal static void Notice(string text, int type)
         {
-            if (_notice == null) return;
-            float k = Mathf.Clamp(Screen.height / 720f, 0.65f, 1.5f);
-            Rect r = new Rect((Screen.width - 499f * k) * 0.5f, Screen.height * 0.12f, 499f * k, 100f * k);
+            if (_notice == null || string.IsNullOrEmpty(text)) return;
+            float k = Scale();
+            float w = Mathf.Min(Screen.width - 24f, 520f * k);
+            _notice.fontSize = Mathf.RoundToInt(18f * k);
+            _notice.alignment = TextAnchor.MiddleLeft;
+            Style(_notice);
+            Content.text = text;
+            // Two passes: the icon square grows with the plate's height.
+            float h = 76f * k;
+            for (int pass = 0; pass < 2; pass++)
+                h = Mathf.Clamp(_notice.CalcHeight(Content, w - h - 26f * k) + 24f * k, 76f * k, 124f * k);
+            Rect r = new Rect((Screen.width - w) * 0.5f, Screen.height * 0.12f, w, h);
             Panel(r, type == NativeMessage.Kill ? "Weapon2_Msg" : type == NativeMessage.Group ? "Group_Msg"
                 : type == NativeMessage.Inventory ? "Iventory_Msg" : "Warning_Msg");
-            _notice.fontSize = Mathf.RoundToInt(18f * k);
-            Label(new Rect(r.x + 28f * k, r.y + 12f * k, r.width - 56f * k, r.height - 24f * k), text, _notice);
+            float x = r.x + IconInset(r) + 4f * k;
+            Label(new Rect(x, r.y + 8f * k, r.xMax - x - 22f * k, r.height - 16f * k), text, _notice);
+            _notice.alignment = TextAnchor.MiddleCenter;
         }
 
-        internal static void Banner(string head, string line, float y, bool toxic)
-        { Banner(head, line, y, toxic, Color.white); }
+        internal static float Banner(string head, string line, float y, bool toxic)
+        { return Banner(head, line, y, toxic, Color.white); }
 
-        internal static void Banner(string head, string line, float y, bool toxic, Color tint)
+        /// <summary>Heading (+ optional line) on a warning/toxic plate, text right
+        /// of the icon. Returns the plate height so callers can stack below it.</summary>
+        internal static float Banner(string head, string line, float y, bool toxic, Color tint)
         {
-            if (_notice == null) return;
-            float k = Mathf.Clamp(Screen.height / 720f, 0.65f, 1.5f);
+            if (_notice == null) return 0f;
+            float k = Scale();
             float w = Mathf.Min(Screen.width - 24f, 640f * k);
-            Rect r = new Rect((Screen.width - w) * 0.5f, y, w, (string.IsNullOrEmpty(line) ? 100f : 130f) * k);
-            Panel(r, toxic ? "Toxic_Msg" : "Warning_Msg", tint);
-            _noticeTitle.fontSize = Mathf.RoundToInt(30f * k);
-            Label(new Rect(r.x + 24f * k, r.y + 14f * k, r.width - 48f * k, 64f * k), head, _noticeTitle);
-            if (!string.IsNullOrEmpty(line))
+            bool two = !string.IsNullOrEmpty(line);
+            _noticeTitle.fontSize = Mathf.RoundToInt(26f * k);
+            _noticeTitle.alignment = TextAnchor.MiddleLeft;
+            _notice.fontSize = Mathf.RoundToInt(17f * k);
+            _notice.alignment = TextAnchor.UpperLeft;
+            Style(_notice); Style(_noticeTitle);
+            float h = (two ? 104f : 84f) * k, headH = 0f, lineH = 0f;
+            for (int pass = 0; pass < 2; pass++)
             {
-                _notice.fontSize = Mathf.RoundToInt(18f * k);
-                Label(new Rect(r.x + 24f * k, r.y + 75f * k, r.width - 48f * k, 42f * k), line, _notice);
+                float tw = w - h - 26f * k;
+                Content.text = head; headH = _noticeTitle.CalcHeight(Content, tw);
+                lineH = 0f;
+                if (two) { Content.text = line; lineH = _notice.CalcHeight(Content, tw); }
+                h = Mathf.Clamp(headH + lineH + (two ? 30f : 24f) * k, (two ? 96f : 76f) * k, 150f * k);
             }
+            Rect r = new Rect((Screen.width - w) * 0.5f, y, w, h);
+            Panel(r, toxic ? "Toxic_Msg" : "Warning_Msg", tint);
+            float x = r.x + IconInset(r) + 4f * k, tw2 = r.xMax - x - 22f * k;
+            float top = r.y + Mathf.Max(8f * k, (h - headH - lineH - (two ? 6f * k : 0f)) * 0.5f);
+            Label(new Rect(x, top, tw2, headH), head, _noticeTitle);
+            if (two) Label(new Rect(x, top + headH + 6f * k, tw2, Mathf.Max(0f, Mathf.Min(lineH, r.yMax - 6f * k - top - headH - 6f * k))), line, _notice);
+            _notice.alignment = TextAnchor.MiddleCenter;
+            _noticeTitle.alignment = TextAnchor.MiddleCenter;
+            return h;
         }
 
         internal static bool LayoutButton(string text, params GUILayoutOption[] options)

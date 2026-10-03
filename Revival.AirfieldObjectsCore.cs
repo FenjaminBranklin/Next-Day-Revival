@@ -13,10 +13,6 @@ namespace NextDayRevival
             "Windsock 0", "Windsock 1", "Maintenance ladder", "Ground power cart",
             "Sandbags S1", "Sandbags D2a"
         };
-        internal static readonly string[] Fuel = {
-            "pol_tank_horizontal 1", "pol_tank_horizontal 2",
-            "pol_loading_stand 1", "fuel_bowser_trailer 1"
-        };
         // A1: the three bundle AA rings stay off. Since L1b no gun stands in
         // them (the four field pits are the gun positions); 6.66 hid them too.
         internal static readonly string[] Shelters = {
@@ -62,6 +58,9 @@ namespace NextDayRevival
         // shelters bundle - S1, S2 and S4 included - in 6.66.
         internal static bool Container(string scene, string name)
         {
+            // C W5: retain the complete original depot as one model subtree,
+            // including Fence/Plant and every renderer/collider descendant.
+            if (scene == "EastAfFuelWater" && name == "Depot") return false;
             return name == scene + "Root" || name == "Apron" || name == "Runway" || name == "Compound"
                 || name == "Depot" || name == "Plant" || name == "Shelters";
         }
@@ -71,7 +70,8 @@ namespace NextDayRevival
         internal static bool RemoveModel(string scene, string name, bool model)
         {
             if (!model) return false;
-            string[] keep = scene == "EastAfProps" ? Props : scene == "EastAfFuelWater" ? Fuel
+            if (scene == "EastAfFuelWater") return name != "Depot";
+            string[] keep = scene == "EastAfProps" ? Props
                 : scene == "EastAfShelters" ? Shelters : null;
             if (keep == null) return false;
             for (int i = 0; i < keep.Length; i++) if (name == keep[i]) return false;
@@ -83,19 +83,11 @@ namespace NextDayRevival
         // the end of the restored "T3 Dispersal branch to S3".
         internal const string KeptFloor = "S3f S3 shelter floor";
 
-        // A1: only the compact fuel depot moves; the bowser trailer parks
-        // beside the loading stand (F3 had the two overlapping). Windsocks
-        // and the apron ladder/cart keep their vanilla places beside the
-        // restored concrete.
+        // C W5: original depot pipes, tanks and gate share their authored
+        // transforms. Moving only four pieces breaks the assembled layout.
         internal static bool Move(string name, out float x, out float z)
         {
             x = z = 0f;
-            switch (name) {
-                case "pol_tank_horizontal 1": x=4100f; z=560f; return true;
-                case "pol_tank_horizontal 2": x=4100f; z=578f; return true;
-                case "pol_loading_stand 1": x=4137f; z=550f; return true;
-                case "fuel_bowser_trailer 1": x=4140f; z=540f; return true;
-            }
             return false;
         }
     }

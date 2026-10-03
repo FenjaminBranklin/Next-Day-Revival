@@ -31,6 +31,11 @@ def main():
     harness = harness.replace('// PRODUCTION_MATCHES', block(stations, 'internal static bool Matches('))
     mercs = (ROOT / 'Revival.Mercs.cs').read_text(encoding='utf-8')
     harness = harness.replace('// PRODUCTION_GIVE', block(mercs, 'static void Give('))
+    aa = (ROOT / 'Revival.MercAA.cs').read_text(encoding='utf-8')
+    harness = harness.replace('// PRODUCTION_AVAILABLE', block(aa, 'static bool Available('))
+    harness = harness.replace('// PRODUCTION_CAN_APPROACH', block(aa, 'internal static bool CanApproach('))
+    ui = (ROOT / 'Revival.MercsUi.cs').read_text(encoding='utf-8')
+    harness = harness.replace('// PRODUCTION_ORDER_TEXT', block(ui, 'internal static string OrderText('))
     src = stage / 'Harness.cs'
     src.write_text(harness, encoding='utf-8')
     compiler = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Microsoft.NET/Framework64/v3.5/csc.exe'
@@ -57,7 +62,8 @@ def main():
     assert 'if (Mercs.AirDefenceManaged(u)) return false;' in block(stations, 'internal static bool Replace(')
     radar = (ROOT / 'Revival.TowerRadar.cs').read_text(encoding='utf-8')
     console = block(radar, 'internal static Transform Console(')
-    assert 'p.y = TowerRadar.TowerBase.y + TowerRadar.RoofM * TowerRadar.K;' in console
+    # C W3: on the measured main roof the outside stairs reach, not the cab roof or cab.
+    assert 'p.y = TowerRadar.MainRoofY;' in console and 'RoofM' not in console
     assert 'CabFloorY' not in console
     # Both native and merc operator poses continue to use this one console.
     assert 'c.TransformPoint(new Vector3(0f, 0.02f, 0.85f)' in radar

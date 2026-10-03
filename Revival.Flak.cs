@@ -3012,7 +3012,7 @@ namespace NextDayRevival
                     VanillaUi.Prompt(s, h * 0.62f);
                 }
                 if (_hint != null && Time.time <= _hintUntil)
-                    VanillaUi.Prompt(_hint, h * 0.62f - 75f);
+                    VanillaUi.PromptAbove(_hint, h * 0.62f - 6f);
             }
             catch { }
         }

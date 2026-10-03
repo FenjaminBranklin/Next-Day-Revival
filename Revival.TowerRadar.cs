@@ -198,19 +198,21 @@ namespace NextDayRevival
         internal static readonly Vector2 MastSpot = new Vector2(4272.12f, 1335f);
         internal const string RadarName = "C1 radar";
         /// <summary>The console in the tower's frame, metres (x east, z north):
-        /// the cab spans x 4.3..11.5 and z -3.6..3.6 (_c1_body.py), its old
-        /// console stands along the east glazing; the radar console stands
-        /// against the south wall, its screen facing north.</summary>
-        internal static readonly Vector3 ConsoleLocalM = new Vector3(7.4f, 0f, -2.95f);
+        /// C W3 - on the MAIN roof (reached by the outside stairs), north of
+        /// the inner flight, inside its sandbag horseshoe, its screen facing
+        /// north (TowerRoofCore). The cab (x 4.3..11.5, z -3.6..3.6) keeps
+        /// the command room; the cab's own roof (RoofM) carries the antenna.</summary>
+        internal static readonly Vector3 ConsoleLocalM = new Vector3(TowerRoofCore.ConsoleX, 0f, TowerRoofCore.ConsoleZ);
         internal const float CabFloorM = 12f;
-        internal const float RoofM = 15.35f;
+        internal const float MainRoofM = TowerRoofCore.RoofY;
+        internal const float RoofM = TowerRoofCore.CabRoofY;
 
         // ------------------------------------------------------------- state
 
         internal static Transform Tower;          // the C1 model (null: its spot)
         internal static float TowerYaw;
         internal static Vector3 TowerBase;        // ground under the tower's origin
-        internal static float CabFloorY;
+        internal static float CabFloorY, MainRoofY;
         internal static Transform RadarRoot, Head, ConsoleRoot;
         internal static Renderer Screen;
         internal static readonly List<Renderer> Elements = new List<Renderer>();
@@ -482,7 +484,8 @@ namespace NextDayRevival
             Built = RadarRoot != null && ConsoleRoot != null;
             Log(Built ? "HQ built: tower " + (tower != null ? "\"" + tower.name + "\"" : "(spot)") + " base y "
                 + TowerBase.y.ToString("0.0", CultureInfo.InvariantCulture) + ", cab floor y "
-                + CabFloorY.ToString("0.0", CultureInfo.InvariantCulture) + ", console at " + ConsoleRoot.position + "."
+                + CabFloorY.ToString("0.0", CultureInfo.InvariantCulture) + ", main roof y "
+                + MainRoofY.ToString("0.0", CultureInfo.InvariantCulture) + ", console at " + ConsoleRoot.position + "."
                 : "HQ could not be built.");
         }
 
@@ -519,11 +522,17 @@ namespace NextDayRevival
                                       : new Vector3(spot.x, ground, spot.z);
             if (tower != null && Mathf.Abs(tower.position.y - ground) < 6f) TowerBase.y = tower.position.y;
             CabFloorY = TowerBase.y + CabFloorM * K;
-            Vector3 probe = TowerPoint(new Vector3(ConsoleLocalM.x, CabFloorM + 1.5f, 0f));
+            Vector3 probe = TowerPoint(new Vector3(7.4f, CabFloorM + 1.5f, 0f));
             RaycastHit hit;
             if (Physics.Raycast(probe, Vector3.down, out hit, 3f * K, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
                 && hit.point.y > TowerBase.y + 10.5f * K)
                 CabFloorY = hit.point.y;
+            // the main roof under the console (C1_LOD0: 8.79 m), its design height where there is no collider
+            MainRoofY = TowerBase.y + MainRoofM * K;
+            probe = TowerPoint(new Vector3(ConsoleLocalM.x, MainRoofM + 1.2f, ConsoleLocalM.z));
+            if (Physics.Raycast(probe, Vector3.down, out hit, 2.4f * K, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
+                && Mathf.Abs(hit.point.y - MainRoofY) < 0.6f * K)
+                MainRoofY = hit.point.y;
         }
 
         /// <summary>A point of the tower's frame (metres, x east, z north,
@@ -1345,7 +1354,7 @@ namespace NextDayRevival
 
         // ----------------------------------------------------- the console
 
-        /// <summary>The radar console on the tower roof: cabinet,
+        /// <summary>The radar console on the tower's main roof: cabinet,
         /// sloped desk, the round PPI screen facing north, knobs, a telephone,
         /// the operator's chair. Frame: +z = the screen's facing (north).</summary>
         internal static Transform Console(Scene scene)
@@ -1355,7 +1364,7 @@ namespace NextDayRevival
                 GameObject root = new GameObject("NDR radar console");
                 SceneManager.MoveGameObjectToScene(root, scene);
                 Vector3 p = TowerRadar.TowerPoint(TowerRadar.ConsoleLocalM);
-                p.y = TowerRadar.TowerBase.y + TowerRadar.RoofM * TowerRadar.K;
+                p.y = TowerRadar.MainRoofY;
                 root.transform.position = p;
                 root.transform.rotation = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
 

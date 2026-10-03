@@ -49,12 +49,12 @@ namespace NextDayRevival
                 return true;
             }
             // Unresolved peer bodies still occupy their advertised seat. Never
-            // expose a foreign roster, invent its name or wait for model loading.
+            // require a loaded model; names are cosmetic owner announcements.
             foreach (MercSeat st in _remote.Values)
             {
                 if (Time.time - st.Heard > HeardSeconds) continue;
                 if (st.WantKind != c.Kind || st.WantView != c.View || st.WantSeat != index) continue;
-                ai = st.Ai;
+                name = st.DisplayName; ai = st.Ai;
                 return true;
             }
             return false;

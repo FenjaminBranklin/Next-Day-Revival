@@ -62,6 +62,10 @@ namespace NextDayRevival
             i.Target = f.Target != null && f.Target;
             i.Sees = i.Target && f.Sees && MercMayFireAt(f, f.Target.position, now);
             i.TargetAt = i.Target ? f.Target.position : i.Me;
+            // c-m1: the primary hostile his scan weighed (M1 sense, seen or not).
+            MercSense sense = u.Sense;
+            i.Known = sense.Count > 0;
+            i.KnownAt = i.Known ? sense.At[0] : i.Me;
             i.Danger = ft.In.Danger;
             i.Maintenance = ft.Health < MercBrain.RetreatUntil || Reloading(f)
                 || (u.Medicine != null && u.Medicine.Active != 0)
@@ -106,8 +110,11 @@ namespace NextDayRevival
             MercAttackGround(run);
             MercAttackTeam team = u.Order.Team as MercAttackTeam;
             float front = 0f;
+            // c-m1: rear overwatch only while he has targets himself; a blind
+            // marksman moves up with the line until he can fire.
             bool overwatch = ft.Overwatch.Role == MercRole.Marksman && team != null
                 && team.Front(now, out front) && now - team.LastSight <= 2f
+                && run.Saw(now, MercAttackRun.MarksmanSight)
                 && (!MercAttackGeo.Continues(u.Order) || !run.NeedsBound(ref input));
             if (overwatch)
             {
@@ -115,14 +122,15 @@ namespace NextDayRevival
                 // the assault front. The explicit objective resumes on clear.
                 Vector3 anchor = u.Order.Origin + MercAttackGeo.Dir(u.Order) * front;
                 Vector3 goal = MercRole.Slot(MercRole.Marksman, anchor, MercAttackGeo.Dir(u.Order), u.Order.K, 0);
-                // Long attacks keep gained ground. A rear role can cover from
-                // here until the front creates room; its dwell deadline still
-                // releases the next forward bound through the common planner.
-                if (MercAttackGeo.Continues(u.Order)
-                    && Vector3.Dot(goal - ft.In.Me, ft.In.AttackDir) <= 1f) return;
+                // Every attack keeps gained ground (c-m1: short ones too - a
+                // marksman with targets fires from where he is rather than
+                // walking back past the start toward the owner). A rear role
+                // covers from here until the front creates room; on long
+                // attacks the dwell deadline still releases the next forward
+                // bound through the common planner.
+                if (Vector3.Dot(goal - ft.In.Me, ft.In.AttackDir) <= 1f) return;
                 ft.In.AttackDest = MercAttackWaypoint(f, u, goal, now);
                 ft.In.AttackMove = !MercRole.InPosition(ft.In.Me, anchor, MercAttackGeo.Dir(u.Order));
-                ft.In.AttackRear = ft.In.AttackMove && !MercAttackGeo.Continues(u.Order);
                 return;
             }
             MercAttackAct act;
@@ -167,12 +175,13 @@ namespace NextDayRevival
             float front;
             if (!i.Protected && !i.Danger && u.Fight.Overwatch.Role == MercRole.Marksman
                 && team != null && team.Front(now, out front) && now - team.LastSight <= 2f
+                && run.Saw(now, MercAttackRun.MarksmanSight)
                 && (!MercAttackGeo.Continues(o) || !run.NeedsBound(ref i)))
             {
                 Vector3 anchor = o.Origin + MercAttackGeo.Dir(o) * front;
                 Vector3 goal = MercRole.Slot(MercRole.Marksman, anchor, MercAttackGeo.Dir(o), o.K, 0);
                 if (!MercRole.InPosition(i.Me, anchor, MercAttackGeo.Dir(o))
-                    && (!MercAttackGeo.Continues(o) || Vector3.Dot(goal - i.Me, MercAttackGeo.Dir(o)) > 1f))
+                    && Vector3.Dot(goal - i.Me, MercAttackGeo.Dir(o)) > 1f)
                     MercMove(f, u, MercAttackWaypoint(f, u, goal, now), true, now);
                 else { MercCrouch(f, now); FaceDir(f, MercAttackGeo.Dir(o)); }
                 return;
@@ -257,9 +266,10 @@ namespace NextDayRevival
             if ((news & MercAttackRun.NewsStalled) != 0)
             {
                 float left = MercAttackGeo.Flat(o.Centre - u.Ai.transform.position) / 2.8f;
-                MercUi.Toast(u.Name + Loc.T(": не может пройти дальше - держится в ", ": cannot get further - holding ")
-                    + left.ToString("0") + Loc.T(" м от цели атаки.", " m short of the attack objective."), true);
-                RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " stalled on the attack " + left.ToString("0") + " m short.");
+                MercUi.Toast(u.Name + Loc.T(": путь закрыт - ищет обход, до цели атаки ", ": way blocked - trying another lane, ")
+                    + left.ToString("0") + Loc.T(" м.", " m short of the attack objective."), true);
+                RevivalPlugin.L.LogInfo("Mercs: " + u.Name + " stalled on the attack " + left.ToString("0")
+                    + " m short - retrying on another lane (try " + (run.Retries + 1) + ").");
             }
             if ((news & MercAttackRun.NewsComplete) != 0)
                 MercUi.Toast(MercAttackGeo.Continues(o)

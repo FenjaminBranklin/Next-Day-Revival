@@ -32,8 +32,10 @@ namespace NextDayRevival
         sealed class Cargo
         { internal Component Drop; internal Rigidbody Body; internal int Controller; internal float Next; }
         static readonly Dictionary<int, Cargo> Cargoes = new Dictionary<int, Cargo>();
+        // C W3: the command room furnishes the cab again; the radar console's
+        // old place by the south wall is the free spot, the rest are fallbacks.
         static readonly Vector3[] Candidates = {
-            new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
+            new Vector3(7.4f, 0f, -2.8f), new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
             new Vector3(5.7f, 0f, 2.8f), new Vector3(9.7f, 0f, 2.8f) };
         static readonly string[] _labels = new string[4];
         static string _title, _prompt, _order, _close, _help, _status = "";
@@ -243,15 +245,19 @@ namespace NextDayRevival
                 || !ClearBox(at + rotation * new Vector3(0f, 2.6f, 3.1f), new Vector3(1f, 2.4f, 0.9f), rotation))) return;
             GameObject desk = GameObject.CreatePrimitive(PrimitiveType.Cube);
             desk.name = "NDR tower supply order console";
-            _console = desk.transform;
-            _console.position = at + Vector3.up * (body.y / 2f + 0.08f);
-            _console.rotation = rotation; _console.localScale = body;
+            // Keep the sign under a unit-scale root. Rotating it under the
+            // nonuniform cube scale would stretch/shear the text.
+            GameObject root = new GameObject("NDR tower supply console root");
+            _console = root.transform;
+            _console.position = at + Vector3.up * (body.y / 2f);   // on the floor; the clearance box above stays lifted
+            _console.rotation = rotation;
+            desk.transform.SetParent(_console, false); desk.transform.localScale = body;
             _material = new Material(Shader.Find("Standard")); _material.color = new Color(0.22f, 0.3f, 0.24f);
             desk.GetComponent<Renderer>().sharedMaterial = _material;
-            UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(desk, TowerRadar.ConsoleRoot.gameObject.scene);
+            UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(root, TowerRadar.ConsoleRoot.gameObject.scene);
             GameObject plate = new GameObject("Supply order sign"); plate.transform.SetParent(_console, false);
-            plate.transform.localPosition = new Vector3(0f, 0.65f, 0f);
-            plate.transform.localScale = new Vector3(1f / body.x, 1f / body.y, 1f / body.z);
+            plate.transform.localPosition = new Vector3(0f, 0.65f * body.y, 0f);
+            plate.AddComponent<SupplySignBillboard>();
             TextMesh text = plate.AddComponent<TextMesh>(); text.text = Loc.T("СНАБЖЕНИЕ АЭРОДРОМА [J]", "AIRFIELD SUPPLIES [J]");
             text.characterSize = 0.14f; text.fontSize = 36; text.anchor = TextAnchor.MiddleCenter;
             _placement = index;
@@ -463,6 +469,24 @@ namespace NextDayRevival
                 return true;
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery release: " + ex.Message); return false; }
+        }
+    }
+    // TextMesh is read from local -Z. Matching the view rotation presents
+    // that face to the camera; looking toward the camera would show its back.
+    internal sealed class SupplySignBillboard : MonoBehaviour
+    {
+        Transform _label;
+        void Awake() { _label = transform; }
+        void LateUpdate()
+        {
+            // Reuse the console's F6 tick bucket; callbacks run sequentially.
+            FrameProf.S(FrameProf.S_TowerDeliveryT);
+            try
+            {
+                Camera camera = CameraOwner.ViewCamera();
+                if (camera != null) _label.rotation = camera.transform.rotation;
+            }
+            finally { FrameProf.E(FrameProf.S_TowerDeliveryT); }
         }
     }
 }

@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.67.0";
+        public const string VERSION = "6.68.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -550,6 +550,7 @@ namespace NextDayRevival
             VehicleScan.Install(_harmony);       // Q1 perf: vehicle/NPC/inventory registries instead of scene scans
             OrdnanceBlast.Install(_harmony);     // Bomb/rocket damage on the Photon health owner
             BlastKill.Install(_harmony);         // A-L1: lethal blasts finish wounded NPCs (owner side)
+            BlastCorpse.Install(_harmony);       // C-W1: explosion corpses keep the native throw and stay where they fell
             NativeBlast.Install(_harmony);       // Position-based people for native explosions
             EnginePerf.Install(_harmony);        // W Perf2: Animal_AI registry
             PhysicsDiet.Install(_harmony);       // Z P3b: lazy plugin ragdolls and physics census
@@ -2320,6 +2321,7 @@ namespace NextDayRevival
             if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_AirEventsT); AirEvents.Tick(); FrameProf.E(FrameProf.S_AirEventsT); }                  // NDR N11 air events: schedule, bombs, paratroopers, warnings
             FrameProf.S(FrameProf.S_RetakeRaidsT); RetakeRaids.Tick(); FrameProf.E(FrameProf.S_RetakeRaidsT);             // W Tower 4: retake raids on a held airfield (master, 1 Hz)
             OrdnanceBlast.Tick();               // Bounded master-only bomb/rocket damage queue
+            BlastCorpse.Tick();                 // C-W1: watched explosion corpses, own F6 slot, idle without one
             if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_NpcAircraftT); NpcAircraft.Tick(); FrameProf.E(FrameProf.S_NpcAircraftT); }            // NDR NPC aircraft: the master flies the flight paths
             FrameProf.S(FrameProf.S_AirKillsT); AirKills.Tick(); FrameProf.E(FrameProf.S_AirKillsT);                      // W AA4: damage smoke, troop Mi-8 target, pit list
             FrameProf.S(FrameProf.S_FuelBalanceT); FuelBalance.Tick(); FrameProf.E(FrameProf.S_FuelBalanceT);                  // NDR fuel balance per vehicle class

@@ -844,7 +844,8 @@ namespace NextDayRevival
                     }
                     else if (PoseNear(t.Root.position))
                         for (int k = 0; k < t.Cab.Count; k++)
-                            if (t.Cab[k] != null) Sitzen(t.Cab[k], k);
+                            if (t.Cab[k] != null && !NpcWar.WoundedLying(t.Cab[k]))
+                                Sitzen(t.Cab[k], k);   // C M6: a wounded man lies, he does not sit
                 }
             }
             catch (Exception ex)
@@ -893,11 +894,15 @@ namespace NextDayRevival
 
         /// <summary>Is this man still on his feet? NpcWar owns the answer - it
         /// is the same test the ground squads and the patrol gun use, so a man
-        /// counts as dead here exactly when he counts as dead there.</summary>
+        /// counts as dead here exactly when he counts as dead there.
+        /// C M6: a man in the game's wounded state is NOT on his feet. Held
+        /// (Ruhig every frame) his wound flag never cleared and ApplyDamage
+        /// refused every later round - he is let go and falls off instead
+        /// (Revival.WoundedHoldCore.cs).</summary>
         static bool Lebt(Component ai)
         {
             return ai != null && ai.gameObject.activeInHierarchy
-                && NpcWar.GroundAlive(ai);
+                && NpcWar.GroundAlive(ai) && !NpcWar.WoundedLying(ai);
         }
 
         static float _poseCameraAt;

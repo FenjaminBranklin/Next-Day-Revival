@@ -578,7 +578,7 @@ namespace NextDayRevival
             if (!_byId.TryGetValue(id, out p)) return -1;
             serves = !p.Wrecked && GunnerServes(p);
             if (p.CrewSettlement != null)
-                return (Alive(p.Gunner) ? 1 : 0) + (Alive(p.Operator) ? 1 : 0);
+                return (Standing(p.Gunner) ? 1 : 0) + (Standing(p.Operator) ? 1 : 0);
             return p.MenNear;
         }
 
@@ -1112,6 +1112,13 @@ namespace NextDayRevival
             return best;
         }
 
+        /// <summary>Alive and on his feet: a man lying in the game's wounded
+        /// state lays no gun and flies no drone (as B1 for the sight).</summary>
+        static bool Standing(Component ai)
+        {
+            return Alive(ai) && !NpcWar.WoundedLying(ai);
+        }
+
         static bool Alive(Component ai)
         {
             if (ai == null) return false;
@@ -1506,7 +1513,20 @@ namespace NextDayRevival
         /// the right man.</summary>
         static Component StationMan(Component known, Vector3 at, bool master)
         {
-            if (known != null) return Alive(known) ? known : null;
+            if (known != null)
+            {
+                // C M6: A MAN THE GAME HAS WOUNDED IS LET GO. Held here he was
+                // paused and stood back up twice a second, and the vanilla
+                // wounded flag that makes ApplyDamage refuse every hit was
+                // never cleared: the crewman mercs emptied magazines into
+                // (Revival.WoundedHoldCore.cs). Lying, he is the game's - he
+                // takes the next round like any other wounded man.
+                int verdict = NpcWar.WoundJudge(known, Alive(known));
+                if (verdict == WoundedHoldCore.Release) return null;
+                if (verdict == WoundedHoldCore.Repair && master)
+                    NpcWar.RepairStuckWound(known, "ArtyBattery crewman");
+                return known;
+            }
             if (master) return null;
             Component best = null;
             float bestD = 4f;
@@ -2184,14 +2204,14 @@ namespace NextDayRevival
             // every drone on the map - which is the very bug this is for.
             if (p.Ghost) return true;
             if (!B(_cfgCrew, true)) return true;     // no crew asked for: the drone is the battery
-            if (p.CrewSettlement != null) return Alive(p.Operator);
+            if (p.CrewSettlement != null) return Standing(p.Operator);
             return p.MenNear > 0;
         }
 
         static bool GunnerServes(Post p)
         {
             if (!B(_cfgCrew, true)) return true;
-            if (p.CrewSettlement != null) return Alive(p.Gunner);
+            if (p.CrewSettlement != null) return Standing(p.Gunner);
             return p.MenNear > 0;
         }
 

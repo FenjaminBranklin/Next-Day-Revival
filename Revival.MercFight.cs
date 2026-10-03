@@ -433,6 +433,8 @@ namespace NextDayRevival
             MercSense s = u.Sense;
             ft.In.Now = now;
             ft.In.Me = f.Tr.position;
+            // c-m2: deliberate fire stays inside the live NPC reply range.
+            MercWeaponReach.ReplyUnits = AssaultRange();
             ft.In.Count = s.Count;
             ft.In.Threats = s.At;
             ft.In.Exposed = s.Exposed;

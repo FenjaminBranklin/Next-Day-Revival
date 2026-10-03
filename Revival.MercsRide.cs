@@ -128,6 +128,8 @@ namespace NextDayRevival
         // every client
         internal Component Ai;
         internal string Key;
+        internal int DisplayId;
+        internal string DisplayName; // cosmetic owner-synced seat label
         internal int Actor;
         internal float Heard, NextPass;
         internal int WantKind = -1, WantView, WantSeat = -1;
@@ -1916,6 +1918,7 @@ namespace NextDayRevival
                 data[o++] = st.GunPitch;
             }
             Raise(data, _dirty);
+            PublishSeatNames();
             _nextSend = now + (working ? 0.2f : 1f);
             _dirty = false;
         }
@@ -1924,7 +1927,7 @@ namespace NextDayRevival
         delegate void AASend(byte code, object data, bool reliable, object options);
         static AASend _aaSend;
         static bool _aaFailed;
-        internal static void SendAAPacket(float[] data)
+        internal static void SendAAPacket(object data)
         {
             if (_aaFailed) return;
             try
@@ -1970,6 +1973,9 @@ namespace NextDayRevival
             if (code != (byte)Code()) return;
             try
             {
+                object[] names = content as object[];
+                if (names != null && names.Length == 3 && names[0] is int && (int)names[0] == 108)
+                { ReceiveSeatNames(names, sender); return; }
                 float[] d = content as float[];
                 if (d != null && d.Length > 0 && d[0] == 7f) { MercDownPose.OnPacket(d, sender); return; }
                 if (d != null && d.Length > 0 && d[0] == 8f) { MercResupply.OnPacket(d, sender); return; }
@@ -1995,7 +2001,7 @@ namespace NextDayRevival
                     if (!_remote.TryGetValue(key, out st))
                     {
                         st = new MercSeat();
-                        st.Key = key; st.Actor = sender;
+                        st.Key = key; st.Actor = sender; st.DisplayId = Mathf.RoundToInt(d[o]);
                         _remote[key] = st;
                     }
                     st.Heard = now;

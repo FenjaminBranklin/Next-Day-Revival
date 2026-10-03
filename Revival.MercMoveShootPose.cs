@@ -30,6 +30,7 @@ namespace NextDayRevival
 
         Component _ai, _view, _ik;
         Animation _anim;
+        bool _medical;
         NavMeshAgent _agent;
         Transform _spine, _hips, _left, _right, _look;
         object _solver;
@@ -108,6 +109,8 @@ namespace NextDayRevival
             if (p._anim == null || p._spine == null || p._hips == null || p._left == null || p._right == null
                 || p._look == null || p._solver == null || p._weight == null || p._weight.FieldType != typeof(float))
             { p.Warn(); return null; }
+            MercMedPose medicine = ai.GetComponent<MercMedPose>();
+            if (medicine != null) medicine.BindMovement(p);
             return p;
         }
         internal static bool MaySetup()
@@ -153,6 +156,7 @@ namespace NextDayRevival
         }
         internal bool Touch(int weapon, Vector3 aim, float now)
         {
+            if (_medical) { Stop(); return false; }
             if (!Prepare(weapon)) { Stop(); return false; }
             _local = true; _aim = aim; _touched = now;
             if (!_active)
@@ -198,6 +202,8 @@ namespace NextDayRevival
             if (_solver != null && _weight != null) FastField.SetFloat(_weight, _solver, 0f);
             if (_local) Publish(Time.time);
         }
+        internal void Medical(bool active)
+        { _medical = active; if (active) Stop(); }
         void Publish(float now)
         {
             if (_id <= 0 || _sequence >= 16000000) return;
@@ -279,7 +285,7 @@ namespace NextDayRevival
             }
             if (!MercMoveShootPolicy.Accept(sender, FastField.GetInt(_ownerField, p._view), sequence, p._sequence, p._local)) return;
             p._sequence = sequence;
-            if (d[4] == 0f || !MercMoveShoot.Enabled) { p.Stop(); return; }
+            if (d[4] == 0f || !MercMoveShoot.Enabled || p._medical) { p.Stop(); return; }
             if (!p.Prepare((int)d[3])) { p.Stop(); return; }
             float now = Time.time;
             if (!p._active) { p._started = now; p._phase = 0f; p._ikWeight = 0f; p._lastPosition = p.transform.position; }

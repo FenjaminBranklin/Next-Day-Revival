@@ -118,6 +118,8 @@ namespace BepInEx.Configuration {
  public class ConfigFile{public ConfigEntry<T> Bind<T>(string s,string k,T v,string d){return new ConfigEntry<T>{Value=v};}}
 }
 namespace NextDayRevival {
+ // C M3: the pose binds to a heal pose; none here (merc_med_pose_check owns it).
+ public class MercMedPose:Component{internal void BindMovement(MercMoveShootPose p){}}
  public class Solver{public float IKPositionWeight;}
  public class IK:Component{public Solver solver=new Solver();}
  public class NPC_AI2:Component {

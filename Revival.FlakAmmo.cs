@@ -206,12 +206,12 @@ namespace NextDayRevival
             if (_label == null) { _label = new GUIStyle(GUI.skin.label); _label.alignment = TextAnchor.MiddleCenter; }
             float y = Flak._manned != null ? Screen.height - 164f : Screen.height * 0.55f;
             float centre = Screen.width * 0.5f;
-            VanillaUi.Panel(new Rect(centre - 210f, y - 4f, 420f, 30f), "groupPlayerWhite");
+            VanillaUi.Panel(new Rect(centre - 210f, y - 4f, 420f, 30f), VanillaUi.Plate);
             VanillaUi.Label(new Rect(centre - 200f, y, 100f, 26f), g.Id, _label);
             VanillaUi.Instrument(new Rect(centre - 100f, y, 300f, 26f), g.AmmoText, _label);
             VanillaUi.Prompt(g.AmmoPrompt, y + 30f);
             if (_notice != null && Time.time < _noticeUntil)
-                VanillaUi.Prompt(_notice, y - 75f);
+                VanillaUi.PromptAbove(_notice, y - 10f);
         }
 
         static void Fill(int kind, int gun, float a, float b, float c, float d, float e)

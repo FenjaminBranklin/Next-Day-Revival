@@ -549,7 +549,7 @@ namespace NextDayRevival
 
         class Squad
         {
-            public bool GroundGroup, GroundWalking;
+            public bool GroundGroup, GroundWalking, AirfieldGarrison;
             public float GroundRadius;
             // The editor ground group's orders. Route is the walked polyline,
             // GroundLeg the point the group is walking to, GroundForward the
@@ -1098,6 +1098,8 @@ namespace NextDayRevival
             Squad s = new Squad();
             s.Tag = tag; s.Settlement = settlement; s.Lz = home;
             s.GroundGroup = true; s.GroundRadius = radius;
+            s.AirfieldGarrison = AirfieldGarrisonTag(tag);
+            if (s.AirfieldGarrison) AirfieldAggroLookUp();
             s.GroundDuty = behavior == "walking" ? GroundMode.Wander
                 : behavior == "patrol" ? GroundMode.Patrol
                 : behavior == "guard" ? GroundMode.Guard
@@ -1659,7 +1661,11 @@ namespace NextDayRevival
                 NavigationStep(f, now);
                 if (Regenerating(f, now)) continue;
                 EnsureArmed(f, now);
-                if (s.Merc == null || MercMayEngage(s.Merc, now)) Acquire(f, now);
+                if (s.Merc == null || MercMayEngage(s.Merc, now))
+                {
+                    if (s.AirfieldGarrison) AirfieldAcquire(f, now);
+                    else Acquire(f, now);
+                }
                 else { f.Target = null; f.Sees = false; f.TargetIsPlayer = false; }
                 // M1: a merc's cover perception (Revival.MercCover.cs).
                 if (s.Merc != null) MercSenseTick(f, s.Merc, now);
@@ -2794,7 +2800,8 @@ namespace NextDayRevival
             if (f.Squad != null && f.Squad.Merc != null && MercRetaliateTarget(f, now)) return true;
             if (f.Squad != null && f.Squad.Merc != null && MercQuickFocus(f, range, now)) return true;
             Component player = f.Squad != null && f.Squad.Merc != null
-                ? MercPlayerTarget(f, range, now) : KillTarget(f);
+                ? MercPlayerTarget(f, range, now)
+                : f.Squad != null && f.Squad.AirfieldGarrison ? null : KillTarget(f);
             if (f.Squad.Merc != null && MercParaPick(f, now)) return true;
             if (f.Target != null && f.Target && now - f.LastSeen < 0.8f)
             {
@@ -2810,7 +2817,10 @@ namespace NextDayRevival
                         && (current == null || current.Squad != f.Squad)
                         && ((current != null && current.Squad != null) || MercNpcTargetable(f, cur))
                         && Hostile(f.Hated, FactionOf(cur))
-                        && Flat(f.Target.position - f.Tr.position) <= range * 1.1f)
+                        && Flat(f.Target.position - f.Tr.position) <= range * 1.1f
+                        // c-m2: a merc does not hold on to a man past his fire
+                        // range while a nearer one may be in it.
+                        && (f.Squad.Merc == null || MercMayFireAt(f, f.Target.position, now)))
                         return false;
                 }
             }
@@ -2818,6 +2828,7 @@ namespace NextDayRevival
             int n = 0;
             Vector3 p = f.Tr.position;
             float rangeSqr = range * range;
+            if (f.Squad.AirfieldGarrison) AirfieldPlayerCandidates(f, p, rangeSqr, ref n);
             if (player != null)
             {
                 float d = (player.transform.position - p).sqrMagnitude;
@@ -3707,6 +3718,10 @@ namespace NextDayRevival
 
         static void Quiet(Fighter f, bool pause)
         {
+            // C M6: a man lying in the game's wounded state keeps the game's
+            // own pause - a refreshed one pins _isWoundedAction and makes him
+            // immune to every round (Revival.WoundedHoldCore.cs).
+            if (WoundedLying(f.Ai)) return;
             float now = Time.time;
             if (pause && now < f.PauseUntil) return;
             try
@@ -3748,6 +3763,10 @@ namespace NextDayRevival
         static bool SetState(Fighter f, int main, int additional, int pose, int index, float rotY)
         {
             if (_mStateSync == null) return false;
+            // C M6: never stand a wounded man back up. Out of MainState 7 the
+            // game's WoundedActions never runs again and the flag that makes
+            // ApplyDamage refuse him stays set for good.
+            if (WoundedLying(f.Ai)) return false;
             try
             {
                 bool useTemp = _fUseTemp == null || !(_fUseTemp.GetValue(f.Ai) is bool)
@@ -5219,6 +5238,10 @@ namespace NextDayRevival
             if (Bool(ai, "_isSafeSettlement")) return false;
             if (Bool(ai, "IsTalkActive")) return false;
             if (!Hurtable(ai)) return false;
+            // C M6: ApplyDamage refuses him while the wounded flag is set (half
+            // a second on a man going down; for good on one something stood
+            // back up). A round at him is a round wasted.
+            if (!WoundedHoldCore.Hurtable(WoundFlag(ai))) return false;
             return FactionOf(ai) != null;
         }
 

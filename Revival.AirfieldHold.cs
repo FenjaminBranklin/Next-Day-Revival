@@ -499,12 +499,13 @@ namespace NextDayRevival
             if (!Enabled || Event.current == null || Event.current.type != EventType.Repaint) return;
             DrawMap();
             if (GameUi.State != 0) return;
+            float zoneY = Screen.height * 0.12f;
             if (Time.time < _bannerUntil)
             {
                 if (!VanillaNotice.Banner("airfield.capture", _head.text, _line.text, NativeMessage.Warning, _bannerUntil))
-                    VanillaUi.Banner(_head.text, _line.text, Screen.height * 0.12f, false);
+                    zoneY += VanillaUi.Banner(_head.text, _line.text, zoneY, false) + 8f;
             }
-            if (_zoneText != null) VanillaUi.Prompt(_zoneText, Screen.height * 0.12f);
+            if (_zoneText != null) VanillaUi.Prompt(_zoneText, zoneY);
         }
 
         static bool _mapBuilt;

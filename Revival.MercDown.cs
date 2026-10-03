@@ -207,7 +207,7 @@ namespace NextDayRevival
                 r.Down.Pending = false;
                 if (result != "ok" || r.Dead || !r.Down.Begin(Time.time, item, healer)) { CancelRescue(r); return; }
                 if (helper != null && IsMedic(helper)) r.Down.MedicTimer(MercMedicPolicy.ReviveSeconds);
-                if (helper != null) MercMedPose.Start(helper.Ai, item, Time.time);
+                if (helper != null) MercMedPose.Start(helper.Ai, item, Time.time, r.Down.Seconds);
                 MercUi.OrderReply(r.Name + Loc.T(": перевязка начата.", ": revival started."), false);
             };
             if (r.Session) begin("ok");

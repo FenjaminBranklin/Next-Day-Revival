@@ -46,10 +46,10 @@ namespace NextDayRevival
         {
             if (!node.name.StartsWith("D1|", StringComparison.Ordinal)
                 && !node.name.StartsWith("L3|", StringComparison.Ordinal)) return;
-            Seat(node, 4125f, 550f);
-            node.localScale = new Vector3(90f, node.localScale.y, 86f);
+            Seat(node, 4091f, 550f);
+            node.localScale = new Vector3(180f, node.localScale.y, 160f);
             node.name = node.name.StartsWith("D1|", StringComparison.Ordinal)
-                ? "D1|Field fuel depot" : "L3|Loot: field fuel";
+                ? "D1|Fuel depot" : "L3|Loot: fuel depot";
         }
 
         // The floor leaves the switched-off shelters fallback for the base

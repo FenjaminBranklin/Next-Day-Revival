@@ -116,16 +116,38 @@ namespace NextDayRevival
                 && (r.Unit == null || !r.Unit.Deserting);
         }
 
-        static bool DefenceSeat(int post, DefenceMember m)
+        static DefenceMember DefenceFor(Record r)
+        {
+            for (int i = 0; i < Defence.Count; i++) if (Defence[i].Record == r) return Defence[i];
+            return null;
+        }
+
+        static bool DefenceSeat(int post, DefenceMember m, bool planning)
         {
             Record r = m == null ? null : m.Record;
-            if (!MercAA.CanApproach(post, r == null || r.Unit == null ? null : r.Unit.Ai)) return false;
+            if (!MercAA.CanApproach(post, r == null || r.Unit == null ? null : r.Unit.Ai))
+            {
+                // A managed crewman moving to a higher-priority gun releases
+                // his lease before we issue any of this plan's replacements.
+                if (!planning || !MercAA.AvailableForOrder(post)) return false;
+                MercAAPost held = MercAA.Held(post); bool leaving = false;
+                for (int i = 0; held != null && i < Defence.Count; i++)
+                {
+                    DefenceMember other = Defence[i];
+                    if (other.Post == post && other.Wanted != post
+                        && other.Record.Unit != null && other.Record.Unit.Ai == held.Ai)
+                    { leaving = true; break; }
+                }
+                if (!leaving) return false;
+            }
             // Respect another local order's reservation before physical arrival.
             for (int i = 0; i < _roster.Count; i++)
             {
                 Record other = _roster[i];
                 if (other == r || other.Dead || other.Deserted || other.Down.Down) continue;
-                if (MercStations.Matches(other.Order, DefenceSeats[post])) return false;
+                if (!MercStations.Matches(other.Order, DefenceSeats[post])) continue;
+                DefenceMember pending = planning ? DefenceFor(other) : null;
+                if (pending == null || pending.Wanted == post) return false;
             }
             return true;
         }
@@ -163,11 +185,17 @@ namespace NextDayRevival
                 for (int i = 0; i < Defence.Count; i++)
                 {
                     DefenceMember m = Defence[i];
-                    if (!DefenceReady(m) || !DefenceSeat(post, m)) continue;
+                    if (!DefenceReady(m) || !DefenceSeat(post, m, true)) continue;
                     if (pass == 0 ? m.Wanted >= 0 : m.Wanted < 0 || DefencePriority[m.Wanted] <= DefencePriority[post]) continue;
                     int score = DefenceTrait(m.Record);
                     if (post == MercAA.Radar) score = 50 - score; // Reserve specialists for guns.
-                    if (best == null || score > trait) { best = m; trait = score; }
+                    // Equal specialists borrow ZU before radar. Contract IDs
+                    // keep all other ties stable across roster reply ordering.
+                    int priority = m.Wanted < 0 ? -1 : DefencePriority[m.Wanted];
+                    int bestPriority = best == null || best.Wanted < 0 ? -1 : DefencePriority[best.Wanted];
+                    if (best == null || score > trait || (score == trait
+                        && (priority > bestPriority || (priority == bestPriority && m.Record.Id < best.Record.Id))))
+                    { best = m; trait = score; }
                 }
             return best;
         }
@@ -179,7 +207,7 @@ namespace NextDayRevival
             {
                 DefenceMember m = Defence[i];
                 m.Wanted = m.Post >= 0 && DefencePriority[m.Post] >= 0 && DefenceReady(m)
-                    && DefenceSeat(m.Post, m) ? m.Post : -1;
+                    && DefenceSeat(m.Post, m, false) ? m.Post : -1;
             }
             for (int n = 0; n < count; n++)
             {

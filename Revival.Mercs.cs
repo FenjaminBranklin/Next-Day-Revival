@@ -123,6 +123,8 @@ namespace NextDayRevival
         internal readonly MercMovePlan Move = new MercMovePlan();
         // x-merc-competence: his halt cover under FOLLOW (Revival.MercsWar.cs MercHaltCover).
         internal readonly MercHalt Halt = new MercHalt();
+        // c-m2: his walk up to firing distance (Revival.MercCloseIn.cs).
+        internal readonly MercCloseRun Close = new MercCloseRun();
         // x-merc-competence: the last hit as it landed (the death report), the
         // threat nearest him then (NPC rounds carry no attacker), self-heal pace.
         internal MercHitNote LastHit;

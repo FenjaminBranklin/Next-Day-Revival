@@ -80,6 +80,9 @@ namespace NextDayRevival
             _active = down;
             if (down)
             {
+                // End treatment before taking the downed IK snapshot, also on
+                // peers where the down event can arrive before the medkit stop.
+                MercMedPose.Stop(_npc);
                 _npcEnabled = _npc != null && _npc.enabled;
                 if (_npc != null)
                 {

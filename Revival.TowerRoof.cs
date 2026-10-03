@@ -1,8 +1,10 @@
 // Next Day: Survival - Revival Toolkit
 //
 // Z T1a: the tower's north outside staircase replaces the unusable B1 ladder.
-// Upper stairs/crossover are deterministic collision + merged visual geometry
-// on every client; merc authority/Photon position replication use existing hooks.
+// C W3: it ends on the main roof again (radar console, sandbag posts); the
+// only runtime stair part is the threshold over the parapet's collider face.
+// Deterministic collision + merged visual geometry on every client; merc
+// authority/Photon position replication use existing hooks.
 // No new frame tick: F6 slots TowerRoof.Tick / TowerRoof.LateFrame are reused.
 // Z T1b: 2 s stalls hop a waypoint, 24 s total goes to the post / foot.
 // Physics: ALL-layer diagnostics at 10 Hz, active lookahead at 5 Hz per merc,
@@ -41,6 +43,8 @@ namespace NextDayRevival
         static Quaternion _rot = Quaternion.identity, _inv = Quaternion.identity;
         static float _footY;
         static Vector3 _footNav, _exitNav, _footL, _exitL;     // world NavMesh spots, the same in the tower frame
+        static Transform _legMan;                               // the last Leg's man and where his roof walk ends
+        static Vector3 _legEnd;
         static readonly Vector3[] _postNav = new Vector3[TowerRoofCore.PostX.Length];
         static NavMeshDataInstance _patch;
         static Material _sand;
@@ -66,7 +70,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             CfgOn = cfg.Bind("TowerRadar", "RoofLadder", true,
-                "Outside staircase access to the C1 cab roof and five sandbag posts. "
+                "Outside staircase access to the C1 main roof: radar console, five sandbag posts, the cab's inner flight. "
                 + "Legacy RoofLadder key retained; no ladder is built. Enabled by default.");
         }
 
@@ -167,8 +171,10 @@ namespace NextDayRevival
             Vector3 m = man.position;
             if (FlatSq(m, _centre) > Near * Near && FlatSq(goal, _centre) > Near * Near) return LegNone;
             _routeWantedUntil = Time.realtimeSinceStartup + 30f;
-            Vector3 l;
-            int r = TowerRoofCore.Leg(Local(m), Local(goal), slot, _footL, _exitL, out l);
+            Vector3 l, lg = Local(goal);
+            int r = TowerRoofCore.Leg(Local(m), lg, slot, _footL, _exitL, out l);
+            _legMan = man;
+            _legEnd = TowerRoofCore.Target(lg, slot);
             switch (r)
             {
                 case LegWalk:
@@ -178,7 +184,11 @@ namespace NextDayRevival
                     // Approach, stairs AND final post belong to the bounded
                     // direct walk; no NavMesh path can veto the roof order.
                     leg = World(l);
-                    return TowerRoofCore.GoalUp(Local(goal)) ? LegClimbUp : LegClimbDown;
+                    return TowerRoofCore.GoalUp(lg) ? LegClimbUp : LegClimbDown;
+                case TowerRoofCore.LegNav:
+                    // the cab's furniture or the last steps: the baked NavMesh
+                    leg = World(l);
+                    return LegWalk;
                 case LegHold:
                     leg = _rot * l;
                     return r;
@@ -257,7 +267,9 @@ namespace NextDayRevival
                 c.Pts[0] = start;
                 c.N = 1;
             } else c.N = TowerRoofCore.Path(up, start, TowerRoofCore.Foot(_footY), TowerRoofCore.Exit(), c.Pts);
-            if (up) c.Pts[c.N++] = TowerRoofCore.Post(slot);
+            // up: around the roof's obstacles to the seat, the cab or his post
+            if (up) c.N = TowerRoofCore.Route(c.Pts, c.N, _legMan == man ? _legEnd : TowerRoofCore.Post(slot));
+            _legMan = null;
             c.EndPoint = World(c.Pts[c.N - 1]);
             TowerRoofCore.Begin(ref c.Walk, c.Pts, c.N, Time.time);
             c.Pos = c.Rot = true;
@@ -328,7 +340,8 @@ namespace NextDayRevival
             _base = TowerRadar.TowerBase;
             _rot = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
             _inv = Quaternion.Inverse(_rot);
-            _centre = World(new Vector3(8.1f, TowerRoofCore.RoofY, 0f));
+            _centre = World(new Vector3(-6f, TowerRoofCore.RoofY, 0f));   // open main roof, west of the inner flight
+            TowerRoofCore.Init();
             _footY = FootY();
 
             GameObject root = new GameObject("NDR TowerRoof");
@@ -342,8 +355,8 @@ namespace NextDayRevival
             if (steel == null) steel = Mat("NDR_Roof_Steel", new Color(0.33f, 0.36f, 0.3f), 0.3f, 0.3f);
             if (_sand == null) _sand = Mat("NDR_Roof_Sandbag", new Color(0.50f, 0.45f, 0.32f), 0f, 0.1f);
             List<CombineInstance> parts = new List<CombineInstance>(128);
-            UpperStairs(parts, root.transform);
-            Finish(parts, "Outside upper stairs", steel, root.transform);
+            Threshold(parts, root.transform);
+            Finish(parts, "Stair threshold", steel, root.transform);
             BagMesh(parts);
             Finish(parts, "Sandbags", _sand, root.transform);
             BagColliders(root.transform);
@@ -358,7 +371,7 @@ namespace NextDayRevival
             _checkSegment = 1; _checkDistance = 0f;
             _routeReady = _routeSaid = false;
             RoofNavOk();
-            Log("outside stairs built on " + tower.name + "; checking every route sample against ALL live colliders.");
+            Log("outside stair threshold and roof posts built on " + tower.name + "; checking every route sample against ALL live colliders.");
         }
 
         static float FootY() { return TowerRoofCore.Stair[0].y; }
@@ -436,20 +449,26 @@ namespace NextDayRevival
             return false;
         }
 
-        /// <summary>A NavMesh over the cab roof only: the slab, the sandbags
-        /// and the siren mast as sources, baked asynchronously.</summary>
+        /// <summary>A NavMesh over the main roof only (the bake normally has
+        /// it): the slab and the roof walk's obstacles, baked asynchronously.</summary>
         static void Patch()
         {
             _patched = true;
             try
             {
                 List<NavMeshBuildSource> src = new List<NavMeshBuildSource>();
-                src.Add(BoxSource(new Vector3(8.125f, TowerRoofCore.RoofY - 0.175f, 0f), new Vector3(8.05f, 0.35f, 8.5f)));
-                for (int i = 0; i < TowerRoofCore.BagX.Length; i++)
-                    src.Add(BoxSource(new Vector3(TowerRoofCore.BagX[i], TowerRoofCore.RoofY + TowerRoofCore.BagH * 0.5f, TowerRoofCore.BagZ[i]),
-                        new Vector3(TowerRoofCore.BagSX[i], TowerRoofCore.BagH, TowerRoofCore.BagSZ[i])));
-                src.Add(BoxSource(new Vector3(5.3f, 16.45f, -1.8f), new Vector3(0.2f, 2.2f, 0.2f)));     // siren mast C1_COL_492
-                Bounds b = new Bounds(_centre, new Vector3(14f * K, 6f * K, 14f * K));
+                float midX = (TowerRoofCore.RoofMinX + TowerRoofCore.RoofMaxX) * 0.5f, midZ = (TowerRoofCore.RoofMinZ + TowerRoofCore.RoofMaxZ) * 0.5f;
+                src.Add(BoxSource(new Vector3(midX, TowerRoofCore.RoofY - 0.175f, midZ),
+                    new Vector3(TowerRoofCore.RoofMaxX - TowerRoofCore.RoofMinX + 0.6f, 0.35f, TowerRoofCore.RoofMaxZ - TowerRoofCore.RoofMinZ + 0.6f)));
+                // every obstacle of the roof walk (cab, vents, bags, console) as a 3 m block
+                for (int i = 0; i < TowerRoofCore.ObstacleCount; i++) {
+                    float x0, z0, x1, z1;
+                    TowerRoofCore.Obstacle(i, out x0, out z0, out x1, out z1);
+                    float d = TowerRoofCore.Inflate;
+                    src.Add(BoxSource(new Vector3((x0 + x1) * 0.5f, TowerRoofCore.RoofY + 1.5f, (z0 + z1) * 0.5f),
+                        new Vector3(Mathf.Max(0.1f, x1 - x0 - 2f * d), 3f, Mathf.Max(0.1f, z1 - z0 - 2f * d))));
+                }
+                Bounds b = new Bounds(World(new Vector3(midX, TowerRoofCore.RoofY, midZ)), new Vector3(26f * K, 6f * K, 20f * K));
                 AsyncOperation op;
                 CrossingCore.Patch(src, b, out _patch, out op);
                 Log("the roof has no NavMesh in the bake - baking a patch over it.");
@@ -524,61 +543,28 @@ namespace NextDayRevival
             return m;
         }
 
-        // Three new sections above the main roof: ordinary treads on both
-        // slopes, flat crossover over the existing rail, full side guardrails.
-        static void UpperStairs(List<CombineInstance> p, Transform root)
+        // The threshold over the parapet's collider face in the north gap
+        // (zero-thickness, z 8.99, up to 9.22 m): two ramps and a plateau,
+        // the gap's own parapet ends are its sides. Everything else of the
+        // stair is the shipped model.
+        static void Threshold(List<CombineInstance> p, Transform root)
         {
-            for (int i = 8; i < TowerRoofCore.Stair.Length; i++) {
-                if (i > 10 && i <= TowerRoofCore.UpperFirst) continue;
+            for (int i = TowerRoofCore.ThresholdFirst; i <= TowerRoofCore.ThresholdLast; i++) {
                 Vector3 a = TowerRoofCore.Stair[i - 1], b = TowerRoofCore.Stair[i];
                 Vector3 delta = b - a;
                 Vector3 axis = delta.normalized;
                 Vector3 side = Vector3.Cross(axis, Vector3.up).normalized;
                 Vector3 normal = Vector3.Cross(side, axis).normalized;
                 Quaternion rot = Quaternion.LookRotation(side, normal);
-                Vector3 size = new Vector3(delta.magnitude, 0.12f, 1.3f);
-                Vector3 centre = (a + b) * 0.5f - normal * 0.06f;
-                GameObject go = new GameObject("StairSupport_" + i);
+                Vector3 size = new Vector3(delta.magnitude, TowerRoofCore.ThresholdThick, TowerRoofCore.ThresholdWidth);
+                Vector3 centre = (a + b) * 0.5f - normal * (TowerRoofCore.ThresholdThick * 0.5f);
+                GameObject go = new GameObject("StairThreshold_" + i);
                 go.transform.SetParent(root, false);
                 go.transform.localPosition = centre * K;
                 go.transform.localRotation = rot;
                 go.AddComponent<BoxCollider>().size = size * K;
-                if (Mathf.Abs(delta.y) < 0.01f) RotBox(p, centre, size, rot);
-                else {
-                    int n = Mathf.CeilToInt(Mathf.Abs(delta.y) / 0.1875f);
-                    for (int j = 0; j < n; j++) {
-                        Vector3 c = Vector3.Lerp(a, b, (j + 0.5f) / n);
-                        c.y = Mathf.Max(a.y + delta.y * j / n, a.y + delta.y * (j + 1) / n) - 0.05f;
-                        Vector3 flat = delta; flat.y = 0f;
-                        RotBox(p, c, new Vector3(flat.magnitude / n, 0.1f, 1.3f),
-                            Quaternion.LookRotation(side, Vector3.up));
-                    }
-                }
-                if (i == 8 || i == 10 || i == TowerRoofCore.UpperFirst + 2) continue; // Existing landing rails protect the short threshold ramp.
-                for (int sign = -1; sign <= 1; sign += 2) {
-                    float trimStart = (i == TowerRoofCore.UpperFirst + 1 || i == TowerRoofCore.UpperFirst + 3) ? 0.75f : 0f;
-                    float trimEnd = i == TowerRoofCore.UpperFirst + 1 ? 0.75f : 0f;
-                    Vector3 c = (a + b) * 0.5f + axis * ((trimStart - trimEnd) * 0.5f) + side * (sign * 0.65f) + Vector3.up * 0.55f;
-                    RotBox(p, c, new Vector3(delta.magnitude - trimStart - trimEnd, 1.1f, 0.06f), rot);
-                    GameObject rail = new GameObject("StairGuard_" + i + "_" + sign);
-                    rail.transform.SetParent(root, false);
-                    rail.transform.localPosition = c * K;
-                    rail.transform.localRotation = rot;
-                    rail.AddComponent<BoxCollider>().size = new Vector3(delta.magnitude - trimStart - trimEnd, 1.1f, 0.06f) * K;
-                }
+                RotBox(p, centre, size, rot);
             }
-            CornerGuard(p, root, "LandingGuardNorth", new Vector3(8f, 17.05f, 6.35f), new Vector3(1.3f, 1.1f, 0.06f));
-            CornerGuard(p, root, "LandingGuardEast", new Vector3(8.65f, 17.05f, 5.65f), new Vector3(0.06f, 1.1f, 1.4f));
-        }
-
-        // Close the OUTSIDE corner of the L landing. Inside rails are trimmed
-        // for the turn; these two guards keep the exposed drop protected.
-        static void CornerGuard(List<CombineInstance> p, Transform root, string name, Vector3 c, Vector3 size)
-        {
-            RotBox(p, c, size, Quaternion.identity);
-            GameObject go = new GameObject(name);
-            go.transform.SetParent(root, false); go.transform.localPosition = c * K;
-            go.AddComponent<BoxCollider>().size = size * K;
         }
 
         static void RotBox(List<CombineInstance> p, Vector3 centre, Vector3 size, Quaternion rot)
@@ -626,7 +612,14 @@ namespace NextDayRevival
                 GameObject go = new GameObject("Sandbag_" + i);
                 go.transform.SetParent(root, false);
                 go.transform.localPosition = new Vector3(TowerRoofCore.BagX[i], TowerRoofCore.RoofY + TowerRoofCore.BagH * 0.5f, TowerRoofCore.BagZ[i]) * K;
-                go.AddComponent<BoxCollider>().size = new Vector3(TowerRoofCore.BagSX[i], TowerRoofCore.BagH, TowerRoofCore.BagSZ[i]) * K;
+                Vector3 size = new Vector3(TowerRoofCore.BagSX[i], TowerRoofCore.BagH, TowerRoofCore.BagSZ[i]) * K;
+                go.AddComponent<BoxCollider>().size = size;
+                // a merc fighting on the baked roof NavMesh walks round, not into, the wall
+                NavMeshObstacle o = go.AddComponent<NavMeshObstacle>();
+                o.shape = NavMeshObstacleShape.Box;
+                o.size = size;
+                o.carving = true;
+                o.carveOnlyStationary = true;
             }
         }
 

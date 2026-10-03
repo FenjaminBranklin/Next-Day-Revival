@@ -11,6 +11,9 @@
 //   REACH     MercWeaponReach: one effective engagement table, by weapon.
 //             Acquisition may look further; every round obeys Allows unless
 //             he is returning incoming fire. Unknown ids count as a rifle.
+//             c-m2: deliberate fire opens only where the enemy can answer -
+//             everyone but a marksman inside the NPC reply range (ReplyUnits,
+//             the live NpcWar AssaultRange, 180 u = 64 m by default).
 //   THREAT    MercThreat.SightUnits: a threat further than this does not
 //             count as seeing him (M1 exposure) unless it hits him - a
 //             distant enemy with a geometric line to him is no reason to
@@ -68,8 +71,19 @@ namespace NextDayRevival
         internal const float Metre = 2.8f;
         internal const byte Pistol = 1, Shotgun = 2, Rifle = 3, MachineGun = 4, Marksman = 5, Smg = 6;
         static readonly string[] Names = { "-", "pistol", "shotgun", "rifle", "machine gun", "marksman", "SMG" };
-        // Metres, indexed by kind. Index zero and unknown kinds use Rifle.
-        static readonly float[] EngagementMetres = { 180f, 45f, 35f, 180f, 220f, 350f, 75f };
+        // c-m2: deliberate fire, metres, indexed by kind (zero and unknown:
+        // Rifle). B S2b had 45/35/75/180/220/350 m against an NPC reply of
+        // 64 m (AssaultRange 180 UNITS read as metres): every fight was one
+        // side sniping. Now only the marksman outranges the reply.
+        static readonly float[] EngagementMetres = { 60f, 45f, 35f, 60f, 64f, 350f, 50f };
+        // How far he LOOKS (acquisition, the old B S2b distances): he sees a
+        // far enemy, and an order that may move closes before firing.
+        static readonly float[] LookMetres = { 180f, 45f, 35f, 180f, 220f, 350f, 75f };
+        internal const float ShortestReply = 84f;     // 30 m: a tiny AssaultRange never mutes a rifle
+        /// <summary>The ordinary NPC reply range, units: NpcWar.RangeOf for a
+        /// squad man and a defender (AssaultRange, default 180). Written by the
+        /// adapter each merc Think; the default is the shipped config.</summary>
+        internal static float ReplyUnits = 180f;
 
         internal static string Name(byte kind) { return kind < Names.Length ? Names[kind] : "?"; }
 
@@ -91,13 +105,22 @@ namespace NextDayRevival
             return Rifle;
         }
 
-        /// <summary>Metres in the single effective-range table.</summary>
-        internal static float Metres(byte kind)
+        static byte Index(byte kind) { return kind > 0 && kind < EngagementMetres.Length ? kind : Rifle; }
+
+        /// <summary>Metres in the single effective-range table (before the
+        /// reply clamp).</summary>
+        internal static float Metres(byte kind) { return EngagementMetres[Index(kind)]; }
+
+        /// <summary>Deliberate fire distance, units: the table, and for every
+        /// kind but the marksman never past the NPC reply range.</summary>
+        internal static float FireUnits(byte kind, float reply)
         {
-            return EngagementMetres[kind > 0 && kind < EngagementMetres.Length ? kind : Rifle];
+            float units = Metres(kind) * Metre;
+            if (Index(kind) == Marksman) return units;
+            return Mathf.Min(units, Mathf.Max(reply, ShortestReply));
         }
 
-        internal static float EffectiveUnits(int item) { return Metres(Kind(item)) * Metre; }
+        internal static float EffectiveUnits(int item) { return FireUnits(Kind(item), ReplyUnits); }
 
         /// <summary>Three-dimensional target-body distance, before aim scatter.
         /// Return fire keeps all other sight/muzzle/friend/ammo gates.</summary>
@@ -111,7 +134,7 @@ namespace NextDayRevival
         /// floor is deliberately never applied to the effective fire range.</summary>
         internal static float Units(int item, float floor)
         {
-            return Mathf.Max(floor, EffectiveUnits(item));
+            return Mathf.Max(floor, LookMetres[Index(Kind(item))] * Metre);
         }
     }
 

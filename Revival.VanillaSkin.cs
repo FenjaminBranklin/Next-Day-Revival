@@ -32,6 +32,7 @@
 // UTF-8 (no BOM), compiled with /codepage:65001 like the rest.
 
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -84,6 +85,24 @@ namespace NextDayRevival
         static Texture2D _white;
         static readonly GUIStyle[] _styles = new GUIStyle[FontCount * 3];
         static GUIStyle _wrap;
+        static readonly GUIContent _measure = new GUIContent();
+        // Font metrics are measured on changed content/geometry only. Repaint
+        // uses the cached size; Font is part of the key for late-loaded assets.
+        struct FitKey : IEquatable<FitKey>
+        {
+            internal string Text;
+            internal Font Face;
+            internal int Size, Width, Height;
+            internal bool Wrap;
+            public bool Equals(FitKey b)
+            { return Text == b.Text && Face == b.Face && Size == b.Size && Width == b.Width && Height == b.Height && Wrap == b.Wrap; }
+            public override bool Equals(object b) { return b is FitKey && Equals((FitKey)b); }
+            public override int GetHashCode()
+            {
+                unchecked { return (((((Text.GetHashCode() * 31 + (Face == null ? 0 : Face.GetInstanceID())) * 31 + Size) * 31 + Width) * 31 + Height) * 2) + (Wrap ? 1 : 0); }
+            }
+        }
+        static readonly Dictionary<FitKey, int> _fit = new Dictionary<FitKey, int>();
 
         /// <summary>The game's UIController (set by the host window, used for sounds).</summary>
         internal static object Ui;
@@ -244,7 +263,7 @@ namespace NextDayRevival
             if (text == null) return;
             GUIStyle s = _styles[Font(font) * 3 + align];
             s.font = font == Bebas && _bebasRu != null && Loc.Ru ? _bebasRu : _fonts[Font(font)];
-            s.fontSize = Mathf.Max(8, Mathf.RoundToInt(size * _k));
+            Fit(r, text, s, size);
             s.normal.textColor = c;
             GUI.Label(r, text, s);
         }
@@ -253,12 +272,37 @@ namespace NextDayRevival
         internal static void Paragraph(Rect r, string text, float size, Color c)
         {
             if (text == null) return;
-            _wrap.fontSize = Mathf.Max(8, Mathf.RoundToInt(size * _k));
+            _wrap.font = _fonts[Regular];
+            Fit(r, text, _wrap, size);
             _wrap.normal.textColor = c;
             GUI.Label(r, text, _wrap);
         }
 
         static int Font(int f) { return f < 0 || f >= FontCount ? Regular : f; }
+        internal static Font BodyFont { get { return _fonts[Regular]; } }
+
+        static void Fit(Rect r, string text, GUIStyle style, float size)
+        {
+            int wanted = Mathf.Max(8, Mathf.RoundToInt(size * _k));
+            FitKey key = new FitKey { Text = text, Face = style.font, Size = wanted,
+                Width = (int)r.width, Height = (int)r.height, Wrap = style.wordWrap };
+            int fitted;
+            if (!_fit.TryGetValue(key, out fitted))
+            {
+                _measure.text = text;
+                fitted = wanted;
+                for (; fitted > 8; fitted--)
+                {
+                    style.fontSize = fitted;
+                    Vector2 bounds = style.CalcSize(_measure);
+                    float height = style.wordWrap ? style.CalcHeight(_measure, r.width) : bounds.y;
+                    if ((style.wordWrap || bounds.x <= r.width - 2f) && height <= r.height) break;
+                }
+                if (_fit.Count >= 2048) _fit.Clear();
+                _fit[key] = fitted;
+            }
+            style.fontSize = fitted;
+        }
 
         internal static void Bar(Rect r, float v, Color fill)
         {
@@ -299,7 +343,7 @@ namespace NextDayRevival
             return state == Off ? GreyDark : state == Down ? Pressed : state == Over ? Hover : White;
         }
 
-        /// <summary>The dialog button (btn / btn_hover, ROBOTO-LIGHT, UIButton tint on the caption).</summary>
+        /// <summary>Native btn art and texture tint; the caption stays white.</summary>
         internal static bool Button(Rect r, string text, float size, bool enabled)
         {
             int st;
@@ -307,9 +351,22 @@ namespace NextDayRevival
             if (Event.current.type == EventType.Repaint)
             {
                 Texture t = st == Over || st == Down ? (_tex[TBtnHover] != null ? _tex[TBtnHover] : _tex[TBtn]) : _tex[TBtn];
-                if (t != null) Tex(r, t, st == Off ? new Color(1f, 1f, 1f, 0.55f) : Color.white);
-                else Fill(r, st == Off ? new Color(0.15f, 0.15f, 0.15f, 0.8f) : new Color(0.2f, 0.2f, 0.2f, 0.95f));
-                Text(r, text, Light, size, Center, Tint(st));
+                // Native brush caps keep their aspect; only the icon-free
+                // centre extends horizontally. Dark underpaint bounds contrast.
+                Fill(r, new Color(0.035f, 0.035f, 0.035f, 1f));
+                if (t != null)
+                {
+                    Color old = GUI.color;
+                    Color tint = Tint(st);
+                    GUI.color = st == Off ? new Color(0.55f, 0.55f, 0.55f, 0.55f)
+                        : new Color(tint.r * 0.7f, tint.g * 0.7f, tint.b * 0.7f, 1f);
+                    float cap = Mathf.Min(r.width * 0.2f, r.height * 230f * 0.08f / 60f);
+                    GUI.DrawTextureWithTexCoords(new Rect(r.x, r.y, cap, r.height), t, new Rect(0f, 0f, 0.08f, 1f));
+                    GUI.DrawTextureWithTexCoords(new Rect(r.x + cap, r.y, r.width - cap * 2f, r.height), t, new Rect(0.08f, 0f, 0.84f, 1f));
+                    GUI.DrawTextureWithTexCoords(new Rect(r.xMax - cap, r.y, cap, r.height), t, new Rect(0.92f, 0f, 0.08f, 1f));
+                    GUI.color = old;
+                }
+                Text(new Rect(r.x + 8f * _k, r.y, r.width - 16f * _k, r.height), text, Light, size, Center, st == Off ? GreyDark : White);
             }
             if (hit) Click();
             return hit;
@@ -322,10 +379,11 @@ namespace NextDayRevival
             bool hit = Hit(r, enabled, out st);
             if (Event.current.type == EventType.Repaint)
             {
+                Fill(r, new Color(0.035f, 0.035f, 0.035f, 1f));
                 Color base_ = st == Off ? GreyDark : Color.white;
-                if (_tex[TBuy] != null) Tex(r, _tex[TBuy], base_);
+                if (_tex[TBuy] != null) BuyPaint(r, _tex[TBuy], base_);
                 else Fill(r, st == Off ? new Color(0.25f, 0.25f, 0.25f, 0.9f) : new Color(0.55f, 0.08f, 0.06f, 0.95f));
-                if ((st == Over || st == Down) && _tex[TBuyHover] != null) Tex(r, _tex[TBuyHover], st == Down ? Pressed : BuyHoverTint);
+                if ((st == Over || st == Down) && _tex[TBuyHover] != null) BuyPaint(r, _tex[TBuyHover], st == Down ? Pressed : BuyHoverTint);
                 float k = r.width / 160f;
                 if (_tex[TBuyIcon] != null)
                     Tex(new Rect(r.x + 5f * k, r.y + 4f * k, 32f * k, 32f * k), _tex[TBuyIcon], base_);
@@ -344,17 +402,32 @@ namespace NextDayRevival
             bool hit = Hit(r, true, out st);
             if (Event.current.type == EventType.Repaint)
             {
-                if (_tex[TBuy] != null) Tex(r, _tex[TBuy], Color.white);
+                // This switch sits OUTSIDE the dark market form, over scenery.
+                // Translucent brush holes must not expose white sky under text.
+                Fill(r, new Color(0.035f, 0.035f, 0.035f, 1f));
+                if (_tex[TBuy] != null) BuyPaint(r, _tex[TBuy], new Color(0.42f, 0.42f, 0.42f, 1f));
                 else Fill(r, new Color(0.55f, 0.08f, 0.06f, 0.95f));
                 if ((active || st == Over || st == Down) && _tex[TBuyHover] != null)
-                    Tex(r, _tex[TBuyHover], st == Down ? Pressed : BuyHoverTint);
-                float k = r.width / 160f;
-                if (_tex[TBuyIcon] != null) Tex(new Rect(r.x + 6f * k, r.y + 4f * k, 32f * k, 32f * k), _tex[TBuyIcon], Color.white);
-                float size = 22f * k / Mathf.Max(0.01f, _k);
-                Text(new Rect(r.x + 36f * k, r.y, r.width - 40f * k, r.height), caption, Bebas, size, Center, White);
+                    BuyPaint(r, _tex[TBuyHover], st == Down ? new Color(Pressed.r * 0.42f, Pressed.g * 0.42f, Pressed.b * 0.42f, 1f)
+                        : new Color(0.42f, 0.42f, 0.42f, BuyHoverTint.a));
+                Text(new Rect(r.x + 8f * _k, r.y, r.width - 16f * _k, r.height), caption, Bebas, 22f, Center, White);
             }
             if (hit) Click();
             return hit;
+        }
+
+        static void BuyPaint(Rect r, Texture texture, Color tint)
+        {
+            // Both 159x39 buy textures bake a shopping bag into columns 14-38.
+            // Stretch only the clean centre; keep native end-cap proportions.
+            // Hire draws its one StoreBuyCut explicitly; the merc tab has none.
+            Color old = GUI.color;
+            GUI.color = tint;
+            float cap = Mathf.Min(r.width * 0.2f, r.height * 8f / 39f);
+            GUI.DrawTextureWithTexCoords(new Rect(r.x, r.y, cap, r.height), texture, new Rect(0f, 0f, 8f / 159f, 1f));
+            GUI.DrawTextureWithTexCoords(new Rect(r.x + cap, r.y, r.width - cap * 2f, r.height), texture, new Rect(40f / 159f, 0f, 111f / 159f, 1f));
+            GUI.DrawTextureWithTexCoords(new Rect(r.xMax - cap, r.y, cap, r.height), texture, new Rect(151f / 159f, 0f, 8f / 159f, 1f));
+            GUI.color = old;
         }
 
         /// <summary>A text tab in the category tab row: white when picked,
@@ -389,13 +462,23 @@ namespace NextDayRevival
 
         /// <summary>A market list row (MarketItemUI2_2_2) with the hover
         /// overlay while hovered or picked. True on click.</summary>
-        internal static bool Row(Rect r, bool picked)
+        internal static bool Row(Rect r, bool picked) { return Row(r, picked, true); }
+
+        /// <summary>currency=false drops the row art's ruble mark (columns
+        /// 379-406 of 421) for rows that show no price (c-u1).</summary>
+        internal static bool Row(Rect r, bool picked, bool currency)
         {
             int st;
             bool hit = Hit(r, true, out st);
             if (Event.current.type == EventType.Repaint)
             {
-                if (_tex[TRow] != null) Tex(r, _tex[TRow], Color.white);
+                if (_tex[TRow] != null && !currency)
+                {
+                    float cap = Mathf.Min(r.width * 0.1f, r.height * 13f / 58f);
+                    GUI.DrawTextureWithTexCoords(new Rect(r.x, r.y, r.width - cap, r.height), _tex[TRow], new Rect(0f, 0f, 370f / 421f, 1f));
+                    GUI.DrawTextureWithTexCoords(new Rect(r.xMax - cap, r.y, cap, r.height), _tex[TRow], new Rect(408f / 421f, 0f, 13f / 421f, 1f));
+                }
+                else if (_tex[TRow] != null) Tex(r, _tex[TRow], Color.white);
                 else Fill(r, new Color(0.18f, 0.16f, 0.16f, 0.9f));
                 if (picked || st == Over || st == Down)
                 {
@@ -493,11 +576,14 @@ namespace NextDayRevival
             Rect form = new Rect(_form.center.x - 225f * k, _form.center.y - 100f * k, 450f * k, 200f * k);
             if (e.type == EventType.Repaint)
             {
+                Fill(form, new Color(0.035f, 0.035f, 0.035f, 1f));
                 if (_tex[TDialog] != null) Tex(form, _tex[TDialog], Color.white);
                 else Fill(form, new Color(0.1f, 0.1f, 0.1f, 0.97f));
                 float save = _k;
                 _k = k;
-                Paragraph(new Rect(form.x + 40f * k, form.y + 22f * k, form.width - 80f * k, 104f * k), _ask, 22f, White);
+                // warning_01_form bakes its triangle into x20-110, y40-120.
+                // Reserve that column; it must never sit behind the question.
+                Paragraph(new Rect(form.x + 126f * k, form.y + 22f * k, form.width - 154f * k, 104f * k), _ask, 22f, White);
                 _k = save;
             }
             Rect yes = new Rect(form.center.x - 180f * k, form.yMax - 62f * k, 166f * k, 42f * k);
@@ -548,6 +634,10 @@ namespace NextDayRevival
         static string _tip;
         static readonly GUIContent _tipContent = new GUIContent();
         static GUIStyle _tipMeasure;
+        static string _measuredTip;
+        static float _tipWidth, _tipHeight;
+        static int _tipSize;
+        static Font _tipFace;
 
         internal static void BeginTips() { _tip = null; }
         internal static void Tip(Rect r, string text)
@@ -585,10 +675,16 @@ namespace NextDayRevival
         {
             if (_tip == null || Event.current.type != EventType.Repaint) return;
             if (_tipMeasure == null) { _tipMeasure = new GUIStyle(); _tipMeasure.wordWrap = true; }
-            _tipMeasure.fontSize = Mathf.Max(8, Mathf.RoundToInt(14f * VanillaSkin.K));
-            _tipContent.text = _tip;
+            int size = Mathf.Max(8, Mathf.RoundToInt(14f * VanillaSkin.K));
             float width = Mathf.Min(420f * VanillaSkin.K, Screen.width - 20f);
-            float height = Mathf.Min(Screen.height - 20f, _tipMeasure.CalcHeight(_tipContent, width - 20f) + 20f);
+            Font face = VanillaSkin.BodyFont;
+            if (_measuredTip != _tip || _tipWidth != width || _tipSize != size || _tipFace != face)
+            {
+                _measuredTip = _tip; _tipWidth = width; _tipSize = size; _tipFace = face;
+                _tipMeasure.font = face; _tipMeasure.fontSize = size; _tipContent.text = _tip;
+                _tipHeight = Mathf.Min(Screen.height - 20f, _tipMeasure.CalcHeight(_tipContent, width - 20f) + 20f);
+            }
+            float height = _tipHeight;
             Vector2 mouse = Event.current.mousePosition;
             Rect r = new Rect(Mathf.Clamp(mouse.x + 12f, 10f, Screen.width - width - 10f),
                 Mathf.Clamp(mouse.y + 20f, 10f, Screen.height - height - 10f), width, height);

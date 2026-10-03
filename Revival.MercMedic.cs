@@ -277,6 +277,7 @@ namespace NextDayRevival
             else if ((r.Down.Down && Mercs.RescueSafe(u, now)) || (!r.Down.Down && Mercs.MedicCalm(u, now)))
             {
                 Hold(f, null, now); Drive(f, MainIdle, AddNone, PoseCrouch, now, true);
+                FaceDir(f, at - f.Tr.position);
                 if (r.Down.Down) Mercs.TryMercRevive(u, r, now); else Mercs.MedicTreat(u, r, now);
             }
             else if (!MercFight(f, u, now))

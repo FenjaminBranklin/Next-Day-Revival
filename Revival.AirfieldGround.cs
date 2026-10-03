@@ -1,6 +1,6 @@
 // Airfield ground: load-only grass edge and gun-pit clearings for the east
-// tile. No Update, physics query, renderer/collider, paint, height edit or
-// steady-state allocation.
+// tile. C W4 also queues the finite kit path job and clears its corridors.
+// No Update, height edit or steady-state allocation.
 // A1: the original concrete, paths, runway paint and markers are not touched
 // (Z F2 switched them off and repainted the field; that is reverted).
 using System;
@@ -21,6 +21,8 @@ namespace NextDayRevival
             {
                 if (roots[i].GetComponent<AirfieldGroundJob>() != null) continue;
                 roots[i].AddComponent<AirfieldGroundJob>();
+                if (i == 0 && roots[i].GetComponent<AirfieldPathsJob>() == null)
+                    roots[i].AddComponent<AirfieldPathsJob>();
             }
         }
     }
@@ -51,7 +53,7 @@ namespace NextDayRevival
                     {
                         TreeInstance tree = trees[at++];
                         float x = origin.x + tree.position.x * size.x, z = origin.z + tree.position.z * size.z;
-                        if (!AirfieldGroundCore.ClearTree(x, z)) keep.Add(tree);
+                        if (!AirfieldGroundCore.ClearTree(x, z) && !AirfieldPathsCore.ClearTree(x, z)) keep.Add(tree);
                     }
                     while (at < trees.Length && System.Diagnostics.Stopwatch.GetTimestamp() - begin
                         < System.Diagnostics.Stopwatch.Frequency / 4000); // 0.25 ms slice
@@ -69,7 +71,7 @@ namespace NextDayRevival
                     yield return null;
                 }
             }
-            RevivalPlugin.L.LogInfo("AirfieldGround: grass edge and flak pit clearings pruned " + pruned
+            RevivalPlugin.L.LogInfo("AirfieldGround: grass edge, flak pits and tower path corridors pruned " + pruned
                 + " tree/bush instances; original concrete, paths and runway paint untouched.");
             Destroy(this);
         }

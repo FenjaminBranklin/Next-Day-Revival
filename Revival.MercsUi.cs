@@ -1050,6 +1050,7 @@ namespace NextDayRevival
 
         internal static void Draw()
         {
+            if (OfflineStart.Active && (MenuScenarioDraw() || HudScenarioDraw())) return;
             Styles();
             bool window = GameUi.WindowOpen;
             // a-u2: only the merc tab is custom; safe/market are always native.
@@ -1066,7 +1067,7 @@ namespace NextDayRevival
             if (GameUi.State == 8 && MapWanted()) DrawMap();
             else HideMap();
             if (_listOpen) DrawList();
-            if (repaint && !window && !_listOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
+            if (repaint && !window && !_listOpen && !_wheelOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
             if (repaint && !window) DrawLocate();
             DrawCommandPing();
             if (repaint) DrawToasts();
@@ -1077,7 +1078,7 @@ namespace NextDayRevival
             Mercs.Record r = Mercs.MedicineTarget;
             if (r == null || r.Unit == null || r.Unit.Ai == null) return;
             float x = Screen.width * 0.5f - 180f, y = Screen.height * 0.5f + 44f;
-            VanillaUi.Panel(new Rect(x - 8f, y - 6f, 376f, 74f), "InteractItem");
+            VanillaUi.Panel(new Rect(x - 12f, y - 8f, 384f, 78f), VanillaUi.Plate);
             VanillaUi.Label(new Rect(x, y, 360f, 20f), r.Name, _label);
             VanillaUi.Label(new Rect(x, y + 20f, 360f, 20f), Mercs.MedkitStockLabel(r), _small);
             string action = r.Down.Down ? Loc.T("Shift+E: оживить аптечкой", "Shift+E: revive with medkit")
@@ -1097,11 +1098,13 @@ namespace NextDayRevival
             {
                 string t = _toasts[i].Text;
                 Vector2 size = Measure(_label, t);
-                float w = Mathf.Min(size.x + 20f, 620f);
-                Rect r = new Rect(Screen.width - w - 20f, y, w, 26f);
+                // The type icon sits in the plate's left square; text starts after it.
+                float w = Mathf.Min(size.x + 52f, 640f);
+                Rect r = new Rect(Screen.width - w - 20f, y, w, 30f);
                 VanillaUi.Panel(r, _toasts[i].Warn ? "Warning_Msg" : "Group_Msg");
-                VanillaUi.Label(new Rect(r.x + 10f, r.y + 4f, w - 12f, 20f), t, _label);
-                y += 30f;
+                float x = r.x + VanillaUi.IconInset(r) + 4f;
+                VanillaUi.Label(new Rect(x, r.y + 5f, r.xMax - x - 8f, 20f), t, _label);
+                y += 34f;
             }
         }
 
@@ -1113,6 +1116,7 @@ namespace NextDayRevival
             internal MercOrder For;
             internal bool Dead, Peaceful, Rally, Survive, Down;
             internal int Mode, Phase, Metres, Points, Radius, Lang = -1;
+            internal float NameHeight, OrderHeight;
         }
         static readonly List<StripRow> _strip = new List<StripRow>(12);
         static readonly GUIContent _stripTitle = new GUIContent();
@@ -1134,6 +1138,7 @@ namespace NextDayRevival
                 _stripTitle.text = "<b>" + Loc.T("НАЁМНИКИ", "MERCS") + "</b>  (" + _listKeyText + ")";
             }
             List<Mercs.Record> roster = Mercs.Roster;
+            if (_stripCount != roster.Count) _hudStripDirty = true;
             _stripCount = roster.Count;
             while (_strip.Count < _stripCount) _strip.Add(new StripRow());
             for (int i = 0; i < _strip.Count; i++)
@@ -1146,7 +1151,8 @@ namespace NextDayRevival
                 if (changed || row.FullName != m.Name)
                 {
                     row.FullName = m.Name;
-                    row.Name.text = Short(m.Name, 10);
+                    row.Name.text = m.Name;
+                    _hudStripDirty = true;
                 }
                 MercOrder order = m.Order;
                 MercUnit u = m.Unit;
@@ -1168,7 +1174,8 @@ namespace NextDayRevival
                     row.For = order; row.Mode = order.Mode; row.Dead = m.Dead; row.Down = m.Down.Down; row.Peaceful = m.Peaceful;
                     row.Rally = rally; row.Survive = order.Survive; row.Lang = lang;
                     row.Phase = phase; row.Metres = metres; row.Points = points; row.Radius = radius;
-                    row.Order.text = m.Dead ? "DEAD" : OrderText(m);
+                    row.Order.text = m.Dead ? Loc.T("МЕРТВ", "DEAD") : OrderText(m);
+                    _hudStripDirty = true;
                 }
             }
         }
@@ -1176,21 +1183,27 @@ namespace NextDayRevival
         static void DrawStrip()
         {
             if (_stripCount == 0) return;
-            float height = 24f + 35f * _stripCount;
-            Rect frame = new Rect(12f, Screen.height - height - 150f, 290f, height);
-            VanillaUi.Panel(frame, "MarkerInfo");
-            VanillaUi.Label(new Rect(frame.x + 8f, frame.y + 2f, 274f, 20f), _stripTitle, _chip);
+            HudStyles();
+            HudStripGeometry();
+            HudPlate(_hudStripFrame, false, true);
+            HudLabel(new Rect(_hudStripFrame.x + HudS(12f), _hudStripFrame.y + HudS(4f),
+                _hudStripFrame.width - HudS(24f), HudS(24f)), _stripTitle, _hudSmall);
+            float y = _hudStripFrame.y + HudS(32f);
             for (int i = 0; i < _stripCount; i++)
             {
                 StripRow row = _strip[i];
                 Mercs.Record m = row.Record;
-                float y = frame.y + 24f + 35f * i;
-                Rect r = new Rect(frame.x + 4f, y, 282f, 33f);
-                VanillaUi.Panel(r, "groupPlayerWhite", new Color(0.329f, 0.329f, 0.329f, 1f));
-                VanillaUi.Instrument(new Rect(r.x + 6f, y, 110f, 27f), row.Name, _stripName);
-                Bar(new Rect(r.x + 116f, y + 13f, 48f, 5f), m.Hp, m.Dead ? Grey : HpColor(m.Hp));
-                VanillaUi.Label(new Rect(r.x + 170f, y, 90f, 27f), row.Order, _small);
-                if (m.Unpaid) VanillaUi.Label(new Rect(r.x + 262f, y, 20f, 27f), "$!", _small);
+                float h = row.NameHeight + row.OrderHeight + HudS(12f);
+                Rect r = new Rect(_hudStripFrame.x + HudS(6f), y, _hudStripFrame.width - HudS(12f), h);
+                HudPlate(r, m.Selected, !m.Dead);
+                float x = r.x + HudS(10f);
+                HudLabel(new Rect(x, y + HudS(4f), r.width - HudS(114f), row.NameHeight), row.Name, _hudName);
+                float bx = r.xMax - HudS(90f);
+                HudSolid(new Rect(bx, y + HudS(14f), HudS(54f), HudS(6f)), new Color(0.25f, 0.25f, 0.25f, 1f));
+                HudSolid(new Rect(bx, y + HudS(14f), HudS(54f) * Mathf.Clamp01(m.Hp), HudS(6f)), m.Dead ? Grey : HpColor(m.Hp));
+                if (m.Unpaid) HudLabel(new Rect(r.xMax - HudS(32f), y + HudS(4f), HudS(26f), HudS(26f)), _hudUnpaid, _hudSmall);
+                HudLabel(new Rect(x, y + HudS(6f) + row.NameHeight, r.width - HudS(20f), row.OrderHeight), row.Order, _hudState);
+                y += h + HudS(4f);
             }
         }
 
@@ -1252,52 +1265,31 @@ namespace NextDayRevival
 
         static void DrawWheel()
         {
-            if (UiKit.ParagraphHeight(" ", 64f) <= 0f) return;   // builds the kit's styles on first use
-            int n = SectorEn.Length;
+            if (Event.current.type != EventType.Repaint) return;
             float now = Time.unscaledTime;
             if (now >= _wheelTextAt || _wheelTextPick != _wheelPick) WheelTexts(now);
-            float cx = Screen.width * 0.5f, cy = Screen.height * 0.5f, rad = UiKit.S(n > 9 ? 320f : n > 8 ? 285f : n > 6 ? 235f : 210f);
-            UiKit.Circle(new Rect(cx - rad - UiKit.S(4f), cy - rad, (rad + UiKit.S(4f)) * 2f, (rad + UiKit.S(4f)) * 2f), UiKit.Shadow);
-            UiKit.Circle(new Rect(cx - rad, cy - rad, rad * 2f, rad * 2f), UiKit.Fade(UiKit.Panel, 0.82f));
-            float pw = UiKit.S(124f), ph = UiKit.S(44f);
-            for (int s = 0; s < n; s++)
+            HudStyles();
+            HudWheelGeometry();
+            for (int s = 0; s < SectorEn.Length; s++)
             {
-                float a = s * (360f / n) * Mathf.Deg2Rad;
-                Vector2 p = new Vector2(cx + Mathf.Sin(a) * rad * 0.66f, cy - Mathf.Cos(a) * rad * 0.66f);
-                // B3c: every sector is live; PATROL is greyed in a seat.
                 bool live = s != 2 || !MercRide.OwnerInVehicle;
-                bool pick = s == _wheelPick;
-                Rect r = new Rect(p.x - pw * 0.5f, p.y - ph * 0.5f, pw, ph);
-                Color fill = pick ? (live ? UiKit.Accent : UiKit.Fade(UiKit.TextDim, 0.6f)) : UiKit.CardFill;
-                UiKit.Fill(r, fill, 1);
-                if (!pick) UiKit.Outline(r, UiKit.Line);
-                Color fg = pick && live ? UiKit.TextOnAccent : live ? UiKit.Text : UiKit.TextDim;
-                string name = s == 5 ? (_wheelPeaceful ? Loc.T("МИРНЫЙ: ВКЛ", "PEACEFUL ON") : Loc.T("МИРНЫЙ: ВЫКЛ", "PEACEFUL OFF"))
-                    : Loc.T(SectorRu[s], SectorEn[s]);
-                UiKit.Label(new Rect(r.x, r.y + UiKit.S(3f), r.width, UiKit.S(24f)), name, UiFont.Heading, UiFont.Center, fg);
-                float kc = UiKit.S(16f);
-                Rect cap = new Rect(r.x + (r.width - kc) * 0.5f - (live ? 0f : UiKit.S(30f)), r.yMax - kc - UiKit.S(4f), kc, kc);
-                UiKit.Fill(cap, UiKit.Fade(pick && live ? UiKit.TextOnAccent : Color.white, 0.14f), 2);
-                UiKit.Label(cap, KeyCaps[Mathf.Min(s, KeyCaps.Length - 1)], UiFont.Small, UiFont.Center, fg);
-                if (!live)
-                    UiKit.Label(new Rect(cap.xMax + UiKit.S(4f), cap.y, UiKit.S(70f), kc), Loc.T("пешком", "on foot"), UiFont.Small, UiFont.Left, UiKit.TextDim);
+                Rect r = _hudSectors[s];
+                HudPlate(r, s == _wheelPick, live);
+                HudLabel(new Rect(r.x + HudS(8f), r.y + HudS(4f), r.width - HudS(16f), r.height - HudS(28f)),
+                    _hudSectorNames[s], live ? _hudWheelLabel : _hudDisabled);
+                HudLabel(new Rect(r.x + HudS(6f), r.yMax - HudS(24f), r.width - HudS(12f), HudS(20f)),
+                    live ? _hudSectorKeys[s] : _hudOnFoot, _hudKey);
             }
-            float hub = UiKit.S(64f);
-            UiKit.Circle(new Rect(cx - hub, cy - hub, hub * 2f, hub * 2f), UiKit.Header);
-            UiKit.Label(new Rect(cx - hub, cy - UiKit.S(24f), hub * 2f, UiKit.S(24f)), _wheelWho, UiFont.Heading, UiFont.Center, UiKit.Text);
-            int lang = Loc.Lang();
-            bool seat = MercRide.OwnerInVehicle;
-            int kk = n * 4 + lang * 2 + (seat ? 1 : 0);
-            string hint = _wheelKeysMemo.Stale(kk)
-                ? _wheelKeysMemo.Set(kk, seat ? (n >= 10 ? Loc.T("клавиши 1-9, 0", "keys 1-9, 0") : Loc.T("клавиши 1-", "keys 1-") + n) : Loc.T("отпустить = приказ", "release = issue"))
-                : _wheelKeysMemo.Text;
-            UiKit.Label(new Rect(cx - hub, cy + UiKit.S(2f), hub * 2f, UiKit.S(20f)), hint, UiFont.Small, UiFont.Center, UiKit.TextDim);
+            HudPlate(_hudHub, false, true);
+            _hudWho.text = _wheelWho;
+            _hudRelease.text = Loc.T("отпустить = приказ", "release = issue");
+            HudLabel(new Rect(_hudHub.x + HudS(10f), _hudHub.y + HudS(6f), _hudHub.width - HudS(20f), _hudHubNameHeight), _hudWho, _hudWheelLabel);
+            HudLabel(new Rect(_hudHub.x + HudS(6f), _hudHub.yMax - HudS(30f), _hudHub.width - HudS(12f), HudS(24f)), _hudRelease, _hudKey);
             if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector || _wheelPick == 6 || _wheelPick == 7) && _wheelPoint != null)
             {
-                float tw = UiKit.S(520f), th = UiKit.S(30f);
-                Rect t = new Rect(cx - tw * 0.5f, cy + rad + UiKit.S(10f), tw, th);
-                UiKit.Fill(t, UiKit.Header, 1);
-                UiKit.Label(t, _wheelPoint, UiFont.Body, UiFont.Center, UiKit.Text);
+                _hudPoint.text = _wheelPoint;
+                HudPlate(_hudFooter, false, true);
+                HudLabel(new Rect(_hudFooter.x + HudS(12f), _hudFooter.y + HudS(4f), _hudFooter.width - HudS(24f), _hudFooter.height - HudS(8f)), _hudPoint, _hudKey);
             }
         }
 

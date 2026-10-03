@@ -413,6 +413,7 @@ namespace NextDayRevival
                 Type pvm = RevivalPlugin.TypeByName("PlayerVehicleManager");
                 if (pvm != null) _vehicle = AccessTools.Field(pvm, "Vehicle");
 
+                NativeSeatNames.Install(harmony, inv);
                 int n = 0;
                 n += Finalize(harmony, inv, "UpdateVehiclePlayersUI", "SeatsFinalizer");
                 n += Finalize(harmony, inv, "Update", "ReportFinalizer");

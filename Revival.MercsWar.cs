@@ -263,6 +263,9 @@ namespace NextDayRevival
                 return;
             }
             if (u.Order.MoveNear) { MercMoveStep(f, u, now); return; }
+            // c-m2: a target past his fire range - walk up to it first, as
+            // far as the order lets him (Revival.MercCloseIn.cs).
+            if (MercCloseInStep(f, u, now)) return;
             switch (u.Order.Mode)
             {
                 case MercOrder.Follow: MercFollow(f, u, now); return;

@@ -18,17 +18,30 @@
 //              outside the corridor. An unseen, safe new order starts moving
 //              immediately in short M1 cover hops. Two fights without a round start an
 //              8 s push in which only a target in sight (or a hit) stops him:
-//              no advance/cover cycle without shots.
+//              no advance/cover cycle without shots. c-m1: without a line of
+//              fire of his own (2.5 s hysteresis), and with no hit, pressure,
+//              danger or maintenance on him, he is not held in a fight at
+//              all - a mate's call-out or a remembered contact moves him on
+//              to where he can fire instead of keeping him low in cover.
 //   SEARCH     a fight that saw its threat ends in a short local search:
 //              at most 20 m toward the last sighting, inside the corridor,
-//              12 s, then the advance or the hold resumes.
-//   CLEAR      at the objective: low at his spot, sweeping his sector. After
-//              every active member holds and nobody fought for 10 s, marks
-//              at least 100 m away continue in 30 m legs on the same heading.
+//              12 s, then the advance or the hold resumes. Fights ending
+//              during a search re-aim it, never extend it, and the 12 s run
+//              out in Gate as well (a marksman's overwatch never steps).
+//   CLEAR      at the objective: low at his spot, sweeping his sector. A
+//              hostile his scan knows of (seen or not) or a mate has in
+//              sight within 40 m of the hold circle is not left standing: he
+//              goes for it until he can fire (the fight takes over) or it is
+//              gone, and the group is not complete while one is known.
+//              After every active member holds and nobody fought for 10 s,
+//              marks at least 100 m away continue in 30 m legs on the same
+//              heading.
 //              Shorter attacks retain the original hold behavior.
-//   STALLED    no progress for 2 x 20 s of stepping, or the step budget
-//              (120 s + 0.5 s per unit of corridor) spent: he holds where he
-//              is and the owner is told. Never an endless run, never a warp.
+//   STALLED    no progress for 2 x 20 s of stepping (fight time does not
+//              count), or the step budget (120 s + 0.5 s per unit of
+//              corridor) spent: he holds 6 s, then tries again on a lane
+//              beside his own (+1, -1, +2, -2 lanes). The owner is told once
+//              per order. Never the end of the order, never a warp.
 //
 // Units are game units (1 m = 2.8 u). No Unity call beyond Vector3 values
 // and no allocation after construction: research/merc_attack_check.py runs
@@ -174,6 +187,8 @@ namespace NextDayRevival
         public bool Danger;             // a grenade or blast beside him
         public bool Protected;          // low HP, reload or exposure: M2/M3 keeps control
         public bool Maintenance;        // actual injury/reload/medicine; pressure still permits bounds
+        public bool Known;              // c-m1: a hostile his scan weighed (M1 sense), seen or not
+        public Vector3 KnownAt;
     }
 
     /// <summary>What he does out of a fight until the next step.</summary>
@@ -213,6 +228,7 @@ namespace NextDayRevival
         int _coverStart;
         internal float LastContact = -1000f;
         internal float LastSight = -1000f;          // a member had a target in sight (covering fire is possible)
+        internal Vector3 SightAt;                   // c-m1: where that target stood (a call-out for the holders)
         internal int Moving;                        // alternating priority for the next covering pair
         internal int Swaps;
         internal bool Complete, CompleteSaid;
@@ -397,6 +413,11 @@ namespace NextDayRevival
         internal const float LookSeconds = 4f;
         internal const float HitKeep = 3f;
         internal const float LaunchSeconds = 0.8f; // unseen old fights must not delay a new attack
+        internal const float StallHold = 6f;       // c-m1: a stall is a pause, then another lane
+        internal const int Detours = 4;            // +1, -1, +2, -2 lanes beside his own
+        internal const float ClearReach = 112f;    // c-m1: hostiles within 40 m of the hold circle are "on the mark"
+        internal const float MarksmanSight = 6f;   // overwatch only for a marksman who saw a target lately
+        internal const float CallOut = 3f;         // a mate's sighting this fresh still sends a holder after it
 
         // News for the owner (the adapter toasts and clears them).
         internal const byte NewsArrived = 1, NewsStalled = 2, NewsComplete = 4;
@@ -411,9 +432,12 @@ namespace NextDayRevival
         internal byte News;
         // Counters (F8, the offline check).
         internal int Fights, DryFights, Pushes, Searches, Stalls, Steps, Bounds;
+        internal int Retries, Clears, Blind;      // c-m1: stall re-plans, clearing pushes, sightless fights left
 
         float _best, _bestAt, _lastStep, _stepTime, _budget;
-        int _stalls;
+        int _stalls, _detour;
+        float _stalledAt;
+        bool _stallSaid, _clearing;
         bool _wasFighting, _haveThreat, _arrivedOnce, _primed, _leftForBound;
         int _shotsAtStart, _hits, _dry;
         float _fightStart, _threatAt, _hitAt = -1000f, _pushUntil, _searchUntil, _lookUntil;
@@ -435,6 +459,17 @@ namespace NextDayRevival
             _launchUntil = 0f;
             _advanceAt = _motionAt = _extension = 0f;
             _threatAt = _hitAt = -1000f;
+            _detour = 0; _stalledAt = 0f; _stallSaid = false; _clearing = false;
+        }
+
+        /// <summary>c-m1: did he have a target in his line of fire lately?</summary>
+        internal bool Saw(float now, float seconds) { return now - _threatAt < seconds; }
+
+        /// <summary>c-m1: a hostile his scan knows of stands on the mark
+        /// (within ClearReach of the hold circle around his spot).</summary>
+        internal bool KnownNear(MercOrder o, ref MercAttackIn i)
+        {
+            return i.Known && MercAttackGeo.Flat(i.KnownAt - HoldAt) <= o.RadiusUnits + ClearReach;
         }
 
         /// <summary>A new order (or the first step of one): his hold spot and
@@ -475,6 +510,9 @@ namespace NextDayRevival
             if (!_primed) { _primed = true; _hits = i.Hits; _shotsAtStart = i.Shots; _wasFighting = i.Fighting; }
             if (i.Hits != _hits) { _hits = i.Hits; _hitAt = now; _dry = 0; }
             if (i.Target && i.Sees) { _threat = i.TargetAt; _threatAt = now; _haveThreat = true; }
+            // c-m1: the search ends on time even when Step is not called (a
+            // marksman's overwatch): "ATTACK: SEARCH" never outlives its 12 s.
+            if (Phase == Search && now >= _searchUntil) Phase = _resume == Holding ? Holding : Advance;
             if (i.Fighting && !_wasFighting)
             {
                 Fights++;
@@ -484,8 +522,14 @@ namespace NextDayRevival
             else if (!i.Fighting && _wasFighting) FightOver(o, ref i);
             _wasFighting = i.Fighting;
             MercAttackTeam team = Team(o);
+            // A hostile known to stand on the mark keeps the group in contact:
+            // the objective is not "taken" (or left for the next leg) over him.
             if (team != null)
-                team.Report(o.K, now, MercAttackGeo.Along(o, i.Me), Phase, i.Fighting || now - _hitAt < HitKeep, i.Target && i.Sees);
+            {
+                team.Report(o.K, now, MercAttackGeo.Along(o, i.Me), Phase,
+                    i.Fighting || now - _hitAt < HitKeep || KnownNear(o, ref i), i.Target && i.Sees);
+                if (i.Target && i.Sees) team.SightAt = i.TargetAt;
+            }
 
             bool hit = now - _hitAt < HitKeep;
             // A visible hostile always interrupts the advance, even outside
@@ -511,6 +555,15 @@ namespace NextDayRevival
             if (!MercAttackGeo.Inside(o, i.Me, 20f)) return false;
             // A push: only a target in sight stops him.
             if (now < _pushUntil && !(i.Target && i.Sees)) return false;
+            // c-m1: no line of fire of his own and nothing on him (hits,
+            // pressure, danger and maintenance returned above): a fight here
+            // is a man low in cover waiting on a mate's call-out. He moves on
+            // in M1 cover hops until he can fire. A stall's pause may fight.
+            if (!sighted && Phase != Stalled)
+            {
+                if (i.Fighting) Blind++;
+                return false;
+            }
             return true;
         }
 
@@ -549,9 +602,12 @@ namespace NextDayRevival
                     at = q + (at - q) * (half / off);
                 }
                 _searchAt = at;
-                _resume = Phase == Search ? _resume : Phase;
+                // c-m1: a fight ending during the search re-aims it; the
+                // first search's end stands, so searches never chain on.
+                bool chained = Phase == Search;
+                _resume = chained ? _resume : Phase;
                 Phase = Search;
-                _searchUntil = now + SearchSeconds;
+                if (!chained) _searchUntil = now + SearchSeconds;
                 _lookUntil = 0f;
                 Searches++;
             }
@@ -565,9 +621,11 @@ namespace NextDayRevival
             float now = i.Now;
             if (For != o) Begin(o, now, i.Me);
             // Fight time is not step time: the stall clock and the budget
-            // stand still while the brain had him.
+            // stand still while the brain had him - between two steps (a
+            // gap) and, since K4a runs this step inside the fight too, in one
+            // (c-m1: 40 s of cover fire used to end the order as STALLED).
             float dt = _lastStep > 0f ? now - _lastStep : 0f;
-            if (dt > 0.5f) { if (_bestAt > 0f) _bestAt += dt; dt = 0f; }
+            if (dt > 0.5f || i.Fighting) { if (_bestAt > 0f) _bestAt += dt; dt = 0f; }
             _lastStep = now;
             Steps++;
             Vector3 me = i.Me;
@@ -582,7 +640,7 @@ namespace NextDayRevival
                 : Phase == Holding && now - _threatAt >= MercAttackTeam.ClearSeconds
                     && now - _hitAt >= MercAttackTeam.ClearSeconds && !i.Fighting;
             if (MercAttackGeo.Continues(o) && cleared
-                && (_extension == 0f || MercAttackGeo.Flat(HoldAt - me) <= MercAttackGeo.Arrive))
+                && (_extension == 0f || OnSpot(o, me)))
             {
                 _extension += MercAttackGeo.Bound;
                 HoldAt += dir * MercAttackGeo.Bound;
@@ -615,13 +673,27 @@ namespace NextDayRevival
             }
             if (Phase == Stalled)
             {
-                Hold(ref a, dir, true, 45f);
-                return;
+                // c-m1: a pause, never the end of the order - then the next
+                // lane beside his own, with a fresh stall clock and budget.
+                if (now - _stalledAt < StallHold)
+                {
+                    Hold(ref a, dir, true, 45f);
+                    return;
+                }
+                Retry(now, along);
             }
             if (Phase == Holding)
             {
+                _detour = 0;
+                // c-m1: a hostile known to stand on the mark is not left there.
+                Vector3 clear;
+                if (Clearing(o, team, ref i, me, out clear))
+                {
+                    a.Act = MercAttackAct.MoveTo; a.Dest = clear; a.Run = true;
+                    return;
+                }
                 // Pulled off his spot by a fight or a search: back to it.
-                if (MercAttackGeo.Flat(HoldAt - me) > MercAttackGeo.Arrive)
+                if (!OnSpot(o, me))
                 {
                     a.Act = MercAttackAct.MoveTo; a.Dest = HoldAt; a.Run = false;
                     return;
@@ -632,7 +704,7 @@ namespace NextDayRevival
             }
 
             // ADVANCE / OVERWATCH. Arrived at his spot: hold.
-            if (MercAttackGeo.Flat(HoldAt - me) <= MercAttackGeo.Arrive)
+            if (OnSpot(o, me))
             {
                 Phase = Holding;
                 if (!_arrivedOnce) { _arrivedOnce = true; News |= NewsArrived; }
@@ -672,9 +744,10 @@ namespace NextDayRevival
             }
             else
             {
-                // The line walks its lanes together.
+                // The line walks its lanes together - out of contact. In
+                // contact nobody stands waiting for a mate who is fighting.
                 float rear = team != null ? team.Rear(now, along) : along;
-                wait = !mustMove && team != null && along > rear + MercAttackGeo.Lead && along < len - MercAttackGeo.Arrive;
+                wait = !mustMove && !contact && team != null && along > rear + MercAttackGeo.Lead && along < len - MercAttackGeo.Arrive;
                 goalAlong = Math.Min(len, along + MercAttackGeo.Bound);
                 run = true; // execute immediately; cover waypoints shape the route
             }
@@ -687,9 +760,65 @@ namespace NextDayRevival
             }
             a.Act = MercAttackAct.MoveTo;
             a.Dest = goalAlong >= len - MercAttackGeo.Arrive ? HoldAt : MercAttackGeo.Lane(o, goalAlong);
+            // After a stall: the lane beside his own, closing on his spot.
+            if (_detour != 0)
+                a.Dest += MercAttackGeo.Side(dir) * (DetourOffset(o)
+                    * Math.Min(1f, MercAttackGeo.Flat(HoldAt - me) / (2f * MercAttackGeo.Bound)));
             a.Run = run;
             Progress(me, now, false);
             if (Phase == Stalled) Hold(ref a, dir, true, 45f);
+        }
+
+        /// <summary>At his hold spot - or, c-m1, on a long attack past it on
+        /// the mark (more ahead of it than beside it; a fight or a clearing
+        /// run took him there): gained ground is kept, the next leg starts
+        /// from in front of him. Beside an unreachable spot is not on it.</summary>
+        bool OnSpot(MercOrder o, Vector3 me)
+        {
+            Vector3 d = me - HoldAt;
+            float off = MercAttackGeo.Flat(d);
+            if (off <= MercAttackGeo.Arrive) return true;
+            if (!MercAttackGeo.Continues(o) || off > o.RadiusUnits + ClearReach) return false;
+            Vector3 dir = MercAttackGeo.Dir(o);
+            float ahead = d.x * dir.x + d.z * dir.z;
+            return ahead > Math.Abs(d.x * dir.z - d.z * dir.x);
+        }
+
+        /// <summary>c-m1: after StallHold, the next try on another lane.</summary>
+        void Retry(float now, float along)
+        {
+            Phase = Advance;
+            Retries++;
+            _stalls = 0; _bestAt = 0f; _stepTime = 0f;
+            _advanceAt = now; _advanceMark = along;
+            HaveMove = false; MoveCovered = false; NextCover = 0f;
+            _detour = _detour >= Detours ? 1 : _detour + 1;
+        }
+
+        /// <summary>Detour k: +1, -1, +2, -2 lanes across, kept inside the corridor.</summary>
+        float DetourOffset(MercOrder o)
+        {
+            float lanes = (_detour + 1) / 2;
+            float off = ((_detour & 1) == 1 ? 1f : -1f) * lanes * MercAttackGeo.Spacing;
+            float room = Math.Max(0f, MercAttackGeo.HalfWidth(o) - MercAttackGeo.Spacing - Math.Abs(MercAttackGeo.Lateral(o.K, o.N)));
+            return off > room ? room : off < -room ? -room : off;
+        }
+
+        /// <summary>c-m1, CLEAR: a hostile on the mark he knows of, or one a
+        /// mate has in sight right now, and not in his own line of fire - go
+        /// to him (the path finder goes round walls, the waypoint keeps the
+        /// M1 cover hops); first sight hands over to the fight.</summary>
+        bool Clearing(MercOrder o, MercAttackTeam team, ref MercAttackIn i, Vector3 me, out Vector3 to)
+        {
+            to = me;
+            if (i.Target && i.Sees) { _clearing = false; return false; }
+            if (KnownNear(o, ref i)) to = i.KnownAt;
+            else if (team != null && i.Now - team.LastSight < CallOut
+                && MercAttackGeo.Flat(team.SightAt - HoldAt) <= o.RadiusUnits + ClearReach) to = team.SightAt;
+            else { _clearing = false; return false; }
+            if (MercAttackGeo.Flat(to - me) <= MercAttackGeo.Arrive) { to = me; _clearing = false; return false; }
+            if (!_clearing) { _clearing = true; Clears++; }
+            return true;
         }
 
         /// <summary>The stall clock: 2 m closer to his hold spot (along his
@@ -704,16 +833,18 @@ namespace NextDayRevival
             {
                 _stalls++; Stalls++;
                 _bestAt = now;
-                if (_stalls >= StallsToStop) StallHere();
+                if (_stalls >= StallsToStop) StallHere(now);
             }
-            if (!waiting && _stepTime > _budget) StallHere();
+            if (!waiting && _stepTime > _budget) StallHere(now);
         }
 
-        void StallHere()
+        void StallHere(float now)
         {
             if (Phase == Stalled) return;
             Phase = Stalled;
-            News |= NewsStalled;
+            _stalledAt = now;
+            // The owner hears of it once per order, not of every new try.
+            if (!_stallSaid) { _stallSaid = true; News |= NewsStalled; }
         }
 
         static void Hold(ref MercAttackAct a, Vector3 face, bool low, float sweep)
@@ -728,7 +859,7 @@ namespace NextDayRevival
             if (Phase == Holding || Phase == Stalled)
             {
                 centre = Phase == Holding ? HoldAt : me;
-                radius = o.RadiusUnits + 28f;
+                radius = o.RadiusUnits + (Phase == Holding && _clearing ? ClearReach : 28f);
                 return;
             }
             centre = o.Origin + MercAttackGeo.Dir(o) * MercAttackGeo.Along(o, me);

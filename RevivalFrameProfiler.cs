@@ -296,7 +296,9 @@ namespace NextDayRevival
         public const int S_MercMedicineInteraction = 229;
         public const int S_VanillaUi = 230;
         public const int S_MercAirfieldT = 231;
-        public const int Count = 232;
+        public const int S_AirfieldAggro = 232;
+        public const int S_BlastCorpseT = 233;
+        public const int Count = 234;
 
         static readonly string[] Names = new string[]
         {
@@ -510,6 +512,8 @@ namespace NextDayRevival
             "  MercMedicine.Interaction.Sub",
             "VanillaUi.Draw",
             "  MercAirfield.Orders.Sub",
+            "  AirfieldAggro.Acquire.Sub",
+            "BlastCorpse.Tick",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested

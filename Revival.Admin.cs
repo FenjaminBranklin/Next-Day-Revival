@@ -1010,7 +1010,7 @@ namespace NextDayRevival
         }
     }
 
-    public static class Admin
+    public static partial class Admin
     {
         static KeyCode _key = KeyCode.None;
         static bool _keyParsed;
@@ -1275,10 +1275,16 @@ namespace NextDayRevival
 
         public static void Draw()
         {
-            if (!UiKit.BeginWindow(Win)) return;
-            try { Content(Win.Content); }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("Adminmenue draw: " + ex.Message); }
-            UiKit.EndWindow(Win);
+            if (OfflineStart.Active) MenuScenario();
+            AdminPaint.Active = true;
+            try
+            {
+                if (!UiKit.BeginWindow(Win)) return;
+                try { Content(Win.Content); }
+                catch (Exception ex) { RevivalPlugin.L.LogWarning("Adminmenue draw: " + ex.Message); }
+                UiKit.EndWindow(Win);
+            }
+            finally { AdminPaint.Active = false; }
         }
 
         static void Content(Rect c)
@@ -1288,7 +1294,7 @@ namespace NextDayRevival
             int tab = UiKit.Tabs(new Rect(0f, 0f, c.width, row + UiKit.S(4f)), _tab, Loc.Lang() == 0 ? TabsRu : TabsEn);
             if (tab != _tab) { _tab = tab; _nextLive = 0f; }
             float top = row + UiKit.S(4f) + UiKit.S(UiKit.Pad);
-            float foot = row + gap;
+            float foot = AdminPaint.FooterHeight + gap;
             Rect view = new Rect(0f, top, c.width, c.height - top - foot);
             _viewH = view.height;
             Rect inner = UiKit.BeginScroll(view, _scroll[_tab], _tabH[_tab]);
@@ -1305,9 +1311,9 @@ namespace NextDayRevival
             }
             _tabH[_tab] = AdminLayout.Y;
             UiKit.EndScroll();
-            Rect status = new Rect(0f, c.height - row, c.width, row);
+            Rect status = new Rect(0f, c.height - AdminPaint.FooterHeight, c.width, AdminPaint.FooterHeight);
             UiKit.Status(status, UiTone.Info, _status ?? Loc.T("Готово.", "Ready."));
-            UiKit.Tip(status, Loc.T("Всё это также попадает в лог BepInEx. Разбор: python playlog.py",
+            UiKit.Tip(status, _status ?? Loc.T("Всё это также попадает в лог BepInEx. Разбор: python playlog.py",
                                     "Everything here also goes to the BepInEx log. Read it with: python playlog.py"));
         }
 
@@ -1386,10 +1392,12 @@ namespace NextDayRevival
                 Melde(message);
             }
             bool self = _targetActor == Net.OwnActor();
+            bool protectedSelf = _godMode;
+            if (OfflineStart.Active && _adminScenario) protectedSelf = _adminScenarioPhase % 2 != 0;
             UiKit.Chip(UiKit.Col(r, 2, 3), self
-                ? (_godMode ? Loc.T("локально: защищён", "local: protected") : Loc.T("локально: уязвим", "local: vulnerable"))
+                ? (protectedSelf ? Loc.T("локально: защищён", "local: protected") : Loc.T("локально: уязвим", "local: vulnerable"))
                 : Loc.T("для выбранного игрока", "applies to selected player"),
-                self && _godMode ? UiTone.Success : UiTone.Info);
+                self && protectedSelf ? UiTone.Success : UiTone.Info);
 
             AdminLayout.Section(Loc.T("ПОЛНОЕ СНАРЯЖЕНИЕ", "COMPLETE LOADOUT"));
             r = AdminLayout.Row();

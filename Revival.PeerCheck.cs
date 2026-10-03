@@ -387,12 +387,10 @@ namespace NextDayRevival
                 _badgeStyle = new GUIStyle(GUI.skin.label);
                 _badgeStyle.fontSize = 16;
             }
-            string text = "Revival " + RevivalPlugin.VERSION;
+            const string text = "Revival " + RevivalPlugin.VERSION;
             Rect r = new Rect(6f, 3f, 260f, 18f);
-            // Drawn twice so it reads on any background: a black shadow, then
-            // the label a pixel up-left. No box, so it stays out of the way.
-            _badgeStyle.normal.textColor = new Color(0f, 0f, 0f, 0.7f);
-            VanillaUi.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, _badgeStyle);
+            // One instrument-font pass: a body-font shadow leaves a second,
+            // differently spaced version visible after the heading is drawn.
             _badgeStyle.normal.textColor = new Color(0.85f, 0.9f, 0.85f, 0.9f);
             VanillaUi.Instrument(r, text, _badgeStyle);
         }
