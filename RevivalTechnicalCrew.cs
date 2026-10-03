@@ -1310,18 +1310,18 @@ namespace NextDayRevival
         /// no clip needs an offset of its own. Every client runs it, because
         /// every client draws the man.
         /// </summary>
-        internal static void Sitzen(Component ai, int seat)
+        internal static bool Sitzen(Component ai, int seat)
         {
             try
             {
-                if (ai == null || !PoseNear(ai.transform.position)) return;
-                if (!SitClips()) return;
+                if (ai == null || !PoseNear(ai.transform.position)) return false;
+                if (!SitClips()) return false;
                 UnityEngine.Object clip = seat == 0 ? _clipDriver : _clipPassenger;
                 if (clip == null) clip = _clipBench;
-                if (clip == null) return;
+                if (clip == null) return false;
                 GameObject model = Modell(ai);
-                if (model == null) return;
-                if (!Gesehen(ai, model)) return;
+                if (model == null) return false;
+                if (!Gesehen(ai, model)) return false;
 
                 float laenge = 0f;
                 if (_clipLength != null)
@@ -1336,8 +1336,9 @@ namespace NextDayRevival
                     : 0f;
                 // No boxed float per man per frame (n01 perf).
                 FastCall.ObjFloat(_sample, clip, model, t);
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
         // P1b script budget: SampleAnimation poses the whole skeleton and ran

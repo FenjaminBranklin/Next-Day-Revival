@@ -147,7 +147,7 @@ namespace NextDayRevival
         internal class Record
         {
             internal MercUnit Unit = new MercUnit(); internal MercOrder Order = MercOrder.FollowMe();
-            internal bool Dead, Deserted, Unpaid, Selected, Peaceful;
+            internal bool Dead, Deserted, Unpaid, Selected = true, Peaceful;
             internal int Id;
             internal string ProfileId = ""; internal DownState Down = new DownState(); internal RaidState Raid = new RaidState();
         }
@@ -158,13 +158,18 @@ namespace NextDayRevival
         // PRODUCTION_GIVE
         static void SendOrders(List<Record> list) { Saves++; }
         static void OrderReceived(Record r, bool focus, Vector3 p) { }
+        internal static bool Picked; internal static int Announced;
+        static readonly List<Record> _onDuty = new List<Record>();
+        internal static bool PickActive()
+        { int a = 0, n = 0; foreach (Record r in _roster) { if (r.Dead) continue; a++; if (r.Selected) n++; } return MercTargetPlan.Explicit(Picked, n, a); }
+        static void Announce(string what, List<Record> got) { Announced = got.Count; }
         internal static void SaveStationOrders(List<Record> list) { Saves++; }
         // PRODUCTION_GIVE_STATION
         internal static List<Record> Roster { get { return _roster; } }
         internal static void TestTick(float t) { Time.time = t; AirDefenceTick(t); }
         internal static void Reset()
         {
-            _defenceActive = false; Defence.Clear(); _roster.Clear(); Saves = 0;
+            _defenceActive = false; Defence.Clear(); _roster.Clear(); Saves = 0; Picked = false; Announced = 0;
             OwnerObject = new GameObject(); OwnerPosition = Vector3.zero;
             TowerRadar.Built = true; MapScene.Current = "East"; Time.time = 0f;
             TowerRadar.OperatorActor = -1; RadarOperator.Alive = false; Flak._manned = null;
@@ -199,7 +204,7 @@ class Check
         Mercs.Reset();
         int[] traits = { 0, 50, 10, 40, 25, 0 };
         for (int i = 0; i < 6; i++) Mercs.Add(traits[i]);
-        Mercs.Roster[0].Selected = true; // Whole squad despite single selection.
+        Mercs.Picked = false; // All checked, no pick: the whole squad.
         Mercs.ToggleAirDefence();
         Ok(Mercs.AirDefenceActive, "toggle active immediately"); Unique();
         Ok(At(0) != null && At(1) != null && At(6) != null && At(4) != null && At(5) != null, "three 52-K, radar and ZU staffed");
@@ -305,6 +310,13 @@ class Check
         Ok(!Mercs.AirDefenceActive, "command limited to airfield presence");
         Mercs.Reset(); Mercs.Add(10); TowerRadar.Built = false; Mercs.ToggleAirDefence();
         Ok(!Mercs.AirDefenceActive, "missing field refuses with reply");
+        // G O1: a pick in L mans air defence alone; the rest keep their orders.
+        Mercs.Reset(); for (int i = 0; i < 6; i++) Mercs.Add(i);
+        Mercs.Record staying = Mercs.Roster[1]; staying.Order = new MercOrder(); staying.Order.Mode = MercOrder.Stay;
+        foreach (Mercs.Record r in Mercs.Roster) r.Selected = r.Id == 3 || r.Id == 5;
+        Mercs.ToggleAirDefence(); int manned = 0;
+        foreach (Mercs.Record r in Mercs.Roster) if (Post(r) >= 0) { manned++; Ok(r.Id == 3 || r.Id == 5, "only picked mercs take posts"); }
+        Ok(manned == 2 && staying.Order.Mode == MercOrder.Stay && Mercs.Announced == 2, "pick mans air defence alone; feedback names the two");
         Mercs.Reset(); for (int i = 0; i < 6; i++) Mercs.Add(i);
         // Missing gun may be built later; registry is sampled without scene scans.
         Flak.Guns[6] = null; Mercs.ToggleAirDefence(); Ok(At(6) == null, "missing gun skipped");

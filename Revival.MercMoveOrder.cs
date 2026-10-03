@@ -13,13 +13,14 @@ namespace NextDayRevival
                 MercUi.Toast(Loc.T("Нет проходимой земли у отметки.", "No walkable ground near the mark."), true);
                 return false;
             }
-            System.Collections.Generic.List<Record> selected = Selection();
-            if (selected.Count == 0) return false;
+            System.Collections.Generic.List<Record> selected = SquadSelection();
+            if (selected.Count == 0) { Announce(Loc.T("В УКРЫТИЕ У ОТМЕТКИ", "MOVE TO COVER"), selected); return false; }
             MercOrder order = new MercOrder();
             order.Mode = MercOrder.Stay; order.MoveNear = true;
             order.Points = new Vector3[] { ground }; order.Facing = facing;
             order.RadiusM = MercMovePlan.Radius / 2.8f;
             Give(selected, order);
+            Announce(Loc.T("В УКРЫТИЕ У ОТМЕТКИ", "MOVE TO COVER"), selected);
             return true;
         }
     }

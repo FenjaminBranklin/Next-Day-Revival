@@ -109,7 +109,8 @@ namespace NextDayRevival
             g.Aim = aim;
             g.FuzeRange = Mathf.Min(Vector3.Distance(mid, aim), ShortRangeCore.RangeM * Flak.K);
             g.Held += dt;
-            bool ready = FlakAmmo.Ready(g) && pitch >= ZuGroundCore.MinPitch && pitch <= 90f && g.Held >= ShortRangeCore.Reaction(radar, drone)
+            bool ready = AARaidBalanceCore.CanFire(Vector3.Distance(mid, t.Go.transform.position), true)
+                && FlakAmmo.Ready(g) && pitch >= ZuGroundCore.MinPitch && pitch <= 90f && g.Held >= ShortRangeCore.Reaction(radar, drone)
                 && g.Mode != FlakMode.HoldFire && !g.Reloading
                 && Vector3.Angle(g.Cradle.forward, aim - mid) < 1.5f;
             bool corrected;

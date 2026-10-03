@@ -32,7 +32,7 @@ using NextDayRevival;
 namespace UnityEngine {
  public class Component { public Transform transform=new Transform(); public bool Up=true; public int Owner; public float Health=1; }
  public class Transform { public Vector3 position; public Quaternion rotation; public Vector3 TransformPoint(Vector3 p){return position+p;} }
- public struct Quaternion { public static Quaternion identity {get{return new Quaternion();}} }
+ public struct Quaternion { public static Quaternion identity {get{return new Quaternion();}} public static Quaternion Euler(float x,float y,float z){return new Quaternion();}public static Quaternion operator*(Quaternion a,Quaternion b){return a;} }
  public class NavMeshAgent {} public class Animation {} public class Animator {} public class Renderer {}
  public struct Vector3 {
   public float x,y,z; public Vector3(float a,float b,float c){x=a;y=b;z=c;}
@@ -66,7 +66,7 @@ namespace NextDayRevival {
   public static bool Up(Component c){return c!=null&&c.Up;}
  }
  static class AirDefenceDamage {public static bool Alive(int i){return true;}}
- static class TowerRadar {public static bool Built=true,Working=true;public static int OperatorActor=-1;public static Transform ConsoleRoot=new Transform();public static int PlayerSide(int a){return 2;}}
+ static class TowerRadar {public static bool Built=true,Working=true;public static int OperatorActor=-1;public static Transform ConsoleRoot=new Transform();public static Vector3 OperatorSeat(bool seated){return ConsoleRoot.TransformPoint(new Vector3(0,.02f,.85f)*2.8f);}public static int PlayerSide(int a){return 2;}}
  static class RadarOperator {public static bool Alive;}
  static class Mortar {
   public static bool MercPose(int p,out Vector3 at,out Quaternion rot){at=new Vector3(20,0,0);rot=Quaternion.identity;return p==100||p==101;}
@@ -199,7 +199,7 @@ def main():
     harness.write_text(HARNESS.replace('ORDER', order).replace('POST', post).replace('RULES', rules), encoding='ascii')
     compiler = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Microsoft.NET/Framework/v3.5/csc.exe'
     exe = work / 'Check.exe'
-    args = [str(compiler), '/nologo', '/warn:0', '/out:' + str(exe), str(harness), str(ROOT / 'Revival.MercStationsCore.cs')]
+    args = [str(compiler), '/nologo', '/warn:0', '/out:' + str(exe), str(harness), str(ROOT / 'Revival.MercStationsCore.cs'), str(ROOT / 'Revival.GunSeatPoseCore.cs')]
     built = subprocess.run(args, capture_output=True, text=True)
     if built.returncode:
         print(built.stdout + built.stderr)

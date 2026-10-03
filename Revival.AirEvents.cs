@@ -581,6 +581,9 @@ namespace NextDayRevival
             float run = (new Vector2(over.x, over.z) - from).magnitude;
             float speed = NpcAircraft.Speed((w.Escort ? EscortKmh : w.Bomber ? BomberKmh : TransportKmh) / 3.6f * K, r.SpeedFactor);
             if (w.Bomber) run = Mathf.Max(run, MercAACore.ApproachUnits(r.E.Length, K));
+            // Match the actual extended inbound paths. An escort's old edge
+            // ETA could place it behind the bombers despite its lead wave.
+            else run = Mathf.Max(run, MercAACore.ApproachUnits(w.Escort ? EscortStick : JumpSpread, K));
             if (w.OwnDrop)
             {
                 run -= RetakeTactics.DropSpread(w.CloseDrop, w.Load, JumpSpread, K) * 0.5f + 25f * K;
@@ -709,6 +712,8 @@ namespace NextDayRevival
                 },
                 null);
             if (f == null) return null;
+            // Keep the established airframe setting; the shared policy now
+            // applies it to gun fragments as well as rifles (six 85 mm hits).
             f.Toughness = 3;
             return f.Go;
         }
@@ -733,15 +738,25 @@ namespace NextDayRevival
             bool released = false;
             float sLine = path.Project(lineStart);
             float groundY = aim.y;
+            float releaseFall = Mathf.Sqrt(2f * Mathf.Max(20f, path.At(sLine).y - groundY) / Gravity);
+            path.Evasive = true;
+            path.WeaveRelease = sLine - path.Speed * releaseFall;
+            path.WeavePhase = s.Index * 2.1f;
             NpcAircraft.Flight f = NpcAircraft.Launch(path, true, EscortTag + r.E.Name,
                 delegate(GameObject go, float at)
                 {
                     if (released) return;
                     float h = Mathf.Max(20f, path.At(at).y - groundY);
                     float fall = Mathf.Sqrt(2f * h / Gravity);
-                    if (at < sLine - path.Speed * fall) return;
+                    if (at < path.WeaveRelease) return;
                     released = true;
-                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, AirKills.PlanRelease(0f), 0f, true, false, false);
+                    NpcAircraft.Flight self = NpcAircraft.Find(go);
+                    float damage = self == null ? 0f : self.Ledger.Damage;
+                    RaidCarpetPlan carpet = RaidCarpetCore.Plan(damage, 0.5f, 0.75f);
+                    ReleasePlan plan = new ReleasePlan();
+                    plan.Kind = damage > 0f ? ReleaseKind.Wide : ReleaseKind.Normal;
+                    plan.AlongM = carpet.AlongM; plan.AcrossM = carpet.AcrossM; plan.Scatter = carpet.Scatter;
+                    Release(go, lineStart, lineEnd, bombs, fall, path.Speed, plan, damage, true, false, false);
                 },
                 null);
             return f == null ? null : f.Go;

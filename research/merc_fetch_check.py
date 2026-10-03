@@ -7,7 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build" / "merc-fetch-check"
-SOURCES = ["Revival.MercFetchCore.cs", "Revival.MercFetchBridge.cs",
+SOURCES = ["Revival.MercFetchCore.cs", "Revival.MercTargetCore.cs", "Revival.MercFetchBridge.cs",
            "Revival.MercFetchNative.cs", "Revival.MercFetch.cs",
            "Revival.FastField.cs",
            "research/merc_fetch_harness.cs"]
@@ -34,8 +34,11 @@ def main():
     quick = (ROOT / "Revival.MercQuickOrders.cs").read_text(encoding="utf-8")
     profiler = (ROOT / "RevivalFrameProfiler.cs").read_text(encoding="utf-8")
     assert '"FETCH AIRDROP"' in ui and "case 9: MercFetch.Start();" in ui
-    assert "n == 10 ? KeyCode.Alpha0 : KeyCode.Alpha0 + n" in quick
-    assert "n <= Mathf.Min(10, SectorEn.Length)" in quick
+    # G O2 uses local submenu shortcuts; FETCH retains dispatch ID 9.
+    radial = (ROOT / "Revival.MercRadialCore.cs").read_text(encoding="ascii")
+    assert "new int[] { 10, 4, 9 }" in radial
+    assert "n <= count" in quick and "Input.GetKeyDown(KeyCode.Alpha0 + n)" in quick
+    assert "Issue(MercRadialPlan.Order(_wheelGroup, n - 1))" in quick
     assert "MercFetch.BindConfig(Config)" in plugin and "MercFetch.Install(_harmony)" in plugin
     assert "S_MercFetchT); MercFetch.Tick();" in plugin
     assert "S_MercFetchT" in profiler and '"MercFetch.Tick"' in profiler
@@ -45,7 +48,7 @@ def main():
     assert "FindObjectsOfType" not in native and "QueryTriggerInteraction.Ignore" in native
     assert "Hits, 11.2f, ~0" in native and "n == Hits.Length" in native
     assert "Physics.OverlapBoxNonAlloc" in native and "Quaternion.identity, ~0" in native
-    print("PASS wiring: selected-only command, key 0, optional prerequisites, unique F6 slot, all-collider nonalloc landing, native cargo/depot sync")
+    print("PASS wiring: selected-only command, SUPPORT 3/3 shortcut, optional prerequisites, unique F6 slot, all-collider nonalloc landing, native cargo/depot sync")
     return 0
 
 

@@ -41,19 +41,12 @@ def box(name, centre, size, rot=None, group="", allow_floor=False):
 def console_boxes(roof):
     """TowerRadar RadarModel.Console(): its Box/Post primitives, tower metres."""
     src = (ROOT / "Revival.TowerRadar.cs").read_text(encoding="ascii")
-    body = src[src.index("internal static Transform Console(Scene scene)"):]
-    body = body[:body.index('Finish(b, "Console", true);')]
+    # G R2: all visible console/chair/cable pieces now come from the shared
+    # command-room recipe. The runtime Console builds only its hit volume.
     num = r"(-?[\d.]+)f"
     vec = r"new Vector3\(" + num + r", " + num + r", " + num + r"\)"
     x0, z0 = core_const("ConsoleX"), core_const("ConsoleZ")
     out = []
-    for m in re.finditer(r"\bBox\(b, " + vec + r", " + vec, body):
-        v = [float(g) for g in m.groups()]
-        out.append(box("console part %d" % len(out), (x0 + v[0], roof + v[1], z0 + v[2]), v[3:], group="console"))
-    for m in re.finditer(r"\bPost\(b, " + vec + r", " + num + r", " + num, body):
-        v = [float(g) for g in m.groups()]
-        out.append(box("console chair post", (x0 + v[0], roof + v[1] + v[4] / 2, z0 + v[2]),
-                       (2 * v[3], v[4], 2 * v[3]), group="console"))
     whole = src[src.index("internal static Transform Console(Scene scene)"):]
     m = re.search(r"bc.center = " + vec + r" . K;\s*bc.size = " + vec, whole)
     v = [float(g) for g in m.groups()]
@@ -102,7 +95,7 @@ def antenna_support():
 
 def all_boxes(roof, floor):
     import tower_command_room_check as room
-    from tower_stairs_check import core_array, supply_spot
+    from tower_stairs_check import core_array, supply_size, supply_spot
     boxes = threshold_boxes()
     bag = core_const("BagH")
     for n, (x, z, sx, sz) in enumerate(zip(core_array("BagX"), core_array("BagZ"),
@@ -113,9 +106,13 @@ def all_boxes(roof, floor):
     cab, station = room.recipe()
     for p in cab:
         boxes.append(box("cab " + p["name"], p["center"] + [0, floor, 0], p["size"],
-                         group="cab-solid" if p["solid"] else "cab"))
+                         group="console" if p["radar_part"] else "cab-solid" if p["solid"] else "cab"))
     sx, sz = supply_spot()
-    boxes.append(box("supply order console", (sx, floor + .4, sz), (.55, .8, .3), group="supply"))
+    sw, sh, sd = supply_size()
+    boxes.append(box("supply order console", (sx, floor + sh / 2, sz), (sw, sh, sd), group="supply"))
+    terminal, _ = room.recipe(terminal=True)
+    for p in terminal:
+        boxes.append(box("supply " + p["name"], p["center"] + [sx,floor,sz], p["size"], group="supply"))
     # CompactRadar's FieldSupport is a physical/rendered box, not part of the
     # imported head. Its base must touch the measured cab roof as well.
     boxes.append(antenna_support())
@@ -277,7 +274,7 @@ def props():
     # 3. nothing cuts into anything else the mod builds
     for i, a in enumerate(boxes):
         for b in boxes[i + 1:]:
-            if a["group"] == b["group"] and a["group"] in ("threshold", "console", "cab"):
+            if a["group"] == b["group"] and a["group"] in ("threshold", "console", "cab", "supply"):
                 continue                    # one prop's own parts touch by design
             if a["group"].startswith("cab") and b["group"].startswith("cab"):
                 continue                    # Z TC1 visuals sit inside their own collider boxes

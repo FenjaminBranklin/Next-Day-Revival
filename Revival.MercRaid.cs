@@ -129,12 +129,13 @@ namespace NextDayRevival
 
         internal static void OrderRaidCover()
         {
-            List<Record> sel = Selection();
+            List<Record> sel = SquadSelection();
             for (int i = 0; i < sel.Count; i++)
             {
                 Record r = sel[i];
                 RaidShelter(r, r.Raid.Until > Time.time || RaidUntil(r, Time.time) > Time.time);
             }
+            Announce(Loc.T("В УКРЫТИЕ", "TAKE COVER"), sel);
         }
 
         // Fill firing places before loaders: one merc per available AA gun.

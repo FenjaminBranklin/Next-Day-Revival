@@ -22,7 +22,7 @@ namespace NextDayRevival
         {
             _commandCfg = cfg.Bind("Mercs", "QuickOrderKey", "Mouse2",
                 "With your owned merc roster: tap = immediate attack at release, double tap = move to cover near the mark, "
-                + "hold = all nine orders. None disables this binding; OrderKey remains available.");
+                + "hold = order categories, then choose an order. None disables this binding; OrderKey remains available.");
             _cameraCfg = cfg.Bind("Mercs", "CameraAimKey", "BackQuote",
                 "Camera aim alignment toggle moved from middle mouse while your owned merc roster uses Mouse2. "
                 + "Without owned mercs, middle mouse keeps its native camera function. Use a different key from QuickOrderKey.");
@@ -202,28 +202,64 @@ namespace NextDayRevival
         { return (_wheelKey != KeyCode.None && Input.GetKeyUp(_wheelKey))
             || (MercQuick.Available && Input.GetKeyUp(MercQuick.CommandKey)); }
 
-        // Same nine sectors as the K menu; no cursor, and seat gun aiming is
-        // retained (numeric sectors in a seat, as with the existing K wheel).
+        // G O2: choose a category, then release on an order. Root release cancels.
+        static int _wheelGroup = -1, _wheelSlot = -1;
+        static int _wheelRootSlot = -1;
+        static float _wheelRootAt;
+        static int _wheelSession;
+
+        static void RadialBegin()
+        {
+            _wheelGroup = -1; _wheelSlot = -1; _wheelPick = -1;
+            _wheelRootSlot = -1; _wheelRootAt = 0f;
+            _wheelVec = Vector2.zero; _wheelScrollPick = false; _wheelSession++;
+        }
+
+        static void RadialGroup(int group)
+        {
+            _wheelGroup = group; _wheelSlot = -1; _wheelPick = -1;
+            _wheelRootSlot = -1; _wheelRootAt = 0f;
+            _wheelVec = Vector2.zero; _wheelScrollPick = false;
+        }
+
         static bool PickWheel()
         {
+            if (Input.GetKeyDown(KeyCode.Escape) || Input.GetMouseButtonDown(1)) return false;
+            if (Input.GetKeyDown(KeyCode.Backspace)) { RadialGroup(-1); return true; }
+            int count = MercRadialPlan.Count(_wheelGroup);
             if (!MercRide.OwnerInVehicle)
             {
                 float x = Input.GetAxis("Mouse X"), y = Input.GetAxis("Mouse Y");
                 if (x != 0f || y != 0f) _wheelScrollPick = false;
                 _wheelVec += new Vector2(x, y);
                 if (_wheelVec.magnitude > 6f) _wheelVec = _wheelVec.normalized * 6f;
-                if (!_wheelScrollPick) _wheelPick = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
-                float scroll = Input.GetAxis("Mouse ScrollWheel");
-                if (scroll != 0f)
-                {
-                    _wheelScrollPick = true;
-                    _wheelPick = (_wheelPick + (scroll > 0f ? 1 : -1) + SectorEn.Length) % SectorEn.Length;
-                }
+                if (!_wheelScrollPick) _wheelSlot = _wheelVec.magnitude > 1.2f ? Sector(_wheelVec) : -1;
             }
-            else { _wheelVec = Vector2.zero; _wheelPick = -1; }
-            for (int n = 1; n <= Mathf.Min(10, SectorEn.Length); n++)
-                if (Input.GetKeyDown(n == 10 ? KeyCode.Alpha0 : KeyCode.Alpha0 + n)) { Issue(n - 1); return false; }
-            return !Input.GetKeyDown(KeyCode.Escape) && !Input.GetMouseButtonDown(1);
+            // Scroll also works in a seat; it never captures the native seat aim.
+            float scroll = Input.GetAxis("Mouse ScrollWheel");
+            if (scroll != 0f)
+            {
+                _wheelScrollPick = true;
+                _wheelSlot = (_wheelSlot < 0 ? (scroll > 0f ? 0 : count - 1)
+                    : (_wheelSlot + (scroll > 0f ? 1 : -1) + count) % count);
+            }
+            _wheelPick = MercRadialPlan.Order(_wheelGroup, _wheelSlot);
+            for (int n = 1; n <= count; n++)
+                if (Input.GetKeyDown(KeyCode.Alpha0 + n))
+                {
+                    if (_wheelGroup < 0) { RadialGroup(n - 1); return true; }
+                    Issue(MercRadialPlan.Order(_wheelGroup, n - 1)); return false;
+                }
+            if (_wheelGroup < 0)
+            {
+                if (_wheelRootSlot != _wheelSlot)
+                { _wheelRootSlot = _wheelSlot; _wheelRootAt = Time.unscaledTime + 0.18f; }
+                // Deliberate dwell opens the category; fresh motion then picks
+                // its order. Left click remains native weapon input.
+                if (_wheelSlot >= 0 && (Input.GetKeyDown(KeyCode.Return)
+                    || Time.unscaledTime >= _wheelRootAt)) RadialGroup(_wheelSlot);
+            }
+            return true;
         }
 
         internal static void CancelQuick()
@@ -260,7 +296,7 @@ namespace NextDayRevival
             if ((action & MercQuickGesture.Open) != 0)
             {
                 _quickWheel = true; _wheelOpen = true; _wheelArmed = false;
-                _wheelVec = Vector2.zero; _wheelPick = -1; _wheelScrollPick = false;
+                RadialBegin();
             }
             if (_quickWheel)
             {
@@ -302,7 +338,9 @@ namespace NextDayRevival
                     "No target under the crosshair - aim at an enemy or ground."), true);
                 return;
             }
-            List<Mercs.Record> selected = Mercs.Selection();
+            // G O1: the same mercs OrderAttack addresses (no gun/radar crew
+            // without a pick).
+            List<Mercs.Record> selected = Mercs.SquadSelection();
             // Keep selection and old orders across the existing command's refusals.
             MercOrder[] before = new MercOrder[selected.Count];
             bool enemy = false;
@@ -328,6 +366,7 @@ namespace NextDayRevival
             bool close = enemy && delta.magnitude < MercOrder.AttackMinUnits;
             if (!close) Mercs.OrderAttack(_quickPoint, MercOrder.AtPoint);
             int focused = 0; bool given = false;
+            List<Mercs.Record> got = close ? new List<Mercs.Record>(selected.Count) : null;
             for (int i = 0; i < selected.Count; i++)
             {
                 Mercs.Record r = selected[i];
@@ -338,10 +377,11 @@ namespace NextDayRevival
                 r.Unit.QuickNpc = _quickNpc; r.Unit.QuickPlayer = _quickPlayer;
                 r.Unit.QuickSteam = _quickPlayer == null ? null : Mercs.SteamOf(_quickPlayer);
                 r.Unit.QuickFor = r.Order; r.Unit.QuickUntil = Time.time + 120f;
-                if (close) Mercs.OrderFocused(r, _quickPoint);
+                if (close) { Mercs.OrderFocused(r, _quickPoint); got.Add(r); }
                 else NpcWar.MercOrderWake(r.Unit);
                 focused++;
             }
+            if (close) Mercs.Announce(Loc.T("АТАКА ЦЕЛИ", "ATTACK TARGET"), got);
             if (given || focused > 0) CommandPing(_quickPoint);
             _quickNpc = null; _quickPlayer = null;
         }

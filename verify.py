@@ -5871,6 +5871,19 @@ def check_mercs():
     need('"Mercs.Tick"' in read("RevivalFrameProfiler.cs") and "Mercs.Tick()" in read("RevivalPlugin.cs"),
          "Mercs.Tick has its own F6 slot",
          "Mercs.Tick is not measured in F6")
+    # G O1: orders reach the picked mercs (else the squad minus gun/radar
+    # crews); FETCH sends one. Production core + wiring, offline.
+    import subprocess
+    check = os.path.join(ROOT, "research", "merc_order_targets_check.py")
+    if os.path.exists(check):
+        try:
+            r = subprocess.run([sys.executable, check], capture_output=True, text=True, errors="replace", timeout=120)
+            need(r.returncode == 0, "orders reach the picked mercs; gun/radar crews hold; FETCH sends one (G O1)",
+                 "research/merc_order_targets_check.py fails: " + (r.stdout + r.stderr).strip()[-600:])
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            bad("Mercenaries: research/merc_order_targets_check.py could not run: " + str(ex))
+    else:
+        bad("Mercenaries: research/merc_order_targets_check.py missing")
 
 
 def check_vehicle_condition():

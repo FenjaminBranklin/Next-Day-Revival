@@ -43,10 +43,11 @@ namespace NextDayRevival
         { return r != null && r.Medic ? Loc.T("Санитар: ВКЛ", "Medic: ON") : Loc.T("Санитар: ВЫКЛ", "Medic: OFF"); }
         internal static void ToggleMedics()
         {
-            System.Collections.Generic.List<Record> rows = Selection();
-            if (rows.Count == 0) return;
+            System.Collections.Generic.List<Record> rows = SquadSelection();
+            if (rows.Count == 0) { Announce(Loc.T("САНИТАР", "MEDIC DUTY"), rows); return; }
             bool on = !rows[0].Medic;
             for (int i = 0; i < rows.Count; i++) SetMedic(rows[i], on);
+            Announce(on ? Loc.T("САНИТАР ВКЛ", "MEDIC DUTY ON") : Loc.T("САНИТАР ВЫКЛ", "MEDIC DUTY OFF"), rows);
         }
         internal static void SetMedic(Record r, bool on)
         {

@@ -22,6 +22,11 @@ namespace NextDayRevival
         internal bool[] AnimationOn, AnimatorOn;
         internal Renderer[] WeaponRenderers;
         internal bool[] WeaponOn;
+        // G C1: the seat owns the skeleton while parked (Revival.GunSeatPose.cs).
+        internal Component Ik;
+        internal object IkSolver;
+        internal bool Seated;
+        internal readonly PoseSwitchMeter Meter = new PoseSwitchMeter();
     }
 
     internal static class MercAA
@@ -131,8 +136,8 @@ namespace NextDayRevival
             if (post == Radar)
             {
                 if (!TowerRadar.Built || TowerRadar.ConsoleRoot == null) return false;
-                at = TowerRadar.ConsoleRoot.TransformPoint(new Vector3(0f, 0.02f, 0.85f) * Flak.K);
-                rot = TowerRadar.ConsoleRoot.rotation;
+                at = TowerRadar.OperatorSeat(true);
+                rot = TowerRadar.ConsoleRoot.rotation * Quaternion.Euler(0f, 180f, 0f);
                 return true;
             }
             if (post >= 100) return Mortar.MercPose(post, out at, out rot);
@@ -260,6 +265,7 @@ namespace NextDayRevival
             p.Actor = -1; p.View = 0; p.Ai = null; p.Agent = null; p.Until = 0f; p.Parked = false; p.Side = -1;
             p.Animations = null; p.Animators = null; p.AnimationOn = p.AnimatorOn = null;
             p.WeaponRenderers = null; p.WeaponOn = null;
+            p.Ik = null; p.IkSolver = null; p.Seated = false; p.Meter.Reset();
         }
 
         internal static Component Resolve(int view, int actor)
@@ -419,12 +425,14 @@ namespace NextDayRevival
                 }
                 _nextAnimation = Time.time + 0.02f;
             }
+            int found = 0;
             for (int i = 0; i < Posts.Length; i++)
             {
                 MercAAPost p = Live(i);
                 if (p == null) continue;
                 Vector3 at; Quaternion rot;
                 if (!Pose(p.Index, out at, out rot)) continue;
+                int foreign = 0;
                 if (!p.Parked)
                 {
                     if (p.Agent != null) { p.Agent.updatePosition = false; p.Agent.updateRotation = false; }
@@ -442,13 +450,48 @@ namespace NextDayRevival
                         p.WeaponOn = new bool[p.WeaponRenderers.Length];
                         for (int k = 0; k < p.WeaponRenderers.Length; k++) p.WeaponOn[k] = p.WeaponRenderers[k].enabled;
                     }
+                    p.Ik = GunSeatPose.AimIk(p.Ai); p.IkSolver = GunSeatPose.Solver(p.Ik);
+                    GunSeatPose.StopGait(p.Ai);
+                    p.Seated = false; p.Meter.Reset();
                     p.Parked = true;
                 }
+                else
+                {
+                    // G C1: nobody else poses a parked man. A writer that came
+                    // back on since last frame is switched off again here.
+                    for (int k = 0; k < p.Animations.Length; k++)
+                        if (p.Animations[k] != null && p.Animations[k].enabled) { p.Animations[k].enabled = false; foreign |= GunSeatPoseCore.AnimationOn; }
+                    for (int k = 0; k < p.Animators.Length; k++)
+                        if (p.Animators[k] != null && p.Animators[k].enabled) { p.Animators[k].enabled = false; foreign |= GunSeatPoseCore.AnimatorOn; }
+                }
+                foreign |= GunSeatPose.Calm(p.Ik, p.IkSolver);
+                found |= foreign;
                 p.Ai.transform.position = at; p.Ai.transform.rotation = rot;
                 if (p.WeaponRenderers != null)
                     for (int k = 0; k < p.WeaponRenderers.Length; k++) if (p.WeaponRenderers[k] != null) p.WeaponRenderers[k].enabled = false;
-                if (i == animate && p.Index < 100 && p.Index != Radar) TechnicalCrew.Sitzen(p.Ai, p.Index >= 7 ? 1 : 0);
+                // G R2: the radar operator sits on the console chair too.
+                if (p.Index >= 100) continue;
+                // Budgeted turn, plus at once after a foreign write and until
+                // the first sample of this park landed.
+                bool sampled = false;
+                if (GunSeatPoseCore.Sample(i == animate, foreign, p.Seated))
+                {
+                    sampled = TechnicalCrew.Sitzen(p.Ai, p.Index >= 7 ? 1 : 0);
+                    if (sampled) p.Seated = true;
+                }
+                // A foreign write the seat could not sample over (off screen)
+                // is re-sampled on the first frame that can.
+                if (foreign != 0 && !sampled) p.Seated = false;
+                p.Meter.Record(GunSeatPoseCore.Shown(p.Seated, foreign, sampled), Time.time);
             }
+            if (found != 0 || GunSeatPose.Reclaims != 0) GunSeatPose.Note(found);
+        }
+
+        /// <summary>G C1 proof: pose-class switches of a post in the last second.</summary>
+        internal static int PoseSwitches(int post)
+        {
+            MercAAPost p = Held(post);
+            return p == null ? -1 : p.Meter.PerSecond(Time.time);
         }
         static float _nextAnimation;
         static int _animationTurn;
@@ -494,6 +537,11 @@ namespace NextDayRevival
                 MercAA.RequestPost(u, post);
                 f.Target = null; f.Sees = false; f.HasOrder = false;
                 if (u.KillTargetSet != null) SetMercKillTarget(f, u, null);
+                // G C1: the seat owns his pose. The order layer lowers the
+                // rifle state (change-only, replicated) and drops its aim IK,
+                // so neither the native controller nor DriveAim raises it.
+                if (f.IkDriven) ReleaseAim(f);
+                Drive(f, MainIdle, AddNone, PoseStand, now, true);
                 return;
             }
             if ((at - f.Tr.position).sqrMagnitude > 16f) { MercAA.Release(u); MercStationApproach(f, u, at, now); return; }

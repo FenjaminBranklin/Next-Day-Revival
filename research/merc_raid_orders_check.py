@@ -100,6 +100,8 @@ namespace NextDayRevival {
   internal static void Reset(){_roster.Clear();RaidClock.Clear();_raidScene=MapScene.Current;Saves=0;Acks=0;}
   internal static void TestTick(float t){Time.time=t;RaidTick(t);}
   internal static List<Record> Selection(){List<Record> a=new List<Record>();foreach(Record r in _roster)if(r.Selected&&!r.Dead&&!r.Deserted)a.Add(r);return a;}
+  SQUAD_SOURCE
+  internal static int Announced;static void Announce(string what,List<Record> got){Announced=got.Count;}
   internal static List<Record> StationSelection(bool radar){List<Record>a=Selection();a.RemoveAll(delegate(Record r){return r.Unpaid;});return a;}
   internal static void SendOrders(List<Record> r){Saves++;}
   internal static void SaveStationOrders(List<Record> r){SendOrders(r);}
@@ -159,6 +161,9 @@ namespace NextDayRevival {
    Mercs.RaidWarning(Vector3.zero,20);foot.Selected=false;Mercs.OrderRaidCover();
    Ok(gun.Order.Survive&&gun.Raid.Previous.Mode==MercOrder.ManGun,"selected gunner can choose cover");
    Mercs.TestTick(31);Ok(gun.Order.Mode==MercOrder.ManGun,"selected gunner returns after alarm");
+   Reset();foot=Mercs.Add(Vector3.zero,MercOrder.Follow);gun=Mercs.Add(Vector3.zero,MercOrder.ManGun);gun.Order.Facing.x=1;
+   Mercs.RaidWarning(Vector3.zero,20);Mercs.OrderRaidCover();
+   Ok(foot.Order.Survive&&gun.Order.Mode==MercOrder.ManGun&&!gun.Order.Survive&&Mercs.Announced==1,"G O1: squad TAKE COVER leaves the gun crew on his gun");
    Reset();foot=Mercs.Add(Vector3.zero,MercOrder.Follow);Mercs.RaidWarning(Vector3.zero,20);
    MercOrder death=new MercOrder();death.Mode=MercOrder.Stay;death.Survive=true;foot.Order=death;foot.Unit.Order=death;
    Mercs.TestTick(31);Ok(foot.Order==death,"owner-death shelter is not undone");
@@ -285,10 +290,16 @@ def main():
     support = SUPPORT.replace('FOR_SOURCE', method(mercs, 'internal MercOrder For('))
     support = support.replace('GIVE_SOURCE', method(mercs, 'static void Give('))
     support = support.replace('STATION_SOURCE', method(stations, 'internal static void GiveStation('))
+    # G O1: the production squad selection (no pick: gun/radar crews hold).
+    NL = chr(10)
+    support = support.replace('SQUAD_SOURCE', NL.join([
+        'internal static bool Picked;', 'static readonly List<Record> _onDuty = new List<Record>(8);',
+        method(mercs, 'internal static bool PickActive()'), method(mercs, 'static bool OnDuty(Record r)'),
+        method(mercs, 'internal static List<Record> SquadSelection()')]))
     field, _ = m1.greybox('all', 'unity/EastTile/Content/east_airfield.json')
     c1, _, _ = m1.c1_layout('all')
     source = m1.harness_source() + support + TEST.replace('ALL_LAYOUT', field + '\n' + c1)
-    for path in ('Revival.MercRaidCore.cs', 'Revival.MercRaid.cs', 'Revival.AirKillCore.cs'):
+    for path in ('Revival.MercRaidCore.cs', 'Revival.MercRaid.cs', 'Revival.AirKillCore.cs', 'Revival.MercTargetCore.cs'):
         source += '\n' + '\n'.join(line for line in read(path).splitlines() if not line.startswith('using '))
     source = source.replace('public static Vector3 zero', 'public static Vector3 forward {get{return new Vector3(0,0,1);}}\n        public static Vector3 zero', 1)
     source = source.replace('public static float Max(float a', 'public static int Max(int a,int b){return a>b?a:b;}\n        public static float Max(float a', 1)
@@ -312,7 +323,7 @@ def main():
     assert 'TowerSupport.FromMaster(sender)' in read('Revival.AirEvents.cs')
     assert 'case 7: Mercs.OrderRaidCover();' in read('Revival.MercsUi.cs')  # A S6 replaces separate radar sector with cover.
     assert 'u.RaidCover = r.Raid.Cover == order;' in mercs
-    assert 'n == 10 ? KeyCode.Alpha0' in read('Revival.MercQuickOrders.cs')
+    assert 'KeyCode.Alpha0 + n' in read('Revival.MercQuickOrders.cs')  # G O2: number keys per radial ring
     assert 'case 6: Mercs.OrderRaidCover();' in read('Revival.MercPage.cs')
     assert 'case 7: Mercs.ToggleAirDefence();' in read('Revival.MercPage.cs')
     assert 'MercRaidCover.Sheltered(u, me, now)' in read('Revival.MercCover.cs')

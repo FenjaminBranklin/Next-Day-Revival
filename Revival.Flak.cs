@@ -242,16 +242,16 @@ namespace NextDayRevival
                 "Muzzle velocity in metres per second. The real 52-K: 800; slowed on "
                 + "purpose so a pilot sees the puffs come (5 s to 2750 m). World speed is x 2.8.");
             CfgRange = cfg.Bind(G, "VisualRange", 1800f,
-                "Slant range in metres the crews open fire at when they lay by eye (radar "
-                + "down, dark or unmanned).");
+                "Visual acquisition range in metres (radar down, dark or unmanned). "
+                + "Fire remains capped at the 52-K effective slant range, 3500 m.");
             CfgRadarRange = cfg.Bind(G, "RadarRange", 7000f,
-                "Slant range in metres with the tower radar manned (radar-directed).");
+                "Radar acquisition range in metres. Early tracking never extends the 3500 m fire limit.");
             CfgSelfDestruct = cfg.Bind(G, "MaxFuzeRange", 8000f,
                 "The longest fuze setting: a shell that meets nothing bursts after this many metres at the latest.");
             CfgAirfieldZone = cfg.Bind(G, "AirfieldZone", FlakEngageCore.ZoneMetres,
                 "Radius in metres of the east airfield's engagement zone around the C1 tower: "
-                + "a manned airfield 52-K opens fire on any hostile aircraft inside it, by eye "
-                + "too (the radar adds range beyond it and accuracy). Smallest 1800.");
+                + "a manned airfield 52-K acquires hostile aircraft inside it by eye too. "
+                + "Fire is capped at 3500 m slant range from the gun. Smallest 1800.");
             CfgCeiling = cfg.Bind(G, "Ceiling", 3000f,
                 "Highest target altitude above the gun in metres engaged.");
             CfgMinHeight = cfg.Bind(G, "MinTargetHeight", 3f,
@@ -377,7 +377,8 @@ namespace NextDayRevival
         internal static float ReachU(Gun g, Vector3 p, float calibrationMetres)
         {
             bool zone = !g.ShortRange && !g.Town && FlakEngageCore.InZone(p.x, p.z, ZoneMetres, K);
-            return FlakEngageCore.Reach(calibrationMetres, zone, ZoneMetres, MaxFuze / K) * K;
+            return AARaidBalanceCore.FireReach(FlakEngageCore.Reach(calibrationMetres, zone,
+                ZoneMetres, MaxFuze / K), g.ShortRange) * K;
         }
         static int RoundsFull { get { return Mathf.Max(1, CfgRoundsPerLoad == null ? 20 : CfgRoundsPerLoad.Value); } }
         internal static int RoundsPerLoad { get { return RoundsFull; } }
@@ -725,7 +726,8 @@ namespace NextDayRevival
         /// else the W AA3 calibration: radar-directed or by eye).</summary>
         internal static float GunRange(Gun g)
         {
-            return (g.ShortRange ? ShortRangeCore.RangeM : MercAA.Calibration(g).Range) * K;
+            return AARaidBalanceCore.FireReach(g.ShortRange ? ShortRangeCore.RangeM
+                : MercAA.Calibration(g).Range, g.ShortRange) * K;
         }
 
         // Only consulted by the master's existing 2 Hz target scan. No new
@@ -2101,6 +2103,7 @@ namespace NextDayRevival
             if (g == null || g.Root == null) return;
             bool full = Time.time >= g.NextHold || Flak.PlayerAt(g);
             if (full && g != null) g.NextHold = Time.time + 0.2f;
+            if (full) GunSeatPose.Purge();
             Seat(g, g.Gunner, g.SeatGunner, 0, full);
             Seat(g, g.Loader, g.SeatLoader, 1, full);
         }
@@ -2110,7 +2113,11 @@ namespace NextDayRevival
             if (seat == null || ai == null) return;
             bool sit = Flak.B2(Flak.CfgSeated);
             if (!full && !NearCamera(g.Root.position)) return;
-            if (!Flak.Up(ai)) return;
+            if (!Flak.Up(ai)) { GunSeatPose.Release(ai); return; }
+            // G C1: the seat owns a seated man's pose - his aim IK stays down
+            // so it cannot bend the sampled seat pose (Revival.GunSeatPose.cs).
+            if (sit) { int foreign = GunSeatPose.Hold(ai); if (foreign != 0) GunSeatPose.Note(foreign); }
+            else GunSeatPose.Release(ai);
             Vector3 at = seat.position;
             if (sit) at -= Vector3.up * Mathf.Max(0f, Flak.CfgSeatDrop == null ? 2.3f : Flak.CfgSeatDrop.Value);
             else at.y = g.Root.position.y + 0.12f * Flak.K;
@@ -2229,8 +2236,10 @@ namespace NextDayRevival
             float error = Vector3.Angle(bore, aim - mid);
             g.Held += dt;
             float reaction = MercAA.Calibration(g).Reaction;
+            // Search runs at 2 Hz. Check the physical slant range again on
+            // every control step, including targets leaving range between scans.
             bool ready = reach && g.Held >= reaction && error < 1.5f && g.Mode != FlakMode.HoldFire
-                && !g.Reloading;
+                && !g.Reloading && AARaidBalanceCore.CanFire(Vector3.Distance(mid, t.Go.transform.position), false);
             Trigger(g, ready, aim, t, mid, tof, gunner && loader);
             Flak.Publish(g, false, false);
         }

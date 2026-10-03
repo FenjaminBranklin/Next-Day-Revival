@@ -85,8 +85,8 @@ namespace NextDayRevival
             System.Console.WriteLine("Settings");
             string err;
             RetakeSettings d = RetakeSettings.FromTable(new string[] { "# header", "Airfield-raid\t1\t..." }, out err);
-            Ok(d != null && err == null && d.Enabled && d.Frequency == 1f && d.Strength == 1f && d.Bombers == 1
-               && d.Transports == 2 && d.Helis == 1 && d.Escort && d.Escorts == 2 && d.Faction == "auto"
+            Ok(d != null && err == null && d.Enabled && d.Frequency == 1f && d.Strength == 1f && d.Bombers == 2
+               && d.Transports == 3 && d.Helis == 1 && d.Escort && d.Escorts == 3 && d.Faction == "auto"
                && d.HitTower && d.HitGuns && d.HitFuel,
                "no #retake row: the defaults, ON, all three targets, escort on");
             d = RetakeSettings.FromTable(null, out err);
@@ -188,14 +188,14 @@ namespace NextDayRevival
             }
             System.Console.WriteLine("        " + seq);
             RetakeRaid r0 = RetakePlan.Compose(s, 0, 0, false, scratch);
-            Ok(r0.Bombers == 1 && r0.Transports == 2 && r0.Helis == 1 && r0.Escorts == 2 && r0.Target == RetakePlan.TargetTower,
-               "raid 1: 2 escort, 1 Tu-95 on the tower, 2 An-2, 1 Mi-8");
+            Ok(r0.Bombers == 2 && r0.Transports == 3 && r0.Helis == 1 && r0.Escorts == 3 && r0.Target == RetakePlan.TargetTower,
+               "raid 1: 3 escort, 2 Tu-95 on the tower, 3 An-2, 1 Mi-8");
             RetakeRaid r6 = RetakePlan.Compose(s, 6, 0, false, scratch);
             RetakeRaid r20 = RetakePlan.Compose(s, 20, 0, false, scratch);
-            Ok(r6.Bombers == 3 && r6.Escorts == 4 && r6.Transports >= 2 && r6.Helis >= 2 && r6.Troops <= RetakePlan.MaxTroops,
-               "raid 7: 3 Tu-95, 4 escort, " + r6.Transports + " An-2 + " + r6.Helis + " Mi-8 (grown, troops capped)");
+            Ok(r6.Bombers == 6 && r6.Escorts == 4 && r6.Transports >= 2 && r6.Helis >= 2 && r6.Troops <= RetakePlan.MaxTroops,
+               "raid 7: 6 Tu-95, 4 escort, " + r6.Transports + " An-2 + " + r6.Helis + " Mi-8 (grown, troops capped)");
             Ok(r20.Bombers == r6.Bombers && r20.Transports == r6.Transports, "growth stops after six raids");
-            Ok(r0.Troops == 24 && r6.Troops == 32, "troops per raid: " + r0.Troops + " .. " + r6.Troops + " (cap " + RetakePlan.MaxTroops + ")");
+            Ok(r0.Troops == 32 && r6.Troops == 32, "troops per raid: " + r0.Troops + " .. " + r6.Troops + " (cap " + RetakePlan.MaxTroops + ")");
             string rot = "";
             for (int l = 0; l < 6; l++) rot += RetakePlan.TargetNames[RetakePlan.Compose(s, l, 1, false, scratch).Target] + ", ";
             Ok(rot == "guns, fuel depot, tower, guns, fuel depot, tower, ", "targets rotate from the hold's start: " + rot);
@@ -220,7 +220,7 @@ namespace NextDayRevival
                "editor maxima (4 x 12 + 3 x 12): cut to " + hv.Transports + " An-2 + " + hv.Helis + " Mi-8 = " + hv.Troops);
             RetakeSettings weak = new RetakeSettings(); weak.Strength = 0.5f;
             RetakeRaid wk = RetakePlan.Compose(weak, 0, 0, false, scratch);
-            Ok(wk.Bombers == 1 && wk.Transports == 1 && wk.Helis == 1 && wk.Escorts == 1, "strength 0.5: at least one of each asked for");
+            Ok(wk.Bombers == 1 && wk.Transports == 2 && wk.Helis == 1 && wk.Escorts == 2, "strength 0.5: rounded half counts, at least one of each asked for");
         }
 
         // Six hours held; each raid's troops fight for 30 min (25 min patrol

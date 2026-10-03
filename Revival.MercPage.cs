@@ -740,6 +740,10 @@ namespace NextDayRevival
             List<Mercs.Record> roster = Mercs.Roster;
             int n = Math.Min(roster.Count, _keep.Length);
             for (int i = 0; i < n; i++) { _keep[i] = roster[i].Selected; roster[i].Selected = target == null || roster[i] == target; }
+            // G O1: a merc's own row is a pick (his gun/radar post too); the
+            // squad row addresses the squad.
+            bool picked = Mercs.Picked;
+            Mercs.Picked = target != null;
             try
             {
                 GameObject o = Mercs.OwnerObject;
@@ -758,6 +762,7 @@ namespace NextDayRevival
             finally
             {
                 for (int i = 0; i < n && i < roster.Count; i++) roster[i].Selected = _keep[i];
+                Mercs.Picked = picked;
             }
             _orderFor = NoRow;
             _orderAll = false;

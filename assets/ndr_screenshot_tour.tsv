@@ -1,0 +1,23 @@
+# Screenshot tour stops (Revival.ScreenshotTour.cs, docs/ai/tasks/screenshot-tour.md).
+# One stop per line, fields separated by tabs or spaces, the note is the rest:
+#   name  x  z  height  yaw  pitch  hour  world  note
+# name: [A-Za-z0-9_-], the JPG file name. x, z: world position (x east, z north).
+# height: 0 = on the ground; more = dropped from that height onto the first
+# collider below (a roof, a tower cab). yaw: 0 north, 90 east. pitch: degrees,
+# positive looks up. hour: 0..24 or - (keep). world: west (GW_Scene_1) or east
+# (needs [World] EastTile, else skipped).
+# Add a stop: append a line, keep the name unique. Coordinates of the airfield
+# pieces: docs/ai/tasks/airfield-greybox.md section 1; runway: east-runway.md.
+airfield_gate      4106   1724   0   160    0  12  east  outside the G1 gate, looking SSE into the compound
+apron              4422   1275   0   180   -3  12  east  north edge of apron A1, looking south along it
+h1_door            4420   1165   0   232    2  12  east  H1 east door (24 x 7.5 m) and the An-2 pocket A2, from the apron
+h1_interior        4335   1100   0   270    3  12  east  inside H1 behind the east door, looking west through the hall
+c1_cab             4276   1335  36   120  -10  12  east  on the C1 control-tower cab, looking ESE over the apron to the runway
+runway_north       4632   1465   0   180    0  12  east  north end of the runway pavement (x 4632, z 1483), looking south
+runway_south       4632  -1585   0     0    0  12  east  south end of the runway pavement (z -1602), looking north
+fuel_depot         4200    740   0   200   -5  12  east  fuel compound D1 (bund, two tanks, pump house) from the north-east
+seam_s1            2440  -1623   0    90    0  12  west  seam saddle S1 (road centre z -1623), looking east over the cut to the tile
+seam_s2            2440    314   0    90    0  12  west  seam saddle S2 (road centre z 314), looking east
+seam_s3            2440   1813   0    90    0  12  west  seam saddle S3 (road centre z 1813), looking east
+town_terrace       5650    900   0   270   -5  12  east  military town terrace centre, looking west down over the valley
+west_berezki       1312  -2008   0   105    0  12  west  Berezki, the biggest vanilla settlement, for comparison

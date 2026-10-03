@@ -41,7 +41,8 @@ def main():
     compiler = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Microsoft.NET/Framework64/v3.5/csc.exe'
     exe = stage / 'Check.exe'
     commands = [[str(compiler), '/nologo', '/warn:0', '/optimize+', '/codepage:65001',
-                 '/out:' + str(exe), str(src), str(ROOT / 'Revival.MercAirfield.cs')], [str(exe)]]
+                 '/out:' + str(exe), str(src), str(ROOT / 'Revival.MercAirfield.cs'),
+                 str(ROOT / 'Revival.MercTargetCore.cs')], [str(exe)]]
     for args in commands:
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout.decode('utf-8', errors='replace').strip())
@@ -69,7 +70,7 @@ def main():
     # Both native and merc operator poses continue to use this one console.
     assert 'c.TransformPoint(new Vector3(0f, 0.02f, 0.85f)' in radar
     aa = (ROOT / 'Revival.MercAA.cs').read_text(encoding='utf-8')
-    assert 'TowerRadar.ConsoleRoot.TransformPoint' in aa
+    assert 'TowerRadar.OperatorSeat(true)' in aa  # G R2: the operator sits on the console chair
     assert 'sender == MasterActor()' in aa and 'Resolve(view, sender)' in aa
     adapter = (ROOT / 'Revival.MercAirfield.cs').read_text(encoding='utf-8')
     tick = block(adapter, 'static void AirDefenceTick(')

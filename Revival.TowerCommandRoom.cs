@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.Rendering;
@@ -17,6 +18,42 @@ namespace NextDayRevival
         readonly List<Vector3> _vertices = new List<Vector3>(2048);
         readonly List<Vector2> _uv = new List<Vector2>(2048);
         readonly List<int> _indices = new List<int>(3072);
+        static TowerCommandRoom _active;
+        bool _terminal;
+        Transform _supplyKit;
+        bool _supplyWasOn;
+        TowerCommandRoomCore.Piece _piece;
+        Quaternion _turn;
+        Material _surface;
+        static readonly float[] Density = { 60f,87f,36.3f,78.5f,123f,131f,23f,446f,62.9f };
+        readonly List<Renderer> _screens = new List<Renderer>(3);
+        readonly List<Material[]> _lit = new List<Material[]>(3), _dim = new List<Material[]>(3);
+
+        internal static void AttachTerminal(Transform root)
+        {
+            TowerCommandRoom room = root.gameObject.AddComponent<TowerCommandRoom>();
+            room._terminal = true;
+        }
+
+        internal static void ScreenState(bool lit, bool dead)
+        {
+            if (_active == null) return;
+            for (int i = 0; i < _active._screens.Count; i++)
+                if (_active._screens[i] != null)
+                    _active._screens[i].sharedMaterials = lit && !dead ? _active._lit[i] : _active._dim[i];
+        }
+
+        Transform TerminalKit()
+        {
+            if (TowerRadar.KitRoom == null) return null;
+            _supplyKit=TowerRadar.KitRoom.Find("Supply");
+            if (_supplyKit == null) return null;
+            _supplyWasOn=_supplyKit.gameObject.activeSelf;
+            Vector3 at=TowerRadar.KitRoom.TransformPoint(new Vector3(TowerCommandRoomCore.SupplyX,TowerCommandRoomCore.SupplyH*.5f,TowerCommandRoomCore.SupplyZ)*K);
+            bool match=(at-transform.position).sqrMagnitude<.01f*K*K;
+            _supplyKit.gameObject.SetActive(match);
+            return match ? _supplyKit : null;
+        }
 
         internal static void Attach(Transform console)
         {
@@ -28,6 +65,10 @@ namespace NextDayRevival
         {
             GameObject go = new GameObject(name);
             go.transform.SetParent(transform, false);
+            if (_terminal) {
+                go.transform.localPosition = Vector3.down * (TowerCommandRoomCore.SupplyH * .5f * K);
+                return go.transform;
+            }
             Vector3 origin = TowerRadar.TowerPoint(Vector3.zero);
             origin.y = y;
             go.transform.position = origin;
@@ -47,13 +88,15 @@ namespace NextDayRevival
                 // floor in the tower frame; E W1: the radar console stands in
                 // it too. The room shares the console's lifetime, not its position.
                 frame = Frame("NDR C1 command room", TowerRadar.CabFloorY);
-                pieces = TowerCommandRoomCore.Pieces();
+                pieces = _terminal ? TowerCommandRoomCore.Terminal() : TowerCommandRoomCore.Pieces();
+                if (!_terminal) _active = this;
             } finally { FrameProf.E(FrameProf.S_TowerCommandRoomLoad); }
             yield return null;
-            Material[] mats=new Material[8];
+            Transform kit = _terminal ? TerminalKit() : TowerRadar.KitRoom;
+            Material[] mats=new Material[TowerCommandRoomCore.Materials];
             for (int i=0;i<mats.Length;i++) {
                 FrameProf.S(FrameProf.S_TowerCommandRoomLoad);
-                try { mats[i]=MaterialFor(i); }
+                try { if (kit == null) mats[i]=MaterialFor(i); }
                 finally { FrameProf.E(FrameProf.S_TowerCommandRoomLoad); }
                 yield return null;
             }
@@ -67,6 +110,7 @@ namespace NextDayRevival
                     GameObject go=new GameObject(p.Name);
                     go.transform.SetParent(frame,false);
                     go.transform.localPosition=new Vector3(p.X,p.Y,p.Z)*K;
+                    go.transform.localRotation=Quaternion.Euler(p.Tilt,p.Yaw,0f);
                     go.isStatic=true;
                     Vector3 size=new Vector3(p.SX,p.SY,p.SZ)*K;
                     go.AddComponent<BoxCollider>().size=size;
@@ -78,9 +122,19 @@ namespace NextDayRevival
                 } finally { FrameProf.E(FrameProf.S_TowerCommandRoomLoad); }
                 yield return null;
             }
+            if (kit != null) {
+                if (_terminal) yield break;
+                Renderer[] renderers = kit.GetComponentsInChildren<Renderer>(true);
+                for (int i = 0; i < renderers.Length; i++)
+                    if (renderers[i].name == "Screen") RegisterScreen(renderers[i]);
+                WarmLight(frame);
+                ScreenState(TowerRadar.Working && TowerRadar.B(TowerRadar.CfgGlow), !TowerRadar.ConsoleAlive);
+                yield break;
+            }
             // Small mesh chunks spread construction across frames. Rendering
             // ends with at most one mesh per material, zero primitive objects.
             for (int material=0;material<mats.Length;material++) {
+                _surface=mats[material];
                 _vertices.Clear(); _uv.Clear(); _indices.Clear();
                 int n=0;
                 for (int i=0;i<pieces.Count;i++) {
@@ -103,13 +157,43 @@ namespace NextDayRevival
                         go.AddComponent<MeshFilter>().sharedMesh=mesh;
                         MeshRenderer renderer=go.AddComponent<MeshRenderer>();
                         renderer.sharedMaterial=mats[material];
-                        if (material==TowerCommandRoomCore.Lamp) renderer.shadowCastingMode=ShadowCastingMode.Off;
+                        if (material==TowerCommandRoomCore.Screen) RegisterScreen(renderer);
+                        if (material==TowerCommandRoomCore.Lamp || material==TowerCommandRoomCore.Screen
+                            || material==TowerCommandRoomCore.Paper || material==TowerCommandRoomCore.Glass)
+                            renderer.shadowCastingMode=ShadowCastingMode.Off;
                     }
                 } finally { FrameProf.E(FrameProf.S_TowerCommandRoomLoad); }
                 yield return null;
             }
             _vertices.Clear(); _uv.Clear(); _indices.Clear();
+            if (!_terminal) {
+                WarmLight(frame);
+                ScreenState(TowerRadar.Working && TowerRadar.B(TowerRadar.CfgGlow), !TowerRadar.ConsoleAlive);
+            }
             RevivalPlugin.L.LogInfo("TowerCommandRoom: static command post ready in the cab with the radar console; east desk reserved for Z M4.");
+        }
+
+        void RegisterScreen(Renderer renderer)
+        {
+            Material[] lit = renderer.sharedMaterials, dim = new Material[lit.Length];
+            for (int i = 0; i < lit.Length; i++) {
+                dim[i] = Own("C1 unpowered CRT", new Color(.08f,.08f,.08f), lit[i]);
+                if (dim[i].HasProperty("_EmissionColor")) dim[i].SetColor("_EmissionColor",Color.black);
+                dim[i].DisableKeyword("_EMISSION");
+            }
+            _screens.Add(renderer); _lit.Add(lit); _dim.Add(dim);
+            if (TowerRadar.Screen == null) TowerRadar.Screen = renderer;
+        }
+
+        static void WarmLight(Transform frame)
+        {
+            GameObject go = new GameObject("C1 warm ceiling light");
+            go.transform.SetParent(frame,false);
+            go.transform.localPosition = new Vector3(7.2f,2.65f,0f)*K;
+            Light lamp = go.AddComponent<Light>();
+            lamp.type = LightType.Point; lamp.range=6f*K; lamp.intensity=.32f;
+            lamp.color=new Color(1f,.76f,.48f); lamp.shadows=LightShadows.None;
+            lamp.renderMode=LightRenderMode.ForceVertex;
         }
 
         Material Own(string name, Color color, Material donor)
@@ -123,123 +207,116 @@ namespace NextDayRevival
 
         Material MaterialFor(int id)
         {
+            string[] names = { "metal_painted_dk", "veh_kung", "Metal_Ext_1", "wood_painted_03",
+                "Metal_Bare", "C1C_Papers", "C1C_Lamp", "C1C_Screens", "glass_clear" };
+            Material kit = RadarModel.Pick(TowerRadar.KitRoom,names[id]);
+            if (kit != null) return kit;
+            if (id==TowerCommandRoomCore.Grey) return RadarModel.Grey;
             if (id==TowerCommandRoomCore.Olive) return RadarModel.Sheet;
             if (id==TowerCommandRoomCore.Steel) return RadarModel.Steel;
             if (id==TowerCommandRoomCore.Wood) return RadarModel.Wood;
             if (id==TowerCommandRoomCore.Black) return RadarModel.Knob;
-            if (id==TowerCommandRoomCore.Paper) return Own("C1 faded paper",new Color(.52f,.49f,.37f),null);
-            if (id==TowerCommandRoomCore.Canvas) {
-                Material canvas=Own("C1 sandbag canvas",Color.white,null);
-                Texture2D weave=new Texture2D(32,32,TextureFormat.RGBA32,true);
-                Color32[] pixels=new Color32[32*32];
-                for (int y=0;y<32;y++) for (int x=0;x<32;x++) {
-                    int shade=(x*3+y*7+x*y)%14+((x+y)%2==0?0:9);
-                    pixels[y*32+x]=new Color32((byte)(112+shade),(byte)(99+shade),(byte)(73+shade),255);
+            if (id==TowerCommandRoomCore.Glass) {
+                Material glass = Own("C1 perspex",new Color(.7f,.75f,.72f,.20f),RadarModel.DarkGlass);
+                glass.SetFloat("_Mode",3f); glass.SetInt("_SrcBlend",(int)BlendMode.SrcAlpha);
+                glass.SetInt("_DstBlend",(int)BlendMode.OneMinusSrcAlpha); glass.SetInt("_ZWrite",0);
+                glass.EnableKeyword("_ALPHABLEND_ON"); glass.renderQueue=3000;
+                return glass;
+            }
+            string name = id==TowerCommandRoomCore.Paper ? "papers" : id==TowerCommandRoomCore.Screen ? "screens" : "lamp";
+            Material m = Own("C1 " + name,Color.white,null);
+            Texture2D texture = new Texture2D(4,4,TextureFormat.RGBA32,true);
+            texture.LoadImage(File.ReadAllBytes(Path.Combine(RevivalPlugin.AssetDir,"c1_room_"+name+".png")));
+            texture.wrapMode=TextureWrapMode.Clamp; _owned.Add(texture); m.mainTexture=texture;
+            if (id==TowerCommandRoomCore.Paper) {
+                m.SetFloat("_Mode",1f); m.SetFloat("_Cutoff",.15f);
+                m.EnableKeyword("_ALPHATEST_ON"); m.renderQueue=2450;
+            } else {
+                m.EnableKeyword("_EMISSION"); m.SetTexture("_EmissionMap",texture);
+                m.SetColor("_EmissionColor",id==TowerCommandRoomCore.Screen ? new Color(.7f,.7f,.7f) : new Color(.35f,.27f,.17f));
+            }
+            return m;
+        }
+
+        Vector3 Point(Vector3 v)
+        {
+            return (new Vector3(_piece.X,_piece.Y,_piece.Z)+_turn*v)*K;
+        }
+
+        Vector2 Planar(Vector3 v, Vector3 n)
+        {
+            if (Mathf.Abs(n.y) >= Mathf.Abs(n.x) && Mathf.Abs(n.y) >= Mathf.Abs(n.z)) return new Vector2(v.x,n.y>0f ? v.z : -v.z);
+            if (Mathf.Abs(n.z) >= Mathf.Abs(n.x)) return new Vector2(n.z > 0f ? -v.x : v.x,v.y);
+            return new Vector2(n.x > 0f ? v.z : -v.z,v.y);
+        }
+
+        void Polygon(Vector3[] local, Vector3 normal)
+        {
+            Vector3 nrm=_turn*normal;
+            Vector2[] uv=new Vector2[local.Length];
+            Vector2 lo=new Vector2(float.MaxValue,float.MaxValue),hi=new Vector2(float.MinValue,float.MinValue);
+            for (int i=0;i<local.Length;i++) {
+                uv[i]=Planar(_turn*local[i],nrm);
+                lo=Vector2.Min(lo,uv[i]); hi=Vector2.Max(hi,uv[i]);
+            }
+            int first=_vertices.Count, region=_piece.Region*4;
+            for (int i=0;i<local.Length;i++) {
+                _vertices.Add(Point(local[i]));
+                if (_piece.Region>0) {
+                    float u=hi.x-lo.x>.000001f ? (uv[i].x-lo.x)/(hi.x-lo.x) : .5f;
+                    float v=hi.y-lo.y>.000001f ? (uv[i].y-lo.y)/(hi.y-lo.y) : .5f;
+                    uv[i]=new Vector2(Mathf.Lerp(TowerCommandRoomCore.Region[region],TowerCommandRoomCore.Region[region+2],u),
+                        Mathf.Lerp(1f-TowerCommandRoomCore.Region[region+3],1f-TowerCommandRoomCore.Region[region+1],v));
+                } else if (_surface.mainTexture != null) {
+                    Texture texture=_surface.mainTexture;
+                    Vector2 scale=_surface.mainTextureScale;
+                    uv[i]=new Vector2(uv[i].x*K*Density[_piece.Material]/texture.width/Mathf.Max(.001f,scale.x),
+                        uv[i].y*K*Density[_piece.Material]/texture.height/Mathf.Max(.001f,scale.y));
                 }
-                weave.name="C1 coarse canvas"; weave.SetPixels32(pixels); weave.Apply(true,true);
-                _owned.Add(weave); canvas.mainTexture=weave; return canvas;
+                _uv.Add(uv[i]);
             }
-            if (id==TowerCommandRoomCore.Lamp) {
-                Material lamp=Own("C1 warm lamp diffuser",new Color(.67f,.55f,.32f),null);
-                // No realtime lights or shadows; a subdued emissive diffuser.
-                lamp.EnableKeyword("_EMISSION"); lamp.SetColor("_EmissionColor",new Color(.22f,.16f,.07f));
-                return lamp;
+            bool forward=Vector3.Dot(Vector3.Cross(local[1]-local[0],local[2]-local[0]),normal)>0f;
+            for (int i=1;i<local.Length-1;i++) {
+                _indices.Add(first); _indices.Add(first+(forward ? i : i+1)); _indices.Add(first+(forward ? i+1 : i));
             }
-            Material map=Own("C1 field chart",Color.white,null);
-            Texture2D texture=Chart(); _owned.Add(texture); map.mainTexture=texture;
-            return map;
-        }
-
-        static Texture2D Chart()
-        {
-            // Small procedural tactical chart, not a map/HUD/target selector.
-            // The concept's single strip in a grassy clearing is schematic.
-            const int size=128;
-            Color32[] pixels=new Color32[size*size];
-            for (int y=0;y<size;y++) for (int x=0;x<size;x++) {
-                int noise=(x*13+y*7+x*y)%13;
-                byte b=(byte)(151+noise);
-                Color32 c=new Color32(b,(byte)(b-5),(byte)(b-29),255);
-                if (x%16==0 || y%16==0) c=new Color32(119,124,100,255);
-                bool clearing=x>42 && x<88 && y>8 && y<119;
-                if (clearing && ((x+y)%5==0)) c=new Color32(133,139,109,255);
-                if (x>=62 && x<=67 && y>=14 && y<=112) c=new Color32(97,91,75,255);
-                if ((x==44 || x==86) && y>9 && y<118 || (y==10 || y==117) && x>44 && x<86)
-                    c=new Color32(121,101,75,255);
-                // Three pencil bearing/route lines to the retained tower.
-                if (y==65 && x>29 && x<61 || x==35 && y>52 && y<64)
-                    c=new Color32(107,61,49,255);
-                pixels[y*size+x]=c;
-            }
-            Texture2D texture=new Texture2D(size,size,TextureFormat.RGBA32,true);
-            texture.name="C1 worn field chart"; texture.wrapMode=TextureWrapMode.Clamp;
-            texture.SetPixels32(pixels); texture.Apply(true,true); return texture;
-        }
-
-        void Face(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
-        {
-            int n=_vertices.Count;
-            _vertices.Add(a); _vertices.Add(b); _vertices.Add(c); _vertices.Add(d);
-            _uv.Add(new Vector2(0,0)); _uv.Add(new Vector2(1,0));
-            _uv.Add(new Vector2(1,1)); _uv.Add(new Vector2(0,1));
-            _indices.Add(n); _indices.Add(n+1); _indices.Add(n+2);
-            _indices.Add(n); _indices.Add(n+2); _indices.Add(n+3);
         }
 
         void Geometry(TowerCommandRoomCore.Piece p)
         {
-            Vector3 center=new Vector3(p.X,p.Y,p.Z)*K;
-            Vector3 h=new Vector3(p.SX,p.SY,p.SZ)*(K*.5f);
-            if (p.Bag) {
-                // Beveled rectangular sack: octagonal horizontal section,
-                // smaller top/bottom rings; no expensive sphere primitives.
-                for (int i=0;i<8;i++) {
-                    int j=(i+1)%8;
-                    Vector3 a=Ring(i,h),b=Ring(j,h);
-                    Face(center+new Vector3(a.x*.8f,h.y,a.z*.8f),
-                        center+new Vector3(b.x*.8f,h.y,b.z*.8f),center+b,center+a);
-                    Face(center+a,center+b,center+new Vector3(b.x*.8f,-h.y,b.z*.8f),
-                        center+new Vector3(a.x*.8f,-h.y,a.z*.8f));
-                    Triangle(center+new Vector3(0,h.y,0),center+new Vector3(b.x*.8f,h.y,b.z*.8f),
-                        center+new Vector3(a.x*.8f,h.y,a.z*.8f));
-                    Triangle(center+new Vector3(0,-h.y,0),center+new Vector3(a.x*.8f,-h.y,a.z*.8f),
-                        center+new Vector3(b.x*.8f,-h.y,b.z*.8f));
-                }
+            _piece=p; _turn=Quaternion.Euler(p.Tilt,p.Yaw,0f);
+            Vector3 h=new Vector3(p.SX,p.SY,p.SZ)*.5f;
+            if (p.Shape==TowerCommandRoomCore.Box) {
+                Polygon(new Vector3[] { new Vector3(-h.x,h.y,-h.z),new Vector3(-h.x,h.y,h.z),new Vector3(h.x,h.y,h.z),new Vector3(h.x,h.y,-h.z) },Vector3.up);
+                Polygon(new Vector3[] { new Vector3(-h.x,-h.y,h.z),new Vector3(-h.x,-h.y,-h.z),new Vector3(h.x,-h.y,-h.z),new Vector3(h.x,-h.y,h.z) },Vector3.down);
+                Polygon(new Vector3[] { new Vector3(-h.x,-h.y,-h.z),new Vector3(-h.x,h.y,-h.z),new Vector3(h.x,h.y,-h.z),new Vector3(h.x,-h.y,-h.z) },Vector3.back);
+                Polygon(new Vector3[] { new Vector3(h.x,-h.y,h.z),new Vector3(h.x,h.y,h.z),new Vector3(-h.x,h.y,h.z),new Vector3(-h.x,-h.y,h.z) },Vector3.forward);
+                Polygon(new Vector3[] { new Vector3(-h.x,-h.y,h.z),new Vector3(-h.x,h.y,h.z),new Vector3(-h.x,h.y,-h.z),new Vector3(-h.x,-h.y,-h.z) },Vector3.left);
+                Polygon(new Vector3[] { new Vector3(h.x,-h.y,-h.z),new Vector3(h.x,h.y,-h.z),new Vector3(h.x,h.y,h.z),new Vector3(h.x,-h.y,h.z) },Vector3.right);
                 return;
             }
-            Vector3 l=center-h, u=center+h;
-            Face(new Vector3(l.x,u.y,l.z),new Vector3(l.x,u.y,u.z),new Vector3(u.x,u.y,u.z),new Vector3(u.x,u.y,l.z));
-            Face(new Vector3(l.x,l.y,u.z),new Vector3(l.x,l.y,l.z),new Vector3(u.x,l.y,l.z),new Vector3(u.x,l.y,u.z));
-            Face(new Vector3(l.x,l.y,l.z),new Vector3(l.x,u.y,l.z),new Vector3(u.x,u.y,l.z),new Vector3(u.x,l.y,l.z));
-            Face(new Vector3(u.x,l.y,u.z),new Vector3(u.x,u.y,u.z),new Vector3(l.x,u.y,u.z),new Vector3(l.x,l.y,u.z));
-            Face(new Vector3(l.x,l.y,u.z),new Vector3(l.x,u.y,u.z),new Vector3(l.x,u.y,l.z),new Vector3(l.x,l.y,l.z));
-            Face(new Vector3(u.x,l.y,l.z),new Vector3(u.x,u.y,l.z),new Vector3(u.x,u.y,u.z),new Vector3(u.x,l.y,u.z));
-        }
-
-        static Vector3 Ring(int i, Vector3 h)
-        {
-            switch (i) {
-                case 0:return new Vector3(-h.x,0,-h.z*.65f);
-                case 1:return new Vector3(-h.x*.65f,0,-h.z);
-                case 2:return new Vector3(h.x*.65f,0,-h.z);
-                case 3:return new Vector3(h.x,0,-h.z*.65f);
-                case 4:return new Vector3(h.x,0,h.z*.65f);
-                case 5:return new Vector3(h.x*.65f,0,h.z);
-                case 6:return new Vector3(-h.x*.65f,0,h.z);
-                default:return new Vector3(-h.x,0,h.z*.65f);
+            int count=TowerCommandRoomCore.Sides(p);
+            Vector3 axis=p.Shape==TowerCommandRoomCore.CylY ? Vector3.up : p.Shape==TowerCommandRoomCore.CylZ ? Vector3.forward : Vector3.right;
+            Vector3 a=p.Shape==TowerCommandRoomCore.CylX ? Vector3.up : Vector3.right;
+            Vector3 b=p.Shape==TowerCommandRoomCore.CylY ? Vector3.forward : p.Shape==TowerCommandRoomCore.CylZ ? Vector3.up : Vector3.forward;
+            float radius=p.Shape==TowerCommandRoomCore.CylX ? h.y : h.x;
+            float length=p.Shape==TowerCommandRoomCore.CylY ? h.y : p.Shape==TowerCommandRoomCore.CylZ ? h.z : h.x;
+            Vector3[] lower=new Vector3[count],upper=new Vector3[count];
+            for (int i=0;i<count;i++) {
+                float angle=2f*Mathf.PI*i/count;
+                Vector3 ring=(a*Mathf.Cos(angle)+b*Mathf.Sin(angle))*radius;
+                lower[i]=ring-axis*length; upper[i]=ring+axis*length;
             }
-        }
-
-        void Triangle(Vector3 a, Vector3 b, Vector3 c)
-        {
-            int n=_vertices.Count;
-            _vertices.Add(a); _vertices.Add(b); _vertices.Add(c);
-            _uv.Add(new Vector2(.5f,.5f)); _uv.Add(new Vector2(1,0)); _uv.Add(new Vector2(0,0));
-            _indices.Add(n); _indices.Add(n+1); _indices.Add(n+2);
+            for (int i=0;i<count;i++) {
+                int j=(i+1)%count;
+                Polygon(new Vector3[] { lower[i],lower[j],upper[j],upper[i] },((lower[i]+upper[i]+lower[j]+upper[j])*.25f).normalized);
+            }
+            Polygon(lower,-axis); Polygon(upper,axis);
         }
 
         void OnDestroy()
         {
+            if (_supplyKit != null) _supplyKit.gameObject.SetActive(_supplyWasOn);
+            if (_active == this) { ScreenState(true,false); _active=null; }
             for (int i=0;i<_owned.Count;i++) if (_owned[i]!=null) Destroy(_owned[i]);
             _owned.Clear();
         }

@@ -74,6 +74,10 @@ namespace NextDayRevival
         public float Speed;                 // world units per second
         public float Length;
         public Vector2 Dir;
+        // Serialized once at spawn, evaluated arithmetically on the master
+        // and for radar velocity on every peer (also survives host migration).
+        internal bool Evasive;
+        internal float WeaveRelease, WeavePhase;
         float[] _y;
         bool[] _profileKnown;
         int _profileIndex;
@@ -211,7 +215,19 @@ namespace NextDayRevival
         internal Vector3 At(float s)
         {
             Vector2 xz = From + Dir * Mathf.Clamp(s, 0f, Length);
+            if (Evasive)
+            {
+                float weave = AARaidBalanceCore.Weave(s / PlayerAn2.K, WeaveRelease / PlayerAn2.K,
+                    Speed / PlayerAn2.K, WeavePhase) * PlayerAn2.K;
+                xz += new Vector2(Dir.y, -Dir.x) * weave;
+            }
             return new Vector3(xz.x, Height(s), xz.y);
+        }
+
+        float LateralSlope(float s)
+        {
+            return Evasive ? AARaidBalanceCore.WeaveSlope(s / PlayerAn2.K, WeaveRelease / PlayerAn2.K,
+                Speed / PlayerAn2.K, WeavePhase) : 0f;
         }
 
         /// <summary>Rise per run over the next stretch (a little look-ahead so
@@ -224,17 +240,24 @@ namespace NextDayRevival
 
         internal Quaternion Attitude(float s)
         {
-            float heading = Mathf.Atan2(Dir.x, Dir.y) * Mathf.Rad2Deg;
+            float lateral = LateralSlope(s);
+            float heading = Mathf.Atan2(Dir.x + Dir.y * lateral, Dir.y - Dir.x * lateral) * Mathf.Rad2Deg;
             float pitch = Mathf.Atan(Slope(s)) * Mathf.Rad2Deg;
+            float bank = Evasive ? Mathf.Clamp((LateralSlope(s + Speed * 0.25f)
+                - LateralSlope(s - Speed * 0.25f)) * Speed / PlayerAn2.K / 9.81f * Mathf.Rad2Deg / 0.5f,
+                -35f, 35f) : 0f;
             // A couple of degrees of angle of attack: the An-2 flies nose-up.
-            return Quaternion.Euler(-(pitch + 2f), heading, 0f);
+            return Quaternion.Euler(-(pitch + 2f), heading, -bank);
         }
 
         /// <summary>Metres per second, world axes (An2Glide's unit).</summary>
         internal Vector3 Velocity(float s)
         {
             float slope = Slope(s);
-            Vector3 d = new Vector3(Dir.x, slope, Dir.y).normalized;
+            float lateral = LateralSlope(s);
+            Vector3 d = new Vector3(Dir.x + Dir.y * lateral, slope, Dir.y - Dir.x * lateral);
+            // s advances at Speed; retain lateral speed for honest lead.
+            if (!Evasive) d = d.normalized;
             return d * (Speed / PlayerAn2.K);
         }
 
@@ -332,7 +355,7 @@ namespace NextDayRevival
             public bool Driving;
             public float Born;
             public int Hits;
-            /// <summary>Multiplier on SmallArmsHits (N11: a Tu-95 is 3).</summary>
+            /// <summary>Airframe multiplier for rifle and nonlethal gun hits.</summary>
             public int Toughness = 1;
             /// <summary>W AA4: hit points and who took them (master), and the
             /// damage level every client shows as smoke (0..2).</summary>
@@ -437,7 +460,8 @@ namespace NextDayRevival
             Net.EnsureHooked();
             object[] data = new object[] { PlayerAn2.Marker, PlayerAn2.Capacity, Tag,
                 path.From.x, path.From.y, path.To.x, path.To.y, path.Agl, path.Speed,
-                hostile ? 1f : 0f, label ?? "" };
+                hostile ? 1f : 0f, label ?? "", path.Evasive ? 1f : 0f,
+                path.WeaveRelease, path.WeavePhase };
             GameObject go = PlayerAn2.BuildNpc(path.At(0f), path.Attitude(0f), data);
             if (go == null) return null;
             Flight f = Find(go);
@@ -479,6 +503,14 @@ namespace NextDayRevival
                 f.Path = FlightPath.Straight(from, to, Fl(data[7]), Fl(data[8]));
                 f.Hostile = Fl(data[9]) > 0.5f;
                 f.Label = data.Length > 10 ? data[10] as string : null;
+                if (data.Length > 13 && Fl(data[11]) > 0.5f)
+                {
+                    f.Path.Evasive = true;
+                    f.Path.WeaveRelease = Fl(data[12]);
+                    f.Path.WeavePhase = Fl(data[13]);
+                }
+                if (f.Label != null && f.Label.StartsWith(AirEvents.BomberTag, StringComparison.Ordinal))
+                    f.Toughness = AARaidBalanceCore.BomberToughness;
                 f.Born = Time.time;
                 _flights[go] = f;
                 RegisterAir();
@@ -619,7 +651,8 @@ namespace NextDayRevival
 
         static void Apply(Flight f, Vector3 point, float amount, int actor)
         {
-            float dmg = amount < 0f ? AirKillCore.RoundDamage(f.Toughness) : amount;
+            float dmg = amount < 0f ? AirKillCore.RoundDamage(f.Toughness)
+                : AARaidBalanceCore.GunDamage(amount, f.Toughness);
             f.Hits++;
             if (!f.Ledger.Add(dmg, actor))
             {

@@ -63,7 +63,7 @@ namespace NextDayRevival
     internal static partial class Mercs
     {
         internal static void OrderDrive(Vector3 target)
-        { MercDrive.Start(Willing(Selection(), "DRIVE"), target); }
+        { MercDrive.Start(Willing(SquadSelection(), "DRIVE"), target); }
 
         internal static void GiveDrive(Record r, MercCarrier c, int seat, Vector3 target)
         {

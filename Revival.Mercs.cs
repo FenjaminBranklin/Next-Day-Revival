@@ -2610,42 +2610,104 @@ namespace NextDayRevival
                 k++;
                 _roster[i].Selected = number == 0 || k == number;
             }
+            Picked = number != 0;
             List<Record> sel = Selection();
             MercUi.Toast(number == 0 ? Loc.T("Выбраны все наёмники", "All mercs selected")
                 : (sel.Count == 1 ? sel[0].Name : "-") + Loc.T(" выбран", " selected"), false);
         }
 
+        /// <summary>G O1: Ctrl+1..5, an L checkbox or a merc's own row picks
+        /// mercs; Ctrl+0 clears the pick.</summary>
+        internal static bool Picked;
+        static readonly List<Record> _onDuty = new List<Record>(8);
+
+        /// <summary>G O1: the player addressed particular mercs (MercTargetPlan.Explicit).</summary>
+        internal static bool PickActive()
+        {
+            int alive = 0, selected = 0;
+            for (int i = 0; i < _roster.Count; i++)
+            {
+                if (_roster[i].Dead) continue;
+                alive++;
+                if (_roster[i].Selected) selected++;
+            }
+            return MercTargetPlan.Explicit(Picked, selected, alive);
+        }
+
+        internal static bool OnDuty(Record r)
+        {
+            return r.Order != null && (r.Order.Mode == MercOrder.ManGun || r.Order.Mode == MercOrder.ManRadar);
+        }
+
+        /// <summary>G O1: who a squad order (FOLLOW, STAY, ATTACK, TAKE COVER
+        /// ...) reaches: the picked mercs, or with no pick everyone except the
+        /// gun and radar crews, who keep their posts (Announce names them).</summary>
+        internal static List<Record> SquadSelection()
+        {
+            bool pick = PickActive();
+            List<Record> all = Selection();
+            List<Record> sel = new List<Record>(all.Count);
+            _onDuty.Clear();
+            for (int i = 0; i < all.Count; i++)
+            {
+                bool duty = OnDuty(all[i]);
+                if (MercTargetPlan.Takes(pick, all[i].Selected, duty)) sel.Add(all[i]);
+                else if (duty) _onDuty.Add(all[i]);
+            }
+            return sel;
+        }
+
+        /// <summary>G O1 order feedback: who got the order and which crews
+        /// stayed at their guns or the radar.</summary>
+        internal static void Announce(string what, List<Record> got)
+        {
+            if (got.Count == 0 && _onDuty.Count == 0) return;
+            StringBuilder sb = new StringBuilder(what).Append(": ");
+            if (got.Count == 0) sb.Append(Loc.T("никто", "nobody"));
+            for (int i = 0; i < got.Count; i++) sb.Append(i == 0 ? "" : ", ").Append(got[i].Name);
+            if (got.Count > 1) sb.Append(" (").Append(Addressed(got)).Append(')');
+            if (_onDuty.Count > 0)
+            {
+                sb.Append(Loc.T(". На посту (пушка/радар) остаются: ", ". Staying on gun/radar: "));
+                for (int i = 0; i < _onDuty.Count; i++) sb.Append(i == 0 ? "" : ", ").Append(_onDuty[i].Name);
+                sb.Append(Loc.T(" - отметьте в L, чтобы снять", " - check them in L to move them"));
+            }
+            MercUi.OrderReply(sb.ToString(), got.Count == 0);
+            _onDuty.Clear();
+        }
+
         internal static void OrderFollow()
         {
-            List<Record> sel = Selection();
-            if (sel.Count == 0) return;
-            Give(sel, MercOrder.FollowMe());
+            List<Record> sel = SquadSelection();
+            if (sel.Count > 0) Give(sel, MercOrder.FollowMe());
+            Announce(Loc.T("ЗА МНОЙ", "FOLLOW"), sel);
         }
 
         /// <summary>B3c FOLLOW MY VEHICLE: board the vehicle the owner sits in
         /// (now or the next one he takes), else follow on foot.</summary>
         internal static void OrderVehicle()
         {
-            List<Record> sel = Selection();
-            if (sel.Count == 0) return;
-            Give(sel, MercOrder.FollowVehicle());
+            List<Record> sel = SquadSelection();
+            if (sel.Count > 0) Give(sel, MercOrder.FollowVehicle());
+            Announce(Loc.T("ЗА ТЕХНИКОЙ", "VEHICLE"), sel);
         }
 
         internal static void OrderStay(Vector3 point, Vector3 facing)
         {
-            List<Record> sel = Selection();
-            if (sel.Count == 0) return;
+            List<Record> sel = SquadSelection();
+            if (sel.Count == 0) { Announce(Loc.T("СТОЯТЬ", "STAY"), sel); return; }
             MercOrder o = new MercOrder();
             o.Mode = MercOrder.Stay; o.Points = new Vector3[] { point }; o.Facing = facing;
             Give(sel, o);
+            Announce(Loc.T("СТОЯТЬ", "STAY"), sel);
         }
 
         /// <summary>B3b PATROL: a loop through the owner's points. One point
         /// (or none: the owner's own spot) becomes a 30 m loop around it.</summary>
         internal static void OrderPatrol(List<Vector3> points)
         {
-            List<Record> sel = Willing(Selection(), Loc.T("патруль", "patrol"));
-            if (sel.Count == 0) return;
+            List<Record> sel = Willing(SquadSelection(), Loc.T("патруль", "patrol"));
+            if (sel.Count == 0) { Announce(Loc.T("ПАТРУЛЬ", "PATROL"), sel); return; }
             List<Vector3> route = new List<Vector3>(points);
             if (route.Count > MercOrder.MaxPoints) route.RemoveRange(MercOrder.MaxPoints, route.Count - MercOrder.MaxPoints);
             if (route.Count < 2)
@@ -2669,6 +2731,7 @@ namespace NextDayRevival
             MercOrder o = new MercOrder();
             o.Mode = MercOrder.Patrol; o.Points = route.ToArray();
             Give(sel, o);
+            Announce(Loc.T("ПАТРУЛЬ", "PATROL"), sel);
         }
 
         static MercOrder _lastPerim;
@@ -2679,8 +2742,8 @@ namespace NextDayRevival
         /// 15 / 25 / 40 / 60 m instead of moving the centre.</summary>
         internal static void OrderPerimeter(Vector3 point, Vector3 facing)
         {
-            List<Record> sel = Willing(Selection(), Loc.T("периметр", "perimeter"));
-            if (sel.Count == 0) return;
+            List<Record> sel = Willing(SquadSelection(), Loc.T("периметр", "perimeter"));
+            if (sel.Count == 0) { Announce(Loc.T("ПЕРИМЕТР", "PERIMETER"), sel); return; }
             MercOrder o = new MercOrder();
             o.Mode = MercOrder.Perimeter; o.Facing = facing; o.RadiusM = MercOrder.Radii[1];
             o.Points = new Vector3[] { point };
@@ -2692,6 +2755,7 @@ namespace NextDayRevival
             }
             _lastPerim = o; _lastPerimAt = Time.time;
             Give(sel, o);
+            Announce(Loc.T("ПЕРИМЕТР", "PERIMETER"), sel);
         }
 
         /// <summary>The list's radius button: the next step for every selected
@@ -2718,8 +2782,8 @@ namespace NextDayRevival
         /// near, too far or without ground is no order at all.</summary>
         internal static void OrderAttack(Vector3 objective, byte kind)
         {
-            List<Record> sel = Willing(Selection(), Loc.T("атака", "attack"));
-            if (sel.Count == 0) return;
+            List<Record> sel = Willing(SquadSelection(), Loc.T("атака", "attack"));
+            if (sel.Count == 0) { Announce(Loc.T("АТАКА", "ATTACK"), sel); return; }
             List<Record> ok = new List<Record>();
             for (int i = 0; i < sel.Count; i++)
             {
@@ -2762,6 +2826,7 @@ namespace NextDayRevival
             o.Facing = d / Mathf.Max(0.01f, d.magnitude);
             o.Team = new MercAttackTeam(ok.Count);
             Give(ok, o);
+            Announce(Loc.T("АТАКА", "ATTACK"), ok);
         }
 
         static float NextRadius(float r)

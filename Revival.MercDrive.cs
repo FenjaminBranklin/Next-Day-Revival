@@ -61,6 +61,13 @@ namespace NextDayRevival
                 : Loc.T("едет к цели", "driving to destination");
         }
 
+        /// <summary>G O1: a ready free vehicle near this merc and the owner.</summary>
+        internal static bool CanDrive(MercUnit u)
+        {
+            MercCarrier car; MercDriveNative native;
+            return u != null && u.Ai != null && MercRide.DriveVehicle(u, out car, out native);
+        }
+
         internal static bool Start(List<Mercs.Record> selection, Vector3 target)
         {
             if (Active) { Say(Loc.T("Сначала верните машину или отдайте водителю новый приказ.",

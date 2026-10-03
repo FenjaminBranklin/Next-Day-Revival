@@ -39,15 +39,15 @@ namespace NextDayRevival
         public float Frequency = 1f;
         /// <summary>Aircraft/heli count multiplier, 0.5..3.</summary>
         public float Strength = 1f;
-        public int Bombers = 1;              // Tu-95 per raid at the start, 0..4
+        public int Bombers = 2;              // Tu-95 per raid at the start, 0..4
         public int Bombs = 36;               // FAB-250 per Tu-95, 20..60
         public bool HitTower = true, HitGuns = true, HitFuel = true;
-        public int Transports = 2;           // An-2 with paratroopers, 0..4
+        public int Transports = 3;           // An-2 with paratroopers, 0..4
         public int Paratroopers = 8;         // per An-2, 1..12
         public int Helis = 1;                // Mi-8 troop landings, 0..3
         public int HeliTroops = 8;           // per Mi-8, 1..12
         public bool Escort = true;           // An-2 that bomb the AA guns first
-        public int Escorts = 2;              // 1..4
+        public int Escorts = 3;              // 1..4
         /// <summary>"auto" = the airfield's garrison ([Airfield] DefenderFaction),
         /// else traitor / looter / civilian / neutral.</summary>
         public string Faction = "auto";

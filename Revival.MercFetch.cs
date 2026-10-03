@@ -1,4 +1,5 @@
 // Z M5b: selected mercs fetch one paid crate, return to the finite depot.
+// G O1: with no pick in L one merc goes, the nearest free one.
 using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
@@ -73,18 +74,28 @@ namespace NextDayRevival
             { Say(Reason(MercFetchJob.WrongSide), true); return; }
             Local l = new Local();
             List<Mercs.Record> roster = Mercs.Roster;
-            for (int i = 0; i < roster.Count && l.Selected.Count < 6; i++)
-            {
-                Mercs.Record r = roster[i];
-                if (!r.Selected || r.Dead || r.Deserted || r.Unit == null || r.Unit.Ai == null || r.Unit.Deserting || !NpcWar.MercAlive(r.Unit.Ai)) continue;
-                l.Selected.Add(r); l.Before.Add(r.Order);
-            }
-            if (l.Selected.Count == 0)
-            { Say(Loc.T("Выберите хотя бы одного живого наёмника в L.", "Select at least one deployed living merc in L."), true); return; }
             l.WithEscort = EscortRequested;
+            bool pick = Mercs.PickActive();
+            if (pick)
+                for (int i = 0; i < roster.Count && l.Selected.Count < 6; i++)
+                {
+                    Mercs.Record r = roster[i];
+                    if (!r.Selected || !Deployed(r)) continue;
+                    l.Selected.Add(r); l.Before.Add(r.Order);
+                }
+            else PickNearest(roster, l, l.WithEscort ? 3 : 1);
+            if (l.Selected.Count == 0)
+            {
+                if (pick) Say(Loc.T("Выберите хотя бы одного живого наёмника в L.", "Select at least one deployed living merc in L."), true);
+                else Say(Loc.T("Нет свободного бойца: расчёты пушек и радара остаются на постах - отметьте бойца в L.",
+                    "No free deployed merc: gun and radar crews keep their posts - check one in L to send him."), true);
+                return;
+            }
             if (l.WithEscort && l.Selected.Count < 3)
-            { Say(Loc.T("Для сопровождения выберите минимум 3 бойцов: последний 2 - водитель и стрелок.",
-                "Escort needs at least 3 selected mercs: the last two are its driver and gunner."), true); return; }
+            { Say(pick ? Loc.T("Для сопровождения выберите минимум 3 бойцов: последний 2 - водитель и стрелок.",
+                "Escort needs at least 3 selected mercs: the last two are its driver and gunner.")
+                : Loc.T("Для сопровождения нужны 3 свободных бойца (не у пушки/радара) - или отметьте их в L.",
+                "Escort needs 3 free mercs (not on a gun or the radar) - or check them in L."), true); return; }
             for (int i = 0; i < l.Selected.Count; i++)
                 if (l.WithEscort && i >= l.Selected.Count - 2) l.Escort.Add(l.Selected[i]);
                 else l.Transport.Add(l.Selected[i]);
@@ -124,8 +135,44 @@ namespace NextDayRevival
             l.Deadline = Time.time + 1300f;
             for (int i = 0; i < l.Selected.Count; i++) l.Driving.Add(l.Selected[i].Order);
             _local = l; _scene = MapScene.Current;
-            Say(Loc.T("Забираем воздушный груз: выбранные бойцы едут, остальные держат посты.",
-                "Fetching the airdrop: selected mercs travel; the rest hold their posts."), false);
+            string names = "";
+            for (int i = 0; i < l.Selected.Count; i++) names += (i == 0 ? "" : ", ") + l.Selected[i].Name;
+            Say(Loc.T("ЗАБРАТЬ ГРУЗ: ", "FETCH AIRDROP: ") + names + Loc.T(" - едут; остальные держат посты.",
+                " travel; the rest hold their posts."), false);
+        }
+
+        static bool Deployed(Mercs.Record r)
+        {
+            return !r.Dead && !r.Deserted && r.Unit != null && r.Unit.Ai != null && !r.Unit.Deserting && NpcWar.MercAlive(r.Unit.Ai);
+        }
+
+        static readonly Mercs.Record[] PickRows = new Mercs.Record[16];
+        static readonly float[] PickDistance = new float[16];
+        static readonly bool[] PickCar = new bool[16], PickTaken = new bool[16];
+
+        // G O1: no pick in L - the nearest free merc to the player (paid, not
+        // crewing a gun or the radar), one beside a ready vehicle first; an
+        // escort takes the next two nearest.
+        static void PickNearest(List<Mercs.Record> roster, Local l, int want)
+        {
+            int n = 0;
+            for (int i = 0; i < roster.Count && n < PickRows.Length; i++)
+            {
+                Mercs.Record r = roster[i];
+                if (!Deployed(r) || r.Unpaid || MercAA.IsOrder(r.Order)) continue;
+                PickRows[n] = r; PickTaken[n] = false;
+                PickDistance[n] = (r.Unit.Ai.transform.position - Mercs.OwnerPosition).sqrMagnitude;
+                PickCar[n] = MercDrive.CanDrive(r.Unit);
+                n++;
+            }
+            for (int k = 0; k < want; k++)
+            {
+                int best = MercTargetPlan.Nearest(PickDistance, PickCar, PickTaken, n, k == 0);
+                if (best < 0) break;
+                PickTaken[best] = true;
+                l.Selected.Add(PickRows[best]); l.Before.Add(PickRows[best].Order);
+            }
+            for (int i = 0; i < n; i++) PickRows[i] = null;
         }
 
         // The existing drive step retains movement/combat/lease failure gates.

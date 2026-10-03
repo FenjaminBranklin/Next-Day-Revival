@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.69.0";
+        public const string VERSION = "6.70.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -478,6 +478,7 @@ namespace NextDayRevival
             Airfield.BindConfig(Config);         // east world: airfield loot, defender pockets, event budget
             MilitaryTown.BindConfig(Config);     // east world: military town batteries, AA site, defenders, loot, reinforcements
             FrameBench.BindConfig(Config);       // research: east extension frame-time baseline, off by default
+            ScreenshotTour.BindConfig(Config);   // research: screenshot tour (hotkey, -ndrTour), off by default
             ContentPerf.BindConfig(Config);      // east world: LOD/cull, shadows, colliders, interiors, batching of content scenes
             ViewDistance.BindConfig(Config);     // view distance Low/Medium/High/Ultra (far clip, prop culling, fog)
             RenderCounter.Bind(gameObject);      // F6 census includes the persistent scene
@@ -547,6 +548,7 @@ namespace NextDayRevival
             _harmony = new Harmony(GUID);
             OfflineStart.Install(_harmony);
             if (!OfflineStart.Active) ClientIntegrity.Install(_harmony);
+            ScreenshotTour.Install(gameObject, _harmony); // research: tour host, offline save guard, -ndrTour boot
             VehicleScan.Install(_harmony);       // Q1 perf: vehicle/NPC/inventory registries instead of scene scans
             OrdnanceBlast.Install(_harmony);     // Bomb/rocket damage on the Photon health owner
             BlastKill.Install(_harmony);         // A-L1: lethal blasts finish wounded NPCs (owner side)

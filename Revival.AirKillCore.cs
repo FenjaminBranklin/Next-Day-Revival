@@ -82,8 +82,8 @@ namespace NextDayRevival
 
         /// <summary>From this much damage a bomber's stick goes wide.</summary>
         internal const float WideFrom = 0.15f;
-        /// <summary>From this much damage (one 85 mm hit on a two-hit
-        /// Tu-95) a bomber may abort the run.</summary>
+        /// <summary>From this much accumulated airframe damage a bomber may
+        /// abort a non-coordinated run.</summary>
         internal const float AbortFrom = 0.45f;
 
         // The AA ring (east_af_shelters "AA position"): sandbags 6.3 m inside,

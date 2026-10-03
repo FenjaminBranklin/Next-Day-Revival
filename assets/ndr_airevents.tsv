@@ -10,5 +10,5 @@
 #   Optional rhythm: closeDrops secondWave secondWaveDelaySeconds(90..600) intervalMinutes(3..120)
 #   randomWindowMinutes(0..60) quietMinutes(3..60); quiet starts after all raid air clears.
 #   Optional approach: approachMode(vary/fixed) approachHeading(0..359.99, flight clockwise from +Z).
-#retake	1	1.00	1.00	1	36	tgf	2	8	1	8	1	2	auto	3	100.00	50	1	1	180.00	30.00	6.00	10.00	vary	0.00
+#retake	1	1.00	1.00	2	36	tgf	3	8	1	8	1	3	auto	3	100.00	50	1	1	180.00	30.00	6.00	10.00	vary	0.00
 Airfield-raid	1	4632.00	0.00	180.0	900.0	150.0	auto	4380.00	-500.00	4250.00	1250.00	traitor	60	2.500	3.500	b:1:0:48;t:2:90:10		550	0.000

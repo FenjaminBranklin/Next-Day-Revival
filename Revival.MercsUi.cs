@@ -8,18 +8,19 @@
 //               profiles: the town has no trader). The hire cards cover the
 //               window; NGUI's mouse is switched off while the pointer is over
 //               them, so a click on a card never buys an item underneath.
-//   ORDERS      K held = wheel (mouse direction or 1-6, release issues), K K =
+//   ORDERS      K held = categories (1-4 or hover), then order/release; K K =
 //               FOLLOW ME, Ctrl+1..5 / Ctrl+0 selection. STAY takes the
 //               crosshair point (up to 300 m) - the player chooses where.
 //               B3b PATROL: a route of 1-6 points (crosshair, own spot, map
 //               clicks); PERIMETER at the crosshair, picked again = radius.
 //               B3c: 5 = FOLLOW MY VEHICLE; K K in a vehicle is that order; in
-//               a seat the mouse belongs to the seat, so the wheel takes 1-6
+//               a seat the mouse belongs to the seat, so the wheel takes numbers
 //               only and PATROL (a route is set on foot) is greyed.
 //   MAP         owner only: patrol loops / perimeter circles as dashed map
 //               ink, his mercs as numbered squares (only while the map is open).
-//   LIST        L: mercs (health, order, state, upkeep, distance; pay, peaceful,
-//               dismiss twice) and the whitelist (Ctrl+L = player under the
+//   LIST        L: compact native group rows (name, health, duty, selection).
+//               The trader's Full roster retains management, dismissal and
+//               the whitelist (Ctrl+L = player under the
 //               crosshair, or undo within 10 s of a whitelisted player's hit).
 //   HUD         a small strip bottom-left and toasts top right (hint settings).
 //   W-UI3       the toasts pass the page's filter ([Mercs] Notifications: all /
@@ -169,7 +170,7 @@ namespace NextDayRevival
         static bool _listOpen;
         static int _listTab;
 
-        internal static bool ListOpen { get { return _listOpen; } }
+        internal static bool ListOpen { get { return _listOpen && !MercListBlocked(); } }
 
         static KeyCode Parse(string text, KeyCode fallback)
         {
@@ -194,20 +195,20 @@ namespace NextDayRevival
         internal static void TickInput()
         {
             Keys();
+            CompactListInput();
             Mercs.MedicineInteractionTick();
-            CacheStrip();
             bool quickOwns = QuickInput();
             if (Input.anyKeyDown && !Input.GetMouseButtonDown(0)) Reply();
             if (_tabActive && Time.frameCount - _tabFrame > 2) CloseTab();
             if (_tabActive)
             {
                 Vector3 pointer = Input.mousePosition;
-                NguiMouse(!_listOpen && !VanillaSkin.Asking && !_panelRect.Contains(new Vector2(pointer.x, Screen.height - pointer.y)));
+                NguiMouse(!ListOpen && !VanillaSkin.Asking && !_panelRect.Contains(new Vector2(pointer.x, Screen.height - pointer.y)));
             }
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
             {
                 if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && GameplayCursor.CommandUiState == 0
-                    && !Admin.IsOpen) _listOpen = true;
+                    && !MercListBlocked()) { _listTab = -1; _listOpen = true; }
                 return;
             }
             int uiState = GameplayCursor.CommandUiState;
@@ -215,9 +216,10 @@ namespace NextDayRevival
             if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey))
             {
                 if (Ctrl()) CtrlL();
-                else if (!gameWindow || _listOpen) { _listOpen = !_listOpen; if (!_listOpen) RestoreCursor(); }
+                else if ((!gameWindow || _listOpen) && !MercListBlocked())
+                { _listTab = -1; _listOpen = !_listOpen; if (!_listOpen) RestoreCursor(); }
             }
-            if (_listOpen)
+            if (ListOpen)
             {
                 if (Input.GetKeyDown(KeyCode.Escape)) { _listOpen = false; RestoreCursor(); }
                 else if (Input.GetKeyDown(KeyCode.P) && _listTab == 0) Mercs.PayAllDue();
@@ -247,7 +249,7 @@ namespace NextDayRevival
                     else Mercs.OrderFollow();
                     return;
                 }
-                _kDownAt = now; _wheelArmed = true; _wheelVec = Vector2.zero; _wheelPick = -1; _wheelScrollPick = false;
+                _kDownAt = now; _wheelArmed = true; RadialBegin();
             }
             if (_wheelArmed && (Input.GetKey(_wheelKey) || Input.GetKeyUp(_wheelKey)))
             {
@@ -276,8 +278,9 @@ namespace NextDayRevival
         {
             float a = Mathf.Atan2(v.x, v.y) * Mathf.Rad2Deg;   // 0 = up, clockwise
             if (a < 0f) a += 360f;
-            float step = 360f / SectorEn.Length;
-            return Mathf.FloorToInt(((a + step * 0.5f) % 360f) / step) % SectorEn.Length;
+            int count = MercRadialPlan.Count(_wheelGroup);
+            float step = 360f / count;
+            return Mathf.FloorToInt(((a + step * 0.5f) % 360f) / step) % count;
         }
 
         static void Issue(int sector)
@@ -1050,9 +1053,10 @@ namespace NextDayRevival
 
         internal static void Draw()
         {
+            CompactListInput();
             if (OfflineStart.Active && (MenuScenarioDraw() || HudScenarioDraw())) return;
             Styles();
-            bool window = GameUi.WindowOpen;
+            bool window = GameplayCursor.CommandUiState != 0;
             // a-u2: only the merc tab is custom; safe/market are always native.
             if (window)
             {
@@ -1064,10 +1068,11 @@ namespace NextDayRevival
             if (repaint && !window && !_listOpen && !_wheelOpen && GameplayCursor.CanCommand)
                 DrawMedicineInteraction();
             if (repaint && _placing && !window && !_listOpen) DrawPlacing();
-            if (GameUi.State == 8 && MapWanted()) DrawMap();
+            if (GameplayCursor.CommandUiState == 8 && MapWanted()) DrawMap();
             else HideMap();
-            if (_listOpen) DrawList();
-            if (repaint && !window && !_listOpen && !_wheelOpen && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawStrip();
+            if (ListOpen) DrawList();
+            if (repaint && !window && !_listOpen && !_wheelOpen && !MercListBlocked()
+                && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawCompactList(false);
             if (repaint && !window) DrawLocate();
             DrawCommandPing();
             if (repaint) DrawToasts();
@@ -1249,15 +1254,12 @@ namespace NextDayRevival
             return Loc.T("АТАКА ", "ATTACK ") + (d / 2.8f).ToString("0") + "m";
         }
 
-        // W-UI4: the order wheel in the UI kit's look - a round dark panel,
-        // one pill per sector (accent = the pick, dimmed = not here), key caps,
-        // the addressed mercs in the hub. Sector count and spacing follow
-        // SectorEn. The texts come from tables or are rebuilt at 5 Hz while
-        // the wheel is open (the selection and the crosshair ray with them).
+        // G O2: native radial categories with an order submenu. Dispatch names
+        // retain their original IDs; target and point text are cached at 5 Hz.
         static readonly string[] KeyCaps = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
         static float _wheelTextAt;
         static int _wheelTextPick = -2;
-        static string _wheelWho, _wheelPoint;
+        static string _wheelWho, _wheelPoint, _wheelDuty;
         static bool _wheelPeaceful;
         static readonly List<Mercs.Record> _wheelSelection = new List<Mercs.Record>(10);
         static int _wheelWhoKey;
@@ -1268,29 +1270,7 @@ namespace NextDayRevival
             if (Event.current.type != EventType.Repaint) return;
             float now = Time.unscaledTime;
             if (now >= _wheelTextAt || _wheelTextPick != _wheelPick) WheelTexts(now);
-            HudStyles();
-            HudWheelGeometry();
-            for (int s = 0; s < SectorEn.Length; s++)
-            {
-                bool live = s != 2 || !MercRide.OwnerInVehicle;
-                Rect r = _hudSectors[s];
-                HudPlate(r, s == _wheelPick, live);
-                HudLabel(new Rect(r.x + HudS(8f), r.y + HudS(4f), r.width - HudS(16f), r.height - HudS(28f)),
-                    _hudSectorNames[s], live ? _hudWheelLabel : _hudDisabled);
-                HudLabel(new Rect(r.x + HudS(6f), r.yMax - HudS(24f), r.width - HudS(12f), HudS(20f)),
-                    live ? _hudSectorKeys[s] : _hudOnFoot, _hudKey);
-            }
-            HudPlate(_hudHub, false, true);
-            _hudWho.text = _wheelWho;
-            _hudRelease.text = Loc.T("отпустить = приказ", "release = issue");
-            HudLabel(new Rect(_hudHub.x + HudS(10f), _hudHub.y + HudS(6f), _hudHub.width - HudS(20f), _hudHubNameHeight), _hudWho, _hudWheelLabel);
-            HudLabel(new Rect(_hudHub.x + HudS(6f), _hudHub.yMax - HudS(30f), _hudHub.width - HudS(12f), HudS(24f)), _hudRelease, _hudKey);
-            if (((_wheelPick >= 1 && _wheelPick <= 3) || _wheelPick == AttackSector || _wheelPick == 6 || _wheelPick == 7) && _wheelPoint != null)
-            {
-                _hudPoint.text = _wheelPoint;
-                HudPlate(_hudFooter, false, true);
-                HudLabel(new Rect(_hudFooter.x + HudS(12f), _hudFooter.y + HudS(4f), _hudFooter.width - HudS(24f), _hudFooter.height - HudS(8f)), _hudPoint, _hudKey);
-            }
+            DrawRadial();
         }
 
         /// <summary>5 Hz while the wheel is open: who is addressed, the
@@ -1313,16 +1293,29 @@ namespace NextDayRevival
             }
             if (sel.Count == 0)
                 for (int i = 0; i < roster.Count; i++) if (!roster[i].Dead) sel.Add(roster[i]);
-            int who = alive * 31 + Loc.Lang();
+            // G O1: without a pick a squad order leaves gun/radar crews at
+            // their posts (MAN AIR DEFENCE and FETCH address them otherwise).
+            // Without a pick FETCH sends the nearest free merc alone.
+            bool pick = Mercs.PickActive(), fetchOne = !pick && _wheelPick == 9;
+            int crews = 0;
+            if (!pick && _wheelPick != 6 && _wheelPick != 9)
+                for (int i = 0; i < sel.Count; i++) if (Mercs.OnDuty(sel[i])) crews++;
+            int who = alive * 31 + Loc.Lang() + (pick ? 15485863 : 0) + crews * 7919 + (fetchOne ? 104729 : 0);
             for (int i = 0; i < sel.Count; i++) who = unchecked(who * 31 + sel[i].Id);
             if (_wheelWho == null || _wheelWhoKey != who)
-            { _wheelWhoKey = who; _wheelWho = Mercs.Addressed(sel); }
+            {
+                _wheelWhoKey = who;
+                _wheelWho = fetchOne ? Loc.T("1 СВОБОДНЫЙ", "1 FREE MERC")
+                    : (pick ? Loc.T("ВЫБРАНО ", "SELECTED ") : Loc.T("ВСЕ ", "ALL ")) + sel.Count;
+                _wheelDuty = crews > 0 ? Loc.T("У пушки/радара остаются: ", "Staying on gun/radar: ") + crews : null;
+            }
             _wheelPeaceful = sel.Count > 0 && sel[0].Peaceful;
             _wheelPoint = null;
             if (_wheelPick == 6)
             {
                 _wheelPoint = Mercs.AirDefenceActive
                     ? Loc.T("ещё раз - освободить ПВО", "click again to release air defence")
+                    : pick ? Loc.T("выбранные: 52-К, радар, ЗУ-23", "selected: 52-K, radar, ZU-23")
                     : Loc.T("весь отряд: 52-К, радар, ЗУ-23; остальные за вами", "whole squad: 52-K, radar, ZU-23; others follow");
                 return;
             }
@@ -1538,7 +1531,7 @@ namespace NextDayRevival
             _tabFrame = Time.frameCount;
             // The original roster window retains whitelist/station controls.
             // Its input must not reach the native trader or the merc page.
-            if (_listOpen) { NguiMouse(false); NguiKeys(false); return; }
+            if (_listOpen && _listTab >= 0) { NguiMouse(false); NguiKeys(false); return; }
             Event e = Event.current;
             if (_tabActive && !VanillaSkin.Asking && e.type == EventType.MouseDown
                 && (_safeRect.Contains(e.mousePosition) || _tradeRect.Contains(e.mousePosition)))
@@ -1600,6 +1593,9 @@ namespace NextDayRevival
 
         static void DrawList()
         {
+            // Recheck at draw time: radar/native/custom screens may open after input.
+            if (MercListBlocked()) return;
+            if (_listTab < 0) { DrawCompactList(true); return; }
             CursorTracker.Restoring = true;
             try { Cursor.visible = true; Cursor.lockState = CursorLockMode.None; }
             finally { CursorTracker.Restoring = false; }
@@ -1663,7 +1659,7 @@ namespace NextDayRevival
                 float y = i * 40f;
                 Box(new Rect(x0 - 4f, y, r.width - 40f, 36f), m.Selected ? new Color(0.22f, 0.19f, 0.10f, 1f) : CardBg);
                 bool sel = GUI.Toggle(new Rect(x0 + cols[0], y + 9f, 20f, 20f), m.Selected, "");
-                if (sel != m.Selected) m.Selected = sel;
+                if (sel != m.Selected) { m.Selected = sel; Mercs.Picked = true; }
                 Mercs.Profile p = Mercs.ProfileById(m.ProfileId);
                 VanillaUi.Label(new Rect(x0 + cols[1], y + 2f, 160f, 18f), "<b>" + m.Name + "</b>", _label);
                 VanillaUi.Label(new Rect(x0 + cols[1], y + 18f, 160f, 16f), (p == null ? m.ProfileId : p.Name) + (m.Session ? " (test)" : ""), _small);

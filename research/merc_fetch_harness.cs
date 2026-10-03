@@ -140,7 +140,7 @@ namespace NextDayRevival
     }
     internal static class MapScene { internal static string Current="test";internal static bool Owns(string s){return Current==s;} }
     internal static class TowerSupport { internal static int WorldGeneration; }
-    internal static class MercAA { internal static int Master=1;internal static int MasterActor(){return Master;} }
+    internal static class MercAA { internal static int Master=1;internal static int MasterActor(){return Master;}internal static bool IsOrder(MercOrder o){return o.Mode==5||o.Mode==6;} }
     internal static class FrameProf { public const int S_MercFetchGate=198;internal static void S(int n){}internal static void E(int n){} }
     internal static class Crocodile
     {
@@ -160,7 +160,9 @@ namespace NextDayRevival
     internal static partial class Mercs
     {
         internal const string KeyPrefix="merc/";
-        internal sealed class Record { internal MercUnit Unit;internal MercOrder Order;internal bool Dead,Deserted,Selected; }
+        internal sealed class Record { internal MercUnit Unit;internal MercOrder Order;internal bool Dead,Deserted,Selected,Unpaid;internal string Name="merc"; }
+        internal static bool Picked;
+        internal static bool PickActive(){int a=0,n=0;for(int i=0;i<Roster.Count;i++){if(Roster[i].Dead)continue;a++;if(Roster[i].Selected)n++;}return MercTargetPlan.Explicit(Picked,n,a);}
         internal static readonly List<Record> Roster=new List<Record>();internal static Vector3 OwnerPosition;
         static void Give(List<Record> rs,MercOrder o) { for(int i=0;i<rs.Count;i++){rs[i].Order=o;rs[i].Unit.Order=o;} }
     }
@@ -189,6 +191,7 @@ namespace NextDayRevival
         static MercDriveRun _run;static MercCarrier _car;static Mercs.Record _driver;
         static List<Mercs.Record> _riders;internal static MercCarrier Candidate;
         internal static bool EscortActive;
+        internal static bool CanDrive(MercUnit u){return Candidate!=null&&((VehicleGameSystem)Candidate.Vgs).Ready&&(Candidate.Root.position-u.Ai.transform.position).sqrMagnitude<168f*168f;}
         internal static int EscortFailure;
         internal static bool StartEscort(List<Mercs.Record> selected,Vector3 point){EscortActive=true;return true;}
         internal static void ReturnEscort(){EscortActive=false;}
@@ -306,7 +309,8 @@ namespace NextDayRevival
             string[] props={"slab","fence","sandbag"};foreach(string prop in props){GameObject obj=new GameObject();Physics.Blockers=new Collider[]{obj.Add<Collider>()};Ok(!MercFetchNative.Parking(crateAt,car.Root.position,out park),"all-collider parking veto "+prop);}Physics.Blockers=new Collider[0];
             RaycastHit[] saved=Physics.Scene;Physics.Scene=new RaycastHit[32];Ok(!MercFetchNative.Target(c,out ground),"saturated physics refuses");Physics.Scene=saved;
             c.Body.velocity=new Vector3(0,-2,0);Ok(!MercFetchNative.Target(c,out ground),"descending source refused");c.Body.velocity=Vector3.zero;
-            merc.Selected=false;MercFetch.Start();Ok(!MercFetchBridge.Active&&MercUi.Last.Contains("Select at least"),"no silent all-squad fallback");merc.Selected=true;
+            Mercs.Picked=false;MercFetch.Start();Ok(!MercFetchBridge.Active&&merc.Order.Mode==6&&MercUi.Last.Contains("No free"),"no pick: the radar crew keeps his post");Mercs.Picked=true;
+            merc.Selected=false;MercFetch.Start();Ok(!MercFetchBridge.Active&&MercUi.Last.Contains("No free")&&merc.Order.Mode==6,"no silent all-squad fallback: nothing checked is no pick, the radar crew holds");merc.Selected=true;
             ((VehicleGameSystem)car.Vgs).Ready=false;MercFetch.Start();Ok(!MercFetchBridge.Active,"no ready vehicle preserves orders");((VehicleGameSystem)car.Vgs).Ready=true;
             MercFetch.Start();Ok(MercFetchBridge.Active&&merc.Order.Mode==8,"start drives selected squad");
             Move(car,merc,crateAt);object run=MercFetchBridge.Run;SetPhase(run,2);Frame(1);MercFetchJob j=RuntimeJob(1);
@@ -339,7 +343,22 @@ namespace NextDayRevival
             MercAA.Master=3;Frame(40);Ok(!c2.Locked&&Goods(c2)==2,"handoff unlocks genuine remaining source");MercAA.Master=1;Crocodile.Actor=1;
             TowerSupport.WorldGeneration++;Frame(41);Ok(RuntimeJob(1)==null&&RuntimeJob(2)==null,"new room clears stale actors/replay state");
             // Array delegates also reject incompatible contents without inventing stock.
+            NoPickCase(car);
             MercFetchGood invalid=new MercFetchGood();invalid.Id=9999;Ok(!invalid.Valid,"unknown item not gifted");invalid.Id=2076;invalid.Condition=float.NaN;Ok(!invalid.Valid,"bad native metadata refused");
+        }
+        // G O1: no pick in L - one merc travels, the nearest free one beside a
+        // ready vehicle; the radar crew and the rest keep their orders.
+        static void NoPickCase(MercCarrier car)
+        {
+            Time.time=60;Scene();Mercs.Roster.Clear();Mercs.Picked=false;Vector3 crateAt=new Vector3(100,80,100);
+            car.Root.position=new Vector3(20,80,20);Mercs.OwnerPosition=car.Root.position;Crate(crateAt,3);
+            Mercs.Record radar=Merc(1,car.Root.position),near=Merc(1,car.Root.position+new Vector3(9,0,0)),far=Merc(1,car.Root.position+new Vector3(40,0,0));
+            near.Order.Mode=1;far.Order.Mode=1;radar.Selected=near.Selected=far.Selected=true;near.Name="Near";far.Name="Far";
+            Mercs.Roster.Add(radar);Mercs.Roster.Add(far);Mercs.Roster.Add(near);
+            MercFetch.Start();
+            if(!MercFetchBridge.Active)Console.WriteLine("TRACE no pick: "+MercUi.Last);
+            Ok(MercFetchBridge.Active&&near.Order.Mode==8&&far.Order.Mode==1&&radar.Order.Mode==6&&MercUi.Last.Contains("Near")&&!MercUi.Last.Contains("Far"),
+                "no pick: one merc (the nearest free) fetches, radar crew and the rest hold");
         }
         static void BenchRuntime(MercFetchJob j)
         {

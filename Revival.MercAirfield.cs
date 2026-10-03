@@ -34,7 +34,8 @@ namespace NextDayRevival
             return seats;
         }
 
-        // Always the whole owned squad: selection and aiming are irrelevant.
+        // The whole owned squad, or (G O1) only the mercs picked in L. Aiming
+        // is irrelevant.
         internal static void ToggleAirDefence()
         {
             if (_defenceActive) { DefenceRelease(); return; }
@@ -48,10 +49,11 @@ namespace NextDayRevival
                 return;
             }
             Defence.Clear();
+            bool pick = PickActive();
             for (int i = 0; i < _roster.Count; i++)
             {
                 Record r = _roster[i];
-                if (r.Dead || r.Deserted || r.Unpaid) continue;
+                if (r.Dead || r.Deserted || r.Unpaid || (pick && !r.Selected)) continue;
                 DefenceMember m = new DefenceMember(); m.Record = r; m.Expected = r.Order;
                 Defence.Add(m);
             }
@@ -66,6 +68,8 @@ namespace NextDayRevival
             DefenceReconcile(); _defenceAt = Time.time + 0.5f;
             MercUi.OrderReply(Loc.T("ПВО: пушки, радар, затем ЗУ-23. Остальные за вами. Ещё раз - освободить.",
                 "Air defence: guns, radar, then ZU-23. Others follow. Click again to release."), false);
+            _onDuty.Clear();
+            Announce(Loc.T("ЗАНЯТЬ ПВО", "MAN AIR DEFENCE"), DefenceOne);
         }
 
         static bool DefenceUntouched(DefenceMember m)

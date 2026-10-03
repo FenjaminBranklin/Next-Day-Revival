@@ -15,7 +15,6 @@ namespace NextDayRevival
         internal static bool Selecting;
         static ConfigEntry<bool> _enabled;
         static Transform _console, _tower;
-        static Material _material;
         static float _next, _ready, _workNext, _queryNext, _requestedUntil;
         static int _candidate, _mask = 1, _serial, _planActor, _planMask, _attempt, _seed, _slot;
         static bool _near, _canOrder, _mapOpened, _planning, _filling, _awaitCommit;
@@ -34,9 +33,10 @@ namespace NextDayRevival
         static readonly Dictionary<int, Cargo> Cargoes = new Dictionary<int, Cargo>();
         // C W3: the command room furnishes the cab again. E W1: the radar
         // console is back by the south window (x 7.25..8.55); the free spot
-        // is between it and the radio bench, the rest are fallbacks.
+        // is between it and the radio bench (G R3: = TowerCommandRoomCore
+        // .SupplyX/SupplyZ, the requisition desk), the rest are fallbacks.
         static readonly Vector3[] Candidates = {
-            new Vector3(6.65f, 0f, -2.8f), new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
+            new Vector3(6.65f, 0f, -2.85f), new Vector3(5.7f, 0f, -2.8f), new Vector3(9.7f, 0f, -2.8f),
             new Vector3(5.7f, 0f, 2.8f), new Vector3(9.7f, 0f, 2.8f) };
         static readonly string[] _labels = new string[4];
         static string _title, _prompt, _order, _close, _help, _status = "", _useText, _lockedText, _key = "F";
@@ -243,8 +243,7 @@ namespace NextDayRevival
             if (_tower != TowerRadar.Tower || !TowerRadar.Built)
             {
                 if (_console != null) UnityEngine.Object.Destroy(_console.gameObject);
-                if (_material != null) UnityEngine.Object.Destroy(_material);
-                _console = null; _material = null; _desk = null; _aimed = false;
+                _console = null; _desk = null; _aimed = false;
                 _tower = TowerRadar.Tower; _candidate = 0; _placement = -1;
                 if (Selecting) Close();
                 _near = _canOrder = false;
@@ -403,27 +402,22 @@ namespace NextDayRevival
             Vector3 at = TowerRadar.TowerPoint(Candidates[index]);
             at.y = TowerRadar.CabFloorY;
             Quaternion rotation = Quaternion.Euler(0f, TowerRadar.TowerYaw, 0f);
-            Vector3 body = new Vector3(0.55f, 0.8f, 0.3f) * TowerDeliveryCore.Units;
+            Vector3 body = new Vector3(TowerCommandRoomCore.SupplyW, TowerCommandRoomCore.SupplyH,
+                TowerCommandRoomCore.SupplyD) * TowerDeliveryCore.Units;
             if (master && (!ClearBox(at + Vector3.up * (body.y / 2f + 0.08f), body / 2f, rotation)
                 || !ClearBox(at + rotation * new Vector3(0f, 2.6f, 3.1f), new Vector3(1f, 2.4f, 0.9f), rotation))) return;
-            GameObject desk = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            desk.name = "NDR tower supply order console";
-            // Keep the sign under a unit-scale root. Rotating it under the
-            // nonuniform cube scale would stretch/shear the text.
             GameObject root = new GameObject("NDR tower supply console root");
             _console = root.transform;
-            _console.position = at + Vector3.up * (body.y / 2f);   // on the floor; the clearance box above stays lifted
+            _console.position = at + Vector3.up * (body.y / 2f);
             _console.rotation = rotation;
-            desk.transform.SetParent(_console, false); desk.transform.localScale = body;
-            _desk = desk.GetComponent<Collider>();
-            _material = new Material(Shader.Find("Standard")); _material.color = new Color(0.22f, 0.3f, 0.24f);
-            desk.GetComponent<Renderer>().sharedMaterial = _material;
+            BoxCollider volume = root.AddComponent<BoxCollider>(); volume.size = body;
+            _desk = volume;
+            // G R3: a real desk now; mercs walk round it like the room's furniture.
+            UnityEngine.AI.NavMeshObstacle obstacle = root.AddComponent<UnityEngine.AI.NavMeshObstacle>();
+            obstacle.shape = UnityEngine.AI.NavMeshObstacleShape.Box; obstacle.size = body;
+            obstacle.carving = true; obstacle.carveOnlyStationary = true;
             UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(root, TowerRadar.ConsoleRoot.gameObject.scene);
-            GameObject plate = new GameObject("Supply order sign"); plate.transform.SetParent(_console, false);
-            plate.transform.localPosition = new Vector3(0f, 0.65f * body.y, 0f);
-            plate.AddComponent<SupplySignBillboard>();
-            TextMesh text = plate.AddComponent<TextMesh>(); text.text = Loc.T("СНАБЖЕНИЕ АЭРОДРОМА [", "AIRFIELD SUPPLIES [") + KeyName() + "]";
-            text.characterSize = 0.14f; text.fontSize = 36; text.anchor = TextAnchor.MiddleCenter;
+            TowerCommandRoom.AttachTerminal(_console);
             _placement = index;
             if (master) RadarNet.Send(new float[] { 22f, index });
             RevivalPlugin.L.LogInfo("TowerDelivery: all-collider clearance passed; console at " + at);
@@ -643,24 +637,6 @@ namespace NextDayRevival
                 return true;
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery release: " + ex.Message); return false; }
-        }
-    }
-    // TextMesh is read from local -Z. Matching the view rotation presents
-    // that face to the camera; looking toward the camera would show its back.
-    internal sealed class SupplySignBillboard : MonoBehaviour
-    {
-        Transform _label;
-        void Awake() { _label = transform; }
-        void LateUpdate()
-        {
-            // Reuse the console's F6 tick bucket; callbacks run sequentially.
-            FrameProf.S(FrameProf.S_TowerDeliveryT);
-            try
-            {
-                Camera camera = CameraOwner.ViewCamera();
-                if (camera != null) _label.rotation = camera.transform.rotation;
-            }
-            finally { FrameProf.E(FrameProf.S_TowerDeliveryT); }
         }
     }
 }

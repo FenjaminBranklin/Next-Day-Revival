@@ -343,6 +343,7 @@ namespace NextDayRevival
             e.WarningLeadSeconds = 180f;
             e.Enabled = true;
             e.Coordinated = true;
+            e.SpeedFactor = AARaidBalanceCore.RaidSpeedFactor;
             e.X = target.x; e.Z = target.z;
             e.Heading = heading;
             e.Length = length; e.Width = width;

@@ -145,6 +145,7 @@ $assetDst = Join-Path $plugins "assets"
 New-Item -ItemType Directory -Force -Path $assetDst | Out-Null
 
 $assets = @(
+    "c1_room_papers.png", "c1_room_screens.png", "c1_room_lamp.png",
     "stinger.ndmesh", "stinger_diffuse.png", "stinger_normal.png",
     "stinger_metal.png", "stinger_rough.png", "stinger_icon.png",
     "stinger_weapon_icon.png", "stinger_missile.ndmesh", "stinger_missile_diffuse.png",
@@ -268,6 +269,9 @@ $assets = @(
     # Helicopter landing pads, the third editor-written runtime view. Header
     # only until pads are authored, so Revival.Helipads.cs builds nothing.
     "ndr_helipads.tsv",
+    # Screenshot tour stops (Revival.ScreenshotTour.cs, [Research] ScreenshotTour
+    # and -ndrTour): hand-written, the game never edits it.
+    "ndr_screenshot_tour.tsv",
     # East extension probe (Revival.EastTile.cs, [Research] EastTile, off by
     # default): a Unity 2018.1.0f2 scene bundle with one terrain tile, built by
     # unity/EastTileProbe. Shipped like a real tile would be.

@@ -54,6 +54,14 @@ namespace NextDayRevival
         static bool BeforeAuth(object __instance)
         {
             if (_resumeAuth) { _resumeAuth = false; return true; }
+            // The screenshot tour's own -ndrTour session talks to the game's
+            // offline master-server emulator: no server whose version could
+            // drift, and a dev build that no launch receipt covers.
+            if (ScreenshotTour.OfflineBoot(__instance))
+            {
+                RevivalPlugin.L.LogInfo("ClientIntegrity: -ndrTour offline session, emulated master server; receipt not required.");
+                return true;
+            }
             if (_checking) return false;
             _checking = true;
             _routeFailed = false;
