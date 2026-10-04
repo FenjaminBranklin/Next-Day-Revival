@@ -178,6 +178,20 @@ namespace NextDayRevival
         public static readonly LaunchHold FpvHold = new LaunchHold(
             "fpv-launch", "\u0417\u0430\u043f\u0443\u0441\u043a FPV", "FPV launch");
 
+        public static void Install(Harmony harmony)
+        {
+            try
+            {
+                Type manager = RevivalPlugin.TypeByName("PlayerWeaponsManager");
+                MethodInfo equip = manager == null ? null : AccessTools.Method(manager,
+                    "SetWeaponInHands", new Type[] { typeof(int), typeof(bool) }, null);
+                if (equip == null) { RevivalPlugin.L.LogWarning("Drone guide: native equip method missing."); return; }
+                harmony.Patch(equip, null, new HarmonyMethod(typeof(DroneGear).GetMethod("EquipPostfix")),
+                    null, null, null);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("Drone guide equip hook: " + ex.Message); }
+        }
+
         public static void Tick()
         {
             if (CfgEnabled != null && !CfgEnabled.Value)
@@ -191,187 +205,125 @@ namespace NextDayRevival
                 if (Antenna.Deploying || Antenna.Up) Antenna.ForceRetract("drone system disabled");
                 FpvHold.Cancel();
                 SurvDrone.Hold.Cancel();
+                _guideState = -1;
                 return;
             }
             if (!RevivalPlugin.CfgDrone.Value || Drone.Flying || SurvDrone.Flying)
                 FpvHold.Cancel();
             Antenna.Tick();
             SurvDrone.Tick();
+            TickGuide();
         }
 
         /// <summary>
         /// The one seam OnGUI hangs on. Long actions use the game's native
-        /// interaction HUD; this draws only the guide and drone overlay/prompts.
+        /// interaction HUD; this draws only the drone overlay/prompts.
         /// </summary>
         public static void Draw()
         {
             if (CfgEnabled != null && !CfgEnabled.Value) return;
-            DrawGuide();
             SurvDrone.Draw();
         }
 
-        static Texture2D _guidePx;
-        static Texture2D GuidePx()
+        // Inventory and vehicle probes share existing caches. Only a changed
+        // state builds text or posts a notice; idle Update and Draw allocate none.
+        static float _guideNext;
+        static int _guideState = -1;
+        static string _guideAntKey, _guideFpvKey, _guideSurvKey;
+        static bool _guideRu;
+        static GameObject _guidePlayer;
+        static int _guideEquipItem;
+        static float _guideEquipUntil;
+        static int _guideSerial;
+
+        // Native SetWeaponInHands receives an item ID, not a slot index (IL).
+        // A fresh local equip is a help event even if the drone was already in
+        // the pack. Unchanged frames and remote players cannot refresh it.
+        public static void EquipPostfix(object __instance, int __0, bool __1)
         {
-            if (_guidePx == null)
-            {
-                _guidePx = new Texture2D(1, 1);
-                _guidePx.SetPixel(0, 0, Color.white);
-                _guidePx.Apply();
-            }
-            return _guidePx;
+            if (!__1 || CfgEnabled == null || !CfgEnabled.Value) return;
+            int fpvId = RevivalPlugin.CfgDroneItemId == null ? 1163 : RevivalPlugin.CfgDroneItemId.Value;
+            if (!((__0 == fpvId && RevivalPlugin.CfgDrone.Value)
+                || (__0 == SurveillanceId && CfgSurvEnabled != null && CfgSurvEnabled.Value))) return;
+            Component manager = __instance as Component;
+            GameObject player = MapTools.LocalPlayer();
+            if (manager == null || player == null || manager.transform.root != player.transform.root) return;
+            if (__0 == _guideEquipItem && Time.time < _guideEquipUntil) return;
+            _guideEquipItem = __0; _guideEquipUntil = Time.time + 0.5f;
+            _guideState = -1; _guideNext = 0f;
         }
 
-        /// <summary>
-        /// A small always-on panel that WALKS THE PLAYER THROUGH the antenna ->
-        /// launch flow with the ACTUAL configured keys and the live state. It is
-        /// the answer to "there is simply no way to figure out how to start it":
-        /// nothing about the antenna gate or the hold-to-launch is discoverable
-        /// without it. Shown only on foot, only while NOTHING of ours is airborne
-        /// (the flight OSDs take over then), and only while the player carries at
-        /// least one relevant piece of gear - so it never clutters an unrelated
-        /// session. Every line is bilingual (Loc.T) like the rest of the HUD.
-        /// </summary>
-        static void DrawGuide()
+        static void TickGuide()
         {
-            try
+            if (Drone.Flying || SurvDrone.Flying || !CameraOwner.Free
+                || GameUi.WindowOpen || Time.time < _guideNext) return;
+            _guideNext = Time.time + 0.5f;
+            GameObject player = MapTools.LocalPlayer();
+            if (player == null) { _guidePlayer = null; _guideState = -1; return; }
+            if (player != _guidePlayer) { _guidePlayer = player; _guideState = -1; }
+            bool haveAnt = Antenna.CarryingAntenna;
+            bool haveFpv = RevivalPlugin.CfgDrone.Value && Turret.HasItem(
+                RevivalPlugin.CfgDroneItemId == null ? 1163 : RevivalPlugin.CfgDroneItemId.Value);
+            bool haveSurv = CfgSurvEnabled != null && CfgSurvEnabled.Value
+                && Turret.HasItem(SurveillanceId);
+            bool grounded = CfgSurvEnabled != null && CfgSurvEnabled.Value
+                && SurvDrone.GroundedAway >= 0;
+            int state = (haveAnt ? 1 : 0) | (haveFpv ? 2 : 0) | (haveSurv ? 4 : 0)
+                | (Antenna.PlayerInVehicle ? 8 : 0) | (Antenna.Up ? 16 : 0)
+                | (Antenna.Deploying ? 32 : 0) | (grounded ? 64 : 0)
+                | (Antenna.GateActive ? 128 : 0);
+            string antKey = CfgAntennaKey == null ? "H" : CfgAntennaKey.Value;
+            string fpvKey = RevivalPlugin.CfgDroneKey == null ? "G" : RevivalPlugin.CfgDroneKey.Value;
+            string survKey = CfgSurvKey == null ? "B" : CfgSurvKey.Value;
+            bool ru = Loc.Ru;
+            if (state == _guideState && antKey == _guideAntKey && fpvKey == _guideFpvKey
+                && survKey == _guideSurvKey && ru == _guideRu) return;
+            _guideState = state;
+            _guideAntKey = antKey; _guideFpvKey = fpvKey; _guideSurvKey = survKey; _guideRu = ru;
+            if (((!haveAnt || !Antenna.GateActive) && !haveFpv && !haveSurv && !grounded)
+                || Antenna.Deploying || FpvHold.Active || SurvDrone.LaunchBusy) return;
+            // Consult the existing hint policy only for an event. A fresh equip
+            // gets a fresh signature; Always still uses the native short life.
+            _guideSerial++;
+            if (Hints.Alpha("drone.guide", _guideSerial.ToString()) <= 0f) return;
+            PostGuide(haveAnt, haveFpv, haveSurv, grounded, fpvKey, survKey);
+        }
+
+        internal static void AntennaReadyHint()
+        {
+            _guideNext = 0f;
+            TickGuide();
+        }
+
+        static void PostGuide(bool haveAnt, bool haveFpv, bool haveSurv, bool grounded,
+                              string fpvKey, string survKey)
+        {
+            string text;
+            if (Antenna.PlayerInVehicle)
+                text = Loc.T("Выйди из машины для запуска дрона", "Exit the vehicle to use the drone");
+            else if (grounded && !haveFpv && !haveSurv)
+                text = Loc.T("[" + survKey + "] Разведдрон на земле - подойди и подбери",
+                             "[" + survKey + "] Recon drone on ground - approach and recover");
+            else if (Antenna.GateActive && !haveAnt)
+                text = Loc.T("Нужна мачтовая антенна в рюкзаке", "Need the mast antenna in the backpack");
+            else if (Antenna.GateActive && !Antenna.Up)
             {
-                if (Drone.Flying || SurvDrone.Flying) return;
-
-                bool haveAnt = Antenna.CarryingAntenna;
-                int fpvId = RevivalPlugin.CfgDroneItemId == null
-                    ? 1163 : RevivalPlugin.CfgDroneItemId.Value;
-                bool haveFpv = Turret.HasItem(fpvId);
-                bool survOn = CfgSurvEnabled != null && CfgSurvEnabled.Value;
-                bool haveSurv = survOn && Turret.HasItem(SurveillanceId);
-                // A recon drone lying on the ground is the one state that used
-                // to be invisible AND blocking. It is worth a line of its own.
-                int grounded = survOn ? SurvDrone.GroundedAway : -1;
-                if (!haveAnt && !haveFpv && !haveSurv && grounded < 0) return;
-
-                bool inVeh = Antenna.PlayerInVehicle;
-                bool up = Antenna.Up;
-                bool deploying = Antenna.Deploying;
-
                 string antKey = Antenna.KeyLabel;
-                string fpvKey = RevivalPlugin.CfgDroneKey == null
-                    ? "G" : RevivalPlugin.CfgDroneKey.Value;
-                string survKey = CfgSurvKey == null ? "B" : CfgSurvKey.Value;
-
-                // NDR P9: [Hints] - shown when the state changes (gear picked up,
-                // antenna raised ...), then faded; the hint key brings it back.
-                // The state is the flags, not the text: the grounded drone's
-                // running distance must not keep the box up.
-                float fade = Hints.Alpha("drone.guide", (haveAnt ? "a" : "-") + (haveFpv ? "f" : "-")
-                    + (haveSurv ? "s" : "-") + (grounded >= 0 ? "g" : "-") + (inVeh ? "v" : "-")
-                    + (up ? "u" : "-") + (deploying ? "d" : "-") + fpvKey + survKey + antKey);
-                if (fade <= 0f) return;
-
-                // Build the lines. Each is {text, tint}.
-                List<string> lines = new List<string>();
-                List<Color> tints = new List<Color>();
-                Color ok = new Color(0.55f, 0.95f, 0.6f, 0.97f);   // ready / done
-                Color todo = new Color(1f, 0.85f, 0.35f, 0.97f);   // action needed
-                Color dim = new Color(0.72f, 0.74f, 0.78f, 0.9f);  // not yet / info
-
-                // Antenna line.
-                if (inVeh)
-                {
-                    lines.Add(Loc.T("В машине антенну развернуть нельзя - выйди",
-                                    "Antenna cannot deploy in a vehicle - get out"));
-                    tints.Add(dim);
-                }
-                else if (!haveAnt)
-                {
-                    lines.Add(Loc.T("Нужна мачтовая антенна в рюкзаке",
-                                    "Need the mast antenna in the backpack"));
-                    tints.Add(todo);
-                }
-                else if (deploying)
-                {
-                    lines.Add(Loc.T("Антенна разворачивается...",
-                                    "Antenna raising..."));
-                    tints.Add(todo);
-                }
-                else if (up)
-                {
-                    lines.Add(Loc.T("[" + antKey + "] Антенна поднята - готова",
-                                    "[" + antKey + "] Antenna up - ready"));
-                    tints.Add(ok);
-                }
-                else
-                {
-                    lines.Add(Loc.T("[" + antKey + "] Поднять антенну (стой на месте)",
-                                    "[" + antKey + "] Raise antenna (stand still)"));
-                    tints.Add(todo);
-                }
-
-                // FPV launch line - only while carrying an FPV drone.
-                if (haveFpv)
-                {
-                    if (up)
-                    {
-                        lines.Add(Loc.T("[" + fpvKey + "] держать - пуск FPV-дрона",
-                                        "[" + fpvKey + "] hold - launch FPV drone"));
-                        tints.Add(ok);
-                    }
-                    else
-                    {
-                        lines.Add(Loc.T("[" + fpvKey + "] FPV-дрон - нужна антенна",
-                                        "[" + fpvKey + "] FPV drone - needs antenna"));
-                        tints.Add(dim);
-                    }
-                }
-
-                // Surveillance launch line - only while carrying the recon drone.
-                if (haveSurv)
-                {
-                    if (up)
-                    {
-                        lines.Add(Loc.T("[" + survKey + "] держать - пуск разведдрона",
-                                        "[" + survKey + "] hold - launch recon drone"));
-                        tints.Add(ok);
-                    }
-                    else
-                    {
-                        lines.Add(Loc.T("[" + survKey + "] разведдрон - нужна антенна",
-                                        "[" + survKey + "] recon drone - needs antenna"));
-                        tints.Add(dim);
-                    }
-                }
-
-                if (grounded >= 0)
-                {
-                    lines.Add(Loc.T("[" + survKey + "] разведдрон на земле в " + grounded + " м - подойди и нажми",
-                                    "[" + survKey + "] recon drone on the ground, " + grounded + " m - walk up and tap"));
-                    tints.Add(todo);
-                }
-
-                // Layout: a compact box on the left edge, below any top OSD.
-                float pad = 8f;
-                float lh = 20f;
-                float w = 320f;
-                float h = pad * 2f + lh * (lines.Count + 1);
-                float x = 16f;
-                float y = Screen.height * 0.32f;
-
-                Color old = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.55f * fade);
-                VanillaUi.Texture(new Rect(x - 4f, y - 4f, w + 8f, h + 8f), GuidePx());
-
-                GUI.color = new Color(0.75f, 0.85f, 1f, 0.97f * fade);
-                VanillaUi.Label(new Rect(x + pad, y + pad, w - pad * 2f, lh),
-                          Loc.T("ДРОН - как запустить", "DRONE - how to launch"));
-
-                for (int i = 0; i < lines.Count; i++)
-                {
-                    GUI.color = Hints.Tint(tints[i], fade);
-                    VanillaUi.Label(new Rect(x + pad, y + pad + lh * (i + 1), w - pad * 2f, lh),
-                              lines[i]);
-                }
-                GUI.color = old;
+                text = Loc.T("[" + antKey + "] Поднять антенну (стой на месте)",
+                             "[" + antKey + "] Raise antenna (stand still)");
             }
-            catch (Exception ex) { RevivalPlugin.L.LogError("Drone guide: " + ex); }
+            else if (haveFpv && haveSurv)
+                text = Loc.T("Держать [" + fpvKey + "] FPV / [" + survKey + "] разведдрон",
+                             "Hold [" + fpvKey + "] FPV / [" + survKey + "] recon");
+            else if (haveFpv)
+                text = Loc.T("Держать [" + fpvKey + "] для запуска FPV-дрона",
+                             "Hold [" + fpvKey + "] to launch FPV drone");
+            else if (haveSurv)
+                text = Loc.T("Держать [" + survKey + "] для запуска разведдрона",
+                             "Hold [" + survKey + "] to launch recon drone");
+            else
+                text = Loc.T("Антенна поднята - готова к запуску дрона", "Antenna up - ready for a drone");
+            Turret.Hinweis(text, 3f);
         }
 
         /// <summary>
@@ -541,6 +493,7 @@ namespace NextDayRevival
         // press - which is long past by then. The caller takes it once and
         // says what happened.
         bool _lost;
+        float _retryAt;
 
         public LaunchHold(string owner, string ru, string en)
         {
@@ -570,14 +523,23 @@ namespace NextDayRevival
                 if (_active && !gateOk) _lost = true;
                 if (_active) NativeActionProgress.End(_owner);
                 _active = false;
+                _retryAt = 0f;
                 return false;
             }
 
             float len = Len();
             if (!_active)
             {
+                if (Time.time < _retryAt) return false;
                 if (!NativeActionProgress.Begin(_owner, Loc.T(_ru, _en), len,
-                    true, "berr", "use_military_medkit")) return false;
+                    true, "berr", "use_military_medkit"))
+                {
+                    // The launch lock also covers a native HUD without a clip.
+                    if (!NativeActionProgress.Begin(_owner, Loc.T(_ru, _en), len, false, null, null))
+                    { _retryAt = Time.time + 0.5f; return false; }
+                    RevivalPlugin.L.LogInfo("Drone action: " + _owner + " uses native HUD without an interaction clip.");
+                }
+                _retryAt = 0f;
                 _active = true;
                 _start = Time.time;
             }
@@ -599,6 +561,7 @@ namespace NextDayRevival
             if (_active) NativeActionProgress.End(_owner);
             _active = false;
             _lost = false;
+            _retryAt = 0f;
         }
 
         static float Len()
@@ -792,9 +755,20 @@ namespace NextDayRevival
         static void Begin()
         {
             _len = Mathf.Max(0.5f, DroneGear.CfgDeploySeconds.Value);
-            if (!NativeActionProgress.Begin("antenna-deploy",
-                Loc.T("\u0410\u043d\u0442\u0435\u043d\u043d\u0430", "Antenna"), _len,
-                true, "berr", "use_military_medkit")) return;
+            if (!NativeActionProgress.Begin("antenna-deploy", Loc.T("Антенна", "Antenna"), _len,
+                true, "berr", "use_military_medkit"))
+            {
+                // Native animation is presentation; Frozen already locks the
+                // body. HUD ownership and the antenna timer remain required.
+                if (!NativeActionProgress.Begin("antenna-deploy", Loc.T("Антенна", "Antenna"), _len,
+                    false, null, null))
+                {
+                    Turret.Hinweis(Loc.T("Действие занято - попробуй развернуть антенну ещё раз",
+                                         "Action unavailable - try deploying the antenna again"), 3f);
+                    return;
+                }
+                RevivalPlugin.L.LogInfo("Drone action: antenna-deploy uses native HUD without an interaction clip.");
+            }
             Deploying = true;
             _start = Time.time;
             _end = _start + _len;
@@ -810,8 +784,7 @@ namespace NextDayRevival
             Deploying = false;
             Up = true;
             Grow(1f);
-            Turret.Hinweis(Loc.T("Антенна поднята - дрон готов к пуску",
-                                 "Antenna up - drone ready to launch"), 3f);
+            DroneGear.AntennaReadyHint();
             RevivalPlugin.L.LogInfo("Antenna: up - backpack bone="
                 + (_packBone == null ? "pending" : _packBone.name)
                 + ", extension=" + MastLength().ToString("F1") + " m.");

@@ -7,7 +7,12 @@ namespace NextDayRevival
     {
         internal const int ShellId = 2076, BeltId = 2077;
         internal const int Cooldown = 600;
-        internal const float Units = 2.8f, RadiusMin = 65f, RadiusMax = 145f;
+        internal const float Units = 2.8f;
+        internal const int Sites = 12;
+        // World coordinates: east_layout.json runway (107 u wide). These
+        // inset points are east of the apron, away from its parked aircraft.
+        internal static bool OnRunway(float x, float z)
+        { return x >= 4604f && x <= 4660f && z >= 990f && z <= 1350f; }
         internal static bool Service(int service) { return service >= 4 && service <= 18; }
         internal static int Mask(int service) { return Service(service) ? service - 3 : 0; }
         internal static int Price(int mask)
@@ -37,14 +42,10 @@ namespace NextDayRevival
         { return enabled && alive && near && held && !busy && Price(mask) > 0 && now >= ready; }
         internal static void Scatter(int seed, int attempt, out float x, out float z)
         {
-            // No Unity random state changes; independent attempts in an annulus.
-            uint n = unchecked((uint)seed + (uint)attempt * 747796405u + 2891336453u);
-            n ^= n >> 16; n *= 2246822519u; n ^= n >> 13;
-            double angle = (n & 65535u) * (Math.PI * 2.0 / 65536.0);
-            double radius = Math.Sqrt(RadiusMin * RadiusMin
-                + (RadiusMax * RadiusMax - RadiusMin * RadiusMin) * ((n >> 16) / 65535.0));
-            x = (float)(Math.Cos(angle) * radius * Units);
-            z = (float)(Math.Sin(angle) * radius * Units);
+            // Visit all 12 candidates once, without changing Unity random state.
+            int index = (int)(((uint)seed % Sites + (uint)attempt * 5u) % Sites);
+            x = 4612f + (index % 3) * 20f;
+            z = 1020f + (index / 3) * 100f;
         }
     }
 }

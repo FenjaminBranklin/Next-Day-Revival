@@ -120,9 +120,11 @@ namespace NextDayRevival
             Set(lo, "startPoint", st);
             Set(lo, "beupPoint", be);
             Set(lo, "endPoint", en);
-            // 0 = the four-storey climb animation, the longest the game has
+            // Optional kit marker selects the measured vanilla one-storey
+            // animation (Ladder_1st_01). Existing tall ladders keep type 0.
+            int ladderType = g.Find("OneStorey") != null ? 1 : 0;
             FieldInfo f = lt.GetField("ladderType", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (f != null && f.FieldType.IsEnum) f.SetValue(lo, Enum.ToObject(f.FieldType, 0));
+            if (f != null && f.FieldType.IsEnum) f.SetValue(lo, Enum.ToObject(f.FieldType, ladderType));
             Log(scene + "/" + g.name + ": ladder wired, climb " + (be.position.y - st.position.y).ToString("F1")
                 + " u, top " + en.position.ToString("F1") + ".");
         }

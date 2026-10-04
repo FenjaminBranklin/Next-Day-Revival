@@ -202,8 +202,13 @@ namespace UnityEngine {
         public int GetInstanceID() { return Id; }
         public static Object[] FindObjectsOfType(Type t) { return new Object[0]; }
     }
-    public class GameObject { public bool activeInHierarchy=true; }
-    public class Component : Object { public GameObject gameObject=new GameObject(); }
+    public struct Vector3 {
+        public float x,y,z;
+        public static Vector3 operator -(Vector3 a,Vector3 b) { return new Vector3 { x=a.x-b.x,y=a.y-b.y,z=a.z-b.z }; }
+    }
+    public class Transform : Object { public Vector3 position; }
+    public class GameObject { public bool activeInHierarchy=true; public string name="Native"; }
+    public class Component : Object { public GameObject gameObject=new GameObject(); public Transform transform=new Transform(); }
     public static class Time { public static float time; }
 }
 namespace HarmonyLib {

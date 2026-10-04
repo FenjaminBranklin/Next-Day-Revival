@@ -6,6 +6,10 @@ namespace NextDayRevival
 {
     internal static partial class Mercs
     {
+        // H M2: set while air defence re-crews itself; its summary replaces
+        // the reply and the refusal receipt of every merc.
+        static bool _orderQuiet;
+
         static void OrderReceived(Record r, bool focus, Vector3 objective)
         {
             RaidReceived(r);
@@ -13,6 +17,8 @@ namespace NextDayRevival
             Vector3 at = u == null || u.Ai == null ? OwnerPosition : u.Ai.transform.position;
             r.ReceiptFor = r.Order; r.ReceiptFocus = focus;
             r.Receipt.Begin(Time.time, at, NpcWar.MercOrderShots(u));
+            // H M2: air defence re-crewing has one summary, no reply or refusal per merc.
+            if (_orderQuiet) { r.Receipt.Pending = false; if (u != null) NpcWar.MercOrderWake(u); return; }
             string action = focus ? Loc.T("атакую", "attacking") : OrderAction(r.Order);
             float metres = Flat(objective - at) / 2.8f;
             MercUi.OrderReply(r.Name + ": " + action + (metres >= 1f ? ", " + metres.ToString("0") + " m" : ""), false);

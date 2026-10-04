@@ -3,7 +3,7 @@ the cab, the radar console stands in it ON the measured cab floor (E W1; C W3
 had it on the main roof), and nothing the mod builds on or in the tower
 floats or cuts into anything.
 
-Every box the mod adds there (stair threshold, five sandbag posts, the radar
+Every box the mod adds there (five sandbag posts, the radar
 console's own primitives and collider in the cab, the Z TC1 command room's props and colliders, the Z M4 supply order console,
 and the antenna's support on the cab roof)
 is tested against ALL shipped collider triangles within 50 m (exact
@@ -54,23 +54,6 @@ def console_boxes(roof):
     return out, collider
 
 
-def threshold_boxes():
-    from tower_stairs_check import layout
-    points = layout()
-    width, thick = core_const("ThresholdWidth"), core_const("ThresholdThick")
-    out = []
-    for i in range(int(core_const("ThresholdFirst")), int(core_const("ThresholdLast")) + 1):
-        a, b = points[i - 1], points[i]
-        d = b - a
-        axis = d / np.linalg.norm(d)
-        side = np.cross(axis, [0, 1, 0]); side /= np.linalg.norm(side)
-        normal = np.cross(side, axis)
-        out.append(box("StairThreshold_%d" % i, (a + b) / 2 - normal * thick / 2,
-                       (np.linalg.norm(d), thick, width), np.column_stack((axis, normal, side)),
-                       group="threshold", allow_floor=True))
-    return out
-
-
 def antenna_support():
     """CompactRadar's physical/rendered FieldSupport, from its production recipe."""
     src = (ROOT / "Revival.AirfieldObjects.cs").read_text(encoding="ascii")
@@ -96,7 +79,7 @@ def antenna_support():
 def all_boxes(roof, floor):
     import tower_command_room_check as room
     from tower_stairs_check import core_array, supply_size, supply_spot
-    boxes = threshold_boxes()
+    boxes = []    # H T1: the building's landing slab spans the gap; no threshold
     bag = core_const("BagH")
     for n, (x, z, sx, sz) in enumerate(zip(core_array("BagX"), core_array("BagZ"),
                                            core_array("BagSX"), core_array("BagSZ"))):
@@ -302,15 +285,6 @@ def props():
     old_support = box("6.67 antenna support", (7.9, 15.35 + 1.5, 0), (.24, 3, .24))
     assert floating([old_support], tri) == ["6.67 antenna support"], \
         "the 6.67 antenna support should float"
-    # threshold ramps: both ends on the landing/roof (8.79), plateau over the face
-    for b in boxes:
-        if b["group"] != "threshold":
-            continue
-        top = b["c"] + b["R"][:, 1] * b["h"][1]
-        ends = [top - b["R"][:, 0] * b["h"][0], top + b["R"][:, 0] * b["h"][0]]
-        low = min(e[1] for e in ends)
-        if abs(b["R"][1, 0]) > 0.1 and abs(low - roof) > 0.005:   # ramps; the plateau clears the face (SAT above)
-            failures.append("%s does not start at the roof/landing" % b["name"])
     summary = dict(shipped_colliders_50m=count, shipped_triangles=int(len(tri)), mod_boxes=len(boxes) + 1,
                    console_floor_y=float(np.nanmean(ys)), console=[x0, z0], cab_floor=floor,
                    failures=failures)

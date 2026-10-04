@@ -34,6 +34,7 @@ def main():
     aa = (ROOT / 'Revival.MercAA.cs').read_text(encoding='utf-8')
     harness = harness.replace('// PRODUCTION_AVAILABLE', block(aa, 'static bool Available('))
     harness = harness.replace('// PRODUCTION_CAN_APPROACH', block(aa, 'internal static bool CanApproach('))
+    harness = harness.replace('// PRODUCTION_HOSTILE_CREW', block(aa, 'internal static Component HostileCrew('))
     ui = (ROOT / 'Revival.MercsUi.cs').read_text(encoding='utf-8')
     harness = harness.replace('// PRODUCTION_ORDER_TEXT', block(ui, 'internal static string OrderText('))
     src = stage / 'Harness.cs'
@@ -42,7 +43,7 @@ def main():
     exe = stage / 'Check.exe'
     commands = [[str(compiler), '/nologo', '/warn:0', '/optimize+', '/codepage:65001',
                  '/out:' + str(exe), str(src), str(ROOT / 'Revival.MercAirfield.cs'),
-                 str(ROOT / 'Revival.MercTargetCore.cs')], [str(exe)]]
+                 str(ROOT / 'Revival.MercTargetCore.cs'), str(ROOT / 'Revival.MercStationsCore.cs')], [str(exe)]]
     for args in commands:
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout.decode('utf-8', errors='replace').strip())
@@ -80,6 +81,19 @@ def main():
     profile = (ROOT / 'RevivalFrameProfiler.cs').read_text(encoding='utf-8')
     assert 'public const int S_MercAirfieldT = ' in profile and 'MercAirfield.Orders.Sub' in profile
     assert 'MercStationApproach(f, u, at, now)' in aa and 'MercStationPlan.Retreat' in aa
+    # H M2: the production post step clears enemy crews, waits out other
+    # holders, walks the direct path, and duty orders reply only by summary.
+    post = block(aa, 'static void MercPostStep(')
+    assert 'MercStationPlan.PostAction(' in post and 'MercClearPost(f, u, occupant, at, now)' in post
+    assert 'Mercs.AirDefenceManaged(u)' in post
+    clear = block(aa, 'static void MercClearPost(')
+    assert 'u.ClearAimAt = now + 0.5f;' in clear and 'new ' not in clear
+    adapters = (ROOT / 'Revival.MercStationsAdapters.cs').read_text(encoding='utf-8')
+    approach = block(adapters, 'static void MercStationApproach(')
+    assert '!Mercs.AirDefenceManaged(u)' in approach
+    received = block((ROOT / 'Revival.MercOrders.cs').read_text(encoding='utf-8'), 'static void OrderReceived(')
+    assert 'if (_orderQuiet) { r.Receipt.Pending = false;' in received
+    assert 'internal static Component Man { get { return _man; } }' in radar
     print('PASS: shared K/MMB toggle/page, removed picker, cab console, 2 Hz/F6, existing master leases and M1/M2/M3 wiring')
     return 0
 

@@ -273,6 +273,7 @@ namespace NextDayRevival
         internal const float BackMemory = 90f;                     // a held cover is remembered this long
         internal const float BackApart = 8f;                       // two covers this far apart are two
         internal const float BackGap = 8f;                         // no new heavy-fire fall-back this soon after one
+        internal const float AttackBackGap = 30f;                  // h-m1: an ATTACK falls back at most once per 30 s (no flip-flop)
 
         readonly int _id;
         uint _rng;
@@ -846,7 +847,7 @@ namespace NextDayRevival
             if (Mode == Flanking && Squad != null) Squad.EndFlank(_id, i.Now);
             StartMode(Retreating, back.Point.Pos, i.Now);
             _backUntil = i.Now + BackSeconds;
-            _nextBack = _backUntil + BackGap;
+            _nextBack = _backUntil + (i.Attack ? AttackBackGap : BackGap);
             _backPick = back; _backNow = true;
             Backs++;
             o.Repick = true;
@@ -1835,6 +1836,15 @@ namespace NextDayRevival
                 Dest = i.Me + move;
                 LaneAvoided++;
             }
+            // h-m1: an ATTACK strafes across or forward, never back down
+            // its heading (no forward-back-forward flip-flop): a strafe
+            // that leads back is mirrored forward, its length kept.
+            if (i.Attack && Mode == Normal && !i.AttackRear)
+            {
+                move = Dest - i.Me;
+                float back = move.x * i.AttackDir.x + move.z * i.AttackDir.z;
+                if (back < 0f) Dest = i.Me + move - i.AttackDir * (2f * back);
+            }
             _until = i.Now + StrafeCap;
             Strafes++;
         }
@@ -1885,6 +1895,16 @@ namespace NextDayRevival
                     _burstLen = Range(EvadeBurstMin, EvadeBurstMax);
                     o.Act = FightAct.Fire;
                     o.Face = Primary(ref i);
+                    return;
+                }
+                if (!seen && !i.Sees && !low && !i.Reloading && i.Attack && i.AttackMove && !i.AttackRear
+                    && Mode == Normal && Flat(i.AttackDest - i.Me) > ArriveCover)
+                {
+                    // h-m1: an ATTACK does not wait low in the open for the
+                    // enemy to show again: unseen and loaded, he runs on.
+                    Dest = i.AttackDest; _until = i.Now + StrafeCap;
+                    o.Act = FightAct.Run;
+                    o.Dest = Dest;
                     return;
                 }
                 if (!seen && (!i.Sees || low || i.Reloading))

@@ -79,9 +79,13 @@ namespace NextDayRevival
         {
             int scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
             if (_sceneIndex != scene) { _sceneIndex = scene; _complete = false; _attempts = 0; _nextAssets = 0f; }
-            if (_complete || _attempts >= 8 || Time.unscaledTime < _nextAssets) return;
-            _nextAssets = Time.unscaledTime + 2f;
+            if (_complete || Time.unscaledTime < _nextAssets) return;
+            // h-u1: HUD prefabs can load after the 16 s fast window. A consumer
+            // still missing art (Want) gets six slow passes per scene.
+            if (_attempts >= 8 && (!_wanted || _attempts >= 14)) return;
+            _nextAssets = Time.unscaledTime + (_attempts >= 8 ? 20f : 2f);
             _attempts++;
+            _wanted = false;
             UnityEngine.Object[] fonts = Resources.FindObjectsOfTypeAll(typeof(Font));
             for (int i = 0; i < fonts.Length; i++)
             {
@@ -106,6 +110,11 @@ namespace NextDayRevival
             for (int i = 0; i < Textures.Length; i++) if (Textures[i] == null) _complete = false;
             _generation++;
         }
+
+        static bool _wanted;
+
+        /// <summary>A drawer is missing native art: allow a slow resolver retry.</summary>
+        internal static void Want() { _wanted = true; }
 
         internal static Font Font(bool heading)
         {

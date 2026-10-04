@@ -1548,7 +1548,7 @@ namespace NextDayRevival
         /// whose output stays under PowerLossThreshold for PowerLossGrace
         /// seconds, with the machine more than PowerLossHeight up, starts the
         /// same stone-fall a pilotless machine gets (HeliCrashFall: nose down,
-        /// wreck, fire, bang; Net.Crashed with seven floats for everybody
+        /// wreck, fire, bang; Net.Crashed carries the fall start for everybody
         /// else). The pilot stays in his seat and rides it: the ground kills
         /// him (FinishAbandonedCrash) unless he jumps first. A dip shorter than
         /// the grace - a restart, a spool-up - does nothing, and close to the
@@ -1716,6 +1716,10 @@ namespace NextDayRevival
             if (go == null || Burning(go) || Falling(go)) return;
             try
             {
+                Quaternion rotation;
+                Vector3 site;
+                double clock;
+                AircraftCrashFx.FallStart(go, out rotation, out site, out clock);
                 int view = ViewId(go);
                 _busyUntil.Remove(view);
                 EngineApply(go, false);
@@ -1725,16 +1729,20 @@ namespace NextDayRevival
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
 
                 HeliCrashFall fall = go.AddComponent<HeliCrashFall>();
-                fall.Begin(drift);
+                fall.Begin(drift, rotation, site, clock);
 
                 if (broadcast && view != 0)
                 {
                     Vector3 at = go.transform.position;
                     // The ordinary crash uses the same event with four floats.
-                    // Seven means "begin the fall" and costs no seventh event
-                    // code - 176 already belongs to the FPV drone.
+                    // The extended fall carries the pose, local engine site
+                    // and split Photon clock; seven-float legacy falls still work.
+                    Vector3 e = rotation.eulerAngles;
+                    float high = (float)clock;
                     Net.Send(Net.Crashed, new float[] {
-                        view, at.x, at.y, at.z, drift.x, drift.y, drift.z }, true);
+                        view, at.x, at.y, at.z, drift.x, drift.y, drift.z,
+                        e.x, e.y, e.z, site.x, site.y, site.z,
+                        high, (float)(clock - high) }, true);
                 }
                 RevivalPlugin.L.LogInfo("PlayerHeli: helicopter " + view
                     + " abandoned in flight - visible crash descent started. Caller: "
@@ -1917,6 +1925,7 @@ namespace NextDayRevival
         {
             GameObject go = MissileTarget(view);
             if (go == null) return;
+            AircraftCrashFx.Hit(go, where);
             _busyUntil.Remove(view);
             if ((CfgCrash == null || CfgCrash.Value) && Airborne(go))
             {
@@ -2058,6 +2067,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + WreckLife();
+                AircraftCrashFx.Stop(go);
                 AircraftAudio.StopEngines(go);
                 EngineApply(go, false);
                 HeliEngine e = EngineOf(go);
@@ -2877,8 +2887,8 @@ namespace NextDayRevival
         /// says who is aboard which machine, base+3 asks the master to take one
         /// away, base+4 is the engine of one machine going on or off, base+5 is
         /// one machine that has just been destroyed. A four-float crash payload
-        /// is an immediate impact; seven floats start the visible fall of a
-        /// helicopter whose pilot left it. Everything else - the
+        /// is an immediate impact; fifteen floats start the visible fall (the
+        /// legacy seven-float start is accepted too). Everything else - the
         /// machine itself, its position for everyone who is not flying it - is
         /// the prefab's own Photon replication.
         ///
@@ -3025,7 +3035,12 @@ namespace NextDayRevival
                         _busyUntil.Remove((int)f[0]);
                         if (f.Length >= 7)
                         {
+                            if (Falling(wreck) || Burning(wreck)) return;
                             wreck.transform.position = new Vector3(f[1], f[2], f[3]);
+                            AircraftCrashFx.RememberFall(wreck,
+                                f.Length >= 15 ? Quaternion.Euler(f[7], f[8], f[9]) : wreck.transform.rotation,
+                                f.Length >= 15 ? new Vector3(f[10], f[11], f[12]) : AircraftCrashFx.Site(wreck),
+                                f.Length >= 15 ? (double)f[13] + f[14] : ParaPose.Clock());
                             Abandon(wreck, new Vector3(f[4], f[5], f[6]), false);
                             return;
                         }
@@ -3192,39 +3207,47 @@ namespace NextDayRevival
     public sealed class HeliCrashFall : MonoBehaviour
     {
         const float Gravity = 9.81f;
-        const float Terminal = 48f;
-        const float MaxFall = 35f;
+        const float Terminal = 65f;
+        const float MaxFall = 120f;
 
-        Vector3 _drift;
-        float _down;
+        Vector3 _velocity, _start;
+        Quaternion _rotation;
+        double _clock;
         float _floor;
         float _nextFloor;
-        float _life;
-        float _rollRate;
-        float _yawRate;
+        float _side;
         bool _begun;
         bool _landed;
         GameObject _trail;
+        internal Vector3 TrailSite;
 
-        internal void Begin(Vector3 velocity)
+        internal void Begin(Vector3 velocity, Quaternion rotation, Vector3 site, double clock)
         {
             if (_begun) return;
             _begun = true;
             float k = PlayerHeli.K;
-            _drift = new Vector3(velocity.x, 0f, velocity.z);
-            _down = Mathf.Max(1.5f * k, -velocity.y);
-            _rollRate = 22f + Mathf.Min(24f, _drift.magnitude / Mathf.Max(1f, k));
-            _yawRate = (_drift.x + _drift.z) >= 0f ? 13f : -13f;
+            _velocity = velocity / k;
+            _start = transform.position;
+            _rotation = rotation; _clock = clock;
+            _side = AircraftCrashFx.Side(gameObject, site);
 
             if (!PlayerHeli.CrashFloor(transform.position, out _floor))
                 _floor = transform.position.y - 120f * k;
 
-            // An unscaled, world-space emitter is moved with the engine deck.
-            // Its old particles stay behind, making a real trail rather than a
-            // ball of smoke glued to the fuselage.
-            _trail = new GameObject("NDR_PlayerHeliCrashTrail");
-            TrailAt();
+            // Keep the existing fire lifecycle API. The airframe is the handle;
+            // FireEffect routes this fall to the cloned native particle trail.
+            TrailSite = site;
+            _trail = gameObject;
             FireEffect.SpawnDroneFire(_trail, true);
+        }
+
+        internal static float Drop(float velocity, float k, double age)
+        {
+            velocity = Mathf.Max(-Terminal, velocity);
+            float dt = (float)Math.Min(age, Math.Max(0.0, (velocity + Terminal) / Gravity));
+            float acceleration = Gravity * k * dt;
+            return velocity * k * dt - 0.5f * acceleration * dt
+                - Terminal * k * (float)(age - dt);
         }
 
         void Update()
@@ -3233,21 +3256,17 @@ namespace NextDayRevival
             try
             {
             if (!_begun || _landed) return;
-            float dt = Mathf.Min(Time.deltaTime, 0.1f);
             float k = PlayerHeli.K;
-            _life += dt;
-
-            _down = Mathf.Min(Terminal * k, _down + Gravity * k * dt);
-            _drift = Vector3.Lerp(_drift, Vector3.zero, Mathf.Clamp01(dt * 0.12f));
-
-            Vector3 at = transform.position + _drift * dt
-                       + Vector3.down * (_down * dt);
+            double age = Math.Max(0.0, ParaPose.Clock() - _clock);
+            float horizontal = (float)AircraftFallCore.HorizontalTravel(age) * k;
+            Vector3 at = _start + new Vector3(_velocity.x * horizontal, Drop(_velocity.y, k, age),
+                _velocity.z * horizontal);
             transform.position = at;
 
-            // A heavy airframe does not tumble like the quadcopter. It develops
-            // one broad roll, yaws away and lowers the nose while it descends.
-            transform.Rotate(new Vector3(7f, _yawRate, _rollRate) * dt, Space.Self);
-            TrailAt();
+            Vector3 e = _rotation.eulerAngles;
+            transform.rotation = Quaternion.Euler(0f, e.y + _side * 8f * (float)age, 0f);
+            transform.Rotate(new Vector3((float)AircraftFallCore.Pitch(Mathf.DeltaAngle(0f, e.x), age),
+                0f, (float)AircraftFallCore.Bank(Mathf.DeltaAngle(0f, e.z), _side, age)), Space.Self);
 
             if (Time.time >= _nextFloor)
             {
@@ -3259,16 +3278,9 @@ namespace NextDayRevival
             // The origin is near the gear plane. A small clearance prevents the
             // last integration step from burying the hull before Burn lays it
             // on the exact floor.
-            if (at.y <= _floor + 0.7f * k || _life >= MaxFall) Land();
+            if (at.y <= _floor + 0.7f * k || age >= MaxFall) Land();
             }
             finally { FrameProf.E(FrameProf.S_HeliCrashFall_Update); }
-        }
-
-        void TrailAt()
-        {
-            if (_trail == null) return;
-            _trail.transform.position = transform.position
-                + transform.rotation * (new Vector3(0f, 3.2f, -2.5f) * PlayerHeli.K);
         }
 
         void Land()
@@ -3278,24 +3290,15 @@ namespace NextDayRevival
             Vector3 impact = transform.position;
             impact.y = _floor + 0.7f * PlayerHeli.K;
             transform.position = impact;
-            if (_trail != null)
-            {
-                FireEffect.StopEmitting(_trail);
-                Light[] lights = _trail.GetComponentsInChildren<Light>(true);
-                for (int i = 0; i < lights.Length; i++)
-                    if (lights[i] != null) UnityEngine.Object.Destroy(lights[i].gameObject);
-                UnityEngine.Object.Destroy(_trail, 7f);
-                _trail = null;
-            }
+            FireEffect.StopEmitting(_trail);
+            _trail = null;
             PlayerHeli.FinishAbandonedCrash(gameObject, impact);
             UnityEngine.Object.Destroy(this);
         }
 
         void OnDestroy()
         {
-            if (_trail == null) return;
             FireEffect.StopEmitting(_trail);
-            UnityEngine.Object.Destroy(_trail, 7f);
             _trail = null;
         }
     }

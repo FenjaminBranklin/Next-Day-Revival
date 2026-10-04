@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.70.0";
+        public const string VERSION = "6.71.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -571,6 +571,7 @@ namespace NextDayRevival
             PatchCustomDrop();
             PatchFire();
             NativeActionProgress.Install(_harmony); // NDR interaction bar: ending an action switches it off
+            DroneGear.Install(_harmony);            // short launch help on a local drone equip
             VehicleWreck.Install(_harmony);
             Turret.Install(_harmony);
             VehicleUi.Install(_harmony);         // Q5: vehicle page seat rows, window error report

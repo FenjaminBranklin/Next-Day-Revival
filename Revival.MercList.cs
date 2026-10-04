@@ -20,13 +20,13 @@ namespace NextDayRevival
 
         static bool MercListBlocked()
         {
-            // Radar has its own scope/input state, outside the vanilla UI enum.
-            if (RadarScope.InView || !CameraOwner.Free || Admin.IsOpen || Settings.IsOpen
-                || Patrol.EditorOpen || UiKit.AnyOpen) return true;
+            // h-u1: only the radar view and the full map hide the list. The
+            // 6.70 gate also asked CanCommand, CameraOwner and every custom
+            // window; one stuck or false native flag hid it for the session.
+            if (RadarScope.InView || GameplayCursor.CommandUiState == 8) return true;
             // Keep the trader's explicit Full roster entry, including whitelist.
-            if (_listOpen && _listTab >= 0)
-                return !_tabVisible || GameplayCursor.CommandUiState == 8;
-            return !GameplayCursor.CanCommand;
+            if (_listOpen && _listTab >= 0) return !_tabVisible;
+            return false;
         }
 
         static void CompactListInput()
@@ -92,6 +92,20 @@ namespace NextDayRevival
             }
         }
 
+        static bool _compactWarned;
+        static Texture2D _compactWhite;
+
+        // Cold: a slow resolver retry while art is missing, one log line.
+        static void CompactMissing(Texture2D row, Texture2D on, Texture2D off, Texture2D bar)
+        {
+            VanillaUi.Want();
+            if (_compactWarned) return;
+            _compactWarned = true;
+            RevivalPlugin.L.LogWarning("MercList: native art missing (row " + (row != null) + ", checks "
+                + (on != null && off != null) + ", bar " + (bar != null) + ", font " + (VanillaUi.Font(false) != null)
+                + ") - plain rows until it resolves.");
+        }
+
         static void CompactTexture(Rect r, Texture2D texture, Color tint)
         {
             Color old = GUI.color;
@@ -106,12 +120,18 @@ namespace NextDayRevival
             int count = Mercs.Roster.Count;
             if (count == 0 && !interactive) return;
             // Native assets are resolved by VanillaUi.Begin, never by this list.
-            // Wait for them instead of painting a flat placeholder panel.
+            // h-u1: a missing texture or font used to hide the list for the
+            // whole session. Draw the same #545454 rows on the built-in white
+            // texture and the default font until the native art resolves.
             Texture2D rowArt = VanillaUi.Asset("groupPlayerWhite");
             Texture2D checkOn = VanillaUi.Asset("galka_enable"), checkOff = VanillaUi.Asset("galka_disable");
             Texture2D health = VanillaUi.Asset("progressbar");
             if (rowArt == null || checkOn == null || checkOff == null || health == null
-                || VanillaUi.Font(false) == null || VanillaUi.Font(true) == null) return;
+                || VanillaUi.Font(false) == null) CompactMissing(rowArt, checkOn, checkOff, health);
+            if (_compactWhite == null) _compactWhite = Texture2D.whiteTexture;
+            Texture2D white = _compactWhite;
+            if (rowArt == null) rowArt = white;
+            if (health == null) health = white;
             float k; int rows;
             Rect frame = CompactFrame(count, out k, out rows);
             CompactStyles(k);
@@ -163,7 +183,10 @@ namespace NextDayRevival
                 if (!repaint) continue;
                 bool hover = interactive && r.Contains(Event.current.mousePosition);
                 CompactTexture(r, rowArt, hover ? CompactHover : CompactInk);
-                CompactTexture(new Rect(r.x + 6f * k, r.y + 9f * k, 14f * k, 14f * k), m.Selected ? checkOn : checkOff, Color.white);
+                Texture2D check = m.Selected ? checkOn : checkOff;
+                Rect box = new Rect(r.x + 6f * k, r.y + 9f * k, 14f * k, 14f * k);
+                if (check != null) CompactTexture(box, check, Color.white);
+                else CompactTexture(box, white, m.Selected ? VanillaUi.White : VanillaSkin.BarBack);
                 VanillaUi.Label(new Rect(r.x + 26f * k, r.y + 2f * k, 140f * k, 22f * k), m.Name, _compactName);
                 Rect bar = new Rect(r.x + 26f * k, r.y + 26f * k, 64f * k, 4f * k);
                 CompactTexture(bar, health, VanillaSkin.BarBack);

@@ -74,6 +74,13 @@ namespace NextDayRevival
                 || (ft.Brain != null && (ft.Brain.Mode == MercBrain.Retreating || ft.Brain.Mode == MercBrain.Falling));
             i.Protected = i.Maintenance || f.Suppression >= MercBrain.CalmPressure
                 || (ft.Brain != null && ft.Brain.Mode != MercBrain.Normal);
+            // h-m1: effective fire and a cover within a short dash decide
+            // whether he bounds at all; otherwise he runs on.
+            i.UnderFire = f.Suppression >= MercBrain.CalmPressure;
+            MercAttackRun run = u.Attack;
+            i.CoverNear = (ft.Brain != null && ft.Brain.Cover.Found
+                    && Flat(ft.Brain.Cover.Point.Pos - i.Me) <= MercBrain.CoverFirstReach)
+                || (run.HaveMove && run.MoveCovered && Flat(run.MoveAt - i.Me) <= MercAssault.Hop + 2f);
             MercAttackTeam team = u.Order.Team as MercAttackTeam;
             if (team != null)
             {
@@ -114,10 +121,11 @@ namespace NextDayRevival
             MercAttackTeam team = u.Order.Team as MercAttackTeam;
             float front = 0f;
             // c-m1: rear overwatch only while he has targets himself; a blind
-            // marksman moves up with the line until he can fire.
+            // marksman moves up with the line until he can fire (h-m1: one
+            // without a target at all moves up at once).
             bool overwatch = ft.Overwatch.Role == MercRole.Marksman && team != null
                 && team.Front(now, out front) && now - team.LastSight <= 2f
-                && run.Saw(now, MercAttackRun.MarksmanSight)
+                && input.Target && run.Saw(now, MercAttackRun.MarksmanSight)
                 && (!MercAttackGeo.Continues(u.Order) || !run.NeedsBound(ref input));
             if (overwatch)
             {
@@ -141,8 +149,10 @@ namespace NextDayRevival
             if (run.News != 0) MercAttackNews(u, run);
             if (act.Act != MercAttackAct.MoveTo) return;
             ft.In.AttackBound = run.NeedsBound(ref input);
+            // h-m1: he moves with walking fire; only under effective fire with
+            // a cover close does a non-runner fight from it until his bound.
             ft.In.AttackMove = ft.In.AttackBound || team == null || team.ReadyCount(now) <= 1
-                || !team.Contact(now) || now - team.LastSight > 2f || team.Runner(u.Order.K, now);
+                || !run.Wary(u.Order, now) || !input.CoverNear || team.Runner(u.Order.K, now);
             if (ft.In.AttackMove) ft.In.AttackDest = MercAttackWaypoint(f, u, act.Dest, now);
             ft.In.AttackCovered = ft.In.AttackMove && run.HaveMove && run.MoveCovered
                 && Flat(ft.In.AttackDest - run.MoveAt) < 1f;
@@ -180,7 +190,7 @@ namespace NextDayRevival
             float front;
             if (!i.Protected && !i.Danger && u.Fight.Overwatch.Role == MercRole.Marksman
                 && team != null && team.Front(now, out front) && now - team.LastSight <= 2f
-                && run.Saw(now, MercAttackRun.MarksmanSight)
+                && i.Target && run.Saw(now, MercAttackRun.MarksmanSight)
                 && (!MercAttackGeo.Continues(o) || !run.NeedsBound(ref i)))
             {
                 Vector3 anchor = o.Origin + MercAttackGeo.Dir(o) * front;
@@ -229,7 +239,8 @@ namespace NextDayRevival
             run.MoveCovered = false;
             // The final hold spot remains exact. Cover decisions use the same
             // globally throttled service and claims as M2, at most 2 Hz.
-            if (u.Sense.Count > 0 && Flat(goal - me) > MercAssault.Hop
+            // h-m1: cover hops only under effective fire; otherwise he runs.
+            if (u.Sense.Count > 0 && Flat(goal - me) > MercAssault.Hop && run.Wary(u.Order, now)
                 && now >= run.NextCover && MercCoverService.MayQuery())
             {
                 run.NextCover = now + MercAssault.CoverEvery;

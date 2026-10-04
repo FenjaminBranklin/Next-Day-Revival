@@ -222,7 +222,8 @@ namespace NextDayRevival
             // Reuse M1's already sampled cover: move through it only when it
             // gains ground toward the assigned seat. Never stop at the cover
             // for a rifle duel or require another physics query to obey.
-            if (u.Sense.Count > 0 && u.Sense.Pick.Found)
+            // H M2: an air defence crewman walks the direct path to his post.
+            if (u.Sense.Count > 0 && u.Sense.Pick.Found && !Mercs.AirDefenceManaged(u))
             {
                 Vector3 cover = u.Sense.Pick.Point.Pos;
                 if ((cover - f.Tr.position).sqrMagnitude > 16f

@@ -165,6 +165,23 @@ namespace NextDayRevival
             return post >= 0 && Available(post, LocalActor()) && (held == null || held.Ai == ai);
         }
 
+        // H M2: the living native crewman on this gun (or the radar operator)
+        // whose faction the merc hates - the man he clears before he sits.
+        internal static Component HostileCrew(int post, Component merc)
+        {
+            if (merc == null || post < 0 || post >= 7) return null;
+            if (post == Radar)
+            {
+                Component man = RadarOperator.Man;
+                return Flak.Up(man) && NpcWar.Hates(merc, man) ? man : null;
+            }
+            Flak.Gun g = Flak.ByIndex(post);
+            if (g == null) return null;
+            if (Flak.Up(g.Gunner) && NpcWar.Hates(merc, g.Gunner)) return g.Gunner;
+            if (Flak.Up(g.Loader) && NpcWar.Hates(merc, g.Loader)) return g.Loader;
+            return null;
+        }
+
         internal static int Nearest(bool radar, Vector3 point)
         {
             int chosen = -1;
@@ -256,6 +273,10 @@ namespace NextDayRevival
                 for (int i = 0; i < p.Animators.Length; i++) if (p.Animators[i] != null) p.Animators[i].enabled = p.AnimatorOn[i];
             if (p.WeaponOn != null)
                 for (int i = 0; i < p.WeaponRenderers.Length; i++) if (p.WeaponRenderers[i] != null) p.WeaponRenderers[i].enabled = p.WeaponOn[i];
+            // H T2: the seated root lies under the cab floor; whoever leaves
+            // the console (order, wound, death) is put back onto its floor.
+            if (p.Parked && p.Index == Radar && p.Ai != null && TowerRadar.ConsoleRoot != null)
+                p.Ai.transform.position = TowerRadar.OperatorSeat(false);
             if (p.Parked && p.Agent != null)
             {
                 p.Agent.updatePosition = true; p.Agent.updateRotation = true;
@@ -506,6 +527,30 @@ namespace NextDayRevival
             _postHealth.Ai = ai; return HealthFraction(_postHealth);
         }
 
+        // H M2: NPC_AI2.IsEnemyFraction between two bodies, without allocation.
+        internal static bool Hates(Component me, Component other)
+        {
+            return me != null && other != null && Hostile(GetHated(me), FactionOf(other));
+        }
+
+        // H M2: hold the enemy crewman as the target (one ray per half second
+        // at most), fight him with the M2 brain, close on the gun without a line.
+        static void MercClearPost(Fighter f, MercUnit u, Component occupant, Vector3 at, float now)
+        {
+            Transform tr = occupant.transform;
+            if (f.Target != tr && now >= u.ClearAimAt)
+            {
+                u.ClearAimAt = now + 0.5f;
+                float height;
+                if (MercNpcTargetable(f, occupant) && AimPoint(f, tr, out height))
+                { f.Target = tr; f.TargetIsPlayer = false; f.Sees = true; f.AimHeight = height; f.LastSeen = now; }
+            }
+            if (MercFight(f, u, now)) return;
+            if ((at - f.Tr.position).sqrMagnitude > MercStationPlan.ClearReach * MercStationPlan.ClearReach)
+                MercMove(f, u, at, true, now);
+            else MercCrouch(f, now);
+        }
+
         static void MercPostStep(Fighter f, MercUnit u, float now)
         {
             int post = MercAA.PostOf(u);
@@ -525,7 +570,22 @@ namespace NextDayRevival
             }
             if (MercCrewPhases.Ground(u)) { MercCrewHold(f, u, now); return; }
             if (post < 0 || !MercAA.Pose(post, out at, out rot)) { MercAA.Release(u); MercFollow(f, u, now); return; }
-            if (!MercAA.CanApproach(post, u.Ai))
+            // H M2: an enemy crew on his gun is his target before the seat;
+            // any other holder is waited out at the post, not where he stood.
+            Component occupant = MercAA.HostileCrew(post, u.Ai);
+            bool open = occupant == null && MercAA.CanApproach(post, u.Ai);
+            int action = MercStationPlan.PostAction(occupant != null, open, !open && Mercs.AirDefenceManaged(u));
+            if (action == MercStationPlan.PostClear) { MercAA.Release(u); MercClearPost(f, u, occupant, at, now); return; }
+            if (action == MercStationPlan.PostWait)
+            {
+                MercAA.Release(u);
+                if (MercFight(f, u, now)) return;
+                if ((at - f.Tr.position).sqrMagnitude > MercStationPlan.WaitReach * MercStationPlan.WaitReach)
+                    MercMove(f, u, at, true, now);
+                else MercCrouch(f, now);
+                return;
+            }
+            if (action == MercStationPlan.PostReplace)
             {
                 MercAA.Release(u);
                 if (!MercStations.Replace(u) && !MercFight(f, u, now)) MercCrouch(f, now);

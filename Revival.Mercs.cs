@@ -87,6 +87,7 @@ namespace NextDayRevival
         internal float MaxHealth;            // B3d: his full health at spawn (regeneration)
         internal float AttackerUntil;        // B3d: LastAttacker is answered until then
         internal float NextOrder, NextSpeed, NextWarp, NextPlayerScan;
+        internal float ClearAimAt;           // H M2: next ray at the enemy crewman on his post
         internal Transform PlayerTarget;
         internal GameObject KillTargetSet;
         internal Component QuickNpc;
@@ -588,6 +589,9 @@ namespace NextDayRevival
             // W: hired at a settlement trader - he appears there once, then
             // walks to his order (FOLLOW: the owner).
             internal Vector3 SpawnAt;
+            internal Vector3 SpawnBuyer;
+            internal MercTraderSpawnSearch SpawnSearch;
+            internal bool SpawnSearchPending;
             internal bool SpawnAtSet;
             internal string SpawnScene;
             internal bool Unpaid { get { return !Dead && Deployed > PaidUntil + 0.0001; } }
@@ -1795,13 +1799,14 @@ namespace NextDayRevival
                     RevivalPlugin.L.LogWarning("Mercs: no roster answer from the master server yet - spawning the last "
                         + "known roster; the server's answer corrects it when it comes.");
                 }
-                if (!Spawn(r, owner)) r.NextSpawn = now + (r.Order.Survive ? 0.5f : 10f);
+                if (!Spawn(r, owner)) r.NextSpawn = now + (r.SpawnSearchPending || r.Order.Survive ? 0.5f : 10f);
                 return;
             }
         }
 
         static bool Spawn(Record r, GameObject owner)
         {
+            r.SpawnSearchPending = false;
             Profile p = ProfileById(r.ProfileId);
             if (p == null && _profiles.Count > 0)
             {
@@ -1816,8 +1821,6 @@ namespace NextDayRevival
             Vector3 side = new Vector3(fwd.z, 0f, -fwd.x);
             int n = UnitCount();
             Vector3 want = owner.transform.position - fwd * (10f + 4f * (n / 2)) + side * ((n % 2 == 0 ? -1f : 1f) * 6f);
-            // W: hired at a settlement trader - he steps out beside the trader
-            // (3-4 m, spread round him) and walks to his order from there.
             if (r.Order.Survive && MercOrder.SceneKey(r.Order.Scene) == MercOrder.SceneKey(MapScene.Current))
             {
                 want = r.Order.Centre;
@@ -1827,16 +1830,20 @@ namespace NextDayRevival
             bool atTrader = r.SpawnAtSet
                 && MercOrder.SceneKey(r.SpawnScene) == MercOrder.SceneKey(MapScene.Current)
                 && Flat(r.SpawnAt - owner.transform.position) < TraderSpawnReach;
+            Vector3 pos;
             if (atTrader)
             {
-                float a = 2.4f + n * 1.25f;
-                want = r.SpawnAt + new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a)) * (9f + 2f * (n / 4));
+                // H S1: preserve the purchase side across a delayed answer.
+                // No valid escape means retry later, never fall behind a counter.
+                if (!MercTraderSpawn.TryPick(ref r.SpawnSearch, r.SpawnAt, r.SpawnBuyer,
+                    owner.transform, n, out pos, out r.SpawnSearchPending)) return false;
             }
-            Vector3 pos;
-            if (r.Order.Survive && !RevivalGroundEnemies.TryGround(want, 12f, out pos)) return false;
-            if (!RevivalGroundEnemies.TryGround(want, 12f, out pos)
-                && !(atTrader && RevivalGroundEnemies.TryGround(r.SpawnAt, 12f, out pos))
-                && !RevivalGroundEnemies.TryGround(owner.transform.position, 12f, out pos)) return false;
+            else
+            {
+                if (r.Order.Survive && !RevivalGroundEnemies.TryGround(want, 12f, out pos)) return false;
+                if (!RevivalGroundEnemies.TryGround(want, 12f, out pos)
+                    && !RevivalGroundEnemies.TryGround(owner.transform.position, 12f, out pos)) return false;
+            }
             int faction = FactionOf(owner);
             string key = KeyPrefix + LocalActor + "/" + r.Id;
             RevivalComposition.CrewMan man = p.Loadout(r.Name);
@@ -2495,6 +2502,7 @@ namespace NextDayRevival
         static bool _hirePending;
         // W: the trader the pending hire was made at (one hire at a time).
         static Vector3 _hireAt;
+        static Vector3 _hireBuyer;
         static bool _hireAtSet;
         // W-UI3: the card on the wire and the last refused hire (trader page).
         static string _hireProfile, _hireError, _hireErrorProfile;
@@ -2518,6 +2526,7 @@ namespace NextDayRevival
             _hirePending = true;
             _hireProfile = p.Id; _hireError = null;
             _hireAtSet = MercUi.TraderPoint(out _hireAt);
+            _hireBuyer = _owner == null ? _hireAt : _owner.transform.position;
             _hireScene = MapScene.Current;
             HireAttempt(p, after, 0, serialBefore);
         }
@@ -2527,6 +2536,7 @@ namespace NextDayRevival
         {
             if (r == null || !_hireAtSet) return;
             r.SpawnAt = _hireAt; r.SpawnAtSet = true; r.SpawnScene = _hireScene;
+            r.SpawnBuyer = _hireBuyer;
         }
 
         static void HireAttempt(Profile p, int after, int attempt, int serialBefore)

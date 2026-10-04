@@ -4,11 +4,13 @@
 //   CORRIDOR   origin (where the attackers stood) -> objective. Merc k of n
 //              has his own lane abreast (7 m apart) and his own hold spot and
 //              watch sector at the objective - never one point for all.
-//   ADVANCE    no contact in the group: the line sprints its lanes in steps of
-//              30 m, nobody more than 14 m ahead of the slowest. Contact in
-//              the last 15 s (or a hit): fire and movement - the odd or the
-//              even half runs a bound 30 m past the others while they fight
-//              or watch low, then the halves swap. Whoever has a target in
+//   ADVANCE    h-m1: everyone runs his lane at once in steps of 30 m, firing
+//              on the move; the front never waits for a straggler (he
+//              catches up). Only under effective fire (a hit or suppression
+//              in the group within the last 4 s - the hysteresis back to the
+//              run) does it bound: the odd or the even half runs 30 m past
+//              the others while they fight or watch low from a cover close
+//              by (no cover close: he runs on too), then the halves swap. Whoever has a target in
 //              sight fires; while a mate has the enemy in sight, a runner
 //              without a line of fire leaves the fight to that cover and runs
 //              on to a position he can fire from. A single merc fights, then
@@ -16,15 +18,16 @@
 //   STANDOFF   e-m1: no advance past his weapon's standoff (MercStandoff:
 //              rifle ~57 m, MG ~61, SMG 40, pistol 30, shotgun 22, marksman
 //              150) from a hostile his scan knows of or a mate saw in the
-//              last 3 s: he stops at that circle, low, facing it, and the
-//              fight (cover first) takes over once he can fire. A forced
+//              last 3 s, while he has a line of fire (h-m1: without one he
+//              moves on until he can fire): he stops at that circle, low,
+//              facing it, and the fight (cover first) takes it. A forced
 //              bound (NeedsBound, 6 s without progress) still takes him on.
 //              In contact the bounding pair runs while the others cover
 //              (two run, never more; with two men one each).
 //   FIGHT      the M2/M3 brain (with the merc-combat-response opening burst
 //              and lane clearance) takes over for any visible enemy, even
 //              outside the corridor. An unseen, safe new order starts moving
-//              immediately in short M1 cover hops. Two fights without a round start an
+//              immediately (h-m1: M1 cover hops only under effective fire). Two fights without a round start an
 //              8 s push in which only a target in sight (or a hit) stops him:
 //              no advance/cover cycle without shots. c-m1: without a line of
 //              fire of his own (2.5 s hysteresis), and with no hit, pressure,
@@ -47,9 +50,11 @@
 //              Shorter attacks retain the original hold behavior.
 //   STALLED    no progress for 2 x 20 s of stepping (fight time does not
 //              count), or the step budget (120 s + 0.5 s per unit of
-//              corridor) spent: he holds 6 s, then tries again on a lane
+//              corridor) spent: he holds 1 s, then tries again on a lane
 //              beside his own (+1, -1, +2, -2 lanes). The owner is told once
 //              per order. Never the end of the order, never a warp.
+//   STUCK      h-m1: a move that has not shifted him 1 m in 1.5 s re-paths at
+//              once: the cover waypoint is dropped and he takes the next lane.
 //
 // Units are game units (1 m = 2.8 u). No Unity call beyond Vector3 values
 // and no allocation after construction: research/merc_attack_check.py runs
@@ -228,6 +233,8 @@ namespace NextDayRevival
         public bool Known;              // c-m1: a hostile his scan weighed (M1 sense), seen or not
         public Vector3 KnownAt;
         public float Standoff;          // e-m1: his weapon's standoff, units (0: off)
+        public bool UnderFire;          // h-m1: effective fire on him (suppression); hits count in the core
+        public bool CoverNear;          // h-m1: a cover he holds or a picked one within a short dash
     }
 
     /// <summary>What he does out of a fight until the next step.</summary>
@@ -254,6 +261,7 @@ namespace NextDayRevival
         internal const float ClearSeconds = 10f;
         internal const float StuckSeconds = 10f;    // no progress this long: he no longer holds the line back
         internal const int Pair = 2;                // e-m1: men running one bound together
+        internal const float FireKeep = 4f;         // h-m1: bounding lasts this long after the last effective fire
 
         internal readonly int Size;
         readonly float[] _along = new float[Max];
@@ -268,6 +276,7 @@ namespace NextDayRevival
         int _coverStart;
         internal float LastContact = -1000f;
         internal float LastSight = -1000f;          // a member had a target in sight (covering fire is possible)
+        internal float LastFire = -1000f;           // h-m1: a member was hit or suppressed (effective fire)
         internal Vector3 SightAt;                   // c-m1: where that target stood (a call-out for the holders)
         internal int Moving;                        // alternating priority for the next covering pair
         internal int Swaps;
@@ -282,6 +291,10 @@ namespace NextDayRevival
         }
 
         internal bool Contact(float now) { return now - LastContact < ContactKeep; }
+
+        /// <summary>h-m1: effective fire on the group lately - the only time
+        /// it bounds; FireKeep is the hysteresis back to the plain run.</summary>
+        internal bool UnderFire(float now) { return now - LastFire < FireKeep; }
 
         internal void Report(int k, float now, float along, byte phase, bool contact, bool sight)
         {
@@ -459,13 +472,15 @@ namespace NextDayRevival
         internal const float PushSeconds = 8f;
         internal const float SearchSeconds = 12f;
         internal const float SearchReach = 56f;     // 20 m
-        internal const float LookSeconds = 4f;
+        internal const float LookSeconds = 1.5f;   // h-m1: a glance, not a stand in the open
         internal const float HitKeep = 3f;
         internal const float LaunchSeconds = 0.8f; // unseen old fights must not delay a new attack
-        internal const float StallHold = 6f;       // c-m1: a stall is a pause, then another lane
+        internal const float StallHold = 1f;       // c-m1: a stall is a short pause, then another lane
+        internal const float StuckRepath = 1.5f;   // h-m1: a move that has not shifted him StuckMove this long re-paths (inside 2 s)
+        internal const float StuckMove = 2.8f;     // 1 m
         internal const int Detours = 4;            // +1, -1, +2, -2 lanes beside his own
         internal const float ClearReach = 112f;    // c-m1: hostiles within 40 m of the hold circle are "on the mark"
-        internal const float MarksmanSight = 6f;   // overwatch only for a marksman who saw a target lately
+        internal const float MarksmanSight = 1.5f; // overwatch only for a marksman who saw a target lately (h-m1: was 6 s of standing)
         internal const float CallOut = 3f;         // a mate's sighting this fresh still sends a holder after it
 
         // News for the owner (the adapter toasts and clears them).
@@ -483,6 +498,7 @@ namespace NextDayRevival
         internal int Fights, DryFights, Pushes, Searches, Stalls, Steps, Bounds;
         internal int Retries, Clears, Blind;      // c-m1: stall re-plans, clearing pushes, sightless fights left
         internal int Standoffs;                   // e-m1: steps held at his standoff from a known hostile
+        internal int Stucks;                      // h-m1: 2 s stuck re-paths (cover waypoint dropped, next lane)
 
         float _best, _bestAt, _lastStep, _stepTime, _budget;
         int _stalls, _detour;
@@ -495,6 +511,8 @@ namespace NextDayRevival
         float _advanceAt, _advanceMark, _motionAt, _extension;
         Vector3 _threat, _searchAt;
         byte _resume;
+        Vector3 _stuckAt, _sideAt;
+        float _stuckSince, _stuckLast = -1000f, _fireAt = -1000f, _sideUntil;
 
         internal bool Pushing(float now) { return now < _pushUntil; }
         internal Vector3 SearchAt { get { return _searchAt; } }
@@ -508,7 +526,8 @@ namespace NextDayRevival
             HaveMove = false; MoveCovered = false; NextCover = 0f;
             _launchUntil = 0f;
             _advanceAt = _motionAt = _extension = 0f;
-            _threatAt = _hitAt = -1000f;
+            _threatAt = _hitAt = _fireAt = _stuckLast = -1000f;
+            _sideUntil = 0f;
             _detour = 0; _stalledAt = 0f; _stallSaid = false; _clearing = false;
         }
 
@@ -582,6 +601,7 @@ namespace NextDayRevival
             }
 
             bool hit = now - _hitAt < HitKeep;
+            if (hit || i.UnderFire) { _fireAt = now; if (team != null) team.LastFire = now; }
             // A visible hostile always interrupts the advance, even outside
             // the corridor and beyond the old 40 m gate. Safety shapes the fight.
             if ((i.Target && i.Sees) || i.Danger || i.Protected || hit) return true;
@@ -615,6 +635,14 @@ namespace NextDayRevival
                 return false;
             }
             return true;
+        }
+
+        /// <summary>h-m1: under effective fire (the group's, with its
+        /// FireKeep hysteresis): cover hops and bounding; otherwise he runs.</summary>
+        internal bool Wary(MercOrder o, float now)
+        {
+            MercAttackTeam team = Team(o);
+            return team != null ? team.UnderFire(now) : now - _fireAt < MercAttackTeam.FireKeep;
         }
 
         internal bool NeedsBound(ref MercAttackIn i)
@@ -675,7 +703,8 @@ namespace NextDayRevival
             // gap) and, since K4a runs this step inside the fight too, in one
             // (c-m1: 40 s of cover fire used to end the order as STALLED).
             float dt = _lastStep > 0f ? now - _lastStep : 0f;
-            if (dt > 0.5f || i.Fighting) { if (_bestAt > 0f) _bestAt += dt; dt = 0f; }
+            bool gap = dt > 0.5f || i.Fighting;
+            if (gap) { if (_bestAt > 0f) _bestAt += dt; dt = 0f; }
             _lastStep = now;
             Steps++;
             Vector3 me = i.Me;
@@ -707,7 +736,7 @@ namespace NextDayRevival
                 if (now >= _searchUntil) Phase = _resume == Holding ? Holding : Advance;
                 else if (_lookUntil <= 0f && MercAttackGeo.Flat(_searchAt - me) > MercAttackGeo.Arrive)
                 {
-                    a.Act = MercAttackAct.MoveTo; a.Dest = _searchAt; a.Run = false;
+                    a.Act = MercAttackAct.MoveTo; a.Dest = _searchAt; a.Run = true;
                     return;
                 }
                 else
@@ -762,16 +791,16 @@ namespace NextDayRevival
                 return;
             }
             _stepTime += dt;
-            bool contact = team != null ? team.Contact(now) : now - _hitAt < MercAttackTeam.ContactKeep;
             float goalAlong;
-            bool run;
-            bool wait = false;
+            bool run = true;
             bool mustMove = NeedsBound(ref i);
-            if (team != null && team.Size >= 2 && contact && team.HasCover(now))
+            // h-m1: bounding overwatch only under effective fire, and a
+            // coverer holds only with cover close; otherwise everyone runs his
+            // lane. The front never stops for a straggler: he catches up.
+            if (team != null && team.Size >= 2 && Wary(o, now) && team.HasCover(now))
             {
-                // Bounding overwatch.
                 team.MaybeSwap(now);
-                if (team.Coverer(o.K, now) && !mustMove)
+                if (team.Coverer(o.K, now) && !mustMove && i.CoverNear)
                 {
                     Phase = Overwatch;
                     Hold(ref a, dir, true, 30f);
@@ -781,35 +810,32 @@ namespace NextDayRevival
                 float front = team.WatchFront(now);
                 float boundFrom = front < 0f || mustMove ? Math.Max(along, front) : front;
                 goalAlong = Math.Min(len, boundFrom + MercAttackGeo.Bound);
-                // At his bound (the last one ends at his hold spot, above).
+                // At his bound (the last one ends at his hold spot, above):
+                // down in the cover there, or on to the next bound.
                 if (goalAlong < len - MercAttackGeo.Arrive && along >= goalAlong - MercAttackGeo.Arrive && !mustMove)
                 {
                     team.Arrived(o.K);
-                    Phase = Overwatch;
-                    Hold(ref a, dir, true, 30f);
-                    Progress(me, now, true);
-                    return;
+                    if (i.CoverNear)
+                    {
+                        Phase = Overwatch;
+                        Hold(ref a, dir, true, 30f);
+                        Progress(me, now, true);
+                        return;
+                    }
+                    goalAlong = Math.Min(len, along + MercAttackGeo.Bound);
                 }
-                run = true;
             }
-            else
-            {
-                // The line walks its lanes together - out of contact. In
-                // contact nobody stands waiting for a mate who is fighting.
-                float rear = team != null ? team.Rear(now, along) : along;
-                wait = !mustMove && !contact && team != null && along > rear + MercAttackGeo.Lead && along < len - MercAttackGeo.Arrive;
-                goalAlong = Math.Min(len, along + MercAttackGeo.Bound);
-                run = true; // execute immediately; cover waypoints shape the route
-            }
+            else goalAlong = Math.Min(len, along + MercAttackGeo.Bound);
             Phase = Advance;
-            if (wait)
-            {
-                Hold(ref a, dir, false, 0f);
-                Progress(me, now, true);
-                return;
-            }
             a.Act = MercAttackAct.MoveTo;
             a.Dest = goalAlong >= len - MercAttackGeo.Arrive ? HoldAt : MercAttackGeo.Lane(o, goalAlong);
+            // h-m1: a long attack keeps gained ground - past his spot along
+            // the heading he closes on it sideways only, never back.
+            if (MercAttackGeo.Continues(o))
+            {
+                float past = (me.x - a.Dest.x) * dir.x + (me.z - a.Dest.z) * dir.z;
+                if (past > 0f) a.Dest += dir * past;
+            }
             // After a stall: the lane beside his own, closing on his spot.
             if (_detour != 0)
                 a.Dest += MercAttackGeo.Side(dir) * (DetourOffset(o)
@@ -819,7 +845,7 @@ namespace NextDayRevival
             // facing it; seen, the fight takes it from cover. A forced bound
             // still takes him on, cover to cover.
             Vector3 foe;
-            if (i.Standoff > 0f && !mustMove && Foe(team, ref i, out foe))
+            if (i.Standoff > 0f && !mustMove && i.Target && i.Sees && Foe(team, ref i, out foe))
             {
                 Vector3 held;
                 if (MercAttackGeo.Standoff(me, a.Dest, foe, i.Standoff, out held))
@@ -836,9 +862,37 @@ namespace NextDayRevival
                     a.Dest = held;
                 }
             }
+            // h-m1: a stuck re-path first steps out to the side (a step
+            // back, under the 2 m reversal), then runs the next lane.
+            if (now < _sideUntil)
+            {
+                if (MercAttackGeo.Flat(_sideAt - me) > MercAttackGeo.Arrive) a.Dest = _sideAt;
+                else _sideUntil = 0f;
+            }
             a.Run = run;
             Progress(me, now, false);
             if (Phase == Stalled) Hold(ref a, dir, true, 45f);
+            else Unstick(me, dir, now, !gap);
+        }
+
+        /// <summary>h-m1: a move order that has not shifted him StuckMove in
+        /// StuckRepath re-paths at once: the cached cover waypoint is
+        /// dropped (straight run for a while), he steps out to the side of
+        /// the next lane (alternating) and takes that lane. Fight time,
+        /// holds and gaps restart the clock.</summary>
+        void Unstick(Vector3 me, Vector3 dir, float now, bool moving)
+        {
+            if (!moving || now - _stuckLast > 0.5f || MercAttackGeo.Flat(me - _stuckAt) > StuckMove)
+            { _stuckAt = me; _stuckSince = now; _stuckLast = moving ? now : -1000f; return; }
+            _stuckLast = now;
+            if (now - _stuckSince < StuckRepath) return;
+            Stucks++;
+            _stuckAt = me; _stuckSince = now;
+            HaveMove = false; MoveCovered = false; NextCover = now + StuckRepath;
+            _detour = _detour >= Detours ? 1 : _detour + 1;
+            float sign = (_detour & 1) == 1 ? 1f : -1f;
+            _sideAt = me + MercAttackGeo.Side(dir) * (sign * MercAttackGeo.Spacing * 1.5f) - dir * (MercAttackGeo.Spacing * 0.25f);
+            _sideUntil = now + StuckRepath;
         }
 
         /// <summary>e-m1: the nearest hostile he knows of - his scan's

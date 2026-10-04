@@ -73,7 +73,25 @@ namespace NextDayRevival
         internal static bool Reachable(Flak.Gun g, Vector3 point)
         {
             Vector3 d = point + Vector3.up * Flak.K - Flak.Mid(g);
-            return ZuGroundCore.Envelope(d.x, d.y, d.z);
+            return ZuGroundCore.Envelope(d.x, d.y, d.z) && !Settlement(point);
+        }
+        static bool Settlement(Vector3 point)
+        {
+            if (MapScene.AtHome)
+            {
+                Vector3 d = point - MilitaryTown.Centre;
+                if (d.x * d.x + d.z * d.z <= MilitaryTown.MapRingRadius * MilitaryTown.MapRingRadius
+                    || MilitaryTown.Inside(point, 0f)) return true;
+                d = point - new Vector3(1446.6f, 0f, 1703.2f);
+                if (d.x * d.x + d.z * d.z <= 340f * 340f) return true;
+            }
+            if (NewSettlement.Here())
+            {
+                Vector3 d = point - NewSettlement.Centre();
+                float r = NewSettlement.MapRingRadius();
+                if (d.x * d.x + d.z * d.z <= r * r) return true;
+            }
+            return SettlementScan.Registry.NativeSettlementNear(point, 340f);
         }
         internal static bool Close(Flak.Gun g, Vector3 point)
         {
@@ -105,7 +123,7 @@ namespace NextDayRevival
                 bool allowed = ZuGroundCore.GroundAllowed(Duty(g), g.Target != null && g.Target.Go != null);
                 if (!allowed)
                 {
-                    if (s.Target != null) { g.Engaged = false; g.Held = 0f; g.ShortBurst = new ShortBurst(); }
+                    if (s.Target != null) { g.Engaged = g.Firing = false; g.Held = 0f; g.ShortBurst = new ShortBurst(); }
                     s.Target = null; s.Npc = null; s.Player = null;
                     return false;
                 }
@@ -133,6 +151,13 @@ namespace NextDayRevival
                     }
                 }
                 if (s.Target == null) return false;
+                // A cached target may leave the envelope between 2 Hz scans.
+                if (!Reachable(g, s.Target.position))
+                {
+                    s.Target = null; s.Npc = null; s.Player = null;
+                    g.Engaged = g.Firing = false; g.Held = 0f; g.ShortBurst = new ShortBurst();
+                    return false;
+                }
                 Vector3 mid = Flak.Mid(g), point = s.Target.position + Vector3.up * Flak.K;
                 float tof;
                 Vector3 aim = ShortRange.Intercept(mid, point, s.Velocity, out tof);
@@ -144,9 +169,22 @@ namespace NextDayRevival
                 // Fly beyond the chest: ground rounds must strike, not expire
                 // as an airborne time puff just short of the body collider.
                 g.FuzeRange = Mathf.Min((point - mid).magnitude + 15f * Flak.K, ShortRangeCore.RangeM * Flak.K);
-                bool ready = Reachable(g, s.Target.position) && pitch >= ZuGroundCore.MinPitch
+                bool ready = pitch >= ZuGroundCore.MinPitch
                     && pitch <= ZuGroundCore.MaxPitch && g.Held >= 0.8f && !g.Reloading
                     && g.Mode != FlakMode.HoldFire && Vector3.Angle(g.Cradle.forward, aim - mid) < 1.5f;
+                // Recheck sight and the led ballistic lane only when a round
+                // can leave (20 Hz maximum), not on every laying frame.
+                if (ready && g.Rounds > 0 && Time.time >= g.ShortBurst.Next
+                    && Time.time >= g.ShortBurst.PauseUntil
+                    && (!Reachable(g, s.Target.position + s.Velocity * tof)
+                        || !Lane(g, s.Target, point, s.Velocity)))
+                {
+                    s.Blocked = s.Target; s.BlockedUntil = Time.time + 2f;
+                    s.Target = null; s.Npc = null; s.Player = null;
+                    g.Engaged = g.Firing = false; g.Held = 0f; g.ShortBurst = new ShortBurst();
+                    Flak.Publish(g, false, false);
+                    return false;
+                }
                 bool corrected;
                 bool shot = ShortRangeCore.Shot(ref g.ShortBurst, Time.time, ready, out corrected);
                 g.Firing = ready && g.ShortBurst.Active;
@@ -161,32 +199,42 @@ namespace NextDayRevival
             finally { FrameProf.E(FrameProf.S_ZuGround); }
         }
 
-        // Three ballistic segments at 2 Hz, all scene colliders. Props,
-        // slabs, fences and the earthwork are blockers; no model whitelist.
+        // Direct sight plus three ballistic segments, all scene colliders.
+        // Props, slabs, fences and earthworks block both scan and shot gates.
         internal static bool Lane(Flak.Gun g, Transform target, Vector3 point)
         {
+            return Lane(g, target, point, Vector3.zero);
+        }
+        static bool Lane(Flak.Gun g, Transform target, Vector3 point, Vector3 targetVelocity)
+        {
             Vector3 from = g.Muzzle.position;
+            if (!ClearSegment(g, target, from, point)) return false;
             float tof;
-            Vector3 aim = ShortRange.Intercept(from, point, Vector3.zero, out tof);
+            Vector3 aim = ShortRange.Intercept(from, point, targetVelocity, out tof);
             if (tof <= 0f) return false;
             Vector3 velocity = (aim - from) / tof, previous = from;
             for (int segment = 1; segment <= 3; segment++)
             {
                 float t = tof * segment / 3f;
                 Vector3 next = from + velocity * t - Vector3.up * (0.5f * 9.81f * Flak.K * t * t);
-                Vector3 d = next - previous;
-                float rest = d.magnitude;
-                Vector3 dir = d.normalized, origin = previous;
-                for (int skip = 0; rest > 0.05f; skip++)
-                {
-                    RaycastHit hit;
-                    if (!Physics.Raycast(origin, dir, out hit, rest, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)) break;
-                    Transform tr = hit.transform;
-                    if (tr == target || tr.IsChildOf(target)) return true;
-                    if (skip >= 4 || !((g.Owner != null && tr.IsChildOf(g.Owner)) || FlakFire.Crewman(g, tr))) return false;
-                    rest -= hit.distance + 0.05f; origin = hit.point + dir * 0.05f;
-                }
+                if (!ClearSegment(g, target, previous, next)) return false;
                 previous = next;
+            }
+            return true;
+        }
+        static bool ClearSegment(Flak.Gun g, Transform target, Vector3 from, Vector3 to)
+        {
+            Vector3 d = to - from;
+            float rest = d.magnitude;
+            Vector3 dir = d.normalized, origin = from;
+            for (int skip = 0; rest > 0.05f; skip++)
+            {
+                RaycastHit hit;
+                if (!Physics.Raycast(origin, dir, out hit, rest, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)) break;
+                Transform tr = hit.transform;
+                if (tr == target || tr.IsChildOf(target)) return true;
+                if (skip >= 4 || !((g.Owner != null && tr.IsChildOf(g.Owner)) || FlakFire.Crewman(g, tr))) return false;
+                rest -= hit.distance + 0.05f; origin = hit.point + dir * 0.05f;
             }
             return true;
         }

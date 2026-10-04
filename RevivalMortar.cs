@@ -1777,7 +1777,16 @@ namespace NextDayRevival
                         + "found - open the map by hand before aiming.");
                     return false;
                 }
+                // h-u1 (IL): ShowMap(true) refuses without map item 8006 or
+                // with another window open, yet ShowMap(false) always writes
+                // _UI_General 0, hides the cursor and shows the HUD. A refused
+                // open reported as opened later "closed" the inventory or pause
+                // menu underneath. Report only a map that opened; close only an
+                // open map.
+                FieldInfo general = AccessTools.Field(ui, "_UI_General");
+                if (!open && general != null && Convert.ToInt32(general.GetValue(inst)) != 8) return false;
                 show.Invoke(inst, new object[] { open });
+                if (open && general != null) return Convert.ToInt32(general.GetValue(inst)) == 8;
                 return true;
             }
             catch (Exception ex)

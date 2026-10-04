@@ -567,8 +567,15 @@ namespace NextDayRevival
         /// </summary>
         public static bool SpawnDroneFire(GameObject root, bool falling)
         {
-            if (root == null || _noShader) return false;
+            if (root == null) return false;
             if (RevivalPlugin.CfgFire != null && !RevivalPlugin.CfgFire.Value) return false;
+            HeliCrashFall aircraft = falling ? root.GetComponent<HeliCrashFall>() : null;
+            if (aircraft != null)
+            {
+                AircraftCrashFx.Start(root, aircraft.TrailSite, 0.7f * PlayerHeli.K);
+                return true;
+            }
+            if (_noShader) return false;
 
             Material add = Additive();
             Material blend = Blended();
@@ -595,6 +602,11 @@ namespace NextDayRevival
         public static void StopEmitting(GameObject root)
         {
             if (root == null) return;
+            if (root.GetComponent<HeliCrashFall>() != null)
+            {
+                AircraftCrashFx.Stop(root);
+                return;
+            }
             ParticleSystem[] all = root.GetComponentsInChildren<ParticleSystem>(true);
             for (int i = 0; i < all.Length; i++)
             {

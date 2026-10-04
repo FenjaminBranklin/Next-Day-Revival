@@ -197,6 +197,11 @@ namespace NextDayRevival
                     if (MercCrewPhases.Ground(u) && gun != null)
                         return MercCrewPhase.InPost(f.Tr.position.x - gun.Earthwork.position.x,
                             f.Tr.position.z - gun.Earthwork.position.z);
+                    goto case MercOrder.ManRadar;
+                case MercOrder.ManRadar:
+                    // H M2: an enemy crew on his seat is fought from his weapon's reach.
+                    if (MercAA.HostileCrew(MercAA.PostOf(u), u.Ai) != null)
+                        return Flat(o.Centre - f.Tr.position) <= MercReachUnits(f);
                     return Flat(o.Centre - f.Tr.position) <= MercStayLeash;
                 default:
                     return Flat(o.Centre - f.Tr.position) <= MercStayLeash;

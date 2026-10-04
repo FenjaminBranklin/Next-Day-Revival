@@ -223,7 +223,7 @@ namespace NextDayRevival
             Vector3 at = ConsoleRoot.TransformPoint(new Vector3(0f, .02f, TowerCommandRoomCore.SeatDZ) * K);
             if (seated) {
                 float drop = Flak.CfgSeatDrop == null ? 2.3f : Flak.CfgSeatDrop.Value;
-                at += Vector3.up * (TowerCommandRoomCore.SeatH * K + .05f - drop);
+                at.y = RadarSeatCore.RootY(at.y, true, at.y + TowerCommandRoomCore.SeatH * K, drop);
             }
             return at;
         }
@@ -356,6 +356,7 @@ namespace NextDayRevival
                 if (Built) Clear("off");
                 return;
             }
+            bool scoped = false;
             try
             {
                 RadarNet.EnsureHooked();
@@ -381,6 +382,7 @@ namespace NextDayRevival
                 if (master) MasterTick();
                 Antenna();
                 RadarScope.Tick();
+                scoped = true;
                 RadarSiren.Tick();
                 RunwayLights.Tick();
                 ConsoleLook();
@@ -388,6 +390,14 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogError("TowerRadar: " + ex);
+                // h-u1: the view holds nine native input predicates, the L list
+                // and other prompts. Without its own frame (Operate's leave
+                // checks) it must not outlive the console.
+                if (!scoped)
+                {
+                    try { RadarScope.Leave("radar tick failed"); }
+                    catch (Exception leave) { RadarScope.InView = false; RevivalPlugin.L.LogError("TowerRadar leave: " + leave.Message); }
+                }
             }
         }
 
@@ -1611,6 +1621,7 @@ namespace NextDayRevival
         static float _nextResolve, _nextTry, _deadSince = -1f, _builtAt = -1f;
 
         internal static bool Alive { get { return Flak.Up(_man); } }
+        internal static Component Man { get { return _man; } }
 
         internal static void Tick(bool master)
         {
@@ -1685,40 +1696,91 @@ namespace NextDayRevival
             return c.TransformPoint(new Vector3(0f, 0.02f, 0.85f) * TowerRadar.K);
         }
 
-        /// <summary>Every client, late: the man on the chair facing the screen.</summary>
+        /// <summary>Every client, late: the man on the chair facing the screen.
+        /// H T2 (RadarSeatCore): the seat owns him every frame he is up, as
+        /// the flak seats do (FlakCrew.Seat) - pose sampled after the
+        /// animator, aim IK down, root and rotation on the anchor; the agent
+        /// park, AI pause and rifle renew at 5 Hz. Down or dead, his root
+        /// goes back onto the cab floor at once (killable, never under it).</summary>
         static float _nextHold;
+        static bool _held;
+        static Component _heldMan;
         internal static void Hold()
         {
-            if (Time.time < _nextHold) return;
-            _nextHold = Time.time + 0.5f;
-            if (!Alive || TowerRadar.ConsoleRoot == null) return;
             Component ai = _man;
+            if (ai == null || TowerRadar.ConsoleRoot == null) { _held = false; _heldMan = null; return; }
+            if (!ReferenceEquals(ai, _heldMan)) { _heldMan = ai; _held = false; }
+            float now = Time.time;
+            bool full = now >= _nextHold;
+            if (full) _nextHold = now + RadarSeatCore.FullEvery;
+            Transform tr = ai.transform;
+            bool up = Flak.Up(ai);
+            Vector3 floor = TowerRadar.OperatorSeat(false);
+            int act = RadarSeatCore.Decide(up, up || (full && GepardCrew.Steht(ai)), _held, full, tr.position.y, floor.y);
+            if (act == RadarSeatCore.Lift) { Lift(ai, tr, floor); return; }
+            if (act != RadarSeatCore.Hold) return;
             bool sit = TowerRadar.B(TowerRadar.CfgSeated);
-            Vector3 at = TowerRadar.OperatorSeat(sit);
+            Vector3 at = sit ? TowerRadar.OperatorSeat(true) : floor;
+            if (!full && !FlakCrew.NearCamera(at)) return;
+            _held = true;
+            // G C1 on the console chair: his aim IK stays down so it cannot
+            // bend the sampled seat pose.
+            if (sit) { int foreign = GunSeatPose.Hold(ai); if (foreign != 0) GunSeatPose.Note(foreign); }
+            else if (full) GunSeatPose.Release(ai);
             Vector3 fwd = -TowerRadar.ConsoleRoot.forward;
             fwd.y = 0f;
-            Quaternion rot = Quaternion.LookRotation(fwd.normalized, Vector3.up);
-            Transform tr = ai.transform;
-            GepardCrew.Parken(ai);
+            Quaternion rot = fwd.sqrMagnitude < 1e-6f ? tr.rotation : Quaternion.LookRotation(fwd.normalized, Vector3.up);
+            if (full) GepardCrew.Parken(ai);
             float away = (tr.position - at).sqrMagnitude;
-            if (away > 64f)
-            {
-                NavMeshAgent agent = GepardCrew.Agent(ai);
-                try
-                {
-                    if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
-                    {
-                        agent.ResetPath();
-                        agent.Warp(at);
-                    }
-                }
-                catch { }
-            }
-            if (away > 0.0025f) tr.position = at;
+            if (full && away > 64f) Warp(ai, at);
+            if (RadarSeatCore.Move(away)) tr.position = at;
             tr.rotation = rot;
-            GepardCrew.Ruhig(ai);
+            if (full) GepardCrew.Ruhig(ai);
             if (sit) TechnicalCrew.Sitzen(ai, 0);
-            TechnicalCrew.Unbewaffnet(ai);     // he works the console, no rifle
+            if (full) TechnicalCrew.Unbewaffnet(ai);     // he works the console, no rifle
+        }
+
+        /// <summary>Off the seat (wounded, dead) or found under the floor:
+        /// the root onto the chair's floor point. A living man's agent is
+        /// put there and handed back to the game (the wounded state is the
+        /// game's own); a body is only moved.</summary>
+        static void Lift(Component ai, Transform tr, Vector3 floor)
+        {
+            bool held = _held;
+            _held = false;
+            GunSeatPose.Release(ai);
+            tr.position = floor;
+            if (!GepardCrew.Steht(ai)) return;
+            NavMeshAgent agent = GepardCrew.Agent(ai);
+            if (agent == null) return;
+            try
+            {
+                if (agent.isActiveAndEnabled && agent.isOnNavMesh)
+                {
+                    agent.ResetPath();
+                    if (agent.Warp(floor) && held) { agent.updatePosition = true; agent.updateRotation = true; }
+                }
+            }
+            catch { }
+            if (Time.time < _liftSaid) return;
+            _liftSaid = Time.time + 30f;
+            TowerRadar.Log(held ? "the NPC operator is down: off the chair onto the cab floor."
+                : "the downed NPC operator was under the cab floor: put back on it.");
+        }
+        static float _liftSaid;
+
+        static void Warp(Component ai, Vector3 at)
+        {
+            NavMeshAgent agent = GepardCrew.Agent(ai);
+            try
+            {
+                if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
+                {
+                    agent.ResetPath();
+                    agent.Warp(at);
+                }
+            }
+            catch { }
         }
     }
 

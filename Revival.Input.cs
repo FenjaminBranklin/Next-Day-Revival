@@ -173,6 +173,18 @@ namespace NextDayRevival
             }
         }
 
+        /// <summary>h-u1: chat text input (state 3). Hotkeys that no longer
+        /// ask CanCommand must still not fire while the player types.</summary>
+        public static bool Typing
+        {
+            get
+            {
+                Behaviour ui = _inputReady ? _ui(null) as Behaviour : null;
+                object chat = ui == null ? null : _chat(ui);
+                return chat != null && _chatState(chat) == 3;
+            }
+        }
+
         public static void Closed()
         {
             if (Enabled && CanRestore) Recover();

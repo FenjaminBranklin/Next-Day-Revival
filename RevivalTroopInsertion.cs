@@ -1257,7 +1257,11 @@ namespace NextDayRevival
         internal bool Down;
         bool _wrecked;
         Vector3 _vel, _fallVel;
-        float _fallSpin, _floor, _floorAt, _wreckUntil;
+        float _floor, _floorAt, _wreckUntil;
+        Vector3 _fallFrom;
+        Quaternion _fallRotation;
+        double _fallClock;
+        float _fallSide;
         const float WreckSeconds = 900f;
 
         // Vertical distances scale with the helicopter (RevivalTroopInsertion.K),
@@ -1346,7 +1350,10 @@ namespace NextDayRevival
             if (Down || Go == null) return false;
             Down = true;
             _fallVel = _vel;
-            _fallSpin = 0f;
+            _fallFrom = Go.transform.position;
+            _fallRotation = Go.transform.rotation;
+            _fallClock = ParaPose.Clock();
+            _fallSide = AircraftCrashFx.Side(Go, AircraftCrashFx.Site(Go));
             _floor = _lz.y;
             _floorAt = 0f;
             RevivalPlugin.L.LogInfo("Troops: the helicopter of " + Landing.Name + " was shot down"
@@ -1470,21 +1477,14 @@ namespace NextDayRevival
             }
             Transform tr = Go.transform;
             float k = RevivalTroopInsertion.K;
-            _fallVel += Vector3.down * (9.81f * k * dt);
-            float drag = Mathf.Clamp01(0.4f * dt);
-            _fallVel.x -= _fallVel.x * drag;
-            _fallVel.z -= _fallVel.z * drag;
-            _fallSpin = Mathf.MoveTowards(_fallSpin, 140f, 70f * dt);
-            _yaw += _fallSpin * dt;
-            Vector3 pos = tr.position + _fallVel * dt;
+            double age = Math.Max(0.0, ParaPose.Clock() - _fallClock);
+            Vector3 pos = AircraftCrashFx.Position(_fallFrom, _fallVel / k, k, age, 65f);
             if (now >= _floorAt)
             {
                 _floorAt = now + 0.25f;
                 float y;
                 if (RevivalTroopInsertion.TerrainHeight(pos, out y)) _floor = y;
             }
-            _pitch = Mathf.MoveTowards(_pitch, 14f, 10f * dt);
-            _roll = Mathf.MoveTowards(_roll, 22f, 14f * dt);
             if (pos.y <= _floor)
             {
                 pos.y = _floor;
@@ -1496,7 +1496,7 @@ namespace NextDayRevival
                 return true;
             }
             tr.position = pos;
-            tr.rotation = Quaternion.Euler(_pitch, _yaw, _roll);
+            tr.rotation = AircraftCrashFx.Rotation(_fallRotation, _fallSide, age);
             return true;
         }
 

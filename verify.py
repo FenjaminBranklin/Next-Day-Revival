@@ -1590,6 +1590,32 @@ def check_tower_roof():
             + r.stderr.strip()[-200:])
 
 
+def check_tower_npc_nav():
+    """[H T2] Tower NPCs (Revival.RadarSeatCore.cs, RadarOperator.Hold in
+    Revival.TowerRadar.cs, Revival.TowerRoofCore.cs; docs/ai/tasks/
+    h-t2-tower-npc-nav.md).
+
+    research/h_t2_tower_nav_check.py compiles the pure cores with csc 3.5:
+    every start to every upper-level post (roof posts, console seat, ladder
+    posts) by explicit waypoints, clear of the cab furniture and catwalk
+    rails; the radar operator's root on its seat anchor over time and on
+    the floor once he is down.
+    """
+    print("[H T2] Tower NPCs (operator seat anchor, upper-level waypoints)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "h_t2_tower_nav_check.py")
+    if not os.path.exists(check):
+        bad("research/h_t2_tower_nav_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip().endswith("RESULT: PASS"):
+        ok("tower NPCs pass research/h_t2_tower_nav_check.py")
+    else:
+        bad("research/h_t2_tower_nav_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
 def check_bomb_damage():
     """W bomb damage: run the production queue/RPC and falloff offline."""
     import subprocess
@@ -8503,6 +8529,7 @@ if __name__ == "__main__":
     check_air_events()
     check_retake_raids()
     check_tower_roof()
+    check_tower_npc_nav()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

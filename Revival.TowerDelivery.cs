@@ -11,15 +11,18 @@ namespace NextDayRevival
     internal static class TowerDelivery
     {
         const string Prefab = "GamePlayObjects/Helicopters/AirDrop_Container";
+        const string FlarePrefab = "PlayerDataPrefabs/Throw/Flare";
         const string Tag = "ndr-airdrop-m4";
         internal static bool Selecting;
         static ConfigEntry<bool> _enabled;
         static Transform _console, _tower;
         static float _next, _ready, _workNext, _queryNext, _requestedUntil;
         static int _candidate, _mask = 1, _serial, _planActor, _planMask, _attempt, _seed, _slot;
-        static bool _near, _canOrder, _mapOpened, _planning, _filling, _awaitCommit;
+        static bool _near, _canOrder, _planning, _filling, _awaitCommit;
         static Vector3 _landing;
         static GameObject _crate;
+        static GameObject _flarePrefab;
+        static readonly Collider[] Clearance = new Collider[1];
         static Component _container;
         static Behaviour _drop;
         static Rigidbody _body;
@@ -29,7 +32,11 @@ namespace NextDayRevival
         static object _parachuteState;
         static readonly Dictionary<int, int> Requests = new Dictionary<int, int>();
         sealed class Cargo
-        { internal Component Drop; internal Rigidbody Body; internal int Controller; internal float Next; }
+        {
+            internal Component Drop; internal Rigidbody Body; internal int Controller;
+            internal float Next; internal Vector3 Landing; internal bool HasLanding, Marked;
+            internal GameObject Flare;
+        }
         static readonly Dictionary<int, Cargo> Cargoes = new Dictionary<int, Cargo>();
         // C W3: the command room furnishes the cab again. E W1: the radar
         // console is back by the south window (x 7.25..8.55); the free spot
@@ -45,7 +52,7 @@ namespace NextDayRevival
         // 11 u against ~98847764, then a 0.7 u sphere; MyInputManager
         // .ButtonDown(ButtonAction 17) is the use key; UIController
         // .ShowInteractingMessage(bool, string, FormType 0 "$Interact") is the prompt.
-        const int UseAction = 17, UseMask = ~98847764, MapItem = 8006;
+        const int UseAction = 17, UseMask = ~98847764;
         const float UseRange = 11f, UseRadius = 0.7f;
         delegate bool ActionDown(int action);
         delegate string ActionKey(int action);
@@ -53,14 +60,16 @@ namespace NextDayRevival
         delegate void UseMessage(bool show, string text, int form);
         static ActionDown _useDown;
         static ActionKey _useKey;
-        static MethodInfo _cantUse, _showUse, _findItem;
-        static FieldInfo _uiField, _eyeField, _inventoryField;
+        static MethodInfo _cantUse, _showUse;
+        static FieldInfo _uiField, _eyeField;
         static Component _manager;
         static object _ui;
         static Refuse _refuse;
         static UseMessage _message;
         static Collider _desk;
-        static bool _hooked, _aimed, _shown, _ownCursor, _mapSeen, _useWarned;
+        static bool _hooked, _aimed, _shown, _ownCursor, _useWarned;
+        static CursorLockMode _savedLock;
+        static bool _savedVisible;
         static float _aimNext;
         static int _toggleFrame = -1;
         static int _lang = -1, _shownMask = -1, _shownWait = -1, _generation = -1, _placement = -1;
@@ -93,6 +102,9 @@ namespace NextDayRevival
         internal static void Install(Harmony harmony)
         {
             HookUse(harmony);
+            HookPanelInput(harmony);
+            // Same prefab as NetworkGameplayEvents.NetworkHelicopterFlareSpawn.
+            _flarePrefab = Resources.Load(FlarePrefab) as GameObject;
             _containerType = RevivalPlugin.TypeByName("ItemsContainer");
             _dropType = RevivalPlugin.TypeByName("AirDropObject");
             _viewType = RevivalPlugin.TypeByName("PhotonView");
@@ -107,6 +119,8 @@ namespace NextDayRevival
             _animation = _animationState == null ? null : AccessTools.Method(_dropType,
                 "SetAnimationState", new Type[] { _animationState.FieldType }, null);
             _parachuteState = _animationState == null ? null : Enum.ToObject(_animationState.FieldType, 2);
+            if (_animation != null) harmony.Patch(_animation, null,
+                new HarmonyMethod(typeof(TowerDelivery).GetMethod("DropStatePostfix")), null, null, null);
             MethodInfo start = AccessTools.Method(_containerType, "Start", Type.EmptyTypes, null);
             if (start != null) harmony.Patch(start, new HarmonyMethod(typeof(TowerDelivery).GetMethod("ContainerStartPrefix")), null, null, null, null);
             harmony.Patch(AccessTools.Method(_dropType, "Update", Type.EmptyTypes, null),
@@ -118,6 +132,38 @@ namespace NextDayRevival
             harmony.Patch(AccessTools.Method(_containerType, "OnInteractingWithContainer", null, null),
                 new HarmonyMethod(typeof(TowerDelivery).GetMethod("InteractingPrefix")), null, null, null, null);
         }
+        static void HookPanelInput(Harmony harmony)
+        {
+            try
+            {
+                // The former map supplied these input/cursor gates. Keep them
+                // for this panel without opening a native map or inventory.
+                harmony.Patch(AccessTools.Method(typeof(GameplayCursor), "get_CanCommand", Type.EmptyTypes, null),
+                    new HarmonyMethod(typeof(TowerDelivery).GetMethod("PanelCommandPrefix")), null, null, null, null);
+                Type input = RevivalPlugin.TypeByName("MyInputManager");
+                foreach (string name in new string[] { "Button", "ButtonDown", "ButtonUp" })
+                    harmony.Patch(AccessTools.Method(input, name, null, null),
+                        new HarmonyMethod(typeof(TowerDelivery).GetMethod("PanelKeyPrefix")), null, null, null, null);
+                harmony.Patch(AccessTools.Method(input, "GetPCAxis", null, null),
+                    new HarmonyMethod(typeof(TowerDelivery).GetMethod("PanelAxisPrefix")), null, null, null, null);
+                Type orbit = RevivalPlugin.TypeByName("MouseOrbitController");
+                harmony.Patch(AccessTools.Method(orbit, "PlayerCantOrbitRotate", Type.EmptyTypes, null), null,
+                    new HarmonyMethod(typeof(TowerDelivery).GetMethod("PanelOrbitPostfix")), null, null, null);
+                Type ui = RevivalPlugin.TypeByName("UIController");
+                harmony.Patch(AccessTools.Method(ui, "InputControlUI", Type.EmptyTypes, null),
+                    new HarmonyMethod(typeof(TowerDelivery).GetMethod("PanelUiPrefix")), null, null, null, null);
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery panel input: " + ex.Message); }
+        }
+        public static bool PanelCommandPrefix(ref bool __result)
+        { if (!Selecting) return true; __result = false; return false; }
+        public static bool PanelKeyPrefix(int __0, ref bool __result)
+        { if (!Selecting || __0 == UseAction) return true; __result = false; return false; }
+        public static bool PanelAxisPrefix(ref float __result)
+        { if (!Selecting) return true; __result = 0f; return false; }
+        public static void PanelOrbitPostfix(ref bool __result)
+        { if (Selecting) __result = true; }
+        public static bool PanelUiPrefix() { return !Selecting; }
         static void HookUse(Harmony harmony)
         {
             try
@@ -134,9 +180,6 @@ namespace NextDayRevival
                 _eyeField = AccessTools.Field(manager, "MainCamera");
                 _cantUse = AccessTools.Method(manager, "CantInteractWithItem", Type.EmptyTypes, null);
                 _showUse = AccessTools.Method(ui, "ShowInteractingMessage", null, null);
-                _inventoryField = AccessTools.Field(ui, "_plrInventoryManager");
-                _findItem = _inventoryField == null ? null : AccessTools.Method(_inventoryField.FieldType, "FindInventoryItem",
-                    new Type[] { typeof(int), typeof(string) }, null);
                 MethodInfo search = AccessTools.Method(manager, "SearchGameplayItems", Type.EmptyTypes, null);
                 if (_uiField == null || _eyeField == null || _showUse == null || search == null) return;
                 harmony.Patch(search, null, new HarmonyMethod(typeof(TowerDelivery).GetMethod("SearchPostfix")), null, null, null);
@@ -158,7 +201,7 @@ namespace NextDayRevival
             if (view == null) return;
             PropertyInfo p = AccessTools.Property(_viewType, "instantiationData");
             object[] data = p == null ? null : p.GetValue(view, null) as object[];
-            if (data == null || data.Length != 3 || !Tag.Equals(data[0])) return;
+            if (data == null || (data.Length != 3 && data.Length != 4) || !Tag.Equals(data[0])) return;
             Set(__instance, "OnCallSpawn", true); Set(__instance, "IsSpawnedData", true);
             Set(__instance, "IsFractionSafelock", false); Set(__instance, "KeyItemID", 0);
             object cargo = Get(__instance, "_containerData");
@@ -182,15 +225,49 @@ namespace NextDayRevival
             }
             Set(cargo, "MaxWeight", 1000f);
             Component drop = __instance.GetComponent(_dropType);
-            Cargoes[__instance.gameObject.GetInstanceID()] = new Cargo { Drop = drop,
-                Body = __instance.GetComponent<Rigidbody>(), Controller = (int)data[2] };
+            int id = __instance.gameObject.GetInstanceID();
+            Cargo registered;
+            if (Cargoes.TryGetValue(id, out registered)) return;
+            Cargo cargoState = new Cargo { Drop = drop,
+                Body = __instance.GetComponent<Rigidbody>(), Controller = (int)data[2],
+                HasLanding = data.Length == 4 && data[3] is Vector3 };
+            if (cargoState.HasLanding) cargoState.Landing = (Vector3)data[3];
+            Cargoes[id] = cargoState;
+            // Start may follow the buffered animation replay on a late join.
+            DropStatePostfix(drop);
         }
         static bool Staged(Cargo cargo)
         { return cargo.Drop != null && FastField.GetInt(_animationState, cargo.Drop) < 2; }
         public static bool InteractingPrefix(Component __instance)
         { Cargo cargo; return !Cargoes.TryGetValue(__instance.gameObject.GetInstanceID(), out cargo) || !Staged(cargo); }
         public static void ContainerDestroyPrefix(Component __instance)
-        { Cargoes.Remove(__instance.gameObject.GetInstanceID()); }
+        {
+            int id = __instance.gameObject.GetInstanceID(); Cargo cargo;
+            if (Cargoes.TryGetValue(id, out cargo) && cargo.Flare != null) UnityEngine.Object.Destroy(cargo.Flare);
+            Cargoes.Remove(id);
+        }
+        public static void DropStatePostfix(Component __instance)
+        {
+            Cargo cargo;
+            if (__instance == null || !Cargoes.TryGetValue(__instance.gameObject.GetInstanceID(), out cargo)
+                || cargo.Marked || !cargo.HasLanding || Staged(cargo)) return;
+            cargo.Marked = true;
+            if (_flarePrefab == null || !TowerDeliveryCore.OnRunway(cargo.Landing.x, cargo.Landing.z)) return;
+            try
+            {
+                cargo.Flare = UnityEngine.Object.Instantiate(_flarePrefab,
+                    cargo.Landing + Vector3.up * 0.15f, Quaternion.identity) as GameObject;
+                if (cargo.Flare == null) return;
+                // A fixed ground marker must not roll or obstruct the native crate.
+                Rigidbody body = cargo.Flare.GetComponent<Rigidbody>();
+                if (body != null) body.isKinematic = true;
+                Collider[] colliders = cargo.Flare.GetComponentsInChildren<Collider>(true);
+                for (int i = 0; i < colliders.Length; i++) colliders[i].enabled = false;
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(cargo.Flare, __instance.gameObject.scene);
+                cargo.Flare.AddComponent<TowerDeliveryFlare>().Begin();
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery flare: " + ex.Message); }
+        }
         public static bool DropUpdatePrefix(Component __instance)
         {
             FrameProf.S(FrameProf.S_TowerDeliveryGate);
@@ -225,6 +302,7 @@ namespace NextDayRevival
             return Crocodile.IsMaster() && TowerDeliveryCore.Service(service)
                 && cost == TowerDeliveryCore.Price(TowerDeliveryCore.Mask(service))
                 && Available(actor, TowerDeliveryCore.Mask(service), false)
+                && TowerDeliveryCore.OnRunway(target.x, target.z)
                 && (_landing - target).sqrMagnitude < 1f && RadarNet.Ready ? 0 : 7;
         }
         internal static bool ChallengeAllowed(int service, int cost)
@@ -249,7 +327,7 @@ namespace NextDayRevival
                 _near = _canOrder = false;
             }
             if (_planning || _filling) Work();
-            if (!Enabled || !TowerRadar.Built) return;
+            if (!Enabled || !TowerRadar.Built) { if (Selecting) Close(); return; }
             if (Time.time >= _next)
             {
                 _next = Time.time + 0.25f;
@@ -274,14 +352,6 @@ namespace NextDayRevival
             if (Selecting)
             {
                 if (Time.frameCount == _toggleFrame) return;
-                if (_mapOpened)
-                {
-                    // The game closes its own map (Esc, M): follow it, never reopen.
-                    int state = GameUi.State;
-                    if (state == 8) _mapSeen = true;
-                    else if (_mapSeen) { _mapOpened = false; Close(); return; }
-                    else if (Time.frameCount > _toggleFrame + 2) { _mapOpened = false; _ownCursor = true; }
-                }
                 if (UseDown() || (_ownCursor && Input.GetKeyDown(KeyCode.Escape))) Close();
             }
             else if (!_hooked)
@@ -350,38 +420,31 @@ namespace NextDayRevival
             _toggleFrame = Time.frameCount;
             Labels();
             if (_shown) { _message(false, string.Empty, 0); _shown = false; }
-            _aimed = _mapSeen = false;
-            // UIController.ShowMap(true) silently does nothing without a map
-            // item (IL), which left the 6.68 menu without a cursor. Then the
-            // menu frees the cursor itself, as the merc list does.
-            _mapOpened = HasMap() && Mortar.ShowMap(true);
-            _ownCursor = !_mapOpened;
+            _aimed = false;
+            _savedLock = CursorTracker.SawCall ? CursorTracker.DesiredLock : Cursor.lockState;
+            _savedVisible = CursorTracker.SawCall ? CursorTracker.DesiredVisible : Cursor.visible;
+            _ownCursor = true;
             Selecting = true;
+            FreeCursor();
         }
         static void Close()
         {
             Selecting = false; _toggleFrame = Time.frameCount;
-            if (_mapOpened) Mortar.ShowMap(false);
-            _mapOpened = false;
             if (_ownCursor)
             {
                 _ownCursor = false;
-                if (!CursorTracker.SawCall) return;
+                CursorTracker.DesiredLock = _savedLock; CursorTracker.DesiredVisible = _savedVisible;
+                CursorTracker.SawCall = true;
                 CursorTracker.Restoring = true;
                 try { Cursor.lockState = CursorTracker.DesiredLock; Cursor.visible = CursorTracker.DesiredVisible; }
                 finally { CursorTracker.Restoring = false; }
             }
         }
-        static bool HasMap()
+        static void FreeCursor()
         {
-            try
-            {
-                if (_ui == null || _inventoryField == null || _findItem == null) return true;
-                object inventory = _inventoryField.GetValue(_ui);
-                object found = inventory == null ? null : _findItem.Invoke(inventory, new object[] { MapItem, string.Empty });
-                return found is bool ? (bool)found : found != null;
-            }
-            catch { return true; }
+            CursorTracker.Restoring = true;
+            try { Cursor.visible = true; Cursor.lockState = CursorLockMode.None; }
+            finally { CursorTracker.Restoring = false; }
         }
         static string KeyName()
         {
@@ -391,8 +454,10 @@ namespace NextDayRevival
 
         static bool ClearBox(Vector3 center, Vector3 half, Quaternion rotation)
         {
-            // Cold placement only: ALL layers/props/slabs/fences, no model-only mask.
-            return Physics.OverlapBox(center, half, rotation, ~0, QueryTriggerInteraction.Ignore).Length == 0;
+            // Bounded query, ALL layers/props/slabs/fences, no per-tick garbage.
+            int count = Physics.OverlapBoxNonAlloc(center, half, Clearance, rotation, ~0, QueryTriggerInteraction.Ignore);
+            Clearance[0] = null;
+            return count == 0;
         }
         static void BuildConsole()
         {
@@ -439,8 +504,8 @@ namespace NextDayRevival
                 _lockedText = Loc.T("Снабжение аэродрома: сначала удержите аэродром", "Airfield supplies: hold the airfield first");
                 _prompt = "[" + _key + "] " + _useText;
                 _close = Loc.T("Закрыть [", "Close [") + _key + " / Esc]";
-                _help = Loc.T("Доставка: 10 000. Перерыв: 10 минут. Ящик упадёт в 65-145 м от башни. Враги могут его забрать.",
-                    "Delivery: 10,000. Cooldown: 10 minutes. Crate lands 65-145 m from the tower. Enemies can take it.");
+                _help = Loc.T("Доставка: 10 000. Перерыв: 10 минут. Ящик упадёт на свободном месте на ВПП аэродрома, у красного дыма. Враги могут его забрать.",
+                    "Delivery: 10,000. Cooldown: 10 minutes. Crate lands on a clear airfield runway spot marked by red smoke. Enemies can take it.");
                 _shownMask = -1;
             }
             if (_shownMask != _mask || _shownWait != wait)
@@ -457,11 +522,7 @@ namespace NextDayRevival
             // Without the native prompt (hook or HUD missing) the plugin plate stands in.
             if (!Selecting) { if (_aimed && !_shown) VanillaUi.Prompt(_canOrder ? _prompt : _lockedText, Screen.height - 150f); return; }
             if (_ownCursor && Event.current.type == EventType.Repaint)
-            {
-                CursorTracker.Restoring = true;
-                try { Cursor.visible = true; Cursor.lockState = CursorLockMode.None; }
-                finally { CursorTracker.Restoring = false; }
-            }
+                FreeCursor();
             Rect r = new Rect(Screen.width / 2f - 230f, Screen.height / 2f - 205f, 460f, 410f);
             GUI.Box(r, _title);
             for (int i = 0; i < 4; i++)
@@ -534,7 +595,7 @@ namespace NextDayRevival
         static void OnReply(int reason)
         {
             TowerSupportPayments.MissionReply(reason);
-            _status = reason == 0 ? Loc.T("Оплачено. Ящик спускается у аэродрома.", "Paid. Crate descending near the airfield.")
+            _status = reason == 0 ? Loc.T("Оплачено. Ящик спускается на ВПП аэродрома, у красного дыма.", "Paid. Crate descending on the airfield runway, at the red smoke.")
                 : reason == 10 ? Loc.T("Ожидание подтверждения сервера...", "Waiting for server payment confirmation...")
                 : reason == 8 ? Loc.T("Недостаточно денег.", "Not enough money.")
                 : reason == 9 ? Loc.T("Оплата не подтверждена. Не повторяйте заказ; проверьте баланс.", "Payment unsettled. Do not reorder; check your balance.")
@@ -544,7 +605,12 @@ namespace NextDayRevival
         static bool Site(int seed, int attempt, out Vector3 landing)
         {
             float x, z; TowerDeliveryCore.Scatter(seed, attempt, out x, out z);
-            landing = TowerRadar.TowerBase + new Vector3(x, 0f, z);
+            landing = new Vector3(x, 0f, z);
+            return ClearSite(ref landing);
+        }
+        static bool ClearSite(ref Vector3 landing)
+        {
+            if (!TowerDeliveryCore.OnRunway(landing.x, landing.z)) return false;
             float ground;
             if (!RevivalTroopInsertion.TerrainHeight(landing, out ground)) return false;
             RaycastHit hit;
@@ -552,7 +618,10 @@ namespace NextDayRevival
             if (!Physics.Raycast(new Vector3(landing.x, ground + 400f, landing.z), Vector3.down,
                 out hit, 410f, ~0, QueryTriggerInteraction.Ignore) || hit.collider.GetComponent<TerrainCollider>() == null) return false;
             landing.y = hit.point.y;
-            return ClearBox(landing + Vector3.up * 6f, new Vector3(6f, 5.8f, 6f), Quaternion.identity);
+            // Ten metres of separation from aircraft/buildings, plus the full
+            // descent column. The 107 u runway still contains this footprint.
+            return ClearBox(landing + Vector3.up * 24f, new Vector3(28f, 23.8f, 28f), Quaternion.identity)
+                && ClearBox(landing + Vector3.up * 170f, new Vector3(6f, 169.8f, 6f), Quaternion.identity);
         }
         static void Work()
         {
@@ -566,9 +635,9 @@ namespace NextDayRevival
                 if (!Available(_planActor, _planMask, TowerSupportPayments.Busy || TowerSupportPayments.WalletBusy || TowerPaymentWire.Pending))
                 { _planning = false; PaymentReply(_planActor, 7); return; }
                 if (!Site(_seed, _attempt++, out _landing))
-                { if (_attempt >= 12) { _planning = false; PaymentReply(_planActor, 7); } return; }
+                { if (_attempt >= TowerDeliveryCore.Sites) { _planning = false; PaymentReply(_planActor, 7); } return; }
                 _planning = false;
-                bool sent = _instantiate != null && _destroy != null && _add != null && _animation != null
+                bool sent = _instantiate != null && _destroy != null && _add != null && _animation != null && _flarePrefab != null
                     && TowerSupportPayments.Begin(_planActor, _planMask + 3, TowerDeliveryCore.Price(_planMask), _landing, "");
                 PaymentReply(_planActor, sent ? 10 : 7);
                 return;
@@ -589,10 +658,13 @@ namespace NextDayRevival
         internal static bool Launch(int actor, int service, Vector3 target)
         {
             if (_filling || Recheck(actor, service, TowerDeliveryCore.Price(TowerDeliveryCore.Mask(service)), target) != 0) return false;
+            // Recheck obstacles after the asynchronous payment reservation.
+            Vector3 checkedTarget = target;
+            if (!ClearSite(ref checkedTarget) || (checkedTarget - target).sqrMagnitude >= 1f) return false;
             try
             {
                 _crate = _instantiate.Invoke(null, new object[] { Prefab, target + Vector3.up * 336f,
-                    Quaternion.identity, (byte)0, new object[] { Tag, TowerDeliveryCore.Mask(service), Crocodile.LocalActor() } }) as GameObject;
+                    Quaternion.identity, (byte)0, new object[] { Tag, TowerDeliveryCore.Mask(service), Crocodile.LocalActor(), target } }) as GameObject;
                 if (_crate == null) return false;
                 _container = _crate.GetComponent(_containerType); _drop = _crate.GetComponent(_dropType) as Behaviour;
                 _body = _crate.GetComponent<Rigidbody>();
@@ -637,6 +709,25 @@ namespace NextDayRevival
                 return true;
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery release: " + ex.Message); return false; }
+        }
+    }
+
+    // Native humanitarian flare lifetime, without an Update callback.
+    public sealed class TowerDeliveryFlare : MonoBehaviour
+    {
+        ParticleSystem[] _particles;
+        internal void Begin()
+        {
+            _particles = GetComponentsInChildren<ParticleSystem>(true);
+            Invoke("StopEmit", 600f);
+            UnityEngine.Object.Destroy(gameObject, 630f);
+        }
+        void StopEmit()
+        {
+            gameObject.SendMessage("FadeOutAudio", 5f, SendMessageOptions.DontRequireReceiver);
+            for (int i = 0; i < _particles.Length; i++)
+                if (_particles[i] != null)
+                { ParticleSystem.EmissionModule emission = _particles[i].emission; emission.enabled = false; }
         }
     }
 }

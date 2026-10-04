@@ -208,9 +208,12 @@ namespace NextDayRevival
         static void ShootDownHeli(GameObject go, Vector3 at, int actor)
         {
             HeliFlight flight = RevivalTroopInsertion.FlightOf(go);
-            if (flight == null || !flight.ShotDown()) return;
+            if (flight == null || flight.Down) return;
+            AircraftCrashFx.Hit(go, at);
+            if (!flight.ShotDown()) return;
             int view = PlayerAn2.View(go);
-            float[] msg = new float[] { 8f, view, at.x, at.y, at.z, 0f };
+            Vector3 site = AircraftCrashFx.Site(go);
+            float[] msg = new float[] { 8f, view, at.x, at.y, at.z, 0f, site.x, site.y, site.z };
             AirEvents.Net.Send(msg, true);
             OnHeli(msg, go);
             Pay(actor, 2, at);
@@ -249,12 +252,15 @@ namespace NextDayRevival
             if (phase == 0)
             {
                 if (!_downHelis.Contains(go)) _downHelis.Add(go);
-                Smoke(go, 2);
+                Vector3 site = f.Length >= 9 ? new Vector3(f[6], f[7], f[8]) : AircraftCrashFx.Site(go);
+                AircraftCrashFx.Start(go, site, 0.7f * RevivalTroopInsertion.K);
+                Unsmoke(go);
                 if (Near(at, 3000f * K)) Turret.Hinweis("A troop helicopter is going down.", 4f);
                 return;
             }
             if (phase != 1) return;
             if (!_downHelis.Contains(go)) _downHelis.Add(go);
+            AircraftCrashFx.Stop(go);
             Unsmoke(go);
             try
             {
@@ -412,6 +418,7 @@ namespace NextDayRevival
             {
                 if (!_registered) Register();
                 float now = Time.time;
+                AircraftCrashFx.Tick(now);
                 if (now >= _nextPrune)
                 {
                     _nextPrune = now + 1f;
@@ -438,6 +445,7 @@ namespace NextDayRevival
                 {
                     GameObject go = _smokeGo[i];
                     if (go == null) continue;
+                    if (PlayerAn2.Down(go)) continue;
                     Transform tr = go.transform;
                     Vector3 p = tr.position;
                     if ((p - eye).sqrMagnitude > reach * reach) continue;

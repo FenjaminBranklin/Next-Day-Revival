@@ -8,7 +8,8 @@ using NextDayRevival;
 namespace UnityEngine
 {
     class GameObject { }
-    class Component { }
+    class Transform { internal Vector3 position; }
+    class Component { internal Transform transform = new Transform(); }
     struct Quaternion { }
     struct Vector3
     {
@@ -17,6 +18,8 @@ namespace UnityEngine
         internal static Vector3 zero { get { return new Vector3(); } }
         internal float sqrMagnitude { get { return x * x + y * y + z * z; } }
         public static Vector3 operator -(Vector3 a, Vector3 b) { return new Vector3(a.x - b.x, a.y - b.y, a.z - b.z); }
+        public static Vector3 operator +(Vector3 a, Vector3 b) { return new Vector3(a.x + b.x, a.y + b.y, a.z + b.z); }
+        public static Vector3 operator *(Vector3 a, float k) { return new Vector3(a.x * k, a.y * k, a.z * k); }
     }
     static class Mathf { internal static int RoundToInt(float v) { return (int)Math.Round(v); } }
     static class Time { internal static float time; }
@@ -91,6 +94,7 @@ namespace NextDayRevival
         }
         // PRODUCTION_AVAILABLE
         // PRODUCTION_CAN_APPROACH
+        // PRODUCTION_HOSTILE_CREW
         internal static void Release(MercUnit u)
         {
             Releases++;
@@ -130,11 +134,19 @@ namespace NextDayRevival
     static class MercUi
     {
         internal static void OrderReply(string s, bool error) { }
+        internal static int Toasts; internal static string Last;
+        internal static void Toast(string s, bool warn) { Toasts++; Last = s; }
         static string AttackText(Mercs.Record m) { return "ATTACK"; }
         // PRODUCTION_ORDER_TEXT
     }
-    static class NpcWar { internal static int Wakes; internal static void MercStationWake(MercUnit u) { Wakes++; } }
-    static class RadarOperator { internal static bool Alive; }
+    static class NpcWar
+    {
+        internal static int Wakes; internal static void MercStationWake(MercUnit u) { Wakes++; }
+        // H M2: the factions the squad hates, as bodies.
+        internal static readonly List<Component> Enemies = new List<Component>();
+        internal static bool Hates(Component me, Component other) { return me != null && Enemies.Contains(other); }
+    }
+    static class RadarOperator { internal static bool Alive; internal static Component Man; }
     static class AirDefenceDamage { internal static bool Alive(int post) { return !MercAA.Blocked[post]; } }
     static class Mortar
     {
@@ -148,7 +160,7 @@ namespace NextDayRevival
         {
             internal MercUnit Unit = new MercUnit(); internal MercOrder Order = MercOrder.FollowMe();
             internal bool Dead, Deserted, Unpaid, Selected = true, Peaceful;
-            internal int Id;
+            internal int Id; internal string Name = "M";
             internal string ProfileId = ""; internal DownState Down = new DownState(); internal RaidState Raid = new RaidState();
         }
         static readonly List<Record> _roster = new List<Record>(10);
@@ -157,12 +169,15 @@ namespace NextDayRevival
         internal static Profile ProfileById(string id) { return null; }
         // PRODUCTION_GIVE
         static void SendOrders(List<Record> list) { Saves++; }
-        static void OrderReceived(Record r, bool focus, Vector3 p) { }
+        // H M2: the production OrderReceived returns before its reply while quiet.
+        internal static int Loud; static bool _orderQuiet;
+        static void OrderReceived(Record r, bool focus, Vector3 p) { if (!_orderQuiet) Loud++; }
         internal static bool Picked; internal static int Announced;
         static readonly List<Record> _onDuty = new List<Record>();
         internal static bool PickActive()
         { int a = 0, n = 0; foreach (Record r in _roster) { if (r.Dead) continue; a++; if (r.Selected) n++; } return MercTargetPlan.Explicit(Picked, n, a); }
-        static void Announce(string what, List<Record> got) { Announced = got.Count; }
+        internal static string AnnouncedText;
+        static void Announce(string what, List<Record> got) { Announced = got.Count; AnnouncedText = what; }
         internal static void SaveStationOrders(List<Record> list) { Saves++; }
         // PRODUCTION_GIVE_STATION
         internal static List<Record> Roster { get { return _roster; } }
@@ -172,7 +187,8 @@ namespace NextDayRevival
             _defenceActive = false; Defence.Clear(); _roster.Clear(); Saves = 0; Picked = false; Announced = 0;
             OwnerObject = new GameObject(); OwnerPosition = Vector3.zero;
             TowerRadar.Built = true; MapScene.Current = "East"; Time.time = 0f;
-            TowerRadar.OperatorActor = -1; RadarOperator.Alive = false; Flak._manned = null;
+            TowerRadar.OperatorActor = -1; RadarOperator.Alive = false; RadarOperator.Man = null; Flak._manned = null;
+            NpcWar.Enemies.Clear(); Loud = 0; MercUi.Toasts = 0;
             for (int p = 0; p < 7; p++)
             {
                 MercAA.Blocked[p] = false; MercAA.Occupant[p] = null;
@@ -202,14 +218,16 @@ class Check
     static int Main()
     {
         Mercs.Reset();
-        int[] traits = { 0, 50, 10, 40, 25, 0 };
-        for (int i = 0; i < 6; i++) Mercs.Add(traits[i]);
+        // H M2: nearest first, not by trait. Each merc stands by one post.
+        float[] near = { 2400f, 0f, 1600f, 400f, 2000f, 5000f };
+        for (int i = 0; i < 6; i++) Mercs.Add(i * 10).Unit.Ai.transform.position = new Vector3(near[i], 0f, 0f);
         Mercs.Picked = false; // All checked, no pick: the whole squad.
         Mercs.ToggleAirDefence();
         Ok(Mercs.AirDefenceActive, "toggle active immediately"); Unique();
         Ok(At(0) != null && At(1) != null && At(6) != null && At(4) != null && At(5) != null, "three 52-K, radar and ZU staffed");
-        Ok(At(0).Unit.AAGunner == 50 && At(1).Unit.AAGunner == 40 && At(6).Unit.AAGunner == 25, "best specialists to heavy guns");
-        Ok(At(4).Unit.AAGunner == 0 && At(5).Unit.AAGunner == 10, "radar leaves remaining specialist for ZU");
+        Ok(At(6) == Mercs.Roster[0] && At(0) == Mercs.Roster[1] && At(4) == Mercs.Roster[2]
+            && At(1) == Mercs.Roster[3] && At(5) == Mercs.Roster[4], "nearest merc takes each post");
+        Ok(Mercs.Loud == 0 && Mercs.AnnouncedText.StartsWith("MAN AIR DEFENCE"), "one summary instead of a reply per merc");
         Ok(MercUi.OrderText(At(4)) == "MAN RADAR", "production squad list displays MAN RADAR on assignment");
         Ok(Mercs.Roster[5].Order.Mode == MercOrder.Follow, "overflow follows");
         Ok(At(6).Order.Points[0].x == 2400f, "whole airfield even beyond old seat proximity limits");
@@ -229,26 +247,28 @@ class Check
             Mercs.Reset(); for (int i = 0; i < 6; i++) Mercs.Add(0);
             if (reverse != 0) Mercs.Roster.Reverse();
             Mercs.ToggleAirDefence();
-            Ok(At(0).Id == 1 && At(1).Id == 2 && At(6).Id == 3 && At(4).Id == 4,
-                "stable equal-trait gun/radar assignments despite roster permutation");
+            Ok(At(0).Id == 1 && At(1).Id == 2 && At(4).Id == 3 && At(5).Id == 4 && At(6).Id == 5,
+                "stable equal-distance gun/radar assignments despite roster permutation");
         }
         Mercs.Reset(); for (int i = 0; i < 5; i++) Mercs.Add(0);
         Mercs.ToggleAirDefence(); Mercs.Record radar = At(4), zu = At(5);
         At(0).Dead = true; Mercs.TestTick(1f);
         Ok(At(4) == radar && At(0) == zu, "equal-trait casualty borrows ZU before radar");
 
-        // If the radar operator becomes the strongest remaining specialist,
-        // transfer his seat and its replacement in the SAME reconciliation.
+        // H M2: posts are kept; a casualty moves only the lowest-priority
+        // crew up, releasing old physical claims in the SAME reconciliation.
         Mercs.Reset(); for (int i = 0; i < 5; i++) Mercs.Add(0);
         Mercs.ToggleAirDefence(); radar = At(4); zu = At(5);
         radar.Unit.AAGunner = 50;
         foreach (Mercs.Record r in Mercs.Roster) if (Post(r) >= 0) MercAA.Occupant[Post(r)] = r.Unit.Ai;
+        int toastsBefore = MercUi.Toasts;
         At(0).Down.Down = true; Mercs.TestTick(1f);
-        Ok(At(0) == radar && At(4) == zu && At(5) == null,
-            "gun transfer releases old physical and pending radar claims before replacement"); Unique();
-        MercOrder radarStable = zu.Order; Mercs.TestTick(2f);
-        Ok(At(4) == zu && zu.Order == radarStable, "replacement radar remains stable on next tick");
-        Ok(MercUi.OrderText(zu) == "MAN RADAR", "production squad list updates replacement radar label");
+        Ok(At(0) == zu && At(4) == radar && At(5) == null && MercAA.Occupant[5] == null,
+            "gun transfer releases old physical claims before replacement; radar keeps its operator"); Unique();
+        Ok(MercUi.Toasts == toastsBefore + 1 && Mercs.Loud == 0, "re-crewing shows one short summary line");
+        MercOrder gunStable = zu.Order; Mercs.TestTick(2f);
+        Ok(At(0) == zu && zu.Order == gunStable, "replacement gunner remains stable on next tick");
+        Ok(MercUi.OrderText(radar) == "MAN RADAR", "production squad list keeps the radar label");
 
         // Exercise the actual MercAA availability checks, not a free-seat bool.
         Mercs.Reset(); for (int i = 0; i < 4; i++) Mercs.Add(0);
@@ -256,16 +276,18 @@ class Check
         Ok(At(4) == null && At(5) != null, "living native operator is never evicted");
         RadarOperator.Alive = false; Mercs.TestTick(1f);
         Ok(At(4) != null && At(5) == null, "free native console gains radar before ZU");
+        Mercs.Record op = At(4); MercOrder opOrder = op.Order;
         TowerRadar.OperatorActor = 2; Mercs.TestTick(2f);
-        Ok(At(4) == null, "player console occupancy is respected");
+        Ok(At(4) == op && op.Order == opOrder && !MercAA.CanApproach(4, op.Unit.Ai),
+            "player at the console: the merc keeps his post and waits there, no FOLLOW");
         TowerRadar.OperatorActor = -1; Mercs.TestTick(3f);
         Ok(At(4) != null, "radar returns when player leaves console");
         MercAA.Blocked[4] = true; Mercs.TestTick(4f);
         Ok(At(4) == null, "damaged radar cannot accept a merc");
         MercAA.Blocked[4] = false; Mercs.TestTick(5f);
         Ok(At(4) != null, "repaired radar resumes priority");
-        MercAA.Occupant[4] = new Component(); Mercs.TestTick(6f);
-        Ok(At(4) == null, "foreign merc radar lease cannot be bypassed by planning");
+        op = At(4); MercAA.Occupant[4] = new Component(); Mercs.TestTick(6f);
+        Ok(At(4) == op && !MercAA.CanApproach(4, op.Unit.Ai), "foreign merc radar lease is waited out, never bypassed");
         MercAA.Occupant[4] = null; Mercs.TestTick(7f);
         Ok(At(4) != null, "expired foreign radar lease permits assignment");
 
@@ -338,6 +360,72 @@ class Check
         Ok(delta == 0 && GC.CollectionCount(0) == gen, "steady adapter zero heap growth/collections");
         Ok(avg < 0.1, "average scheduled tick below 0.1 ms");
         Ok(FrameProf.Starts == FrameProf.Ends, "balanced F6 scope");
+        // H M2 harness: four 52-K + radar, two guns held by enemy crews. One
+        // plan on the click, nearest first; the enemy crews are cleared by the
+        // production step decision, every merc reaches his seat, nobody follows.
+        Mercs.Reset(); Flak.Guns[2].Town = false;
+        Component enemyA = new Component(), enemyB = new Component();
+        Flak.Guns[1].Gunner = enemyA; Flak.Guns[6].Gunner = enemyB;
+        NpcWar.Enemies.Add(enemyA); NpcWar.Enemies.Add(enemyB);
+        float[] spot = { 2350f, 60f, 1500f, 450f, 820f }; // by posts 6, 0, radar, 1, 2
+        for (int i = 0; i < 5; i++) Mercs.Add(0).Unit.Ai.transform.position = new Vector3(spot[i], 0f, 600f);
+        NpcWar.Wakes = 0;
+        Mercs.ToggleAirDefence();
+        Mercs.Record[] crew = Mercs.Roster.ToArray();
+        int[] expect = { 6, 0, 4, 1, 2 };
+        for (int i = 0; i < 5; i++) Ok(Post(crew[i]) == expect[i], "H M2: nearest-first split on the click, merc " + i);
+        Ok(At(5) == null, "H M2: four 52-K and radar before the ZU-23");
+        Ok(NpcWar.Wakes == 5 && Mercs.Loud == 0, "H M2: every merc starts at once, no reply per merc");
+        Ok(Mercs.AnnouncedText.Contains("clearing enemy crews: 2"), "H M2: the summary names the two enemy-held guns");
+        Ok(MercAA.HostileCrew(1, crew[3].Unit.Ai) == enemyA && MercAA.HostileCrew(6, crew[0].Unit.Ai) == enemyB
+            && MercAA.HostileCrew(0, crew[1].Unit.Ai) == null, "H M2: production HostileCrew finds the enemy gunners only");
+        MercOrder[] given = new MercOrder[5];
+        for (int i = 0; i < 5; i++) given[i] = crew[i].Order;
+        int savesAt = Mercs.Saves, toastsAt = MercUi.Toasts;
+        float[] engagedAt = new float[7], seatedAt = { -1f, -1f, -1f, -1f, -1f };
+        bool followed = false, drifted = false, reissued = false;
+        float walk = 4f * 2.8f * 0.5f, reach = 60f * 2.8f; // 4 m/s per 0.5 s tick; 60 m rifle line
+        for (int step = 1; step <= 240; step++)
+        {
+            float t = step * 0.5f;
+            Mercs.TestTick(t);
+            for (int i = 0; i < 5; i++)
+            {
+                Mercs.Record r = crew[i]; int post = Post(r);
+                if (r.Order != given[i]) reissued = true;
+                if (r.Order.Mode == MercOrder.Follow || post < 0) { followed = true; continue; }
+                Component occupant = MercAA.HostileCrew(post, r.Unit.Ai);
+                bool open = occupant == null && MercAA.CanApproach(post, r.Unit.Ai);
+                int act = MercStationPlan.PostAction(occupant != null, open, !open && Mercs.AirDefenceManaged(r.Unit));
+                if (act == MercStationPlan.PostReplace) drifted = true;
+                Vector3 me = r.Unit.Ai.transform.position, d = r.Order.Points[0] - me; d.y = 0f;
+                float dist = (float)Math.Sqrt(d.sqrMagnitude);
+                float stop = act == MercStationPlan.PostClear ? reach : act == MercStationPlan.PostWait ? MercStationPlan.WaitReach : 0f;
+                if (dist > stop) r.Unit.Ai.transform.position = me + d * (Math.Min(walk, dist - stop) / dist);
+                if (act == MercStationPlan.PostClear && dist <= reach + walk)
+                {
+                    if (engagedAt[post] == 0f) engagedAt[post] = t;
+                    if (t - engagedAt[post] >= 6f) Flak.Guns[post].Gunner = null; // six seconds of fire kill him
+                }
+                if (act == MercStationPlan.PostGo && dist <= walk && seatedAt[i] < 0f)
+                { MercAA.Occupant[post] = r.Unit.Ai; seatedAt[i] = t; }
+            }
+        }
+        float last = 0f; bool all = true;
+        for (int i = 0; i < 5; i++) { if (seatedAt[i] < 0f) all = false; if (seatedAt[i] > last) last = seatedAt[i]; }
+        Ok(!followed, "H M2: no assigned merc falls back to FOLLOW while the order stands");
+        Ok(!reissued && Mercs.Saves == savesAt, "H M2: the assignment is computed once; no re-orders while posts are busy");
+        Ok(!drifted, "H M2: a busy post is waited out or cleared, never swapped");
+        Ok(engagedAt[1] > 0f && engagedAt[1] <= 45f && engagedAt[6] > 0f && engagedAt[6] <= 45f,
+            "H M2: both enemy-held guns are engaged within 45 s (direct 154 m walk: 39 s)");
+        Ok(all && last <= 90f, "H M2: every merc sits at his post within 90 s (last " + last + " s)");
+        Ok(MercUi.Toasts == toastsAt && Mercs.Loud == 0, "H M2: no notifications for the duty's own status changes");
+        Console.WriteLine("INFO: H M2 enemy guns engaged at {0} s / {1} s, last seat {2} s", engagedAt[1], engagedAt[6], last);
+        Mercs.Reset(); for (int i = 0; i < 6; i++) Mercs.Add(0);
+        Component friend = new Component(); Flak.Guns[0].Gunner = friend; MercAA.Occupant[4] = new Component();
+        Mercs.ToggleAirDefence();
+        Ok(At(0) == null && At(4) == null && At(1) != null && At(5) != null,
+            "H M2: a friendly native crew and a foreign radar lease are not planned over");
         Console.WriteLine("INFO: six-merc scheduled tick avg {0:F6} ms, wall peak {1:F6} ms; heap delta {2}, gen0 delta {3}", avg, peak * 1000.0 / Stopwatch.Frequency, delta, GC.CollectionCount(0) - gen);
         Console.WriteLine("PASS: {0} production adapter/station assertions; failures {1}", checks, failures);
         return failures == 0 ? 0 : 1;

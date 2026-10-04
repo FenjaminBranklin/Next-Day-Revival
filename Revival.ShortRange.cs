@@ -12,7 +12,7 @@ namespace NextDayRevival
         internal static void BindConfig(ConfigFile cfg)
         {
             Enabled = cfg.Bind("FlakZU23", "Enabled", true,
-                "Airfield ZU-23-2 for low aircraft and ground targets; earthworks limit depression.");
+                "Airfield ZU-23-2 for aircraft; ground self-defence within 300 m, outside settlements, with clear sight.");
         }
         internal static bool On { get { return Enabled == null || Enabled.Value; } }
         internal static bool Drone(GepardGun.Contact c) { return c.Kind == 2 || c.Kind == 3; }
@@ -73,7 +73,6 @@ namespace NextDayRevival
             FlakFire.FollowAll(g.Air, dt, ShortRangeCore.Lag * (radar ? 1.5f : 1f));
             if (ZuGround.Control(g, dt, gunner, loader)) return;
             GepardGun.Contact t = g.Target;
-            if (ZuGround.Duty(g) == MercCrewPhase.Ground) t = null;
             if (t == null || t.Go == null)
             {
                 g.Engaged = false;

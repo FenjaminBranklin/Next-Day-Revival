@@ -2,8 +2,8 @@
 //
 // Z T1a: the tower's north outside staircase replaces the unusable B1 ladder.
 // C W3: it ends on the main roof again (sandbag posts, the cab's inner
-// flight; E W1: the radar console stands inside the cab); the
-// only runtime stair part is the threshold over the parapet's collider face.
+// flight; E W1: the radar console stands inside the cab). H T1: the
+// building's own landing slab spans the parapet gap; no runtime stair part.
 // Deterministic collision + merged visual geometry on every client; merc
 // authority/Photon position replication use existing hooks.
 // No new frame tick: F6 slots TowerRoof.Tick / TowerRoof.LateFrame are reused.
@@ -72,7 +72,7 @@ namespace NextDayRevival
         {
             CfgOn = cfg.Bind("TowerRadar", "RoofLadder", true,
                 "Outside staircase access to the C1 main roof: five sandbag posts, the cab's inner flight to the radar console. "
-                + "Legacy RoofLadder key retained; no ladder is built. Enabled by default.");
+                + "Legacy RoofLadder key retained for merc stair access. The kit roof ladder uses EastLadders. Enabled by default.");
         }
 
         static bool On { get { return (CfgOn == null || CfgOn.Value) && EastWorld.On && TowerRadar.On; } }
@@ -352,12 +352,8 @@ namespace NextDayRevival
             root.transform.rotation = _rot;
             _root = root;
 
-            Material steel = RadarModel.Steel;
-            if (steel == null) steel = Mat("NDR_Roof_Steel", new Color(0.33f, 0.36f, 0.3f), 0.3f, 0.3f);
             if (_sand == null) _sand = Mat("NDR_Roof_Sandbag", new Color(0.50f, 0.45f, 0.32f), 0f, 0.1f);
             List<CombineInstance> parts = new List<CombineInstance>(128);
-            Threshold(parts, root.transform);
-            Finish(parts, "Stair threshold", steel, root.transform);
             BagMesh(parts);
             Finish(parts, "Sandbags", _sand, root.transform);
             BagColliders(root.transform);
@@ -372,7 +368,7 @@ namespace NextDayRevival
             _checkSegment = 1; _checkDistance = 0f;
             _routeReady = _routeSaid = false;
             RoofNavOk();
-            Log("outside stair threshold and roof posts built on " + tower.name + "; checking every route sample against ALL live colliders.");
+            Log("roof posts built on " + tower.name + "; checking every route sample against ALL live colliders.");
         }
 
         static float FootY() { return TowerRoofCore.Stair[0].y; }
@@ -542,37 +538,6 @@ namespace NextDayRevival
             if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", gloss);
             m.hideFlags = HideFlags.HideAndDontSave;
             return m;
-        }
-
-        // The threshold over the parapet's collider face in the north gap
-        // (zero-thickness, z 8.99, up to 9.22 m): two ramps and a plateau,
-        // the gap's own parapet ends are its sides. Everything else of the
-        // stair is the shipped model.
-        static void Threshold(List<CombineInstance> p, Transform root)
-        {
-            for (int i = TowerRoofCore.ThresholdFirst; i <= TowerRoofCore.ThresholdLast; i++) {
-                Vector3 a = TowerRoofCore.Stair[i - 1], b = TowerRoofCore.Stair[i];
-                Vector3 delta = b - a;
-                Vector3 axis = delta.normalized;
-                Vector3 side = Vector3.Cross(axis, Vector3.up).normalized;
-                Vector3 normal = Vector3.Cross(side, axis).normalized;
-                Quaternion rot = Quaternion.LookRotation(side, normal);
-                Vector3 size = new Vector3(delta.magnitude, TowerRoofCore.ThresholdThick, TowerRoofCore.ThresholdWidth);
-                Vector3 centre = (a + b) * 0.5f - normal * (TowerRoofCore.ThresholdThick * 0.5f);
-                GameObject go = new GameObject("StairThreshold_" + i);
-                go.transform.SetParent(root, false);
-                go.transform.localPosition = centre * K;
-                go.transform.localRotation = rot;
-                go.AddComponent<BoxCollider>().size = size * K;
-                RotBox(p, centre, size, rot);
-            }
-        }
-
-        static void RotBox(List<CombineInstance> p, Vector3 centre, Vector3 size, Quaternion rot)
-        {
-            if (_cube == null) Box(p, Vector3.zero, Vector3.zero);
-            CombineInstance c = new CombineInstance(); c.mesh = _cube;
-            c.transform = Matrix4x4.TRS(centre * K, rot, size * K); p.Add(c);
         }
 
         static void BagMesh(List<CombineInstance> p)

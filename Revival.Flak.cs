@@ -2086,7 +2086,7 @@ namespace NextDayRevival
         static Vector3 _camPos;
         static bool _camOk;
 
-        static bool NearCamera(Vector3 p)
+        internal static bool NearCamera(Vector3 p)
         {
             if (_camFrame != Time.frameCount)
             {

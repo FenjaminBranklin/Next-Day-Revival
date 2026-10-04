@@ -62,6 +62,7 @@ namespace NextDayRevival
         float _verifyAt = -1f;
         int _verifyTries;
         readonly Dictionary<int, Component> _live = new Dictionary<int, Component>();
+        readonly Dictionary<int, Transform> _nativeSettlementAt = new Dictionary<int, Transform>();
         readonly List<int> _dead = new List<int>();
         readonly List<Component> _scratch = new List<Component>();
         Component[] _snapshot = Empty;
@@ -145,6 +146,7 @@ namespace NextDayRevival
                 if (r._type != null && r._type.IsInstanceOfType(c))
                 {
                     if (r._live.Remove(c.GetInstanceID())) r._dirty = true;
+                    r._nativeSettlementAt.Remove(c.GetInstanceID());
                     return;
                 }
             }
@@ -155,7 +157,28 @@ namespace NextDayRevival
             int id = c.GetInstanceID();
             if (_live.ContainsKey(id)) return;
             _live[id] = c;
+            // Unity's name getter allocates a string. Classify on registration,
+            // never while the AA controller is checking a cached ground target.
+            if (_typeName == "NPC_Settlement" && !c.gameObject.name.StartsWith("NDR_", StringComparison.Ordinal))
+                _nativeSettlementAt[id] = c.transform;
             _dirty = true;
+        }
+
+        // AA ground-fire exclusion reads the hook-fed set directly. No All()
+        // call, scene walk, snapshot rebuild or enumerator boxing in Update.
+        // If registration failed, refuse ground fire rather than miss a town.
+        internal bool NativeSettlementNear(Vector3 point, float radius)
+        {
+            if (!_hooked) return true;
+            float limit = radius * radius;
+            foreach (KeyValuePair<int, Transform> kv in _nativeSettlementAt)
+            {
+                Transform tr = kv.Value;
+                if (tr == null) continue;
+                Vector3 d = point - tr.position;
+                if (d.x * d.x + d.z * d.z <= limit) return true;
+            }
+            return false;
         }
 
         /// <summary>Forces the next <see cref="All"/> to rebuild (after a module
@@ -230,7 +253,7 @@ namespace NextDayRevival
             {
                 int id = found[i].GetInstanceID();
                 if (_live.ContainsKey(id)) continue;
-                _live[id] = found[i];
+                Add(found[i]);
                 missed++;
             }
             _dirty = true;
@@ -254,7 +277,11 @@ namespace NextDayRevival
                 if (!c.gameObject.activeInHierarchy) continue;
                 _scratch.Add(c);
             }
-            for (int i = 0; i < _dead.Count; i++) _live.Remove(_dead[i]);
+            for (int i = 0; i < _dead.Count; i++)
+            {
+                _live.Remove(_dead[i]);
+                _nativeSettlementAt.Remove(_dead[i]);
+            }
 
             // Allocate only when the membership changed; readers hold the old
             // array for the rest of the frame at most.

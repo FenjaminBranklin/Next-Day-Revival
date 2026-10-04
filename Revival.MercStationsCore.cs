@@ -31,6 +31,19 @@ namespace NextDayRevival
             return best;
         }
 
+        // H M2: a crewman's step at his assigned post. An enemy crew is
+        // cleared first; an air defence crewman waits out any other holder
+        // within WaitReach of the seat; others look for another free seat.
+        internal const int PostGo = 0, PostClear = 1, PostWait = 2, PostReplace = 3;
+        internal const float WaitReach = 16f, ClearReach = 8f; // ~5.7 m, ~2.9 m
+
+        internal static int PostAction(bool enemyCrew, bool open, bool airDefence)
+        {
+            if (enemyCrew) return PostClear;
+            if (open) return PostGo;
+            return airDefence ? PostWait : PostReplace;
+        }
+
         internal static bool Retreat(float health, bool retreating, bool danger)
         {
             return danger || health < (retreating ? 0.5f : 0.35f);

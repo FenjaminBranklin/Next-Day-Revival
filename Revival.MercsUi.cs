@@ -208,7 +208,7 @@ namespace NextDayRevival
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
             {
                 if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && GameplayCursor.CommandUiState == 0
-                    && !MercListBlocked()) { _listTab = -1; _listOpen = true; }
+                    && !MercListBlocked() && !GameplayCursor.Typing) { _listTab = -1; _listOpen = true; }
                 return;
             }
             int uiState = GameplayCursor.CommandUiState;
@@ -216,7 +216,7 @@ namespace NextDayRevival
             if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey))
             {
                 if (Ctrl()) CtrlL();
-                else if ((!gameWindow || _listOpen) && !MercListBlocked())
+                else if ((!gameWindow || _listOpen) && !MercListBlocked() && !GameplayCursor.Typing)
                 { _listTab = -1; _listOpen = !_listOpen; if (!_listOpen) RestoreCursor(); }
             }
             if (ListOpen)

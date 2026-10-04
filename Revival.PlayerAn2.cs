@@ -1675,12 +1675,13 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("PlayerAn2: " + view + " shot down in the air at "
                 + where.ToString("0") + ".");
             if (view != 0) Net.Send(Net.Crashed, new float[] { view, where.x, where.y, where.z, 1f }, true);
-            ShotDownHere(go, view);
+            ShotDownHere(go, view, where);
         }
 
-        static void ShotDownHere(GameObject go, int view)
+        static void ShotDownHere(GameObject go, int view, Vector3 where)
         {
             if (go == null || Burning(go) || Gliding(go)) return;
+            AircraftCrashFx.Hit(go, where);
             AircraftAudio.StopEngines(go);
             if (ReferenceEquals(go, _plane) && _pilot)
             {
@@ -1692,7 +1693,9 @@ namespace NextDayRevival
                 // An NPC aeroplane is flown by the master (Revival.NpcAircraft.cs):
                 // it goes down at once with the speed and heading of its path.
                 Vector3 vel;
-                if (!NpcAircraft.Velocity(go, out vel)) vel = go.transform.forward * 30f;
+                // The path supplies world units/s; An2Glide takes metres/s.
+                if (NpcAircraft.Velocity(go, out vel)) vel /= K;
+                else vel = go.transform.forward * 30f;
                 Abandon(go, vel, go.transform.rotation, true);
             }
             else if (view == 0) Abandon(go, go.transform.forward * 30f, go.transform.rotation, true);
@@ -1740,6 +1743,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + Mathf.Max(5f, AirEvents.WreckSeconds(go, F(CfgWreckSeconds, 180f)));
+                AircraftCrashFx.Stop(go);
                 AircraftAudio.StopEngines(go);
                 An2Repair.Wrecked(go);
                 An2Glide glide = go.GetComponent<An2Glide>();
@@ -1791,9 +1795,16 @@ namespace NextDayRevival
         }
 
         /// <summary>An aeroplane nobody flies any more goes on with the speed it
-        /// had, loses its trim and spirals in. Every client runs the same
-        /// descent from the same start (the Crashed event with ten floats).</summary>
+        /// had, loses all lift and tumbles in. Every client evaluates the same
+        /// descent from the pose, engine site and shared clock.</summary>
         static void Abandon(GameObject go, Vector3 vel, Quaternion rot, bool broadcast)
+        {
+            if (go == null) return;
+            Abandon(go, vel, rot, broadcast, AircraftCrashFx.Site(go), ParaPose.Clock());
+        }
+
+        static void Abandon(GameObject go, Vector3 vel, Quaternion rot, bool broadcast,
+            Vector3 site, double clock)
         {
             if (go == null || Burning(go) || Gliding(go)) return;
             if (CfgCrash != null && !CfgCrash.Value) return;
@@ -1804,13 +1815,15 @@ namespace NextDayRevival
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
                 AircraftAudio.StopEngines(go);
                 An2Glide g = go.AddComponent<An2Glide>();
-                g.Begin(vel, rot);
+                g.Begin(vel, rot, site, clock);
                 if (broadcast && view != 0)
                 {
                     Vector3 at = go.transform.position;
                     Vector3 e = rot.eulerAngles;
+                    float high = (float)clock;
                     Net.Send(Net.Crashed, new float[] { view, at.x, at.y, at.z,
-                        vel.x, vel.y, vel.z, e.x, e.y, e.z }, true);
+                        vel.x, vel.y, vel.z, e.x, e.y, e.z, site.x, site.y, site.z,
+                        high, (float)(clock - high) }, true);
                 }
                 RevivalPlugin.L.LogInfo("PlayerAn2: " + view + " abandoned in the air - going down.");
             }
@@ -2382,7 +2395,7 @@ namespace NextDayRevival
         /// Eight codes from NetworkEventCode (150): base+0 asks the master for an
         /// An-2, +1 the pilot's pose and controls (13 floats), +2 who is aboard,
         /// +3 asks the master to remove one, +4 engine and fuel of one An-2,
-        /// +5 destroyed (4 floats) or abandoned in the air (10 floats), +6 the
+        /// +5 destroyed (4 floats), hit (5), or fall (15; legacy 10), +6 the
         /// repair state from the master, +7 a finished fitting or refuelling to
         /// the master (both Revival.An2Repair.cs).
         /// </summary>
@@ -2513,14 +2526,17 @@ namespace NextDayRevival
                         _busyUntil.Remove((int)f[0]);
                         if (f.Length == 5)
                         {
-                            ShotDownHere(wreck, (int)f[0]);
+                            ShotDownHere(wreck, (int)f[0], new Vector3(f[1], f[2], f[3]));
                             return;
                         }
                         if (f.Length >= 10)
                         {
+                            if (Gliding(wreck) || Burning(wreck)) return;
                             wreck.transform.position = new Vector3(f[1], f[2], f[3]);
                             Abandon(wreck, new Vector3(f[4], f[5], f[6]),
-                                    Quaternion.Euler(f[7], f[8], f[9]), false);
+                                Quaternion.Euler(f[7], f[8], f[9]), false,
+                                f.Length >= 15 ? new Vector3(f[10], f[11], f[12]) : AircraftCrashFx.Site(wreck),
+                                f.Length >= 15 ? (double)f[13] + f[14] : ParaPose.Clock());
                             return;
                         }
                         Burn(wreck, new Vector3(f[1], f[2], f[3]));
@@ -3014,24 +3030,26 @@ namespace NextDayRevival
     }
 
     /// <summary>
-    /// The descent of an An-2 nobody flies: it keeps its speed, the wing lifts
-    /// less and less as the nose drops and one wing goes, and it spirals into
-    /// the ground. Arithmetic, like HeliCrashFall; started on every client from
-    /// the same pose by the reliable Crashed event.
+    /// An aircraft without control loses all lift and drops under gravity,
+    /// nose down with a rolling wing and a native fire/smoke trail. Every peer
+    /// evaluates the same pose from the reliable start and shared Photon clock.
     /// </summary>
     public sealed class An2Glide : MonoBehaviour
     {
         Vector3 _vel;
+        Vector3 _start;
         Quaternion _rot;
-        float _t;
+        double _clock;
         float _side;
 
-        public void Begin(Vector3 vel, Quaternion rot)
+        internal void Begin(Vector3 vel, Quaternion rot, Vector3 site, double clock)
         {
             _vel = vel;
+            _start = transform.position;
             _rot = rot;
-            _t = 0f;
-            _side = UnityEngine.Random.value < 0.5f ? -1f : 1f;
+            _clock = clock;
+            _side = AircraftCrashFx.Side(gameObject, site);
+            AircraftCrashFx.Start(gameObject, site, PlayerAn2.K * (NpcAircraft.IsTu95(gameObject) ? 1.4f : 0.7f));
         }
 
         void Update()
@@ -3039,21 +3057,12 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_An2Glide_Update);
             try
             {
-            float dt = Mathf.Min(Time.deltaTime, 0.05f);
-            if (dt <= 0f) return;
-            _t += dt;
-            float speed = _vel.magnitude;
-            float carry = Mathf.Clamp01(1f - _t / 5f) * Mathf.Clamp01(speed / 25f);
-            _vel += new Vector3(0f, -9.81f * (1f - 0.85f * carry), 0f) * dt;
-            _vel -= _vel * Mathf.Min(1f, 0.05f * dt);
-            if (speed > 60f) _vel = _vel.normalized * 60f;
-            // Nose down and a wing dropping, faster as it goes.
-            _rot = _rot * Quaternion.Euler(Mathf.Min(25f, 6f + _t * 4f) * dt, 0f, -_side * Mathf.Min(40f, 10f + _t * 8f) * dt);
-            Vector3 pos = transform.position + _vel * (PlayerAn2.K * dt);
+            double age = Math.Max(0.0, ParaPose.Clock() - _clock);
+            Vector3 pos = AircraftCrashFx.Position(_start, _vel, PlayerAn2.K, age, 85f);
             float floor;
             bool solid;
             PlayerAn2.GlideFloor(pos, out floor, out solid);
-            transform.rotation = _rot;
+            transform.rotation = AircraftCrashFx.Rotation(_rot, _side, age);
             if (solid && pos.y <= floor)
             {
                 pos.y = floor;
@@ -3063,9 +3072,11 @@ namespace NextDayRevival
                 return;
             }
             transform.position = pos;
-            if (_t > 120f) { enabled = false; PlayerAn2.FinishGlide(gameObject, pos); }
+            if (age > 120.0) { enabled = false; PlayerAn2.FinishGlide(gameObject, pos); }
             }
             finally { FrameProf.E(FrameProf.S_An2Glide_Update); }
         }
+
+        void OnDestroy() { AircraftCrashFx.Stop(gameObject); }
     }
 }

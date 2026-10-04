@@ -56,11 +56,23 @@ namespace NextDayRevival
         internal static int ParseLevel(string s)
         {
             if (string.IsNullOrEmpty(s)) return 3;
-            string t = s.Trim().ToLowerInvariant();
-            if (t == "off" || t == "none" || t == "0" || t == "false") return 0;
-            if (t == "low" || t == "1") return 1;
-            if (t == "medium" || t == "mid" || t == "2") return 2;
+            // Fx.Level is read in effect frame loops: trim/compare in place.
+            int first = 0, last = s.Length;
+            while (first < last && char.IsWhiteSpace(s[first])) first++;
+            while (last > first && char.IsWhiteSpace(s[last - 1])) last--;
+            int length = last - first;
+            if (LevelName(s, first, length, "off") || LevelName(s, first, length, "none")
+                || LevelName(s, first, length, "0") || LevelName(s, first, length, "false")) return 0;
+            if (LevelName(s, first, length, "low") || LevelName(s, first, length, "1")) return 1;
+            if (LevelName(s, first, length, "medium") || LevelName(s, first, length, "mid")
+                || LevelName(s, first, length, "2")) return 2;
             return 3;
+        }
+
+        static bool LevelName(string value, int first, int length, string name)
+        {
+            return length == name.Length && string.Compare(value, first, name, 0,
+                length, StringComparison.OrdinalIgnoreCase) == 0;
         }
 
         internal static void SetLevel(int level)

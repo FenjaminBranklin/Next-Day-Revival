@@ -175,7 +175,7 @@ static class Sim {
   Vector3 dummy; Vector3 Fo=TowerRoofCore.Foot(foot), E=TowerRoofCore.Exit();
   Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(8f,0f,0f),0,Fo,E,out dummy)==TowerRoofCore.LegNone,"a goal on the ground floor under the cab: no climb");
   Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(0f,5.79f,0f),0,Fo,E,out dummy)==TowerRoofCore.LegNone,"a goal on the tower's inner floor (5.8 m): no climb");
-  Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(8f,TowerRoofCore.CabRoofY,0f),0,Fo,E,out dummy)==TowerRoofCore.LegNone,"a goal on the cab's roof (antenna, 15.35 m): no climb, no stair goes there");
+  Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(8f,TowerRoofCore.CabRoofY,0f),0,Fo,E,out dummy)==TowerRoofCore.LegWalk && Flat(dummy,Fo)<1e-4f,"H T2: a goal on the cab's roof (antenna) means the ladder posts: walk to the stair's foot");
   Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(8f,40f,0f),0,Fo,E,out dummy)==TowerRoofCore.LegNone,"a goal in the air over the tower (a helicopter): no climb");
   Ok(TowerRoofCore.Leg(new Vector3(30f,0f,0f),new Vector3(40f,TowerRoofCore.RoofY,0f),0,Fo,E,out dummy)==TowerRoofCore.LegNone,"roof height 28 m away from the roof: no climb");
   Ok(TowerRoofCore.Leg(new Vector3(8f,0f,0f),roofGoal,0,Fo,E,out dummy)==TowerRoofCore.LegWalk,"under the roof inside: walks to the foot first");
@@ -191,12 +191,12 @@ static class Sim {
   Vector3 m4=new Vector3(40f,0f,-20f);
   List<int> q4=Run(ref m4,seat,2,foot,out t,true,"seat");
   Console.WriteLine("SEQ seat "+S(q4)+" in "+F(t)+" s");
-  Ok(S(q4)=="Walk,ClimbUp,Nav,Step","radar merc: foot, stair, roof, inner flight, cab door, NavMesh to the seat");
+  Ok(S(q4)=="Walk,ClimbUp,Nav,Step","radar merc: foot, stair, roof, inner flight, cab door, aisle, chair (H T2 waypoints), the post takes him");
   Ok(Flat(m4,seat)<1e-3f && Math.Abs(m4.y-seat.y)<1e-3f,"radar merc ends at the console seat");
   Ok(TowerRoofCore.InCab(seat) && TowerRoofCore.AtSeat(seat) && TowerRoofCore.Exact(seat),"the console pose is an exact goal inside the cab");
   Ok(Math.Abs(TowerRoofCore.Seat().y-TowerRoofCore.CabFloorY)<1e-4f,"the seat stands on the cab floor");
   Vector3 at;
-  Ok(TowerRoofCore.Leg(TowerRoofCore.Post(0),seat,0,Fo,E,out at)==TowerRoofCore.LegWalk && Flat(at,TowerRoofCore.Inner[0])<1e-4f,"from a post the seat leg is the cab door, not the post");
+  Ok(TowerRoofCore.Leg(TowerRoofCore.Post(0),seat,0,Fo,E,out at)==TowerRoofCore.LegWalk && Flat(at,TowerRoofCore.Seat())<1e-4f,"H T2: from a post the seat leg is the seat itself (explicit waypoints), not the post");
   // 7. into the cab (command room) and out again
   Vector3 m5=new Vector3(40f,0f,-20f);
   List<int> q5=Run(ref m5,cabGoal,1,foot,out t,true,"cab");
@@ -206,11 +206,11 @@ static class Sim {
   Vector3 m6=new Vector3(8f,TowerRoofCore.CabFloorY,-0.8f);
   List<int> q6=Run(ref m6,seat,0,foot,out t,true,"cabseat");
   Console.WriteLine("SEQ cabseat "+S(q6)+" in "+F(t)+" s");
-  Ok(S(q6)=="Nav,Step" && Flat(m6,seat)<1e-3f,"cab to the console: the cab's NavMesh straight to the seat, no roof walk");
+  Ok(S(q6)=="ClimbUp,Nav,Step" && Flat(m6,seat)<1e-3f,"H T2 cab to the console: the cab's waypoints to the seat, no roof walk");
   Vector3 m7=new Vector3(8f,TowerRoofCore.CabFloorY,-0.8f);
   List<int> q7=Run(ref m7,ground,0,foot,out t,true,"cabdown");
   Console.WriteLine("SEQ cabdown "+S(q7)+" in "+F(t)+" s");
-  Ok(S(q7)=="Nav,Step,ClimbDown,None","cab to the airfield: door, inner flight, roof, outside stairs");
+  Ok(S(q7)=="ClimbDown,None","H T2 cab to the airfield: aisle, door, inner flight, roof, outside stairs in one walk");
   Ok(Flat(m7,TowerRoofCore.Foot(foot))<0.01f,"cab to the airfield: ends at the stair's foot");
   // 8. every post from the stair top and from the seat (all roof legs dumped)
   for(int i=0;i<TowerRoofCore.Posts*2;i++){
@@ -221,11 +221,31 @@ static class Sim {
    Run(ref m9,new Vector3(-6f,TowerRoofCore.RoofY,0f),i,foot,out t,true,"seatpost"+i);
    Ok(Flat(m9,TowerRoofCore.Post(i))<1e-3f,"seat to post "+i);
   }
+  // H T2: the ladder posts (an owner on the antenna roof) from the ground,
+  // the seat and the roof; dumped for the collider proof.
+  Vector3 antenna=new Vector3(6f,TowerRoofCore.CabRoofY,1f);
+  for(int i=0;i<2;i++){
+   Vector3 ml=new Vector3(40f,0f,-20f);
+   List<int> ql=Run(ref ml,antenna,i,foot,out t,true,"ladder"+i);
+   Ok(S(ql)=="Walk,ClimbUp,Hold" && Flat(ml,TowerRoofCore.LadderPost(i))<1e-3f && Math.Abs(ml.y-TowerRoofCore.CabFloorY)<1e-3f,"H T2 ground to ladder post "+i+" ("+S(ql)+")");
+   Vector3 ms=TowerRoofCore.Seat();
+   List<int> qs=Run(ref ms,antenna,i,foot,out t,true,"seatladder"+i);
+   Ok(S(qs)=="ClimbUp,Hold" && Flat(ms,TowerRoofCore.LadderPost(i))<1e-3f,"H T2 seat to ladder post "+i+" ("+S(qs)+")");
+   Vector3 mr=TowerRoofCore.Post(3);
+   List<int> qr=Run(ref mr,antenna,i,foot,out t,true,"roofladder"+i);
+   Ok(S(qr)=="ClimbUp,Hold" && Flat(mr,TowerRoofCore.LadderPost(i))<1e-3f,"H T2 roof post to ladder post "+i+" ("+S(qr)+")");
+   Vector3 md=TowerRoofCore.LadderPost(i);
+   List<int> qd=Run(ref md,ground,i,foot,out t,true,"ladderdown"+i);
+   Ok(S(qd)=="ClimbDown,None" && Flat(md,TowerRoofCore.Foot(foot))<0.01f,"H T2 ladder post "+i+" to the airfield");
+   Vector3 mc=TowerRoofCore.LadderPost(i);
+   List<int> qc=Run(ref mc,seat,i,foot,out t,true,"ladderseat"+i);
+   Ok(S(qc)=="ClimbUp,Nav,Step" && Flat(mc,seat)<1e-3f,"H T2 ladder post "+i+" to the seat");
+  }
   for(int i=0;i<TowerRoofCore.Posts;i++) Console.WriteLine("POST "+i+" "+V(TowerRoofCore.Post(i))+" face "+V(TowerRoofCore.Face(i)));
   // Z T1b: all exact endpoints enter the ALL-area collision/support proof.
   string endpoints="";
   for(int i=0;i<TowerRoofCore.Posts*2;i++)endpoints+=V(TowerRoofCore.Post(i))+";";
-  endpoints+=V(TowerRoofCore.Seat())+";"+V(TowerRoofCore.Inner[0]);
+  endpoints+=V(TowerRoofCore.Seat())+";"+V(TowerRoofCore.Inner[0])+";"+V(TowerRoofCore.LadderPost(0))+";"+V(TowerRoofCore.LadderPost(1));
   Console.WriteLine("PATH posts "+endpoints);
   Console.WriteLine("Tower roof merc simulation: "+Pass+" PASS, "+Fail+" FAIL");
   if(Fail>0) Environment.Exit(1);
@@ -323,13 +343,16 @@ def geometry(paths):
     from tower_stairs_check import geometry as stair_geometry
     stair_geometry(paths)
     ok(True, "ALL area colliders and full stair sweep checked")
-    # E W1: the radar merc's checked walk ends inside the cab door (the cab's
-    # NavMesh takes him to the seat: tower_command_room_check proves that
-    # leg); the cab route reaches the command room; every added box rests
-    inner = [float(v) for v in re.search(r"Inner = \{\s*new Vector3\(([-\d.]+)f, CabFloorY, ([-\d.]+)f\)", CORE).groups()]
+    # H T2: the radar merc's checked walk ends AT the console seat (explicit
+    # cab waypoints, collider-checked above); the cab route reaches the
+    # command room; every added box rests
+    seat = (const("ConsoleX"), const("CabFloorY"), const("ConsoleZ") + 0.85)
     last = paths.get("seat", [(0, 0, 0)])[-1]
-    ok(abs(last[0] - inner[0]) < 0.01 and abs(last[2] - inner[1]) < 0.01 and abs(last[1] - const("CabFloorY")) < 0.01,
-       "the radar merc's checked walk ends inside the cab door, on the cab floor")
+    ok(abs(last[0] - seat[0]) < 0.01 and abs(last[2] - seat[2]) < 0.01 and abs(last[1] - seat[1]) < 0.01,
+       "H T2: the radar merc's checked walk ends at the console seat, on the cab floor")
+    for i in range(2):
+        ok("ladder%d" % i in paths and abs(paths["ladder%d" % i][-1][1] - const("CabFloorY")) < 0.01,
+           "H T2: the checked ladder post %d walk ends on the command catwalk" % i)
     ok("cab" in paths and abs(paths["cab"][-1][1] - const("CabFloorY")) < 0.01, "the checked cab walk ends inside the cab")
     import c_w3_tower_check
     c_w3_tower_check.props()
@@ -356,7 +379,8 @@ def wiring():
         idx = int(re.search(slot + r" = (\d+);", prof).group(1))
         ok(listed[idx] == name, "F6 slot %s = \"%s\"" % (slot, name))
     ok("UpperFirst" not in CORE and "UpperStairs(" not in RUNTIME and "CornerGuard(" not in RUNTIME
-       and "Threshold(parts, root.transform);" in RUNTIME, "C W3: no stair above the cab, only the parapet threshold")
+       and "Threshold(" not in RUNTIME and "Threshold" not in CORE,
+       "C W3: no stair above the cab; H T1: no runtime threshold, the building's landing slab spans the gap")
     ok("TowerRoofCore.Route(c.Pts, c.N," in RUNTIME and "case TowerRoofCore.LegNav:" in RUNTIME,
        "C W3: roof walks route round the obstacles; cab inside and last steps use the NavMesh")
     radar = (ROOT / "Revival.TowerRadar.cs").read_text(encoding="utf-8")

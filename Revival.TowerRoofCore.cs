@@ -2,10 +2,14 @@
 //
 // C W3: the main roof (design 9 m, 8.79 m on the shipped C1_LOD0 collider)
 // is THE roof. The existing north outside stairs (three flights and a short
-// threshold over the parapet's collider face) reach it; the five sandbag
+// level threshold in the parapet gap) reach it; the five sandbag
 // posts stand on it; the cab (the glazed command room) is reached over the
 // roof's own inner flight. E W1: the radar console stands INSIDE the cab, by
-// its south window. No stair leads above the cab any more.
+// its south window. The kit's player ladder reaches the antenna roof; mercs
+// continue to use only the main roof and the cab. H T2: every post up there
+// (roof posts, the console seat, the ladder posts on the command catwalk for
+// an owner on the antenna roof) ends an explicit waypoint walk from the
+// stairs; the cab NavMesh only serves cab spots that are no post.
 // Coordinates are metres in TowerRadar's C1 frame (world units = m * 2.8),
 // heights measured on the shipped collider. Walks across the roof follow a
 // visibility graph over authored, capsule-inflated obstacle rectangles, so
@@ -38,19 +42,17 @@ namespace NextDayRevival
         internal const float FootLift = 0.12f;
         // The existing three flights: a line 5 cm over the measured nosings
         // (0.25 m treads, 0.1875 m risers), landings at their own height;
-        // then the threshold over the collider face at z 8.99 (top 9.22) in
-        // the parapet's gap.
+        // then level across the parapet gap on the building's own landing
+        // slab (top 8.791). H T1 excludes the grime decal's collider face in
+        // the building recipe; no raised barrier, no runtime threshold.
         internal static readonly Vector3[] Stair = {
             new Vector3(-10.9f, 0f, 9.65f), new Vector3(-10.56f, -0.02f, 9.65f),
             new Vector3(-6.81f, 2.79f, 9.65f), new Vector3(-5.41f, 2.79f, 9.65f),
             new Vector3(-1.41f, 5.79f, 9.65f), new Vector3(-0.01f, 5.79f, 9.65f),
             new Vector3(3.99f, 8.79f, 9.75f), new Vector3(5f, 8.79f, 9.75f),
-            new Vector3(5f, 9.36f, 9.1f), new Vector3(5f, 9.36f, 8.88f),
+            new Vector3(5f, 8.79f, 9.1f), new Vector3(5f, 8.79f, 8.88f),
             new Vector3(5f, 8.79f, 8.2f), new Vector3(5f, 8.79f, 7.6f)
         };
-        // Runtime geometry: the threshold segments Stair[ThresholdFirst-1 .. ThresholdLast].
-        internal const int ThresholdFirst = 8, ThresholdLast = 10;
-        internal const float ThresholdWidth = 1.1f, ThresholdThick = 0.12f;
         // The cab's way out: inside the door, the door, the inner flight's
         // landing and foot (5 cm over its nosings), the roof west of it.
         internal static readonly Vector3[] Inner = {
@@ -72,6 +74,30 @@ namespace NextDayRevival
         internal const float ConsoleX = 7.9f, ConsoleZ = -2.95f, SeatZ = ConsoleZ + 0.85f;
         internal const float SeatReach = 1.5f;        // a goal this close to the seat means the seat
         internal static Vector3 Seat() { return new Vector3(ConsoleX, CabFloorY, SeatZ); }
+
+        // H T2: the cab's own waypoints, no free NavMesh to a post. The aisle
+        // (z 0) runs from the door past every desk and chair (all at |z| >= 1.15,
+        // TowerCommandRoomCore); the chair is reached from the north of it.
+        internal const float AisleZ = 0f, AisleMinX = 5.4f, AisleMaxX = 9.35f;
+        internal static Vector3 SeatApproach() { return new Vector3(ConsoleX, CabFloorY, SeatZ + 1.3f); }
+
+        // H T2: the antenna roof's ladder (H T1 Ladders/C1Roof, StartPoint
+        // 3.35/1.73 in this frame) stands on the command catwalk north of the
+        // inner flight's landing (x 2.83..4.3, z 0.55..2.6 inside its rails).
+        // Mercs do not climb it: a goal up there (an owner on the antenna
+        // roof) means the two ladder posts beside its foot, which stays free
+        // for a player, both facing the ladder (slots 0 and 1; the others
+        // keep their roof posts). Reached from the landing.
+        internal static readonly float[] LadderX = { 3.85f, 3.2f };
+        internal static readonly float[] LadderZ = { 1.0f, 1.0f };
+        internal static Vector3 Landing() { return new Vector3(3.3f, CabFloorY, 0.25f); }
+        // the first two slots; the rest of his men hold their roof posts
+        internal static bool Ladder(int slot) { return slot >= 0 && slot < LadderX.Length; }
+        internal static Vector3 LadderPost(int slot)
+        {
+            int i = slot & 1;
+            return new Vector3(LadderX[i], CabFloorY, LadderZ[i]);
+        }
 
         // THE POSTS: five places behind a sandbag wall along the parapet, one
         // per merc slot, looking out over the wall (face). Sandbags 0.9 m high.
@@ -154,10 +180,28 @@ namespace NextDayRevival
                 && l.x > -1.4f && l.x <= CabMinX && l.z > -0.9f && l.z < 0.9f;
         }
 
+        /// <summary>On the command catwalk or the inner flight's landing (cab
+        /// floor height, west of the cab).</summary>
+        internal static bool OnCatwalk(Vector3 l)
+        {
+            return l.y > RoofY + 2f && l.y < CabFloorY + 1.5f
+                && l.x > Inner[2].x - 0.05f && l.x <= CabMinX && l.z > -0.9f && l.z < 2.6f;
+        }
+
+        /// <summary>H T2: up on the cab's roof (the antenna roof, above the
+        /// cab's ceiling), reached only by the ladder.</summary>
+        internal static bool OnAntenna(Vector3 l)
+        {
+            return l.y > CabFloorY + 2.5f && l.y < CabRoofY + 3f
+                && l.x > CabMinX - 1f && l.x < CabMaxX + 1f && l.z > CabMinZ - 1f && l.z < CabMaxZ + 1f;
+        }
+
         /// <summary>A goal meant for the roof: at roof height over it or
-        /// beside it (a FOLLOW slot behind an owner standing up there), or in the cab.</summary>
+        /// beside it (a FOLLOW slot behind an owner standing up there), in
+        /// the cab, or on the antenna roof (H T2: the ladder posts).</summary>
         internal static bool GoalUp(Vector3 l)
         {
+            if (OnAntenna(l)) return true;
             if (l.y < RoofY - GoalBelow || l.y > RoofY + GoalAbove) return false;
             float dx = l.x < RoofMinX ? RoofMinX - l.x : (l.x > RoofMaxX ? l.x - RoofMaxX : 0f);
             float dz = l.z < RoofMinZ ? RoofMinZ - l.z : (l.z > RoofMaxZ ? l.z - RoofMaxZ : 0f);
@@ -174,12 +218,23 @@ namespace NextDayRevival
         /// every other roof goal means his post.</summary>
         internal static bool Exact(Vector3 l) { return InCab(l) || AtSeat(l); }
 
-        /// <summary>Where a roof goal ends his direct walk: inside the cab's
-        /// door (the cab, the console seat) or his post.</summary>
+        /// <summary>Where a roof goal ends his direct walk: the console seat
+        /// itself (H T2), inside the cab's door (elsewhere in the cab), a
+        /// ladder post (the antenna roof) or his roof post.</summary>
         internal static Vector3 Target(Vector3 goal, int slot)
         {
-            if (InCab(goal) || AtSeat(goal)) return Inner[0];
+            if (AtSeat(goal)) return Seat();
+            if (InCab(goal)) return Inner[0];
+            if (OnAntenna(goal) && Ladder(slot)) return LadderPost(slot);
             return Post(slot);
+        }
+
+        /// <summary>The way his post faces: the ladder for a ladder post,
+        /// out over the sandbags for a roof post.</summary>
+        internal static Vector3 Face(Vector3 goal, int slot)
+        {
+            if (OnAntenna(goal) && Ladder(slot)) return new Vector3(0f, 0f, 1f);
+            return Face(slot);
         }
 
         /// <summary>Man and goal on different sides of the stair: a flat
@@ -203,10 +258,17 @@ namespace NextDayRevival
             if (!manUp && !goalUp) return LegNone;
             if (manUp && InCab(man))
             {
-                // Furniture: the baked, carved cab NavMesh takes him to the door.
-                if (goalUp && Exact(goal)) return LegNav;
-                leg = Inner[0];
-                if (Flat(man, leg) > DoorArrive) return LegNav;
+                // H T2: the console seat is a post with its own waypoints
+                // (aisle, north of the chair); at the chair MercAA takes him.
+                if (goalUp && AtSeat(goal))
+                {
+                    leg = Seat();
+                    if (Flat(man, leg) <= FootArrive) { leg = goal; return LegNav; }
+                    return LegWalk;
+                }
+                // Any other spot in the cab is no post: the cab's NavMesh.
+                if (goalUp && InCab(goal)) return LegNav;
+                // Out of the cab: the aisle, the door and on (Route/Path).
                 leg = goalUp ? Target(goal, slot) : exit;
                 return LegWalk;
             }
@@ -214,7 +276,7 @@ namespace NextDayRevival
             {
                 leg = Target(goal, slot);
                 if (Exact(goal)) return LegWalk;
-                if (Flat(man, leg) <= PostArrive) { leg = Face(slot); return LegHold; }
+                if (Flat(man, leg) <= PostArrive && Mathf.Abs(man.y - leg.y) < 1f) { leg = Face(goal, slot); return LegHold; }
                 return LegWalk;
             }
             if (goalUp)
@@ -257,19 +319,69 @@ namespace NextDayRevival
         /// when end is inside its door. Returns the new count.</summary>
         internal static int Route(Vector3[] pts, int n, Vector3 end)
         {
+            Vector3 s = pts[n - 1];
+            bool seat = AtSeat(end), cab = seat || InCab(end), ladder = !cab && OnCatwalk(end);
+            // H T2: already up at cab-floor height - the upper level's own
+            // waypoints, never down onto the roof and back up the flight.
+            if (cab && InCab(s)) return CabTail(pts, Aisle(pts, n), end, seat);
+            if (ladder && InCab(s))
+            {
+                n = Aisle(pts, n);
+                for (int i = Flat(pts[n - 1], Inner[0]) > 0.05f ? 0 : 1; i <= 1; i++) pts[n++] = Inner[i];
+                pts[n++] = Landing();
+                pts[n++] = end;
+                return n;
+            }
+            if ((cab || ladder) && OnCatwalk(s))
+            {
+                if (s.z > 0.9f || ladder) pts[n++] = Landing();
+                if (ladder) { pts[n++] = end; return n; }
+                pts[n++] = Inner[1];
+                pts[n++] = Inner[0];
+                return CabTail(pts, n, end, seat);
+            }
             n = Leave(pts, n);
-            bool cab = InCab(end);
-            n = Graph(pts, n, cab ? Inner[Inner.Length - 1] : end, PathMax - (cab ? Inner.Length : 0));
-            if (cab) for (int i = Inner.Length - 2; i >= 0; i--) pts[n++] = Inner[i];
+            n = Graph(pts, n, cab || ladder ? Inner[Inner.Length - 1] : end, PathMax - (cab || ladder ? 6 : 0));
+            if (ladder)
+            {
+                for (int i = Inner.Length - 2; i >= 2; i--) pts[n++] = Inner[i];
+                pts[n++] = Landing();
+                pts[n++] = end;
+                return n;
+            }
+            if (!cab) return n;
+            for (int i = Inner.Length - 2; i >= 0; i--) pts[n++] = Inner[i];
+            return CabTail(pts, n, end, seat);
+        }
+
+        // In the cab: into the aisle unless he already stands in its open
+        // band (no desk or chair between z -1.1 and 0.6, x 5.4..9.35).
+        static int Aisle(Vector3[] pts, int n)
+        {
+            Vector3 s = pts[n - 1];
+            if (s.z >= AisleZ - 1.1f && s.z <= AisleZ + 0.6f) return n;
+            float x = s.x < AisleMinX ? AisleMinX : (s.x > AisleMaxX ? AisleMaxX : s.x);
+            pts[n++] = new Vector3(x, CabFloorY, AisleZ);
             return n;
         }
 
-        // Down the inner flight to the roof beside it.
+        // From the aisle to the cab goal: the console seat over its approach
+        // north of the chair, any other cab goal straight (Target = the door).
+        static int CabTail(Vector3[] pts, int n, Vector3 end, bool seat)
+        {
+            if (seat && Flat(pts[n - 1], SeatApproach()) > 0.05f) pts[n++] = SeatApproach();
+            if (Flat(pts[n - 1], end) > 0.01f || n == 1) pts[n++] = end;
+            return n;
+        }
+
+        // Down the inner flight to the roof beside it: out of the cab over
+        // the aisle and the door, off the catwalk over the landing.
         static int Leave(Vector3[] pts, int n)
         {
             Vector3 s = pts[n - 1];
             int from;
-            if (InCab(s)) from = 1;
+            if (InCab(s)) { n = Aisle(pts, n); from = Flat(pts[n - 1], Inner[0]) > 0.05f ? 0 : 1; }
+            else if (OnCatwalk(s) && s.z > 0.9f) { pts[n++] = Landing(); from = 2; }
             else if (OnFlight(s)) from = s.x > Inner[2].x ? 2 : 3;
             else return n;
             for (int i = from; i < Inner.Length; i++) pts[n++] = Inner[i];

@@ -1,5 +1,9 @@
 // A S6: one owner-local defence order, using the existing master seat leases.
+// H M2: one nearest-first plan per order. A post stays with its merc until it
+// is destroyed or he falls; an enemy crew on it is cleared, any other holder
+// is waited out at the post. Duty orders are silent; one summary speaks.
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 
 namespace NextDayRevival
@@ -11,6 +15,7 @@ namespace NextDayRevival
             internal Record Record;
             internal MercOrder Expected;
             internal int Post = -1, Wanted = -1;
+            internal bool Moved;
         }
 
         static readonly List<DefenceMember> Defence = new List<DefenceMember>(10);
@@ -19,6 +24,8 @@ namespace NextDayRevival
         static readonly MercStation[] DefenceSeats = DefenceMakeSeats();
         static readonly int[] DefencePosts = new int[7];
         static readonly int[] DefencePriority = new int[7];
+        static readonly bool[] DefenceTake = new bool[7];
+        static readonly StringBuilder DefenceNote = new StringBuilder(160);
         static bool _defenceActive;
         static string _defenceScene;
         static GameObject _defenceOwner;
@@ -60,16 +67,20 @@ namespace NextDayRevival
             if (Defence.Count == 0)
             { MercUi.OrderReply(Loc.T("Нет оплаченных наёмников для ПВО.", "No paid mercs for air defence."), true); return; }
             _defenceActive = true; _defenceScene = MapScene.Current; _defenceOwner = owner;
-            // Replace previous individual assignments too; overflow follows.
             DefenceOne.Clear();
             for (int i = 0; i < Defence.Count; i++) DefenceOne.Add(Defence[i].Record);
-            Give(DefenceOne, MercOrder.FollowMe());
-            for (int i = 0; i < Defence.Count; i++) Defence[i].Expected = Defence[i].Record.Order;
-            DefenceReconcile(); _defenceAt = Time.time + 0.5f;
-            MercUi.OrderReply(Loc.T("ПВО: пушки, радар, затем ЗУ-23. Остальные за вами. Ещё раз - освободить.",
-                "Air defence: guns, radar, then ZU-23. Others follow. Click again to release."), false);
+            _orderQuiet = true;
+            try
+            {
+                // Replace previous individual assignments too; overflow follows.
+                Give(DefenceOne, MercOrder.FollowMe());
+                for (int i = 0; i < Defence.Count; i++) Defence[i].Expected = Defence[i].Record.Order;
+                DefenceReconcile();
+            }
+            finally { _orderQuiet = false; }
+            _defenceAt = Time.time + 0.5f;
             _onDuty.Clear();
-            Announce(Loc.T("ЗАНЯТЬ ПВО", "MAN AIR DEFENCE"), DefenceOne);
+            Announce(DefenceSummary(), DefenceOne);
         }
 
         static bool DefenceUntouched(DefenceMember m)
@@ -88,7 +99,9 @@ namespace NextDayRevival
                 if (!m.Record.Dead && !m.Record.Deserted && DefenceUntouched(m)) DefenceOne.Add(m.Record);
             }
             _defenceActive = false; Defence.Clear();
-            if (DefenceOne.Count > 0) Give(DefenceOne, MercOrder.FollowMe());
+            _orderQuiet = true;
+            try { if (DefenceOne.Count > 0) Give(DefenceOne, MercOrder.FollowMe()); }
+            finally { _orderQuiet = false; }
             MercUi.OrderReply(Loc.T("ПВО освобождена; наёмники следуют за вами.", "Air defence released; mercs follow you."), false);
         }
 
@@ -108,7 +121,11 @@ namespace NextDayRevival
                     if (!_roster.Contains(m.Record) || m.Record.Dead || m.Record.Deserted || !DefenceUntouched(m))
                         Defence.RemoveAt(i);
                 }
-                DefenceReconcile();
+                _orderQuiet = true;
+                bool moved;
+                try { moved = DefenceReconcile(); }
+                finally { _orderQuiet = false; }
+                if (moved) DefenceMovedNote();
             }
             finally { FrameProf.E(FrameProf.S_MercAirfieldT); }
         }
@@ -126,32 +143,40 @@ namespace NextDayRevival
             return null;
         }
 
-        static bool DefenceSeat(int post, DefenceMember m, bool planning)
+        static DefenceMember DefenceOf(Component ai)
         {
-            Record r = m == null ? null : m.Record;
-            if (!MercAA.CanApproach(post, r == null || r.Unit == null ? null : r.Unit.Ai))
-            {
-                // A managed crewman moving to a higher-priority gun releases
-                // his lease before we issue any of this plan's replacements.
-                if (!planning || !MercAA.AvailableForOrder(post)) return false;
-                MercAAPost held = MercAA.Held(post); bool leaving = false;
-                for (int i = 0; held != null && i < Defence.Count; i++)
-                {
-                    DefenceMember other = Defence[i];
-                    if (other.Post == post && other.Wanted != post
-                        && other.Record.Unit != null && other.Record.Unit.Ai == held.Ai)
-                    { leaving = true; break; }
-                }
-                if (!leaving) return false;
-            }
+            for (int i = 0; ai != null && i < Defence.Count; i++)
+                if (Defence[i].Record.Unit != null && Defence[i].Record.Unit.Ai == ai) return Defence[i];
+            return null;
+        }
+
+        static DefenceMember DefenceCrew(int post)
+        {
+            for (int i = 0; i < Defence.Count; i++) if (Defence[i].Wanted == post) return Defence[i];
+            return null;
+        }
+
+        // Only destruction ends a post; every other holder is temporary.
+        static bool DefenceStanding(int post)
+        {
+            return post == MercAA.Radar ? TowerRadar.Working : AirDefenceDamage.Alive(post);
+        }
+
+        // A seat this duty may plan: free, or held by an enemy crew that its
+        // merc clears first. Players, friendly crews and foreign leases keep theirs.
+        static bool DefenceOpen(int post, Component probe)
+        {
+            if (!DefenceStanding(post)) return false;
+            if (probe != null && MercAA.HostileCrew(post, probe) != null) return true;
+            if (!MercAA.AvailableForOrder(post)) return false;
+            MercAAPost held = MercAA.Held(post);
+            if (held != null && DefenceOf(held.Ai) == null) return false;
             // Respect another local order's reservation before physical arrival.
             for (int i = 0; i < _roster.Count; i++)
             {
                 Record other = _roster[i];
-                if (other == r || other.Dead || other.Deserted || other.Down.Down) continue;
-                if (!MercStations.Matches(other.Order, DefenceSeats[post])) continue;
-                DefenceMember pending = planning ? DefenceFor(other) : null;
-                if (pending == null || pending.Wanted == post) return false;
+                if (other.Dead || other.Deserted || other.Down.Down || DefenceFor(other) != null) continue;
+                if (MercStations.Matches(other.Order, DefenceSeats[post])) return false;
             }
             return true;
         }
@@ -159,7 +184,7 @@ namespace NextDayRevival
         static int DefenceDiscover()
         {
             int count = 0;
-            for (int i = 0; i < DefencePriority.Length; i++) DefencePriority[i] = -1;
+            for (int i = 0; i < DefencePriority.Length; i++) { DefencePriority[i] = -1; DefenceTake[i] = false; }
             // Registry lookups only: no scene search, rays or player-distance seat limit.
             for (int pass = 0; pass < 3; pass++)
                 for (int post = 0; post < DefenceSeats.Length; post++)
@@ -175,53 +200,65 @@ namespace NextDayRevival
             return count;
         }
 
-        static int DefenceTrait(Record r)
+        static Vector3 DefenceWhere(Record r)
         {
-            if (r.Unit != null) return r.Unit.AAGunner;
-            Profile p = ProfileById(r.ProfileId); return p == null ? 0 : p.AAGunner;
+            return r.Unit == null || r.Unit.Ai == null ? OwnerPosition : r.Unit.Ai.transform.position;
         }
 
-        static DefenceMember DefencePick(int post)
-        {
-            DefenceMember best = null; int trait = -1;
-            // Use followers first; only borrow a lower-priority post if necessary.
-            for (int pass = 0; pass < 2 && best == null; pass++)
-                for (int i = 0; i < Defence.Count; i++)
-                {
-                    DefenceMember m = Defence[i];
-                    if (!DefenceReady(m) || !DefenceSeat(post, m, true)) continue;
-                    if (pass == 0 ? m.Wanted >= 0 : m.Wanted < 0 || DefencePriority[m.Wanted] <= DefencePriority[post]) continue;
-                    int score = DefenceTrait(m.Record);
-                    if (post == MercAA.Radar) score = 50 - score; // Reserve specialists for guns.
-                    // Equal specialists borrow ZU before radar. Contract IDs
-                    // keep all other ties stable across roster reply ordering.
-                    int priority = m.Wanted < 0 ? -1 : DefencePriority[m.Wanted];
-                    int bestPriority = best == null || best.Wanted < 0 ? -1 : DefencePriority[best.Wanted];
-                    if (best == null || score > trait || (score == trait
-                        && (priority > bestPriority || (priority == bestPriority && m.Record.Id < best.Record.Id))))
-                    { best = m; trait = score; }
-                }
-            return best;
-        }
-
-        static void DefenceReconcile()
+        // True when a living, ready merc changed post (for the one summary).
+        static bool DefenceReconcile()
         {
             int count = DefenceDiscover();
+            Component probe = null; // The squad shares the owner's faction.
+            int free = 0;
             for (int i = 0; i < Defence.Count; i++)
             {
                 DefenceMember m = Defence[i];
+                m.Moved = false;
                 m.Wanted = m.Post >= 0 && DefencePriority[m.Post] >= 0 && DefenceReady(m)
-                    && DefenceSeat(m.Post, m, false) ? m.Post : -1;
+                    && DefenceStanding(m.Post) ? m.Post : -1;
+                if (!DefenceReady(m)) continue;
+                if (m.Wanted < 0) free++;
+                if (probe == null && m.Record.Unit != null) probe = m.Record.Unit.Ai;
             }
+            // 52-K > radar > ZU-23: open posts take the reserve; with none left
+            // the crew of the lowest-priority post below moves up.
             for (int n = 0; n < count; n++)
             {
-                int post = DefencePosts[n]; bool staffed = false;
-                for (int i = 0; i < Defence.Count; i++) if (Defence[i].Wanted == post) { staffed = true; break; }
-                if (staffed) continue;
-                DefenceMember next = DefencePick(post);
-                if (next != null) next.Wanted = post;
+                int post = DefencePosts[n];
+                if (DefenceCrew(post) != null || !DefenceOpen(post, probe)) continue;
+                if (free > 0) { DefenceTake[post] = true; free--; continue; }
+                for (int k = count - 1; k > n; k--)
+                {
+                    DefenceMember low = DefenceCrew(DefencePosts[k]);
+                    if (low == null) continue;
+                    low.Wanted = -1; DefenceTake[post] = true; break;
+                }
+            }
+            // Nearest pair first; contract IDs break exact ties.
+            for (;;)
+            {
+                DefenceMember best = null; int seat = -1; float near = float.MaxValue;
+                for (int i = 0; i < Defence.Count; i++)
+                {
+                    DefenceMember m = Defence[i];
+                    if (m.Wanted >= 0 || !DefenceReady(m)) continue;
+                    Vector3 from = DefenceWhere(m.Record);
+                    for (int n = 0; n < count; n++)
+                    {
+                        int post = DefencePosts[n];
+                        if (!DefenceTake[post]) continue;
+                        Vector3 d = DefenceSeats[post].At - from; d.y = 0f;
+                        float s = d.sqrMagnitude;
+                        if (best == null || s < near || (s == near && m.Record.Id < best.Record.Id))
+                        { best = m; seat = post; near = s; }
+                    }
+                }
+                if (best == null) break;
+                best.Wanted = seat; DefenceTake[seat] = false;
             }
             // Release old claims before assigning replacements, including lower-priority crew.
+            bool moved = false;
             DefenceChanged.Clear();
             for (int i = 0; i < Defence.Count; i++)
             {
@@ -239,8 +276,62 @@ namespace NextDayRevival
                 if (m.Wanted >= 0)
                 { GiveStation(m.Record, DefenceSeats[m.Wanted], m.Wanted == MercAA.Radar); DefenceChanged.Add(m.Record); }
                 m.Post = m.Wanted; m.Expected = m.Record.Order;
+                m.Moved = DefenceReady(m);
+                if (m.Moved) moved = true;
             }
             if (DefenceChanged.Count > 0) SaveStationOrders(DefenceChanged);
+            return moved;
+        }
+
+        static bool DefenceShort(int post)
+        {
+            Flak.Gun g = post == MercAA.Radar ? null : Flak.ByIndex(post);
+            return g != null && g.ShortRange;
+        }
+
+        static string DefencePostName(int post)
+        {
+            return post == MercAA.Radar ? Loc.T("радар", "radar") : DefenceShort(post) ? "ZU-23" : "52-K";
+        }
+
+        static string DefenceSummary()
+        {
+            int guns = 0, enemy = 0, reserve = 0; bool radar = false, zu = false;
+            for (int i = 0; i < Defence.Count; i++)
+            {
+                DefenceMember m = Defence[i];
+                if (m.Post < 0) { reserve++; continue; }
+                if (m.Post == MercAA.Radar) radar = true;
+                else if (DefenceShort(m.Post)) zu = true;
+                else guns++;
+                if (m.Record.Unit != null && MercAA.HostileCrew(m.Post, m.Record.Unit.Ai) != null) enemy++;
+            }
+            DefenceNote.Length = 0;
+            DefenceNote.Append(Loc.T("ЗАНЯТЬ ПВО - 52-К: ", "MAN AIR DEFENCE - 52-K: ")).Append(guns);
+            if (radar) DefenceNote.Append(Loc.T(", радар", ", radar"));
+            if (zu) DefenceNote.Append(", ZU-23");
+            if (enemy > 0) DefenceNote.Append(Loc.T("; зачистка от врага: ", "; clearing enemy crews: ")).Append(enemy);
+            if (reserve > 0) DefenceNote.Append(Loc.T("; за вами: ", "; following you: ")).Append(reserve);
+            DefenceNote.Append(Loc.T("; ещё раз - освободить", "; click again to release"));
+            return DefenceNote.ToString();
+        }
+
+        // One line for every re-crewing of a tick, instead of a reply per merc.
+        static void DefenceMovedNote()
+        {
+            DefenceNote.Length = 0;
+            DefenceNote.Append(Loc.T("ПВО: ", "Air defence: "));
+            bool first = true;
+            for (int i = 0; i < Defence.Count; i++)
+            {
+                DefenceMember m = Defence[i];
+                if (!m.Moved) continue;
+                if (!first) DefenceNote.Append(", ");
+                first = false;
+                DefenceNote.Append(m.Record.Name).Append(" - ")
+                    .Append(m.Post < 0 ? Loc.T("за вами", "following you") : DefencePostName(m.Post));
+            }
+            MercUi.Toast(DefenceNote.ToString(), false);
         }
 
         internal static bool AirDefenceManaged(MercUnit u)
