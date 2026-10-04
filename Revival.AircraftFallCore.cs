@@ -7,8 +7,10 @@ namespace NextDayRevival
     // independent and can be evaluated at the same Photon clock on every peer.
     internal static class AircraftFallCore
     {
-        internal const double Gravity = 9.81;
-        const double Drag = 0.12;
+        // A destroyed airframe has no lift. This visible dive reaches 64 m/s
+        // in four seconds and hits from 550 m within ten seconds.
+        internal const double Gravity = 16.0;
+        const double Drag = 0.5;
 
         internal static double HorizontalTravel(double age)
         {
@@ -24,10 +26,15 @@ namespace NextDayRevival
                 - terminal * (age - accelerating);
         }
 
+        internal static double VerticalSpeed(double velocity, double age, double terminal)
+        {
+            return Math.Max(-terminal, velocity - Gravity * Math.Max(0.0, age));
+        }
+
         internal static double Pitch(double initial, double age)
         {
-            double fall = 1.0 - Math.Exp(-Math.Max(0.0, age) / 1.5);
-            return initial + (58.0 - initial + 7.0 * Math.Sin(age * 1.8)) * fall;
+            double fall = 1.0 - Math.Exp(-Math.Max(0.0, age));
+            return initial + (72.0 - initial + 5.0 * Math.Sin(age * 1.8)) * fall;
         }
 
         internal static double Bank(double initial, double side, double age)

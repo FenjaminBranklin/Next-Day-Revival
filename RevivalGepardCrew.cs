@@ -182,6 +182,7 @@ namespace NextDayRevival
             _hits.Remove(id);
             try
             {
+                AircraftCrashFx.MarkKill(c.Go, "GepardAir.Hit/" + c.Src.Name);
                 c.Src.Kill(c.Go, point);
                 RevivalPlugin.L.LogInfo("GepardAir: " + c.Src.Name + " shot down (airframe damage "
                     + n + ").");
@@ -210,6 +211,44 @@ namespace NextDayRevival
             return KillNow(go, point);
         }
 
+        // Player rifles and native blasts use the same registered destruction
+        // entry as flak/Stinger. NPC fixed-wing damage keeps its master ledger.
+        internal static void WeaponHit(GameObject go, Vector3 point, bool lethal)
+        {
+            if (go == null) return;
+            if (NpcAircraft.Is(go)) { NpcAircraft.Damage(go, point, lethal); return; }
+            if (PlayerHeli.Contains(go))
+            {
+                int view = PlayerHeli.MissileView(go);
+                if (view == 0 || PlayerHeli.MissileTarget(view) == null) return;
+                int id = go.GetInstanceID();
+                float hits;
+                _hits.TryGetValue(id, out hits);
+                hits = lethal ? 1f : ShortRangeCore.AddHit(hits, 30);
+                if (hits < 0.99999f) { _hits[id] = hits; return; }
+                _hits.Remove(id);
+                AircraftCrashFx.MarkKill(go, lethal ? "player-blast/Mi-8" : "player-rifle/Mi-8");
+                GepardNet.SendHeliKill(view, point);
+                PlayerHeli.MissileImpact(view, point);
+                return;
+            }
+            Probe();
+            for (int i = 0; i < _sources.Count; i++)
+            {
+                Source s = _sources[i];
+                _tmp.Clear(); s.List(_tmp);
+                if (!_tmp.Contains(go) || IsDown(s, go)) continue;
+                if (lethal) KillNow(go, point);
+                else
+                {
+                    GepardGun.Contact c = new GepardGun.Contact();
+                    c.Go = go; c.Src = s;
+                    Hit(c, point, 30);
+                }
+                return;
+            }
+        }
+
         /// <summary>The owning source's own kill, at once.</summary>
         internal static bool KillNow(GameObject go, Vector3 point)
         {
@@ -225,6 +264,7 @@ namespace NextDayRevival
                 _hits.Remove(go.GetInstanceID());
                 try
                 {
+                    AircraftCrashFx.MarkKill(go, "GepardAir.KillNow/" + s.Name);
                     s.Kill(go, point);
                     RevivalPlugin.L.LogInfo("GepardAir: " + s.Name + " destroyed outright.");
                     return true;

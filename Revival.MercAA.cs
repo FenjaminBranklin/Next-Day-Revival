@@ -197,6 +197,17 @@ namespace NextDayRevival
             return chosen;
         }
 
+        /// <summary>H M3: flat distance from a gun post's pit centre, -1 for
+        /// the radar, a mortar or a gun without an earthwork.</summary>
+        internal static float PitFlat(int post, Vector3 at)
+        {
+            if (post < 0 || post >= 14 || post == Radar || post == Radar + 7) return -1f;
+            Flak.Gun g = Flak.ByIndex(post >= 7 ? post - 7 : post);
+            if (g == null || g.Earthwork == null) return -1f;
+            Vector3 d = at - g.Earthwork.position; d.y = 0f;
+            return d.magnitude;
+        }
+
         internal static int PostOf(MercUnit u)
         {
             if (!IsOrder(u.Order)) return -1;
@@ -250,6 +261,47 @@ namespace NextDayRevival
             Request[3] = u.AAGunner; Request[4] = u.Peaceful ? 1f : 0f;
             if (Authority) OnPacket(Request, LocalActor());
             else MercRide.SendAAPacket(Request);
+        }
+
+        /// <summary>H M3 log: why this merc does not hold his post (the master's
+        /// lease rules, in order). Allocates; called at most every 5 s.</summary>
+        internal static string LeaseWhy(MercUnit u, int post)
+        {
+            if (u == null || u.Ai == null) return "merc not spawned";
+            MercAAPost held = Held(post);
+            if (held != null && held.Ai == u.Ai) return "seated";
+            if (held != null) return "post held by actor " + held.Actor + " view " + held.View;
+            if (post == Radar)
+            {
+                if (!TowerRadar.Built) return "radar not built";
+                if (!TowerRadar.Working) return "radar not working";
+                if (TowerRadar.OperatorActor >= 0) return "player actor " + TowerRadar.OperatorActor + " at the console";
+                if (RadarOperator.Alive) return NpcWar.Hates(u.Ai, RadarOperator.Man) ? "enemy operator alive (to clear)" : "own-side NPC operator on the seat";
+            }
+            else if (post < 14)
+            {
+                Flak.Gun g = Flak.ByIndex(post >= 7 ? post - 7 : post);
+                if (g == null) return "no gun with index " + post;
+                if (!AirDefenceDamage.Alive(g.Index)) return "gun destroyed";
+                if (g == Flak._manned) return "you sit at this gun";
+                if (Time.time < g.ClaimedUntil) return "player actor " + g.ClaimActor + " at this gun";
+                Component native = post >= 7 ? g.Loader : g.Gunner;
+                if (Flak.Up(native)) return (NpcWar.Hates(u.Ai, native) ? "enemy" : "own-side") + " native crewman on the seat";
+            }
+            Vector3 at; Quaternion rot;
+            if (!Pose(post, out at, out rot)) return "no seat pose";
+            if (ViewOf(u) <= 0) return "no PhotonView id on the merc: no request sent";
+            if (!Authority) return "lease asked of master actor " + MasterActor() + "; not in its snapshot yet";
+            Component ai = Resolve(u.AAView, LocalActor());
+            if (ai == null) return "view " + u.AAView + " does not resolve to a merc of actor " + LocalActor()
+                + " (key " + Crew.GroundKey(u.Ai) + ")";
+            Vector3 body = ai.transform.position;
+            Vector3 d = body - at;
+            if (!MercDefenceCore.LeaseNear(d.sqrMagnitude, PitFlat(post, body), d.y))
+                return "too far for the lease: " + d.magnitude.ToString("0.0") + " u from the seat, pit "
+                    + PitFlat(post, body).ToString("0.0") + " u";
+            if (NpcWar.MercHealthForPost(ai) < 0.35f) return "health below 35 %";
+            return "lease rules met; grant due on the next request";
         }
 
         internal static void Release(MercUnit u)
@@ -322,7 +374,9 @@ namespace NextDayRevival
                 if (p.Until > Time.time && (p.Actor != sender || p.View != view)) return;
                 Component ai = p.Actor == sender && p.View == view ? p.Ai : Resolve(view, sender);
                 Vector3 at; Quaternion rot;
-                if (!Flak.Up(ai) || !Pose(index, out at, out rot) || (ai.transform.position - at).sqrMagnitude > 36f) return;
+                if (!Flak.Up(ai) || !Pose(index, out at, out rot)) return;
+                Vector3 body = ai.transform.position;
+                if (!MercDefenceCore.LeaseNear((body - at).sqrMagnitude, PitFlat(index, body), body.y - at.y)) return;
                 if (NpcWar.MercHealthForPost(ai) < 0.35f) return;
                 if (index >= 100) Mortar.MercPrepare(index);
                 for (int i = 0; i < Posts.Length; i++)
@@ -559,8 +613,11 @@ namespace NextDayRevival
             float hp = u.Fight.Health;
             if (hp < 0.35f) u.AARetreat = true;
             if (hp >= 0.5f) u.AARetreat = false;
+            MercPostTrack t = u.DefTrack;
+            if (t.Post != post || t.For != u.Order) t.Reset(post, u.Order, now);
             if (MercStationPlan.Retreat(hp, u.AARetreat, danger) || u.Deserting)
             {
+                t.State = MercDefenceCore.SRetreat;
                 MercAA.Release(u);
                 if (u.Sense.Pick.Found) at = u.Sense.Pick.Point.Pos;
                 else at = u.Owner == null ? f.Tr.position : u.Owner.position - u.Owner.forward * 8f;
@@ -568,16 +625,19 @@ namespace NextDayRevival
                 else MercCrouch(f, now);
                 return;
             }
-            if (MercCrewPhases.Ground(u)) { MercCrewHold(f, u, now); return; }
-            if (post < 0 || !MercAA.Pose(post, out at, out rot)) { MercAA.Release(u); MercFollow(f, u, now); return; }
+            if (MercCrewPhases.Ground(u)) { t.State = MercDefenceCore.SGround; MercCrewHold(f, u, now); return; }
+            if (post < 0 || !MercAA.Pose(post, out at, out rot))
+            { t.State = MercDefenceCore.SNoPose; MercAA.Release(u); MercFollow(f, u, now); return; }
             // H M2: an enemy crew on his gun is his target before the seat;
             // any other holder is waited out at the post, not where he stood.
             Component occupant = MercAA.HostileCrew(post, u.Ai);
             bool open = occupant == null && MercAA.CanApproach(post, u.Ai);
             int action = MercStationPlan.PostAction(occupant != null, open, !open && Mercs.AirDefenceManaged(u));
-            if (action == MercStationPlan.PostClear) { MercAA.Release(u); MercClearPost(f, u, occupant, at, now); return; }
+            if (action == MercStationPlan.PostClear)
+            { t.State = MercDefenceCore.SClear; MercAA.Release(u); MercClearPost(f, u, occupant, at, now); return; }
             if (action == MercStationPlan.PostWait)
             {
+                t.State = MercDefenceCore.SWait;
                 MercAA.Release(u);
                 if (MercFight(f, u, now)) return;
                 if ((at - f.Tr.position).sqrMagnitude > MercStationPlan.WaitReach * MercStationPlan.WaitReach)
@@ -587,6 +647,7 @@ namespace NextDayRevival
             }
             if (action == MercStationPlan.PostReplace)
             {
+                t.State = MercDefenceCore.SReplace;
                 MercAA.Release(u);
                 if (!MercStations.Replace(u) && !MercFight(f, u, now)) MercCrouch(f, now);
                 return;
@@ -594,6 +655,7 @@ namespace NextDayRevival
             MercAAPost held = MercAA.Held(post);
             if (held != null && held.Ai == u.Ai)
             {
+                t.State = MercDefenceCore.SSeated; t.Seated = true;
                 MercAA.RequestPost(u, post);
                 f.Target = null; f.Sees = false; f.HasOrder = false;
                 if (u.KillTargetSet != null) SetMercKillTarget(f, u, null);
@@ -604,7 +666,31 @@ namespace NextDayRevival
                 Drive(f, MainIdle, AddNone, PoseStand, now, true);
                 return;
             }
-            if ((at - f.Tr.position).sqrMagnitude > 16f) { MercAA.Release(u); MercStationApproach(f, u, at, now); return; }
+            // H M3: arrival is flat reach plus a rise band (the seat pose lies
+            // over the pad); a man stalled inside his pit walks in, one stuck
+            // up on the tower goes down, one stalled on open ground re-paths.
+            t.Seated = false;
+            Vector3 me = f.Tr.position;
+            float flat = Flat(at - me), rise = me.y - at.y;
+            MercDefenceCore.Note(t, flat, rise, now);
+            if (!MercDefenceCore.AtPost(flat, rise))
+            {
+                int rescue = MercDefenceCore.Rescue(t, now, MercAA.PitFlat(post, me), TowerRoof.ManUp(me));
+                t.Rescue = rescue;
+                if (rescue == MercDefenceCore.RescueDescend && TowerRoof.Descend(f.Tr, Agent(f)))
+                { t.State = MercDefenceCore.SDescend; t.Rescues++; f.HasOrder = false; u.NextOrder = 0f; MercAA.Release(u); return; }
+                if (rescue != MercDefenceCore.RescueWalkIn)
+                {
+                    if (rescue == MercDefenceCore.RescueRepath) { t.Rescues++; f.HasOrder = false; f.MoveDeadline = 0f; u.NextOrder = 0f; }
+                    t.State = TowerRoof.ManUp(me) ? MercDefenceCore.SClimb : MercDefenceCore.SWalk;
+                    MercAA.Release(u); MercStationApproach(f, u, at, now); return;
+                }
+                // Inside the pit and no closer: the lease seats him from here.
+                if (t.State != MercDefenceCore.SWalkIn) t.Rescues++;
+                t.State = MercDefenceCore.SWalkIn;
+            }
+            else t.State = MercDefenceCore.SRequest;
+            t.Arrived = true;
             MercAA.RequestPost(u, post);
             f.Target = null; f.Sees = false; f.HasOrder = false;
             u.PlayerTarget = null;

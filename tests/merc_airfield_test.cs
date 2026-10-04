@@ -178,6 +178,11 @@ namespace NextDayRevival
         { int a = 0, n = 0; foreach (Record r in _roster) { if (r.Dead) continue; a++; if (r.Selected) n++; } return MercTargetPlan.Explicit(Picked, n, a); }
         internal static string AnnouncedText;
         static void Announce(string what, List<Record> got) { Announced = got.Count; AnnouncedText = what; }
+        // H M3: the "MercAD" log lines (Revival.MercDefenceLog.cs) are Unity-side.
+        internal static int LogOrders, LogTicks;
+        static void DefenceLogRefused(bool owner, bool built, float sq) { }
+        static void DefenceLogOrder() { LogOrders++; }
+        static void DefenceLogTick(float now, bool moved) { LogTicks++; }
         internal static void SaveStationOrders(List<Record> list) { Saves++; }
         // PRODUCTION_GIVE_STATION
         internal static List<Record> Roster { get { return _roster; } }
@@ -421,6 +426,33 @@ class Check
         Ok(all && last <= 90f, "H M2: every merc sits at his post within 90 s (last " + last + " s)");
         Ok(MercUi.Toasts == toastsAt && Mercs.Loud == 0, "H M2: no notifications for the duty's own status changes");
         Console.WriteLine("INFO: H M2 enemy guns engaged at {0} s / {1} s, last seat {2} s", engagedAt[1], engagedAt[6], last);
+        // H M3: unassigned extras keep their own order; only an extra whose
+        // old order is an air defence post the plan hands out is freed (FOLLOW).
+        Mercs.Reset();
+        MercOrder[] prior = new MercOrder[7];
+        for (int i = 0; i < 7; i++)
+        {
+            Mercs.Record r = Mercs.Add(0); r.Unit.Ai.transform.position = new Vector3(i * 400f, 0f, 0f);
+            MercOrder o = new MercOrder(); o.Mode = MercOrder.Stay; o.Points = new Vector3[] { new Vector3(i, 0f, 0f) };
+            if (i == 2) { o.Mode = MercOrder.ManGun; o.Facing = new Vector3(1f, 0f, 0f); } // an old order on post 0
+            r.Order = o; r.Unit.Order = o; prior[i] = o;
+        }
+        int logsAt = Mercs.LogOrders;
+        Mercs.ToggleAirDefence(); Unique();
+        int kept = 0, freed = 0, extras = 0;
+        for (int i = 0; i < 7; i++)
+        {
+            Mercs.Record r = Mercs.Roster[i];
+            if (Post(r) >= 0) continue;
+            extras++;
+            if (r.Order == prior[i] && r.Unit.Order == prior[i]) kept++;
+            else if (i == 2 && r.Order.Mode == MercOrder.Follow) freed++;
+        }
+        Ok(extras == 2 && kept == 1 && freed == 1, "H M3: extras keep their previous order (" + kept + " kept, " + freed + " freed of " + extras + ")");
+        Ok(Mercs.LogOrders == logsAt + 1, "H M3: the order writes its MercAD lines once");
+        Mercs.TestTick(1f); Mercs.TestTick(2f);
+        Ok(Mercs.Roster[3].Order == prior[3] && Mercs.AirDefenceWants(0) && !Mercs.AirDefenceWants(2),
+            "H M3: the kept order stands over ticks; planned guns are reserved from native crew spawns");
         Mercs.Reset(); for (int i = 0; i < 6; i++) Mercs.Add(0);
         Component friend = new Component(); Flak.Guns[0].Gunner = friend; MercAA.Occupant[4] = new Component();
         Mercs.ToggleAirDefence();

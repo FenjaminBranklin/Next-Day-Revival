@@ -113,6 +113,8 @@ namespace NextDayRevival
             int what = label.StartsWith(AirEvents.BomberTag, StringComparison.Ordinal) ? 0
                 : label.StartsWith(AirEvents.TransportTag, StringComparison.Ordinal) ? 1 : 3;
             Pay(f.Ledger.Winner(), what, at);
+            AircraftCrashFx.MarkKill(f.Go, "AirKills.Downed");
+            PlayerAn2.ShotDown(f.Go, at);
         }
 
         static void OnLevel(float[] f)
@@ -209,6 +211,7 @@ namespace NextDayRevival
         {
             HeliFlight flight = RevivalTroopInsertion.FlightOf(go);
             if (flight == null || flight.Down) return;
+            AircraftCrashFx.MarkKill(go, "AirKills.TroopHeli");
             AircraftCrashFx.Hit(go, at);
             if (!flight.ShotDown()) return;
             int view = PlayerAn2.View(go);
@@ -253,6 +256,7 @@ namespace NextDayRevival
             {
                 if (!_downHelis.Contains(go)) _downHelis.Add(go);
                 Vector3 site = f.Length >= 9 ? new Vector3(f[6], f[7], f[8]) : AircraftCrashFx.Site(go);
+                AircraftCrashFx.BeginFall(go, 0f, RevivalTroopInsertion.K, ParaPose.Clock(), 65f);
                 AircraftCrashFx.Start(go, site, 0.7f * RevivalTroopInsertion.K);
                 Unsmoke(go);
                 if (Near(at, 3000f * K)) Turret.Hinweis("A troop helicopter is going down.", 4f);
@@ -260,6 +264,7 @@ namespace NextDayRevival
             }
             if (phase != 1) return;
             if (!_downHelis.Contains(go)) _downHelis.Add(go);
+            AircraftCrashFx.Impact(go);
             AircraftCrashFx.Stop(go);
             Unsmoke(go);
             try

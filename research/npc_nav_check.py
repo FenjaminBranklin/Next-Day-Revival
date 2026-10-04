@@ -49,6 +49,9 @@ namespace NextDayRevival
     public static partial class NpcWar
     {
         static System.Type _npcType;
+        // i-m3 move-owner hooks (Revival.MercMoveOwner.cs; research/merc_tick_check.py covers them).
+        static bool MercOwnerDetourPick(MercUnit u,Vector3 me,Vector3 pick){ return true; }
+        static void MercOwnerEvent(MercUnit u,string what,Vector3 from,Vector3 to,float now){ }
         static int Issues;
         static bool Retarget(Fighter f,Vector3 goal,float now)
         { f.NavGoal=NavDestination(f,goal,now); Issues++; return true; }

@@ -92,7 +92,21 @@ namespace NextDayRevival
                     f.Armed, f.Target != null && f.Target,
                     Reloading(f), u.Medicine != null && u.Medicine.Active != 0,
                     ft.In.Danger, ft.In.Survive || (brain != null && brain.Mode != MercBrain.Normal), ft.Health);
-                if (!eligible) { if (ft.MovePose != null) ft.MovePose.Stop(); return false; }
+                if (!eligible)
+                {
+                    // i-m3: a sight or travel flicker while he is shooting on
+                    // the move keeps the pose - a changed path is no fire stop.
+                    bool hard = !MercMoveShoot.Enabled || !f.Armed || f.Target == null || !f.Target || Reloading(f)
+                        || (u.Medicine != null && u.Medicine.Active != 0) || ft.In.Danger || ft.In.Survive
+                        || (brain != null && brain.Mode != MercBrain.Normal) || ft.Health < 0.35f;
+                    // A long sprint to cover stays a sprint (Travel's 24-unit bound).
+                    if (!hard && MercMoveShootPolicy.Travel(moving.Act == FightAct.Step, moving.Act == FightAct.Run,
+                            Flat(moving.Dest - f.Tr.position), false) && now - ft.LastShotAt <= MercMoveShootPolicy.FireKeep
+                        && ft.MovePose != null && ft.MovePose.Touch(f.WeaponId, AimWorld(f), now))
+                    { act = moving; return true; }
+                    if (ft.MovePose != null) ft.MovePose.Stop();
+                    return false;
+                }
                 if (!ft.MovePoseTried)
                 {
                     if (!MercMoveShootPose.MaySetup()) return false;

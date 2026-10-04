@@ -188,13 +188,15 @@ namespace NextDayRevival
             run.Gate(o, ref i);
             MercAttackTeam team = o.Team as MercAttackTeam;
             float front;
-            if (!i.Protected && !i.Danger && u.Fight.Overwatch.Role == MercRole.Marksman
+            // i-m3: a fresh mark - the marksman runs with the others first.
+            if (!i.Protected && !i.Danger && u.Fight.Overwatch.Role == MercRole.Marksman && !u.Own.FreshMark(now)
                 && team != null && team.Front(now, out front) && now - team.LastSight <= 2f
                 && i.Target && run.Saw(now, MercAttackRun.MarksmanSight)
                 && (!MercAttackGeo.Continues(o) || !run.NeedsBound(ref i)))
             {
                 Vector3 anchor = o.Origin + MercAttackGeo.Dir(o) * front;
                 Vector3 goal = MercRole.Slot(MercRole.Marksman, anchor, MercAttackGeo.Dir(o), o.K, 0);
+                u.Own.Step = MercWriter.Overwatch; u.Own.StepReason = "marksman overwatch";
                 if (!MercRole.InPosition(i.Me, anchor, MercAttackGeo.Dir(o))
                     && Vector3.Dot(goal - i.Me, MercAttackGeo.Dir(o)) > 1f)
                     MercMove(f, u, MercAttackWaypoint(f, u, goal, now), true, now);
@@ -202,7 +204,10 @@ namespace NextDayRevival
                 return;
             }
             MercAttackAct a;
+            int stucks = run.Stucks;
             run.Step(o, ref i, out a);
+            u.Own.StepReason = MercAttackRun.Name(run.Phase);   // i-m3: the log's reason
+            if (run.Stucks != stucks) MercOwnerEvent(u, "attack-run stuck re-path (no 1 m in 1.5 s: side step)", i.Me, a.Dest, now);
             if (run.News != 0) MercAttackNews(u, run);
             if (a.Act == MercAttackAct.MoveTo)
             {

@@ -7,6 +7,7 @@ namespace NextDayRevival
     {
         internal const float Speed = 4.2f; // 1.5 m/s, 2.8 units/m
         internal const float Fade = 0.15f, Heartbeat = 0.5f, Lease = 1.5f;
+        internal const float FireKeep = 1.5f; // i-m3: a shot this recent keeps the pose over a new path (= MercMoveOwner.FireKeep)
 
         internal static bool Eligible(bool enabled, bool move, bool safeMove, bool armed,
             bool target, bool reload, bool medicine, bool danger, bool survive, float health)

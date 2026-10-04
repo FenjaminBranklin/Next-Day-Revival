@@ -260,17 +260,25 @@ namespace NextDayRevival
                 u.LegUntil += now - u.LastStep;
             }
             u.LastStep = now;
+            MercMoveOwner own = u.Own;
             if (u.Deserting)
             {
+                own.Step = MercWriter.Desert; own.StepReason = "deserting";
                 Vector3 away = u.DesertTo;
                 if (Flat(away - f.Tr.position) < 4f) { Hold(f, null, now); return; }
                 MercMove(f, u, away, false, now);
                 return;
             }
-            if (u.Order.MoveNear) { MercMoveStep(f, u, now); return; }
+            if (u.Order.MoveNear) { own.Step = MercWriter.MoveOrder; own.StepReason = "move-to mark"; MercMoveStep(f, u, now); return; }
             // c-m2: a target past his fire range - walk up to it first, as
-            // far as the order lets him (Revival.MercCloseIn.cs).
-            if (MercCloseInStep(f, u, now)) return;
+            // far as the order lets him (Revival.MercCloseIn.cs). i-m3: not on
+            // an ATTACK - the mark's run owns his path there (REGROUP-level
+            // close-in walked off the lane and back: a two-writer fight).
+            own.Step = MercWriter.CloseIn; own.StepReason = "target past fire range";
+            if (u.Order.Mode == MercOrder.Attack) u.Close.End();
+            else if (MercCloseInStep(f, u, now)) return;
+            own.Step = MercOwnerWriter(u.Order.Mode);
+            own.StepReason = MercOwnerMode(u.Order.Mode);
             switch (u.Order.Mode)
             {
                 case MercOrder.Follow: MercFollow(f, u, now); return;
@@ -282,6 +290,27 @@ namespace NextDayRevival
                 case MercOrder.ManRadar: MercPostStep(f, u, now); return;
                 case MercOrder.Attack: MercAttackStep(f, u, now); return;
                 default: MercStay(f, u, now); return;
+            }
+        }
+
+        // i-m3: the log's names for the order-side writer and its order.
+        static readonly string[] _ownModes = { "follow", "stay", "patrol", "perimeter", "vehicle", "man gun",
+            "man radar", "attack", "drive" };
+        static string MercOwnerMode(int mode) { return mode >= 0 && mode < _ownModes.Length ? _ownModes[mode] : "order"; }
+
+        static byte MercOwnerWriter(int mode)
+        {
+            switch (mode)
+            {
+                case MercOrder.Attack: return MercWriter.AttackRun;
+                case MercOrder.Follow: return MercWriter.Follow;
+                case MercOrder.Vehicle:
+                case MercOrder.Drive: return MercWriter.Board;
+                case MercOrder.Patrol:
+                case MercOrder.Perimeter: return MercWriter.Patrol;
+                case MercOrder.ManGun:
+                case MercOrder.ManRadar: return MercWriter.Post;
+                default: return MercWriter.Stay;
             }
         }
 
@@ -297,6 +326,7 @@ namespace NextDayRevival
             if (medic) marksman = false;
             MercFollowState(f, u, now);
             bool catching = u.Fight.Follow.Active;
+            if (catching) MercOwnerCatchUp(u);
             Vector3 goal = catching ? u.Fight.Follow.Goal : TowerRoof.GoalUp(owner.position) ? owner.position : marksman ? MercOverwatchGoal(f, u, fwd, now)
                 : MercRole.Slot(MercRole.Assault, owner.position, fwd, u.Slot, 0);
             if (medic) goal = owner.position - fwd * 16.8f + new Vector3(fwd.z, 0f, -fwd.x) * ((u.Slot & 1) == 0 ? -8.4f : 8.4f);
@@ -352,6 +382,7 @@ namespace NextDayRevival
                         slot, MercHalt.Leash, u.Id, out pick) || !pick.Confirmed) return false;
                 h.Take(pick);
             }
+            u.Own.Step = MercWriter.HaltCover; u.Own.StepReason = "owner halted";
             Vector3 p = h.Pick.Point.Pos;
             if (now >= h.NextClaim)
             {
@@ -586,6 +617,11 @@ namespace NextDayRevival
             }
             if (roof == TowerRoof.LegHold) { MercCrouch(f, now); FaceDir(f, leg); return; }
             if (roof == TowerRoof.LegWalk) goal = leg;
+            // i-m3: legs of moving mercs at least 5 m apart (exact spots and
+            // the last hop untouched); the sink notes what it set; a merc who
+            // is shooting keeps walking fire on the order's changed path.
+            else goal = MercOwnerLeg(f, u, goal, now);
+            if (roof == TowerRoof.LegNone && MercOrderFire(f, u, goal, now)) return;
             int state = run ? MainRun : MainWalk;
             float precision = u.Order.Mode == MercOrder.Attack || u.Order.MoveNear || u.Supply.Active ? 1f : 6f;
             bool reorder = !f.HasOrder || now >= f.MoveDeadline || Flat(f.Ordered - goal) > precision

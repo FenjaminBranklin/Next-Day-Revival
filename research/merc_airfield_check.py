@@ -43,7 +43,8 @@ def main():
     exe = stage / 'Check.exe'
     commands = [[str(compiler), '/nologo', '/warn:0', '/optimize+', '/codepage:65001',
                  '/out:' + str(exe), str(src), str(ROOT / 'Revival.MercAirfield.cs'),
-                 str(ROOT / 'Revival.MercTargetCore.cs'), str(ROOT / 'Revival.MercStationsCore.cs')], [str(exe)]]
+                 str(ROOT / 'Revival.MercTargetCore.cs'), str(ROOT / 'Revival.MercStationsCore.cs'),
+                 str(ROOT / 'Revival.MercDefenceCore.cs'), str(ROOT / 'Revival.FlakPositionsCore.cs')], [str(exe)]]
     for args in commands:
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout.decode('utf-8', errors='replace').strip())

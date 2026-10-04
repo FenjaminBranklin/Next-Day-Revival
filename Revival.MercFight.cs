@@ -290,6 +290,7 @@ namespace NextDayRevival
             // NpcWar's suppression is only raised by shooters this client
             // runs; it wears off as it does for a defender.
             f.Suppression = Mathf.Max(0f, f.Suppression - dt * 0.28f);
+            MercOwnerInputs(f, u, ft, now);
 
             if (u.Order.Mode == MercOrder.Attack && f.Sees && f.Target != null
                 && (ft.TraceTarget != f.Target || ft.React.ContactAt < 0f))
@@ -335,17 +336,20 @@ namespace NextDayRevival
                 MercNotice(f, u, ft, now);           // W: the owner's toasts (Revival.MercNotify.cs)
             }
             FightOut act = ft.Out;
+            // i-m3: the one owner of his move target this tick.
+            byte verdict = MercOwnerDecide(f, u, ft, ref act, now);
+            if (verdict == MercMoveOwner.ToOrder) act.Act = FightAct.None;
             bool walking;
             if (act.CatchUp)
             { if (ft.MovePose != null) ft.MovePose.Stop(); walking = false; }
             else walking = MercWalkingPose(f, u, ft, ref act, now);
             // Unsupported/late rigs and target changes answer the visible
             // contact planted. They must never turn a fire-bound into a sprint.
-            if (!walking && b.State == MercBrain.AttackFire && act.Act == FightAct.Step) act.Act = FightAct.Fire;
+            if (!walking && verdict != MercMoveOwner.ToCover && b.State == MercBrain.AttackFire && act.Act == FightAct.Step) act.Act = FightAct.Fire;
             MercTrace(f, ft, act, now);
             if (act.Act == FightAct.None)
             {
-                if (ft.LastAct != FightAct.None) MercFightEnd(f, ft);
+                if (ft.LastAct != FightAct.None) MercFightEnd(f, u, ft, now);
                 ft.LastAct = FightAct.None;
                 // The game's reload holds him as it did before M2.
                 if (Reloading(f)) { Quiet(f, true); return true; }
@@ -471,6 +475,9 @@ namespace NextDayRevival
             MercFollowFight(f, u, ft, now);
             MercRangeFightIn(f, u, ft, now);
             if (ft.In.Survive) ft.In.MayFight = true;
+            // i-m3: the order's gate through the owner hold - a fresh mark
+            // runs first, a fight is not dropped by a sight or range flicker.
+            else ft.In.MayFight = MercOwnerGate(u, ft.In.MayFight);
             // A perimeter guard gives up the cover sooner: his B3b pursuit
             // takes over a target that went out of sight.
             // merc-attack-orders: an attacker too - the advance picks up sooner.
@@ -585,6 +592,7 @@ namespace NextDayRevival
             Vector3 post;
             if (TowerRoof.KeepUp(f.Tr.position, goal, u.Slot, out post)) goal = post;
             int moveState = walking ? MainWalk : MainRun;
+            goal = MercOwnerRun(f, u, ft, goal, walking, now);
             // K3b: an outward/return turn must replace the old destination in
             // this frame, even inside the normal quarter-second move throttle.
             bool phase = ft.WalkingFire != walking || (walking && ft.MoveState != ft.State);
@@ -605,8 +613,10 @@ namespace NextDayRevival
                 // a flight point is put on the mesh here.
                 NavMeshHit hit;
                 if (sprint && NavMesh.SamplePosition(goal, out hit, 6f, NavMesh.AllAreas)) dest = MercCrewPhases.Bound(u, hit.position);
+                f.KeepAim = walking;
                 if (ft.In.Follow) MercFollowOrder(f, dest, moveState, now, Stance.Reposition);
                 else Go(f, dest, moveState, PoseStand, now, Stance.Reposition);
+                f.KeepAim = false;
                 ft.Sprinting = sprint && !walking;
                 ft.NextSpeed = 0f;
             }
@@ -737,10 +747,11 @@ namespace NextDayRevival
         }
 
         /// <summary>The fight is over: out of cover, his order next.</summary>
-        static void MercFightEnd(Fighter f, MercFight ft)
+        static void MercFightEnd(Fighter f, MercUnit u, MercFight ft, float now)
         {
             ft.Position.Reset();
-            if (ft.MovePose != null) ft.MovePose.Stop();
+            // i-m3: shooting lately - the order's path carries the pose on.
+            if (ft.MovePose != null && !u.Own.KeepFire(now)) ft.MovePose.Stop();
             f.InCover = false;
             f.Crouched = false;
             f.Cover = Vector3.zero;

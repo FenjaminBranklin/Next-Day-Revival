@@ -195,6 +195,10 @@ namespace NextDayRevival
         internal static void TickInput()
         {
             Keys();
+            // c0ae7def2a: the gate line on L, and while the roster is unseen.
+            GateWatch(_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl());
+            // The wheel is open only while K or the quick key holds it.
+            if (_wheelOpen && !_wheelArmed && !_quickWheel) _wheelOpen = false;
             CompactListInput();
             Mercs.MedicineInteractionTick();
             bool quickOwns = QuickInput();
@@ -207,11 +211,11 @@ namespace NextDayRevival
             }
             if (Mercs.Roster.Count == 0 && !_listOpen && !_wheelOpen)
             {
-                if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && GameplayCursor.CommandUiState == 0
+                if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey) && !Ctrl() && HudUiState() == 0
                     && !MercListBlocked() && !GameplayCursor.Typing) { _listTab = -1; _listOpen = true; }
                 return;
             }
-            int uiState = GameplayCursor.CommandUiState;
+            int uiState = HudUiState();
             bool gameWindow = uiState != 0;
             if (_listKey != KeyCode.None && Input.GetKeyDown(_listKey))
             {
@@ -251,6 +255,9 @@ namespace NextDayRevival
                 }
                 _kDownAt = now; _wheelArmed = true; RadialBegin();
             }
+            // c0ae7def2a: K released unseen (focus lost): nothing holds the wheel.
+            if (_wheelArmed && !Input.GetKey(_wheelKey) && !Input.GetKeyUp(_wheelKey))
+            { _wheelArmed = false; _wheelOpen = false; }
             if (_wheelArmed && (Input.GetKey(_wheelKey) || Input.GetKeyUp(_wheelKey)))
             {
                 if (!_wheelOpen && now - _kDownAt > 0.22f) _wheelOpen = true;
@@ -1063,17 +1070,20 @@ namespace NextDayRevival
                 FrameProf.S(FrameProf.S_MercTabD); DrawTradeTab(); FrameProf.E(FrameProf.S_MercTabD);
             }
             else if (_tabVisible || _tabActive) CloseTab();
-            if (_wheelOpen && !window) DrawWheel();
+            // c0ae7def2a: HUD overlays ask the self-healing native state, not
+            // the raw flag a closed vanilla window may leave behind.
+            bool hudWindow = HudUiState() != 0;
+            if (_wheelOpen && !hudWindow) DrawWheel();
             bool repaint = Event.current.type == EventType.Repaint;
-            if (repaint && !window && !_listOpen && !_wheelOpen && GameplayCursor.CanCommand)
+            if (repaint && !hudWindow && !_listOpen && !_wheelOpen && GameplayCursor.CanCommand)
                 DrawMedicineInteraction();
-            if (repaint && _placing && !window && !_listOpen) DrawPlacing();
+            if (repaint && _placing && !hudWindow && !_listOpen) DrawPlacing();
             if (GameplayCursor.CommandUiState == 8 && MapWanted()) DrawMap();
             else HideMap();
             if (ListOpen) DrawList();
-            if (repaint && !window && !_listOpen && !_wheelOpen && !MercListBlocked()
+            if (repaint && !hudWindow && !_listOpen && !_wheelOpen && !MercListBlocked()
                 && (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)) DrawCompactList(false);
-            if (repaint && !window) DrawLocate();
+            if (repaint && !hudWindow) DrawLocate();
             DrawCommandPing();
             if (repaint) DrawToasts();
         }

@@ -1378,6 +1378,7 @@ namespace NextDayRevival
 
         /// <summary>Shot down and going down, or a burning wreck.</summary>
         internal static bool Down(GameObject go) { return Burning(go) || Gliding(go); }
+        internal static bool Contains(GameObject go) { return go != null && _all.Contains(go); }
 
         static void Remove(GameObject go, bool say)
         {
@@ -1666,7 +1667,8 @@ namespace NextDayRevival
         internal static void ShotDown(GameObject go, Vector3 where)
         {
             if (go == null || Burning(go) || Gliding(go)) return;
-            if ((CfgCrash != null && !CfgCrash.Value) || !Airborne(go))
+            AircraftCrashFx.MarkKill(go, "PlayerAn2.ShotDown");
+            if (!Airborne(go))
             {
                 Crash(go, where);
                 return;
@@ -1743,6 +1745,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + Mathf.Max(5f, AirEvents.WreckSeconds(go, F(CfgWreckSeconds, 180f)));
+                AircraftCrashFx.Impact(go);
                 AircraftCrashFx.Stop(go);
                 AircraftAudio.StopEngines(go);
                 An2Repair.Wrecked(go);
@@ -1807,12 +1810,13 @@ namespace NextDayRevival
             Vector3 site, double clock)
         {
             if (go == null || Burning(go) || Gliding(go)) return;
-            if (CfgCrash != null && !CfgCrash.Value) return;
+            if (CfgCrash != null && !CfgCrash.Value
+                && go.GetComponent<AircraftDamageSite>() == null) return;
             try
             {
                 int view = ViewId(go);
                 _busyUntil.Remove(view);
-                if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
+                Interpolator(go, false);
                 AircraftAudio.StopEngines(go);
                 An2Glide g = go.AddComponent<An2Glide>();
                 g.Begin(vel, rot, site, clock);
@@ -3049,6 +3053,7 @@ namespace NextDayRevival
             _rot = rot;
             _clock = clock;
             _side = AircraftCrashFx.Side(gameObject, site);
+            AircraftCrashFx.BeginFall(gameObject, vel.y, PlayerAn2.K, clock, 85f);
             AircraftCrashFx.Start(gameObject, site, PlayerAn2.K * (NpcAircraft.IsTu95(gameObject) ? 1.4f : 0.7f));
         }
 

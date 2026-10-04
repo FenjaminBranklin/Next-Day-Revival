@@ -38,6 +38,7 @@ namespace UnityEngine {
   public float x,y,z; public Vector3(float a,float b,float c){x=a;y=b;z=c;}
   public static Vector3 zero {get{return new Vector3();}} public static Vector3 up {get{return new Vector3(0,1,0);}}
   public float sqrMagnitude {get{return x*x+y*y+z*z;}}
+  public float magnitude {get{return (float)Math.Sqrt(x*x+y*y+z*z);}}
   public static Vector3 operator+(Vector3 a,Vector3 b){return new Vector3(a.x+b.x,a.y+b.y,a.z+b.z);}
   public static Vector3 operator-(Vector3 a,Vector3 b){return new Vector3(a.x-b.x,a.y-b.y,a.z-b.z);}
   public static Vector3 operator*(Vector3 a,float b){return new Vector3(a.x*b,a.y*b,a.z*b);}
@@ -60,7 +61,7 @@ namespace NextDayRevival {
   public static MercUnit UnitOf(Component c){return c==LocalBody?LocalUnit:null;}
  }
  static class Flak {
-  public class Gun {public int Index;public Transform SeatGunner=new Transform(),SeatLoader=new Transform(),Mount=new Transform(); public Component Gunner,Loader;public float ClaimedUntil;}
+  public class Gun {public int Index;public Transform SeatGunner=new Transform(),SeatLoader=new Transform(),Mount=new Transform(); public Component Gunner,Loader;public float ClaimedUntil;public Transform Earthwork;}
   public static Gun _manned;public static float? CfgSeatDrop=null;public const float K=2.8f;
   public static Gun[] guns=new Gun[7];public static Gun ByIndex(int i){return i>=0&&i<guns.Length?guns[i]:null;}
   public static bool Up(Component c){return c!=null&&c.Up;}
@@ -191,6 +192,7 @@ def main():
                'internal static bool IsVehicle(', 'internal static bool Pose(',
                'static bool Available(', 'internal static bool CanApproach(',
                'internal static int PostOf(', 'internal static void OnPacket(',
+               'internal static float PitFlat(',   # H M3: pit-aware master lease
                'internal static void Tick(']
     rules = '\n'.join(block(aa, anchor) for anchor in anchors)
     work = ROOT / 'build' / 'merc_stations_check'
@@ -199,7 +201,8 @@ def main():
     harness.write_text(HARNESS.replace('ORDER', order).replace('POST', post).replace('RULES', rules), encoding='ascii')
     compiler = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Microsoft.NET/Framework/v3.5/csc.exe'
     exe = work / 'Check.exe'
-    args = [str(compiler), '/nologo', '/warn:0', '/out:' + str(exe), str(harness), str(ROOT / 'Revival.MercStationsCore.cs'), str(ROOT / 'Revival.GunSeatPoseCore.cs')]
+    args = [str(compiler), '/nologo', '/warn:0', '/out:' + str(exe), str(harness), str(ROOT / 'Revival.MercStationsCore.cs'), str(ROOT / 'Revival.GunSeatPoseCore.cs'),
+            str(ROOT / 'Revival.MercDefenceCore.cs'), str(ROOT / 'Revival.FlakPositionsCore.cs')]
     built = subprocess.run(args, capture_output=True, text=True)
     if built.returncode:
         print(built.stdout + built.stderr)

@@ -1616,6 +1616,33 @@ def check_tower_npc_nav():
             + r.stderr.strip()[-200:])
 
 
+def check_man_air_defence():
+    """[H M3] Man air defence from the C1 tower roof (Revival.MercDefenceCore.cs,
+    Revival.MercDefenceLog.cs, NpcWar.MercPostStep in Revival.MercAA.cs,
+    Revival.MercAirfield.cs).
+
+    research/h_m3_defence_route_check.py compiles the production pure cores
+    with csc 3.5 and walks Kevin's six mercs from the tower roof (roof posts,
+    ladders, cab, console seat) to the real 52-K / ZU-23 pits of the east
+    tile data: every assigned merc seated (lease held, gun fires), extras keep
+    their order, the 6.71 4 u arrival rule as negative control, and the
+    production seams plus the "MercAD:" log lines pinned.
+    """
+    print("[H M3] Man air defence (roof start, real pits, seated, MercAD log)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "h_m3_defence_route_check.py")
+    if not os.path.exists(check):
+        bad("research/h_m3_defence_route_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip().endswith("RESULT: PASS"):
+        ok("man air defence passes research/h_m3_defence_route_check.py")
+    else:
+        bad("research/h_m3_defence_route_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
 def check_bomb_damage():
     """W bomb damage: run the production queue/RPC and falloff offline."""
     import subprocess
@@ -5910,6 +5937,19 @@ def check_mercs():
             bad("Mercenaries: research/merc_order_targets_check.py could not run: " + str(ex))
     else:
         bad("Mercenaries: research/merc_order_targets_check.py missing")
+    # I M3: one owner of each merc's move target per tick (hold, fall-back,
+    # still-in-open watchdog, fire across path changes, spacing, change log),
+    # driven through the whole per-tick merc update offline.
+    check = os.path.join(ROOT, "research", "merc_tick_check.py")
+    if os.path.exists(check):
+        try:
+            r = subprocess.run([sys.executable, check], capture_output=True, text=True, errors="replace", timeout=900)
+            need(r.returncode == 0, "one move-target owner per merc per tick: run on a mark, cover in contact, fire on the move, change log (I M3)",
+                 "research/merc_tick_check.py fails: " + (r.stdout + r.stderr).strip()[-900:])
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            bad("Mercenaries: research/merc_tick_check.py could not run: " + str(ex))
+    else:
+        bad("Mercenaries: research/merc_tick_check.py missing")
 
 
 def check_vehicle_condition():
@@ -8530,6 +8570,7 @@ if __name__ == "__main__":
     check_retake_raids()
     check_tower_roof()
     check_tower_npc_nav()
+    check_man_air_defence()
     check_version()
     print("=" * 74)
     print("Fehler: %d    Hinweise: %d" % (len(fails), len(warns)))

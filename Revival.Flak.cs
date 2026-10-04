@@ -2007,7 +2007,8 @@ namespace NextDayRevival
         /// no player is within 150 u and nobody is at the sight.</summary>
         internal static void Spawn(Flak.Gun g)
         {
-            if (MercAA.Gun(g.Index) != null) return;
+            // H M3: nor onto a gun a local defence crewman is still walking to.
+            if (MercAA.Gun(g.Index) != null || Mercs.AirDefenceWants(g.Index)) return;
             if (!Flak.B2(Flak.CfgNpcCrew) || g.Root == null) return;
             if (Flak.Side(g) == null) return;
             bool alive = Flak.Up(g.Gunner) || Flak.Up(g.Loader);

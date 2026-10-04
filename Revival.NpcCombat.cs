@@ -450,6 +450,7 @@ namespace NextDayRevival
         {
             public Component Ai;          // NPC_AI2
             public Transform Tr;
+            public bool KeepAim;          // i-m3: Go keeps the aim (walking fire on a changed path)
             public Squad Squad;           // null = defender
             public object Faction;        // Fraction enum value
             public Array Hated;           // Fraction[] this NPC hates
@@ -1675,12 +1676,17 @@ namespace NextDayRevival
                 // fight is over his order runs again.
                 if (s.Merc != null)
                 {
+                    // i-m3: one owner of the move target per tick; every sink
+                    // below notes what it set, MercOwnerAfter logs changes.
+                    s.Merc.Own.Step = MercWriter.Duty;
+                    s.Merc.Own.StepReason = "duty: rescue/tower/resupply/station";
                     if (MercRescueStep(f, s.Merc, now)) { }
                     else if (MercTowerStep(f, s.Merc, now)) { }
                     else if (MercResupplyDuty(f, s.Merc, now)) { }
                     else if (MercStationDuty(f, s.Merc, now)) { }
                     else if (MercFight(f, s.Merc, now)) MercAA.Release(s.Merc);
                     else MercStep(f, s, now);
+                    MercOwnerAfter(f, s.Merc, now);
                     continue;
                 }
                 if (Reloading(f)) { Quiet(f, true); continue; }
@@ -3602,7 +3608,8 @@ namespace NextDayRevival
         {
             f.Stance = stance;
             f.Crouched = pose == PoseCrouch;
-            ReleaseAim(f);
+            // i-m3: a changed path for a man firing on the move keeps his aim.
+            if (!f.KeepAim) ReleaseAim(f);
             OrderMove(f, dest, state, AddNone, pose);
         }
 

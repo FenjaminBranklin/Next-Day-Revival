@@ -35,7 +35,7 @@ using System;
 namespace NextDayRevival {
 static class Density { PARSER }
 static class HeliDrop {
-    const float Gravity = 9.81f, Terminal = 65f;
+    const float Gravity = (float)AircraftFallCore.Gravity, Terminal = 65f;
     HELI_DROP
 }
 static class FallCheck {
@@ -49,13 +49,13 @@ static class FallCheck {
     static void Main() {
         // Physical acceptance: no lift from the first second, also at high
         // cruise speed (horizontal speed is deliberately absent from gravity).
-        Near(AircraftFallCore.VerticalTravel(0, 1, 85), -4.905, 1e-8, "first second gravity");
-        Near(AircraftFallCore.VerticalTravel(0, 3, 85), -44.145, 1e-8, "three second gravity");
-        Near(AircraftFallCore.VerticalTravel(0, 5, 85), -122.625, 1e-8, "five second gravity");
+        Near(AircraftFallCore.VerticalTravel(0, 1, 85), -8, 1e-8, "first second destruction dive");
+        Near(AircraftFallCore.VerticalTravel(0, 3, 85), -72, 1e-8, "three second destruction dive");
+        Near(AircraftFallCore.VerticalTravel(0, 5, 85), -200, 1e-8, "five second destruction dive");
         Near(AircraftFallCore.VerticalTravel(0, -1, 85), 0, 1e-8, "future start waits");
         Check(AircraftFallCore.VerticalTravel(0, 8, 85) < -300, "300 m fall under 8 s");
         Check(AircraftFallCore.VerticalTravel(0, 10.5, 85) < -500, "500 m fall under 10.5 s");
-        Near(AircraftFallCore.VerticalTravel(20, 1, 85), 15.095, 1e-8, "preserve upward momentum");
+        Near(AircraftFallCore.VerticalTravel(20, 1, 85), 12, 1e-8, "preserve upward momentum");
         double terminalAt = 85 / AircraftFallCore.Gravity;
         Near(AircraftFallCore.VerticalTravel(0, terminalAt + 2, 85)
             - AircraftFallCore.VerticalTravel(0, terminalAt + 1, 85), -85, 1e-8, "terminal descent");
@@ -145,6 +145,24 @@ def native_sources():
         assert renderer.read_typetree()['m_Materials'], 'native particle material missing'
         assert ps.read_typetree()['InitialModule'], 'native particle setup missing'
     print('PASS installed vanilla sources: flame %s, smoke %s, particles only' % (flame, smoke))
+
+    # The crash-only Mi-8 camera proxy copies actual MeshRenderer/MeshFilter
+    # geometry. Verify that prerequisite against the installed carrier prefab.
+    pending = [paths['gameplayobjects/helicopters/mi-8_mchs']]
+    mesh_renderers = skinned_renderers = 0
+    while pending:
+        pid = pending.pop()
+        comps = components(pid)
+        kinds = [c.type.name for c in comps]
+        if 'MeshRenderer' in kinds:
+            assert 'MeshFilter' in kinds, 'Mi-8 renderer has no mesh'
+            mesh_renderers += 1
+        skinned_renderers += kinds.count('SkinnedMeshRenderer')
+        tr = next(c for c in comps if c.type.name == 'Transform')
+        pending.extend(tree(t['m_PathID'])['m_GameObject']['m_PathID']
+                       for t in tr.read_typetree()['m_Children'])
+    assert mesh_renderers > 0 and skinned_renderers == 0, 'unsupported Mi-8 geometry'
+    print('PASS installed Mi-8 proxy prerequisite: %s mesh renderers, no skinned geometry' % mesh_renderers)
 
 
 def plumbing():

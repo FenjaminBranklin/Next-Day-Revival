@@ -1354,6 +1354,8 @@ namespace NextDayRevival
             _fallRotation = Go.transform.rotation;
             _fallClock = ParaPose.Clock();
             _fallSide = AircraftCrashFx.Side(Go, AircraftCrashFx.Site(Go));
+            AircraftCrashFx.BeginFall(Go, _fallVel.y / RevivalTroopInsertion.K,
+                RevivalTroopInsertion.K, _fallClock, 65f);
             _floor = _lz.y;
             _floorAt = 0f;
             RevivalPlugin.L.LogInfo("Troops: the helicopter of " + Landing.Name + " was shot down"

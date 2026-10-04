@@ -2,6 +2,7 @@
 // #545454 row, Bebas heading and Roboto body. No management window on L.
 // Existing Mercs.Tick/Draw F6 slots include this adapter; no scene discovery,
 // string formatting, roster copies or reference allocation in its hot paths.
+using System;
 using UnityEngine;
 
 namespace NextDayRevival
@@ -23,10 +24,79 @@ namespace NextDayRevival
             // h-u1: only the radar view and the full map hide the list. The
             // 6.70 gate also asked CanCommand, CameraOwner and every custom
             // window; one stuck or false native flag hid it for the session.
-            if (RadarScope.InView || GameplayCursor.CommandUiState == 8) return true;
+            // c0ae7def2a: both remaining flags heal when their owner is gone.
+            if (RadarScope.Holds || HudUiState() == 8) return true;
             // Keep the trader's explicit Full roster entry, including whitelist.
             if (_listOpen && _listTab >= 0) return !_tabVisible;
             return false;
+        }
+
+        // c0ae7def2a: the native window gate of the merc HUD, self-healing.
+        // UIController._UI_General belongs to the vanilla window that wrote
+        // it, and every vanilla window shows the cursor while it is open
+        // (GameplayCursor.YieldToUi). A non-zero state while the game's own
+        // last cursor call hid the cursor for StaleAfter seconds has no open
+        // window behind it: the strip, L and the list read it as 0 until the
+        // state or the cursor changes. Native state is never written.
+        const float StaleAfter = 1f;
+        static int _staleState;
+        static float _staleSince = -1f;
+        static bool _staleHeld, _staleLogged;
+
+        static int HudUiState()
+        {
+            int state = GameplayCursor.CommandUiState;
+            if (state == 0 || !CursorTracker.SawCall || CursorTracker.DesiredVisible)
+            {
+                _staleSince = -1f; _staleHeld = false;
+                return state;
+            }
+            float now = Time.unscaledTime;
+            if (_staleSince < 0f || state != _staleState)
+            { _staleState = state; _staleSince = now; _staleHeld = _staleLogged = false; }
+            if (!_staleHeld && now - _staleSince >= StaleAfter) _staleHeld = true;
+            return _staleHeld ? 0 : state;
+        }
+
+        // c0ae7def2a: one line on every L press, and at most every 10 s while
+        // the roster has mercs but neither the strip nor the L list painted
+        // for 2 s. Strings are built only when a line is written.
+        static int _compactPaintFrame = -1;
+        static float _gateHiddenSince = -1f, _gateLogAt;
+
+        static void GateWatch(bool listKey)
+        {
+            if (listKey) GateLog("L pressed");
+            if (_staleHeld && !_staleLogged)
+            {
+                _staleLogged = true;
+                GateLog("native window state " + _staleState + " with the game cursor hidden for "
+                    + StaleAfter + " s: stale, the merc HUD ignores it");
+            }
+            bool want = Mercs.Roster.Count > 0 && (_listOpen || Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value);
+            if (!want || Time.frameCount - _compactPaintFrame <= 2) { _gateHiddenSince = -1f; return; }
+            float now = Time.unscaledTime;
+            if (_gateHiddenSince < 0f) _gateHiddenSince = now;
+            if (now - _gateHiddenSince < 2f || now < _gateLogAt) return;
+            _gateLogAt = now + 10f;
+            GateLog("merc strip/list not painted");
+        }
+
+        static void GateLog(string why)
+        {
+            try
+            {
+                int raw = GameplayCursor.CommandUiState;
+                RevivalPlugin.L.LogInfo("MercList gate (" + why + "): CommandUiState " + raw
+                    + ", hud state " + HudUiState() + ", GameUi.WindowOpen " + GameUi.WindowOpen
+                    + ", RadarScope.InView " + RadarScope.InView + ", Roster.Count " + Mercs.Roster.Count
+                    + ", _listOpen " + _listOpen + ", _listTab " + _listTab + ", _tabVisible " + _tabVisible
+                    + ", _wheelOpen " + _wheelOpen + ", HudStrip " + (Mercs.CfgHudStrip == null || Mercs.CfgHudStrip.Value)
+                    + ", Typing " + GameplayCursor.Typing + ", CanCommand " + GameplayCursor.CanCommand
+                    + ", game cursor " + (CursorTracker.SawCall ? (CursorTracker.DesiredVisible ? "shown" : "hidden") : "unseen")
+                    + ", painted " + (_compactPaintFrame < 0 ? "never" : (Time.frameCount - _compactPaintFrame) + " frames ago") + ".");
+            }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("MercList gate: " + ex.Message); }
         }
 
         static void CompactListInput()
@@ -152,6 +222,7 @@ namespace NextDayRevival
             bool repaint = Event.current.type == EventType.Repaint;
             if (repaint)
             {
+                _compactPaintFrame = Time.frameCount;
                 CompactTexture(new Rect(frame.x, frame.y, frame.width, 26f * k), rowArt, CompactInk);
                 VanillaUi.Label(new Rect(frame.x + 8f * k, frame.y, frame.width - 48f * k, 26f * k),
                     Loc.T("НАЁМНИКИ", "MERCS"), _compactTitle);

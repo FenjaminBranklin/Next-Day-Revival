@@ -88,6 +88,7 @@ namespace NextDayRevival
         internal float AttackerUntil;        // B3d: LastAttacker is answered until then
         internal float NextOrder, NextSpeed, NextWarp, NextPlayerScan;
         internal float ClearAimAt;           // H M2: next ray at the enemy crewman on his post
+        internal readonly MercPostTrack DefTrack = new MercPostTrack(); // H M3: way to his AA post (Revival.MercDefenceCore.cs)
         internal Transform PlayerTarget;
         internal GameObject KillTargetSet;
         internal Component QuickNpc;
@@ -122,6 +123,8 @@ namespace NextDayRevival
         // merc-attack-orders: his progress through an ATTACK (Revival.MercAttackCore.cs).
         internal readonly MercAttackRun Attack = new MercAttackRun();
         internal readonly MercMovePlan Move = new MercMovePlan();
+        // i-m3: the one owner of his move target per tick (Revival.MercMoveOwnerCore.cs).
+        internal readonly MercMoveOwner Own = new MercMoveOwner();
         // x-merc-competence: his halt cover under FOLLOW (Revival.MercsWar.cs MercHaltCover).
         internal readonly MercHalt Halt = new MercHalt();
         // c-m2: his walk up to firing distance (Revival.MercCloseIn.cs).

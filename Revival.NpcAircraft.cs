@@ -662,7 +662,6 @@ namespace NextDayRevival
             RevivalPlugin.L.LogInfo("NpcAircraft: " + (string.IsNullOrEmpty(f.Label) ? "flight" : f.Label)
                 + " brought down (" + (amount >= 1f ? "blast" : f.Hits + " hits") + ").");
             AirKills.Downed(f, point);
-            if (!GepardAir.KillNow(f.Go, point)) PlayerAn2.ShotDown(f.Go, point);
         }
 
         static FieldInfo _camera;
@@ -674,7 +673,7 @@ namespace NextDayRevival
         {
             try
             {
-                if (_flights.Count == 0 || __instance == null) return;
+                if (__instance == null) return;
                 if (Stinger.IsStinger(__instance) || Drone.Flying) return;
                 if (!Mine(__instance)) return;
                 if (!_cameraLooked)
@@ -688,7 +687,7 @@ namespace NextDayRevival
                 if (!Physics.Raycast(cam.position + cam.forward * 0.5f, cam.forward, out hit,
                         1200f * PlayerAn2.K, ~0, QueryTriggerInteraction.Ignore)) return;
                 GameObject go = Owner(hit.transform);
-                if (go != null) Damage(go, hit.point, false);
+                if (go != null) GepardAir.WeaponHit(go, hit.point, false);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("NpcAircraft shot: " + ex.Message); }
         }
@@ -699,7 +698,6 @@ namespace NextDayRevival
         {
             try
             {
-                if (_flights.Count == 0) return;
                 Component c = __instance as Component;
                 if (c == null || !Mine(c)) return;
                 Vector3 p = c.transform.position;
@@ -715,14 +713,37 @@ namespace NextDayRevival
                     if ((centre - p).sqrMagnitude <= radius * radius) Damage(_tmp[i].Go, p, true);
                 }
                 _tmp.Clear();
+                // Registered An-2, troop and player Mi-8 kills share the same
+                // fall path even when no NPC fixed-wing sortie is active.
+                _weaponTargets.Clear();
+                GepardAir.Collect(_weaponTargets);
+                for (int i = 0; i < _weaponTargets.Count; i++)
+                {
+                    GameObject target = _weaponTargets[i].Go;
+                    if (Is(target)) continue; // handled by the ledger above
+                    if ((target.transform.position - p).sqrMagnitude <= radius * radius)
+                        GepardAir.WeaponHit(target, p, true);
+                }
+                _weaponTargets.Clear();
+                _weaponHelis.Clear();
+                PlayerHeli.MissileTargets(_weaponHelis);
+                for (int i = 0; i < _weaponHelis.Count; i++)
+                    if ((_weaponHelis[i].transform.position - p).sqrMagnitude <= radius * radius)
+                        GepardAir.WeaponHit(_weaponHelis[i], p, true);
+                _weaponHelis.Clear();
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("NpcAircraft blast: " + ex.Message); }
         }
 
+        static readonly List<GepardAir.Found> _weaponTargets = new List<GepardAir.Found>();
+        static readonly List<GameObject> _weaponHelis = new List<GameObject>();
+
         static GameObject Owner(Transform t)
         {
             for (; t != null; t = t.parent)
-                if (_flights.ContainsKey(t.gameObject)) return t.gameObject;
+                if (_flights.ContainsKey(t.gameObject) || PlayerAn2.Contains(t.gameObject)
+                    || PlayerHeli.Contains(t.gameObject) || RevivalTroopInsertion.IsTroopHeli(t.gameObject))
+                    return t.gameObject;
             return null;
         }
 

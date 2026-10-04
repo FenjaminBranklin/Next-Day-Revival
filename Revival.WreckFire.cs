@@ -310,8 +310,8 @@ namespace NextDayRevival
         static int _normalBlast, _heliBlast;
         static void PooledBlast(Vector3 point, float r, Material add, Material blend, float flame, float smoke)
         {
-            if (!CombatLoad.LocalNear(point, 1400f)) return;
             bool heli = flame > 1f;
+            if (!CombatLoad.LocalNear(point, heli ? 6000f : 1400f)) return;
             int slot = heli ? 4 + (_heliBlast++ & 3) : (_normalBlast++ & 3);
             BlastLease v = _blastPool[slot];
             if (v == null || v.Root == null)
@@ -349,6 +349,7 @@ namespace NextDayRevival
             }
             v.Flash.enabled = Anim.Lights;
             v.Flash.range = Mathf.Clamp(r * 5f, 8f, 90f); v.Flash.intensity = 7f;
+            if (heli) AircraftParticleDraw.Attach(v.Root);
         }
 
         internal static void TickBlasts()
@@ -817,6 +818,7 @@ namespace NextDayRevival
             HeliRauchsaule(root, blend);
             HeliRauchstoss(root, blend);
             if (Anim.Lights) HeliGlut(root);   // NDR P9: [Effects] ExplosionLights
+            AircraftParticleDraw.Attach(root);
 
             if (RevivalPlugin.L != null)
                 RevivalPlugin.L.LogInfo("PlayerHeli: aircraft fire attached to the "

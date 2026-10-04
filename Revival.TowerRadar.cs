@@ -1830,6 +1830,26 @@ namespace NextDayRevival
         static string _hint;
         static float _hintUntil;
 
+        static int _tickFrame = -1000;
+
+        /// <summary>c0ae7def2a: InView, self-healing. The view's owner is this
+        /// Tick (leave checks in Operate). If it has not run for 10 frames
+        /// (radar not built, tick skipped or failing early) the flag cannot be
+        /// cleared by its owner any more: leave here, so the L list, prompts
+        /// and input predicates do not stay hidden behind a view nobody sees.</summary>
+        internal static bool Holds
+        {
+            get
+            {
+                if (!InView) return false;
+                if (TowerRadar.Built && Time.frameCount - _tickFrame <= 10) return true;
+                try { Leave("the console view stopped ticking"); }
+                catch (Exception ex) { RevivalPlugin.L.LogError("TowerRadar leave: " + ex.Message); }
+                InView = false;
+                return false;
+            }
+        }
+
         static KeyCode Key()
         {
             if (!_keyParsed)
@@ -1851,6 +1871,7 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
+            _tickFrame = Time.frameCount;
             float now = Time.time;
             Vector3 eye = TowerRadar.RadarPos;
             bool collected = now >= _nextCollect;

@@ -2,6 +2,8 @@
 // H M2: one nearest-first plan per order. A post stays with its merc until it
 // is destroyed or he falls; an enemy crew on it is cleared, any other holder
 // is waited out at the post. Duty orders are silent; one summary speaks.
+// H M3: extras keep their own order; every step is logged ("MercAD",
+// Revival.MercDefenceLog.cs).
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
@@ -51,6 +53,7 @@ namespace NextDayRevival
             delta.y = 0f;
             if (owner == null || !TowerRadar.Built || delta.sqrMagnitude > 1680f * 1680f)
             {
+                DefenceLogRefused(owner != null, TowerRadar.Built, delta.sqrMagnitude);
                 MercUi.OrderReply(Loc.T("Подойдите к аэродрому для занятия ПВО.",
                     "Approach the airfield to man air defence."), true);
                 return;
@@ -65,19 +68,29 @@ namespace NextDayRevival
                 Defence.Add(m);
             }
             if (Defence.Count == 0)
-            { MercUi.OrderReply(Loc.T("Нет оплаченных наёмников для ПВО.", "No paid mercs for air defence."), true); return; }
+            { DefenceLogRefused(true, true, -1f); MercUi.OrderReply(Loc.T("Нет оплаченных наёмников для ПВО.", "No paid mercs for air defence."), true); return; }
             _defenceActive = true; _defenceScene = MapScene.Current; _defenceOwner = owner;
             DefenceOne.Clear();
             for (int i = 0; i < Defence.Count; i++) DefenceOne.Add(Defence[i].Record);
             _orderQuiet = true;
             try
             {
-                // Replace previous individual assignments too; overflow follows.
-                Give(DefenceOne, MercOrder.FollowMe());
+                // H M3: an extra keeps his order. Only a man whose order is an
+                // air defence post the plan hands out is freed first (FOLLOW).
+                DefenceChanged.Clear();
+                for (int i = 0; i < Defence.Count; i++)
+                {
+                    MercOrder o = Defence[i].Record.Order;
+                    if (!MercDefenceCore.KeepsOrder(MercAA.IsOrder(o), MercAA.IsVehicle(o), Mathf.RoundToInt(o.Facing.x) - 1))
+                        DefenceChanged.Add(Defence[i].Record);
+                }
+                if (DefenceChanged.Count > 0) Give(DefenceChanged, MercOrder.FollowMe());
+                DefenceChanged.Clear();
                 for (int i = 0; i < Defence.Count; i++) Defence[i].Expected = Defence[i].Record.Order;
                 DefenceReconcile();
             }
             finally { _orderQuiet = false; }
+            DefenceLogOrder();
             _defenceAt = Time.time + 0.5f;
             _onDuty.Clear();
             Announce(DefenceSummary(), DefenceOne);
@@ -126,6 +139,7 @@ namespace NextDayRevival
                 try { moved = DefenceReconcile(); }
                 finally { _orderQuiet = false; }
                 if (moved) DefenceMovedNote();
+                DefenceLogTick(now, moved);
             }
             finally { FrameProf.E(FrameProf.S_MercAirfieldT); }
         }
@@ -332,6 +346,16 @@ namespace NextDayRevival
                     .Append(m.Post < 0 ? Loc.T("за вами", "following you") : DefencePostName(m.Post));
             }
             MercUi.Toast(DefenceNote.ToString(), false);
+        }
+
+        /// <summary>H M3: a gun this client's defence order has a living crewman
+        /// on the way to (the master spawns no native crew onto it).</summary>
+        internal static bool AirDefenceWants(int gun)
+        {
+            if (!_defenceActive) return false;
+            for (int i = 0; i < Defence.Count; i++)
+                if (Defence[i].Post == gun && DefenceReady(Defence[i])) return true;
+            return false;
         }
 
         internal static bool AirDefenceManaged(MercUnit u)

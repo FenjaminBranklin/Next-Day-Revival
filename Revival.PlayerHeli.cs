@@ -1726,7 +1726,7 @@ namespace NextDayRevival
                 AircraftAudio.StopEngines(go);
                 HeliEngine engine = EngineOf(go);
                 if (engine != null) engine.Kill();
-                if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
+                Interpolator(go, false);
 
                 HeliCrashFall fall = go.AddComponent<HeliCrashFall>();
                 fall.Begin(drift, rotation, site, clock);
@@ -1926,8 +1926,9 @@ namespace NextDayRevival
             GameObject go = MissileTarget(view);
             if (go == null) return;
             AircraftCrashFx.Hit(go, where);
+            AircraftCrashFx.MarkKill(go, "PlayerHeli.MissileImpact");
             _busyUntil.Remove(view);
-            if ((CfgCrash == null || CfgCrash.Value) && Airborne(go))
+            if (Airborne(go))
             {
                 if (ReferenceEquals(go, _heli) && _pilot)
                 {
@@ -1976,6 +1977,7 @@ namespace NextDayRevival
         }
 
         internal static int MissileView(GameObject go) { return ViewId(go); }
+        internal static bool Contains(GameObject go) { return go != null && _all.Contains(go); }
 
         internal static void MissileTargets(List<GameObject> targets)
         {
@@ -2067,6 +2069,7 @@ namespace NextDayRevival
             try
             {
                 _burning[go] = Time.time + WreckLife();
+                AircraftCrashFx.Impact(go);
                 AircraftCrashFx.Stop(go);
                 AircraftAudio.StopEngines(go);
                 EngineApply(go, false);
@@ -3206,7 +3209,7 @@ namespace NextDayRevival
     /// </summary>
     public sealed class HeliCrashFall : MonoBehaviour
     {
-        const float Gravity = 9.81f;
+        const float Gravity = (float)AircraftFallCore.Gravity;
         const float Terminal = 65f;
         const float MaxFall = 120f;
 
@@ -3230,6 +3233,7 @@ namespace NextDayRevival
             _start = transform.position;
             _rotation = rotation; _clock = clock;
             _side = AircraftCrashFx.Side(gameObject, site);
+            AircraftCrashFx.BeginFall(gameObject, _velocity.y, k, clock, Terminal);
 
             if (!PlayerHeli.CrashFloor(transform.position, out _floor))
                 _floor = transform.position.y - 120f * k;
@@ -3290,6 +3294,7 @@ namespace NextDayRevival
             Vector3 impact = transform.position;
             impact.y = _floor + 0.7f * PlayerHeli.K;
             transform.position = impact;
+            AircraftCrashFx.Impact(gameObject);
             FireEffect.StopEmitting(_trail);
             _trail = null;
             PlayerHeli.FinishAbandonedCrash(gameObject, impact);
@@ -4393,12 +4398,17 @@ namespace NextDayRevival
         internal static void Attach(GameObject go)
         {
             if (!On || go == null || !Look()) return;
+            bool reactivate = go.activeSelf;
             try
             {
                 if (go.GetComponent(_tContainer) != null) return;   // already fitted
 
                 Plate(go);
 
+                // Awake reads _containerData immediately. Add while inactive,
+                // populate its data, then restore activation in finally.
+                // Keep the container on the PhotonView/interact collider root.
+                go.SetActive(false);
                 Component hold = go.AddComponent(_tContainer);
                 if (hold == null) return;
 
@@ -4407,9 +4417,7 @@ namespace NextDayRevival
                 // has no spawn table to roll from - a hold arrives empty.
                 if (_fSpawned != null) _fSpawned.SetValue(hold, true);
 
-                // Awake has already run SetContainerData, which reads MaxSlots
-                // (zero on a component nobody serialized) and sized the slot
-                // arrays to match. The size is ours, so both are set again here.
+                // No Awake or Start has run on the newly added component yet.
                 object data = _fData.GetValue(hold);
                 if (data == null)
                 {
@@ -4431,6 +4439,10 @@ namespace NextDayRevival
             catch (Exception ex)
             {
                 RevivalPlugin.L.LogWarning("PlayerHeli hold: " + ex.Message);
+            }
+            finally
+            {
+                if (reactivate && !go.activeSelf) go.SetActive(true);
             }
         }
 

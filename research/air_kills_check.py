@@ -287,7 +287,11 @@ def source_checks():
     tick = npc[npc.index('internal static void Tick()'):npc.index('static void Drive(Flight f')]
     ok('if (PlayerAn2.Down(f.Go)) { f.Driving = false; continue; }' in tick and tick.index('PlayerAn2.Down') < tick.index('Drive(f, dt)'),
        'source: a downed NPC aircraft is never driven, so its release / jump point never fires')
-    ok('Ledger.Add(dmg, actor)' in npc and 'AirKills.Downed(f, point)' in npc and 'GepardAir.KillNow(f.Go, point)' in npc,
+    # i-a3: AirKills.Downed pays the ledger's winner and starts the fall itself (PlayerAn2.ShotDown);
+    # the old GepardAir.KillNow fallback after it is gone (research/aircraft_crash_entry_check.py).
+    downed = text('Revival.AirKills.cs')
+    ok('Ledger.Add(dmg, actor)' in npc and 'AirKills.Downed(f, point)' in npc and 'GepardAir.KillNow(f.Go, point)' not in npc
+       and 'Pay(f.Ledger.Winner(), what, at);' in downed and 'PlayerAn2.ShotDown(f.Go, at);' in downed,
        'source: the master\'s ledger decides the kill and the bounty')
     ok('Damage(go, new Vector3(f[2], f[3], f[4]), amount, sender)' in npc,
        'source: a remote hit is credited to its Photon sender (not to a claim in the payload)')

@@ -199,6 +199,8 @@ namespace NextDayRevival
                     MercSense sense = f.Squad.Merc.Sense;
                     hasPreferred = sense.Pick.Found && sense.Pick.Confirmed && now - sense.PickAt < 2f;
                     preferred = sense.Pick.Point.Pos;
+                    // i-m3: never a detour to a cover back down his mark.
+                    if (hasPreferred && !MercOwnerDetourPick(f.Squad.Merc, f.Tr.position, preferred)) hasPreferred = false;
                 }
                 Vector3 via;
                 bool found = NpcNavCore.Plan(world, f.Tr.position, f.Ordered, preferred,
@@ -210,6 +212,8 @@ namespace NextDayRevival
                     {
                         f.Navigation.Via = via; f.Navigation.Goal = f.Ordered;
                         f.Navigation.Until = now + 3f; f.Navigation.Detouring = true;
+                        if (f.Squad != null && f.Squad.Merc != null)
+                            MercOwnerEvent(f.Squad.Merc, "nav-detour (K2: no 0.5 m in 1.5 s)", f.Tr.position, via, now);
                     }
                     // Even with no physical detour, immediately replan the
                     // native path after carving. Do not stop or erase the order.
@@ -217,6 +221,8 @@ namespace NextDayRevival
                 }
                 else if (found && agent.Warp(via))
                 {
+                    if (f.Squad != null && f.Squad.Merc != null)
+                        MercOwnerEvent(f.Squad.Merc, "nav-warp (K2: still stuck)", f.Tr.position, via, now);
                     f.Navigation.Detouring = false; f.Navigation.Watching = false;
                     f.HasOrder = false; f.NextMove = 0f;
                     f.LastPos = via; f.MovedAt = now;

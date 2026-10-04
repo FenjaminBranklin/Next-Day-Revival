@@ -234,6 +234,30 @@ namespace NextDayRevival
             return true;
         }
 
+        /// <summary>H M3: up on the tower (main roof, inner flight, cab, catwalk
+        /// or antenna roof), world position.</summary>
+        internal static bool ManUp(Vector3 w)
+        {
+            if (!Ready || FlatSq(w, _centre) > Near * Near) return false;
+            Vector3 l = Local(w);
+            return TowerRoofCore.OnRoof(l) || TowerRoofCore.OnAntenna(l);
+        }
+
+        /// <summary>H M3: the NavMesh spot at the outside stair's foot.</summary>
+        internal static Vector3 FootNav { get { return _footNav; } }
+
+        /// <summary>H M3: a crewman stuck up on the tower without a climb is
+        /// put at the stair's foot (the end of the climb he did not finish).</summary>
+        internal static bool Descend(Transform man, NavMeshAgent agent)
+        {
+            if (!Ready || man == null || !ManUp(man.position)) return false;
+            Cancel(man, false);
+            bool warped = false;
+            try { if (agent != null && agent.isActiveAndEnabled) warped = agent.Warp(_footNav); } catch { }
+            if (!warped) man.position = _footNav;
+            return true;
+        }
+
         internal static bool Climbing(Transform man)
         {
             if (_active == 0 || man == null) return false;
