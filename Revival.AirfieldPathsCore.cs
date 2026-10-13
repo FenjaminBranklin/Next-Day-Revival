@@ -14,13 +14,15 @@ namespace NextDayRevival
         internal const float FootX = 4219.48f, FootZ = 1362.02f;
         internal static readonly string[] Names = { "Apron", "AA-NW", "AA-NE", "AA-S", "ZU-W" };
         internal static readonly int[][] Routes = {
-            new int[] { 0, 16, 1, 2, 3, 4 }, new int[] { 0, 16, 1, 5, 6 },
-            new int[] { 0, 16, 1, 2, 7, 8 }, new int[] { 0, 16, 1, 2, 3, 4, 9, 10, 11 },
+            new int[] { 0, 16, 1, 2, 3, 4 }, new int[] { 0, 16, 1, 17, 18, 19, 20, 5, 6 },
+            new int[] { 0, 16, 1, 2, 21, 22, 7, 8 }, new int[] { 0, 16, 1, 2, 3, 4, 9, 10, 11 },
             new int[] { 0, 16, 1, 12, 13, 14, 15 }
         };
         internal static readonly int[][] Edges = {
             new int[] {0,16}, new int[] {16,1}, new int[] {1,2}, new int[] {2,3}, new int[] {3,4},
-            new int[] {1,5}, new int[] {5,6}, new int[] {2,7}, new int[] {7,8},
+            new int[] {1,17}, new int[] {17,18}, new int[] {18,19}, new int[] {19,20},
+            new int[] {20,5}, new int[] {5,6}, new int[] {2,21}, new int[] {21,22},
+            new int[] {22,7}, new int[] {7,8},
             new int[] {4,9}, new int[] {9,10}, new int[] {10,11},
             new int[] {1,12}, new int[] {12,13}, new int[] {13,14}, new int[] {14,15}
         };
@@ -47,7 +49,11 @@ namespace NextDayRevival
                 new Point(FootX,FootZ), new Point(4208,1376), new Point(4296,1376),
                 new Point(4296,1302), new Point(4355,1272), new Point(), new Point(),
                 new Point(), new Point(), new Point(4362,903), new Point(), new Point(),
-                new Point(4180,1376), new Point(4180,1135), new Point(), new Point(), new Point(4208,FootZ)
+                new Point(4180,1376), new Point(4180,1135), new Point(), new Point(), new Point(4208,FootZ),
+                // Skirt the restored B1 barracks; stay west of D3 and east of B1.
+                new Point(4160,1380), new Point(4160,1594), new Point(4100,1594), new Point(4098,1608),
+                // D3 occupies the former direct AA-NE leg.
+                new Point(4345,1390), new Point(4345,1500)
             };
             int[] outer = { 5, 7, 10, 14 }, inner = { 6, 8, 11, 15 };
             for (int p = 0; p < outer.Length; p++)

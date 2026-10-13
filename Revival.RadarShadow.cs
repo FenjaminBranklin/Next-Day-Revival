@@ -11,6 +11,7 @@ namespace NextDayRevival
         static bool[] Seen = new bool[Capacity];
         static float[] Heights = new float[Capacity];
         static float[] CheckedAt = new float[Capacity];
+        static float[] Factors = new float[Capacity];
         static Terrain[] _terrain;
         static TerrainCollider[] _colliders;
         static int _count;
@@ -30,6 +31,13 @@ namespace NextDayRevival
         {
             for (int i = 0; i < _count; i++) if (object.ReferenceEquals(Targets[i], go)) return Heights[i];
             return 0f;
+        }
+
+        internal static float RangeFactor(GameObject go)
+        {
+            for (int i = 0; i < _count; i++)
+                if (object.ReferenceEquals(Targets[i], go)) return Factors[i] > 0 ? Factors[i] : 1f;
+            return 1f;
         }
 
         internal static void Scan(List<GepardGun.Contact> contacts, Vector3 eye)
@@ -61,6 +69,7 @@ namespace NextDayRevival
                     System.Array.Resize(ref Seen, size);
                     System.Array.Resize(ref Heights, size);
                     System.Array.Resize(ref CheckedAt, size);
+                    System.Array.Resize(ref Factors, size);
                 }
                 _count = contacts.Count;
                 // Eight LOS checks per 4 Hz slice; a large formation must not
@@ -70,6 +79,7 @@ namespace NextDayRevival
                 {
                     if (object.ReferenceEquals(Targets[i], contacts[i].Go)) continue;
                     Targets[i] = contacts[i].Go; Seen[i] = false; Heights[i] = 0f; CheckedAt[i] = -10f;
+                    Factors[i] = 1f;
                 }
                 // At most eight targets per quarter-second, irrespective of raid size.
                 // Expired solutions fail closed while the next slice is pending.
@@ -81,6 +91,7 @@ namespace NextDayRevival
                     GepardGun.Contact c = contacts[i];
                     Seen[i] = false; Heights[i] = 0f; CheckedAt[i] = Time.time;
                     if (c.Go == null) continue;
+                    Factors[i] = An2Water.RadarFactor(c.Go);
                     float ground = 0f;
                     bool known = false, blocked = false;
                     Vector3 d = c.Pos - eye;
@@ -104,7 +115,10 @@ namespace NextDayRevival
                     NpcAircraft.Flight flight = known ? null : NpcAircraft.Find(c.Go);
                     bool approach = !known && _terrain.Length > 0 && flight != null && flight.Path != null;
                     Heights[i] = known ? c.Pos.y - ground : approach ? flight.Path.Agl : 0f;
-                    Seen[i] = (known || approach) && AirDefenceCore.RadarVisible(Heights[i], blocked);
+                    float water;
+                    if (AirLanding.Water(c.Pos, out water)) Heights[i] = c.Pos.y - water;
+                    Seen[i] = (known || approach) && AirDefenceCore.RadarVisible(Heights[i], blocked)
+                        && length <= TowerRadar.ScopeRangeU * Factors[i];
                 }
             }
             finally { FrameProf.E(FrameProf.S_RadarShadowT); }

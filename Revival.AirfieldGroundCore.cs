@@ -31,6 +31,7 @@ namespace NextDayRevival
 
         internal static bool ClearTree(float x, float z)
         {
+            if (PowerTree(x, z)) return true;
             if (!InField(x, z) && !(z >= ZMax && z <= 1760f && Math.Abs(x - 4100f) < 16f)) return false;
             if (z >= RunwaySouth && z <= RunwayNorth && Math.Abs(x - RunwayX) <= FlightWidth / 2f) return true;
             float pit = FlakPositionsCore.Outer * FlakPositionsCore.K + PitClearMargin;
@@ -40,6 +41,59 @@ namespace NextDayRevival
                 if (dx * dx + dz * dz <= pit * pit) return true;
             }
             return ClearingDistance(x, z) <= ClearHalfWidth;
+        }
+
+        // BEGIN GENERATED POWER CLEARING (Tools/airfield_power.py)
+        internal static readonly float[][] PowerSegments = {
+            new float[] { 4145f, 1240f, 4145f, 1320f },
+            new float[] { 4145f, 1320f, 4145f, 1395f },
+            new float[] { 4145f, 1395f, 4145f, 1470f },
+            new float[] { 4145f, 1470f, 4145f, 1545f },
+            new float[] { 4145f, 1545f, 4145f, 1620f },
+            new float[] { 4145f, 1620f, 4120f, 1650f },
+            new float[] { 4120f, 1650f, 4065f, 1640f },
+            new float[] { 4065f, 1640f, 4078f, 1628f },
+            new float[] { 4145f, 1620f, 4220f, 1635f },
+            new float[] { 4220f, 1635f, 4300f, 1635f },
+            new float[] { 4300f, 1635f, 4380f, 1635f },
+            new float[] { 4380f, 1635f, 4410f, 1590f },
+            new float[] { 4145f, 1395f, 4225f, 1395f },
+            new float[] { 4225f, 1395f, 4335f, 1395f },
+            new float[] { 4335f, 1395f, 4335f, 1325f },
+            new float[] { 4145f, 1240f, 4145f, 1135f },
+            new float[] { 4145f, 1135f, 4145f, 1050f },
+            new float[] { 4145f, 1050f, 4145f, 950f },
+            new float[] { 4145f, 950f, 4230f, 950f },
+            new float[] { 4230f, 950f, 4310f, 895f },
+            new float[] { 4310f, 895f, 4385f, 895f },
+            new float[] { 4385f, 895f, 4405f, 875f },
+            new float[] { 4145f, 1050f, 4137f, 978f },
+        };
+        internal static readonly float[][] PowerBunkers = {
+            new float[] { 4028f, 1164f, 4128.86f, 1276f },
+        };
+        // END GENERATED POWER CLEARING
+
+        internal static bool PowerTree(float x, float z)
+        {
+            // A narrow utility right-of-way. Called only during scene-load
+            // vegetation pruning, never Update; native sources stay untouched.
+            const float half = 16f;
+            for (int i = 0; i < PowerBunkers.Length; i++)
+            {
+                float[] b = PowerBunkers[i];
+                if (x >= b[0]-half && x <= b[2]+half && z >= b[1]-half && z <= b[3]+half) return true;
+            }
+            for (int i = 0; i < PowerSegments.Length; i++)
+            {
+                float[] p = PowerSegments[i];
+                float dx=p[2]-p[0], dz=p[3]-p[1];
+                float t=((x-p[0])*dx+(z-p[1])*dz)/(dx*dx+dz*dz);
+                t=Math.Max(0f,Math.Min(1f,t));
+                float a=x-p[0]-dx*t, b=z-p[1]-dz*t;
+                if (a*a+b*b <= half*half) return true;
+            }
+            return false;
         }
 
         internal static bool InField(float x, float z)

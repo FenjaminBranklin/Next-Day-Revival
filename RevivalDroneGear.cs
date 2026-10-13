@@ -149,14 +149,14 @@ namespace NextDayRevival
                 "Bis zu wie vielen Metern ein NPC auf die Aufklaerungsdrohne "
                 + "schiesst.");
             CfgSurvNpcShooters = cfg.Bind("DroneGear", "SurveillanceNpcShooters", 3,
-                "Wie viele NPCs pro Salve gleichzeitig auf die Drohne feuern "
-                + "duerfen (die naechsten). Klein halten fuer die Bildrate.");
+                "Maximum NPC shots in a drone volley. Discovered shooters "
+                + "take turns under the shared think/LOS budget.");
             CfgSurvNpcShotSeconds = cfg.Bind("DroneGear", "SurveillanceNpcShotSeconds", 1.1f,
                 "Sekunden zwischen zwei Salven auf die Aufklaerungsdrohne.");
             CfgSurvNpcAccuracy = cfg.Bind("DroneGear", "SurveillanceNpcAccuracy", 0.22f,
-                "Trefferwahrscheinlichkeit eines NPC-Schusses auf die "
-                + "Aufklaerungsdrohne aus naechster Naehe (0..1). Faellt mit der "
-                + "Entfernung. Die Drohne ist gross und langsam, aber hoch.");
+                "Base NPC accuracy (0..1). Sound/search delays acquisition; "
+                + "small-target hit chance falls with range and movement. "
+                + "Shotguns and MGs work better close in than rifles.");
             CfgSurvEventCode = cfg.Bind("DroneGear", "SurveillanceEventCode", 182,
                 "Photon-Ereigniscode-Basis der Aufklaerungsdrohne (Start, Lauf, "
                 + "Ende, Treffer belegen vier Codes ab hier). Muss sich von der "
@@ -1795,7 +1795,7 @@ namespace NextDayRevival
             if (Admin.GodModeActive) return;   // god mode: the drone cannot be shot down
             if (Time.time < _armed) return;
             _hp -= 1f;
-            float dist = Vector3.Distance(shooterPos, _pos);
+            float dist = Vector3.Distance(shooterPos, _pos) / DroneNpcAimCore.Metre;
             SurvDiag.Damage(dist, _hp);
             RevivalPlugin.L.LogInfo("SurvDrone hit by NPC at " + dist.ToString("0")
                 + " m - " + _hp.ToString("0.#") + " hp left.");

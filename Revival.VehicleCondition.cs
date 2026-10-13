@@ -559,6 +559,43 @@ namespace NextDayRevival
             return Loc.T("Топливо кончилось - двигатель встал", "Out of fuel - the engine has stopped");
         }
 
+        /// <summary>The found roll on its own: each part 50 percent, a partly
+        /// filled tank (the aircraft registry sends it before it builds).</summary>
+        internal static void FoundRoll(out int mask, out float fuel)
+        {
+            mask = 0;
+            if (UnityEngine.Random.value > 0.5f) mask |= 1 << BatteryBit;
+            if (UnityEngine.Random.value > 0.5f) mask |= 1 << SparkBit;
+            if (UnityEngine.Random.value > 0.5f) mask |= 1 << KeyBit;
+            fuel = Mathf.Round(Capacity * UnityEngine.Random.Range(FoundFuelMin, FoundFuelMax));
+        }
+
+        /// <summary>The aircraft registry: what this machine has (whole and
+        /// full when nothing was ever recorded).</summary>
+        internal static void Read(GameObject go, out int mask, out float fuel)
+        {
+            State s = go == null ? null : Get(go, false);
+            mask = s == null ? AllParts : s.Mask & AllParts;
+            fuel = s == null ? Capacity : s.Fuel;
+        }
+
+        /// <summary>The aircraft registry, master only: the stored parts and fuel.</summary>
+        internal static void Restore(GameObject go, int mask, float fuel)
+        {
+            if (go == null || !RevivalTroopInsertion.MasterClient()) return;
+            State s = Get(go, true);
+            if (s == null) return;
+            s.Mask = mask < 0 ? AllParts : mask & AllParts;
+            s.Fuel = Mathf.Clamp(fuel, 0f, Capacity);
+            Broadcast(PlayerHeli.ViewOf(go), s);
+        }
+
+        internal static void TravelFill(GameObject go)
+        {
+            State s = Get(go, false);
+            if (s != null && RevivalTroopInsertion.MasterClient()) Send(PlayerHeli.ViewOf(go), -3f, s.Mask, s.Fuel);
+        }
+
         /// <summary>The world's 3/3/3 roll on a helicopter: each part 50
         /// percent, a partly filled tank. Master only.</summary>
         internal static void MakeFound(GameObject go)
@@ -566,11 +603,7 @@ namespace NextDayRevival
             if (go == null || !RevivalTroopInsertion.MasterClient()) return;
             State s = Get(go, true);
             if (s == null) return;
-            s.Mask = 0;
-            if (UnityEngine.Random.value > 0.5f) s.Mask |= 1 << BatteryBit;
-            if (UnityEngine.Random.value > 0.5f) s.Mask |= 1 << SparkBit;
-            if (UnityEngine.Random.value > 0.5f) s.Mask |= 1 << KeyBit;
-            s.Fuel = Mathf.Round(Capacity * UnityEngine.Random.Range(FoundFuelMin, FoundFuelMax));
+            FoundRoll(out s.Mask, out s.Fuel);
             int view = PlayerHeli.ViewOf(go);
             Broadcast(view, s);
             RevivalPlugin.L.LogInfo("HeliCondition: helicopter " + view + " as found - mask "
@@ -605,6 +638,14 @@ namespace NextDayRevival
         {
             if (f == null || f.Length < 4) return;
             int view = (int)f[0];
+            if (f[1] == -3f)
+            {
+                State filled;
+                if (!_state.TryGetValue(view, out filled)) { filled = new State(); _state[view] = filled; }
+                filled.Mask = (int)f[2] & AllParts;
+                filled.Fuel = Mathf.Clamp(f[3], 0f, Capacity);
+                return;
+            }
             if (f[1] > -1.5f)
             {
                 // { view, -1, mask, fuel }

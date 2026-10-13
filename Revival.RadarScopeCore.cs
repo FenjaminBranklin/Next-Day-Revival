@@ -58,6 +58,9 @@ namespace NextDayRevival
                     float rotor = (ax - 10f) * (ax - 10f) + (ay - 10f) * (ay - 10f);
                     return (ax <= 3f && ay <= 5f)
                         || (Math.Abs(ax - ay) <= 2f && ax <= 10f) || rotor <= 30f;
+                case 6: // compact wheeled hull, distinct from the aircraft diamond
+                    return (ax <= 7f && ay <= 11f)
+                        || (ax >= 8f && ax <= 10f && ay >= 5f && ay <= 9f);
                 case 4:
                     return (ax <= 3f && y >= -12f && y <= 14f)
                         || (ax <= 16f && y >= -4f && y <= 1f)

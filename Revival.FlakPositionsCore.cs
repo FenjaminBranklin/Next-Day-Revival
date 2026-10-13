@@ -25,6 +25,9 @@ namespace NextDayRevival
 
         internal static float Heading(int pit)
         {
+            // B1 is restored: enter AA-NW from the east, above its north wall.
+            // The gun centre and wire ID stay at their existing positions.
+            if (pit == 0) return 90f;
             return (float)(Math.Atan2(4272.12 - X[pit], 1335.05 - Z[pit]) * 180 / Math.PI);
         }
 

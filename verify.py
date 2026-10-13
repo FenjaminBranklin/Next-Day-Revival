@@ -91,6 +91,8 @@ ASSET_FILES = [
     "an2_body.ndmesh", "an2_glass.ndmesh", "an2_prop.ndmesh",
     "an2_aileron_l.ndmesh", "an2_aileron_r.ndmesh", "an2_elevator.ndmesh",
     "an2_rudder.ndmesh", "an2_diffuse.png", "an2_normal.png",
+    "an2_amphib_floats.ndmesh", "an2_amphib_main.ndmesh", "an2_amphib_rear.ndmesh",
+    "an2_amphib_diffuse.png", "an2_amphib_normal.png", "an2_amphib_rig.txt",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png",
     "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -141,6 +143,9 @@ ASSET_FILES = [
     "mine.ndmesh", "mine_diffuse.png", "mine_normal.png", "mine_icon.png",
     "apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png", "apmine_metal.png",
     "apmine_rough.png", "apmine_icon.png",
+    "c4.ndmesh", "c4_diffuse.png", "c4_normal.png", "c4_icon.png",
+    "detonator.ndmesh", "detonator_diffuse.png", "detonator_normal.png", "detonator_icon.png",
+    "defusekit.ndmesh", "defusekit_diffuse.png", "defusekit_normal.png", "defusekit_icon.png",
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
     "crocodile_rig.bin",
     "t72_hull.ndmesh", "t72_turret.ndmesh",
@@ -181,6 +186,7 @@ MESHES = ["arty_hull.ndmesh", "arty_turret.ndmesh", "arty_barrel.ndmesh", "arty_
           "mag68drum.ndmesh", "mgbelt.ndmesh", "ammo50.ndmesh", "law.ndmesh",
           "rocket.ndmesh", "drone.ndmesh", "jammer.ndmesh", "antenna_head.ndmesh",
           "fireext.ndmesh", "toolkit.ndmesh", "mine.ndmesh", "apmine.ndmesh",
+          "c4.ndmesh", "detonator.ndmesh", "defusekit.ndmesh",
           "t72_hull.ndmesh",
           "crocodile.ndmesh",
           "t72_turret.ndmesh", "t72_track_left.ndmesh", "t72_track_right.ndmesh",
@@ -206,6 +212,8 @@ ICON_SIZES = {
     "fireext_icon.png": (300, 300), "toolkit_icon.png": (300, 300),
     "mine_icon.png": (300, 300), "apmine_icon.png": (300, 300),
     "shell125_icon.png": (300, 300),
+    "c4_icon.png": (300, 300), "detonator_icon.png": (300, 300),
+    "defusekit_icon.png": (300, 300),
     "thermal_icon.png": (300, 300), "nvmodule_icon.png": (300, 300),
     "jammod_icon.png": (300, 300), "antenna_pack_icon.png": (300, 300),
     "battery_icon.png": (300, 300), "survdrone_icon.png": (300, 300),
@@ -1565,6 +1573,45 @@ def check_retake_raids():
             + r.stderr.strip()[-200:])
 
 
+def check_air_registry():
+    """[AB1] Aircraft registry on the master server (docs/ai/AIR_BRIDGE.md 4.2/4.5,
+    server module docs/ai/tasks/air-bridge/server/AirRegistry.cs, plugin
+    Revival.AirRegistry*.cs).
+
+    research/air_registry_check.py compiles the server module and the plugin
+    core unchanged with csc 3.5 and simulates ops, leases, owner tokens,
+    region resets, stale clients and respawn (never two instances), then pins
+    the seams (storageId 7702, legacy spawn gates, admin buttons, F6 slot).
+    """
+    print("[AB1] Aircraft registry (one An-2, one Mi-8, kept by the master server)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "air_registry_check.py")
+    if not os.path.exists(check):
+        bad("research/air_registry_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip().endswith("RESULT: PASS"):
+        ok("aircraft registry passes research/air_registry_check.py")
+    else:
+        bad("research/air_registry_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_air_bridge_transfer():
+    """[AB2] Real server/client transfer logic, routes, seats and failure recovery."""
+    import subprocess
+    print("[AB2] Aircraft region transfer, cargo, passengers and fuel")
+    check = os.path.join(ROOT, "research", "air_bridge_transfer_check.py")
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode == 0 and "0 failures" in r.stdout:
+        ok("air bridge transfer state machine and integration checks pass")
+    else:
+        bad("air bridge transfer fails: " + "; ".join(
+            line.strip() for line in r.stdout.splitlines() if "FAIL" in line or "error" in line)[-600:]
+            + r.stderr.strip()[-200:])
+
+
 def check_tower_roof():
     """[Y B1] Tower roof (Revival.TowerRoof.cs + the pure core
     Revival.TowerRoofCore.cs, docs/ai/tasks/y-b1-tower-roof.md).
@@ -1586,6 +1633,86 @@ def check_tower_roof():
         ok("tower roof passes research/tower_roof_check.py")
     else:
         bad("research/tower_roof_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_power_network():
+    """[Power 2] Power network (Revival.PowerNetCore.cs, Revival.PowerSitesData.cs,
+    Revival.PowerNet.cs; docs/ai/POWER.md).
+
+    research/power_network_check.py compiles the production rules with csc 3.5:
+    bunker hit thresholds (heavy from the 2nd, medium from the 3rd, small arms
+    never), generator/day tank/breaker states, the unpowered AA crews, no
+    per-call allocation; then the site table against the layout and the
+    bunker recipe, and the consumer seams (radar, AA, terminal, screens, lights).
+    """
+    print("[Power 2] Power network (generator bunker, consumers, armour, status)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "power_network_check.py")
+    if not os.path.exists(check):
+        bad("research/power_network_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    if r.returncode == 0 and last.endswith(", 0 FAIL"):
+        ok("power network passes research/power_network_check.py (" + last + ")")
+    else:
+        bad("research/power_network_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_fuel_depot_power():
+    """[Power 3] Day tank, fuel depot link, fragile fuel tanks
+    (Revival.FuelDepotCore.cs, Revival.Fuel.cs, Revival.PowerNet.cs;
+    docs/ai/POWER.md).
+
+    research/fuel_depot_check.py compiles the depot rules with csc 3.5: day
+    tank drain/refill, tank destruction by heavy/medium hits (small arms
+    never, a heavy MG burst once), lost pool share, empty repaired tanks, no
+    per-call allocation; then the seams (smoke column without fire, shared
+    depot for generator and aircraft, vehicle refill at the day tank).
+    """
+    print("[Power 3] Fuel depot (day tank link, fragile tanks)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "fuel_depot_check.py")
+    if not os.path.exists(check):
+        bad("research/fuel_depot_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    if r.returncode == 0 and last.endswith(", 0 FAIL"):
+        ok("fuel depot passes research/fuel_depot_check.py (" + last + ")")
+    else:
+        bad("research/fuel_depot_check.py fails: "
+            + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
+            + r.stderr.strip()[-200:])
+
+
+def check_airfield_lights():
+    """[Power 4] Airfield lights on the power network (Revival.AirfieldLightsCore.cs,
+    Revival.AirfieldLightsData.cs, Revival.AirfieldLights.cs; docs/ai/POWER.md).
+
+    research/airfield_lights_check.py compiles the light rules and the site
+    declarations with csc 3.5: night hysteresis, lit only at night with power,
+    real-time lights only near, snapped edge lights dark, valid declarations
+    (negative controls), the props filter keeping the edge lights, no per-tick
+    allocation; then the anchors against the recipes/power layout, the wall
+    lamps against their recipe colliders, the shipped edge lights and seams.
+    """
+    print("[Power 4] Airfield lights (runway, doors, pole floodlights, beacon)")
+    import subprocess
+    check = os.path.join(ROOT, "research", "airfield_lights_check.py")
+    if not os.path.exists(check):
+        bad("research/airfield_lights_check.py missing")
+        return
+    r = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    if r.returncode == 0 and last.endswith(", 0 FAIL"):
+        ok("airfield lights pass research/airfield_lights_check.py (" + last + ")")
+    else:
+        bad("research/airfield_lights_check.py fails: "
             + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
             + r.stderr.strip()[-200:])
 
@@ -1641,6 +1768,69 @@ def check_man_air_defence():
         bad("research/h_m3_defence_route_check.py fails: "
             + "; ".join(l.strip() for l in r.stdout.splitlines() if "FAIL" in l)[-400:]
             + r.stderr.strip()[-200:])
+
+
+def check_c4():
+    """C4 (Revival.C4.cs, Revival.C4Core.cs, docs/ai/POWER.md): the headless
+    core test (chain radius, limit, timer, beep, shares, defuse) and the
+    seams that make the feature live."""
+    import subprocess
+
+    def read(name):
+        f = os.path.join(ROOT, name)
+        return io.open(f, encoding="utf-8").read() if os.path.exists(f) else ""
+
+    path = os.path.join(ROOT, "research", "c4_core_check.py")
+    if not os.path.exists(path):
+        bad("C4: research/c4_core_check.py missing")
+        return
+    proc = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True)
+    last = (proc.stdout.strip().splitlines() or [""])[-1]
+    if proc.returncode == 0 and last.endswith(" 0 FAIL"):
+        ok("C4: core test and runtime seams " + last)
+    else:
+        bad("C4 core check: " + (proc.stdout + proc.stderr)[-1800:])
+    plug = read("RevivalPlugin.cs")
+    for seam in ("C4.BindConfig(Config)", "C4.Install(_harmony)", "C4.AddItems(Items)",
+                 "C4.Tick()", "C4.Draw()"):
+        if seam in plug:
+            ok("C4: seam " + seam)
+        else:
+            bad("C4: RevivalPlugin.cs does not call " + seam)
+    if "C4.OnPacket(f, sender)" in read("Revival.Flak.cs"):
+        ok("C4: FlakNet dispatches the C4 packets")
+    else:
+        bad("C4: FlakNet.OnPhotonEvent does not hand kinds 40..46 to C4.OnPacket")
+    items = read("Revival.Items.cs")
+    shop = re.search(r"ShopItemIds = new int\[\] \{(.*?)\};", items, re.S)
+    ids = [int(x) for x in re.findall(r"[0-9]+", shop.group(1))] if shop else []
+    if all(i in ids for i in (1493, 1494, 2078)):
+        ok("C4: charge, detonator and defuse kit are sold by the trader")
+    else:
+        bad("C4: 1493/1494/2078 missing from ShopItemIds")
+    if os.path.exists(os.path.join(ROOT, "docs", "ai", "POWER.md")):
+        ok("C4: docs/ai/POWER.md present")
+    else:
+        bad("C4: docs/ai/POWER.md missing")
+
+
+def check_sabotage():
+    """Power 5 (Revival.Sabotage*.cs, docs/ai/POWER.md "Power 5"): every
+    sabotage point has a valid charge anchor, the C4 rules (generator in its
+    bunker past the armour, tanks, command post, radar mast, AA guns), the
+    anchors match their source geometry and the runtime seams are live."""
+    import subprocess
+    path = os.path.join(ROOT, "research", "sabotage_check.py")
+    if not os.path.exists(path):
+        bad("Sabotage: research/sabotage_check.py missing")
+        return
+    proc = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True)
+    lines = [l for l in proc.stdout.strip().splitlines() if not l.startswith("POINT ")]
+    last = (lines or [""])[-1]
+    if proc.returncode == 0 and last.endswith(" 0 FAIL"):
+        ok("Sabotage: anchors, C4 rules and seams " + last)
+    else:
+        bad("Sabotage check: " + (" | ".join(lines) + proc.stderr)[-1800:])
 
 
 def check_bomb_damage():
@@ -5763,10 +5953,32 @@ def check_player_an2():
     need("vis.Fuel - burn * dt" in code and "Gauge(" in code and "SetEngine(false)" in code,
          "fuel burns with the throttle, the gauge is drawn, an empty tank stops the engine",
          "no fuel burn, no gauge or no engine stop on an empty tank")
-    need("static bool Touchdown(Vector3 arrival)" in code and '"CrashSinkRate", 4f' in code
+    need("static bool Touchdown(Vector3 arrival)" in code and '"CrashSinkRate", 6f' in code
+         and "An2GroundTouchCore.Landing(" in _body(code, "static bool Touchdown(Vector3 arrival)")
          and "Crash(_plane, _plane.transform.position);" in _body(code, "static bool Touchdown(Vector3 arrival)"),
-         "a touchdown faster than 4 m/s of sink is a crash",
+         "real landing impacts use the 6 m/s default and the tested ground-touch policy",
          "a hard landing does not crash the aeroplane")
+    # Compile the real rule and contact methods; do not trust literals alone.
+    try:
+        import subprocess
+        ground_check = os.path.join(ROOT, "research", "an2_ground_touch_check.py")
+        ground_result = subprocess.run([sys.executable, ground_check], cwd=ROOT,
+                                       capture_output=True, text=True, errors="replace", timeout=120)
+        need(ground_result.returncode == 0,
+             "ground-touch harness: taxi scratches, severe impacts, grace, migration, wear and budget pass",
+             "ground-touch harness failed: " + (ground_result.stdout + ground_result.stderr)[-1200:])
+    except Exception as ex:
+        bad("PlayerAn2: ground-touch harness failed: " + str(ex))
+    try:
+        for check_name in ("an2_water_check.py", "an2_water_sites_check.py"):
+            water_result = subprocess.run([sys.executable, os.path.join(ROOT, "research", check_name)],
+                                          cwd=ROOT, capture_output=True, text=True, errors="replace", timeout=120)
+            need(water_result.returncode == 0,
+                 "amphibious An-2: " + check_name + " passes",
+                 "amphibious An-2: " + check_name + " failed: "
+                 + (water_result.stdout + water_result.stderr)[-1200:])
+    except Exception as ex:
+        bad("PlayerAn2: water harness failed: " + str(ex))
     need("FireEffect.SpawnHeliFire(anchor)" in code and "HeliCrashSound.Play(where);" in code
          and "Parachute.Jump(" in code,
          "the crash reuses the aircraft fire, the crash sound and the parachute jump",
@@ -5848,6 +6060,41 @@ def check_player_an2():
         clash = [(c, taken[c]) for c in range(base, base + 8) if c in taken]
         need(not clash and base + 7 <= 199, "event codes %d-%d are free" % (base, base + 7),
              "event codes collide: " + ", ".join("%d is %s" % (c, w) for c, w in clash))
+
+
+def check_an2_amphibious():
+    """Air bridge 4a: permanent float assets and actual production loader."""
+    print("[22b-amphib] An-2 permanent amphibious kit")
+    import subprocess
+    check = os.path.join(ROOT, "research", "an2_amphibious_check.py")
+    if not os.path.exists(check):
+        bad("An-2 amphibious check is missing")
+        return
+    result = subprocess.run([sys.executable, check], cwd=ROOT, capture_output=True, text=True)
+    if result.returncode == 0:
+        ok("amphibious geometry, capsule scale, production C# loader/rig/gear and failure paths")
+    else:
+        bad("An-2 amphibious check failed: " + (result.stdout + result.stderr)[-800:])
+
+
+def check_air_gunners():
+    """Air gunners (Revival.AirGunners.cs): An-2 tail gun and cargo door, Mi-8
+    doors, the air weapon rating from the weapons_db numbers, the orbit on a
+    mark. research/air_gunners_check.py compiles the pure core with csc 3.5,
+    runs tests/air_gunners_test.cs (rating order on the real weapons_db rows,
+    station arcs, a simulated pylon turn holding the mark in the door's arc)
+    and holds the live file to its seams and frame budget."""
+    import subprocess
+    path = os.path.join(ROOT, "research", "air_gunners_check.py")
+    if not os.path.exists(path):
+        bad("AirGunners: research/air_gunners_check.py missing")
+        return
+    proc = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
+                          errors="replace", timeout=180)
+    if proc.returncode == 0 and "ALL PASS" in proc.stdout and "PASS live seams" in proc.stdout:
+        ok("AirGunners: weapon rating order, station arcs, orbit geometry and live seams PASS")
+    else:
+        bad("AirGunners offline check: " + (proc.stdout + proc.stderr)[-1800:])
 
 
 def check_vehicle_spawns():
@@ -8539,6 +8786,8 @@ if __name__ == "__main__":
     check_helipads()
     check_player_heli()
     check_player_an2()
+    check_an2_amphibious()
+    check_air_gunners()
     check_an2_repair()
     check_fuel_economy()
     check_vehicle_condition()
@@ -8554,6 +8803,8 @@ if __name__ == "__main__":
     check_gepard_npc()
     check_katyusha()
     check_bomb_damage()
+    check_c4()
+    check_sabotage()
     check_east_world()
     check_east_crossings()
     check_east_roads()
@@ -8568,7 +8819,12 @@ if __name__ == "__main__":
     check_npc_aircraft()
     check_air_events()
     check_retake_raids()
+    check_air_registry()
+    check_air_bridge_transfer()
     check_tower_roof()
+    check_power_network()
+    check_fuel_depot_power()
+    check_airfield_lights()
     check_tower_npc_nav()
     check_man_air_defence()
     check_version()

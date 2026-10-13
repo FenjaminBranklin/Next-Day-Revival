@@ -84,6 +84,21 @@ namespace NextDayRevival
         /// TAC-50/L96 character requested for it. Cadence remains the caller's
         /// responsibility, so automatic fire becomes repeated sniper reports.
         /// </summary>
+        /// <summary>A weapon's own report (an air gunner's carried weapon,
+        /// Revival.AirGunners.cs) through the same pooled sources.</summary>
+        public static void PlayClip(Vector3 point, AudioClip clip)
+        {
+            if (clip == null) { PlayTechnical(point); return; }
+            if (RevivalPlugin.CfgTurretSound == null
+                || !RevivalPlugin.CfgTurretSound.Value) return;
+            try { Setup(Source(point, clip, "NDR Air Gunner Shot Sound"), 8f); }
+            catch (Exception ex)
+            {
+                if (RevivalPlugin.L != null)
+                    RevivalPlugin.L.LogWarning("Air gunner shot sound: " + ex.Message);
+            }
+        }
+
         public static void PlayTechnical(Vector3 point)
         {
             if (RevivalPlugin.CfgTurretSound == null

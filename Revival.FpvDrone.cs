@@ -395,7 +395,7 @@ namespace NextDayRevival
         {
             if (!_flying || !RevivalPlugin.CfgDroneShootable.Value) return;
             _hp -= 1f;
-            float dist = Vector3.Distance(schuetzenPos, _pos);
+            float dist = Vector3.Distance(schuetzenPos, _pos) / DroneNpcAimCore.Metre;
             RevivalPlugin.L.LogInfo("Drohne von NPC auf " + dist.ToString("0")
                 + " m getroffen - noch " + _hp.ToString("0.#") + " von "
                 + RevivalPlugin.CfgDroneHitpoints.Value + ".");
@@ -486,6 +486,7 @@ namespace NextDayRevival
             {
                 RocketHook.Detonate(p, RevivalPlugin.CfgDroneDamage.Value,
                                     RevivalPlugin.CfgDroneRadius.Value, 3f);
+                PowerNet.Strike(p, PowerNetCore.HitMedium);   // Power 2: FPV on a generator bunker
                 RevivalPlugin.L.LogInfo("Drohne detoniert bei " + p + ", "
                     + RevivalPlugin.CfgDroneDamage.Value + " Schaden auf "
                     + RevivalPlugin.CfgDroneRadius.Value + " m.");
@@ -1985,7 +1986,7 @@ namespace NextDayRevival
             if (RevivalPlugin.CfgDroneNpcFire != null
                 && RevivalPlugin.CfgDroneNpcFire.Value)
             {
-                float r = Mathf.Max(0f, RevivalPlugin.CfgDroneNpcFireRange.Value);
+                float r = Mathf.Max(0f, RevivalPlugin.CfgDroneNpcFireRange.Value) * DroneNpcAimCore.Metre;
                 radius2 = Mathf.Max(radius2, r * r);
             }
             if ((drohne - __0).sqrMagnitude < radius2) __result = true;
@@ -2030,236 +2031,67 @@ namespace NextDayRevival
     /// Only the local drone is considered. Its pilot owns its hit points, so
     /// the same client decides the deliberately low hit chance and subtracts a
     /// hit. Remote clients receive the real firearm effect through the game's
-    /// weapon network path. At most three closest hostile NPCs fire per volley;
-    /// no drone, no scan and no cost.
+    /// weapon network path. Discovered hostile NPCs share the configured volley
+    /// ceiling and a fixed think/LOS budget; no drone, no scan and no cost.
     /// </summary>
     public static class DroneNpcFire
     {
-        /// <summary>How much of the point blank chance is left at maximum
-        /// range. A rifle at 110 m against a moving 40 cm target is a worse
-        /// shot than at 10 m, but not a hopeless one.</summary>
-        const float Abfall = 0.5f;
-
-        /// <summary>Seconds before the same man is asked to reload again.
-        /// `NPC_AI2.OnBulletsEnded` starts `ReloadingCor(3f)`, so anything
-        /// above that is enough; five leaves room for the animation.</summary>
-        const float NachladeWarten = 5f;
-
-        class Shooter
-        {
-            public Component Ai;
-            public Component Gun;
-            public Vector3 Muzzle;
-            public float Distance2;
-        }
-
-        static float _next;
+        static readonly DroneNpcEngagement _engagement = new DroneNpcEngagement(Hit);
+        static float _nextPilot;
         static GameObject _pilot;
         static object _pilotTarget;
-        static bool _announced;
         static bool _lookedUp, _failed;
-
-        /// <summary>Instance id of an NPC -> when it may be asked to reload
-        /// again. Without this a man who empties his magazine at the drone
-        /// never fires again: the game reloads inside its own shooting
-        /// actions, and this class deliberately does not go through them.</summary>
-        static Dictionary<int, float> _nachladen = new Dictionary<int, float>();
-
         static Type _aiType, _ngsType, _enemyTargetType;
-        static FieldInfo _gunField, _sensorField, _initializedField;
-        static FieldInfo _networkPlayers, _rateDelay;
+        static FieldInfo _gunField, _sensorField, _initializedField, _networkPlayers;
+        static FieldInfo _rateDelay;
         static PropertyInfo _instance;
         static MethodInfo _isEnemy, _isAlive, _fireTo, _getMuzzle;
         static MethodInfo _hasBullets, _cantWork, _bulletsEnded;
 
         public static void Reset()
         {
-            _next = Time.time + 0.5f;
-            _pilot = null;
-            _pilotTarget = null;
-            _announced = false;
-            _nachladen.Clear();
-        }
-
-        public static void Tick()
-        {
-            if (!Drone.Flying) return;
-            if (RevivalPlugin.CfgDroneNpcFire == null
-                || !RevivalPlugin.CfgDroneNpcFire.Value) return;
-            if (Time.time < _next) return;
-
-            float seconds = Mathf.Max(0.35f,
-                RevivalPlugin.CfgDroneNpcShotSeconds.Value);
-            _next = Time.time + seconds * UnityEngine.Random.Range(0.8f, 1.2f);
-
+            _engagement.Reset();
+            _pilot = null; _pilotTarget = null;
+            _nextPilot = Time.time + 1f;
             try
             {
-                if (!LookUp()) return;
-                if (_pilot == null)
+                // Resolve native delegates at launch, never in each think.
+                if (LookUp())
                 {
                     _pilot = FindPilot();
                     if (_pilot != null) _pilotTarget = FindEnemyTarget(_pilot);
                 }
-                if (_pilot == null) return;
-                if (_pilotTarget == null)
+            }
+            catch (Exception ex) { Fail("initialization: " + ex.Message); }
+        }
+
+        static bool Hit(Vector3 shooter)
+        {
+            Drone.NpcTreffer(shooter);
+            return Drone.Flying;
+        }
+
+        public static void Tick()
+        {
+            if (!Drone.Flying || _failed || Admin.GodModeActive) return;
+            if (RevivalPlugin.CfgDroneNpcFire == null || !RevivalPlugin.CfgDroneNpcFire.Value) return;
+            try
+            {
+                if (_pilot == null)
                 {
-                    Fail("pilot has no " + _enemyTargetType.Name + " component");
-                    return;
+                    if (Time.time < _nextPilot) return;
+                    _nextPilot = Time.time + 1f;
+                    _pilot = FindPilot();
+                    if (_pilot != null) _pilotTarget = FindEnemyTarget(_pilot);
                 }
-
-                float range = Mathf.Max(1f,
-                    RevivalPlugin.CfgDroneNpcFireRange.Value);
-                float range2 = range * range;
-                List<Shooter> closest = new List<Shooter>();
-                UnityEngine.Object[] all = NpcScan.All();
-                for (int i = 0; i < all.Length; i++)
-                {
-                    Component ai = all[i] as Component;
-                    if (ai == null || !ai.gameObject.activeInHierarchy) continue;
-                    if (!Bool(_initializedField, ai, true)) continue;
-                    if (!Bool(_sensorField, ai, true)) continue;
-                    if (!(bool)_isAlive.Invoke(ai, null)) continue;
-                    if (!(bool)_isEnemy.Invoke(ai,
-                                               new object[] { _pilotTarget })) continue;
-
-                    Component gun = _gunField.GetValue(ai) as Component;
-                    if (gun == null || !Ready(ai, gun)) continue;
-                    Vector3 muzzle = (Vector3)_getMuzzle.Invoke(gun, null);
-                    if (muzzle == Vector3.zero) muzzle = ai.transform.position + Vector3.up * 1.4f;
-                    float d2 = (Drone.Position - muzzle).sqrMagnitude;
-                    if (d2 < 4f || d2 > range2) continue;
-                    if (!Visible(ai, muzzle, Mathf.Sqrt(d2))) continue;
-
-                    Shooter s = new Shooter();
-                    s.Ai = ai;
-                    s.Gun = gun;
-                    s.Muzzle = muzzle;
-                    s.Distance2 = d2;
-                    Insert(closest, s);
-                }
-
-                if (closest.Count == 0) return;
-                if (!_announced)
-                {
-                    _announced = true;
-                    RevivalPlugin.L.LogInfo("Drohne: " + closest.Count
-                        + " hostile NPC(s) open fire, accuracy "
-                        + RevivalPlugin.CfgDroneNpcAccuracy.Value.ToString("0.00")
-                        + ", range " + range.ToString("0") + " m.");
-                }
-
-                for (int i = 0; i < closest.Count && Drone.Flying; i++)
-                    Fire(closest[i], range);
+                if (_pilotTarget == null) return;
+                _engagement.Tick(_pilotTarget, Drone.Position,
+                    RevivalPlugin.CfgDroneNpcFireRange == null ? 110f : Mathf.Max(1f, RevivalPlugin.CfgDroneNpcFireRange.Value),
+                    (RevivalPlugin.CfgDroneNpcAccuracy == null ? 0.25f : Mathf.Clamp01(RevivalPlugin.CfgDroneNpcAccuracy.Value)) * DroneNpcAimCore.FpvArea,
+                    RevivalPlugin.CfgDroneNpcShotSeconds == null ? 0.8f : Mathf.Max(0.35f, RevivalPlugin.CfgDroneNpcShotSeconds.Value),
+                    RevivalPlugin.CfgDroneNpcShooters == null ? 8 : Mathf.Max(1, RevivalPlugin.CfgDroneNpcShooters.Value));
             }
-            catch (Exception ex)
-            {
-                // NPC fire is an optional counter to the drone. A reflection
-                // mismatch must disable this volley, never abort the flight.
-                RevivalPlugin.L.LogWarning("Drohne: NPC-Beschuss - " + ex.Message);
-            }
-        }
-
-        static void Insert(List<Shooter> list, Shooter s)
-        {
-            int at = 0;
-            while (at < list.Count && list[at].Distance2 <= s.Distance2) at++;
-            list.Insert(at, s);
-            int max = Mathf.Max(1, RevivalPlugin.CfgDroneNpcShooters.Value);
-            while (list.Count > max) list.RemoveAt(list.Count - 1);
-        }
-
-        static void Fire(Shooter s, float range)
-        {
-            Vector3 to = Drone.Position - s.Muzzle;
-            float dist = to.magnitude;
-            if (dist < 0.1f) return;
-            Vector3 dir = to / dist;
-
-            float chance = Mathf.Clamp01(RevivalPlugin.CfgDroneNpcAccuracy.Value);
-            chance *= 1f - (1f - Abfall) * Mathf.Clamp01(dist / range);
-            bool hit = UnityEngine.Random.value < chance;
-            Vector3 aim = Drone.Position;
-            if (!hit)
-            {
-                Vector3 side = Vector3.Cross(dir, Vector3.up);
-                if (side.sqrMagnitude < 0.01f) side = Vector3.right;
-                side.Normalize();
-                Vector3 up = Vector3.Cross(side, dir).normalized;
-                float spread = Mathf.Max(2.5f, dist * 0.08f);
-                float x = UnityEngine.Random.Range(-spread, spread);
-                float y = UnityEngine.Random.Range(-spread, spread);
-                if (Mathf.Abs(x) + Mathf.Abs(y) < spread * 0.5f)
-                    x += x < 0f ? -spread : spread;
-                aim += side * x + up * y;
-            }
-
-            _fireTo.Invoke(s.Gun, new object[] { aim, true });
-            if (hit) Drone.NpcTreffer(s.Ai.transform.position);
-        }
-
-        static bool Visible(Component ai, Vector3 muzzle, float distance)
-        {
-            Vector3 dir = (Drone.Position - muzzle) / distance;
-            Vector3 from = muzzle + dir * 0.35f;
-            float left = distance - 1.0f;
-            for (int i = 0; i < 3 && left > 0.1f; i++)
-            {
-                Vector3 point;
-                GameObject block = Turret.RaycastObject(from, dir, left, out point);
-                if (block == null) return true;
-                if (block.transform.IsChildOf(ai.transform)
-                    || ai.transform.IsChildOf(block.transform))
-                {
-                    float step = Vector3.Distance(from, point) + 0.35f;
-                    left -= step;
-                    from = point + dir * 0.35f;
-                    continue;
-                }
-                return false;
-            }
-            return left <= 0.1f;
-        }
-
-        static bool Ready(Component ai, Component gun)
-        {
-            if (!(bool)_hasBullets.Invoke(gun, null)) { Nachladen(ai); return false; }
-            if ((bool)_cantWork.Invoke(gun, null)) return false;
-            if (_rateDelay != null)
-            {
-                object v = _rateDelay.GetValue(gun);
-                if (v is float && (float)v >= Time.time) return false;
-            }
-            return true;
-        }
-
-        /// <summary>
-        /// Let the man reload, with the game's own method and its own
-        /// animation. `NPC_AI2.OnBulletsEnded` tells the other clients, stops
-        /// his rotation, puts him into the reload state and starts
-        /// `ReloadingCor(3f)`, which refills the magazine at the end. Calling
-        /// it again while that runs would restart the animation, hence the
-        /// wait.
-        /// </summary>
-        static void Nachladen(Component ai)
-        {
-            if (_bulletsEnded == null || ai == null) return;
-            int id = ai.GetInstanceID();
-            float frei;
-            if (_nachladen.TryGetValue(id, out frei) && Time.time < frei) return;
-            _nachladen[id] = Time.time + NachladeWarten;
-            try { _bulletsEnded.Invoke(ai, null); }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("Drohne: NPC-Nachladen - " + ex.Message);
-                _bulletsEnded = null;
-            }
-        }
-
-        static bool Bool(FieldInfo field, object instance, bool fallback)
-        {
-            if (field == null) return fallback;
-            try { return (bool)field.GetValue(instance); }
-            catch { return fallback; }
+            catch (Exception ex) { Fail("NPC fire: " + ex.Message); }
         }
 
         static GameObject FindPilot()
@@ -2329,6 +2161,9 @@ namespace NextDayRevival
             if (_fireTo == null || _getMuzzle == null || _hasBullets == null
                 || _cantWork == null)
                 return Fail("NPC firearm methods missing");
+            _engagement.Bind(_gunField, _initializedField, _sensorField,
+                AccessTools.Field(_aiType, "_mainWeaponId") ?? AccessTools.Field(_aiType, "_weaponId"),
+                _rateDelay, _isAlive, _isEnemy, _hasBullets, _cantWork, _getMuzzle, _fireTo, _bulletsEnded);
             return true;
         }
 

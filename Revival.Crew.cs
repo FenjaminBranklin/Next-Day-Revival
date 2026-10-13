@@ -3723,6 +3723,7 @@ namespace NextDayRevival
                     RocketHook.Detonate(point,
                         d.Damage > 0f ? d.Damage : RevivalPlugin.CfgPatrolCrewDroneDamage.Value,
                         d.Radius > 0f ? d.Radius : RevivalPlugin.CfgPatrolCrewDroneRadius.Value, 3f);
+                    PowerNet.Strike(point, PowerNetCore.HitMedium);   // Power 2: crew FPV drone
                 }
                 catch (Exception ex)
                 {

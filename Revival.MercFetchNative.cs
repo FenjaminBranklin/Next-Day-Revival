@@ -13,6 +13,7 @@ namespace NextDayRevival
         internal sealed class Crate
         {
             internal int View;
+            internal string Source;
             internal Component Container, Drop;
             internal Rigidbody Body;
             internal Transform Root, PreviousParent;
@@ -86,18 +87,28 @@ namespace NextDayRevival
 
         public static void StartPostfix(Component __instance)
         {
-            if (!Available || !MercFetch.Enabled || Crates.Count >= 32) return;
+            if (!Available || !MercFetch.Enabled) return;
             try
             {
+                // Both paid spawn formats and vanilla humanitarian drops use
+                // these components. Ordinary loot containers are not airdrops.
+                Component drop = __instance.GetComponent(_dropType);
+                if (drop == null) return;
                 Component view = __instance.GetComponent(_viewType);
                 object[] spawn = view == null ? null : _spawn.GetValue(view, null) as object[];
-                if (spawn == null || spawn.Length != 3 || !"ndr-airdrop-m4".Equals(spawn[0])) return;
+                int id = Crocodile.ViewId(__instance.gameObject);
+                if (ByView(id) != null) return;
+                if (Crates.Count >= 32)
+                { RevivalPlugin.L.LogWarning("MercFetch discovery rejected view=" + id + ": registry full (32)."); return; }
                 Crate c = new Crate(); c.Container = __instance; c.Root = __instance.transform;
-                c.Drop = __instance.GetComponent(_dropType); c.Body = __instance.GetComponent<Rigidbody>();
-                c.View = Crocodile.ViewId(__instance.gameObject);
-                if (c.Drop == null || c.Body == null || c.View <= 0 || ByView(c.View) != null) return;
+                c.Drop = drop; c.Body = __instance.GetComponent<Rigidbody>(); c.View = id;
+                c.Source = spawn != null && spawn.Length >= 3 && "ndr-airdrop-m4".Equals(spawn[0])
+                    ? (spawn.Length == 4 ? "supply-order" : "paid") : "native";
+                if (c.Body == null || c.View <= 0)
+                { RevivalPlugin.L.LogWarning("MercFetch discovery rejected view=" + id + ": missing body or network view."); return; }
                 c.Colliders = __instance.GetComponentsInChildren<Collider>(true); c.ColliderOn = new bool[c.Colliders.Length];
                 Crates.Add(c); MercFetch.NeedSnapshot = true;
+                RevivalPlugin.L.LogInfo("MercFetch registered view=" + c.View + " source=" + c.Source);
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("MercFetch crate discovery: " + ex.Message); }
         }
@@ -125,15 +136,49 @@ namespace NextDayRevival
         { for (int i = 0; i < Crates.Count; i++) if (Crates[i].View == view) return Crates[i]; return null; }
 
         internal static bool Target(Crate c, out Vector3 at)
+        { string reason; return Target(c, out at, out reason); }
+
+        // Command-only scan: at most 32 landing rays, no polling or scene scan.
+        // Logs allocate only when FETCH is requested, never in Tick/think paths.
+        internal static Crate NearestAirfieldCrate(Vector3 depot, out Vector3 target)
         {
-            at = Vector3.zero;
-            if (c == null || c.Root == null || c.Body == null || c.Locked || FastCall.Bool(_busy, c.Container)
-                || FastField.GetInt(_animation, c.Drop) != 4 || c.Body.velocity.sqrMagnitude >= 1f) return false;
+            Crate best = null; target = Vector3.zero; float distance = float.MaxValue;
+            for (int i = 0; i < Crates.Count; i++)
+            {
+                Crate c = Crates[i]; Vector3 at; string reason;
+                if (c.Root == null) reason = "missing root";
+                else if (!Airfield.Inside(c.Root.position, 0f)) reason = "outside airfield bounds";
+                else if (Target(c, out at, out reason))
+                {
+                    Vector3 delta = c.Root.position - depot; delta.y = 0f;
+                    float d = delta.sqrMagnitude;
+                    if (d < distance) { best = c; distance = d; target = at; }
+                    continue;
+                }
+                RevivalPlugin.L.LogInfo("MercFetch rejected view=" + c.View + " source=" + c.Source + ": " + reason);
+            }
+            if (best == null) RevivalPlugin.L.LogInfo("MercFetch search: no eligible crate; registered=" + Crates.Count);
+            else RevivalPlugin.L.LogInfo("MercFetch selected view=" + best.View + " source=" + best.Source
+                + " depot-distance-u=" + Mathf.Sqrt(distance));
+            return best;
+        }
+
+        internal static bool Target(Crate c, out Vector3 at, out string reason)
+        {
+            at = Vector3.zero; reason = null;
+            if (c == null || c.Root == null || c.Container == null) reason = "missing container/root";
+            else if (c.Body == null || c.Drop == null) reason = "missing native body/drop";
+            else if (c.Locked) reason = "locked by fetch job";
+            else if (FastCall.Bool(_busy, c.Container)) reason = "player interacting";
+            else if (FastField.GetInt(_animation, c.Drop) != 4) reason = "not landed (native state != 4)";
+            else if (c.Body.velocity.sqrMagnitude >= 1f) reason = "still moving";
+            else HasGoods(c, out reason);
+            if (reason != null) return false;
             // Native landed state 4 becomes kinematic on sleep. Remote peers
             // are always kinematic; landing state plus ground/velocity is the gate.
             // All layers, including slabs/props/fences. Saturation refuses selection.
             int n = Physics.RaycastNonAlloc(c.Root.position + Vector3.up * 2.8f, Vector3.down, Hits, 11.2f, ~0, QueryTriggerInteraction.Ignore);
-            if (n == Hits.Length) return false;
+            if (n == Hits.Length) { reason = "landing ray saturated"; return false; }
             float best = float.MaxValue;
             for (int i = 0; i < n; i++)
             {
@@ -141,13 +186,27 @@ namespace NextDayRevival
                 if (col == null || col.transform.IsChildOf(c.Root) || Hits[i].normal.y < 0.5f) continue;
                 if (Hits[i].distance < best) { best = Hits[i].distance; at = Hits[i].point; }
             }
-            return best < float.MaxValue && HasGoods(c);
+            if (best == float.MaxValue) { reason = "no solid landing support within 4 m"; return false; }
+            return true;
         }
         internal static bool HasGoods(Crate c)
+        { string reason; return HasGoods(c, out reason); }
+
+        static bool HasGoods(Crate c, out string reason)
         {
-            object data = _data(c.Container); Array ids = _arrays[0](data);
-            if (ids == null) return false;
-            for (int i = 0; i < ids.Length; i++) if (Good(data, i).Valid) return true;
+            reason = null;
+            object data = _data(c.Container);
+            if (data == null) { reason = "inventory not initialized"; return false; }
+            Array ids = _arrays[0](data);
+            if (ids == null) { reason = "inventory slots not initialized"; return false; }
+            bool nonempty = false;
+            for (int i = 0; i < ids.Length; i++)
+            {
+                if (_ints[0](ids, i) <= 0) continue;
+                nonempty = true;
+                if (Good(data, i).Valid) return true;
+            }
+            reason = nonempty ? "no supported depot goods or invalid metadata" : "empty inventory";
             return false;
         }
         internal static bool Parking(Vector3 anchor, Vector3 from, out Vector3 at)

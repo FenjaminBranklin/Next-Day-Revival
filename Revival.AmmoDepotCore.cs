@@ -35,8 +35,12 @@ namespace NextDayRevival
         }
         internal bool Add(DepotGood g)
         {
-            if (!Valid(g) || Count >= Capacity) return false;
-            Goods[Count++] = g; Revision++; return true;
+            int units = g.Id == 2076 ? Math.Max(1, g.Bullets) : 1;
+            if (!Valid(g) || units > Capacity - Count) return false;
+            // Depot accounting remains per round, including crew withdrawals.
+            if (g.Id == 2076) g.Bullets = 1;
+            for (int i = 0; i < units; i++) Goods[Count++] = g;
+            Revision++; return true;
         }
         internal int Find(int id)
         { for (int i = 0; i < Count; i++) if (Goods[i].Id == id) return i; return -1; }

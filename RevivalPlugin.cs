@@ -181,7 +181,7 @@ namespace NextDayRevival
         // verify.py prueft das. Zwei Staende, die sich beide "0.3.0" nennen,
         // machen jeden Versionsabgleich wertlos, und genau das war zwischen
         // dem Release 0.3.0 und dem Stand vom 2026-08-28 der Fall.
-        public const string VERSION = "6.72.0";
+        public const string VERSION = "6.73.0";
 
         internal static ManualLogSource L;
         internal static string AssetDir;
@@ -496,6 +496,7 @@ namespace NextDayRevival
             TechnicalGun.BindConfig(Config);     // NDR technical: the man at the MG
             AntiTankMine.BindConfig(Config);     // NDR anti-tank mine
             ApMine.BindConfig(Config);           // NDR anti-personnel mine
+            C4.BindConfig(Config);               // NDR C4
             Stinger.BindConfig(Config);
             GasLauncher.BindConfig(Config);      // NDR gas launcher
             Crocodile.BindConfig(Config);        // NDR toxic crocodile boss in the Point 12 lake
@@ -507,10 +508,12 @@ namespace NextDayRevival
             Helipads.BindConfig(Config);         // NDR editor helicopter landing pads
             PlayerHeli.BindConfig(Config);       // NDR the Mi-8 a player flies himself
             PlayerAn2.BindConfig(Config);        // NDR the An-2 a player flies (on by default)
+            AirGunners.BindConfig(Config);       // NDR air gunners: An-2 tail gun and door, Mi-8 doors, orbit on a mark
             An2Repair.BindConfig(Config);        // NDR An-2 repair loop: four stages, fuel (on by default)
             An2Bombs.BindConfig(Config);         // NDR An-2 bombs: racks, bombsight, release ([Gameplay] An2Bombs)
             AirEvents.BindConfig(Config);        // NDR N11 air events (editor air strikes)
             RetakeRaids.BindConfig(Config);      // W Tower 4: the garrison strikes back at a held airfield
+            AirRegistry.BindConfig(Config);       // AB1: one An-2 and one Mi-8, kept by the master server
             NpcAircraft.BindConfig(Config);      // NDR NPC aircraft on a flight path (admin test flyover)
             AirKills.BindConfig(Config);         // W AA4: aircraft hit points, bounties, gun pits
             FuelBalance.BindConfig(Config);      // NDR fuel use and tank size per vehicle class
@@ -530,6 +533,8 @@ namespace NextDayRevival
             Flak.BindConfig(Config);             // east airfield: ZU-23-2 flak guns on the AA positions (P4)
             TowerSupport.BindConfig(Config);
             TowerDelivery.BindConfig(Config);
+            PowerNet.BindConfig(Config);         // Power 2: generator bunker network (radar, AA, lights, terminal, screens)
+            AirfieldLights.BindConfig(Config);   // Power 4: runway edge lights, door lamps, pole floodlights, tower beacon
             AirfieldHold.BindConfig(Config);     // W Tower 3: holding the airfield (An-2, income, announcement)
             TowerRadar.BindConfig(Config);       // east airfield: the tower C1 as air defence HQ, radar + console (P5)
             TowerRoof.BindConfig(Config);        // Y B1: the tower's outside ladder to the cab roof, mercs' climb, roof posts
@@ -611,8 +616,10 @@ namespace NextDayRevival
             TowerRadar.Install(_harmony);        // tower radar HQ: the console's input lock, hits on the radar and console
             TowerDelivery.Install(_harmony);
             TowerPaymentWire.Install(_harmony);  // authenticated remote support wallet channel
+            AirRegistry.Install(_harmony);       // AB1: aircraft registry answers on storage 7702
             AntiTankMine.Install(_harmony);      // NDR anti-tank mine
             ApMine.Install(_harmony);            // NDR anti-personnel mine
+            C4.Install(_harmony);                // NDR C4
             Stinger.Install(_harmony);
             GasLauncher.Install(_harmony);       // NDR gas launcher
             Crocodile.Install(_harmony);         // NDR native animal-boss damage gate
@@ -1117,20 +1124,14 @@ namespace NextDayRevival
                 "Metres. Also extends the drone's NPC wake radius so the shooter "
                 + "is active before it fires.");
             CfgDroneNpcAccuracy = Config.Bind("Drone", "NpcAccuracy", 0.25f,
-                "Chance per NPC shot at point blank. It falls to half this "
-                + "value at maximum range. A drone over a camp is the most "
-                + "dangerous thing in it and everyone shoots at it first, so "
-                + "this is not a token defence: at 0.25, three men with line "
-                + "of sight take a three-hit drone down in about four seconds "
-                + "of hovering. Flying fast, high and behind cover is the "
-                + "answer, not a lower number here.");
+                "Base NPC accuracy (0..1). Drone fire adds a sound/search delay "
+                + "and reduces hits with range and movement. Shotguns and MGs "
+                + "are more effective close in; rifles struggle at range.");
             CfgDroneNpcShotSeconds = Config.Bind("Drone", "NpcShotSeconds", 0.8f,
                 "Average seconds between NPC volleys at the drone.");
             CfgDroneNpcShooters = Config.Bind("Drone", "NpcShooters", 8,
-                "How many hostile NPCs fire at the drone in one volley, "
-                + "closest first. Everyone in range with a clear line would "
-                + "shoot at it, so this is a ceiling against a whole camp "
-                + "firing at once, not a squad size.");
+                "Maximum hostile NPC shots in a drone volley. Discovered "
+                + "shooters take turns under the shared think/LOS budget.");
 
             // ----------------------------------------------------- DroneAlert
             // Leichter Warnmelder: schlaegt an, wenn eine feindliche Crew-FPV in
@@ -1778,6 +1779,7 @@ namespace NextDayRevival
             AntiTankMine.AddItems(Items);
             // PMN-2 anti-personnel mine, Blender model (own file).
             ApMine.AddItems(Items);              // NDR anti-personnel mine
+            C4.AddItems(Items);                  // NDR C4 (charge, detonator, defuse kit)
             // The Stinger shares the LAW's donor but NOT its ammunition setup.
             // The LAW above is a factory-sealed tube: clip 0, and once the
             // rocket is gone the launcher is scrap. The Stinger is a reusable
@@ -2297,6 +2299,8 @@ namespace NextDayRevival
             if (PerfBisect.Run(PerfBisect.G_Gepard)) { FrameProf.S(FrameProf.S_GepardT); Gepard.Tick(); FrameProf.E(FrameProf.S_GepardT); }                       // NDR Gepard: spawn key, gunner station, rounds in flight
             if (PerfBisect.Run(PerfBisect.G_Flak)) { FrameProf.S(FrameProf.S_FlakT); Flak.Tick(); FrameProf.E(FrameProf.S_FlakT); }                         // east airfield flak: guns, crews, fire control, a manning player
             FrameProf.S(FrameProf.S_AaDamageT); AirDefenceDamage.Tick(); FrameProf.E(FrameProf.S_AaDamageT);
+            FrameProf.S(FrameProf.S_PowerNetT); PowerNet.Tick(); FrameProf.E(FrameProf.S_PowerNetT);              // Power 2: generator state, breaker, door sign
+            FrameProf.S(FrameProf.S_AirfieldLightsT); AirfieldLights.Tick(); FrameProf.E(FrameProf.S_AirfieldLightsT); // Power 4: airfield lights (night + power)
             FrameProf.S(FrameProf.S_TowerDeliveryT); TowerDelivery.Tick(); FrameProf.E(FrameProf.S_TowerDeliveryT);
             FrameProf.S(FrameProf.S_TowerSupportT); TowerSupport.Tick(); FrameProf.E(FrameProf.S_TowerSupportT);
             if (PerfBisect.Run(PerfBisect.G_Radar)) { FrameProf.S(FrameProf.S_TowerRadarT); TowerRadar.Tick(); FrameProf.E(FrameProf.S_TowerRadarT); }                   // tower radar HQ: antenna, scope, fire control, siren, runway lights
@@ -2306,6 +2310,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_NoFlyT); NoFly.Tick(); FrameProf.E(FrameProf.S_NoFlyT);                        // no-fly zones: violators, warning, defenders, scripted flak
             FrameProf.S(FrameProf.S_AntiTankMineT); AntiTankMine.Tick(); FrameProf.E(FrameProf.S_AntiTankMineT);                 // NDR anti-tank mine (placement)
             FrameProf.S(FrameProf.S_ApMineT); ApMine.Tick(); FrameProf.E(FrameProf.S_ApMineT);                       // NDR anti-personnel mine (event channel, triggers)
+            FrameProf.S(FrameProf.S_C4T); C4.Tick(); FrameProf.E(FrameProf.S_C4T);                                   // NDR C4 (preview, timers, LEDs, defuse)
             FrameProf.S(FrameProf.S_StingerT); Stinger.Tick(); FrameProf.E(FrameProf.S_StingerT);
             FrameProf.S(FrameProf.S_GasLauncherT); GasLauncher.Tick(); FrameProf.E(FrameProf.S_GasLauncherT);                  // NDR gas launcher (optional keys, cloud list)
             if (PerfBisect.Run(PerfBisect.G_Patrol)) { FrameProf.S(FrameProf.PatrolTick);  Patrol.Tick();           FrameProf.E(FrameProf.PatrolTick); }
@@ -2321,8 +2326,10 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_PlayerAn2T); PlayerAn2.Tick(); FrameProf.E(FrameProf.S_PlayerAn2T);                    // NDR player-flown An-2 (apron spawn, boarding, flight)
             FrameProf.S(FrameProf.S_An2RepairT); An2Repair.Tick(); FrameProf.E(FrameProf.S_An2RepairT);                    // NDR An-2 repair: fit parts, refuel, save the state
             FrameProf.S(FrameProf.S_An2BombsT); An2Bombs.Tick(); FrameProf.E(FrameProf.S_An2BombsT);                     // NDR An-2 bombs: load, sight, release, falling bombs
+            FrameProf.S(FrameProf.S_AirGunT); AirGunners.Tick(); FrameProf.E(FrameProf.S_AirGunT);                       // NDR air gunners: stations, mark, orbit, merc gunners
             if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_AirEventsT); AirEvents.Tick(); FrameProf.E(FrameProf.S_AirEventsT); }                  // NDR N11 air events: schedule, bombs, paratroopers, warnings
             FrameProf.S(FrameProf.S_RetakeRaidsT); RetakeRaids.Tick(); FrameProf.E(FrameProf.S_RetakeRaidsT);             // W Tower 4: retake raids on a held airfield (master, 1 Hz)
+            FrameProf.S(FrameProf.S_AirRegistryT); AirRegistry.Tick(); FrameProf.E(FrameProf.S_AirRegistryT);             // AB1: aircraft registry (rehydrate, respawn, writes; 2 Hz)
             OrdnanceBlast.Tick();               // Bounded master-only bomb/rocket damage queue
             BlastCorpse.Tick();                 // C-W1: watched explosion corpses, own F6 slot, idle without one
             if (PerfBisect.Run(PerfBisect.G_AirEvents)) { FrameProf.S(FrameProf.S_NpcAircraftT); NpcAircraft.Tick(); FrameProf.E(FrameProf.S_NpcAircraftT); }            // NDR NPC aircraft: the master flies the flight paths
@@ -2393,6 +2400,7 @@ namespace NextDayRevival
             // the game's own animator and movement controller have written.
             FrameProf.S(FrameProf.S_PlayerHeliL); PlayerHeli.LateFrame(); FrameProf.E(FrameProf.S_PlayerHeliL);
             FrameProf.S(FrameProf.S_PlayerAn2L); PlayerAn2.LateFrame(); FrameProf.E(FrameProf.S_PlayerAn2L);               // NDR player-flown An-2: the crew in their seats
+            AirGunners.LateFrame();                                                                                                   // NDR air gunners: the station view after the seat binding
             // B3c: mercenaries riding a vehicle, on their seats after the
             // animator and after every vehicle has moved; the owner's gunners
             // lay and fire here (Revival.MercsRide.cs).
@@ -2428,16 +2436,18 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.PatrolDraw);  Patrol.Draw();           FrameProf.E(FrameProf.PatrolDraw);
             FrameProf.S(FrameProf.ConvRepDraw); ConvoyRepair.Draw();     FrameProf.E(FrameProf.ConvRepDraw);  // NDR convoy vehicle repair
             FrameProf.S(FrameProf.OtherDraw); AntiTankMine.Draw(); GasLauncher.Draw(); Stinger.Draw(); FrameProf.E(FrameProf.OtherDraw);
+            FrameProf.S(FrameProf.S_C4D); C4.Draw(); FrameProf.E(FrameProf.S_C4D);   // NDR C4 (timer, defuse bar)
             FrameProf.S(FrameProf.ConvoyDraw);  if (repaint) RevivalConvoy.Draw();    FrameProf.E(FrameProf.ConvoyDraw);   // NDR convoy event
             if (repaint) AirEvents.Draw();                                                                                            // NDR N11 air raid banner
             FrameProf.S(FrameProf.S_TroopInsertionD); if (repaint) RevivalTroopInsertion.Draw(); FrameProf.E(FrameProf.S_TroopInsertionD);        // NDR heli troop insertion banner
             FrameProf.S(FrameProf.S_EastZonesD); if (repaint) EastZones.Draw(); FrameProf.E(FrameProf.S_EastZonesD);                    // east world: the marker id the player stands in
-            FrameProf.S(FrameProf.S_HelipadsD); Helipads.Draw(); FrameProf.E(FrameProf.S_HelipadsD);                     // NDR helicopter landing pads on the world map
+            FrameProf.S(FrameProf.S_HelipadsD); Helipads.Draw(); AirBridge.Draw(); FrameProf.E(FrameProf.S_HelipadsD);    // landing pads and air corridors on the world map
             FrameProf.S(FrameProf.S_PlayerHeliD); if (seatHud) PlayerHeli.Draw(); FrameProf.E(FrameProf.S_PlayerHeliD);                   // NDR player-flown Mi-8: readout and notices
             FrameProf.S(FrameProf.S_PlayerAn2D); if (seatHud) PlayerAn2.Draw(); FrameProf.E(FrameProf.S_PlayerAn2D);                    // NDR player-flown An-2: instruments, fuel gauge, stall
             FrameProf.S(FrameProf.S_An2RepairD); if (repaint) An2Repair.Draw(); FrameProf.E(FrameProf.S_An2RepairD);                    // NDR An-2 repair: the stage panel and the key prompt
             FrameProf.S(FrameProf.S_VehicleConditionD); if (repaint) VehicleCondition.Draw(); FrameProf.E(FrameProf.S_VehicleConditionD);   // N8 Mi-8 fit/refuel prompt on foot
             FrameProf.S(FrameProf.S_An2BombsD); if (seatHud) An2Bombs.Draw(); FrameProf.E(FrameProf.S_An2BombsD);                     // NDR An-2 bombs: the bombsight and the load prompt
+            FrameProf.S(FrameProf.S_AirGunD); if (seatHud) AirGunners.Draw(); FrameProf.E(FrameProf.S_AirGunD);                       // NDR air gunners: crosshair, ammo, air rating, the mark
             FrameProf.S(FrameProf.S_FuelDepotD); if (repaint) FuelDepot.Draw(); FrameProf.E(FrameProf.S_FuelDepotD);                    // NDR POL depot: remaining fuel and the key prompt
             FrameProf.S(FrameProf.S_NewSettlementD); NewSettlement.Draw(); FrameProf.E(FrameProf.S_NewSettlementD);                // NDR bottom-left traitor settlement (Phase 1, isolated)
             FrameProf.S(FrameProf.S_CrocodileD); if (repaint) Crocodile.Draw(); FrameProf.E(FrameProf.S_CrocodileD);                    // NDR toxic crocodile name and exposure warning
@@ -2449,6 +2459,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_FlakD); if (seatHud) Flak.Draw(); FrameProf.E(FrameProf.S_FlakD);                         // east airfield flak: the man-the-gun prompt and the ZU-23 sight
             FrameProf.S(FrameProf.S_AmmoDepotD); if (seatHud) AmmoDepot.Draw(); FrameProf.E(FrameProf.S_AmmoDepotD);
             FrameProf.S(FrameProf.S_AaDamageD); if (repaint) AirDefenceDamage.Draw(); FrameProf.E(FrameProf.S_AaDamageD);
+            FrameProf.S(FrameProf.S_PowerNetD); if (repaint) PowerNet.Draw(); FrameProf.E(FrameProf.S_PowerNetD);
             FrameProf.S(FrameProf.S_TowerDeliveryD); TowerDelivery.Draw(); FrameProf.E(FrameProf.S_TowerDeliveryD);
             FrameProf.S(FrameProf.S_TowerSupportD); TowerSupport.Draw(); FrameProf.E(FrameProf.S_TowerSupportD);
             FrameProf.S(FrameProf.S_TowerRadarD); TowerRadar.Draw(); FrameProf.E(FrameProf.S_TowerRadarD);                   // tower radar HQ: the console prompt and the PPI radar view
@@ -2462,6 +2473,7 @@ namespace NextDayRevival
             FrameProf.S(FrameProf.S_VehicleSeatsD); if (seatHud) VehicleSeats.Draw(); FrameProf.E(FrameProf.S_VehicleSeatsD);
             FrameProf.S(FrameProf.S_MercsD); MercUi.Draw(); FrameProf.E(FrameProf.S_MercsD);                         // B3: trader Mercenaries tab, order wheel, merc list, HUD strip
             FrameProf.S(FrameProf.S_MercCoverD); if (repaint && Admin.IsOpen && MercCoverService.Show) MercCoverService.Draw(); FrameProf.E(FrameProf.S_MercCoverD);   // M1: F8 "Show merc cover" overlay (off: one bool)
+            FrameProf.S(FrameProf.S_SabotageD); if (repaint && Admin.IsOpen && Sabotage.Show) Sabotage.Draw(); FrameProf.E(FrameProf.S_SabotageD);   // Power 5: admin "show sabotage points" overlay (off: one bool)
             // W-UI4: the admin panel is a UI kit window now - drawn late, over the
             // HUD lines above, like every kit window (docs/UI_KIT.md).
             FrameProf.S(FrameProf.AdminDraw);   Admin.Draw();            FrameProf.E(FrameProf.AdminDraw);

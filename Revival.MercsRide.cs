@@ -1777,6 +1777,7 @@ namespace NextDayRevival
                     float boomDmg = RevivalPlugin.CfgTankExplosionDamage == null ? 300f : RevivalPlugin.CfgTankExplosionDamage.Value;
                     float boomR = RevivalPlugin.CfgTankExplosionRadius == null ? 10f : RevivalPlugin.CfgTankExplosionRadius.Value;
                     RocketHook.Detonate(impact - dir * 0.15f, boomDmg, boomR, 3f);
+                    PowerNet.Strike(impact - dir * 0.15f, PowerNetCore.HitMedium);   // Power 2: tank shell
                     ShellSplash.SweepFrozen(impact - dir * 0.15f, boomDmg, boomR);
                 }
                 catch (Exception ex) { Warn("tank shell", ex); }

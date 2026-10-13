@@ -85,8 +85,12 @@ namespace NextDayRevival
             bool proxy = distance > near;
             if (proxy && Time.unscaledTime >= _occludeAt)
             {
-                _occludeAt = Time.unscaledTime + 0.25f;
-                _hidden = AircraftCrashFx.TerrainHidden(eye, transform.position, distance);
+                bool hidden;
+                if (AircraftCrashFx.TryTerrainHidden(eye, transform.position, distance, out hidden))
+                {
+                    _occludeAt = Time.unscaledTime + (hidden ? 5f : 1f);
+                    _hidden = hidden;
+                }
             }
             float scale = proxy ? near / Mathf.Max(1f, distance) : 1f;
             float dt = Mathf.Max(0f, Time.time - _simulatedAt);

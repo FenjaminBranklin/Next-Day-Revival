@@ -377,8 +377,16 @@ namespace NextDayRevival
         internal static float ReachU(Gun g, Vector3 p, float calibrationMetres)
         {
             bool zone = !g.ShortRange && !g.Town && FlakEngageCore.InZone(p.x, p.z, ZoneMetres, K);
-            return AARaidBalanceCore.FireReach(FlakEngageCore.Reach(calibrationMetres, zone,
+            float reach = AARaidBalanceCore.FireReach(FlakEngageCore.Reach(calibrationMetres, zone,
                 ZoneMetres, MaxFuze / K), g.ShortRange) * K;
+            return Dark(g) ? PowerNetCore.DarkRange(reach) : reach;
+        }
+
+        /// <summary>Power 2: an airfield gun fed by a generator that is down
+        /// (PowerNet): by eye only, short range, poor accuracy - ZU included.</summary>
+        internal static bool Dark(Gun g)
+        {
+            return g != null && !g.Town && !PowerNet.FeedsGun(g.Index);
         }
         static int RoundsFull { get { return Mathf.Max(1, CfgRoundsPerLoad == null ? 20 : CfgRoundsPerLoad.Value); } }
         internal static int RoundsPerLoad { get { return RoundsFull; } }
@@ -453,6 +461,7 @@ namespace NextDayRevival
             public FlakMode Mode = FlakMode.WeaponsFree;
             public GameObject Assigned;
             public GameObject RadarAssigned;     // master radar order provenance
+            public GepardGun.Contact RadarGroundTarget; // explicit console ground order only
             public Vector3 ZoneCentre;
             public float ZoneRadius, ZoneCeiling;
             public bool ZoneStrict;
@@ -548,7 +557,7 @@ namespace NextDayRevival
             f.State = State(g);
             f.Health = AirDefenceDamage.Hp(g.Index);
             f.Mode = g.Mode;
-            f.Target = g.Target != null ? g.Target.Go : null;
+            f.Target = g.RadarGroundTarget != null ? g.RadarGroundTarget.Go : g.Target != null ? g.Target.Go : null;
             f.Assigned = g.Assigned;
             f.Rounds = FlakAmmo.DisplayRounds(g);
             MercAAPost merc = MercAA.Gun(g.Index);
@@ -592,6 +601,7 @@ namespace NextDayRevival
                 if (!Match(_guns[i], id)) continue;
                 _guns[i].Assigned = target;
                 _guns[i].RadarAssigned = null;   // an independent API order replaces radar focus
+                _guns[i].RadarGroundTarget = null;
                 _guns[i].NextLook = 0f;
                 any = true;
             }
@@ -616,6 +626,20 @@ namespace NextDayRevival
             {
                 Gun g = _guns[i];
                 if (g.Root == null) continue;
+                if (target.Kind == RadarGroundCore.Kind)
+                {
+                    bool ground = RadarGround.CanEngage(g, target, side) && RadarGround.Allowed(target, OwnerFaction(g));
+                    if (ground)
+                    {
+                        if (g.RadarGroundTarget != target)
+                        { g.Target = null; g.Engaged = g.Firing = false; g.Held = 0f; g.ShortBurst = new ShortBurst(); }
+                        g.Assigned = g.RadarAssigned = target.Go; g.RadarGroundTarget = target;
+                        g.Mode = FlakMode.WeaponsFree;
+                    }
+                    else if (g.RadarGroundTarget == target)
+                    { g.Assigned = g.RadarAssigned = null; g.RadarGroundTarget = null; g.Firing = g.Engaged = false; g.NextLook = 0f; }
+                    continue;
+                }
                 FlakGunInfo info = Snapshot(g);
                 bool eligible = TowerRadar.Follows(info, side) && info.Health > 0f
                     && info.CrewAlive > 0 && !info.PlayerManned;
@@ -650,6 +674,8 @@ namespace NextDayRevival
                 if (object.ReferenceEquals(_guns[i].RadarAssigned, target))
                 {
                     _guns[i].RadarAssigned = null;
+                    if (_guns[i].RadarGroundTarget != null)
+                    { _guns[i].RadarGroundTarget = null; _guns[i].Firing = _guns[i].Engaged = false; _guns[i].ShortBurst = new ShortBurst(); }
                     if (!object.ReferenceEquals(_guns[i].Assigned, target)) continue;
                     _guns[i].Assigned = null;
                     if (_guns[i].Mode == FlakMode.AssignedOnly) _guns[i].Mode = FlakMode.WeaponsFree;
@@ -726,8 +752,9 @@ namespace NextDayRevival
         /// else the W AA3 calibration: radar-directed or by eye).</summary>
         internal static float GunRange(Gun g)
         {
-            return AARaidBalanceCore.FireReach(g.ShortRange ? ShortRangeCore.RangeM
+            float range = AARaidBalanceCore.FireReach(g.ShortRange ? ShortRangeCore.RangeM
                 : MercAA.Calibration(g).Range, g.ShortRange) * K;
+            return Dark(g) ? PowerNetCore.DarkRange(range) : range;
         }
 
         // Only consulted by the master's existing 2 Hz target scan. No new
@@ -799,7 +826,8 @@ namespace NextDayRevival
                 if (!_guns[i].Town)
                 {
                     Gun g = _guns[i];
-                    g.Assigned = null;
+                    g.Assigned = g.RadarAssigned = null;
+                    g.RadarGroundTarget = null;
                     g.Target = null;
                     g.Hostile.Clear();
                     g.Mode = FlakMode.WeaponsFree;
@@ -1351,7 +1379,7 @@ namespace NextDayRevival
             // A range-set time fuze. The player's is exact (W AA2: a random error
             // moved the burst tens of metres past a correctly led aircraft); an
             // NPC or merc crew keeps its W AA3 calibrated error.
-            float fuzeError = live && !PlayerAt(g) ? MercAA.Calibration(g).FuzeError : 0f;
+            float fuzeError = live && !PlayerAt(g) && g.RadarGroundTarget == null ? MercAA.Calibration(g).FuzeError : 0f;
             float life = range / Speed * (fuzeError > 0f ? UnityEngine.Random.Range(1f - fuzeError, 1f + fuzeError) : 1f);
             Vector2 spread = UnityEngine.Random.insideUnitCircle * (Spec().Dispersion * 0.001f);
             Vector3 right = Vector3.Cross(Vector3.up, dir);
@@ -2173,6 +2201,7 @@ namespace NextDayRevival
                 g.Rounds = g.Rounds < 0 ? Flak.RoundsPerLoad : g.Rounds;
                 g.NextLook = Time.time + (g.Index & 3) * 0.125f;
             }
+            if (RadarGround.Control(g, dt, gunner, loader)) return;
             if (Time.time >= g.NextLook)
             {
                 g.NextLook = Time.time + 0.5f;
@@ -2396,6 +2425,8 @@ namespace NextDayRevival
             bool direction = MercAA.DirectionAvailable(g);
             MercAAPost man = MercAA.Gun(g.Index);
             float range = (g.ShortRange ? ShortRangeCore.RangeM : MercAACore.Calibrate(man != null, direction, man == null ? 0 : man.Trait).Range) * Flak.K;
+            // Power 2: no power, close in by eye (the ZU's reach; heavy guns via ReachU).
+            if (Flak.Dark(g)) range = PowerNetCore.DarkRange(range);
             // A L2: a heavy airfield gun also gathers what flies in the airfield zone;
             // E L1: a radar-cued gun what the radar shows out to CueMetres.
             Collect(g.Air, eye, FlakEngageCore.CueCollectMetres(FlakEngageCore.CollectMetres(range / Flak.K,
@@ -2427,6 +2458,8 @@ namespace NextDayRevival
                 float d = Vector3.Distance(eye, c.Pos);
                 float targetRange = g.ShortRange ? range : Flak.ReachU(g, c.Pos, MercAACore.Calibrate(man != null,
                     direction && RadarShadow.Visible(c.Go), man == null ? 0 : man.Trait).Range);
+                if (!g.ShortRange && direction && RadarShadow.Visible(c.Go))
+                    targetRange *= RadarShadow.RangeFactor(c.Go);
                 if (d > targetRange || c.Pos.y - eye.y > (g.ShortRange ? ShortRangeCore.CeilingM * Flak.K : Flak_Ceiling()))
                 {
                     // E L1: the radar's nearest hostile beyond reach is the cue.
@@ -3490,9 +3523,14 @@ namespace NextDayRevival
                 if (kind >= AmmoDepot.State && kind <= AmmoDepot.Loot)
                 { AmmoDepot.OnPacket(f, sender); return; }
                 if (kind == ZuGroundCore.ModePacket) { ZuGround.OnPacket(f, sender); return; }
+                if (kind >= C4.PlaceAsk && kind <= C4.Refused) { C4.OnPacket(f, sender); return; }   // NDR C4
                 if (f.Length < 7) return;
                 if (kind >= AirDefenceDamage.BlastMsg && kind <= AirDefenceDamage.RepairMsg)
                 { AirDefenceDamage.OnPacket(f, sender); return; }
+                if (kind >= PowerNet.StateMsg && kind <= PowerNet.RefuelMsg)
+                { PowerNet.OnPacket(f, sender); return; }
+                if (kind == PowerBunkerDoor.StateMsg || kind == PowerBunkerDoor.AskMsg)
+                { PowerBunkerDoor.OnPacket(f, sender); return; }
                 if (kind >= FlakAmmo.State && kind <= FlakAmmo.ReloadAsk)
                 { FlakAmmo.OnPacket(f, sender); return; }
                 if (kind == Burst) { OnBurst(f, sender); return; }

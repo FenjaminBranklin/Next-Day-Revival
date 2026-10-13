@@ -226,6 +226,14 @@ namespace NextDayRevival
             return go != null && _mask.TryGetValue(go, out m) ? m : -1;
         }
 
+        internal static void TravelRestore(GameObject go, int mask)
+        {
+            if (!Enabled || go == null || !RevivalTroopInsertion.MasterClient()) return;
+            _mask[go] = mask < 0 ? AllParts : mask & AllParts;
+            ShowProp(go);
+            Broadcast(go, PlayerAn2.View(go));
+        }
+
         internal static bool Airworthy(GameObject go)
         {
             int m = MaskOf(go);

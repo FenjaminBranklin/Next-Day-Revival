@@ -117,7 +117,7 @@ namespace NextDayRevival
             CfgImpactSpeed, CfgRollFriction, CfgGrassFriction, CfgBrake,
             CfgCrashDamage, CfgWreckSeconds, CfgRespawnMinutes, CfgBoardRange,
             CfgCamDistance, CfgCamHeight, CfgSensitivity, CfgNetHz, CfgMaxBank;
-        internal static ConfigEntry<int> CfgEventCode;
+        internal static ConfigEntry<int> CfgEventCode, CfgGroundTouchVersion;
 
         internal static void BindConfig(ConfigFile cfg)
         {
@@ -167,7 +167,7 @@ namespace NextDayRevival
                 "Engine power reaching the air, watts per kilogram of aeroplane "
                 + "(the ASh-62's 745 kW at 80 % propeller efficiency over 5.25 t "
                 + "is 113). Above Power/Thrust m/s the thrust is Power/speed.");
-            CfgTopSpeed = cfg.Bind(S, "TopSpeed", 200f,
+            CfgTopSpeed = cfg.Bind(S, "TopSpeed", 185f,
                 "km/h in level flight at full throttle. Sets the drag. "
                 + "Use space to add throttle, ctrl/C to reduce it for tighter turns.");
             CfgPitchRate = cfg.Bind(S, "PitchRate", 40f, "Deg/s at full elevator and full authority.");
@@ -184,6 +184,7 @@ namespace NextDayRevival
             // A L6: existing installs need the tighter-turn defaults too.
             // Only former defaults migrate; other player tuning is retained.
             if (Mathf.Abs(CfgTopSpeed.Value - 250f) < 0.001f) CfgTopSpeed.Value = 200f;
+            if (Mathf.Abs(CfgTopSpeed.Value - 200f) < 0.001f) CfgTopSpeed.Value = An2WaterCore.TopKmh;
             if (Mathf.Abs(CfgRollRate.Value - 75f) < 0.001f) CfgRollRate.Value = 100f;
             if (Mathf.Abs(CfgYawRate.Value - 20f) < 0.001f) CfgYawRate.Value = 30f;
             if (Mathf.Abs(CfgMaxBank.Value - 40f) < 0.001f) CfgMaxBank.Value = 55f;
@@ -202,21 +203,34 @@ namespace NextDayRevival
                 "Litres per minute at full throttle (game time). Idle burns 15 % "
                 + "of that. 1200 l last 30 minutes at full power (fuel economy, P3).");
             CfgCrash = cfg.Bind(S, "Crash", true,
-                "Hard landings, obstacles and wingtips on the ground destroy the "
-                + "aeroplane. Off: nothing breaks (testing).");
-            CfgCrashSink = cfg.Bind(S, "CrashSinkRate", 4f,
-                "m/s of sink at touchdown that breaks the gear. Above 60 % of it "
-                + "the landing is announced as hard.");
-            CfgCrashSpeed = cfg.Bind(S, "CrashGroundSpeed", 140f,
-                "km/h at touchdown above which the landing is a crash.");
-            CfgCrashBank = cfg.Bind(S, "CrashBank", 25f,
-                "Degrees of bank at touchdown that put a wingtip in first.");
-            CfgCrashSlope = cfg.Bind(S, "CrashSlope", 0.45f,
-                "Rise per metre of the ground ahead that breaks the gear when "
-                + "rolling faster than 30 km/h (0.45 = 24 degrees).");
-            CfgImpactSpeed = cfg.Bind(S, "ImpactSpeed", 20f,
-                "km/h. Running into something slower than this just stops the "
-                + "aeroplane; faster is a crash.");
+                "Real impacts destroy the aeroplane; light ground scrapes cause "
+                + "small structural damage. Off: nothing breaks (testing).");
+            CfgCrashSink = cfg.Bind(S, "CrashSinkRate", 6f,
+                "m/s of sink that destroys the aeroplane. Above 60 percent causes minor damage; "
+                + "the first three seconds after lift-off tolerate 50 percent more sink.");
+            CfgCrashSpeed = cfg.Bind(S, "CrashGroundSpeed", 70f,
+                "Sideways km/h into terrain that destroys the aeroplane. Forward runway speed is safe.");
+            CfgCrashBank = cfg.Bind(S, "CrashBank", 60f,
+                "Legacy bank/sink gate. A moving touchdown above 35 degrees also strikes a wing.");
+            CfgCrashSlope = cfg.Bind(S, "CrashSlope", 0.6f,
+                "Rise per metre ahead that counts as a terrain bank; destruction also needs a fast impact into it.");
+            CfgImpactSpeed = cfg.Bind(S, "ImpactSpeed", 45f,
+                "km/h into the surface, not total speed. Slower collisions cause a bump or scratch.");
+            CfgGroundTouchVersion = cfg.Bind(S, "GroundTouchDefaultsVersion", 0,
+                "One-time migration of the old destructive ground-touch defaults; 1 means applied.");
+            float sinkDefault = CfgCrashSink.Value, sideDefault = CfgCrashSpeed.Value;
+            float bankDefault = CfgCrashBank.Value, slopeDefault = CfgCrashSlope.Value;
+            float impactDefault = CfgImpactSpeed.Value;
+            if (An2GroundTouchCore.Migrate(CfgGroundTouchVersion.Value, ref sinkDefault,
+                ref sideDefault, ref bankDefault, ref slopeDefault, ref impactDefault))
+            {
+                CfgCrashSink.Value = sinkDefault;
+                CfgCrashSpeed.Value = sideDefault;
+                CfgCrashBank.Value = bankDefault;
+                CfgCrashSlope.Value = slopeDefault;
+                CfgImpactSpeed.Value = impactDefault;
+                CfgGroundTouchVersion.Value = 1;
+            }
             CfgRollFriction = cfg.Bind(S, "RollFriction", 0.04f, "Rolling friction on concrete.");
             CfgGrassFriction = cfg.Bind(S, "GrassFriction", 0.08f, "Rolling friction on grass and earth.");
             CfgBrake = cfg.Bind(S, "BrakeFriction", 0.35f, "Extra friction with the brakes on.");
@@ -285,8 +299,17 @@ namespace NextDayRevival
         static Quaternion _rot = Quaternion.identity;
         static float _throttle;               // 0..1, the lever
         static float _pIn, _rIn, _yIn;        // smoothed control deflection -1..1
-        static bool _onGround, _paved, _stalled, _brake;
+        static bool _onGround, _onWater, _paved, _stalled, _brake;
+        static An2WaterPhase _waterPhase;
         static float _airborneSince, _boardedAt, _nextPose, _nextHeartbeat, _nextSurface;
+        static float _nextScrape, _nextRough;
+        static int _impactRays;
+        static readonly An2LandingHistory _landing = new An2LandingHistory();
+        static bool _surfaceValid;
+        static Vector3 _surfacePoint, _surfaceNormal = Vector3.up;
+        static bool _approachFloorValid;
+        static Vector3 _approachPoint;
+        static float _approachFloor;
         static float _look, _orbit, _lastMouse;
         static float _wingDrop;
         static float _aoa;
@@ -313,6 +336,8 @@ namespace NextDayRevival
 
         // ---- for the bombs (Revival.An2Bombs.cs)
         internal static GameObject Plane { get { return _plane; } }
+        /// <summary>Every An-2 this client knows (Revival.AirGunners.cs tail gun models).</summary>
+        internal static List<GameObject> AllPlanes { get { return _all; } }
         /// <summary>The local pilot's velocity, m/s in world axes.</summary>
         internal static Vector3 Velocity { get { return _pilot ? _vel : Vector3.zero; } }
         internal static bool OnGround { get { return _onGround; } }
@@ -342,6 +367,56 @@ namespace NextDayRevival
         internal static bool Parked(GameObject go)
         {
             return go != null && !Occupied(go) && !Gliding(go) && !Burning(go);
+        }
+
+        // ---- for the aircraft registry (Revival.AirRegistry.cs)
+        /// <summary>The player An-2s in this room (no NPC flights), into a reused list.</summary>
+        internal static void PlayerPlanes(List<GameObject> into)
+        {
+            into.Clear();
+            for (int i = 0; i < _all.Count; i++)
+                if (_all[i] != null && !NpcAircraft.Is(_all[i])) into.Add(_all[i]);
+        }
+        /// <summary>Off the ground (flown or gliding down), not a wreck.</summary>
+        internal static bool InAir(GameObject go)
+        {
+            return go != null && !Burning(go) && (Gliding(go) || Airborne(go));
+        }
+        internal static void RegistryRemove(GameObject go) { Remove(go, false); }
+        internal static float WearOf(GameObject go) { return go == null ? 0f : VisualOf(go).GroundDamage; }
+        internal static void RestoreWear(GameObject go, float wear)
+        {
+            if (go != null) VisualOf(go).GroundDamage = Mathf.Clamp01(wear);
+        }
+        /// <summary>The registry's new An-2 at MAIN: the saved parking place
+        /// and repair state of this host once (migration of
+        /// ndr_an2_state.txt), else the apron stand, broken and dry - the
+        /// apron spawn's own rules. False: no airfield in this room yet.</summary>
+        internal static bool RegistryStand(bool migrate, out Vector3 at, out float heading, out float litres, out int mask)
+        {
+            at = Apron; heading = ApronHeading; litres = 0f; mask = -1;
+            float y;
+            if (!Enabled || !EastWorld.On || !MapScene.AtHome || !AirfieldHold.SpawnAllowed()
+                || !RevivalTroopInsertion.TerrainHeight(Apron, out y)) return false;
+            at = new Vector3(Apron.x, y, Apron.z);
+            float g;
+            if (RevivalTroopInsertion.GroundY(at, out g) && Mathf.Abs(g - y) < 3f * K) at.y = Mathf.Max(y, g);
+            Vector3 saved;
+            float savedHeading;
+            if (migrate && An2Repair.SavedPlace(out saved, out savedHeading)) { at = saved; heading = savedHeading; }
+            litres = Mathf.Clamp01(F(CfgStartFuel, 0.6f)) * F(CfgFuelCapacity, 1200f);
+            if (migrate) An2Repair.NewPlane(ref litres, out mask);
+            else if (An2Repair.Enabled) { litres = 0f; mask = 0; }
+            return true;
+        }
+        /// <summary>The registry's An-2 as stored: fuel in litres, the repair
+        /// mask (-1 none).</summary>
+        internal static GameObject BuildRestored(Vector3 at, float heading, float litres, int mask)
+        {
+            if (!An2Repair.Enabled) mask = -1;
+            else if (mask < 0) mask = An2Repair.AllParts;
+            else mask &= An2Repair.AllParts;
+            return Make(at, heading, Mathf.Clamp(litres, 0f, Capacity), mask, false);
         }
 
         // =============================================================== frame
@@ -386,10 +461,11 @@ namespace NextDayRevival
                 }
                 if (Burning(_plane)) { Leave(false); return; }
                 bool gliding = Gliding(_plane);
+                if (AirRegistry.IsArriving(_plane) || AirBridge.Departing(_plane)) { Heartbeat(); return; }
 
                 if (Input.GetKeyDown(Key(CfgViewKey, KeyCode.V))) _cockpit = !_cockpit;
                 if (Input.GetKeyDown(Key(CfgJumpKey, KeyCode.X))) { Jump(); return; }
-                if (Input.GetKeyDown(Key(CfgBoardKey, KeyCode.F))) { Leave(true); return; }
+                if (Input.GetKeyDown(Key(CfgBoardKey, KeyCode.F)) && !AirBridge.UsesBoardKey(_plane)) { Leave(true); return; }
                 // G is the engine on the ground and the bombsight in the air
                 // (An2Bombs SightKey): the engine is not switched off in flight
                 // by the key that opens the sight.
@@ -560,7 +636,7 @@ namespace NextDayRevival
         /// cancel at full throttle.</summary>
         static float Cd0()
         {
-            float vt = Mathf.Max(20f, F(CfgTopSpeed, 200f) / 3.6f);
+            float vt = Mathf.Max(20f, F(CfgTopSpeed, An2WaterCore.TopKmh) / 3.6f);
             float c = (Vs() / vt) * (Vs() / vt);
             float t = ThrustAt(vt) - Induced * G * c;
             return Mathf.Max(0.00001f, t / (vt * vt));
@@ -574,17 +650,29 @@ namespace NextDayRevival
         /// <summary>One frame of flight or ground roll.</summary>
         static void Fly()
         {
+            if (AirRegistry.IsArriving(_plane) || AirBridge.Departing(_plane)) return;
             float dt = Mathf.Min(Time.deltaTime, 0.05f);
             if (dt <= 0f) return;
             Transform tr = _plane.transform;
             An2Visual vis = VisualOf(_plane);
             Vector3 was = tr.position;
+            // Capture flight state BEFORE this frame's forces, wheel snap or roll.
+            // The contact frame cannot turn one integration spike into a crash.
+            if (!_onGround)
+            {
+                Vector3 noseAxis = _rot * Vector3.forward;
+                _landing.Push(Time.time, _vel.x, _vel.y, _vel.z,
+                    Mathf.Asin(Mathf.Clamp(noseAxis.y, -1f, 1f)) * Mathf.Rad2Deg,
+                    LandingBank(_rot));
+            }
 
             // ---- engine and fuel
             float power = vis.Power;
             float thrIn = (Input.GetKey(KeyCode.Space) ? 1f : 0f)
                 - ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.C)) ? 1f : 0f);
             _throttle = Mathf.Clamp01(_throttle + thrIn * 0.5f * dt);
+            // The orbit on a mark (Revival.AirGunners.cs) sets a slow circle.
+            if (thrIn == 0f) _throttle = AirGunners.OrbitThrottle(_throttle, _vel.magnitude, dt);
             if (vis.Running && vis.Power > 0.01f)
             {
                 float burn = F(CfgFuelBurn, 40f) / 60f * (0.15f + 0.85f * _throttle) * power;
@@ -617,7 +705,7 @@ namespace NextDayRevival
             _aoa = aoa;
             float crit = Mathf.Clamp(F(CfgCritAoa, 15f), 6f, 30f);
             float tmax = Mathf.Max(0.2f, F(CfgThrust, 4.0f));
-            float thrust = ThrustAt(Mathf.Max(0f, vb.z)) * _throttle * power;
+            float thrust = ThrustAt(Mathf.Max(0f, vb.z)) * _throttle * power * (1f - vis.GroundDamage);
             float wash = thrust / tmax;
             // Control authority: the elevator and rudder have it all from
             // 65 km/h (18 m/s) and get the propeller's wash at any speed, the
@@ -642,7 +730,10 @@ namespace NextDayRevival
                 float pRate, rRate, yRate;
                 float aero = Mathf.Clamp01(speed / 20f);
                 float steer = 0f;
-                bool autopilot = Mathf.Abs(_rIn) < 0.05f && An2Bombs.Steer(out steer);
+                // The bombsight, else the orbit on a mark (Revival.AirGunners.cs,
+                // which any control key ends) ask for the bank.
+                bool autopilot = Mathf.Abs(_rIn) < 0.05f && (An2Bombs.Steer(out steer)
+                    || AirGunners.OrbitSteer(_plane, tr.position, _vel, Mathf.Clamp(F(CfgMaxBank, 55f), 10f, 70f), out steer));
                 // B6 soft map edge: past it a countdown, then the assist banks
                 // the aeroplane back towards the map (A/D still add or take
                 // 15 degrees); too low over the skirt, it climbs.
@@ -717,18 +808,55 @@ namespace NextDayRevival
             Vector3 pos = tr.position + _vel * (K * dt);
             Vector3 arrival = _vel;
             float floor;
-            bool solid = Floor(pos, out floor);
+            bool solid = AirLanding.GroundReady ? AirLanding.Ground(pos, out floor)
+                : RevivalTroopInsertion.TerrainHeight(pos, out floor);
+            solid = SurfaceFloor(pos, solid, ref floor);
+            float waterFloor;
+            bool waterContact = An2Water.Support(pos, _rot, out waterFloor) && (!solid || waterFloor > floor);
+            if (waterContact) { floor = waterFloor; solid = true; }
+            // Reuse the old 4 Hz surface ray in flight as well as during roll.
+            // A concrete slab can stand above Terrain.SampleHeight.
+            if (!waterContact && solid && pos.y < floor + 10f * K && Time.time >= _nextSurface)
+            {
+                _nextSurface = Time.time + 0.25f;
+                _paved = Paved(pos);
+                // Streamed-out terrain colliders still have height data. Use
+                // successive EXISTING floor samples along the approach, with
+                // no added height queries, to recover its longitudinal normal.
+                Vector3 track = new Vector3(pos.x - _approachPoint.x, 0f, pos.z - _approachPoint.z);
+                if (!_surfaceValid && _approachFloorValid && track.sqrMagnitude > 0.01f * K * K)
+                {
+                    Vector3 normal = (Vector3.up - track * ((floor - _approachFloor) / track.sqrMagnitude)).normalized;
+                    if (normal.y >= 0.85f) { _surfaceNormal = normal; _surfaceValid = true; }
+                }
+                _approachPoint = pos;
+                _approachFloor = floor;
+                _approachFloorValid = true;
+                solid = SurfaceFloor(pos, solid, ref floor);
+            }
             bool wasFlying = !_onGround;
-            bool contact = solid && pos.y <= floor + 0.02f * K;
+            An2LandingSample scrapeSample = new An2LandingSample(arrival.x, arrival.y, arrival.z,
+                Mathf.Asin(Mathf.Clamp(fwd.y, -1f, 1f)) * Mathf.Rad2Deg, LandingBank(_rot));
+            if (wasFlying) scrapeSample = _landing.Mean(Time.time, scrapeSample);
+            // Follow an ordinary downhill field while rolling, without snapping
+            // across a ditch or retaining the wheels once lift makes vy positive.
+            float stepRun = new Vector3(pos.x - was.x, 0f, pos.z - was.z).magnitude;
+            bool follow = _onGround && _vel.y <= 0f && floor < was.y
+                && was.y - floor <= 0.05f * K + stepRun * F(CfgCrashSlope, An2GroundTouchCore.SlopeDefault);
+            bool contact = solid && (pos.y <= floor + 0.02f * K || follow);
             if (contact)
             {
                 pos.y = floor;
+                _onWater = waterContact;
+                if (_onWater) { _paved = _surfaceValid = false; _surfaceNormal = Vector3.up; }
                 if (wasFlying)
                 {
-                    if (Touchdown(arrival)) return;
+                    LandContact(arrival);
+                    if (_plane == null || Burning(_plane)) return;
                     // Landed: the attitude continues from the flight's.
                     Vector3 f = _rot * Vector3.forward;
                     _gHeading = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;
+                    if (_surfaceValid) f = Quaternion.FromToRotation(_surfaceNormal, Vector3.up) * f;
                     _gTheta = Mathf.Clamp(Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg,
                                           0f, An2Model.Parked);
                 }
@@ -737,25 +865,39 @@ namespace NextDayRevival
                     + Mathf.RoundToInt(new Vector3(arrival.x, 0f, arrival.z).magnitude * 3.6f)
                     + " km/h, sink " + (-arrival.y).ToString("0.0") + " m/s.");
                 _onGround = true;
+                _waterPhase = An2WaterCore.Step(_waterPhase, _onWater, speed);
+                _landing.Clear();
                 Roll(dt, lift, speed);
-                if (Rough(pos, speed)) return;
+                if (!_onWater && Rough(pos, speed)) return;
             }
             else
             {
                 if (_onGround)
                 {
+                    _landing.Clear();
                     _airborneSince = Time.time;
                     RevivalPlugin.L.LogInfo("PlayerAn2: airborne at "
                         + Mathf.RoundToInt(speed * 3.6f) + " km/h.");
                 }
                 _onGround = false;
+                _onWater = false;
+                _waterPhase = An2WaterPhase.Air;
             }
 
             tr.position = pos;
             tr.rotation = _rot;
 
             // Wingtips and propeller in the ground; obstacles along the path.
-            if (Scrape(tr)) return;
+            // Probe locations remain in the real attitude. Their damage policy
+            // uses the same smoothed, surface-relative arrival as the wheels.
+            Quaternion flightRotation = _rot;
+            Quaternion groundFrame = _surfaceValid ? Quaternion.FromToRotation(_surfaceNormal, Vector3.up)
+                                                  : Quaternion.identity;
+            float scrapeHeading = Mathf.Atan2(fwd.x, fwd.z) * Mathf.Rad2Deg;
+            _rot = groundFrame * Quaternion.Euler(-scrapeSample.Nose, scrapeHeading, -scrapeSample.Bank);
+            arrival = groundFrame * scrapeSample.Velocity;
+            try { if (Scrape(tr, arrival)) return; }
+            finally { _rot = flightRotation; }
             if (Impact(was, pos)) return;
 
             // The model: surfaces follow the stick, the prop the engine.
@@ -824,7 +966,7 @@ namespace NextDayRevival
             // the gear takes CrashSinkRate, the assist asks for half of it.
             float agl;
             if (vyWant < 0f && Height(_plane, out agl) && agl < 25f)
-                vyWant = Mathf.Max(vyWant, -0.5f * F(CfgCrashSink, 4f));
+            vyWant = Mathf.Max(vyWant, -0.5f * F(CfgCrashSink, An2GroundTouchCore.SinkDefault));
             if (!_stalled && speed > vs * 0.9f)
             {
                 float need = (vs / speed) * (vs / speed) / Mathf.Max(0.3f, Mathf.Cos(phi));
@@ -846,6 +988,16 @@ namespace NextDayRevival
 
         static void GroundAttitude(float dt, float speed, float auth)
         {
+            if (_onWater)
+            {
+                float waterSteer = Assisted() ? Mathf.Clamp(_yIn + _rIn, -1f, 1f) : _yIn;
+                _waterPhase = An2WaterCore.Step(_waterPhase, true, speed);
+                _gHeading += waterSteer * An2WaterCore.TurnRate(speed, _throttle * VisualOf(_plane).Power) * dt;
+                float pitch = An2WaterCore.Pitch(_waterPhase, speed, _pIn, _throttle, Vs(), Assisted());
+                _gTheta = Mathf.MoveTowards(_gTheta, pitch, 10f * dt);
+                _rot = Quaternion.Euler(-_gTheta, _gHeading, 0);
+                return;
+            }
             float steerFade = Mathf.Clamp01(1f - speed / 28f);
             // WASD: with the assist A/D steer the tail wheel too.
             float steer = Assisted() ? Mathf.Clamp(_yIn + _rIn, -1f, 1f) : _yIn;
@@ -880,8 +1032,8 @@ namespace NextDayRevival
                 && Floor(p + flat * (new Vector3(0f, 0f, tail.z) * K), out yt))
             {
                 float track = Mathf.Max(0.5f, An2Model.Contact(1).x - An2Model.Contact(0).x) * K;
-                slopeRoll = Mathf.Clamp(Mathf.Atan2(yl - yr, track) * Mathf.Rad2Deg, -15f, 15f);
-                slopePitch = Mathf.Clamp(Mathf.Atan2(yt - y0, -tail.z * K) * Mathf.Rad2Deg, -15f, 15f);
+                slopeRoll = Mathf.Clamp(Mathf.Atan2(yr - yl, track) * Mathf.Rad2Deg, -30f, 30f);
+                slopePitch = Mathf.Clamp(Mathf.Atan2(y0 - yt, -tail.z * K) * Mathf.Rad2Deg, -30f, 30f);
             }
             _rot = Quaternion.Euler(-(_gTheta + slopePitch), _gHeading, slopeRoll);
         }
@@ -894,12 +1046,15 @@ namespace NextDayRevival
             Quaternion flat = Quaternion.Euler(0f, _gHeading, 0f);
             Vector3 f = flat * Vector3.forward, r = flat * Vector3.right;
             float vf = Vector3.Dot(_vel, f), vr = Vector3.Dot(_vel, r);
-            vr -= vr * Mathf.Min(1f, 6f * dt);
-            if (Time.time > _nextSurface)
+            if (_onWater)
             {
-                _nextSurface = Time.time + 0.25f;
-                _paved = Paved(_plane.transform.position);
+                vr *= Mathf.Max(0, 1 - 3f * dt);
+                vf = Mathf.MoveTowards(vf, 0, An2WaterCore.Drag(_waterPhase, speed) * dt);
+                // Wheel brakes have no traction in water. Idle drag moors it.
+                _vel = f * vf + r * vr + Vector3.up * Mathf.Max(0, _vel.y);
+                return;
             }
+            vr -= vr * Mathf.Min(1f, 6f * dt);
             float load = Mathf.Clamp01(1f - lift / G);
             float mu = (_paved ? F(CfgRollFriction, 0.04f) : F(CfgGrassFriction, 0.08f))
                        + (_brake ? F(CfgBrake, 0.35f) : 0f);
@@ -913,42 +1068,113 @@ namespace NextDayRevival
         /// airfield's slabs and runway are objects; a field is terrain.</summary>
         static bool Paved(Vector3 at)
         {
+            _surfaceValid = false;
             Vector3 point, normal;
-            GameObject hit = Turret.RaycastObject(at + Vector3.up * (1.2f * K), Vector3.down,
-                                                  3f * K, out point, out normal);
+            Vector3 origin = at + Vector3.up * (1.2f * K);
+            float remaining = 12f * K;
+            GameObject hit = Turret.RaycastObject(origin, Vector3.down, remaining, out point, out normal);
             int guard = 0;
-            while (hit != null && Mine(hit) && guard++ < 4)
-                hit = Turret.RaycastObject(point + Vector3.down * 0.05f, Vector3.down,
-                                           2f * K, out point, out normal);
-            if (hit == null) return false;
+            while (hit != null && Through(hit) && guard++ < 4 && remaining > 0.1f)
+            {
+                remaining -= Vector3.Distance(origin, point) + 0.05f;
+                origin = point + Vector3.down * 0.05f;
+                hit = remaining > 0.1f ? Turret.RaycastObject(origin, Vector3.down,
+                    remaining, out point, out normal) : null;
+            }
+            if (hit == null || Through(hit) || normal.y < 0.85f) return false;
+            _surfacePoint = point;
+            _surfaceNormal = normal;
+            _surfaceValid = true;
             return !IsTerrain(hit);
         }
 
-        /// <summary>Arriving at the ground. Everything the gear cannot take is
-        /// a crash: sink, speed, bank, a nose-first arrival.</summary>
+        /// <summary>Pilot only: evaluate the pre-contact history in the surface
+        /// frame. Keep the actual flight attitude; smoothing is for damage only.</summary>
+        static void LandContact(Vector3 arrival)
+        {
+            if (!Flown(_plane) || (CfgCrash != null && !CfgCrash.Value)) return;
+            Vector3 forward = _rot * Vector3.forward;
+            An2LandingSample sample = _landing.Mean(Time.time, new An2LandingSample(
+                arrival.x, arrival.y, arrival.z,
+                Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f)) * Mathf.Rad2Deg,
+                LandingBank(_rot)));
+            Quaternion saved = _rot;
+            float heading = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+            Quaternion surface = _surfaceValid ? Quaternion.FromToRotation(_surfaceNormal, Vector3.up)
+                                              : Quaternion.identity;
+            _rot = surface * Quaternion.Euler(-sample.Nose, heading, -sample.Bank);
+            arrival = surface * sample.Velocity;
+            try
+            {
+                float run = new Vector3(arrival.x, 0f, arrival.z).magnitude;
+                float bank = Mathf.Abs(LandingBank(_rot));
+                string why = run * 3.6f > An2LandingHistory.MaxTouchdownKmh ? "ground speed"
+                    : bank > Mathf.Min(An2LandingHistory.WingStrikeBank,
+                        Mathf.Max(30f, F(CfgCrashBank, An2GroundTouchCore.BankDefault))) && run > 8f
+                        ? "bank / wing strike" : null;
+                if (why != null)
+                {
+                    RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - " + why
+                        + " (speed " + (run * 3.6f).ToString("0.0") + " km/h, bank " + bank.ToString("0.0") + " deg).");
+                    Crash(_plane, _plane.transform.position);
+                    Hint(why == "ground speed"
+                        ? Loc.T("Авария при посадке: слишком большая скорость", "Crash landing: ground speed")
+                        : Loc.T("Авария при посадке: крен / удар крылом", "Crash landing: bank / wing strike"), 6f);
+                    return;
+                }
+                RevivalPlugin.L.LogInfo("PlayerAn2: landing sample - sink " + (-arrival.y).ToString("0.0")
+                    + " m/s, speed " + (run * 3.6f).ToString("0.0") + " km/h, nose "
+                    + (Mathf.Asin(Mathf.Clamp((_rot * Vector3.forward).y, -1f, 1f)) * Mathf.Rad2Deg).ToString("0.0")
+                    + " deg, bank " + bank.ToString("0.0") + " deg (0.3 s, relative to surface).");
+                if (Touchdown(arrival)) return;
+            }
+            finally { _rot = saved; }
+        }
+
+        /// <summary>Only a real impact destroys the plane. Forward runway
+        /// speed and a bank angle alone do not turn a touch into a crash.</summary>
         static bool Touchdown(Vector3 arrival)
         {
             if (CfgCrash != null && !CfgCrash.Value) return false;
-            if (Time.time - _airborneSince < 1.0f) return false;
             float sink = -arrival.y;
             float run = new Vector3(arrival.x, 0f, arrival.z).magnitude;
             Vector3 f = _rot * Vector3.forward;
             float nose = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg;
             float bank = Bank(_rot * Vector3.right);
-            float sinkLimit = Mathf.Max(0.5f, F(CfgCrashSink, 4f));
-            string why = null;
-            if (sink > sinkLimit) why = "sink " + sink.ToString("0.0") + " m/s";
-            else if (run * 3.6f > F(CfgCrashSpeed, 140f)) why = "ground speed " + Mathf.RoundToInt(run * 3.6f) + " km/h";
-            else if (Mathf.Abs(bank) > F(CfgCrashBank, 25f)) why = "bank " + Mathf.RoundToInt(bank) + " deg";
-            else if (nose < -6f) why = "nose first (" + Mathf.RoundToInt(nose) + " deg)";
-            if (why == null)
+            float side = Vector3.Dot(arrival, _rot * Vector3.right);
+            // A glide can be nose-down while its nose is ABOVE its flight path.
+            // The measured prop is 0.15 m above the axle and 2.9 m ahead; minor
+            // contact wears it. A destructive strike needs a clear dive attitude
+            // AND a nose at least ten degrees below the arrival path.
+            float path = (float)(Math.Atan2(arrival.y, Math.Max(0.1f, run)) * 180.0 / Math.PI);
+            bool dive = nose < -12f && nose < path - 10f;
+            An2GroundTouch touch = _onWater ? An2WaterCore.Touch(sink, run, side, nose,
+                LandingBank(_rot), Time.time - _airborneSince, F(CfgCrashSink, An2GroundTouchCore.SinkDefault),
+                F(CfgCrashSpeed, An2GroundTouchCore.SideDefault), F(CfgCrashBank, An2GroundTouchCore.BankDefault))
+                : An2GroundTouchCore.Landing(sink, run, side,
+                dive || nose > 35f ? nose : 0f,
+                bank, Time.time - _airborneSince, F(CfgCrashSink, An2GroundTouchCore.SinkDefault),
+                F(CfgCrashSpeed, An2GroundTouchCore.SideDefault), F(CfgCrashBank, An2GroundTouchCore.BankDefault));
+            if (touch == An2GroundTouch.Scratch)
             {
-                if (sink > 0.6f * sinkLimit)
-                    Hint(Loc.T("Жёсткая посадка!", "Hard landing!"), 3f);
-                return false;
+                Scratch();
+                if (sink > 0.6f * F(CfgCrashSink, An2GroundTouchCore.SinkDefault))
+                    Hint(Loc.T("Жёсткая посадка!", "Hard landing!"), 4f);
             }
-            RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - " + why + ".");
+            if (touch != An2GroundTouch.Destroy) return false;
+            bool soft = Time.time - _airborneSince >= 0f
+                && Time.time - _airborneSince < An2GroundTouchCore.SoftSeconds;
+            string why = sink > (soft ? 1.5f : 1f) * Mathf.Max(0.5f, F(CfgCrashSink, 6f)) ? "sink rate"
+                : Mathf.Abs(side) * 3.6f > (soft ? 1.5f : 1f) * Mathf.Max(10f, F(CfgCrashSpeed, 70f)) ? "sideways speed"
+                : dive ? "nose / prop strike" : nose > 35f ? "tail first" : "bank with hard sink";
+            RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - " + why);
             Crash(_plane, _plane.transform.position);
+            Hint(Loc.T("Авария при посадке: ", "Crash landing: ") +
+                (why == "sink rate" ? Loc.T("скорость снижения", "sink rate")
+                : why == "sideways speed" ? Loc.T("боковая скорость", "sideways speed")
+                : why == "nose / prop strike" ? Loc.T("удар носом / винтом", "nose / prop strike")
+                : why == "tail first" ? Loc.T("удар хвостом", "tail first")
+                : Loc.T("крен и сильный удар", "bank with hard sink")), 6f);
             return true;
         }
 
@@ -957,43 +1183,73 @@ namespace NextDayRevival
         static bool Rough(Vector3 pos, float speed)
         {
             if (CfgCrash != null && !CfgCrash.Value) return false;
-            if (speed < 30f / 3.6f) return false;
+            if (speed < 30f / 3.6f || Time.time < _nextRough) return false;
+            _nextRough = Time.time + 0.25f;
             Vector3 flatVel = new Vector3(_vel.x, 0f, _vel.z);
             if (flatVel.sqrMagnitude < 1f) return false;
             Vector3 ahead = pos + flatVel.normalized * (3f * K);
             float y0, y1;
             if (!Floor(pos, out y0) || !Floor(ahead, out y1)) return false;
             float rise = (y1 - y0) / (3f * K);
-            if (rise < F(CfgCrashSlope, 0.45f)) return false;
-            RevivalPlugin.L.LogInfo("PlayerAn2: gear torn off - ground rises " + rise.ToString("0.00")
-                + " per metre at " + Mathf.RoundToInt(speed * 3.6f) + " km/h.");
+            if (rise < F(CfgCrashSlope, An2GroundTouchCore.SlopeDefault)) return false;
+            float closing = flatVel.magnitude * rise / Mathf.Sqrt(1f + rise * rise);
+            An2GroundTouch touch = An2GroundTouchCore.Surface(closing, F(CfgImpactSpeed, An2GroundTouchCore.ImpactDefault));
+            if (touch != An2GroundTouch.Destroy)
+            {
+                if (touch == An2GroundTouch.Scratch) Scratch();
+                return false;
+            }
+            RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - steep terrain / gear strike");
             Crash(_plane, pos);
+            Hint(Loc.T("Авария: крутой склон / удар шасси", "Crash landing: steep terrain / gear strike"), 6f);
             return true;
         }
 
-        /// <summary>Lower wingtips, upper wingtips, propeller tip and tail
-        /// cone below the ground: a wing or the propeller has hit it.</summary>
-        static bool Scrape(Transform tr)
+        /// <summary>A moving ground probe can scrape without destroying the
+        /// plane. Only a hard impact goes through to Crash.</summary>
+        static bool Scrape(Transform tr, Vector3 arrival)
         {
             if (CfgCrash != null && !CfgCrash.Value) return false;
-            if (_vel.magnitude < 2f) return false;
+            // Preserve the old slow-motion sampling cutoff: no extra reflective
+            // terrain calls or wear while parked or moving below walking speed.
+            if (_vel.sqrMagnitude < 4f) return false;
+            if (_onGround && Time.time < _nextScrape) return false;
+            _nextScrape = Time.time + 0.25f;
             Vector3[] probes = An2Model.Probes;
-            // Rolling on its wheels only a wingtip can meet the ground (a
-            // slope across the track); the attitude keeps the propeller
-            // clear, and uneven ground under it is not a crash.
+            // Keep the arrival sink: Roll has already zeroed downward velocity.
+            float run = new Vector3(arrival.x, 0f, arrival.z).magnitude;
+            float side = Vector3.Dot(arrival, _rot * Vector3.right);
+            Vector3 f = _rot * Vector3.forward;
+            float nose = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg;
+            float path = (float)(Math.Atan2(arrival.y, Math.Max(0.1f, run)) * 180.0 / Math.PI);
+            bool dive = nose < -12f && nose < path - 10f;
             int count = _onGround ? Mathf.Min(4, probes.Length) : probes.Length;
             for (int i = 0; i < count; i++)
             {
                 Vector3 w = tr.position + tr.rotation * (probes[i] * K);
                 float floor;
                 if (!Floor(w, out floor)) continue;
-                if (w.y >= floor - 0.05f * K) continue;
-                RevivalPlugin.L.LogInfo("PlayerAn2: " + An2Model.ProbeNames[i]
-                    + " struck the ground at " + Mathf.RoundToInt(_vel.magnitude * 3.6f) + " km/h.");
+                An2GroundTouch touch = An2GroundTouchCore.Probe(i >= 4 && !dive ? 0 : i, (floor - w.y) / K,
+                    -arrival.y, run, side, Time.time - _airborneSince,
+                    F(CfgCrashSink, An2GroundTouchCore.SinkDefault), F(CfgCrashSpeed, An2GroundTouchCore.SideDefault));
+                if (touch == An2GroundTouch.Scratch) Scratch();
+                if (touch != An2GroundTouch.Destroy) continue;
+                RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - " + (i < 4 ? "wing ground impact" : "nose / prop strike"));
                 Crash(_plane, w);
+                Hint(i < 4 ? Loc.T("Авария: удар крылом о землю", "Crash landing: wing ground impact")
+                    : Loc.T("Авария: удар носом / винтом", "Crash landing: nose / prop strike"), 6f);
                 return true;
             }
             return false;
+        }
+
+        static void Scratch()
+        {
+            An2Visual vis = VisualOf(_plane);
+            float previous = vis.GroundDamage;
+            vis.GroundDamage = An2GroundTouchCore.ScratchDamage(previous, Time.time, ref vis.NextScratch);
+            if (vis.GroundDamage > previous)
+                Hint(Loc.T("Небольшое повреждение при касании земли.", "Minor ground scrape damage."), 3f);
         }
 
         /// <summary>In the air, the tail wheel is a wheel too: a flare past the
@@ -1006,6 +1262,8 @@ namespace NextDayRevival
             Vector3 tail = An2Model.Contact(2);
             Vector3 w = tr.position + _rot * (tail * K);
             float floor;
+            float water;
+            if (AirLanding.Water(w, out water)) return; // Wheels do not pitch a floating hull.
             if (!Floor(w, out floor) || w.y >= floor) return;
             float arm = Mathf.Max(1f, -tail.z) * K;
             float down = Mathf.Asin(Mathf.Clamp((floor - w.y) / arm, 0f, 0.5f)) * Mathf.Rad2Deg;
@@ -1018,18 +1276,27 @@ namespace NextDayRevival
             return -Mathf.Asin(Mathf.Clamp(right.y, -1f, 1f)) * Mathf.Rad2Deg;
         }
 
+        // Unlike asin(right.y), this preserves inverted bank for the damage
+        // history. FlightAssist's ordinary bank controller retains its old API.
+        static float LandingBank(Quaternion rotation)
+        {
+            Vector3 right = rotation * Vector3.right, up = rotation * Vector3.up;
+            return Mathf.Atan2(-right.y, up.y) * Mathf.Rad2Deg;
+        }
+
         // ============================================================ impact
 
         /// <summary>Obstacles along the frame's travel: one ray from the middle
         /// of the fuselage out to its own surface in that direction, and one
-        /// from each wingtip - trees, masts, hangar walls. Slower than
-        /// ImpactSpeed the aeroplane only stops; faster it is destroyed.</summary>
+        /// from each wingtip - trees, masts, hangar walls. A glancing touch
+        /// slides or stops; only fast motion into the surface destroys it.</summary>
         static bool Impact(Vector3 from, Vector3 to)
         {
             if (_plane == null) return false;
             Vector3 travel = to - from;
             float dist = travel.magnitude;
             if (dist < 0.001f) return false;
+            _impactRays = An2GroundTouchCore.RayBudget;
             Vector3 dir = travel / dist;
             Transform tr = _plane.transform;
             Vector3 axis = Quaternion.Inverse(tr.rotation) * dir;
@@ -1052,8 +1319,9 @@ namespace NextDayRevival
         static bool Cast(Vector3 origin, Vector3 dir, float range)
         {
             float rest = range;
-            for (int step = 0; step < 10 && rest > 0.1f; step++)
+            for (int step = 0; step < 10 && rest > 0.1f && _impactRays > 0; step++)
             {
+                _impactRays--;
                 Vector3 point, normal;
                 GameObject hit = Turret.RaycastObject(origin, dir, rest, out point, out normal);
                 if (hit == null) return false;
@@ -1065,20 +1333,27 @@ namespace NextDayRevival
                     continue;
                 }
                 // The ground is the floor's business; only a wall counts.
-                if (IsGround(hit) && normal.y > 0.55f) return false;
-                float speed = _vel.magnitude;
-                if (speed * 3.6f < F(CfgImpactSpeed, 20f) || (CfgCrash != null && !CfgCrash.Value))
+                if (normal.y > 0.85f || (IsGround(hit) && normal.y > 0.55f)) return false;
+                float closing = Mathf.Max(0f, -Vector3.Dot(_vel, normal));
+                An2GroundTouch touch = An2GroundTouchCore.Surface(closing, F(CfgImpactSpeed, An2GroundTouchCore.ImpactDefault));
+                bool damageOn = CfgCrash == null || CfgCrash.Value;
+                if (!damageOn || touch != An2GroundTouch.Destroy)
                 {
-                    // A bump: the aeroplane stops where it was.
+                    if (damageOn && touch == An2GroundTouch.Scratch) Scratch();
+                    // A glancing touch removes only motion into the surface.
                     _plane.transform.position -= dir * Mathf.Min(0.5f * K, Vector3.Distance(origin, point));
-                    _vel = Vector3.zero;
-                    _throttle = 0f;
+                    _vel += normal * closing;
+                    if (Vector3.Dot(dir, normal) < -0.8f)
+                    {
+                        _vel = Vector3.zero;
+                        _throttle = 0f;
+                    }
                     Hint(Loc.T("Препятствие!", "Obstacle!"), 2f);
                     return true;
                 }
-                RevivalPlugin.L.LogInfo("PlayerAn2: hit " + hit.name + " at "
-                    + Mathf.RoundToInt(speed * 3.6f) + " km/h - the aeroplane is down.");
+                RevivalPlugin.L.LogInfo("PlayerAn2: crash landing - obstacle impact");
                 Crash(_plane, point);
+                Hint(Loc.T("Авария: удар о препятствие", "Crash landing: obstacle impact"), 6f);
                 return true;
             }
             return false;
@@ -1101,6 +1376,7 @@ namespace NextDayRevival
         static bool Through(GameObject hit)
         {
             if (hit == null) return true;
+            if (AirLanding.IsWater(hit)) return true;
             Transform t = hit.transform;
             if (_plane != null && t.IsChildOf(_plane.transform)) return true;
             if (_body != null && t.IsChildOf(_body)) return true;
@@ -1151,7 +1427,25 @@ namespace NextDayRevival
 
         static bool Floor(Vector3 at, out float y)
         {
-            return RevivalTroopInsertion.TerrainHeight(at, out y);
+            bool solid = AirLanding.GroundReady ? AirLanding.Ground(at, out y)
+                : RevivalTroopInsertion.TerrainHeight(at, out y);
+            float water;
+            if (AirLanding.An2Floor(at, out water) && (!solid || water > y)) { y = water; solid = true; }
+            return SurfaceFloor(at, solid, ref y);
+        }
+
+        static bool SurfaceFloor(Vector3 at, bool solid, ref float y)
+        {
+            // Only extrapolate the cached slab over one ray interval and the
+            // aircraft footprint. Terrain retains its exact height data.
+            if (_paved && _surfaceValid && Time.time <= _nextSurface
+                && new Vector3(at.x - _surfacePoint.x, 0f, at.z - _surfacePoint.z).sqrMagnitude < 324f * K * K)
+            {
+                float slab = _surfacePoint.y - ((_surfaceNormal.x * (at.x - _surfacePoint.x)
+                    + _surfaceNormal.z * (at.z - _surfacePoint.z)) / _surfaceNormal.y);
+                if (!solid || slab > y) { y = slab; solid = true; }
+            }
+            return solid;
         }
 
         static bool Height(GameObject go, out float metres)
@@ -1182,6 +1476,7 @@ namespace NextDayRevival
         static void ApronSpawn()
         {
             if (CfgApronSpawn != null && !CfgApronSpawn.Value) return;
+            if (AirRegistry.Owns("an2")) return;             // AB1: the master-server registry builds the one An-2
             if (Time.time < _nextApron) return;
             _nextApron = Time.time + 3f;
             if (LocalPlayerRoot() == null) return;
@@ -1231,6 +1526,8 @@ namespace NextDayRevival
 
         static void SpawnOrRemove()
         {
+            // AB1: exactly one An-2 lives in the registry; the test key is an admin's.
+            if (!AirRegistry.SpawnKeyAllowed()) { Hint(AirRegistry.SpawnKeyRefused(), 4f); return; }
             GameObject near = Nearest(20f * K);
             if (near != null)
             {
@@ -1293,6 +1590,7 @@ namespace NextDayRevival
         /// take the saved repair state, which stays for the apron one.</summary>
         internal static GameObject Build(Vector3 at, float heading, bool ready)
         {
+            if (AirRegistry.Owns("an2")) return null;
             if (!An2Model.Load()) return null;
             if (!LookUp()) return null;
             try
@@ -1305,6 +1603,22 @@ namespace NextDayRevival
                     parts = An2Repair.Enabled ? An2Repair.AllParts : -1;
                 }
                 else An2Repair.NewPlane(ref fuel, out parts);
+                return Make(at, heading, fuel, parts, ready);
+            }
+            catch (Exception ex)
+            {
+                RevivalPlugin.L.LogWarning("PlayerAn2: spawn failed - "
+                    + (ex.InnerException == null ? ex.Message : ex.InnerException.Message));
+                return null;
+            }
+        }
+
+        static GameObject Make(Vector3 at, float heading, float fuel, int parts, bool ready)
+        {
+            if (!An2Model.Load()) return null;
+            if (!LookUp()) return null;
+            try
+            {
                 object[] data = parts < 0 ? new object[] { Marker, fuel } : new object[] { Marker, fuel, parts };
                 ParameterInfo[] ps = _instantiate.GetParameters();
                 object group = Convert.ChangeType(0, ps[3].ParameterType);
@@ -1379,6 +1693,9 @@ namespace NextDayRevival
         /// <summary>Shot down and going down, or a burning wreck.</summary>
         internal static bool Down(GameObject go) { return Burning(go) || Gliding(go); }
         internal static bool Contains(GameObject go) { return go != null && _all.Contains(go); }
+        // C4 (Revival.C4.cs) walks the planes when a charge goes off nearby.
+        internal static int PlaneCount { get { return _all.Count; } }
+        internal static GameObject PlaneAt(int i) { return i >= 0 && i < _all.Count ? _all[i] : null; }
 
         static void Remove(GameObject go, bool say)
         {
@@ -1468,11 +1785,39 @@ namespace NextDayRevival
         {
             GameObject go = Nearest(Mathf.Max(3f, F(CfgBoardRange, 9f)) * K);
             if (go == null) return;
+            BoardAt(go, false, -1, 0f);
+        }
+
+        internal static void TravelLeave() { if (_plane != null) Leave(false); }
+        internal static void TravelEngine(GameObject go, out float power, out bool running, out float throttle)
+        {
+            An2Visual visual = VisualOf(go);
+            power = visual.Power; running = visual.Running; throttle = Flown(go) ? _throttle : visual.Throttle;
+        }
+        internal static bool TravelBoard(GameObject go, int seat, float speed, float power, bool running, float throttle)
+        {
+            if (go == null || _plane != null || PlayerHeli.Aboard) return false;
+            BoardAt(go, true, seat, speed);
+            if (_plane == go)
+            {
+                VisualOf(go).TravelPower(power, running);
+                if (_pilot) _throttle = throttle;
+                if (_pilot) Net.Send(Net.EngineState, new float[] { ViewId(go), running ? 1f : 0f,
+                    FuelOf(go), WearOf(go), power, throttle }, true);
+            }
+            return _plane == go && _seat == seat;
+        }
+
+        static void BoardAt(GameObject go, bool travel, int seat, float speed)
+        {
             int view = ViewId(go);
-            bool taken = Busy(view);
+            bool taken = travel ? seat >= 0 : Busy(view);
             if (taken && (CfgPassengers == null || !CfgPassengers.Value)) { Hint(Text.Occupied(), 3f); return; }
             // W Tower 3: only the airfield's holder takes the controls of an An-2 standing there.
-            if (!taken && !AirfieldHold.LocalMayUse(go)) { Hint(AirfieldHold.LockedText(), 4f); return; }
+            if (!travel && !taken && !AirfieldHold.LocalMayUse(go)) { Hint(AirfieldHold.LockedText(), 4f); return; }
+
+            int assigned = travel ? seat : taken ? AirBridge.FreeSeat(go, An2Model.CabinSeats) : -1;
+            if (assigned < -1) { Hint(Text.Occupied(), 3f); return; }
 
             _plane = go;
             _body = LocalPlayerRoot();
@@ -1480,7 +1825,7 @@ namespace NextDayRevival
             _boardedAt = Time.time;
             _cockpit = false;
             _pilot = !taken;
-            _seat = taken ? UnityEngine.Random.Range(0, An2Model.CabinSeats) : -1;
+            _seat = assigned;
             _look = 6f;
             _orbit = 0f;
 
@@ -1498,14 +1843,24 @@ namespace NextDayRevival
                 Vector3 f = _rot * Vector3.forward;
                 _gHeading = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;
                 _gTheta = An2Model.Parked;
-                _vel = Vector3.zero;
-                _throttle = 0f;
+                _vel = travel ? tr.forward * speed : Vector3.zero;
+                _throttle = travel ? .65f : 0f;
                 _pIn = _rIn = _yIn = 0f;
-                _onGround = true;
+                _onGround = !travel;
+                float water;
+                _onWater = !travel && AirLanding.An2Floor(tr.position, out water);
+                _waterPhase = An2WaterCore.Step(An2WaterPhase.Air, _onWater, 0);
                 _stalled = false;
                 _airborneSince = Time.time;
+                _nextScrape = _nextRough = 0f;
+                _landing.Clear();
+                _surfaceValid = _paved = false;
+                _approachFloorValid = false;
+                _surfaceNormal = Vector3.up;
+                _nextSurface = 0f;
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
                 Idle(go);
+                if (travel) SetEngine(true);
                 Hint(Text.AtControls(), 8f);
                 RevivalPlugin.L.LogInfo("PlayerAn2: controls taken on " + view
                     + " (master: " + RevivalTroopInsertion.MasterClient() + ", fuel "
@@ -1580,6 +1935,8 @@ namespace NextDayRevival
             Vector3 outside = DoorOf(go);
             if (Airborne(go)) { _body.position = outside; return; }
             float y;
+            Vector3 jetty;
+            if (An2WaterSites.Exit(go.transform.position, out jetty)) { _body.position = jetty; return; }
             if (RevivalTroopInsertion.GroundY(outside, out y) || RevivalTroopInsertion.TerrainHeight(outside, out y))
                 outside.y = y;
             _body.position = outside;
@@ -1649,7 +2006,11 @@ namespace NextDayRevival
             if (go == null || Burning(go)) return;
             int view = ViewId(go);
             Burn(go, where);
-            if (view != 0) Net.Send(Net.Crashed, new float[] { view, where.x, where.y, where.z }, true);
+            // Six floats distinguish pilot contact from master weapon damage
+            // (four), shot-down notification (five), and abandoned flight (15).
+            if (view != 0) Net.Send(Net.Crashed, Flown(go)
+                ? new float[] { view, where.x, where.y, where.z, 0f, 0f }
+                : new float[] { view, where.x, where.y, where.z }, true);
             DestroyedAboard(go, "crash");
         }
 
@@ -1809,6 +2170,7 @@ namespace NextDayRevival
         static void Abandon(GameObject go, Vector3 vel, Quaternion rot, bool broadcast,
             Vector3 site, double clock)
         {
+            if (AirRegistry.HoldingArrival(go)) return;
             if (go == null || Burning(go) || Gliding(go)) return;
             if (CfgCrash != null && !CfgCrash.Value
                 && go.GetComponent<AircraftDamageSite>() == null) return;
@@ -1922,7 +2284,7 @@ namespace NextDayRevival
             // the master (for a non-master pilot), but every client reads the
             // stick, the throttle and the fuel from it for its own model.
             Net.Send(Net.PoseUpdate, new float[] { view, pos.x, pos.y, pos.z, e.x, e.y, e.z,
-                vis.Running ? 1f : 0f, _throttle, _pIn, _rIn, _yIn, vis.Fuel }, false);
+                vis.Running ? 1f : 0f, _throttle, _pIn, _rIn, _yIn, vis.Fuel, vis.GroundDamage }, false);
         }
 
         static float _nextState;
@@ -1951,7 +2313,7 @@ namespace NextDayRevival
                 int view = ViewId(go);
                 if (view == 0) continue;
                 An2Visual vis = VisualOf(go);
-                Net.Send(Net.EngineState, new float[] { view, vis.Running ? 1f : 0f, vis.Fuel }, false);
+                Net.Send(Net.EngineState, new float[] { view, vis.Running ? 1f : 0f, vis.Fuel, vis.GroundDamage }, false);
                 An2Repair.Broadcast(go, view);
             }
         }
@@ -2453,7 +2815,11 @@ namespace NextDayRevival
 
             internal static void Send(int kind, float[] content, bool reliable)
             {
-                if (kind == Aboard) AirPilot.Board(_plane, Crocodile.LocalActor(), content);
+                if (kind == Aboard)
+                {
+                    AirPilot.Board(_plane, Crocodile.LocalActor(), content);
+                    AirBridge.Board(_plane, Crocodile.LocalActor(), content);
+                }
                 if (!_hooked) return;
                 try
                 {
@@ -2471,6 +2837,7 @@ namespace NextDayRevival
                     if (kind < 0 || kind > 7) return;
                     float[] f = content as float[];
                     if (f == null || !Enabled) return;
+                    if (kind == SpawnRequest && f.Length == 3) { AirBridge.Request(true, f, sender); return; }
                     if (kind == An2Repair.NetState || kind == An2Repair.NetRequest)
                     {
                         An2Repair.OnNet(kind, f, sender);
@@ -2490,6 +2857,8 @@ namespace NextDayRevival
                         _busyUntil[view] = Time.time + 5f;
                         GameObject go = ByView(view);
                         if (go == null || Flown(go)) return;
+                        AirPilot pilot = go.GetComponent<AirPilot>();
+                        if (!An2LandingHistory.ContactSender(sender, pilot == null ? -1 : pilot.Actor)) return;
                         An2Visual vis = VisualOf(go);
                         vis.Running = f[7] > 0.5f;
                         vis.Throttle = f[8];
@@ -2497,6 +2866,7 @@ namespace NextDayRevival
                         vis.Aileron = f[10];
                         vis.Rudder = f[11];
                         vis.Fuel = f[12];
+                        if (f.Length >= 14) vis.GroundDamage = Mathf.Clamp01(f[13]);
                         if (!RevivalTroopInsertion.MasterClient() || Burning(go) || Gliding(go)) return;
                         go.transform.position = new Vector3(f[1], f[2], f[3]);
                         go.transform.rotation = Quaternion.Euler(f[4], f[5], f[6]);
@@ -2509,6 +2879,7 @@ namespace NextDayRevival
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
                         AirPilot.Board(ByView(view), sender, f);
+                        AirBridge.Board(ByView(view), sender, f);
                         SeatBinding.AircraftBoard(ByView(view), sender, f, true);
                         return;
                     }
@@ -2519,7 +2890,10 @@ namespace NextDayRevival
                         if (go == null || Flown(go) || Burning(go)) return;
                         An2Visual vis = VisualOf(go);
                         vis.Running = f[1] > 0.5f;
+                        if (f.Length >= 5) vis.TravelPower(f[4], vis.Running);
+                        if (f.Length >= 6) vis.Throttle = f[5];
                         if (f.Length >= 3) vis.Fuel = f[2];
+                        if (f.Length >= 4) vis.GroundDamage = Mathf.Clamp01(f[3]);
                         return;
                     }
                     if (kind == Crashed)
@@ -2527,6 +2901,11 @@ namespace NextDayRevival
                         if (f.Length < 4) return;
                         GameObject wreck = ByView((int)f[0]);
                         if (wreck == null) return;
+                        if (f.Length == 6)
+                        {
+                            AirPilot pilot = wreck.GetComponent<AirPilot>();
+                            if (!An2LandingHistory.ContactSender(sender, pilot == null ? -1 : pilot.Actor)) return;
+                        }
                         _busyUntil.Remove((int)f[0]);
                         if (f.Length == 5)
                         {
@@ -2623,6 +3002,74 @@ namespace NextDayRevival
         }
     }
 
+    // Fixed storage, no engine/reflection calls. The trailing time window is
+    // independent of frame rate; the newest 10 ms bucket is overwritten at
+    // very high FPS instead of shortening the history to a few frames.
+    internal struct An2LandingSample
+    {
+        internal float X, Y, Z, Nose, Bank;
+        internal An2LandingSample(float x, float y, float z, float nose, float bank)
+        { X = x; Y = y; Z = z; Nose = nose; Bank = bank; }
+        internal Vector3 Velocity { get { return new Vector3(X, Y, Z); } }
+    }
+
+    internal sealed class An2LandingHistory
+    {
+        internal const float Window = 0.3f;
+        internal const float MaxTouchdownKmh = 160f;
+        internal const float WingStrikeBank = 35f;
+        const int Capacity = 64;
+        readonly float[] _times = new float[Capacity];
+        readonly An2LandingSample[] _samples = new An2LandingSample[Capacity];
+        int _next, _count;
+
+        internal void Clear() { _next = _count = 0; }
+
+        internal void Push(float now, float x, float y, float z, float nose, float bank)
+        {
+            int last = (_next + Capacity - 1) % Capacity;
+            if (_count > 0 && now < _times[last]) Clear();
+            if (_count > 0)
+            {
+                float previous = _samples[last].Bank;
+                while (bank - previous > 180f) bank -= 360f;
+                while (bank - previous < -180f) bank += 360f;
+            }
+            An2LandingSample sample = new An2LandingSample(x, y, z, nose, bank);
+            if (_count > 0 && now - _times[last] < 0.01f)
+            { _samples[last] = sample; return; }
+            _times[_next] = now;
+            _samples[_next] = sample;
+            _next = (_next + 1) % Capacity;
+            if (_count < Capacity) _count++;
+        }
+
+        internal An2LandingSample Mean(float now, An2LandingSample fallback)
+        {
+            if (_count == 0) return fallback;
+            float start = now - Window;
+            double total = 0.0, x = 0.0, y = 0.0, z = 0.0, nose = 0.0, bank = 0.0;
+            int first = (_next + Capacity - _count) % Capacity;
+            for (int n = 0; n < _count; n++)
+            {
+                int i = (first + n) % Capacity;
+                float end = n + 1 == _count ? now : _times[(i + 1) % Capacity];
+                float weight = Math.Max(0f, end - Math.Max(start, _times[i]));
+                if (weight <= 0f) continue;
+                An2LandingSample s = _samples[i];
+                x += (double)s.X * weight; y += (double)s.Y * weight; z += (double)s.Z * weight;
+                nose += (double)s.Nose * weight; bank += (double)s.Bank * weight;
+                total += weight;
+            }
+            if (total <= 0f) return _samples[(_next + Capacity - 1) % Capacity];
+            return new An2LandingSample((float)(x / total), (float)(y / total), (float)(z / total),
+                (float)(nose / total), (float)(bank / total));
+        }
+
+        internal static bool ContactSender(int sender, int pilot)
+        { return sender > 0 && sender == pilot; }
+    }
+
     /// <summary>
     /// The An-2 model from an2_import.py: meshes, materials and the rig file.
     /// Loaded once, built on every carrier.
@@ -2679,6 +3126,19 @@ namespace NextDayRevival
                 if (_body == null || _prop == null || _ailL == null || _ailR == null
                     || _elev == null || _rud == null || tex == null)
                     throw new InvalidOperationException("An-2 assets missing; repair the client package (python an2_import.py)");
+
+                _body = An2Amphibious.Load(_body);
+                // The float kit raises the airframe above four level tyres.
+                // Rig points consumed outside the visual root must follow it.
+                Vector3 offset = An2Amphibious.Offset;
+                List<int> seatKeys = new List<int>(_seats.Keys);
+                for (int i = 0; i < seatKeys.Count; i++) _seats[seatKeys[i]] += offset;
+                for (int i = 0; i < _contact.Length; i++) _contact[i] = An2Amphibious.Contact(i);
+                for (int i = 0; i < Boxes.Count; i++)
+                    Boxes[i] = new Bounds(Boxes[i].center + offset, Boxes[i].size);
+                for (int i = 0; i < Probes.Length; i++) Probes[i] += offset;
+                Door += offset; WingTip += offset; LowerTip += offset;
+                Parked = An2Amphibious.Parked;
 
                 Shader shader = Shader.Find("Standard");
                 if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
@@ -2832,6 +3292,7 @@ namespace NextDayRevival
             GameObject root = new GameObject("NDR_An2");
             root.transform.SetParent(carrier, false);
             root.transform.localScale = Vector3.one * Scale;
+            root.transform.localPosition = An2Amphibious.Offset * Scale;
             Part(root.transform, "Body", _body, _skin);
             if (_glass != null) Part(root.transform, "Glass", _glass, _clear);
             vis.Attach(root.transform,
@@ -2840,9 +3301,11 @@ namespace NextDayRevival
                        Hinge(root.transform, "aileron_r", _ailR),
                        Hinge(root.transform, "elevator", _elev),
                        Hinge(root.transform, "rudder", _rud));
+            An2Amphibious.Attach(root.transform);
             ModelLod.Apply(root, ModelLod.Kind.Aircraft);    // P2: small parts off far away, never culled
             return true;
         }
+
     }
 
     /// <summary>
@@ -2855,10 +3318,12 @@ namespace NextDayRevival
     {
         public bool Running;
         public float Fuel;
+        internal float GroundDamage, NextScratch;
         public float Throttle, Elevator, Aileron, Rudder;   // -1..1 (throttle 0..1)
         float _power, _spin, _e, _a, _r;
         bool _dead, _engineDead;
         Transform _root, _prop, _ailL, _ailR, _elev, _rud;
+        An2WaterWake _wake;
         Vector3 _axProp, _axAilL, _axAilR, _axElev, _axRud;
         AudioSource _audio;
         static AudioClip _clip;
@@ -2885,6 +3350,8 @@ namespace NextDayRevival
         }
 
         public float Power { get { return _power; } }
+        internal void TravelPower(float power, bool running)
+        { _power = Mathf.Clamp01(power); Running = running; }
 
         /// <summary>A broken An-2 (Revival.An2Repair.cs) has no propeller.</summary>
         internal void ShowProp(bool on)
@@ -2896,6 +3363,7 @@ namespace NextDayRevival
                              Transform elev, Transform rud)
         {
             _root = root; _prop = prop; _ailL = ailL; _ailR = ailR; _elev = elev; _rud = rud;
+            _wake = new An2WaterWake(transform);
             _axProp = An2Model.AxisOf("prop");
             _axAilL = An2Model.AxisOf("aileron_l");
             _axAilR = An2Model.AxisOf("aileron_r");
@@ -2953,6 +3421,7 @@ namespace NextDayRevival
             if (_root == null) return;
             try
             {
+                if (_wake != null) _wake.Tick(transform, dt, _dead);
                 // Idle at 25 % of full rpm, full rpm at full throttle.
                 float rpm = _power * (0.25f + 0.75f * Throttle);
                 _spin += rpm * 1650f * dt;                         // deg/s at full rpm (visible blur)

@@ -256,7 +256,10 @@ namespace NextDayRevival
 
         internal static bool RadarAlive { get { return RadarHp > 0f; } }
         internal static bool ConsoleAlive { get { return ConsoleHp > 0f; } }
-        internal static bool Working { get { return RadarAlive && ConsoleAlive; } }
+        // Power 2: without power from the generator bunker the radar paints
+        // nothing - no contacts, no siren, no direction (PowerNet).
+        internal static bool Powered { get { return PowerNet.Has(PowerNetCore.Radar); } }
+        internal static bool Working { get { return RadarAlive && ConsoleAlive && Powered; } }
 
         internal static Vector3 RadarPos
         {
@@ -596,13 +599,15 @@ namespace NextDayRevival
                 if (Elements[i] != null && Elements[i].enabled != show) Elements[i].enabled = show;
         }
 
-        static bool _screenLit = true, _screenDead;
+        static bool _screenLit = true, _screenDead, _lampOn = true;
 
         static void ConsoleLook()
         {
             if (Screen == null) return;
-            bool lit = Working && B(CfgGlow);
+            bool lit = Working && B(CfgGlow) && PowerNet.Has(PowerNetCore.Screens);
             bool dead = !ConsoleAlive && B(CfgDamageLook);
+            bool lamp = PowerNet.Has(PowerNetCore.Lights);
+            if (lamp != _lampOn) { _lampOn = lamp; TowerCommandRoom.LampState(lamp); }
             if (lit == _screenLit && dead == _screenDead) return;
             _screenLit = lit; _screenDead = dead;
             TowerCommandRoom.ScreenState(lit, dead);
@@ -940,7 +945,7 @@ namespace NextDayRevival
         static void UpdateFocus()
         {
             if (AssignedKind < 0) return;
-            GepardGun.Contact c = null;
+            GepardGun.Contact c = AssignedKind == RadarGroundCore.Kind ? RadarGround.Find(_focusTarget) : null;
             List<GepardGun.Contact> air = RadarScope.Air;
             for (int i = 0; i < air.Count; i++)
                 if (_focusTarget != null && air[i].Go == _focusTarget) { c = air[i]; break; }
@@ -956,11 +961,8 @@ namespace NextDayRevival
 
         static bool CanFocus(GepardGun.Contact c, string side)
         {
-            float range = ScopeRangeU;
-            return Working && c != null && c.Go != null && RadarShadow.Visible(c.Go)
-                && RadarShadow.Height(c.Go) >= Mathf.Max(0f, F(CfgMinHeight, 3f)) * K
-                && (c.Pos - RadarPos).sqrMagnitude <= range * range
-                && AirDefencePolicy.Hostile(side, AirPilot.Faction(c));
+            return RadarScope.ManualContact(c)
+                && (c.Kind == RadarGroundCore.Kind ? RadarGround.Allowed(c, side) : AirDefencePolicy.Hostile(side, AirPilot.Faction(c)));
         }
 
         /// <summary>A console command (master): only from the claimed operator
@@ -983,6 +985,7 @@ namespace NextDayRevival
                 if (!Working) return;
                 focus = RadarScope.Resolve(kind, pos, 120f);
                 if (!CanFocus(focus, Fraktion.Spielerseite(Crocodile.PlayerByActor(actor)))) return;
+                if (focus.Kind == RadarGroundCore.Kind) cmd = CmdFocus; // same LOS gate for legacy ENGAGE
             }
             if (AirfieldOwnership.Take(actor))
             {
@@ -1807,6 +1810,8 @@ namespace NextDayRevival
             public float PaintedAt = -100f, Height;
             public int Iff;                   // 1 friend, -1 foe, 0 unknown
             public bool Lost;
+            public bool Live;
+            public float NextManual;
         }
 
         static readonly List<GepardGun.Contact> _air = new List<GepardGun.Contact>();
@@ -1815,6 +1820,9 @@ namespace NextDayRevival
         internal static List<GepardGun.Contact> Air { get { return _air; } }
         internal static float SampleAt = -1000f;
         static readonly List<Blip> _blips = new List<Blip>();
+        static readonly List<Blip> _spareBlips = new List<Blip>();
+        static float _trackRange;
+        internal static float ManualRangeU { get { return Mathf.Max(TowerRadar.ScopeRangeU, _trackRange); } }
         static int _nextId = 1;
         static float _nextCollect, _lastFollow, _lastSweep = -1f;
         static string _mine;
@@ -1886,75 +1894,143 @@ namespace NextDayRevival
             {
                 _nextCollect = now + 0.25f;
                 _mine = MySide();
-                FlakFire.Collect(_air, eye, TowerRadar.ScopeRangeU);
+                Guns();
+                _trackRange = TowerRadar.ScopeRangeU;
+                for (int i = 0; i < _guns.Count; i++)
+                {
+                    FlakGunInfo g = _guns[i];
+                    _trackRange = RadarManualCore.Coverage(_trackRange, (g.Position - eye).magnitude,
+                        g.Range, g.AirfieldReach);
+                }
+                FlakFire.Collect(_air, eye, ManualRangeU);
                 RadarShadow.Scan(_air, eye);
                 SampleAt = now;
-                Guns();
+                RadarGround.Registry();
                 if (InView) ScopeArt(); // Bake only on entry, resize or a new range.
             }
+            RadarGround.Tick();
             if (InView)
             {
-                Sweep(eye);
-                if (collected) Rows(); // Include newly painted tracks in this snapshot.
+                if (collected)
+                {
+                    RefreshManual(eye);
+                    Rows();
+                }
             }
             Operate();
         }
 
-        /// <summary>The sweep paints what it passes: a working radar only,
-        /// airborne contacts only (below MinContactHeight is ground clutter).</summary>
-        static void Sweep(Vector3 eye)
+        /// <summary>Manual tracks come from the same collector as the guns.
+        /// A sweep/terrain solution changes afterglow and calibration, not selection.</summary>
+        static void RefreshManual(Vector3 eye)
         {
-            float a1 = TowerRadar.AntennaAngle;
-            float a0 = _lastSweep < 0f ? a1 : _lastSweep;
-            // Opening the console shows the existing picture immediately;
-            // subsequent paints still follow the antenna, including wraparound.
-            float span = _lastSweep < 0f ? 360f : Mathf.Repeat(a1 - a0, 360f);
-            _lastSweep = a1;
-            bool working = TowerRadar.Working;
-            float range = TowerRadar.ScopeRangeU;
-            string mine = _mine;
-            for (int i = 0; i < _air.Count; i++)
+            FrameProf.S(FrameProf.S_RadarManualT);
+            try
             {
-                GepardGun.Contact c = _air[i];
-                if (c.Go == null) continue;
-                Blip b = Find(c.Go);
-                if (!working || !RadarShadow.Visible(c.Go)) continue;
-                Vector3 d = c.Pos - eye;
-                d.y = 0f;
-                if (d.magnitude > range) continue;
-                float brg = Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
-                if (Mathf.Repeat(brg - a0, 360f) > span && span < 359f) continue;
-                float h = RadarShadow.Height(c.Go);
-                if (h < Mathf.Max(0f, TowerRadar.F(TowerRadar.CfgMinHeight, 3f)) * K) continue;
-                if (b == null)
+                RadarManualStats stats = new RadarManualStats();
+                stats.Frame = Time.frameCount;
+                stats.Candidates = _air.Count;
+                float now = Time.time;
+                float a1 = TowerRadar.AntennaAngle;
+                float a0 = _lastSweep < 0f ? a1 : _lastSweep;
+                // Opening the console shows the existing picture immediately;
+                // subsequent paints still follow the antenna, including wraparound.
+                float span = _lastSweep < 0f ? 360f : Mathf.Repeat(a1 - a0, 360f);
+                _lastSweep = a1;
+                bool working = TowerRadar.Working;
+                float range = ManualRangeU;
+                float oldRange = TowerRadar.ScopeRangeU;
+                float min = Mathf.Max(0f, TowerRadar.F(TowerRadar.CfgMinHeight, 3f)) * K;
+                string mine = _mine;
+                for (int i = 0; i < _blips.Count; i++) _blips[i].Live = false;
+                for (int i = 0; i < _air.Count + RadarGround.Contacts.Count; i++)
                 {
-                    b = new Blip();
-                    b.Id = _nextId++;
-                    if (_nextId > 99) _nextId = 1;
-                    b.Go = c.Go;
-                    _blips.Add(b);
+                    GepardGun.Contact c = i < _air.Count ? _air[i] : RadarGround.Contacts[i - _air.Count];
+                    bool ground = c.Kind == RadarGroundCore.Kind;
+                    if (ground && !RadarGround.Visible(c)) continue;
+                    if (ground) stats.Candidates++;
+                    Vector3 d = c.Pos - eye;
+                    float distanceSquared = d.sqrMagnitude;
+                    int rejected = RadarManualCore.Reject(working, c.Go != null && c.Go.activeInHierarchy,
+                        distanceSquared, ground ? range : range * RadarShadow.RangeFactor(c.Go));
+                    if (rejected == RadarManualCore.Invalid) { stats.Invalid++; continue; }
+                    if (rejected == RadarManualCore.Offline) { stats.Offline++; continue; }
+                    if (rejected == RadarManualCore.Range) { stats.Range++; continue; }
+                    Blip b = Find(c.Go);
+                    bool seen = ground || RadarShadow.Visible(c.Go);
+                    float h = ground ? 0f : RadarShadow.Height(c.Go);
+                    float brg = Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
+                    bool painted = Mathf.Repeat(brg - a0, 360f) <= span || span >= 359f;
+                    // Sequential old reasons: these contacts used to disappear even
+                    // though the gun can acquire them from its own position.
+                    if (!seen) stats.OldShadow++;
+                    else if (d.x * d.x + d.z * d.z > oldRange * oldRange) stats.OldRange++;
+                    else if (!ground && h < min) stats.OldHeight++;
+                    else if (!painted) stats.OldSweep++;
+                    if (b == null)
+                    {
+                        int last = _spareBlips.Count - 1;
+                        // Repaint grows the pool on a spawn high-water mark.
+                        // Retry next refresh; never allocate or cap tracks here.
+                        if (last < 0) { stats.PendingPool++; continue; }
+                        b = _spareBlips[last];
+                        _spareBlips.RemoveAt(last);
+                        b.Id = _nextId++;
+                        if (_nextId > 99) _nextId = 1;
+                        b.Go = c.Go;
+                        b.NextManual = 0f;
+                        b.PaintedAt = -100f;
+                        _blips.Add(b);
+                    }
+                    stats.Listed++;
+                    b.Live = true;
+                    if (ground || (seen && h >= min && painted)) b.PaintedAt = now;
+                    if (b != _selected && now < b.NextManual) { stats.Deferred++; continue; }
+                    float interval = RadarManualCore.Interval(distanceSquared, b == _selected);
+                    b.NextManual = now + interval;
+                    if (interval < 1f) stats.Near++; else stats.Far++;
+                    b.Kind = c.Kind;
+                    b.Type = ground ? RadarGroundCore.Marker : AirPicturePolicy.Type(c.Kind, c.Kind == 6 && NpcAircraft.IsTu95(c.Go));
+                    b.Radius = c.Radius;
+                    b.Pos = c.Pos;
+                    b.Vel = c.Vel;
+                    b.Height = h;
+                    b.Lost = false;
+                    b.Iff = Iff(c, mine);
                 }
-                b.Kind = c.Kind;
-                b.Type = AirPicturePolicy.Type(c.Kind, c.Kind == 6 && NpcAircraft.IsTu95(c.Go));
-                b.Radius = c.Radius;
-                b.Pos = c.Pos;
-                b.Vel = c.Vel;
-                b.Height = h;
-                b.PaintedAt = Time.time;
-                b.Lost = false;
-                b.Iff = Iff(c, mine);
-            }
-            // a track not painted for two sweeps is lost
-            float lostAfter = TowerRadar.SweepSeconds * 2.2f;
-            for (int i = _blips.Count - 1; i >= 0; i--)
-            {
-                Blip b = _blips[i];
-                if (Time.time - b.PaintedAt > lostAfter && working)
+                for (int i = _blips.Count - 1; i >= 0; i--)
                 {
-                    if (_selected == b) _selected = null;
-                    _blips.RemoveAt(i);
+                    Blip b = _blips[i];
+                    if (!b.Live)
+                    {
+                        if (_selected == b) _selected = null;
+                        _blips.RemoveAt(i);
+                        b.Go = null;
+                        _spareBlips.Add(b);
+                    }
                 }
+                RadarManualLog.Enqueue(stats);
             }
+            finally { FrameProf.E(FrameProf.S_RadarManualT); }
+        }
+
+        internal static bool ManualContact(GepardGun.Contact c)
+        {
+            if (c != null && c.Kind == RadarGroundCore.Kind) return RadarGround.Visible(c);
+            return c != null && RadarManualCore.Reject(TowerRadar.Working,
+                c.Go != null && c.Go.activeInHierarchy, (c.Pos - TowerRadar.RadarPos).sqrMagnitude,
+                ManualRangeU * RadarShadow.RangeFactor(c.Go)) == RadarManualCore.Accepted;
+        }
+
+        // Cold entry/spawn work only. Repaint checks the high-water mark; the
+        // recurring refresh borrows/recycles blips without resizing either list.
+        static void WarmBlips()
+        {
+            int capacity = Mathf.Max(256, (_air.Count + RadarGround.Contacts.Count) * 2);
+            if (_blips.Count + _spareBlips.Count >= capacity) return;
+            if (_blips.Capacity < capacity) _blips.Capacity = capacity;
+            if (_spareBlips.Capacity < capacity) _spareBlips.Capacity = capacity;
+            while (_blips.Count + _spareBlips.Count < capacity) _spareBlips.Add(new Blip());
         }
 
         static Blip Find(GameObject go)
@@ -1993,6 +2069,7 @@ namespace NextDayRevival
         /// pilot.</summary>
         static int Iff(GepardGun.Contact c, string mine)
         {
+            if (c.Kind == RadarGroundCore.Kind) return RadarGround.Iff(c, mine);
             string pilot = AirPilot.Faction(c);
             return pilot == null ? 0 : mine != null && pilot == mine ? 1 : AirDefencePolicy.Hostile(mine, pilot) ? -1 : 0;
         }
@@ -2019,10 +2096,10 @@ namespace NextDayRevival
         {
             GepardGun.Contact best = null;
             float bestD = within * within;
-            for (int i = 0; i < _air.Count; i++)
+            for (int i = 0; i < _air.Count + RadarGround.Contacts.Count; i++)
             {
-                GepardGun.Contact c = _air[i];
-                if (c.Go == null || !RadarShadow.Visible(c.Go) || (kind >= 0 && c.Kind != kind)) continue;
+                GepardGun.Contact c = i < _air.Count ? _air[i] : RadarGround.Contacts[i - _air.Count];
+                if (!ManualContact(c) || (kind >= 0 && c.Kind != kind)) continue;
                 float d = (c.Pos - pos).sqrMagnitude;
                 if (d < bestD) { best = c; bestD = d; }
             }
@@ -2093,6 +2170,8 @@ namespace NextDayRevival
             _nextCollect = 0f;   // the console's lines at once
             _lastSweep = -1f;    // show the existing picture on entry
             WarmNumbers();
+            WarmBlips();
+            RadarManualLog.Open(System.IO.Path.Combine(BepInEx.Paths.BepInExRootPath, "RadarManual.log"));
             TowerRadar.Log("the local player is at the console.");
         }
 
@@ -2100,6 +2179,7 @@ namespace NextDayRevival
         {
             if (!InView) return;
             InView = false;
+            RadarManualLog.Close();
             Claim(false);
             TowerRadar.Log("the local player left the console (" + why + ").");
         }
@@ -2119,11 +2199,10 @@ namespace NextDayRevival
             int kind = -1;
             if (cmd == TowerRadar.CmdEngage || cmd == TowerRadar.CmdFocus)
             {
-                if (!TowerRadar.Working || _selected == null || _selected.Go == null || !RadarShadow.Visible(_selected.Go)
-                    || Time.time - _selected.PaintedAt > TowerRadar.SweepSeconds * 2.2f)
+                if (_selected == null || !Shown(_selected))
                 { Hint(RadarFireText.SelectFirst, 2f); return; }
                 if (_selected.Iff > 0) { Hint(RadarFireText.Friendly, 3f); return; }
-                GepardGun.Contact c = null;
+                GepardGun.Contact c = _selected.Kind == RadarGroundCore.Kind ? RadarGround.Find(_selected.Go) : null;
                 for (int i = 0; i < _air.Count; i++) if (_air[i].Go == _selected.Go) { c = _air[i]; break; }
                 pos = c != null ? c.Pos : _selected.Pos;
                 kind = _selected.Kind;
@@ -2241,6 +2320,8 @@ namespace NextDayRevival
             {
                 if (!InView && !_near && (_hint == null || Time.time > _hintUntil)) return;
                 if (Event.current.type != EventType.Repaint) return;
+                if (InView) { RadarGround.Warm(); WarmBlips(); }
+                RadarManualLog.Flush();
                 Ensure();
                 float w = UnityEngine.Screen.width, h = UnityEngine.Screen.height;
                 if (!InView)
@@ -2260,6 +2341,7 @@ namespace NextDayRevival
                 Layout(w, h);
                 _eye = TowerRadar.RadarPos;
                 Scope();
+                PowerLine(new Rect(_cx - _r, _cy - _r, _r * 2f, _r * 2f), _u);
                 Column();
                 // the cursor
                 GUI.color = Color.white;
@@ -2313,8 +2395,8 @@ namespace NextDayRevival
 
         static bool Shown(Blip b)
         {
-            return TowerRadar.Working && b.Go != null && RadarShadow.Visible(b.Go)
-                && Time.time - b.PaintedAt <= TowerRadar.SweepSeconds * 2.2f;
+            return TowerRadar.Working && b.Live && b.Go != null && b.Go.activeInHierarchy
+                && (b.Kind != RadarGroundCore.Kind || RadarGround.Visible(RadarGround.Find(b.Go)));
         }
 
         // ----------------------------------------------------- the scope art
@@ -2325,7 +2407,7 @@ namespace NextDayRevival
         static void ScopeArt()
         {
             Layout(UnityEngine.Screen.width, UnityEngine.Screen.height);
-            _range = Mathf.Max(1f, TowerRadar.ScopeRangeU);
+            _range = Mathf.Max(1f, ManualRangeU);
             int n = Mathf.Clamp(Mathf.RoundToInt(_r * 2f), 64, 2048);
             int key = n * 100003 + Mathf.RoundToInt(_range / K);
             if (_disc == null || key != _discKey)
@@ -2419,6 +2501,17 @@ namespace NextDayRevival
 
         // -------------------------------------------------------- the scope
 
+        /// <summary>Power 2: the generator's state at the scope's foot,
+        /// cached text (PowerNet rebuilds it only on change).</summary>
+        static void PowerLine(Rect face, float u)
+        {
+            bool powered;
+            string line = PowerNet.TowerLine(out powered);
+            if (line == null) return;
+            Text(new Rect(face.x - 40f * u, face.yMax - 34f * u, face.width + 80f * u, 18f * u), line,
+                false, 13f, TextAnchor.MiddleCenter, powered ? Phosphor : VanillaUi.Red);
+        }
+
         static void Scope()
         {
             float u = _u;
@@ -2430,8 +2523,8 @@ namespace NextDayRevival
             if (!TowerRadar.Working)
             {
                 Text(new Rect(face.x, _cy - 16f * u, face.width, 32f * u),
-                    !TowerRadar.RadarAlive ? RadarScopeText.NoAntenna : RadarScopeText.NoConsole,
-                    true, 24f, TextAnchor.MiddleCenter, VanillaUi.Red);
+                    !TowerRadar.RadarAlive ? RadarScopeText.NoAntenna : !TowerRadar.ConsoleAlive ? RadarScopeText.NoConsole
+                    : RadarScopeText.NoPower, true, 24f, TextAnchor.MiddleCenter, VanillaUi.Red);
                 return;
             }
             // the sweep: one baked afterglow and the bright line
@@ -2478,7 +2571,8 @@ namespace NextDayRevival
                 Matrix4x4 keep = GUI.matrix;
                 if (b.Vel.x * b.Vel.x + b.Vel.z * b.Vel.z > 1f)
                     GUIUtility.RotateAroundPivot(RadarScopeCore.Heading(b.Vel.x, b.Vel.z), p);
-                GUI.DrawTexture(new Rect(p.x - size * 0.5f, p.y - size * 0.5f, size, size), AirPicture.Icon(b.Type));
+                GUI.DrawTexture(new Rect(p.x - size * 0.5f, p.y - size * 0.5f, size, size),
+                    b.Kind == RadarGroundCore.Kind ? RadarGround.Icon() : AirPicture.Icon(b.Type));
                 GUI.matrix = keep;
                 Text(new Rect(p.x + size * 0.5f + 3f * u, p.y - 8f * u, 30f * u, 16f * u), Id2(b.Id), false, 12f, TextAnchor.MiddleLeft, c);
                 if (b == _selected)
@@ -2999,7 +3093,7 @@ namespace NextDayRevival
                 _at.Clear();
                 _sweep.Begin("East");
             }
-            bool on = _night && TowerRadar.ConsoleAlive;
+            bool on = _night && TowerRadar.ConsoleAlive && PowerNet.Has(PowerNetCore.Lights);
             bool lightEngines = on && CombatLoad.LocalNear(TowerRadar.RadarPos, 1500f);
             for (int i = 0; i < _lights.Count; i++)
                 if (_lights[i] != null && _lights[i].enabled != lightEngines) _lights[i].enabled = lightEngines;

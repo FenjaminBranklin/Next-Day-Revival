@@ -42,6 +42,7 @@ GROUPS = [
     # An-2 repair parts (2069 control cable set, 2070 magneto, 2071 propeller
     # hub) for Revival.An2Repair.cs.
     ("an2parts", ["an2_parts_build.py"]),
+    ("an2amphib", ["an2_amphibious_build.py"]),
     # The An-2's FAB-50 bomb (2072) for Revival.An2Bombs.cs.
     ("fab50", ["fab50_build.py"]),
     # The 52-K 85 mm AA gun (N6) for Revival.Flak.cs.
@@ -64,6 +65,8 @@ GROUPS = [
     ("mine", ["antitank_mine_build.py"]),
     # PMN-2 anti-personnel mine (1492): Blender model, baked maps and icon.
     ("apmine", ["apmine_build.py"]),
+    # C4 charge (1493), remote detonator (1494), defuse kit (2078).
+    ("c4", ["c4_build.py"]),
     # Toxic crocodile boss: Blender is the modelling source of truth. The
     # wrapper finds Blender and produces the editable .blend, runtime ndmesh,
     # texture set and a source preview in one deterministic background run.

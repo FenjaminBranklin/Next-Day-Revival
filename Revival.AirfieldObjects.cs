@@ -220,7 +220,8 @@ namespace NextDayRevival
                 yield return new WaitForSeconds(0.5f);
             }
             AirfieldObjects.Ready = true;
-            RevivalPlugin.L.LogInfo("AirfieldObjects: five removed building holes patched from current physics, "
+            RevivalPlugin.L.LogInfo("AirfieldObjects: " + AirfieldObjectsCore.Holes.Length
+                + " removed building holes patched from current physics, "
                 + links.Count + " tile links; defenders/loot ready.");
         }
         void OnDestroy()

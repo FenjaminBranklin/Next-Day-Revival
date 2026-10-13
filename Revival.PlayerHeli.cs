@@ -348,6 +348,7 @@ namespace NextDayRevival
         internal static int ViewOf(GameObject go) { return ViewId(go); }
         internal static GameObject MachineByView(int view) { return ByView(view); }
         internal static GameObject FlownMachine { get { return _pilot ? _heli : null; } }
+        internal static Vector3 TravelVelocity { get { return _pilot ? _vel : Vector3.zero; } }
         internal static bool EngineRunning { get { return _heli != null && _engine; } }
 
         /// <summary>Is this the machine the LOCAL pilot has the controls of? Its
@@ -356,6 +357,28 @@ namespace NextDayRevival
         internal static bool Flown(GameObject go)
         {
             return go != null && _pilot && ReferenceEquals(go, _heli);
+        }
+
+        // Seams for the aircraft registry (Revival.AirRegistry.cs).
+        internal static void Machines(List<GameObject> into)
+        {
+            into.Clear();
+            for (int i = 0; i < _all.Count; i++) if (_all[i] != null) into.Add(_all[i]);
+        }
+        /// <summary>Off the ground (flown or falling), not a wreck.</summary>
+        internal static bool InAir(GameObject go) { return go != null && !Burning(go) && (Falling(go) || Airborne(go)); }
+        internal static bool Wrecked(GameObject go) { return go != null && Burning(go); }
+        internal static bool Occupied(GameObject go) { return go != null && (Busy(ViewId(go)) || ReferenceEquals(go, _heli)); }
+        internal static void RegistryRemove(GameObject go) { Remove(go, false); }
+        /// <summary>The registry's Mi-8: no cap (it is the only one), no
+        /// condition roll - the caller restores the stored one.</summary>
+        internal static GameObject BuildRegistered(Vector3 at, float heading)
+        {
+            GameObject go = Instantiate(at, heading);
+            if (go != null)
+                RevivalPlugin.L.LogInfo("PlayerHeli: the registry's Mi-8 " + ViewId(go) + " at " + at.ToString("0")
+                    + ", heading " + heading.ToString("0") + ".");
+            return go;
         }
 
         // B3c mercenaries (Revival.MercsRide.cs): the machine the local player
@@ -465,11 +488,12 @@ namespace NextDayRevival
                 // HeliCrashFall moves it - not the flight. The pilot rides it
                 // down: he can look around, and he can jump.
                 bool falling = Falling(_heli);
+                if (AirRegistry.IsArriving(_heli) || AirBridge.Departing(_heli)) { Heartbeat(); return; }
 
                 if (Input.GetKeyDown(ViewKey())) _cockpit = !_cockpit;
                 if (_pilot && !falling && Input.GetKeyDown(KeyCode.C)) Mi8Flares.Request(_heli);
                 if (Input.GetKeyDown(JumpKey())) { Why("key " + JumpKey()); Jump(); return; }
-                if (Input.GetKeyDown(BoardKey())) { Why("key " + BoardKey()); Leave(true); return; }
+                if (Input.GetKeyDown(BoardKey()) && !AirBridge.UsesBoardKey(_heli)) { Why("key " + BoardKey()); Leave(true); return; }
                 if (_pilot && !falling && Input.GetKeyDown(EngineKey()))
                 {
                     // A cold engine starts only with the vanilla parts in and
@@ -625,6 +649,8 @@ namespace NextDayRevival
         /// </summary>
         static void SpawnOrRemove()
         {
+            // AB1: exactly one Mi-8 lives in the registry; the spawn key is an admin's.
+            if (!AirRegistry.SpawnKeyAllowed()) { Hint(AirRegistry.SpawnKeyRefused(), 4f); return; }
             GameObject near = Nearest(20f * K);
             if (near != null)
             {
@@ -730,6 +756,7 @@ namespace NextDayRevival
 
         internal static GameObject Build(Vector3 at, float heading)
         {
+            if (AirRegistry.Owns("mi8")) return null;
             Cap();
             GameObject go = Instantiate(at, heading);
             if (go == null) return null;
@@ -812,13 +839,42 @@ namespace NextDayRevival
             GameObject go = Nearest(Mathf.Max(3f, CfgBoardRange.Value) * K);
             if (go == null) return;
 
+            BoardAt(go, false, -1, 0f);
+        }
+
+        internal static void TravelLeave() { if (_heli != null) Leave(false); }
+        internal static void TravelEngine(GameObject go, out float power, out bool running)
+        {
+            HeliEngine engine = EngineOf(go);
+            power = engine == null ? 0 : engine.Power; running = engine != null && engine.Running;
+        }
+        internal static bool TravelBoard(GameObject go, int seat, float speed, float power, bool running)
+        {
+            if (go == null || _heli != null || PlayerAn2.Aboard) return false;
+            BoardAt(go, true, seat, speed);
+            if (_heli == go)
+            {
+                HeliEngine engine = EngineOf(go);
+                if (engine != null) engine.TravelPower(power, running);
+                if (_pilot) _engine = running;
+                if (_pilot) Net.Send(Net.EngineState, new float[] { ViewId(go), running ? 1f : 0f, power }, true);
+            }
+            return _heli == go && _seat == seat;
+        }
+
+        static void BoardAt(GameObject go, bool travel, int seat, float speed)
+        {
+
             int view = ViewId(go);
-            bool taken = Busy(view);
+            bool taken = travel ? seat >= 0 : Busy(view);
             if (taken && (CfgPassengers == null || !CfgPassengers.Value))
             {
                 Hint(Text.Occupied(), 3f);
                 return;
             }
+
+            int assigned = travel ? seat : taken ? AirBridge.FreeSeat(go, 8) : -1;
+            if (assigned < -1) { Hint(Text.Occupied(), 3f); return; }
 
             _heli = go;
             _body = LocalPlayerRoot();
@@ -829,7 +885,7 @@ namespace NextDayRevival
             _ring.Clear();
             _boardedAt = Time.time;
             _cockpit = false;
-            _seat = taken ? FreeSeat() : -1;
+            _seat = assigned;
             _pilot = !taken;
 
             if (_pilot)
@@ -844,11 +900,11 @@ namespace NextDayRevival
                 Transform tr = go.transform;
                 _yaw = tr.eulerAngles.y;
                 _look = 8f;
-                _vel = Vector3.zero;
+                _vel = travel ? tr.forward * speed : Vector3.zero;
                 _nose = 0f;
                 _bank = 0f;
                 _yawRate = 0f;
-                _onGround = true;
+                _onGround = !travel;
                 _airborneSince = Time.time;
                 // Whatever this machine is doing, the new pilot inherits it. A
                 // cold one stays cold until he starts it.
@@ -858,6 +914,7 @@ namespace NextDayRevival
                 // master it only sends, so it stays on.
                 if (!RevivalTroopInsertion.MasterClient()) Interpolator(go, false);
                 Idle(go);
+                if (travel) SetEngine(true);
                 Hint(Text.AtControls(), 8f);
                 RevivalPlugin.L.LogInfo("PlayerHeli: controls taken on helicopter "
                     + view + " (master: " + RevivalTroopInsertion.MasterClient() + ").");
@@ -1372,6 +1429,7 @@ namespace NextDayRevival
         /// </summary>
         static void Fly()
         {
+            if (AirRegistry.IsArriving(_heli) || AirBridge.Departing(_heli)) return;
             float dt = Mathf.Min(Time.deltaTime, 0.1f);
             if (dt <= 0f) return;
             float k = K;
@@ -1402,6 +1460,8 @@ namespace NextDayRevival
             float lift = (CfgLift == null ? 3.2f : CfgLift.Value) * k;
             float drag = CfgDrag == null ? 0.12f : Mathf.Max(0.02f, CfgDrag.Value);
             float max = (CfgMaxSpeed == null ? 62f : CfgMaxSpeed.Value) * k;
+            if (AirBridge.On)
+                max = AirTravel.HeliSpeedCap(max, PlayerAn2.CfgTopSpeed == null ? 200f : PlayerAn2.CfgTopSpeed.Value);
             float climb = (CfgClimbRate == null ? 7f : Mathf.Max(0.5f, CfgClimbRate.Value)) * k;
             float sink = (CfgSinkRate == null ? 7f : Mathf.Max(0.5f, CfgSinkRate.Value)) * k;
 
@@ -1607,16 +1667,18 @@ namespace NextDayRevival
         /// machine if there is one, the terrain otherwise.</summary>
         static bool Floor(Vector3 at, out float y)
         {
+            if (AirLanding.Deck(at, out y)) return true;
             Vector3 pad;
             float heading;
             if (Helipads.Snap(new Vector3(at.x, 0f, at.z), out pad, out heading))
             {
                 float ground;
-                y = RevivalTroopInsertion.TerrainHeight(at, out ground)
+                y = AirLanding.Ground(at, out ground)
                     ? Mathf.Max(pad.y, ground) : pad.y;
                 return true;
             }
-            return RevivalTroopInsertion.TerrainHeight(at, out y);
+            if (!AirLanding.GroundReady) return RevivalTroopInsertion.TerrainHeight(at, out y);
+            return AirLanding.Ground(at, out y);
         }
 
         /// <summary>A pilot who is not the master hands his pose to the master,
@@ -1713,6 +1775,7 @@ namespace NextDayRevival
         /// </summary>
         static void Abandon(GameObject go, Vector3 drift, bool broadcast)
         {
+            if (AirRegistry.HoldingArrival(go)) return;
             if (go == null || Burning(go) || Falling(go)) return;
             try
             {
@@ -2218,6 +2281,7 @@ namespace NextDayRevival
         static bool IsGround(GameObject go)
         {
             if (go == null) return false;
+            if (AirLanding.LandingSurface(go)) return true;
             if (!_terrainLooked)
             {
                 _terrainLooked = true;
@@ -2953,7 +3017,11 @@ namespace NextDayRevival
 
             internal static void Send(int kind, float[] content, bool reliable)
             {
-                if (kind == Aboard) AirPilot.Board(_heli, Crocodile.LocalActor(), content);
+                if (kind == Aboard)
+                {
+                    AirPilot.Board(_heli, Crocodile.LocalActor(), content);
+                    AirBridge.Board(_heli, Crocodile.LocalActor(), content);
+                }
                 if (!_hooked) return;
                 try
                 {
@@ -2975,6 +3043,7 @@ namespace NextDayRevival
                     if (kind < 0 || kind > 5) return;
                     float[] f = content as float[];
                     if (f == null) return;
+                    if (kind == SpawnRequest && f.Length == 3) { AirBridge.Request(false, f, sender); return; }
 
                     if (kind == SpawnRequest)
                     {
@@ -3014,6 +3083,7 @@ namespace NextDayRevival
                         if (f[1] > 0.5f) _busyUntil[view] = Time.time + 5f;
                         else _busyUntil.Remove(view);
                         AirPilot.Board(ByView(view), sender, f);
+                        AirBridge.Board(ByView(view), sender, f);
                         SeatBinding.AircraftBoard(ByView(view), sender, f, false);
                         return;
                     }
@@ -3027,6 +3097,11 @@ namespace NextDayRevival
                         if (f[1] < -0.5f) { HeliCondition.OnNet(f, sender); return; }
                         GameObject go = ByView((int)f[0]);
                         if (go != null) EngineApply(go, f[1] > 0.5f);
+                        if (go != null && f.Length >= 3)
+                        {
+                            HeliEngine engine = EngineOf(go);
+                            if (engine != null) engine.TravelPower(f[2], f[1] > 0.5f);
+                        }
                         return;
                     }
 
@@ -4042,6 +4117,8 @@ namespace NextDayRevival
         }
 
         public float Power { get { return _power; } }
+        internal void TravelPower(float power, bool running)
+        { _power = Mathf.Clamp01(power); _running = running; Write(_power); }
 
         /// <summary>Move the spool one frame closer to what was asked for, and
         /// put the result on the rotor and the sound. Called by the pilot's own

@@ -76,7 +76,7 @@ namespace NextDayRevival
         }
         static float Seconds(int id) { return id < Radar ? AaDamageCore.GunSeconds : AaDamageCore.RadarSeconds; }
 
-        static Transform Root(int id)
+        internal static Transform Root(int id)
         {
             if (id == Radar) return TowerRadar.On && TowerRadar.Built ? TowerRadar.RadarRoot : null;
             if (id == Console) return TowerRadar.On && TowerRadar.Built ? TowerRadar.ConsoleRoot : null;
@@ -122,6 +122,16 @@ namespace NextDayRevival
 
         internal static void ReportBlast(Vector3 at, float radius, float peak)
         {
+            ReportBlast(at, radius, peak, true);
+        }
+
+        /// <summary>power false: Power 5, a C4 charge inside a generator bunker
+        /// (Sabotage.C4Chain) - it went to the generator, not the armour.</summary>
+        internal static void ReportBlast(Vector3 at, float radius, float peak, bool power)
+        {
+            // Power 2: every caller is mod bomb/rocket/artillery ordnance on the
+            // master (OrdnanceBlast.Enqueue, EnqueueMortar) - a heavy hit.
+            if (power) PowerNet.Strike(at, PowerNetCore.HitHeavy);
             if (!Flak.On && !TowerRadar.On) return;
             if (Authority()) { Blast(at, radius, peak); return; }
             float[] p = Packets[Count];
@@ -161,6 +171,15 @@ namespace NextDayRevival
             int max = part == 0 ? TowerRadar.I(TowerRadar.CfgRadarHits, 30) : TowerRadar.I(TowerRadar.CfgConsoleHits, 12);
             Hit(part == 0 ? Radar : Console, amount / Mathf.Max(1, max));
         }
+        /// <summary>Power 5, master: a C4 sabotage point (gun, radar mast,
+        /// command post console) is wrecked outright. True when it was standing.</summary>
+        internal static bool Wreck(int id)
+        {
+            if (id < 0 || id >= Count || !Authority() || Root(id) == null || States[id].Hp <= 0f) return false;
+            Hit(id, 1f);
+            return true;
+        }
+
         static void Hit(int id, float amount)
         {
             if (!Authority() || Root(id) == null) return;

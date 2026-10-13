@@ -75,7 +75,8 @@ namespace NextDayRevival
         internal static bool Available
         {
             get { return CommandKey != KeyCode.None && HasRoster
-                && GameplayCursor.CanCommand && !MercUi.ListOpen; }
+                && GameplayCursor.CanCommand && !MercUi.ListOpen
+                && !AirGunners.PilotOwnsMark; }   // a pilot's click marks for his gunners
         }
 
         internal static void Install(Harmony harmony)

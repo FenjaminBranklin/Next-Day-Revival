@@ -298,7 +298,22 @@ namespace NextDayRevival
         public const int S_MercAirfieldT = 231;
         public const int S_AirfieldAggro = 232;
         public const int S_BlastCorpseT = 233;
-        public const int Count = 234;
+        public const int S_RadarManualT = 234;
+        public const int S_RadarGroundT = 235;
+        public const int S_RadarGroundFire = 236;
+        public const int S_DroneNpcFire = 237;
+        public const int S_AirRegistryT = 238;
+        public const int S_AirGunT = 239;
+        public const int S_AirGunD = 240;
+        public const int S_PowerNetT = 241;
+        public const int S_PowerNetD = 242;
+        public const int S_AirfieldLightsT = 243;
+        public const int S_C4T = 244;
+        public const int S_C4D = 245;
+        public const int S_SabotageD = 246;
+        public const int S_MercPortraitT = 247;
+        public const int S_MercPortraitCapture = 248;
+        public const int Count = 249;
 
         static readonly string[] Names = new string[]
         {
@@ -514,6 +529,21 @@ namespace NextDayRevival
             "  MercAirfield.Orders.Sub",
             "  AirfieldAggro.Acquire.Sub",
             "BlastCorpse.Tick",
+            "  RadarManual.Refresh.Sub",
+            "  RadarGround.Think.Sub",
+            "  RadarGround.Fire.Sub",
+            "  DroneNpcFire.Think.Sub",
+            "AirRegistry.Tick",
+            "AirGunners.Tick",
+            "AirGunners.Draw",
+            "PowerNet.Tick",
+            "PowerNet.Draw",
+            "AirfieldLights.Tick",
+            "C4.Tick",
+            "C4.Draw",
+            "Sabotage.Draw",
+            "MercPortrait.Tick",
+            "MercPortrait.Capture.Draw",
         };
 
         // 0 = Update, 1 = FixedUpdate, 2 = LateUpdate, 3 = OnGUI, 4 = nested

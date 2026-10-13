@@ -15,6 +15,9 @@ namespace NextDayRevival
     {
         internal static void Loaded(Scene scene)
         {
+            GeneratorPlacement.Loaded(scene); // footprint data comes from the placed bunker floor
+            PowerNet.Loaded(scene);           // Power 2: bind the declared sites to their bunkers
+            AirfieldLights.Loaded(scene);     // Power 4: lamps of the declared sites in this scene
             if (!EastWorld.On || scene.name != EastWorld.SceneName) return;
             GameObject[] roots = scene.GetRootGameObjects();
             for (int i = 0; i < roots.Length; i++)

@@ -99,17 +99,10 @@ namespace NextDayRevival
             for (int i = 0; i < l.Selected.Count; i++)
                 if (l.WithEscort && i >= l.Selected.Count - 2) l.Escort.Add(l.Selected[i]);
                 else l.Transport.Add(l.Selected[i]);
-            MercFetchNative.Crate best = null; Vector3 target = Vector3.zero; float distance = 840f * 840f;
-            for (int i = 0; i < MercFetchNative.Crates.Count; i++)
-            {
-                MercFetchNative.Crate c = MercFetchNative.Crates[i]; if (c.Root == null || c.Locked) continue;
-                float d = (c.Root.position - Mercs.OwnerPosition).sqrMagnitude;
-                if (d >= distance) continue;
-                Vector3 at; if (!MercFetchNative.Target(c, out at)) continue;
-                best = c; distance = d; target = at;
-            }
+            Vector3 target;
+            MercFetchNative.Crate best = MercFetchNative.NearestAirfieldCrate(MercFetchBridge.Depot, out target);
             if (best == null)
-            { Say(Loc.T("Нет приземлившегося непустого воздушного груза в 300 м.", "No landed nonempty supply airdrop within 300 m."), true); return; }
+            { Say(Loc.T("На аэродроме нет доступного приземлившегося непустого воздушного груза.", "No available landed nonempty supply airdrop on the airfield."), true); return; }
             Vector3 parking;
             if (!MercFetchNative.Parking(target, Mercs.OwnerPosition, out parking)
                 || !MercFetchNative.Parking(MercFetchBridge.Depot, target, out l.Home))

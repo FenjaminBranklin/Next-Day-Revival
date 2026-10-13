@@ -211,7 +211,8 @@ namespace NextDayRevival
                 GepardGun.Contact c = air[i];
                 if (c.Go == null || !c.Go.activeInHierarchy || !c.Air) continue;
                 float dx = c.Pos.x - eye.x, dz = c.Pos.z - eye.z;
-                if (dx * dx + dz * dz > range * range) continue;
+                float detectedRange = range * RadarShadow.RangeFactor(c.Go);
+                if (dx * dx + dz * dz > detectedRange * detectedRange || !RadarShadow.Visible(c.Go)) continue;
                 if (Own(c, local, now)) continue;
                 float h = RadarScope.Height(c.Pos);
                 if (h < min) continue;

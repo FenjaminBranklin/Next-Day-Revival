@@ -18,7 +18,7 @@ namespace UnityEngine {
  public class Component : Object {public GameObject gameObject;public Transform transform {get{return gameObject.transform;}}}
  public class Transform : Component {public Vector3 position;public Quaternion localRotation;public T[] GetComponentsInChildren<T>(bool b){return new T[0];}}
  public class GameObject : Object {public bool activeInHierarchy=true;public Transform transform;public GameObject(){transform=new Transform();transform.gameObject=this;}}
- public struct Vector3 {public float x,y,z;public Vector3(float a,float b,float c){x=a;y=b;z=c;}public static Vector3 up {get{return new Vector3(0,1,0);}}public float sqrMagnitude {get{return x*x+y*y+z*z;}}public static float Distance(Vector3 a,Vector3 b){return (float)Math.Sqrt((a-b).sqrMagnitude);}public static Vector3 operator +(Vector3 a,Vector3 b){return new Vector3(a.x+b.x,a.y+b.y,a.z+b.z);}public static Vector3 operator -(Vector3 a,Vector3 b){return new Vector3(a.x-b.x,a.y-b.y,a.z-b.z);}public static Vector3 operator *(Vector3 a,float b){return new Vector3(a.x*b,a.y*b,a.z*b);}}
+ public struct Vector3 {public static Vector3 zero {get{return new Vector3();}}public float x,y,z;public Vector3(float a,float b,float c){x=a;y=b;z=c;}public static Vector3 up {get{return new Vector3(0,1,0);}}public float sqrMagnitude {get{return x*x+y*y+z*z;}}public static float Distance(Vector3 a,Vector3 b){return (float)Math.Sqrt((a-b).sqrMagnitude);}public static Vector3 operator +(Vector3 a,Vector3 b){return new Vector3(a.x+b.x,a.y+b.y,a.z+b.z);}public static Vector3 operator -(Vector3 a,Vector3 b){return new Vector3(a.x-b.x,a.y-b.y,a.z-b.z);}public static Vector3 operator *(Vector3 a,float b){return new Vector3(a.x*b,a.y*b,a.z*b);}}
  public struct Vector4 {public float x,y,z,w;public Vector4(float a,float b,float c,float d){x=a;y=b;z=c;w=d;}public static Vector4 zero {get{return new Vector4();}}}
  public struct Quaternion {public static Quaternion Euler(float a,float b,float c){return new Quaternion();}}
  public struct Color {public Color(float a,float b,float c){}}
@@ -51,7 +51,12 @@ namespace NextDayRevival {
  static class TowerRadar {internal static bool On=true,Built=true;internal static Transform RadarRoot=new GameObject().transform,ConsoleRoot=new GameObject().transform;internal static int CfgRadarHits=30,CfgConsoleHits=12;internal static bool CfgDamageLook=true;internal static float RadarHp=1f,ConsoleHp=1f;internal static bool B(bool b){return b;}internal static int I(int v,int d){return v;}internal static void SetDamageHealth(float a,float b){RadarHp=a;ConsoleHp=b;}}
  static class RadarDamage {internal static float Radius(Component c){return 6f;}internal static void Blast(Vector3 at,float r,float peak){if(Vector3.Distance(at,TowerRadar.RadarRoot.position)<r)AirDefenceDamage.RadarHit(0,40f*peak);}}
  static class RadarScope {internal static bool InView;}
- static class MercAA {internal static int MasterActor(){return 1;}}
+ static class MercAA {internal const int Radar=7;internal static bool Pose(int id,out Vector3 p,out Quaternion q){p=Vector3.zero;q=new Quaternion();return false;}internal static int MasterActor(){return 1;}}
+ static class AmmoDepot {internal static Vector3 At=Vector3.zero;internal static void Blast(Vector3 at,float r,float peak){}}
+ static class VanillaUi {internal static void Prompt(string text,float y){}}
+ // Power 2: ReportBlast also reports heavy hits to the power network.
+ static class PowerNet {internal static int Strikes;internal static void Strike(Vector3 at,int cls){Strikes++;}}
+ static class PowerNetCore {internal const int HitHeavy=2;}
  static class GameUi {internal static bool WindowOpen;}
  static class NativeActionProgress {internal static bool Active;internal static bool IsActive(string s){return Active;}internal static bool Begin(string a,string b,float c,bool d,string e,string f){Active=true;return true;}internal static void End(string s){Active=false;}}
  static class RepairTap {internal static bool CanStart {get{return !NativeActionProgress.Active;}}}
@@ -192,7 +197,9 @@ def main():
         'Revival.TowerRadar.cs': ['if (!Working) tier = 0;', 'Flak.SetRadarDirected(tier == 2)',
                                  'AirfieldOwnership.MasterSender(sender)', 'AirDefenceDamage.RadarHit',
                                  'dead == _screenDead'],
-        'RevivalMortar.cs': ['if (shooter) AirDefenceDamage.ReportBlast'],
+        'RevivalMortar.cs': ['OrdnanceBlast.EnqueueMortar(point, shooter, radius, npcPeak, vehiclePeak, playerPeak, AnyFaction);'],
+        'Revival.OrdnanceBlast.cs': ['internal static void EnqueueMortar(', 'if (_master())',
+                                    'AirDefenceDamage.ReportBlast(point, radiusU, Mathf.Clamp(vehiclePeak / 700f, 0f, 2f));'],
         'RevivalPlugin.cs': ['S_AaDamageT); AirDefenceDamage.Tick()', 'AirDefenceDamage.Draw(); FrameProf.E(FrameProf.S_AaDamageD)'],
         'sync_public.py': ['Revival.AirDefenceDamageCore.cs', 'research/air_defence_damage_check.py'],
     }

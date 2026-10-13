@@ -170,6 +170,8 @@ namespace NextDayRevival
             if (_spots.Count == 0 || MapScene.Current != "GW_Scene_1" || MapTools.LocalPlayer() == null
                 || !RevivalTroopInsertion.MasterClient()) return;
             Spot s = _spots[_cursor++ % _spots.Count];
+            // AB1: the one Mi-8 is the master-server registry's (Revival.AirRegistry.cs).
+            if (s.Kind == "mi8" && AirRegistry.Owns("mi8")) { _status[s.Id] = "the aircraft registry owns the Mi-8"; return; }
             if (s.East && !EastWorld.On) { _status[s.Id] = "east tile unavailable"; return; }
             try
             {

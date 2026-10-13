@@ -68,7 +68,8 @@ namespace UnityEngine
         public GameObject Clone()
         {
             GameObject copy = new GameObject(name);
-            if (GetComponent<ParticleSystem>() != null) copy.AddComponent<ParticleSystem>();
+            ParticleSystem source = GetComponent<ParticleSystem>();
+            if (source != null) copy.AddComponent<ParticleSystem>().main.startSize = source.main.startSize;
             foreach (Transform child in transform.Children) child.gameObject.Clone().transform.SetParent(copy.transform, false);
             return copy;
         }
@@ -115,6 +116,7 @@ namespace UnityEngine
         public static Vector3 up { get { return new Vector3(0, 1, 0); } }
         public static Vector3 forward { get { return new Vector3(0, 0, 1); } }
         public float sqrMagnitude { get { return x*x+y*y+z*z; } }
+        public static float Dot(Vector3 a,Vector3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
         public float magnitude { get { return (float)Math.Sqrt(sqrMagnitude); } }
         public static Vector3 operator +(Vector3 a, Vector3 b) { return new Vector3(a.x+b.x,a.y+b.y,a.z+b.z); }
         public static Vector3 operator -(Vector3 a, Vector3 b) { return new Vector3(a.x-b.x,a.y-b.y,a.z-b.z); }
@@ -153,7 +155,7 @@ namespace UnityEngine
     public class MeshRenderer : Renderer { }
     public class MeshFilter : Component { public Mesh sharedMesh = new Mesh(); }
     public class ParticleSystemRenderer : Renderer { public ParticleSystemRenderMode renderMode; public float minParticleSize; }
-    public struct Color { public Color(float r,float g,float b,float a) { } public static Color white { get { return new Color(); } } }
+    public struct Color { public float r,g,b,a; public Color(float r,float g,float b,float a) { this.r=r;this.g=g;this.b=b;this.a=a; } public static Color white { get { return new Color(1,1,1,1); } } }
     public struct Color32 { public static implicit operator Color32(Color c) { return new Color32(); } }
     public enum ParticleSystemRenderMode { Billboard }
     public enum ParticleSystemStopBehavior { StopEmitting, StopEmittingAndClear }
@@ -187,23 +189,24 @@ namespace UnityEngine
     public class Camera : Component
     {
         public bool orthographic; public int cullingMask=1; public float farClipPlane=1000;
+        public Vector3 WorldToViewportPoint(Vector3 at) { Vector3 d=at-transform.position; return new Vector3(0.5f,0.5f,Vector3.Dot(d,transform.forward)); }
         public static event Action<Camera> onPreCull;
         public static void Render(Camera c) { if(onPreCull!=null) onPreCull(c); }
     }
     public class Terrain : Component { public static Terrain[] activeTerrains=new Terrain[0]; }
     public enum QueryTriggerInteraction { Ignore }
-    public static class Physics { public static bool Raycast(Vector3 p,Vector3 d,float reach,int mask,QueryTriggerInteraction trigger) { return false; } }
+    public static class Physics { public static int Rays; public static bool Hidden; public static bool Raycast(Vector3 p,Vector3 d,float reach,int mask,QueryTriggerInteraction trigger) { Rays++;return Hidden; } }
     public static class Resources
     {
         public static Object Load(string path,Type type)
         {
-            if(path.Contains("VehicleSmoke")) { GameObject go=new GameObject("native smoke"); go.AddComponent<ParticleSystem>(); return go; }
+            if(path.Contains("VehicleSmoke")) { GameObject go=new GameObject("native smoke"); go.AddComponent<ParticleSystem>().main.startSize=5; return go; }
             GameObject root=new GameObject("camp"); Transform tr=root.transform;
             foreach(string part in new string[]{"FireEmitObjects","CampfireElements","FireComplex_old","Flames"}) { GameObject child=new GameObject(part); child.transform.SetParent(tr,false); tr=child.transform; }
-            tr.gameObject.AddComponent<ParticleSystem>(); return root;
+            tr.gameObject.AddComponent<ParticleSystem>().main.startSize=1.01f; return root;
         }
     }
-    public static class Time { public static float time,unscaledTime,deltaTime=1f/60; }
+    public static class Time { public static int frameCount; public static float time,unscaledTime,deltaTime=1f/60; }
     public static class Mathf
     {
         public static float Abs(float f) { return Math.Abs(f); }
@@ -237,7 +240,7 @@ namespace NextDayRevival
     internal static class FrameProf { public const int S_An2Glide_Update=1,S_AirKillsT=2; public static void S(int n) { } public static void E(int n) { } }
     internal static class ParaPose { public static double Clock() { return Time.time; } }
     internal static class CameraOwner { internal static Camera Main; public static Camera MainCamera() { return Main; } }
-    internal static class Fx { internal static float Factor=1; }
+    internal static class Fx { internal static float Factor=1; internal static int Level { get { return Factor==0 ? 0 : Factor<0.5f ? 1 : Factor<1 ? 2 : 3; } } }
     internal static class AircraftAudio { internal static void StopEngines(GameObject go) { } }
     internal static class RevivalTroopInsertion { internal static bool Master=true; internal static bool MasterClient() { return Master; } }
     internal static class RetakeRaids { internal const string NamePrefix="raid"; }
@@ -249,6 +252,7 @@ namespace NextDayRevival
     internal static class ShortRangeCore { internal static float AddHit(float a,int n) { return a+1f/n; } }
     internal static class GepardNet { internal static void SendHeliKill(int n,Vector3 p) { } }
     internal static class GepardGun { internal sealed class Contact { internal GameObject Go; internal GepardAir.Source Src; } }
+    internal static class AirRegistry { internal static bool HoldingArrival(GameObject go) { return false; } }
     internal static class PlayerHeli
     {
         internal const float K=3.84f;
@@ -369,13 +373,15 @@ namespace NextDayRevival
             An2Glide glide=go.GetComponent<An2Glide>();
             Check(glide!=null,"real kill did not attach An2Glide");
             Check(go.GetComponent<AircraftCrashEvent>()!=null,"fall telemetry missing");
+            go.GetComponent<AircraftCrashEvent>().enabled=false;
             Check(!go.GetComponent<FakeInterpolator>().enabled,"interpolator still writes fall pose");
             float y=go.transform.position.y;
             for(int i=1;i<=120;i++)
             {
                 Time.time=Time.unscaledTime=i/60f;
+                Time.frameCount++;
                 Call(glide,"Update"); NpcAircraft.Tick(); AircraftCrashFx.Tick(Time.time);
-                Call(go.GetComponent<AircraftCrashEvent>(),"Update"); Camera.Render(cam);
+                Camera.Render(cam);
             }
             Check(y-go.transform.position.y>30*PlayerAn2.K,"path driver overwrote the falling carrier");
             Check(!NpcAircraft.Find(go).Driving,"NPC flight driver retained ownership");
@@ -385,7 +391,16 @@ namespace NextDayRevival
             Check(ps[0].main.simulationSpace==ParticleSystemSimulationSpace.World,"flame not world space");
             Check(ps[1].main.startLifetime>=20,"short smoke lifetime");
             Check(ps[1].Simulations>=120,"off-screen smoke not simulated");
-            Check(ps[1].main.startSize>=35,"combat smoke too small");
+            Check(Math.Abs(ps[1].main.startSize-5)<0.001f,"smoke quad enlarged beyond native size");
+            Check(Math.Abs(ps[0].main.startSize-1.01f)<0.001f,"flame quad enlarged beyond native size");
+            Check(ps[1].main.startColor.r<0.15f&&ps[1].main.startColor.a>0.8f,"smoke is not dense/dark");
+            Check(ps[1].main.maxParticles==768&&ps[1].emission.rateOverTime==36,"thick smoke particle budget missing");
+            Check(ps[0].emission.rateOverTime==64,"denser flame core missing");
+            for(int i=0;i<ps.Length;i++)
+            {
+                Check((ps[i].transform.localScale-Vector3.one).sqrMagnitude==0,"particle transform scaled");
+                Check(ps[i].GetComponent<ParticleSystemRenderer>().minParticleSize==0,"quad screen footprint enlarged");
+            }
             ParticleSystem.Particle[] actual=new ParticleSystem.Particle[256],draw=new ParticleSystem.Particle[256];
             int n=ps[1].GetParticles(actual),m=ps[3].GetParticles(draw);
             Check(n>0&&n==m,"far smoke particles missing");
@@ -395,6 +410,13 @@ namespace NextDayRevival
             Check(actual[0].startSize>draw[0].startSize,"proxy angular scaling missing");
             Check(ps[0].GetParticles(actual)>0&&ps[2].GetParticles(draw)>0,"flame core missing at combat distance");
             Check(RevivalPlugin.L.Lines.Exists(delegate(string line){return line.Contains("after2s")&&line.Contains("lost_m=");}),"2s event diagnostic missing");
+            int samples=0;
+            foreach(string line in RevivalPlugin.L.Lines) if(line.Contains("AircraftCrash after2s: name="+go.name+" "))
+            {
+                samples++;
+                Check(line.Contains("lost_m=32")&&line.Contains("vertical_mps=-"),"central sample did not observe real descent");
+            }
+            Check(samples==1,"disabled monitor did not produce exactly one central 2s sample");
             Tu95Visual visual=go.transform.Find("NDR_Tu95")==null?null:go.transform.Find("NDR_Tu95").gameObject.GetComponent<Tu95Visual>();
             if(visual!=null)
             {
@@ -403,9 +425,11 @@ namespace NextDayRevival
                 Check((carrier/carrier.magnitude-render/render.magnitude).magnitude<0.001f,"Tu95 visual followed stale flight pose");
                 Check(Math.Abs(fly.rotation.eulerAngles.x-go.transform.rotation.eulerAngles.x)<0.001f,"Tu95 visual lost fall attitude");
             }
-            for(int i=121;i<=720&&!PlayerAn2.Burning(go);i++) { Time.time=Time.unscaledTime=i/60f; Call(glide,"Update"); }
+            for(int i=121;i<=720&&!PlayerAn2.Burning(go);i++) { Time.time=Time.unscaledTime=i/60f; Time.frameCount++; Call(glide,"Update"); AircraftCrashFx.Tick(Time.time); }
             Check(PlayerAn2.Burning(go)&&Time.time<12,"550m descent exceeded 12s");
             Check(RevivalPlugin.L.Lines.Exists(delegate(string line){return line.Contains("AircraftCrash impact:");}),"impact diagnostic missing");
+            if(go.name=="tu95:entry") foreach(string line in RevivalPlugin.L.Lines)
+                if(line.Contains("AircraftCrash ")&&line.Contains("name="+go.name+" ")) Console.WriteLine("TRACE "+line);
             AircraftCrashFx.Tick(Time.time+21);
         }
         static GameObject TrailRoot(GameObject go)
@@ -417,6 +441,7 @@ namespace NextDayRevival
         public static void Main()
         {
             Camera cam=new GameObject("camera").AddComponent<Camera>(); cam.transform.position=new Vector3(0,200,-3000*PlayerAn2.K); CameraOwner.Main=cam;
+            Terrain.activeTerrains=new Terrain[] {new GameObject("terrain").AddComponent<Terrain>()};
             GameObject bomber=Aircraft("tu95:entry",true);
             Tu95Model.Props.Add(new KeyValuePair<string,Vector3>("Front",new Vector3(8,2,0)));
             bomber.transform.Find("NDR_Tu95").gameObject.GetComponent<Tu95Visual>().Draw(cam);
@@ -424,7 +449,7 @@ namespace NextDayRevival
             Vector3 site=AircraftCrashFx.Site(bomber);
             Check((site-new Vector3(8,2,-1)*PlayerAn2.K).magnitude<0.001f,"engine site used camera proxy transform");
             AirKills.Downed(NpcAircraft.Find(bomber),bomber.transform.position);
-            Check(RevivalPlugin.L.Lines.Exists(delegate(string line){return line.Contains("path=AirKills.Downed")&&line.Contains("fall=yes fx=4 sim=World");}),"kill diagnostic missing");
+            Check(RevivalPlugin.L.Lines.Exists(delegate(string line){return line.Contains("path=AirKills.Downed")&&line.Contains("fall=yes fx=4 sim=World scale=1.0 nativeSize=yes density=3");}),"native-size kill diagnostic missing");
             An2Glide once=bomber.GetComponent<An2Glide>(); PlayerAn2.ShotDown(bomber,bomber.transform.position); Check(bomber.GetComponent<An2Glide>()==once,"duplicate fall");
             Fall(bomber,cam);
             Time.time=Time.unscaledTime=0;
@@ -457,6 +482,68 @@ namespace NextDayRevival
             Check(hold._containerData.MaxSlots==200&&hold._containerData.Slots.Length==200&&hold.IsSpawnedData,"wreck hold not configured before Awake");
             Check(wreck.activeSelf,"wreck activation lost");
             GameObject inactive=new GameObject("inactive"); inactive.SetActive(false); HeliHold.Attach(inactive); Check(!inactive.activeSelf,"inactive carrier was activated"); inactive.SetActive(true); Check(FakeContainer.Exceptions==0,"deferred Awake failed");
+            ParticleSystem[] density=TrailRoot(rifle).GetComponentsInChildren<ParticleSystem>(true);
+            Fx.Factor=0.25f; Time.time=Time.unscaledTime=10; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(density[1].main.maxParticles==192&&density[1].emission.rateOverTime==9,"Low density clamped upward");
+            Fx.Factor=0.55f; Time.time=Time.unscaledTime=16; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(density[1].main.maxParticles==422&&Math.Abs(density[1].emission.rateOverTime-19.8f)<0.001f,"Medium density ignored");
+            Fx.Factor=0; Time.time=Time.unscaledTime=22; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(!density[1].emission.enabled&&density[1].GetParticles(impactBuffer)==0,"Off density still emits smoke");
+            Fx.Factor=1; Time.time=Time.unscaledTime=28; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(density[1].main.maxParticles==768&&density[1].emission.rateOverTime==36,"High density not restored");
+            Check(density[1].main.startSize==5,"density/distance changed native sprite size");
+            Time.frameCount++; Physics.Rays=0; Physics.Hidden=true; bool hidden;
+            Check(AircraftCrashFx.TryTerrainHidden(Vector3.zero,Vector3.one*1000,2000,out hidden)&&hidden,"first terrain query missing");
+            Check(!AircraftCrashFx.TryTerrainHidden(Vector3.zero,Vector3.one*1000,2000,out hidden)&&Physics.Rays==1,"terrain ray budget exceeded");
+            Camera.Render(cam); Camera.Render(cam);
+            Check(Physics.Rays==1,"multiple cameras bypassed terrain budget");
+            Time.frameCount++;
+            Check(AircraftCrashFx.TryTerrainHidden(Vector3.zero,Vector3.one*1000,2000,out hidden)&&Physics.Rays==2,"terrain budget did not reset next frame");
+            Physics.Hidden=false;
+            AircraftCrashFx.Stop(rifle); AircraftCrashFx.Tick(60);
+            cam.transform.position=new Vector3(0,1500,-100);
+            Time.time=Time.unscaledTime=61; Time.frameCount++;
+            GameObject budgetA=Aircraft("budget-a",false),budgetB=Aircraft("budget-b",false);
+            AircraftCrashFx.Start(budgetA,Vector3.zero,100); AircraftCrashFx.Start(budgetB,Vector3.zero,100);
+            ParticleSystem smokeA=TrailRoot(budgetA).GetComponentsInChildren<ParticleSystem>(true)[1];
+            ParticleSystem smokeB=TrailRoot(budgetB).GetComponentsInChildren<ParticleSystem>(true)[1];
+            Check(smokeA.emission.enabled!=smokeB.emission.enabled,"multiple kill/setup ticks exceeded per-frame thinking budget");
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.enabled&&smokeB.emission.enabled,"deferred emitter never activated");
+            Fx.Factor=0.25f; Time.time=Time.unscaledTime=61.1f; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==72,"near settings thought faster than 4Hz");
+            Time.time=Time.unscaledTime=61.26f; Time.frameCount++; AircraftCrashFx.Tick(Time.time); AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==45,"repeated tick bypassed thinking budget");
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==18,"next-frame settings work starved");
+            Check(smokeA.main.startSize==5&&smokeB.main.startSize==5,"legacy Start scale parameter still enlarged particles");
+            cam.transform.position=new Vector3(0,1500,-3000*PlayerAn2.K);
+            Fx.Factor=0.55f; Time.time=Time.unscaledTime=61.52f; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Fx.Factor=1; Time.time=Time.unscaledTime=62; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(Math.Abs(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime-39.6f)<0.001f,"far settings thought faster than 1Hz");
+            Time.time=Time.unscaledTime=62.53f; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==72,"far settings did not refresh after 1s");
+            cam.transform.position=new Vector3(0,1500,3000*PlayerAn2.K);
+            Fx.Factor=0.25f; Time.time=Time.unscaledTime=63.54f; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Fx.Factor=1; Time.time=Time.unscaledTime=65; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==18,"unseen emitter kept thinking at visible cadence");
+            Time.time=Time.unscaledTime=68.55f; Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Time.frameCount++; AircraftCrashFx.Tick(Time.time);
+            Check(smokeA.emission.rateOverTime+smokeB.emission.rateOverTime==72,"unseen settings did not refresh after 5s");
+            AircraftCrashFx.Stop(budgetA); AircraftCrashFx.Stop(budgetB); AircraftCrashFx.Tick(90); Fx.Factor=1;
+            GameObject noFx=new GameObject("no-fx-monitor"); noFx.transform.position=Vector3.up*100*PlayerAn2.K;
+            AircraftCrashFx.BeginFall(noFx,0,PlayerAn2.K,Time.time,85);
+            noFx.SetActive(false); double began=Time.time;
+            Time.time=Time.unscaledTime=(float)(began+2); Time.frameCount++;
+            noFx.transform.position-=Vector3.up*32*PlayerAn2.K;
+            AircraftCrashFx.Tick(Time.time);
+            Check(RevivalPlugin.L.Lines.Exists(delegate(string line){return line.Contains("after2s: name=no-fx-monitor ")&&line.Contains("lost_m=32");}),"inactive carrier/no FX starved central monitor");
+            AircraftCrashFx.Impact(noFx); AircraftCrashFx.Impact(noFx);
+            int impacts=0; foreach(string line in RevivalPlugin.L.Lines) if(line.Contains("impact: name=no-fx-monitor ")) impacts++;
+            Check(impacts==1,"disabled/inactive monitor impact missing or duplicated");
             Console.WriteLine("PASS real C# kill entries/fall/FX/visual/hold: "+checks+" assertions");
         }
     }

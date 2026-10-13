@@ -132,7 +132,7 @@ namespace NextDayRevival
 {
     using UnityEngine;
     internal static class Loc { internal static string T(string ru,string en) { return en; } }
-    internal sealed class Log { internal int Warnings;internal void LogWarning(string s){Warnings++;}internal void LogInfo(string s){} }
+    internal sealed class Log { internal int Warnings;internal readonly List<string> Messages=new List<string>();internal void LogWarning(string s){Warnings++;Messages.Add(s);}internal void LogInfo(string s){Messages.Add(s);} }
     internal static class RevivalPlugin
     {
         internal static readonly Log L=new Log();
@@ -154,6 +154,8 @@ namespace NextDayRevival
     { internal static bool MercAlive(Component c){return c is NPC_AI2&&((NPC_AI2)c).Alive;}internal static bool PatrolVehicleAlive(Component c){return c is VehicleGameSystem&&((VehicleGameSystem)c).Alive;} }
     internal static class Mortar { internal static class FactionShield { internal static int FactionOf(GameObject p){return p==null?-1:1;} } }
     internal sealed class Hold { internal bool ByPlayers=true;internal int Holder=1; }
+    internal static class Airfield
+    { internal static bool On=true;internal static bool Inside(Vector3 p,float margin){return p.x>=3990-margin&&p.x<=4820+margin&&p.z>=-1690-margin&&p.z<=1690+margin;} }
     internal static class AirfieldHold { internal static Hold State=new Hold(); }
     internal sealed class MercOrder { internal int Mode; }
     internal sealed class MercUnit { internal NPC_AI2 Ai;internal bool Deserting;internal MercOrder Order; }
@@ -217,7 +219,7 @@ namespace NextDayRevival
         internal bool Add(DepotGood g){if(Count==256)return false;Goods[Count++]=g;return true;}
     }
     internal static class AmmoDepot
-    { internal static DepotStore Store=new DepotStore();internal static Vector3 At=new Vector3(10,80,10);internal static int Broadcasts,Asks;static void Broadcast(){Broadcasts++;}
+    { internal static DepotStore Store=new DepotStore();internal static Vector3 At=new Vector3(4210,80,10);internal static int Broadcasts,Asks;static void Broadcast(){Broadcasts++;}
       static void Send(int kind,int ticket,int actor,int request,int truck,int gun,int limit){if(kind==28){Asks++;Store.Known=true;}} }
 
     internal sealed class FetchFixture : IMercFetchWorld
@@ -244,14 +246,16 @@ namespace NextDayRevival
         { GameObject go=new GameObject();go.transform.position=pos;NPC_AI2 ai=go.Add<NPC_AI2>();ai.Key=Mercs.KeyPrefix+actor+"/unit";View(go,actor);
           Mercs.Record r=new Mercs.Record();r.Selected=true;r.Order=new MercOrder();r.Order.Mode=6;r.Unit=new MercUnit();r.Unit.Ai=ai;r.Unit.Order=r.Order;return r; }
         static MercFetchNative.Crate Crate(Vector3 pos,int goods)
+        { return Crate(pos,goods,new object[]{"ndr-airdrop-m4",15,1}); }
+        static MercFetchNative.Crate Crate(Vector3 pos,int goods,object[] spawn)
         { GameObject go=new GameObject();go.transform.position=pos;go.Add<Rigidbody>();go.Add<AirDropObject>();ItemsContainer c=go.Add<ItemsContainer>();go.Add<Collider>();PhotonView v=View(go,1);
-          v.Spawn=new object[]{"ndr-airdrop-m4",15,1};for(int i=0;i<goods;i++){c._containerData.ItemID[i]=i<24?2076:i<30?2077:i<36?7013:10005;c._containerData.ItemBullets[i]=i<24?1:200;
+          v.Spawn=spawn;for(int i=0;i<goods;i++){c._containerData.ItemID[i]=i<24?2076:i<30?2077:i<36?7013:10005;c._containerData.ItemBullets[i]=i<24?1:200;
           c._containerData.ClipItemID[i]=2030;c._containerData.ItemCondition[i]=77f;c._containerData.ItemWater[i]=3f;c._containerData.ItemEnergy[i]=4f;}
           MercFetchNative.StartPostfix(c);return MercFetchNative.ByView(v.Id); }
         static int Goods(MercFetchNative.Crate c)
         { int n=0;foreach(ObscuredInt id in ((ItemsContainer)c.Container)._containerData.ItemID)if((int)id!=0)n++;return n; }
         static void Scene()
-        { GameObject floor=new GameObject();Collider col=floor.Add<Collider>();Physics.Scene=new RaycastHit[]{new RaycastHit{collider=col,normal=Vector3.up,point=new Vector3(100,80,100),distance=3}}; }
+        { GameObject floor=new GameObject();Collider col=floor.Add<Collider>();Physics.Scene=new RaycastHit[]{new RaycastHit{collider=col,normal=Vector3.up,point=new Vector3(4300,80,100),distance=3}}; }
         static void Move(MercCarrier car,Mercs.Record driver,Vector3 at)
         { car.Root.position=at;driver.Unit.Ai.transform.position=at; }
         static void Frame(float now)
@@ -301,9 +305,9 @@ namespace NextDayRevival
             Ok(MercFetchBridge.Available&&MercFetchNative.Available&&hm.Patches==6,"actual emitted bindings and hooks");
             AmmoDepot.Store.Known=false;MercFetchBridge.Snapshot();Ok(AmmoDepot.Store.Known&&AmmoDepot.Asks==1,"late join requests existing depot authority snapshot");
             GameObject player=new GameObject();Crocodile.Players[1]=player;Crocodile.Players[2]=new GameObject();
-            Scene();Vector3 crateAt=new Vector3(100,80,100);MercCarrier car=Car(1,new Vector3(20,80,20));MercDrive.Candidate=car;
+            Scene();Vector3 crateAt=new Vector3(4300,80,100);MercCarrier car=Car(1,new Vector3(4220,80,20));MercDrive.Candidate=car;
             Mercs.OwnerPosition=car.Root.position;Mercs.Record merc=Merc(1,car.Root.position);Mercs.Roster.Add(merc);
-            MercFetchNative.Crate c=Crate(crateAt,38);Ok(c!=null,"native paid crate discovered");
+            MercFetchNative.Crate c=Crate(crateAt,38,new object[]{"ndr-airdrop-m4",15,1,crateAt});Ok(c!=null,"native paid crate discovered");
             Vector3 ground;Ok(MercFetchNative.Target(c,out ground)&&Physics.Layers==-1,"all layers landing support");
             Vector3 park;Ok(MercFetchNative.Parking(crateAt,car.Root.position,out park)&&(park-crateAt).sqrMagnitude>14*14,"park outside physical source footprint");
             string[] props={"slab","fence","sandbag"};foreach(string prop in props){GameObject obj=new GameObject();Physics.Blockers=new Collider[]{obj.Add<Collider>()};Ok(!MercFetchNative.Parking(crateAt,car.Root.position,out park),"all-collider parking veto "+prop);}Physics.Blockers=new Collider[0];
@@ -329,7 +333,7 @@ namespace NextDayRevival
                 &&AmmoDepot.Store.Goods[0].Condition==77&&AmmoDepot.Store.Goods[0].Water==3&&AmmoDepot.Store.Goods[0].Energy==4,"actual native metadata preserved");
             Ok(!MercFetchBridge.Active&&!c.Locked&&merc.Order.Mode==6,"successful original post restored");
             // Attack/replacement cancels promptly and retains both order and cargo.
-            Time.time=30;AmmoDepot.Store.Count=0;Move(car,merc,new Vector3(20,80,20));MercFetchNative.Crate c2=Crate(crateAt,2);
+            Time.time=30;AmmoDepot.Store.Count=0;Move(car,merc,new Vector3(4220,80,20));MercFetchNative.Crate c2=Crate(crateAt,2);
             MercFetch.Start();Move(car,merc,crateAt);SetPhase(MercFetchBridge.Run,2);Frame(31);Frame(35);
             MercOrder replacement=new MercOrder();replacement.Mode=9;merc.Order=replacement;merc.Unit.Order=replacement;SetPhase(MercFetchBridge.Run,5);Frame(36);
             Ok(ReferenceEquals(merc.Order,replacement)&&Goods(c2)==2&&!c2.Locked,"cancel retains replacement and real crate");
@@ -350,8 +354,8 @@ namespace NextDayRevival
         // ready vehicle; the radar crew and the rest keep their orders.
         static void NoPickCase(MercCarrier car)
         {
-            Time.time=60;Scene();Mercs.Roster.Clear();Mercs.Picked=false;Vector3 crateAt=new Vector3(100,80,100);
-            car.Root.position=new Vector3(20,80,20);Mercs.OwnerPosition=car.Root.position;Crate(crateAt,3);
+            Time.time=60;Scene();Mercs.Roster.Clear();Mercs.Picked=false;Vector3 crateAt=new Vector3(4300,80,100);
+            car.Root.position=new Vector3(4220,80,20);Mercs.OwnerPosition=car.Root.position;Crate(crateAt,3);
             Mercs.Record radar=Merc(1,car.Root.position),near=Merc(1,car.Root.position+new Vector3(9,0,0)),far=Merc(1,car.Root.position+new Vector3(40,0,0));
             near.Order.Mode=1;far.Order.Mode=1;radar.Selected=near.Selected=far.Selected=true;near.Name="Near";far.Name="Far";
             Mercs.Roster.Add(radar);Mercs.Roster.Add(far);Mercs.Roster.Add(near);
@@ -359,6 +363,49 @@ namespace NextDayRevival
             if(!MercFetchBridge.Active)Console.WriteLine("TRACE no pick: "+MercUi.Last);
             Ok(MercFetchBridge.Active&&near.Order.Mode==8&&far.Order.Mode==1&&radar.Order.Mode==6&&MercUi.Last.Contains("Near")&&!MercUi.Last.Contains("Far"),
                 "no pick: one merc (the nearest free) fetches, radar crew and the rest hold");
+        }
+        // Regression: real fence coordinates, both paid formats and native drops.
+        static void QuickfixCases()
+        {
+            MercFetchNative.Crates.Clear();Scene();Vector3 at;string reason;
+            Vector3 depot=new Vector3(4210,80,10);
+            Mercs.OwnerPosition=new Vector3(4800,80,1600);
+            MercFetchNative.Crate far=Crate(new Vector3(4700,80,1500),2);
+            MercFetchNative.Crate terminal=Crate(new Vector3(4300,80,100),2,
+                new object[]{"ndr-airdrop-m4",15,1,new Vector3(4300,80,100)});
+            Ok(terminal!=null&&terminal.Source=="supply-order","four-field supply terminal crate registered");
+            Ok((terminal.Root.position-Mercs.OwnerPosition).sqrMagnitude>840f*840f,"terminal is beyond old player radius");
+            MercFetchNative.Crate outside=Crate(new Vector3(3989,80,10),2);
+            MercFetchNative.Crate empty=Crate(new Vector3(4211,80,10),0);
+            MercFetchNative.Crate busy=Crate(new Vector3(4212,80,10),2);((ItemsContainer)busy.Container).Busy=true;
+            MercFetchNative.Crate locked=Crate(new Vector3(4213,80,10),2);locked.Locked=true;
+            MercFetchNative.Crate airborne=Crate(new Vector3(4214,80,10),2);
+            ((AirDropObject)airborne.Drop).animationState=AirDropObject.AnimationState.Parachute;
+            MercFetchNative.Crate native=Crate(new Vector3(4750,80,1550),2,null);
+            Ok(native!=null&&native.Source=="native","vanilla native airdrop registered");
+            int calls=Physics.Calls;RevivalPlugin.L.Messages.Clear();
+            Ok(ReferenceEquals(MercFetchNative.NearestAirfieldCrate(depot,out at),terminal),"nearest depot crate wins anywhere in airfield, independent of owner");
+            Ok(Physics.Calls-calls==3,"only landed nonempty unlocked candidates use one ray each");
+            string logs=string.Join("\n",RevivalPlugin.L.Messages.ToArray());
+            Ok(logs.Contains("outside airfield bounds")&&logs.Contains("empty inventory")
+                &&logs.Contains("player interacting")&&logs.Contains("locked by fetch job")
+                &&logs.Contains("not landed"),"command rejection logs explain every ineligible crate");
+            terminal.Locked=true;far.Locked=true;
+            Ok(ReferenceEquals(MercFetchNative.NearestAirfieldCrate(depot,out at),native),"native supply crate remains eligible");
+            native.Locked=true;
+            Ok(MercFetchNative.NearestAirfieldCrate(depot,out at)==null,"no eligible airfield crate returns none");
+            terminal.Locked=false;Physics.Scene=new RaycastHit[0];
+            Ok(!MercFetchNative.Target(terminal,out at,out reason)&&reason.Contains("no solid"),"missing landing support diagnosed");
+            Physics.Scene=new RaycastHit[32];
+            Ok(!MercFetchNative.Target(terminal,out at,out reason)&&reason.Contains("saturated"),"saturated landing ray diagnosed");
+            Scene();terminal.Body.velocity=new Vector3(0,2,0);
+            Ok(!MercFetchNative.Target(terminal,out at,out reason)&&reason=="still moving","moving crate diagnosed");
+            terminal.Body.velocity=Vector3.zero;
+            ((ItemsContainer)terminal.Container)._containerData.ItemID[0]=9999;
+            ((ItemsContainer)terminal.Container)._containerData.ItemID[1]=9999;
+            Ok(!MercFetchNative.Target(terminal,out at,out reason)&&reason.Contains("no supported"),"unsupported goods distinguished from empty inventory");
+            Ok(Airfield.Inside(new Vector3(3990,0,-1690),0)&&Airfield.Inside(new Vector3(4820,0,1690),0)
+                &&!Airfield.Inside(new Vector3(4821,0,0),0),"exact fence bounds with no extra radius");
         }
         static void BenchRuntime(MercFetchJob j)
         {
@@ -372,7 +419,7 @@ namespace NextDayRevival
         }
         static void SetPhase(object run,int n){typeof(MercDriveRun).GetField("Phase",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(run,n);}
         public static int Main()
-        { try{CoreCases();RuntimeCases();}catch(Exception ex){failures++;Console.WriteLine(ex);}
+        { try{CoreCases();RuntimeCases();QuickfixCases();}catch(Exception ex){failures++;Console.WriteLine(ex);}
           Console.WriteLine("Z M5b production simulation: "+assertions+" assertions, "+failures+" failures");return failures==0?0:1; }
     }
 }

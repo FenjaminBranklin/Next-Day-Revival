@@ -165,6 +165,9 @@ $assets = @(
     "an2_body.ndmesh", "an2_glass.ndmesh", "an2_prop.ndmesh",
     "an2_aileron_l.ndmesh", "an2_aileron_r.ndmesh", "an2_elevator.ndmesh",
     "an2_rudder.ndmesh", "an2_diffuse.png", "an2_normal.png", "an2_rig.txt",
+    # Permanent amphibious kit; original plane sources are not required.
+    "an2_amphib_floats.ndmesh", "an2_amphib_main.ndmesh", "an2_amphib_rear.ndmesh",
+    "an2_amphib_diffuse.png", "an2_amphib_normal.png", "an2_amphib_rig.txt",
     "mg42.ndmesh", "mg42_diffuse.png", "mg42_normal.png", "mg42_metal.png",
     "mg42_rough.png", "mg42_icon.png", "mg42_weapon_icon.png",
     "sniper50.ndmesh", "sniper50_diffuse.png", "sniper50_normal.png",
@@ -189,6 +192,11 @@ $assets = @(
     # the item and the laid mine both read the metal map.
     "apmine.ndmesh", "apmine_diffuse.png", "apmine_normal.png", "apmine_metal.png",
     "apmine_rough.png", "apmine_icon.png",
+    # C4 charge (1493), remote detonator (1494), defuse kit (2078):
+    # c4_build.py; Revival.C4.cs.
+    "c4.ndmesh", "c4_diffuse.png", "c4_normal.png", "c4_icon.png",
+    "detonator.ndmesh", "detonator_diffuse.png", "detonator_normal.png", "detonator_icon.png",
+    "defusekit.ndmesh", "defusekit_diffuse.png", "defusekit_normal.png", "defusekit_icon.png",
     # Blender-built toxic crocodile boss in the Point 12 lake.
     "crocodile.ndmesh", "crocodile_diffuse.png", "crocodile_normal.png",
     # Its jaw/leg part map from the same Blender run (crocodile_build.py).

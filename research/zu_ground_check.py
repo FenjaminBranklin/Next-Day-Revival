@@ -89,7 +89,7 @@ namespace NextDayRevival {
  internal static class MapTools {public static GameObject LocalPlayer(){return null;}}
  internal static class GepardCrew {public static List<GameObject> Spieler(){return Crocodile.Live;}}
  internal static class NoFly {public static bool TownContains(Vector3 p){return true;}}
- internal static class RadarShadow {public static bool Visible(GameObject go){return true;}}
+ internal static class RadarShadow {public static bool Visible(GameObject go){return true;}public static float RangeFactor(GameObject go){return 1f;}}
  internal static class AirKills {public static int NextShotCredit;}
  internal static class GepardFx {public static void Muzzle(Vector3 p,Vector3 dir){}}
  internal static class VehicleShotSound {public static void Play(Vector3 p,bool heavy){}}
@@ -109,8 +109,11 @@ namespace NextDayRevival {
  internal static class FlakNet {public static int Sends;public static void SendPacket(float[] p,bool reliable){Sends++;}
   public static void SendShot(Flak.Gun g,Vector3 p,Vector3 dir,float life){}}
  internal class GunAmmo {public bool Limited;}
+ // This automatic-ground fixture has no player radar FIRE order.
+ internal static class RadarGround {internal static bool Control(Flak.Gun g,float dt,bool gunner,bool loader){return false;}}
  internal static class FlakAmmo {public static bool Ready(Flak.Gun g){return true;}public static int ShotActor(Flak.Gun g){return 3;}}
  internal static class Flak {
+  public static bool Dark(Gun g){return false;}
   public const float K=2.8f;public static Gun Current,_manned;public static int Shots,Publishes,Reloads,AirShots,GroundShots;
   public static GameObject LastShot;public const float ZoneMetres=4500,MaxFuze=20000;
   public static bool CfgTracers,CfgPuffs,CfgMuzzleFlash,CfgGunSound;
@@ -288,7 +291,7 @@ def main():
     sources = ['Revival.ZuGround.cs', 'Revival.ZuGroundCore.cs', 'Revival.ShortRange.cs',
                'Revival.VehicleScan.cs', 'Revival.MercCrewPhasesCore.cs',
                'Revival.ShortRangeCore.cs', 'Revival.MercAACore.cs',
-               'Revival.AARaidBalanceCore.cs', 'Revival.FlakEngageCore.cs']
+               'Revival.AARaidBalanceCore.cs', 'Revival.FlakEngageCore.cs', 'Revival.PowerNetCore.cs']
     flak_source = (ROOT / 'Revival.Flak.cs').read_text(encoding='utf-8')
     start = flak_source.index('        internal static void Search(Flak.Gun g)')
     end = flak_source.index('        static float Flak_Ceiling()', start)

@@ -503,7 +503,28 @@ namespace NextDayRevival
         }
 
         /// <summary>One pinned HTTPS GET. Null for 304 (unchanged).</summary>
-        static string Fetch(string address, string pin, string revision)
+        internal static string Fetch(string address, string pin, string revision)
+        {
+            return Transfer(address, pin, revision, null, null);
+        }
+
+        // Called on the portrait worker thread, never the frame/think path.
+        internal static string PortraitEndpoint(out string pin)
+        {
+            pin = _pin == null ? "" : _pin.Value;
+            string address = _url == null ? "" : _url.Value;
+            int cut = address.LastIndexOf("/runtime/routes", StringComparison.Ordinal);
+            return cut < 0 ? "" : address.Substring(0, cut) + "/runtime/merc-portraits";
+        }
+
+        internal static string UploadPortrait(string address, string pin, string ticket, byte[] png)
+        {
+            if (png == null || png.Length > 1024 * 1024 || !HexHash(ticket))
+                throw new IOException("Invalid portrait transfer");
+            return Transfer(address, pin, "", ticket, png);
+        }
+
+        static string Transfer(string address, string pin, string revision, string ticket, byte[] png)
         {
             Uri uri = new Uri(address);
             if (uri.Scheme != "https" || uri.UserInfo.Length != 0 || !HexHash(pin)
@@ -518,16 +539,25 @@ namespace NextDayRevival
                 SetOption(session, 84, 0x800); // WINHTTP_OPTION_SECURE_PROTOCOLS: TLS 1.2
                 connection = WinHttpConnect(session, uri.Host, (ushort)uri.Port, 0);
                 NativeCheck(connection != IntPtr.Zero, "connect");
-                request = WinHttpOpenRequest(connection, "GET", uri.PathAndQuery, null,
+                request = WinHttpOpenRequest(connection, png == null ? "GET" : "POST", uri.PathAndQuery, null,
                     null, IntPtr.Zero, 0x00800000); // WINHTTP_FLAG_SECURE
                 NativeCheck(request != IntPtr.Zero, "request");
                 SetOption(request, 63, 7); // Disable cookies, redirects and authentication.
                 // The exact leaf pin replaces CA/name trust for the editor's private
                 // certificate. Date and server-usage checks remain enforced by Windows.
                 SetOption(request, 31, 0x100 | 0x1000);
-                string headers = "If-None-Match: \"" + revision + "\"\r\n";
+                string headers = png == null ? "If-None-Match: \"" + revision + "\"\r\n"
+                    : "Content-Type: image/png\r\nX-NDR-Portrait: " + ticket + "\r\n";
                 NativeCheck(WinHttpSendRequest(request, headers, (uint)headers.Length,
-                    IntPtr.Zero, 0, 0, UIntPtr.Zero), "TLS/send");
+                    IntPtr.Zero, 0, png == null ? 0 : (uint)png.Length, UIntPtr.Zero), "TLS/send");
+                // Pin before sending image bytes. No global TLS callbacks.
+                CheckCertificate(request, pin);
+                if (png != null)
+                {
+                    uint written;
+                    NativeCheck(WinHttpWriteData(request, png, (uint)png.Length, out written), "portrait write");
+                    NativeCheck(written == png.Length, "portrait length");
+                }
                 NativeCheck(WinHttpReceiveResponse(request, IntPtr.Zero), "receive");
                 CheckCertificate(request, pin);
                 uint status, length = 4;
@@ -637,6 +667,8 @@ namespace NextDayRevival
             out uint value, ref uint size, IntPtr index);
         [DllImport("winhttp.dll", SetLastError = true)]
         static extern bool WinHttpReadData(IntPtr request, [Out] byte[] buffer, uint size, out uint read);
+        [DllImport("winhttp.dll", SetLastError = true)]
+        static extern bool WinHttpWriteData(IntPtr request, byte[] buffer, uint size, out uint written);
         [DllImport("winhttp.dll")]
         static extern bool WinHttpCloseHandle(IntPtr handle);
         [DllImport("crypt32.dll")]

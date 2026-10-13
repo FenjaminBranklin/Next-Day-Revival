@@ -404,6 +404,7 @@ namespace NextDayRevival
         internal sealed class Profile
         {
             internal string Settlement, Id, Name, WeaponLabel, ArmourLabel;
+            internal string PortraitKey;
             internal int Price, Upkeep, Weapon, Headwear, Mask, Body, Hands, Legs, Backpack;
             internal int Precise, Fast, Tanky, Level, Health, AAGunner;
             internal int HealthPercent = 0, ArmorPercent = -1;
@@ -523,6 +524,7 @@ namespace NextDayRevival
                 List<Profile> list = ParseProfiles(lines, out cap, out grace);
                 _profiles = list; _profileCap = cap; _profileGrace = grace;
                 _profileSource = source;
+                MercPortraits.ProfilesChanged(list);
                 RevivalPlugin.L.LogInfo("Mercs: " + list.Count + " hire profile(s) from " + source
                     + ", cap " + _profileCap + ", grace " + _profileGrace + " h.");
             }
@@ -656,6 +658,8 @@ namespace NextDayRevival
 
         /// <summary>Any merc of this client alive (M2: the danger feed idles without).</summary>
         internal static bool Any { get { return _units.Count > 0; } }
+        /// <summary>The mercs of this client (pb-4: the blast door opens for them).</summary>
+        internal static Dictionary<int, MercUnit>.ValueCollection AllUnits { get { return _units.Values; } }
 
         internal static MercUnit UnitOf(object ai)
         {
@@ -908,7 +912,9 @@ namespace NextDayRevival
                 // W: a server that answered with the roster in this game run
                 // has the module - a plain list then is the game's own and
                 // passes (our request is simply asked again).
-                if (_flight != null && !stashOpen && !_link.Answered)
+                // An empty list is another channel's answer (tower, aircraft) whose
+                // own prefix took its bag out - never a plain stash.
+                if (_flight != null && !stashOpen && !_link.Answered && list.Count > 0)
                 {
                     if (_support != 0)
                         RevivalPlugin.L.LogWarning("Mercs: the master server answered the roster request "
@@ -1618,6 +1624,7 @@ namespace NextDayRevival
 
         internal static void Tick()
         {
+            MercPortraits.Tick();
             MercUi.PollCommands();
             float now = Time.time;
             MercMates.Tick(now);            // W: only while the map is open, 1 Hz

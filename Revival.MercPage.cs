@@ -95,7 +95,7 @@ namespace NextDayRevival
         {
             internal Mercs.Profile P;
             internal string Name, Price, Upkeep, Weapon, Armour, Tier, Number, HireText, ConfirmText, Where;
-            internal string Initial, Description, DetailTip, Question;
+            internal string Initial, Description, DetailTip, Question, Vitals;
             internal int TierN;
             internal readonly string[] Chips = new string[4];
             internal readonly string[] ChipTips = new string[4];
@@ -155,6 +155,8 @@ namespace NextDayRevival
                     Loc.T("Точнее наводит 52-К, быстрее корректирует огонь и точнее ставит взрыватель. 25 - стандартный специалист. Исправный радар с оператором усиливает всю батарею.",
                         "Steadier 52-K aim, faster bracketing and tighter fuze timing. 25 is the standard specialist. A working, manned radar improves the whole battery."));
                 k.Initial = string.IsNullOrEmpty(k.Name) ? "?" : k.Name.Substring(0, 1);
+                float hp = MercVital.MaxHealth(p.Health, p.Tanky, MercGrade.Of(p.Precise, p.Fast, p.Tanky, p.Level), p.HealthPercent);
+                k.Vitals = "HP " + Mathf.RoundToInt(hp) + Loc.T("   Броня ", "   Armor ") + Mathf.RoundToInt(p.Protection * 100f) + "%";
                 k.Description = k.Upkeep + "\n" + k.Weapon + "\n" + k.Armour;
                 k.DetailTip = k.Description;
                 for (int c = 0; c < k.ChipCount; c++)
@@ -347,7 +349,7 @@ namespace NextDayRevival
                 if (r.yMax < 0f || r.y > view.height) continue;
                 Card k = _cards[i];
                 if (VanillaSkin.Row(r, i == _pickedHire)) _pickedHire = i;
-                VanillaSkin.Plate(new Rect(r.x + S(8f), r.y + S(5f), S(48f), S(48f)), k.Initial, TierColor(k.TierN), 26f);
+                Portrait(new Rect(r.x + S(8f), r.y + S(5f), S(48f), S(48f)), k, 26f);
                 VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(4f), S(200f), S(24f)), k.Name, VanillaSkin.Regular, 18f, VanillaSkin.Left, VanillaSkin.White);
                 VanillaSkin.Text(new Rect(r.x + S(65f), r.y + S(30f), S(200f), S(20f)), k.Tier, VanillaSkin.Regular, 14f, VanillaSkin.Left, VanillaSkin.Grey);
                 // The row art's ruble mark starts at 379: the price ends before it.
@@ -376,12 +378,24 @@ namespace NextDayRevival
             }
         }
 
+        static void Portrait(Rect rect, Card k, float initialSize)
+        {
+            MercPortraits.Entry entry = MercPortraits.For(k.P);
+            if (entry != null && entry.Texture != null)
+            {
+                if (Event.current.type == EventType.Repaint)
+                    GUI.DrawTexture(rect, entry.Texture, ScaleMode.ScaleToFit, false);
+            }
+            else VanillaSkin.Plate(rect, k.Initial, TierColor(k.TierN), initialSize);
+        }
+
         static void HireDetail(Card k, int block, int lang, float now)
         {
             Mercs.Profile p = k.P;
             VanillaSkin.Text(VanillaSkin.Px(40f, 9f, 348f, 22f), k.Name, VanillaSkin.Regular, 20f, VanillaSkin.Right, VanillaSkin.White);
-            VanillaSkin.Plate(VanillaSkin.Px(71f, 29f, 300f, 300f), k.Initial, TierColor(k.TierN), 76f);
+            Portrait(VanillaSkin.Px(71f, 29f, 300f, 300f), k, 76f);
             VanillaSkin.Text(VanillaSkin.Px(85f, 39f, 272f, 26f), k.Tier, VanillaSkin.Bebas, 22f, VanillaSkin.Center, VanillaSkin.White);
+            VanillaSkin.Text(VanillaSkin.Px(85f, 259f, 272f, 22f), k.Vitals, VanillaSkin.Regular, 14f, VanillaSkin.Center, VanillaSkin.White);
             VanillaSkin.Bar(VanillaSkin.Px(85f, 282f, 272f, 6f), p.Protection, VanillaSkin.Green);
             VanillaSkin.Paragraph(VanillaSkin.Px(40f, 351f, 366f, 84f), k.Description, 14f, VanillaSkin.Grey);
             MercPageLook.Tip(VanillaSkin.Px(40f, 351f, 366f, 84f), k.DetailTip);

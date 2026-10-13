@@ -380,9 +380,11 @@ namespace NextDayRevival
     {
         internal static ConfigEntry<bool> CfgEnabled;
         internal static ConfigEntry<string> CfgKey;
-        internal static ConfigEntry<float> CfgBigHealth, CfgSmallHealth, CfgBigUnits, CfgSmallUnits;
+        internal static ConfigEntry<float> CfgBigUnits, CfgSmallUnits;
         internal static ConfigEntry<float> CfgRefillMinutes, CfgRespawnMinutes, CfgBurnMinutes;
-        internal static ConfigEntry<float> CfgBulletDamage, CfgExplosionFactor, CfgBlastDamage, CfgBlastRadius;
+        internal static ConfigEntry<float> CfgBlastDamage, CfgBlastRadius;
+        internal static ConfigEntry<float> CfgHeavyBlast, CfgMediumBlast, CfgBurstSeconds;
+        internal static ConfigEntry<int> CfgTankHits, CfgBurstHits;
         internal static ConfigEntry<float> CfgRange, CfgVehicleRange, CfgSeconds;
         internal static ConfigEntry<int> CfgEventCode;
 
@@ -393,17 +395,24 @@ namespace NextDayRevival
                 "The POL depot of the east airfield (D1): five big tanks with health and a "
                 + "finite fuel pool. Acts only with [World] EastTile.");
             CfgKey = cfg.Bind(S, "Key", "G", "Key on foot at the depot: refuel the nearest vehicle, else fill a canister.");
-            CfgBigHealth = cfg.Bind(S, "BigTankHealth", 2000f, "Health of each of the two vertical tanks (a BTR has 2000).");
-            CfgSmallHealth = cfg.Bind(S, "SmallTankHealth", 1200f, "Health of each of the three horizontal tanks.");
+            // Power 3: fragile tanks - a few heavy hits, not a health bar.
+            CfgTankHits = cfg.Bind(S, "TankHits", FuelDepotCore.DefaultTankHits,
+                "Hit points of each tank. A heavy hit (bomb, artillery, Katyusha, C4, tank shell blast) costs 2, "
+                + "a medium hit (tank shell, FPV drone, LAW, heavy MG burst) costs 1. Small arms and grenades never count.");
+            CfgHeavyBlast = cfg.Bind(S, "HeavyBlastDamage", FuelDepotCore.DefaultHeavyBlast,
+                "A native explosion with at least this ExplosionDamage is a heavy hit on a tank.");
+            CfgMediumBlast = cfg.Bind(S, "MediumBlastDamage", FuelDepotCore.DefaultMediumBlast,
+                "A native explosion with at least this ExplosionDamage is a medium hit (grenades stay below).");
+            CfgBurstHits = cfg.Bind(S, "BurstHits", FuelDepotCore.DefaultBurstHits,
+                "Firearm hits on one tank within BurstSeconds that make one medium hit (a heavy MG burst). 0 = bullets never count.");
+            CfgBurstSeconds = cfg.Bind(S, "BurstSeconds", FuelDepotCore.DefaultBurstSeconds, "Window of such a burst.");
             CfgBigUnits = cfg.Bind(S, "BigTankUnits", 6000f, "Fuel units a vertical tank adds to the pool (a canister is 100).");
             CfgSmallUnits = cfg.Bind(S, "SmallTankUnits", 2500f, "Fuel units a horizontal tank adds to the pool.");
             CfgRefillMinutes = cfg.Bind(S, "RefillMinutes", 120f, "Real minutes in which an empty pool fills up again.");
             CfgRespawnMinutes = cfg.Bind(S, "RespawnMinutes", 60f,
-                "Real minutes a destroyed tank stays empty and dead before it stands again (empty, then filling).");
-            CfgBurnMinutes = cfg.Bind(S, "BurnMinutes", 8f, "How long a destroyed tank burns and smokes ([Effects] Fire).");
-            CfgBulletDamage = cfg.Bind(S, "BulletDamage", 5f, "Health one firearm hit takes from a tank.");
-            CfgExplosionFactor = cfg.Bind(S, "ExplosionFactor", 1f,
-                "Explosion damage x this x (1 - distance / radius) goes onto a tank.");
+                "Real minutes a destroyed tank stays a wreck before it is repaired (it stands again empty, then fills).");
+            CfgBurnMinutes = cfg.Bind(S, "BurnMinutes", 8f,
+                "How long a destroyed tank's smoke column rises ([Effects] Fire switches it off). There is no fire.");
             CfgBlastDamage = cfg.Bind(S, "BlastDamage", 400f,
                 "Damage of the explosion of a destroyed tank (the game's grenade blast; can set a neighbour off). 0 = fire only.");
             CfgBlastRadius = cfg.Bind(S, "BlastRadius", 30f, "Radius of that explosion.");
@@ -422,8 +431,13 @@ namespace NextDayRevival
             internal bool Big;          // vertical: cylinder; else a box along world X
             internal float Health;
             internal float RespawnAt;   // master clock; 0 = standing
-            internal float BurnUntil;   // local clock
-            internal GameObject Fire;
+            internal float BurnUntil;   // local clock: the smoke column rises until then
+            internal GameObject Fire;   // Power 3: the smoke anchor (AircraftCrashFx plume), no fire
+            internal float LastHitAt;   // master clock, one bill per impact
+            internal int BurstCount;    // firearm hits in the current burst (shooter's client)
+            internal float BurstSince;
+            internal Vector3 Scale;     // the standing model's localScale (the wreck is squashed)
+            internal bool Wrecked;
             internal bool HaveY;
             internal float Y;
             internal GameObject Model;
@@ -454,7 +468,7 @@ namespace NextDayRevival
             get { return CfgEnabled != null && CfgEnabled.Value && EastWorld.On; }
         }
 
-        static float MaxHealth(TankDef t) { return t.Big ? CfgBigHealth.Value : CfgSmallHealth.Value; }
+        static float MaxHealth(TankDef t) { return Mathf.Max(1, CfgTankHits.Value); }
         static float Units(TankDef t) { return Mathf.Max(0f, t.Big ? CfgBigUnits.Value : CfgSmallUnits.Value); }
         static bool Intact(TankDef t) { return t.Health > 0f; }
 
@@ -691,24 +705,41 @@ namespace NextDayRevival
 
         /// <summary>Any client: an explosion at `point`. The public door for a
         /// weapon that does not go through the game's ExplosionObject (an An-2
-        /// bomb, for instance); everything that does is caught by ExplodePostfix.</summary>
+        /// bomb, for instance); everything that does is caught by ExplodePostfix.
+        /// Power 3: the damage picks the hit class, the radius widens the reach.</summary>
         public static void Blast(Vector3 point, float damage, float radius)
         {
             if (!Active || damage <= 0f || radius <= 0f) return;
+            int cls = FuelDepotCore.BlastClass(damage, CfgHeavyBlast.Value, CfgMediumBlast.Value);
+            if (cls == FuelDepotCore.HitLight) return;
+            Hits(point, cls, radius);
+        }
+
+        /// <summary>Power 3: tagged ordnance (PowerNet.Strike: bombs, artillery,
+        /// Katyusha heavy; tank shells, FPV drones medium) at `at`.</summary>
+        internal static void Strike(Vector3 at, int cls)
+        {
+            if (!Active || FuelDepotCore.Cost(cls) == 0) return;
+            Vector3 flat = at - Centre; flat.y = 0f;
+            if (flat.sqrMagnitude > 200f * 200f) return;
+            Hits(at, cls, 0f);
+        }
+
+        static void Hits(Vector3 point, int cls, float radius)
+        {
             EnsureInit();
+            const float K = PowerNetCore.K;
             for (int i = 0; i < _tanks.Length; i++)
             {
                 TankDef t = _tanks[i];
                 if (!Intact(t) || !TankY(t)) continue;
-                float d = Distance(t, point);
-                if (d >= radius) continue;
-                float dmg = damage * Mathf.Max(0f, CfgExplosionFactor.Value) * (1f - d / radius);
-                if (dmg > 0.5f) Report(i, dmg);
+                if (FuelDepotCore.Counts(cls, Distance(t, point) / K, radius / K)) Report(i, FuelDepotCore.Cost(cls));
             }
         }
 
         /// <summary>Postfix on ExplosionObject::Explode - that runs on the
-        /// explosion's owner only, so one report per bang.</summary>
+        /// explosion's owner only, so one report per bang. C4, LAW, mines and
+        /// tank shells are big enough to count; grenades are not.</summary>
         public static void ExplodePostfix(object __instance)
         {
             try
@@ -731,12 +762,14 @@ namespace NextDayRevival
 
         /// <summary>Postfix on PlayerFirearmWeaponController::FireOneShot:
         /// the shooter's camera ray against the tanks, blocked by whatever
-        /// stands closer (the same line the drone hit uses).</summary>
+        /// stands closer (the same line the drone hit uses). Power 3: single
+        /// bullets do nothing; BurstHits of them in BurstSeconds (a heavy MG
+        /// burst) make one medium hit.</summary>
         public static void ShotPostfix(object __instance)
         {
             try
             {
-                if (!Active || __instance == null) return;
+                if (!Active || __instance == null || CfgBurstHits.Value <= 0) return;
                 if (Stinger.IsStinger(__instance) || Drone.Flying) return;
                 if (!Mine(__instance)) return;      // a remote copy of somebody's gun
                 if (!_cameraLooked)
@@ -764,7 +797,9 @@ namespace NextDayRevival
                 if (Physics.Raycast(o + d * 0.5f, d, out hit, bestT, ~0, QueryTriggerInteraction.Ignore)
                     && hit.distance < bestT - 3f && Distance(_tanks[best], hit.point) > 3f)
                     return;         // something else stopped the bullet first
-                Report(best, Mathf.Max(0f, CfgBulletDamage.Value));
+                TankDef b = _tanks[best];
+                if (FuelDepotCore.Burst(ref b.BurstCount, ref b.BurstSince, Time.time, CfgBurstHits.Value, Mathf.Max(0.1f, CfgBurstSeconds.Value)))
+                    Report(best, FuelDepotCore.Cost(FuelDepotCore.HitMedium));
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("FuelDepot shot: " + ex.Message); }
         }
@@ -782,6 +817,32 @@ namespace NextDayRevival
             catch { return true; }
         }
 
+        /// <summary>`dmg` is the hit's cost in tank hit points (1 medium, 2 heavy).</summary>
+        /// <summary>Power 5 (Sabotage.C4Chain): a C4 charge on tank i - it is
+        /// destroyed (master; a client's report goes to the master). True when
+        /// it was standing.</summary>
+        internal static bool Demolish(int i)
+        {
+            if (!Active) return false;
+            EnsureInit();
+            if (i < 0 || i >= _tanks.Length || !Intact(_tanks[i])) return false;
+            Report(i, FuelDepotCore.DemolishCost);
+            return true;
+        }
+
+        /// <summary>Power 5: the base of tank i (model x/z, seated height), the
+        /// frame of its sabotage point.</summary>
+        internal static bool TankBase(int i, out Vector3 at)
+        {
+            at = Vector3.zero;
+            if (!Active || i < 0 || i >= _tanks.Length) return false;
+            EnsureInit();
+            TankDef t = _tanks[i];
+            if (!TankY(t)) return false;
+            at = new Vector3(t.Pos.x, t.Y, t.Pos.z);
+            return true;
+        }
+
         static void Report(int tank, float dmg)
         {
             if (dmg <= 0f) return;
@@ -789,24 +850,31 @@ namespace NextDayRevival
             else Send(OpDamage, new float[] { tank, dmg });
         }
 
-        /// <summary>Master: health down; at zero the tank blows.</summary>
+        /// <summary>Master: hit points down; at zero the tank blows.</summary>
         static void Damage(int i, float dmg)
         {
             EnsureInit();
             if (i < 0 || i >= _tanks.Length || dmg <= 0f) return;
             TankDef t = _tanks[i];
             if (!Intact(t)) return;
+            // Power 5: a C4 charge on the tank (Demolish) destroys it outright.
+            bool demolish = dmg >= FuelDepotCore.DemolishCost;
+            // One impact reported by two hooks (or shooter and echo) is billed once.
+            if (!demolish && FuelDepotCore.SameImpact(t.LastHitAt, Time.time)) return;
+            t.LastHitAt = Time.time;
             float capBefore = Capacity;
-            t.Health = Mathf.Max(0f, t.Health - Mathf.Min(dmg, 100000f));
+            float points = t.Health;
+            bool gone = demolish ? FuelDepotCore.Demolish(ref points)
+                : FuelDepotCore.Hit(ref points, dmg >= 2f ? FuelDepotCore.HitHeavy : FuelDepotCore.HitMedium);
+            t.Health = points;
             _dirty = true;
-            if (t.Health > 0f)
+            if (!gone)
             {
-                if (Time.time > _nextDamageLog) { _nextDamageLog = Time.time + 1f; RevivalPlugin.L.LogInfo("FuelDepot: tank " + t.Id + " health " + Mathf.RoundToInt(t.Health) + "."); }
+                RevivalPlugin.L.LogInfo("FuelDepot: tank " + t.Id + " hit, " + Mathf.RoundToInt(t.Health) + " hit points left.");
                 return;
             }
-            // Its share of what is in the pool burns with it.
-            if (capBefore > 0f) _pool = Mathf.Max(0f, _pool - _pool * Units(t) / capBefore);
-            _pool = Mathf.Min(_pool, Capacity);
+            // Its share of what is in the pool is lost with it.
+            _pool = FuelDepotCore.PoolAfterLoss(_pool, Units(t), capBefore);
             t.RespawnAt = Time.time + Mathf.Max(1f, CfgRespawnMinutes.Value) * 60f;
             RevivalPlugin.L.LogInfo("FuelDepot: tank " + t.Id + " destroyed - " + IntactCount + "/" + _tanks.Length
                 + " left, pool " + Mathf.RoundToInt(_pool) + " / " + Mathf.RoundToInt(Capacity) + ".");
@@ -815,46 +883,51 @@ namespace NextDayRevival
             float bd = CfgBlastDamage.Value;
             if (bd > 0f && TankY(t))
             {
+                // The game's own blast; below MediumBlastDamage it cannot set a neighbour off.
                 try { RocketHook.Detonate(Middle(t), bd, Mathf.Max(1f, CfgBlastRadius.Value), 3f); }
                 catch (Exception ex) { RevivalPlugin.L.LogWarning("FuelDepot blast: " + ex.Message); }
             }
             Broadcast();
         }
 
-        static float _nextDamageLog;
-
         // -------------------------------------------------------------- FX
 
-        /// <summary>Every client: the fireball (fresh) and the burning wreck.</summary>
+        /// <summary>Every client: the wreck and its smoke column (the aircraft
+        /// crash plume). Power 3: no fire, no fireball, nothing spreads.</summary>
         static void Explode(int i, bool fresh)
         {
             TankDef t = _tanks[i];
             float burn = Mathf.Max(0f, CfgBurnMinutes.Value) * 60f;
             if (fresh) t.BurnUntil = Time.time + burn;
+            Wreck(t, true);
             if (RevivalPlugin.CfgFire == null || !RevivalPlugin.CfgFire.Value) return;
             if (!TankY(t)) return;
             try
             {
-                if (fresh) FireEffect.SpawnHeliBlast(Middle(t), t.Big ? 40f : 28f);
                 if (t.Fire == null && Time.time < t.BurnUntil)
                 {
                     float top = t.Shell != null ? t.Bounds.max.y : t.Y + (t.Big ? BigH : SmallH);
-                    t.Fire = new GameObject("NDR FuelDepot fire " + t.Id);
-                    t.Fire.transform.position = new Vector3(t.Pos.x, top - 1.9f, t.Pos.z);
-                    Anchor(t.Fire, Vector3.zero);
-                    if (t.Big) { Anchor(t.Fire, new Vector3(6f, 0f, 0f)); Anchor(t.Fire, new Vector3(-6f, 0f, 0f)); }
-                    else { Anchor(t.Fire, new Vector3(9f, 0f, 0f)); Anchor(t.Fire, new Vector3(-9f, 0f, 0f)); }
+                    t.Fire = new GameObject("NDR FuelDepot smoke " + t.Id);
+                    t.Fire.transform.position = new Vector3(t.Pos.x, top, t.Pos.z);
+                    AircraftCrashFx.StartSmoke(t.Fire, (t.Big ? 1.4f : 1f) * RevivalTroopInsertion.K);
                 }
             }
-            catch (Exception ex) { RevivalPlugin.L.LogWarning("FuelDepot fire: " + ex.Message); }
+            catch (Exception ex) { RevivalPlugin.L.LogWarning("FuelDepot smoke: " + ex.Message); }
         }
 
-        static void Anchor(GameObject root, Vector3 offset)
+        /// <summary>Every client, on change only: a destroyed tank stands
+        /// squashed as a wreck until it is repaired.</summary>
+        static void Wreck(TankDef t, bool wrecked)
         {
-            GameObject a = new GameObject("anchor");
-            a.transform.position = root.transform.position + offset;
-            a.transform.parent = root.transform;
-            FireEffect.SpawnWreck(a, true);
+            if (t.Wrecked == wrecked || t.Model == null) return;
+            Transform m = t.Model.transform;
+            if (wrecked)
+            {
+                t.Scale = m.localScale;
+                m.localScale = new Vector3(t.Scale.x, t.Scale.y * (t.Big ? 0.45f : 0.6f), t.Scale.z);
+            }
+            else m.localScale = t.Scale;
+            t.Wrecked = wrecked;
         }
 
         static void TickFire()
@@ -862,14 +935,15 @@ namespace NextDayRevival
             for (int i = 0; i < _tanks.Length; i++)
             {
                 TankDef t = _tanks[i];
+                if (t.Wrecked == Intact(t)) Wreck(t, !Intact(t));
                 if (t.Fire == null)
                 {
                     if (!Intact(t) && Time.time < t.BurnUntil) Explode(i, false);
                     continue;
                 }
                 if (Time.time < t.BurnUntil && !Intact(t)) continue;
-                FireEffect.StopEmitting(t.Fire);
-                UnityEngine.Object.Destroy(t.Fire, 30f);
+                AircraftCrashFx.Stop(t.Fire);
+                UnityEngine.Object.Destroy(t.Fire);
                 t.Fire = null;
             }
         }
@@ -1162,6 +1236,69 @@ namespace NextDayRevival
 
         static bool FindCan(out object inv, out int slot, out float energy)
         {
+            return FindCan(CanArgs, out inv, out slot, out energy);
+        }
+
+        // Power 2: hand refuelling of a generator day tank from a canister.
+        static readonly object[] AnyCanArgs = { false };
+
+        /// <summary>A canister with fuel in the local pack?</summary>
+        internal static bool HasFuelCan()
+        {
+            object inv; int slot; float energy;
+            return FindCan(AnyCanArgs, out inv, out slot, out energy) && energy > 0.5f;
+        }
+
+        // Power 3: a fuel truck (any vehicle with fuel) parked at a generator's
+        // day tank. Runs on a key press only, never per frame.
+        static Component FuelledVehicle(Vector3 p)
+        {
+            if (FuelBalance.VgsType == null || !FuelBalance.LookUp()) return null;
+            UnityEngine.Object[] all = VehicleScan.All();
+            Component best = null;
+            float bestD = Mathf.Max(3f, CfgVehicleRange.Value);
+            for (int i = 0; i < all.Length; i++)
+            {
+                Component v = all[i] as Component;
+                if (v == null || FuelBalance.Fuel(v) <= 0.5f) continue;
+                float dist = Vector3.Distance(v.transform.position, p);
+                if (dist < bestD) { bestD = dist; best = v; }
+            }
+            return best;
+        }
+
+        internal static bool HasVehicleFuel(Vector3 p)
+        {
+            return FuelledVehicle(p) != null;
+        }
+
+        /// <summary>Take up to `units` out of the nearest fuelled vehicle at
+        /// `p` (the game's SetFuelValue RPC); returns what was taken.</summary>
+        internal static float PourFromVehicle(Vector3 p, float units)
+        {
+            Component v = units > 0f ? FuelledVehicle(p) : null;
+            if (v == null) return 0f;
+            float have = FuelBalance.Fuel(v);
+            float take = Mathf.Min(units, have);
+            if (take <= 0f || !FuelBalance.SetFuel(v, have - take)) return 0f;
+            return take;
+        }
+
+        /// <summary>Pour up to `units` out of a canister in the local pack
+        /// (the game's FillItemJerryCan); returns what was poured.</summary>
+        internal static float PourFromCan(float units)
+        {
+            object inv; int slot; float energy;
+            if (units <= 0f || !FindCan(AnyCanArgs, out inv, out slot, out energy) || energy <= 0.5f) return 0f;
+            MethodInfo fill = AccessTools.Method(inv.GetType(), "FillItemJerryCan", new Type[] { typeof(int), typeof(float) }, null);
+            if (fill == null) return 0f;
+            float take = Mathf.Min(units, energy);
+            fill.Invoke(inv, new object[] { slot, energy - take });
+            return take;
+        }
+
+        static bool FindCan(object[] args, out object inv, out int slot, out float energy)
+        {
             inv = null; slot = -1; energy = 0f;
             List<object> invs = Turret.PlayerInventories();
             for (int i = 0; i < invs.Count; i++)
@@ -1176,7 +1313,7 @@ namespace NextDayRevival
                 }
                 MethodInfo find = _canFind;
                 if (find == null) continue;
-                int s = (int)find.Invoke(pim, CanArgs);
+                int s = (int)find.Invoke(pim, args);
                 if (s < 0) continue;
                 FieldInfo bp = _canBackpack;
                 object data = bp == null ? null : bp.GetValue(pim);

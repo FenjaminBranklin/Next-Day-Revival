@@ -64,12 +64,13 @@ namespace NextDayRevival
                 if (g.Rounds < 0) g.Rounds = ShortRangeCore.Magazine;
                 g.NextLook = Time.time + (g.Index & 3) * 0.125f;
             }
+            if (RadarGround.Control(g, dt, gunner, loader)) return;
             if (Time.time >= g.NextLook)
             {
                 g.NextLook = Time.time + 0.5f;
                 FlakFire.Search(g);
             }
-            bool radar = MercAA.Directed(g);
+            bool radar = MercAA.Directed(g), dark = Flak.Dark(g);
             FlakFire.FollowAll(g.Air, dt, ShortRangeCore.Lag * (radar ? 1.5f : 1f));
             if (ZuGround.Control(g, dt, gunner, loader)) return;
             GepardGun.Contact t = g.Target;
@@ -94,7 +95,9 @@ namespace NextDayRevival
                 g.CueHeld = 0f;
                 g.DrySaid = false;
                 g.ShortBurst = new ShortBurst();
-                g.Err = FlakFire.Offset(t, mid, ShortRangeCore.Initial(dist, drone));
+                float initial = ShortRangeCore.Initial(dist, drone);
+                // Power 2: an unpowered ZU lays by eye with a much wider first burst.
+                g.Err = FlakFire.Offset(t, mid, dark ? PowerNetCore.DarkInitial(initial) : initial);
                 g.LastVel = t.Vel;
                 Flak.RaiseEngaging(g, t.Go);
             }
@@ -109,7 +112,7 @@ namespace NextDayRevival
             g.FuzeRange = Mathf.Min(Vector3.Distance(mid, aim), ShortRangeCore.RangeM * Flak.K);
             g.Held += dt;
             bool ready = AARaidBalanceCore.CanFire(Vector3.Distance(mid, t.Go.transform.position), true)
-                && FlakAmmo.Ready(g) && pitch >= ZuGroundCore.MinPitch && pitch <= 90f && g.Held >= ShortRangeCore.Reaction(radar, drone)
+                && FlakAmmo.Ready(g) && pitch >= ZuGroundCore.MinPitch && pitch <= 90f && g.Held >= ShortRangeCore.Reaction(radar, drone) * (dark ? PowerNetCore.DarkReaction : 1f)
                 && g.Mode != FlakMode.HoldFire && !g.Reloading
                 && Vector3.Angle(g.Cradle.forward, aim - mid) < 1.5f;
             bool corrected;
@@ -117,7 +120,8 @@ namespace NextDayRevival
                 MercAACore.CadenceScale(operatorMerc != null, radar), out corrected);
             if (corrected)
             {
-                float size = ShortRangeCore.Correct(g.Err.magnitude, dist, radar, drone);
+                float size = dark ? PowerNetCore.DarkCorrect(g.Err.magnitude, dist, drone ? 0.7f : ShortRangeCore.FloorMil)
+                    : ShortRangeCore.Correct(g.Err.magnitude, dist, radar, drone);
                 g.Err = g.Err.sqrMagnitude > 0.001f ? g.Err.normalized * size : FlakFire.Offset(t, mid, size);
                 g.Err += UnityEngine.Random.onUnitSphere * ShortRangeCore.Evasion((t.Vel - g.LastVel).magnitude, tof);
                 g.LastVel = t.Vel;

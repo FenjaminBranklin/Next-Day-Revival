@@ -465,6 +465,8 @@ namespace NextDayRevival
             // W AA1: town crews always work by eye; an airfield gun's side is its
             // holder's (it changes on capture), a merc crew's its own.
             if (g.Town) return false;
+            // Power 2: an unpowered gun has no radar direction or cue.
+            if (Flak.Dark(g)) return false;
             MercAAPost gun = Gun(g.Index), radar = Operator;
             int side = gun == null ? Flak.OwnerSide(g) : gun.Side;
             return TowerRadar.Working && ((radar != null && radar.Side == side)
@@ -485,6 +487,8 @@ namespace NextDayRevival
             c.Reaction *= (Flak.CfgReaction == null ? 3f : Flak.CfgReaction.Value) / 3f;
             c.InitialMil *= Flak.DirError / (Flak.RadarDirected ? 0.55f : 1f);
             c.Reaction *= Flak.DirReaction / (Flak.RadarDirected ? 0.45f : 1f);
+            // Power 2: without power the crew lays by eye, close in, badly.
+            if (Flak.Dark(g)) c = PowerNetCore.Dark(c);
             return c;
         }
 

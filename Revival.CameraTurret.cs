@@ -52,6 +52,7 @@ namespace NextDayRevival
         public const int Gepard = 6;       // the Gepard's sight (RevivalGepard.cs)
         public const int An2 = 7;          // the An-2 a player flies (Revival.PlayerAn2.cs)
         public const int Flak = 8;         // the airfield's ZU-23-2 sight (Revival.Flak.cs)
+        public const int AirGun = 9;       // an aircraft gun station (Revival.AirGunners.cs)
 
         /// <summary>
         /// Skripte, die die Kamera bewegen und deshalb waehrend einer
@@ -264,6 +265,7 @@ namespace NextDayRevival
             else if (_owner == Gepard) GepardGun.LateTick();
             else if (_owner == An2) PlayerAn2.LateTick();
             else if (_owner == Flak) NextDayRevival.Flak.LateTick();
+            else if (_owner == AirGun) AirGunners.LateTick();
         }
 
         /// <summary>
@@ -1624,6 +1626,7 @@ namespace NextDayRevival
                 {
                     RocketHook.Detonate(impact - dir * 0.15f,
                         Sprengschaden(), Sprengradius(), 3f);
+                    PowerNet.Strike(impact - dir * 0.15f, PowerNetCore.HitMedium);   // Power 2: tank shell
                     // P11: the NPCs the game's blast cannot reach (frozen,
                     // ragdoll collision off) get the same profile here.
                     ShellSplash.SweepFrozen(impact - dir * 0.15f,
@@ -2082,6 +2085,7 @@ namespace NextDayRevival
                 object inv = invs[i];
                 int vorher = CountItem(inv, wanted);
                 if (vorher <= 0) continue;
+                if (wanted == TowerDeliveryCore.ShellId) return ShellStacks.TakeRound(inv);
 
                 MethodInfo remove = AccessTools.Method(inv.GetType(), "RemoveItem",
                     new Type[] { typeof(int), typeof(int) }, null);
@@ -2611,6 +2615,18 @@ namespace NextDayRevival
                 }
             }
 
+            /// <summary>An air gunner's message (Revival.AirGunners.cs, actions
+            /// -6/-7/-8) on this channel; nothing without a hooked channel.</summary>
+            internal static void PublishAir(float[] data, bool reliable)
+            {
+                if (!_hooked || data == null) return;
+                try { Send(data, reliable); }
+                catch (Exception ex)
+                {
+                    RevivalPlugin.L.LogWarning("Air gunner network send: " + ex.Message);
+                }
+            }
+
             internal static void PublishTechnicalShot(Vector3 point)
             {
                 if (!_hooked) return;
@@ -2689,6 +2705,13 @@ namespace NextDayRevival
                     float[] data = content as float[];
                     if (data == null || data.Length < 3) return;
                     int action = Mathf.RoundToInt(data[0]);
+                    // Air gunners (Revival.AirGunners.cs): -6 rounds, -7 a
+                    // station claim, -8 the pilot's mark.
+                    if (action == -6 || action == -7 || action == -8)
+                    {
+                        AirGunners.OnNet(data, sender);
+                        return;
+                    }
                     if (action == -2 && data.Length >= 5)
                     {
                         Vector3 point = new Vector3(data[2], data[3], data[4]);

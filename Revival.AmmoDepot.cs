@@ -19,7 +19,7 @@ namespace NextDayRevival
         static readonly string[][] LabelsRu = Labels(true), LabelsEn = Labels(false);
         static readonly Dictionary<int, float> RequestNext = new Dictionary<int, float>();
         static float _next, _snapshotNext, _jobEnd, _lootNext;
-        static int _host = -1, _sent = -1, _request, _job, _jobTruck, _workTicket, _workGun, _workLimit, _workCount;
+        static int _host = -1, _sent = -1, _request, _job, _jobTruck, _workTicket, _workGun, _workLimit, _workCount, _workUnits;
         static int _workActor, _workHost, _workSeenHost = -1, _workSeenTicket;
         static bool _ready, _near, _dispatched;
         static AmmoDepotCargo.Truck _truck, _working;
@@ -239,7 +239,7 @@ namespace NextDayRevival
             if (_workHost != MercAA.MasterActor() || _working.Owner != Crocodile.LocalActor()
                 || !_working.Parked || _working.Busy || (_workGun < 0 ? !UnloadValid(_working, _workActor) : !GunTruckValid(_working, _workGun, _workActor)))
             { FinishWork(); return; }
-            if (_workCount >= _workLimit || _working.Ids == null) { FinishWork(); return; }
+            if (_workCount >= _workLimit || _workUnits >= _workLimit || _working.Ids == null) { FinishWork(); return; }
             int item = _workGun < 0 ? 0 : Flak.ByIndex(_workGun) == null ? -1 : Flak.ByIndex(_workGun).ShortRange ? 2077 : 2076;
             int walked = 0;
             while (_working.Scan < _working.Ids.Length && walked++ < 16)
@@ -247,7 +247,15 @@ namespace NextDayRevival
                 int slot = _working.Scan++;
                 DepotGood good = _working.Good(slot);
                 if (!DepotStore.Valid(good) || (item != 0 && good.Id != item)) continue;
+                int units = _workGun < 0 && good.Id == 2076 ? Math.Max(1, good.Bullets) : 1;
+                if (units > _workLimit - _workUnits) continue;
+                if (_workGun >= 0 && good.Id == 2076)
+                {
+                    Flak.Gun gun = Flak.ByIndex(_workGun);
+                    if (gun == null || gun.Ammo.Stock > FlakAmmoStock.Capacity(false) - Math.Max(1, good.Bullets)) continue;
+                }
                 if (!_working.Remove(slot)) { FinishWork(); return; }
+                _workUnits += units;
                 // At most one native RPC/removal per frame. No rounds loop.
                 Array.Clear(Packet, 0, Packet.Length);
                 Packet[0] = Item; Packet[1] = _workTicket; Packet[2] = _workActor; Packet[4] = _working.View;
@@ -307,7 +315,7 @@ namespace NextDayRevival
                 if (_workSeenHost == host && ticket <= _workSeenTicket) return;
                 _workSeenHost = host; _workSeenTicket = ticket;
                 _working = truck; _working.Scan = 0; _workTicket = ticket; _workGun = gun; _workActor = actor;
-                _workHost = host; _workLimit = (int)f[6]; _workCount = 0; return;
+                _workHost = host; _workLimit = (int)f[6]; _workCount = _workUnits = 0; return;
             }
             if (kind == Accepted && sender == host && actor == Crocodile.LocalActor())
             {
@@ -352,9 +360,9 @@ namespace NextDayRevival
                 DepotGood good = ReadGood(f, 9);
                 Flak.Gun g = gun < 0 ? null : Flak.ByIndex(gun);
                 if (gun >= 0 && (!SupplyGun(g, actor) || good.Id != (g.ShortRange ? 2077 : 2076)
-                    || g.Ammo.Stock > FlakAmmoStock.Capacity(g.ShortRange) - (g.ShortRange ? 100 : 1))) return;
+                    || g.Ammo.Stock > FlakAmmoStock.Capacity(g.ShortRange) - (g.ShortRange ? 100 : Math.Max(1, good.Bullets)))) return;
                 if (Store.Receipt(sender, ticket, (int)f[8], Time.time, good))
-                { if (g != null) Credit(g, g.ShortRange ? 100 : 1); else Broadcast(); }
+                { if (g != null) Credit(g, g.ShortRange ? 100 : Math.Max(1, good.Bullets)); else Broadcast(); }
             }
             else if (kind == Done || kind == Cancel)
             {
@@ -399,7 +407,7 @@ namespace NextDayRevival
                 for (int i = 0; i < Store.Count; i++)
                 {
                     int id = Store.Goods[i].Id;
-                    if (id == 2076) shells++; else if (id == 2077) belts++;
+                    if (id == 2076) shells += Math.Max(1, Store.Goods[i].Bullets); else if (id == 2077) belts++;
                     else if (id >= 7011 && id <= 7016) meds++; else tools++;
                 }
                 _stock = Store.Hp <= 0f ? Loc.T("Склад - РАЗРУШЕН (добыча)", "Depot - WRECK (loot)") : Loc.T("Склад", "Depot");

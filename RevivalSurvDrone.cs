@@ -335,29 +335,16 @@ namespace NextDayRevival
     ///
     /// Only the local drone is considered; its owner holds the hit points, so the
     /// same client rolls the deliberately low hit chance and subtracts a hit
-    /// (SurvDrone.NpcHit). At most SurveillanceNpcShooters closest hostile NPCs
-    /// fire per volley - bounded work, bounded cost.
+    /// (SurvDrone.NpcHit). Discovered NPCs share SurveillanceNpcShooters and the
+    /// same bounded think/LOS budget as the FPV drone.
     /// </summary>
     public static class SurvNpcFire
     {
-        const float Falloff = 0.5f;      // fraction of point-blank chance at max range
-        const float ReloadWait = 5f;     // seconds before the same man reloads again
-
-        class Shooter
-        {
-            public Component Ai;
-            public Component Gun;
-            public Vector3 Muzzle;
-            public float Distance2;
-        }
-
-        static float _next;
+        static readonly DroneNpcEngagement _engagement = new DroneNpcEngagement(Hit);
+        static float _nextPilot;
         static GameObject _pilot;
         static object _pilotTarget;
-        static bool _announced;
         static bool _lookedUp, _failed;
-        static readonly Dictionary<int, float> _reload = new Dictionary<int, float>();
-
         static Type _aiType, _ngsType, _enemyTargetType;
         static FieldInfo _gunField, _sensorField, _initializedField, _networkPlayers;
         static FieldInfo _rateDelay;
@@ -367,189 +354,49 @@ namespace NextDayRevival
 
         public static void Reset()
         {
-            _next = Time.time + 0.5f;
-            _pilot = null;
-            _pilotTarget = null;
-            _announced = false;
-            _reload.Clear();
-        }
-
-        public static void Tick()
-        {
-            if (!SurvDrone.Flying) return;
-            // God mode keeps the recon drone out of every fight: no NPC picks
-            // it as a target, so no round is fired at it at all.
-            if (Admin.GodModeActive) return;
-            if (DroneGear.CfgSurvNpcFire == null || !DroneGear.CfgSurvNpcFire.Value) return;
-            if (Time.time < _next) return;
-
-            float seconds = DroneGear.CfgSurvNpcShotSeconds == null
-                ? 1.1f : Mathf.Max(0.35f, DroneGear.CfgSurvNpcShotSeconds.Value);
-            _next = Time.time + seconds * UnityEngine.Random.Range(0.8f, 1.2f);
-
+            _engagement.Reset();
+            _pilot = null; _pilotTarget = null;
+            _nextPilot = Time.time + 1f;
             try
             {
-                if (!LookUp()) return;
-                if (_pilot == null)
+                // Resolve native delegates at launch, never in each think.
+                if (LookUp())
                 {
                     _pilot = FindPilot();
                     if (_pilot != null) _pilotTarget = FindEnemyTarget(_pilot);
                 }
-                if (_pilot == null) return;
-                if (_pilotTarget == null) { Fail("pilot has no target component"); return; }
+            }
+            catch (Exception ex) { Fail("initialization: " + ex.Message); }
+        }
 
-                float range = DroneGear.CfgSurvNpcFireRange == null
-                    ? 140f : Mathf.Max(1f, DroneGear.CfgSurvNpcFireRange.Value);
-                float range2 = range * range;
-                Vector3 drone = SurvDrone.Position;
+        static bool Hit(Vector3 shooter)
+        {
+            SurvDrone.NpcHit(shooter);
+            return SurvDrone.Flying;
+        }
 
-                int inRange = 0, aiActive = 0;   // for the diagnostics split
-                List<Shooter> closest = new List<Shooter>();
-                UnityEngine.Object[] all = NpcScan.All();
-                for (int i = 0; i < all.Length; i++)
+        public static void Tick()
+        {
+            if (!SurvDrone.Flying || _failed || Admin.GodModeActive) return;
+            if (DroneGear.CfgSurvNpcFire == null || !DroneGear.CfgSurvNpcFire.Value) return;
+            try
+            {
+                if (_pilot == null)
                 {
-                    Component ai = all[i] as Component;
-                    if (ai == null || !ai.gameObject.activeInHierarchy) continue;
-                    float dPos2 = (drone - ai.transform.position).sqrMagnitude;
-                    if (dPos2 > range2) continue;
-                    inRange++;                       // rendered/animated presence
-                    if (!Bool(_initializedField, ai, true)) continue;
-                    if (!Bool(_sensorField, ai, true)) continue;
-                    if (!(bool)_isAlive.Invoke(ai, null)) continue;
-                    aiActive++;                      // AI actually running
-                    if (!(bool)_isEnemy.Invoke(ai, new object[] { _pilotTarget })) continue;
-
-                    Component gun = _gunField.GetValue(ai) as Component;
-                    if (gun == null || !Ready(ai, gun)) continue;
-                    Vector3 muzzle = (Vector3)_getMuzzle.Invoke(gun, null);
-                    if (muzzle == Vector3.zero) muzzle = ai.transform.position + Vector3.up * 1.4f;
-                    float d2 = (drone - muzzle).sqrMagnitude;
-                    if (d2 < 4f || d2 > range2) continue;
-                    if (!Visible(ai, muzzle, Mathf.Sqrt(d2))) continue;
-
-                    Shooter s = new Shooter();
-                    s.Ai = ai; s.Gun = gun; s.Muzzle = muzzle; s.Distance2 = d2;
-                    Insert(closest, s);
+                    if (Time.time < _nextPilot) return;
+                    _nextPilot = Time.time + 1f;
+                    _pilot = FindPilot();
+                    if (_pilot != null) _pilotTarget = FindEnemyTarget(_pilot);
                 }
-
-                SurvDiag.Combat(inRange, aiActive, closest.Count);
-                if (closest.Count == 0) return;
-                if (!_announced)
-                {
-                    _announced = true;
-                    RevivalPlugin.L.LogInfo("SurvDrone: " + closest.Count
-                        + " hostile NPC(s) open fire, accuracy "
-                        + (DroneGear.CfgSurvNpcAccuracy == null ? 0.22f
-                           : DroneGear.CfgSurvNpcAccuracy.Value).ToString("0.00")
-                        + ", range " + range.ToString("0") + " m.");
-                }
-
-                for (int i = 0; i < closest.Count && SurvDrone.Flying; i++)
-                    Fire(closest[i], range);
+                if (_pilotTarget == null) return;
+                _engagement.Tick(_pilotTarget, SurvDrone.Position,
+                    DroneGear.CfgSurvNpcFireRange == null ? 140f : Mathf.Max(1f, DroneGear.CfgSurvNpcFireRange.Value),
+                    DroneGear.CfgSurvNpcAccuracy == null ? 0.22f : Mathf.Clamp01(DroneGear.CfgSurvNpcAccuracy.Value),
+                    DroneGear.CfgSurvNpcShotSeconds == null ? 1.1f : Mathf.Max(0.35f, DroneGear.CfgSurvNpcShotSeconds.Value),
+                    DroneGear.CfgSurvNpcShooters == null ? 3 : Mathf.Max(1, DroneGear.CfgSurvNpcShooters.Value));
+                SurvDiag.Combat(_engagement.LastInRange, _engagement.LastActive, _engagement.LastLocated);
             }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("SurvDrone: NPC fire - " + ex.Message);
-            }
-        }
-
-        static void Insert(List<Shooter> list, Shooter s)
-        {
-            int at = 0;
-            while (at < list.Count && list[at].Distance2 <= s.Distance2) at++;
-            list.Insert(at, s);
-            int max = DroneGear.CfgSurvNpcShooters == null
-                ? 3 : Mathf.Max(1, DroneGear.CfgSurvNpcShooters.Value);
-            while (list.Count > max) list.RemoveAt(list.Count - 1);
-        }
-
-        static void Fire(Shooter s, float range)
-        {
-            Vector3 drone = SurvDrone.Position;
-            Vector3 to = drone - s.Muzzle;
-            float dist = to.magnitude;
-            if (dist < 0.1f) return;
-            Vector3 dir = to / dist;
-
-            float chance = Mathf.Clamp01(DroneGear.CfgSurvNpcAccuracy == null
-                ? 0.22f : DroneGear.CfgSurvNpcAccuracy.Value);
-            chance *= 1f - (1f - Falloff) * Mathf.Clamp01(dist / range);
-            bool hit = UnityEngine.Random.value < chance;
-            Vector3 aim = drone;
-            if (!hit)
-            {
-                Vector3 side = Vector3.Cross(dir, Vector3.up);
-                if (side.sqrMagnitude < 0.01f) side = Vector3.right;
-                side.Normalize();
-                Vector3 up = Vector3.Cross(side, dir).normalized;
-                float spread = Mathf.Max(2.5f, dist * 0.08f);
-                float x = UnityEngine.Random.Range(-spread, spread);
-                float y = UnityEngine.Random.Range(-spread, spread);
-                if (Mathf.Abs(x) + Mathf.Abs(y) < spread * 0.5f)
-                    x += x < 0f ? -spread : spread;
-                aim += side * x + up * y;
-            }
-
-            _fireTo.Invoke(s.Gun, new object[] { aim, true });
-            if (hit) SurvDrone.NpcHit(s.Ai.transform.position);
-        }
-
-        static bool Visible(Component ai, Vector3 muzzle, float distance)
-        {
-            Vector3 drone = SurvDrone.Position;
-            Vector3 dir = (drone - muzzle) / distance;
-            Vector3 from = muzzle + dir * 0.35f;
-            float left = distance - 1.0f;
-            for (int i = 0; i < 3 && left > 0.1f; i++)
-            {
-                Vector3 point;
-                GameObject block = Turret.RaycastObject(from, dir, left, out point);
-                if (block == null) return true;
-                if (block.transform.IsChildOf(ai.transform)
-                    || ai.transform.IsChildOf(block.transform))
-                {
-                    float step = Vector3.Distance(from, point) + 0.35f;
-                    left -= step;
-                    from = point + dir * 0.35f;
-                    continue;
-                }
-                return false;
-            }
-            return left <= 0.1f;
-        }
-
-        static bool Ready(Component ai, Component gun)
-        {
-            if (!(bool)_hasBullets.Invoke(gun, null)) { Reload(ai); return false; }
-            if ((bool)_cantWork.Invoke(gun, null)) return false;
-            if (_rateDelay != null)
-            {
-                object v = _rateDelay.GetValue(gun);
-                if (v is float && (float)v >= Time.time) return false;
-            }
-            return true;
-        }
-
-        static void Reload(Component ai)
-        {
-            if (_bulletsEnded == null || ai == null) return;
-            int id = ai.GetInstanceID();
-            float free;
-            if (_reload.TryGetValue(id, out free) && Time.time < free) return;
-            _reload[id] = Time.time + ReloadWait;
-            try { _bulletsEnded.Invoke(ai, null); }
-            catch (Exception ex)
-            {
-                RevivalPlugin.L.LogWarning("SurvDrone: NPC reload - " + ex.Message);
-                _bulletsEnded = null;
-            }
-        }
-
-        static bool Bool(FieldInfo field, object instance, bool fallback)
-        {
-            if (field == null) return fallback;
-            try { return (bool)field.GetValue(instance); }
-            catch { return fallback; }
+            catch (Exception ex) { Fail("NPC fire: " + ex.Message); }
         }
 
         static GameObject FindPilot()
@@ -622,6 +469,9 @@ namespace NextDayRevival
             if (_fireTo == null || _getMuzzle == null || _hasBullets == null
                 || _cantWork == null)
                 return Fail("NPC firearm methods missing");
+            _engagement.Bind(_gunField, _initializedField, _sensorField,
+                AccessTools.Field(_aiType, "_mainWeaponId") ?? AccessTools.Field(_aiType, "_weaponId"),
+                _rateDelay, _isAlive, _isEnemy, _hasBullets, _cantWork, _getMuzzle, _fireTo, _bulletsEnded);
             return true;
         }
 
@@ -748,11 +598,12 @@ namespace NextDayRevival
             if (DroneGear.CfgSurvNpcFire != null && DroneGear.CfgSurvNpcFire.Value
                 && DroneGear.CfgSurvNpcFireRange != null)
             {
-                float fr = Mathf.Max(0f, DroneGear.CfgSurvNpcFireRange.Value);
+                float fr = Mathf.Max(0f, DroneGear.CfgSurvNpcFireRange.Value) * DroneNpcAimCore.Metre;
                 radius2 = Mathf.Max(radius2, fr * fr);
             }
             float cap = DroneGear.CfgSurvRelevanceRadius == null
                 ? 160f : Mathf.Max(10f, DroneGear.CfgSurvRelevanceRadius.Value);
+            cap *= DroneNpcAimCore.Metre;
             radius2 = Mathf.Min(radius2, cap * cap);
 
             if ((drone - __0).sqrMagnitude < radius2)

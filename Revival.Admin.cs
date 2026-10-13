@@ -1490,6 +1490,22 @@ namespace NextDayRevival
             }
             AdminLayout.Note(PlayerAn2.OffNote() ?? An2Bombs.OffNote());
 
+            // AB1: the master server's aircraft registry - one An-2, one Mi-8.
+            // A reset makes the airfield build a new one at once (the server
+            // checks the admin list); "show" lists what the server holds.
+            AdminLayout.Section(Loc.T("РЕЕСТР АВИАЦИИ", "AIRCRAFT REGISTRY"));
+            r = AdminLayout.Row();
+            if (Btn(UiKit.Col(r, 0, 5), Loc.T("показать", "show"), "What the master server holds: region, place, fuel, damage, cargo, owner room"))
+                Melde(AirRegistry.Describe());
+            if (Btn(UiKit.Col(r, 1, 5), Loc.T("сброс Ан-2", "reset An-2"), "Forget the An-2: the airfield builds a new one"))
+                Melde(AirRegistry.AdminReset("an2"));
+            if (Btn(UiKit.Col(r, 2, 5), Loc.T("сброс Ми-8", "reset Mi-8"), "Forget the Mi-8: the airfield builds a new one"))
+                Melde(AirRegistry.AdminReset("mi8"));
+            if (Btn(UiKit.Col(r, 3, 5), Loc.T("сброс всего", "reset all"), "Reset both aircraft, including recovery of a corrupt registry"))
+                Melde(AirRegistry.AdminReset("all"));
+            if (Btn(UiKit.Col(r, 4, 5), Loc.T("запросить", "ask again"), "Ask the master server for the registry again"))
+                Melde(AirRegistry.Resync());
+
             AdminLayout.Section(Loc.T("БЛИЖАЙШАЯ ТЕХНИКА", "NEAREST VEHICLE"));
             // The vehicle within 15 m (a Mi-8 within 20 m first): what it has,
             // and the two conditions put on it by hand for a test.
@@ -1556,6 +1572,15 @@ namespace NextDayRevival
             // Every PMN-2 this client knows, off the map on every client.
             if (UiKit.Button(UiKit.Col(r, 1, 2), "Clear AP mines", UiButton.Danger, true, _liveMines))
                 Melde(ApMine.ClearAll());
+            // Power 5: the precomputed C4 sabotage points (generator, fuel
+            // tanks, command post, radar mast, AA guns) - admins only.
+            r = AdminLayout.Row();
+            Sabotage.Show = UiKit.Toggle(UiKit.Col(r, 0, 2), Sabotage.Show,
+                Loc.T("показать точки подрыва", "show sabotage points"),
+                Loc.T("якоря зарядов C4 на электростанции, только для админа",
+                      "C4 charge anchors of the power site, admin only"));
+            if (Btn(UiKit.Col(r, 1, 2), Loc.T("точки подрыва: статус", "sabotage: status")))
+                Melde(Sabotage.Report());
         }
 
         // -------------------------------------------------------------- Mercs

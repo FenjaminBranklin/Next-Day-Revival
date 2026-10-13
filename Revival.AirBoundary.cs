@@ -144,6 +144,7 @@ namespace NextDayRevival
                                    out float target, out float turn, out float strength, out bool climb)
         {
             target = heading; turn = 0f; strength = 0f; climb = false;
+            if (AirBridge.CorridorFlight) { Reset(); return false; }
             if (!On) { Reset(); return false; }
             Rect r = Play;
             float depth = Depth(r, pos.x, pos.z);

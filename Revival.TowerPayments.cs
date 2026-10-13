@@ -374,7 +374,8 @@ namespace NextDayRevival
                 }
                 if (nonce == _nonce && sequence == _activeSequence) Complete(reply);
             }
-            if (!ours && plainStash && Pending && Get(__instance, "currentStorage") == null)
+            // An empty list is another channel's answer whose prefix took its bag out.
+            if (!ours && plainStash && list.Count > 0 && Pending && Get(__instance, "currentStorage") == null)
             {
                 // Older backends return ordinary stash bags for any id. Keep
                 // that unsupported-channel response out of the native UI.

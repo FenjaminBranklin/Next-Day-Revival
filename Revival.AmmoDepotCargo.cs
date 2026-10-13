@@ -20,7 +20,8 @@ namespace NextDayRevival
             internal int Count(int id)
             {
                 int n = 0;
-                if (Ids != null) for (int i = 0; i < Ids.Length; i++) if (ReadInt(Ids, i) == id) n++;
+                if (Ids != null) for (int i = 0; i < Ids.Length; i++) if (ReadInt(Ids, i) == id)
+                    n += id == 2076 ? Math.Max(1, ReadInt(Bullets, i)) : 1;
                 return n;
             }
             internal bool Parked { get { return Root != null && Body != null && Body.velocity.sqrMagnitude < 1f; } }
@@ -97,7 +98,8 @@ namespace NextDayRevival
             ReadFloat = (Func<Array, int, float>)Reader(_conditions.FieldType, typeof(float), typeof(Func<Array, int, float>));
             return _clear != null && _hooked;
         }
-        static Delegate Reader(Type array, Type result, Type delegateType)
+        /// <summary>Also the aircraft registry's hold reader (Revival.AirRegistry.cs).</summary>
+        internal static Delegate Reader(Type array, Type result, Type delegateType)
         {
             Type element = array.GetElementType();
             MethodInfo cast = null;

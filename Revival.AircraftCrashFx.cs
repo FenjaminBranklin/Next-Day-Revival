@@ -18,6 +18,10 @@ namespace NextDayRevival
     internal static class AircraftCrashFx
     {
         const int MaxTrails = 24;
+        const int FlameCap = 96, SmokeCap = 768;
+        const float FlameRate = 64f, SmokeRate = 36f, SmokeSeconds = 20f;
+        static readonly AircraftCrashEvent[] Reports = new AircraftCrashEvent[MaxTrails * 2];
+        static int _reports;
         sealed class Trail
         {
             internal GameObject Aircraft, Root;
@@ -25,12 +29,13 @@ namespace NextDayRevival
             internal ParticleSystem Flame, Smoke;
             internal ParticleSystem FlameDraw, SmokeDraw;
             internal ParticleSystemRenderer FlameRenderer, SmokeRenderer, FlameDrawRenderer, SmokeDrawRenderer;
-            internal ParticleSystem.Particle[] FlameBuffer = new ParticleSystem.Particle[96];
-            internal ParticleSystem.Particle[] SmokeBuffer = new ParticleSystem.Particle[256];
+            internal ParticleSystem.Particle[] FlameBuffer = new ParticleSystem.Particle[FlameCap];
+            internal ParticleSystem.Particle[] SmokeBuffer = new ParticleSystem.Particle[SmokeCap];
             internal AircraftCrashVisual Visual;
-            internal float Factor = -1f, CheckAt, Scale, Size = -1f, OccludeAt, SimulatedAt;
+            internal float Factor = -1f, CheckAt, OccludeAt, SimulatedAt;
             internal bool Occluded, Ended;
             internal bool Emitting;
+            internal bool SmokeOnly;    // Power 3: a fuel tank wreck's column, no flame
         }
         static readonly Trail[] Trails = new Trail[MaxTrails];
         static int _count;
@@ -38,6 +43,8 @@ namespace NextDayRevival
         static bool _looked;
         static bool _hooked;
         static int _terrainMask;
+        static int _rayFrame = -1, _rayUsed;
+        static int _thinkFrame = -1, _thinks;
 
         internal static void MarkKill(GameObject go, string path)
         {
@@ -53,6 +60,16 @@ namespace NextDayRevival
             AircraftCrashEvent report = go.GetComponent<AircraftCrashEvent>();
             if (report == null) report = go.AddComponent<AircraftCrashEvent>();
             report.Begin(vertical, k, clock, terminal);
+        }
+
+        internal static void Watch(AircraftCrashEvent report)
+        {
+            for (int i = 0; i < _reports; i++) if (Reports[i] == report) return;
+            for (int i = _reports - 1; i >= 0; i--)
+                if (Reports[i] == null || Reports[i].Finished)
+                { Reports[i] = Reports[--_reports]; Reports[_reports] = null; }
+            if (_reports < Reports.Length) Reports[_reports++] = report;
+            else RevivalPlugin.L.LogWarning("AircraftCrash monitor capacity reached.");
         }
 
         internal static void Impact(GameObject go)
@@ -192,6 +209,19 @@ namespace NextDayRevival
 
         internal static void Start(GameObject go, Vector3 local, float scale)
         {
+            Begin(go, local, scale, false);
+        }
+
+        /// <summary>Power 3: the same plume as a smoke column only (no flame,
+        /// no aircraft visual) on a static anchor, e.g. a destroyed fuel tank.
+        /// Stop(anchor) lets it fade out.</summary>
+        internal static void StartSmoke(GameObject anchor, float scale)
+        {
+            Begin(anchor, Vector3.zero, scale, true);
+        }
+
+        static void Begin(GameObject go, Vector3 local, float scale, bool smokeOnly)
+        {
             if (go == null) return;
             if (_count >= MaxTrails)
             {
@@ -207,7 +237,7 @@ namespace NextDayRevival
             if (_count >= MaxTrails || !Templates())
             {
                 AircraftCrashEvent failed = go.GetComponent<AircraftCrashEvent>();
-                if (failed != null) failed.FxStarted(0, scale);
+                if (failed != null) failed.FxStarted(0);
                 return;
             }
             for (int i = 0; i < _count; i++) if (Trails[i].Aircraft == go) return;
@@ -220,16 +250,16 @@ namespace NextDayRevival
             t.Aircraft = go; t.Local = local;
             t.Root = new GameObject("NDR_AircraftCrashTrail");
             t.Root.transform.position = go.transform.TransformPoint(local);
-            t.Scale = scale;
-            t.Visual = AircraftCrashVisual.Attach(go);
+            t.SmokeOnly = smokeOnly;
+            t.Visual = smokeOnly ? null : AircraftCrashVisual.Attach(go);
             t.SimulatedAt = Time.time;
-            t.Flame = Clone(_flame, t.Root.transform, 96, false);
-            t.Smoke = Clone(_smoke, t.Root.transform, 256, true);
+            t.Flame = Clone(_flame, t.Root.transform, FlameCap, false);
+            t.Smoke = Clone(_smoke, t.Root.transform, SmokeCap, true);
             // Render-only twins keep native materials and billboard animation.
             // Simulation remains at the real engine in world space. A camera
             // projects cached particles just as Tu95Visual projects its mesh.
-            t.FlameDraw = Clone(_flame, t.Root.transform, 96, false);
-            t.SmokeDraw = Clone(_smoke, t.Root.transform, 256, true);
+            t.FlameDraw = Clone(_flame, t.Root.transform, FlameCap, false);
+            t.SmokeDraw = Clone(_smoke, t.Root.transform, SmokeCap, true);
             Freeze(t.FlameDraw); Freeze(t.SmokeDraw);
             t.FlameRenderer = t.Flame.GetComponent<ParticleSystemRenderer>();
             t.SmokeRenderer = t.Smoke.GetComponent<ParticleSystemRenderer>();
@@ -241,7 +271,7 @@ namespace NextDayRevival
             if (!_hooked) { _hooked = true; Camera.onPreCull += PreCull; }
             Tick(Time.time);
             AircraftCrashEvent report = go.GetComponent<AircraftCrashEvent>();
-            if (report != null) report.FxStarted(4, scale);
+            if (report != null) report.FxStarted(4);
         }
 
         static ParticleSystem Clone(GameObject prefab, Transform root, int cap, bool smoke)
@@ -258,7 +288,7 @@ namespace NextDayRevival
             main.simulationSpace = ParticleSystemSimulationSpace.World;
             main.scalingMode = ParticleSystemScalingMode.Shape;
             main.maxParticles = cap;
-            main.startLifetime = smoke ? 20f : 1.2f;
+            main.startLifetime = smoke ? SmokeSeconds : 1.2f;
             main.startSpeed = smoke ? 5f : 1f;
             main.startColor = smoke ? new Color(0.12f, 0.12f, 0.12f, 0.9f) : Color.white;
             ParticleSystem.EmissionModule em = ps.emission;
@@ -267,7 +297,9 @@ namespace NextDayRevival
             ParticleSystemRenderer renderer = ps.GetComponent<ParticleSystemRenderer>();
             renderer.renderMode = ParticleSystemRenderMode.Billboard;
             renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            renderer.minParticleSize = 0.002f;
+            // Keep native startSize/size-over-life. Neither the aircraft scale
+            // nor distance may enlarge a particle quad or its screen footprint.
+            renderer.minParticleSize = 0f;
             go.SetActive(true);
             return ps;
         }
@@ -283,8 +315,23 @@ namespace NextDayRevival
         // bounded work, no Instantiate, reflection, arrays or strings here.
         internal static void Tick(float now)
         {
+            // Aircraft behaviour activation cannot starve the diagnostic. Also
+            // runs with ParticleDensity Off, missing templates or no FX trails.
+            if (_reports != 0)
+            {
+                double clock = ParaPose.Clock();
+                for (int i = _reports - 1; i >= 0; i--)
+                {
+                    AircraftCrashEvent report = Reports[i];
+                    if (report != null) report.Sample(clock);
+                    if (report != null && !report.Finished) continue;
+                    Reports[i] = Reports[--_reports]; Reports[_reports] = null;
+                }
+            }
             if (_count == 0) return;
             Camera cam = CameraOwner.MainCamera();
+            int frame = Time.frameCount;
+            if (_thinkFrame != frame) { _thinkFrame = frame; _thinks = 0; }
             for (int i = _count - 1; i >= 0; i--)
             {
                 Trail t = Trails[i];
@@ -306,31 +353,27 @@ namespace NextDayRevival
                 if (t.Aircraft == null) { Remove(i); continue; }
                 Vector3 at = t.Aircraft.transform.TransformPoint(t.Local);
                 t.Root.transform.position = at;
-                if (now < t.CheckAt) continue;
-                t.CheckAt = now + 0.25f;
+                if (now < t.CheckAt || _thinks >= 1) continue;
+                _thinks++;
+                t.CheckAt = now + ThinkInterval(cam, at, t.Occluded);
                 float factor = Fx.Factor;
-                float distance = cam == null ? 0f : (cam.transform.position - at).magnitude;
-                // Increase the angular footprint at combat range, never cull
-                // or pause when off-screen. Even Low keeps a continuous trail.
-                float size = Mathf.Clamp(distance / (1500f * PlayerAn2.K), 1f, 2f);
-                if (size != t.Size)
-                {
-                    t.Size = size;
-                    SetSize(t.Flame, 8f * t.Scale * size);
-                    SetSize(t.Smoke, 18f * t.Scale * size);
-                }
                 bool visible = factor > 0f;
                 if (factor == t.Factor && visible == t.Emitting) continue;
                 t.Factor = factor; t.Emitting = visible;
-                Density(t.Flame, Mathf.Max(0.5f, factor), visible, 96, 32f);
-                Density(t.Smoke, Mathf.Max(0.5f, factor), visible, 256, 12f);
+                Density(t.Flame, factor, visible && !t.SmokeOnly, FlameCap, FlameRate);
+                Density(t.Smoke, factor, visible, SmokeCap, SmokeRate);
             }
         }
 
-        static void SetSize(ParticleSystem ps, float size)
+        static float ThinkInterval(Camera cam, Vector3 at, bool hidden)
         {
-            ParticleSystem.MainModule main = ps.main;
-            main.startSize = size;
+            if (cam == null || hidden) return 5f;
+            Vector3 view = cam.WorldToViewportPoint(at);
+            // Margin includes a trail whose emitter just left the viewport.
+            if (view.z <= 0f || view.x < -0.5f || view.x > 1.5f
+                || view.y < -0.5f || view.y > 1.5f) return 5f;
+            float near = 1500f * PlayerAn2.K;
+            return (at - cam.transform.position).sqrMagnitude <= near * near ? 0.25f : 1f;
         }
 
         // Called by the camera after fall transforms moved. Cached buffers and
@@ -352,7 +395,7 @@ namespace NextDayRevival
                     float distance = (at - eye).magnitude;
                     float near = Mathf.Min(Tu95Visual.ProxyU(cam.farClipPlane), cam.farClipPlane * 0.45f);
                     bool proxy = distance > near;
-                    bool hidden = proxy && Occluded(t, eye, at, distance);
+                    bool hidden = proxy && Occluded(t, cam, eye, at, distance);
                     if (t.Visual != null) t.Visual.Place(cam, hidden);
                     t.FlameRenderer.enabled = t.SmokeRenderer.enabled = !proxy && !hidden;
                     t.FlameDrawRenderer.enabled = t.SmokeDrawRenderer.enabled = proxy && !hidden;
@@ -383,19 +426,30 @@ namespace NextDayRevival
             draw.SetParticles(buffer, n);
         }
 
-        static bool Occluded(Trail t, Vector3 eye, Vector3 at, float distance)
+        static bool Occluded(Trail t, Camera cam, Vector3 eye, Vector3 at, float distance)
         {
             float now = Time.unscaledTime;
             if (now < t.OccludeAt) return t.Occluded;
-            t.OccludeAt = now + 0.25f;
-            t.Occluded = TerrainHidden(eye, at, distance);
+            bool hidden;
+            if (!TryTerrainHidden(eye, at, distance, out hidden)) return t.Occluded;
+            t.OccludeAt = now + ThinkInterval(cam, at, hidden);
+            t.Occluded = hidden;
             return t.Occluded;
         }
 
-        internal static bool TerrainHidden(Vector3 eye, Vector3 at, float distance)
+        internal static bool TryTerrainHidden(Vector3 eye, Vector3 at, float distance, out bool hidden)
         {
-            return _terrainMask != 0 && distance > 128f && Physics.Raycast(eye,
+            hidden = false;
+            if (_terrainMask == 0 || distance <= 128f) return true;
+            // One terrain cast per frame shared by falling trails and impacts,
+            // including multiple cameras. Exhaustion preserves cached visibility.
+            int frame = Time.frameCount;
+            if (_rayFrame != frame) { _rayFrame = frame; _rayUsed = 0; }
+            if (_rayUsed >= 1) return false;
+            _rayUsed++;
+            hidden = Physics.Raycast(eye,
                 (at - eye) / distance, distance - 120f, _terrainMask, QueryTriggerInteraction.Ignore);
+            return true;
         }
 
         static void Density(ParticleSystem ps, float factor, bool play, int cap, float rate)
@@ -424,7 +478,7 @@ namespace NextDayRevival
             flameEmission.enabled = smokeEmission.enabled = false;
             // Leave smoke in the sky after impact. Tick retires the detached
             // simulation only after its longest native particle has expired.
-            t.Ended = true; t.Aircraft = null; t.CheckAt = Time.time + 20f;
+            t.Ended = true; t.Aircraft = null; t.CheckAt = Time.time + SmokeSeconds;
         }
     }
 
@@ -433,7 +487,8 @@ namespace NextDayRevival
     public sealed class AircraftCrashEvent : MonoBehaviour
     {
         float _height, _previousHeight, _k;
-        double _clock, _killClock, _previousClock;
+        double _clock, _killClock, _previousClock, _sampleAt;
+        int _view;
         bool _begun, _sampled, _impact, _logged;
         string _path, _name;
 
@@ -443,28 +498,35 @@ namespace NextDayRevival
             _begun = true;
             _height = _previousHeight = transform.position.y; _k = k;
             _clock = _previousClock = clock;
+            _sampleAt = ParaPose.Clock() + 0.25;
+            _view = PlayerAn2.View(gameObject);
             NpcAircraft.Flight flight = NpcAircraft.Find(gameObject);
             _name = flight == null || string.IsNullOrEmpty(flight.Label) ? gameObject.name : flight.Label;
             AircraftDamageSite site = GetComponent<AircraftDamageSite>();
             _path = site == null || site.KillPath == null ? "fall-event" : site.KillPath;
             _killClock = site == null || site.KillPath == null ? clock : site.KillClock;
+            enabled = false;
+            AircraftCrashFx.Watch(this);
         }
 
-        internal void FxStarted(int systems, float scale)
+        internal void FxStarted(int systems)
         {
             if (_logged) return;
             _logged = true;
             RevivalPlugin.L.LogInfo("AircraftCrash kill: name=" + _name
-                + " view=" + PlayerAn2.View(gameObject) + " path=" + _path
+                + " view=" + _view + " path=" + _path
                 + " fall=" + (_begun ? "yes" : "no") + " fx=" + systems
-                + " sim=World scale=" + scale.ToString("0.0"));
+                + " sim=World scale=1.0 nativeSize=yes density=" + Fx.Level);
         }
 
-        void Update()
+        internal bool Finished { get { return _sampled || _impact; } }
+
+        internal void Sample(double now)
         {
             if (!_begun || _sampled || _impact) return;
-            double now = ParaPose.Clock();
             double age = now - _clock;
+            if (now < _sampleAt && age < 2.0) return;
+            _sampleAt = now + 0.25;
             float height = transform.position.y;
             double vertical = now > _previousClock
                 ? (height - _previousHeight) / ((now - _previousClock) * _k) : 0.0;
@@ -472,19 +534,22 @@ namespace NextDayRevival
             if (age < 2.0) return;
             _sampled = true;
             RevivalPlugin.L.LogInfo("AircraftCrash after2s: name=" + _name
-                + " view=" + PlayerAn2.View(gameObject) + " lost_m="
+                + " view=" + _view + " sample_s=" + age.ToString("0.00") + " lost_m="
                 + ((_height - transform.position.y) / _k).ToString("0.0")
                 + " vertical_mps=" + vertical.ToString("0.0"));
-            enabled = false;
         }
 
         internal void Impact()
         {
             if (_impact) return;
+            // Flush a due 2s sample if impact precedes this frame's central tick.
+            if (!_sampled && _begun) Sample(ParaPose.Clock());
             _impact = true; enabled = false;
             RevivalPlugin.L.LogInfo("AircraftCrash impact: name=" + _name
-                + " view=" + PlayerAn2.View(gameObject) + " seconds="
-                + Math.Max(0.0, ParaPose.Clock() - _killClock).ToString("0.00"));
+                + " view=" + _view + " seconds="
+                + Math.Max(0.0, ParaPose.Clock() - _killClock).ToString("0.00")
+                + " fall_seconds=" + Math.Max(0.0, ParaPose.Clock() - _clock).ToString("0.00")
+                + " lost_m=" + ((_height - transform.position.y) / _k).ToString("0.0"));
         }
     }
 }

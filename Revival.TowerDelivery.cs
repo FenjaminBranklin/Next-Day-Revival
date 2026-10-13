@@ -18,7 +18,7 @@ namespace NextDayRevival
         static Transform _console, _tower;
         static float _next, _ready, _workNext, _queryNext, _requestedUntil;
         static int _candidate, _mask = 1, _serial, _planActor, _planMask, _attempt, _seed, _slot;
-        static bool _near, _canOrder, _planning, _filling, _awaitCommit;
+        static bool _near, _canOrder, _planning, _filling, _awaitCommit, _dark;
         static Vector3 _landing;
         static GameObject _crate;
         static GameObject _flarePrefab;
@@ -85,7 +85,7 @@ namespace NextDayRevival
                 "85-мм снаряд 52-К", "52-K 85 mm shell",
                 "Один снаряд для 52-К. Доставьте его в боевую позицию.",
                 "One 52-K shell. Carry it to the gun position.",
-                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png", null, 1, 0, 9f));
+                "ammo50.ndmesh", "ammo50_diffuse.png", "ammo50_normal.png", "ammo50_icon.png", null, ShellStacks.Maximum, 0, ShellStacks.RoundWeight));
             if (!HasItem(items, TowerDeliveryCore.BeltId)) items.Add(new ItemDef(TowerDeliveryCore.BeltId, 2030, false,
                 "Лента ЗУ-23 (100)", "ZU-23 belt (100)",
                 "100 патронов для ЗУ-23. Доставьте ленту в боевую позицию.",
@@ -101,6 +101,7 @@ namespace NextDayRevival
 
         internal static void Install(Harmony harmony)
         {
+            ShellStacks.Install(harmony);
             HookUse(harmony);
             HookPanelInput(harmony);
             // Same prefab as NetworkGameplayEvents.NetworkHelicopterFlareSpawn.
@@ -293,10 +294,14 @@ namespace NextDayRevival
 
         static bool Near(GameObject player)
         { return player != null && _console != null && (player.transform.position - _console.position).sqrMagnitude <= 8.4f * 8.4f; }
+        // Power 5: or the command post (the tower console) is wrecked by sabotage.
+        static string NoPower { get { return PowerNet.CommandPostDown
+            ? Loc.T("Снабжение аэродрома: командный пункт разрушен - нужен ремонт", "Airfield supplies: the command post is wrecked - it needs a repair")
+            : Loc.T("Снабжение аэродрома: нет питания - генератор не работает", "Airfield supplies: no power - the generator is down"); } }
         static bool Held(int actor)
         { int side = TowerRadar.PlayerSide(actor); return side >= 0 && side != TowerRadar.UnreadSide && side == AirfieldHold.State.Holder; }
         static bool Available(int actor, int mask, bool busy)
-        { GameObject p = Crocodile.PlayerByActor(actor); return TowerDeliveryCore.CanOrder(Enabled, Crocodile.PlayerUp(p), Near(p), Held(actor), busy, mask, RadarClock.Now, _ready); }
+        { GameObject p = Crocodile.PlayerByActor(actor); return PowerNet.Has(PowerNetCore.Terminal) && TowerDeliveryCore.CanOrder(Enabled, Crocodile.PlayerUp(p), Near(p), Held(actor), busy, mask, RadarClock.Now, _ready); }
         internal static int Recheck(int actor, int service, int cost, Vector3 target)
         {
             return Crocodile.IsMaster() && TowerDeliveryCore.Service(service)
@@ -345,7 +350,9 @@ namespace NextDayRevival
                     }
                 }
                 _near = Near(player);
-                _canOrder = _near && Crocodile.PlayerUp(player) && Held(Crocodile.LocalActor());
+                // Power 2: the terminal is a power consumer; dark, it takes no orders.
+                _dark = !PowerNet.Has(PowerNetCore.Terminal);
+                _canOrder = _near && !_dark && Crocodile.PlayerUp(player) && Held(Crocodile.LocalActor());
                 if (Selecting && !_canOrder) Close();
                 if (Selecting || (_near && _lang < 0)) Labels();
             }
@@ -398,12 +405,12 @@ namespace NextDayRevival
             else _aimed = false;
             if (_message != null)
             {
-                if (aim) { _message(true, _canOrder ? _useText : _lockedText, 0); _shown = true; }
+                if (aim) { _message(true, _canOrder ? _useText : _dark ? NoPower : _lockedText, 0); _shown = true; }
                 else if (_shown) { _message(false, string.Empty, 0); _shown = false; }
             }
             if (!aim || Time.frameCount == _toggleFrame || !UseDown()) return;
             if (_canOrder) Open();
-            else UiKit.Toast(_lockedText, UiTone.Warning);   // Update: one native HUD line, not an OnGUI draw
+            else UiKit.Toast(_dark ? NoPower : _lockedText, UiTone.Warning);   // Update: one native HUD line, not an OnGUI draw
         }
         // The game's ray and sphere, 10 Hz and only within reach of the desk:
         // whatever the game would use instead is hit first and wins.
@@ -651,7 +658,8 @@ namespace NextDayRevival
                 int before = Turret.CountInContainer(cargo, item);
                 _add.Invoke(_container, new object[] { item });
                 if (Turret.CountInContainer(cargo, item) != before + 1) { FinishCrate(false); return; }
-                _slot++;
+                // One native shell stack holds the entire 28-round basket.
+                _slot += item == TowerDeliveryCore.ShellId ? ShellStacks.Maximum : 1;
             }
             catch (Exception ex) { RevivalPlugin.L.LogWarning("TowerDelivery fill: " + ex.Message); FinishCrate(false); }
         }

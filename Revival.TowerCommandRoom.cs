@@ -35,6 +35,12 @@ namespace NextDayRevival
             room._terminal = true;
         }
 
+        static Light _lamp;
+        internal static void LampState(bool on)
+        {
+            if (_lamp != null && _lamp.enabled != on) _lamp.enabled = on;
+        }
+
         internal static void ScreenState(bool lit, bool dead)
         {
             if (_active == null) return;
@@ -194,6 +200,8 @@ namespace NextDayRevival
             lamp.type = LightType.Point; lamp.range=6f*K; lamp.intensity=.32f;
             lamp.color=new Color(1f,.76f,.48f); lamp.shadows=LightShadows.None;
             lamp.renderMode=LightRenderMode.ForceVertex;
+            // Power 2: the ceiling lamp is a power consumer (lights).
+            _lamp = lamp; lamp.enabled = PowerNet.Has(PowerNetCore.Lights);
         }
 
         Material Own(string name, Color color, Material donor)

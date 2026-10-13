@@ -223,7 +223,8 @@ namespace NextDayRevival
         // Field routes use dirt and grass beside retained structures.
         // Six groups, 5 + 5 + 4 + 4 = 18 men; no removed pad posts.
         static readonly Pocket[] Pockets = new Pocket[] {
-            new Pocket("airfield-N1-gate", "guard", 2, 30f,
+            // Power step: guard disk stays inside the restored G1 gate and pole PN1.
+            new Pocket("airfield-N1-gate", "guard", 2, 18f,
                 new RevivalComposition.CrewMan[] {
                     Defender("nco", "regular", 1006, 4007, 4308, 4504),
                     Defender("rifleman", "regular", 1001, 4005, 4321, 4514)
@@ -234,7 +235,7 @@ namespace NextDayRevival
                     Defender("rifleman", "regular", 1001, 4006, 4322, 4515),
                     Defender("mg", "regular", 1016, 4008, 4307, 4503)
                 },
-                P(4100f, 1640f), P(4180f, 1570f), P(4180f, 1395f), P(4280f, 1395f)),
+                P(4100f, 1640f), P(4180f, 1570f), P(4180f, 1388f), P(4280f, 1388f)),
             new Pocket("airfield-N2-repair", "patrol", 4, 320f,
                 new RevivalComposition.CrewMan[] {
                     Defender("nco", "regular", 1006, 4007, 4308, 4504),

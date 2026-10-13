@@ -429,6 +429,15 @@ namespace NextDayRevival
             if (send) Net.Send(new float[] { 2f, view, n, kg }, true);
         }
 
+        /// <summary>The aircraft registry (master): the stored bomb load back
+        /// on a rehydrated An-2.</summary>
+        internal static void Restore(GameObject go, int n, int kg)
+        {
+            if (!Enabled || go == null || n < 0) return;
+            Net.EnsureHooked();
+            SetCount(go, n, kg, true);
+        }
+
         /// <summary>From PlayerAn2.Build for a "ready" An-2 (the admin panel):
         /// the racks full.</summary>
         internal static void FullLoad(GameObject go)
@@ -778,6 +787,7 @@ namespace NextDayRevival
 
         static void Release(GameObject plane)
         {
+            if (AirRegistry.CargoLocked(plane)) return;
             if (Time.time < _nextRelease) return;
             _nextRelease = Time.time + Mathf.Max(0.1f, F(CfgInterval, 0.4f));
             int have;
